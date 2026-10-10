@@ -19,6 +19,8 @@ from typing import Any
 __all__ = [
     "DiffApplyError",
     "apply_unified_diff",
+    "format_diff",
+    "unified_diff",
 ]
 
 
@@ -314,3 +316,55 @@ def apply_unified_diff(
     if not patches:
         raise DiffApplyError("no file sections found in diff")
     return _apply_parsed_diff(patches, file_texts)
+
+
+# ── Diff generation & rendering ────────────────────────────────────────────
+
+def unified_diff(a: str, b: str, *, path: str = "file",
+                 context: int = 3) -> str:
+    """Generate a unified diff from ``a`` to ``b`` (the inverse of applying).
+
+    Pure-Python Myers-free implementation: good enough for review-sized
+    texts (code patches, config changes). For huge files prefer difflib.
+    The output feeds straight back into :func:`apply_unified_diff`.
+    """
+    import difflib
+
+    a_lines = a.splitlines(keepends=True)
+    b_lines = b.splitlines(keepends=True)
+    out = difflib.unified_diff(
+        a_lines, b_lines, fromfile=f"a/{path}", tofile=f"b/{path}",
+        n=context)
+    text = "".join(out)
+    # difflib omits the trailing newline marker handling; normalize so our
+    # own parser round-trips.
+    return text
+
+
+def format_diff(diff_text: str, *, color: bool | None = None,
+                theme: Any = None) -> str:
+    """Render a unified diff for humans: magenta removals… no — red-free.
+
+    House rule (the owner hates red): deletions render magenta, additions
+    green, hunk headers electric blue, context dimmed. ``color=None``
+    auto-detects the tty.
+    """
+    from .style import paint, supports_color
+
+    if color is None:
+        color = supports_color()
+    if not color:
+        return diff_text
+    out: list[str] = []
+    for line in diff_text.splitlines():
+        if line.startswith("+++") or line.startswith("---"):
+            out.append(paint(line, "label", theme, color=color))
+        elif line.startswith("@@"):
+            out.append(paint(line, "info", theme, color=color))
+        elif line.startswith("+"):
+            out.append(paint(line, "ok", theme, color=color))
+        elif line.startswith("-"):
+            out.append(paint(line, "error", theme, color=color))
+        else:
+            out.append(paint(line, "muted", theme, color=color))
+    return "\n".join(out)

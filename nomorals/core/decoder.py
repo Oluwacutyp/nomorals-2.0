@@ -1526,6 +1526,56 @@ class _StringsDecoder(Decoder):
 
 
 # ── built-in registry ──
+class _Base85Decoder(Decoder):
+    name = "base85"
+    description = "ascii85 / base85 (Adobe '<~ ~>' and raw variants)"
+
+    def attempt(self, data: str) -> DecoderHit | None:
+        s = data.strip()
+        if not s or len(s) < 8:
+            return None
+        body = s
+        adobe = False
+        if body.startswith("<~") and body.endswith("~>"):
+            body = body[2:-2]
+            adobe = True
+        body = re.sub(r"\s+", "", body)
+        if not body or len(set(body)) < 4:
+            return None
+        # Python's a85 (both adobe and raw) uses the Ascii85 alphabet
+        # '!' (33) .. 'u' (117), plus 'z' as a zero-run shorthand.
+        if not re.fullmatch(r"[!-uz]+", body):
+            return None
+        try:
+            raw = base64.a85decode(("<~" + body + "~>" if adobe else body),
+                                   adobe=adobe)
+        except (ValueError, binascii.Error):
+            return None
+        variant = "adobe ascii85" if adobe else "ascii85"
+        return _bytes_hit(self.name, raw, 0.75, variant)
+
+
+class _Rot47Decoder(Decoder):
+    name = "rot47"
+    description = "ROT47 (printable-ASCII rotation, CyberChef staple)"
+
+    def attempt(self, data: str) -> DecoderHit | None:
+        s = data.strip()
+        if not s or len(s) < 4 or _word_score(s) > 0.3:
+            return None  # already wordy — not ROT47'd
+        if not re.fullmatch(r"[ -~]+", s):
+            return None
+        out = "".join(
+            chr(33 + ((ord(c) - 33 + 47) % 94)) if 33 <= ord(c) <= 126 else c
+            for c in s)
+        if out == s:
+            return None
+        if not _cipher_wordy(out):
+            return None
+        return DecoderHit(self.name, out, 0.7 + min(0.2, _word_score(out)),
+                          "ROT47")
+
+
 for _d in (_HexDecoder, _HexdumpDecoder, _Base64Decoder, _Base32Decoder,
            _Base58Decoder, _BinaryDecoder, _Rot13Decoder, _AtbashDecoder,
            _ReverseDecoder, _UrlDecoder, _HtmlEntityDecoder,
@@ -1534,7 +1584,8 @@ for _d in (_HexDecoder, _HexdumpDecoder, _Base64Decoder, _Base32Decoder,
            _IniDecoder, _CsvDecoder, _MimeDecoder, _PemDecoder,
            _JwtDecoder, _CookieDecoder, _UuidDecoder, _LuhnDecoder,
            _GzipDecoder, _Bz2Decoder, _XzDecoder, _QuotedPrintableDecoder,
-           _XorDecoder, _CaesarDecoder, _StringsDecoder):
+           _XorDecoder, _CaesarDecoder, _StringsDecoder,
+           _Base85Decoder, _Rot47Decoder):
     register_decoder(_d())
 
 

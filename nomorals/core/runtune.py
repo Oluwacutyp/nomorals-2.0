@@ -203,6 +203,49 @@ class RuntimeTune:
             f"model_pref {self.model_pref}"
         )
 
+    def describe(self, *, color: bool | None = None,
+                 theme: Any = None) -> str:
+        """A styled multi-section runtime report for ``nm profile``."""
+        from .style import paint, supports_color, kv_lines, header
+
+        if color is None:
+            color = supports_color()
+        lines = [header(f"runtime tune — {self.profile.kind}", theme,
+                        color=color), ""]
+        sections = [
+            ("concurrency", {
+                "threads": self.threads,
+                "process pool": "yes" if self.use_processes else "no",
+                "vcpus (min/target/max)":
+                    f"{self.vcpu_min}/{self.vcpu_target}/{self.vcpu_max}",
+            }),
+            ("downloads", {
+                "parallel": self.max_concurrent_downloads,
+                "max download": f"{self.max_download_mb:g} MB",
+                "max upload": f"{self.max_upload_mb:g} MB",
+                "http timeout": f"{self.http_timeout:g}s",
+            }),
+            ("memory", {
+                "context budget": f"{self.context_budget_tokens:,} tokens",
+                "pressure": self.memory_pressure,
+            }),
+            ("workload", {
+                "parallel chats": self.max_parallel_chats,
+                "missions": f"{self.mission_max_concurrent}x",
+                "mission autonomy": f"{self.mission_autonomy:.2f}",
+                "model preference": self.model_pref,
+            }),
+        ]
+        for title, kv in sections:
+            lines.append(paint(title.upper(), "label", theme, color=color))
+            lines.extend(kv_lines(kv, theme, color=color))
+            lines.append("")
+        if self.notes:
+            lines.append(paint("PROVENANCE", "label", theme, color=color))
+            lines.extend(f"  {paint(n, 'muted', theme, color=color)}"
+                         for n in self.notes)
+        return "\n".join(lines).rstrip()
+
 
 def build_tune(settings: Any, *, profile: EnvironmentProfile | None = None) -> RuntimeTune:
     """Compute the effective runtime tuning for ``settings``.

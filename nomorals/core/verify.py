@@ -33,7 +33,8 @@ from typing import Any, Optional
 
 from .logging_setup import get_logger
 
-__all__ = ["LiveVerifier", "VerificationResult", "VerificationCheck"]
+__all__ = ["LiveVerifier", "VerificationResult", "VerificationCheck",
+           "check_tcp", "check_tls", "check_dns", "check_http"]
 
 _log = get_logger(__name__)
 
@@ -101,7 +102,18 @@ class LiveVerifier:
     
     def __init__(self, config: Optional[Any] = None) -> None:
         self.config = config
+        self._custom_checks: list[tuple[str, Any]] = []
         _log.info("Live verifier initialized")
+
+    def add_check(self, name: str, func: Any) -> "LiveVerifier":
+        """Register a custom check.
+
+        ``func`` is a zero-arg callable returning a VerificationCheck
+        (sync) or an awaitable of one. It runs after the built-ins in
+        :meth:`verify_all`. Returns self for chaining.
+        """
+        self._custom_checks.append((name, func))
+        return self
     
     async def verify_all(self) -> VerificationResult:
         """Run all verification checks.
@@ -137,7 +149,22 @@ class LiveVerifier:
                     passed=False,
                     message=f"Check failed: {e}",
                 ))
-        
+        for name, func in self._custom_checks:
+            try:
+                check = func()
+                if hasattr(check, "__await__"):
+                    check = await check
+                if not isinstance(check, VerificationCheck):
+                    check = VerificationCheck(
+                        name=name, passed=bool(check),
+                        message=str(check))
+                result.checks.append(check)
+            except Exception as e:
+                result.checks.append(VerificationCheck(
+                    name=name, passed=False,
+                    message=f"Check failed: {e}",
+                ))
+        return result
         return result
     
     async def verify_hf_token(self) -> VerificationCheck:
@@ -557,3 +584,129 @@ class LiveVerifier:
                 passed=False,
                 message=f"Installed but broken: {e}",
             )
+
+
+# ── network probes ───────────────────────────────────────────────────────────
+# Standalone checks returning VerificationCheck. Usable on their own or
+# registered on a LiveVerifier via add_check().
+
+def check_tcp(host: str, port: int, *, timeout: float = 5.0,
+              name: str | None = None) -> VerificationCheck:
+    """Can we open a TCP connection to host:port?"""
+    import socket
+    import time as _time
+
+    label = name or f"TCP {host}:{port}"
+    start = _time.monotonic()
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            ms = (_time.monotonic() - start) * 1000
+            return VerificationCheck(
+                name=label, passed=True,
+                message=f"connected in {ms:.0f}ms",
+                details={"host": host, "port": port, "latency_ms": round(ms, 1)})
+    except Exception as exc:
+        return VerificationCheck(
+            name=label, passed=False,
+            message=f"connection failed: {exc}",
+            details={"host": host, "port": port})
+
+
+def check_tls(host: str, port: int = 443, *, timeout: float = 8.0,
+              warn_days: int = 30) -> VerificationCheck:
+    """TLS handshake + certificate expiry for host:port.
+
+    Passes when the handshake succeeds; warns (still passes) when the cert
+    expires within ``warn_days``, fails when already expired.
+    """
+    import socket
+    import ssl
+    from datetime import datetime, timezone
+
+    label = f"TLS {host}:{port}"
+    try:
+        ctx = ssl.create_default_context()
+        with socket.create_connection((host, port), timeout=timeout) as sock:
+            with ctx.wrap_socket(sock, server_hostname=host) as tls:
+                cert = tls.getpeercert() or {}
+    except Exception as exc:
+        return VerificationCheck(name=label, passed=False,
+                                 message=f"TLS handshake failed: {exc}",
+                                 details={"host": host, "port": port})
+    expires = None
+    for key in ("notAfter",):
+        val = cert.get(key)
+        if val:
+            try:
+                expires = datetime.strptime(val, "%b %d %H:%M:%S %Y %Z")
+                expires = expires.replace(tzinfo=timezone.utc)
+            except ValueError:
+                pass
+    details: dict[str, Any] = {"host": host, "port": port,
+                               "subject": cert.get("subject"),
+                               "issuer": cert.get("issuer")}
+    if expires is None:
+        return VerificationCheck(name=label, passed=True,
+                                 message="handshake ok (expiry unreadable)",
+                                 details=details)
+    days = (expires - datetime.now(timezone.utc)).days
+    details["expires"] = expires.isoformat()
+    details["days_left"] = days
+    if days < 0:
+        return VerificationCheck(name=label, passed=False,
+                                 message=f"certificate EXPIRED {abs(days)}d ago",
+                                 details=details)
+    if days <= warn_days:
+        return VerificationCheck(
+            name=label, passed=True,
+            message=f"handshake ok — certificate expires in {days}d",
+            details={**details, "warning": "expiring soon"})
+    return VerificationCheck(
+        name=label, passed=True,
+        message=f"handshake ok — certificate valid {days}d",
+        details=details)
+
+
+def check_dns(host: str, *, timeout: float = 5.0) -> VerificationCheck:
+    """Does the hostname resolve?"""
+    import socket
+
+    label = f"DNS {host}"
+    try:
+        infos = socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)
+        addrs = sorted({info[4][0] for info in infos})
+        return VerificationCheck(
+            name=label, passed=True,
+            message=f"resolves to {', '.join(addrs[:3])}"
+                    + ("…" if len(addrs) > 3 else ""),
+            details={"host": host, "addresses": addrs})
+    except Exception as exc:
+        return VerificationCheck(name=label, passed=False,
+                                 message=f"DNS resolution failed: {exc}",
+                                 details={"host": host})
+
+
+def check_http(url: str, *, timeout: float = 8.0,
+               expect_status: int = 200) -> VerificationCheck:
+    """GET a URL and check the status code."""
+    import time as _time
+
+    label = f"HTTP {url}"
+    start = _time.monotonic()
+    try:
+        req = urllib.request.Request(url, method="GET",
+                                     headers={"User-Agent": "nomorals-verify/1.0"})
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            ms = (_time.monotonic() - start) * 1000
+            status = getattr(resp, "status", 200)
+            ok = status == expect_status
+            return VerificationCheck(
+                name=label, passed=ok,
+                message=f"HTTP {status} in {ms:.0f}ms"
+                        + ("" if ok else f" (expected {expect_status})"),
+                details={"url": url, "status": status,
+                         "latency_ms": round(ms, 1)})
+    except Exception as exc:
+        return VerificationCheck(name=label, passed=False,
+                                 message=f"request failed: {exc}",
+                                 details={"url": url})

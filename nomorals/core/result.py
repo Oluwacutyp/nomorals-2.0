@@ -25,7 +25,8 @@ from .errors import NoMoralsError, classify
 T = TypeVar("T")
 U = TypeVar("U")
 
-__all__ = ["Err", "Ok", "Outcome", "outcome_from", "unwrap_all"]
+__all__ = ["Err", "Ok", "Outcome", "collect", "outcome_from", "sequence", "unwrap_all",
+           "partition"]
 
 
 class Ok(Generic[T]):
@@ -59,6 +60,24 @@ class Ok(Generic[T]):
             return Err(classify(exc))
 
     def or_else(self, fn: Callable[[NoMoralsError], "Outcome[T]"]) -> "Outcome[T]":
+        return self
+
+    def map_err(self, fn: Callable[[NoMoralsError], NoMoralsError]) -> "Outcome[T]":
+        """Transform the error side (no-op on ``Ok``) — Rust's ``map_err``."""
+        return self
+
+    def tap(self, fn: Callable[[T], None]) -> "Outcome[T]":
+        """Run a side effect on the value, pass the outcome through unchanged."""
+        try:
+            fn(self._value)
+        except Exception:  # noqa: BLE001 - taps must not break the pipeline
+            pass
+        return self
+
+    def flatten(self) -> "Outcome[Any]":
+        """Collapse ``Ok(Ok(x))`` / ``Ok(Err(e))`` one level."""
+        if isinstance(self._value, (Ok, Err)):
+            return self._value
         return self
 
     def unwrap(self) -> T:
@@ -133,6 +152,24 @@ class Err(Generic[T]):
             return fn(self._error)
         except Exception as exc:  # noqa: BLE001
             return Err(classify(exc))
+
+    def map_err(self, fn: Callable[[NoMoralsError], NoMoralsError]) -> "Outcome[T]":
+        """Transform the error side without unwrapping — Rust's ``map_err``."""
+        try:
+            return Err(fn(self._error))
+        except Exception as exc:  # noqa: BLE001
+            return Err(classify(exc))
+
+    def tap(self, fn: Callable[[NoMoralsError], None]) -> "Outcome[T]":
+        """Run a side effect on the error, pass the outcome through unchanged."""
+        try:
+            fn(self._error)
+        except Exception:  # noqa: BLE001 - taps must not break the pipeline
+            pass
+        return self
+
+    def flatten(self) -> "Outcome[Any]":
+        return self
 
     def unwrap(self) -> T:
         raise self._error
@@ -219,3 +256,15 @@ def partition(outcomes: list[Outcome[T]]) -> tuple[list[T], list[NoMoralsError]]
         else:
             errs.append(item.error)  # type: ignore[union-attr]
     return oks, errs
+
+
+def collect(outcomes: list[Outcome[T]]) -> "Outcome[tuple[list[T], list[NoMoralsError]]]":
+    """Keep *everything*: ``Ok((values, errors))`` — unlike :func:`unwrap_all`,
+    no failure is dropped and the first error is not privileged. The pair
+    shape composes with :func:`partition`-style consumers."""
+    return Ok(partition(outcomes))
+
+
+def sequence(outcomes: list[Outcome[T]]) -> "Outcome[list[T]]":
+    """Alias for :func:`unwrap_all`: fail fast on the first ``Err``."""
+    return unwrap_all(outcomes)

@@ -461,3 +461,92 @@ def hmac_hex(key: bytes | str, msg: bytes | str) -> str:
     if isinstance(msg, str):
         msg = msg.encode("utf-8")
     return hmac.new(key, msg, hashlib.sha256).hexdigest()
+
+
+# ─────────────────────────── HKDF + seal/unseal ────────────────────────────
+
+def hkdf(ikm: bytes, *, salt: bytes = b"", info: bytes = b"",
+         length: int = 32, hash_name: str = "sha256") -> bytes:
+    """HKDF key derivation (RFC 5869): extract-then-expand.
+
+    The KDF hygiene the codebase was missing: one master secret in,
+    any number of *separated* keys out. ``info`` is the domain-separation
+    label — ``b"enc"`` vs ``b"mac"`` must never share derived bytes::
+
+        master = derive_key(passphrase, salt)
+        enc_key = hkdf(master, info=b"file-enc")
+        mac_key = hkdf(master, info=b"file-mac")
+    """
+    if length <= 0 or length > 255 * hmac.new(b"", b"", hash_name).digest_size:
+        raise CipherError("hkdf length out of range")
+    if not salt:
+        salt = b"\x00" * hmac.new(b"", b"", hash_name).digest_size
+    prk = hmac.new(salt, ikm, hash_name).digest()
+    okm = b""
+    prev = b""
+    counter = 1
+    while len(okm) < length:
+        prev = hmac.new(prk, prev + info + bytes([counter]), hash_name).digest()
+        okm += prev
+        counter += 1
+    return okm[:length]
+
+
+def seal(data: bytes | str, key: bytes, *, associated: bytes = b"") -> str:
+    """High-level authenticated encryption with a raw 32-byte key.
+
+    Derives separate enc/mac subkeys via HKDF (never reuse one key for
+    both), binds ``associated`` data (headers, filenames) into the tag,
+    and returns a self-describing ``nmc2`` blob. Inverse: :func:`unseal`.
+    """
+    if len(key) != 32:
+        raise CipherError("seal needs a 32-byte key")
+    if isinstance(data, str):
+        data = data.encode("utf-8")
+    enc_key = hkdf(key, info=b"nmc2-enc")
+    mac_key = hkdf(key, info=b"nmc2-mac")
+    nonce = os.urandom(16)
+    rkeys = _expand_key(enc_key)
+    out = bytearray()
+    for i in range(0, len(data), 16):
+        ks = _ctr_keystream_block(nonce, i // 16, rkeys)
+        chunk = data[i:i + 16]
+        out.extend(a ^ b for a, b in zip(chunk, ks))
+    ct = bytes(out)
+    tag = hmac.new(mac_key, associated + b"\x00" + nonce + ct,
+                   hashlib.sha256).digest()[:16]
+    import base64 as _b64
+
+    blob = b"nmc2$" + _b64.urlsafe_b64encode(nonce + tag + ct)
+    return blob.decode("ascii")
+
+
+def unseal(blob: str, key: bytes, *, associated: bytes = b"") -> bytes:
+    """Inverse of :func:`seal`. Raises :class:`CipherError` on tampering,
+    wrong key, or mismatched associated data."""
+    if len(key) != 32:
+        raise CipherError("unseal needs a 32-byte key")
+    import base64 as _b64
+
+    if not blob.startswith("nmc2$"):
+        raise CipherError("not an nmc2 blob")
+    try:
+        raw = _b64.urlsafe_b64decode(blob[5:].encode("ascii"))
+    except Exception as exc:
+        raise CipherError(f"malformed nmc2 blob: {exc}") from exc
+    if len(raw) < 32:
+        raise CipherError("nmc2 blob too short")
+    nonce, tag, ct = raw[:16], raw[16:32], raw[32:]
+    enc_key = hkdf(key, info=b"nmc2-enc")
+    mac_key = hkdf(key, info=b"nmc2-mac")
+    expected = hmac.new(mac_key, associated + b"\x00" + nonce + ct,
+                        hashlib.sha256).digest()[:16]
+    if not hmac.compare_digest(expected, tag):
+        raise CipherError("integrity check failed (wrong key, tampered "
+                          "blob, or mismatched associated data)")
+    rkeys = _expand_key(enc_key)
+    out = bytearray()
+    for i in range(0, len(ct), 16):
+        ks = _ctr_keystream_block(nonce, i // 16, rkeys)
+        out.extend(a ^ b for a, b in zip(ct[i:i + 16], ks))
+    return bytes(out)

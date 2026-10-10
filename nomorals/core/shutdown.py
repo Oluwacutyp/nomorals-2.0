@@ -139,6 +139,7 @@ class ShutdownCoordinator:
         self._shutdown_requested = False
         self._shutdown_reason = ""
         self._shutdown_started_at = 0.0
+        self._shutdown_event = threading.Event()
         self._shutdown_report: dict[str, Any] | None = None
         self._startup_report: dict[str, Any] | None = None
         self._booted_at = time.time()
@@ -172,6 +173,32 @@ class ShutdownCoordinator:
                     timeout_s: float | None = None) -> Callable[..., Any]:
         """Decorator: ``@coord.on_shutdown("db", priority=50)``."""
         return self.register(name, priority=priority, timeout_s=timeout_s,
+                             phase="shutdown")
+
+    # -- named shutdown phases (Signal → Stop Accepting → Drain → Teardown) --
+    def on_stop_accepting(self, name: str, *,
+                          timeout_s: float | None = None) -> Callable[..., Any]:
+        """Phase 1 (priority 100): close listeners, pause schedulers — stop
+        taking *new* work the moment the signal lands."""
+        return self.register(name, priority=100, timeout_s=timeout_s,
+                             phase="shutdown")
+
+    def on_drain(self, name: str, *,
+                 timeout_s: float | None = None) -> Callable[..., Any]:
+        """Phase 2 (priority 50): finish in-flight requests, flush queues."""
+        return self.register(name, priority=50, timeout_s=timeout_s,
+                             phase="shutdown")
+
+    def on_close(self, name: str, *,
+                 timeout_s: float | None = None) -> Callable[..., Any]:
+        """Phase 3 (priority 0): close DB pools, HTTP sessions, file handles."""
+        return self.register(name, priority=0, timeout_s=timeout_s,
+                             phase="shutdown")
+
+    def on_beacon(self, name: str, *,
+                  timeout_s: float | None = None) -> Callable[..., Any]:
+        """Phase 4 (priority -100): final beacon / last log line."""
+        return self.register(name, priority=-100, timeout_s=timeout_s,
                              phase="shutdown")
 
     def on_startup(self, name: str, *, priority: int = 0,
@@ -228,7 +255,20 @@ class ShutdownCoordinator:
             self._shutdown_requested = True
             self._shutdown_reason = reason or "requested"
             self._shutdown_started_at = time.time()
+            self._shutdown_event.set()
             return True
+
+    def shutdown_event(self) -> threading.Event:
+        """The event background loops should watch: set on shutdown request.
+
+            while not coord.shutdown_event().wait(timeout=1.0):
+                poll()
+        """
+        return self._shutdown_event
+
+    def wait_for_shutdown(self, timeout: float | None = None) -> bool:
+        """Block until shutdown is requested. Returns True if it was."""
+        return self._shutdown_event.wait(timeout=timeout)
 
     # -- execution ---------------------------------------------------------------
     def run_startup(self) -> dict[str, Any]:

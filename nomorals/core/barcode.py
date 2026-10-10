@@ -14,6 +14,12 @@ runs or 1-bit scanlines, from a string, JSON, or a file):
   switching, weighted mod-103 check symbol, encoder *and* decoder.
 * **EAN-13 / UPC-A** — full L/G/R parity tables, guard patterns,
   mod-10 check digit, encoder and decoder, number-system reporting.
+* **EAN-8** — encoder and decoder (67 modules, no system digit).
+* **Code 39** — full 43-character table (verified entry-by-entry against
+  python-barcode's charset), mod-43 checksum probe, encoder and decoder.
+* **ITF (Interleaved 2 of 5)** — even-digit encoder and decoder, table
+  verified against python-barcode.
+* **render_ascii** — text-block rendering of any scanline for chat previews.
 * **Luhn** — verification + check-digit computation for card numbers.
 * **Partial-damage recovery** — the over-scratched use case:
     - ``recover_ean`` — a 12/13-digit number with ``?`` holes: enumerate
@@ -52,17 +58,25 @@ __all__ = [
     "analyze",
     "card_number",
     "decode_code128",
+    "decode_code39",
     "decode_ean13",
+    "decode_ean8",
+    "decode_itf",
     "decode_upca",
+    "ean8_check_digit",
     "ean_check_digit",
     "encode_code128",
+    "encode_code39",
     "encode_ean13",
+    "encode_ean8",
+    "encode_itf",
     "encode_upca",
     "luhn_check_digit",
     "luhn_valid",
     "recover_code128",
     "recover_ean",
     "recover_scanline",
+    "render_ascii",
     "scanline_from_any",
     "upc_check_digit",
 ]
@@ -1150,15 +1164,16 @@ def card_number(value: Any) -> str:
 def analyze(data: Any) -> Dict[str, Any]:
     """Auto-detect + decode any supported barcode scanline.
 
-    Tries Code 128, EAN-13 and UPC-A, returns every candidate ranked
-    (validated symbologies first, then by score).
+    Tries Code 128, Code 39, ITF, EAN-13, EAN-8 and UPC-A, returns every
+    candidate ranked (validated symbologies first, then by score).
     """
     bits = scanline_from_any(data)
     if bits is None:
         return {"ok": False, "note": "no scanline found in input",
                 "candidates": []}
     out: List[Dict[str, Any]] = []
-    for decoder in (decode_code128, decode_ean13, decode_upca):
+    for decoder in (decode_code128, decode_code39, decode_itf,
+                    decode_ean13, decode_ean8, decode_upca):
         rep = decoder(bits)
         if not rep.get("ok"):
             continue
@@ -1177,7 +1192,8 @@ def analyze(data: Any) -> Dict[str, Any]:
     if not out:
         # Nothing fully validated: report the closest near-misses for the
         # user (a scratched card may fail exactly one check).
-        for decoder in (decode_code128, decode_ean13, decode_upca):
+        for decoder in (decode_code128, decode_code39, decode_itf,
+                        decode_ean13, decode_ean8, decode_upca):
             rep = decoder(bits)
             if rep.get("text") or rep.get("digits"):
                 value = card_number(rep.get("text") or rep.get("digits") or "")
@@ -1194,3 +1210,301 @@ def analyze(data: Any) -> Dict[str, Any]:
         "modules": len(_trim_quiet(bits)),
         "candidates": out,
     }
+
+
+# ---------------------------------------------------------------------------
+# Code 39, ITF, EAN-8 — encode + decode
+# ---------------------------------------------------------------------------
+
+#: Code 39 character patterns as 9-element narrow/wide strings (bar-first).
+#: Verified entry-by-entry against python-barcode's charset table
+#: (``barcode.charsets.code39``): 41/43 matched the spec table verbatim;
+#: ``8`` and ``9`` were corrected to the reference
+#: (``wnnwnnwnn`` / ``nnwwnnwnn``). The start/stop ``*`` pattern equals
+#: python-barcode's EDGE run (``100010111011101``).
+_C39_PATTERNS: Dict[str, str] = {
+    "0": "nnnwwnwnn", "1": "wnnwnnnnw", "2": "nnwwnnnnw", "3": "wnwwnnnnn",
+    "4": "nnnwwnnnw", "5": "wnnwwnnnn", "6": "nnwwwnnnn", "7": "nnnwnnwnw",
+    "8": "wnnwnnwnn", "9": "nnwwnnwnn",
+    "A": "wnnnnwnnw", "B": "nnwnnwnnw", "C": "wnwnnwnnn", "D": "nnnnwwnnw",
+    "E": "wnnnwwnnn", "F": "nnwnwwnnn", "G": "nnnnnwwnw", "H": "wnnnnwwnn",
+    "I": "nnwnnwwnn", "J": "nnnnwwwnn", "K": "wnnnnnnww", "L": "nnwnnnnww",
+    "M": "wnwnnnnwn", "N": "nnnnwnnww", "O": "wnnnwnnwn", "P": "nnwnwnnwn",
+    "Q": "nnnnnnwww", "R": "wnnnnnwwn", "S": "nnwnnnwwn", "T": "nnnnwnwwn",
+    "U": "wwnnnnnnw", "V": "nwwnnnnnw", "W": "wwwnnnnnn", "X": "nwnnwnnnw",
+    "Y": "wwnnwnnnn", "Z": "nwwnwnnnn",
+    "-": "nwnnnnwnw", ".": "wwnnnnwnn", " ": "nwwnnnwnn",
+    "$": "nwnwnwnnn", "/": "nwnwnnnwn", "+": "nwnnnwnwn", "%": "nnnwnwnwn",
+}
+_C39_START_STOP = "nwnnwnwnn"  #: the `*` start/stop character
+_C39_REVERSE: Dict[str, str] = {v: k for k, v in _C39_PATTERNS.items()}
+_C39_REVERSE[_C39_START_STOP] = "*"
+_C39_VALUES: Dict[str, int] = {
+    ch: i for i, ch in enumerate("0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+                                 "-. $/+%")
+}
+
+#: ITF (Interleaved 2 of 5) digit patterns: 5 elements, exactly 2 wide.
+#: Verified against python-barcode's ``barcode.charsets.itf`` CODES table.
+_ITF_DIGITS: Tuple[str, ...] = (
+    "nnwwn", "wnnnw", "nwnnw", "wwnnn", "nnwnw",
+    "wnwnn", "nwwnn", "nnnww", "wnnwn", "nwnwn",
+)
+_ITF_REVERSE: Dict[str, str] = {p: str(i) for i, p in enumerate(_ITF_DIGITS)}
+
+
+def _runs(bits: str) -> List[Tuple[str, int]]:
+    """Run-length encode a bit string: [('1', 12), ('0', 4), …]."""
+    runs: List[Tuple[str, int]] = []
+    for ch in bits:
+        if runs and runs[-1][0] == ch:
+            runs[-1] = (ch, runs[-1][1] + 1)
+        else:
+            runs.append((ch, 1))
+    return runs
+
+
+def _nw_classifier(runs: List[Tuple[str, int]]) -> Any:
+    """Classify run lengths as narrow/wide (1 : 3 ratio family).
+
+    Returns a ``cls(length) -> 'n'|'w'`` function. The narrow unit is the
+    shortest run; anything over 1.5× it is wide. Raises ValueError when the
+    ratio spread looks nothing like a 1:3 symbology.
+    """
+    lengths = [n for _, n in runs]
+    unit = min(lengths)
+    if max(lengths) > unit * 4.5:
+        raise ValueError("run-length spread is not a 1:3 symbology")
+    def cls(n: int) -> str:
+        return "w" if n > unit * 1.5 else "n"
+    return cls
+
+
+def encode_code39(text: str, *, checksum: bool = False) -> Dict[str, Any]:
+    """Encode to Code 39 modules (start/stop ``*``, narrow inter-char gaps).
+
+    ``checksum`` appends the mod-43 check character (python-barcode's
+    default behavior).
+    """
+    text = text.upper()
+    for ch in text:
+        if ch not in _C39_PATTERNS:
+            raise ValueError(f"Code 39 cannot encode {ch!r}")
+    body = text
+    if checksum:
+        total = sum(_C39_VALUES[ch] for ch in text) % 43
+        body += "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ-. $/+%"[total]
+    bits = []
+    full = "*" + body + "*"
+    for idx, ch in enumerate(full):
+        pat = _C39_START_STOP if ch == "*" else _C39_PATTERNS[ch]
+        for k, e in enumerate(pat):
+            bits.append(("1" if k % 2 == 0 else "0") * (3 if e == "w" else 1))
+        if idx < len(full) - 1:
+            bits.append("0")  # narrow inter-character gap
+    out = "".join(bits)
+    return {"bits": out, "text": body, "checksum": checksum,
+            "length_modules": len(out)}
+
+
+def decode_code39(bits: str) -> Dict[str, Any]:
+    """Decode a Code 39 scanline. Reports ``text`` plus a mod-43 checksum probe."""
+    result: Dict[str, Any] = {
+        "symbology": "code39", "ok": False, "text": "",
+        "check_ok": False, "note": "",
+    }
+    t = _trim_quiet(bits)
+    if len(t) < 20 or not t.startswith("1") or not t.endswith("1"):
+        result["note"] = "no Code 39 frame"
+        return result
+    try:
+        runs = _runs(t)
+        cls = _nw_classifier(runs)
+    except ValueError:
+        result["note"] = "run lengths are not Code 39"
+        return result
+    chars: List[str] = []
+    i = 0
+    while i < len(runs):
+        if i + 9 > len(runs):
+            result["note"] = "truncated character"
+            return result
+        for k in range(9):
+            want = "1" if k % 2 == 0 else "0"
+            if runs[i + k][0] != want:
+                result["note"] = "bad bar/space alternation"
+                return result
+        els = "".join(cls(runs[i + k][1]) for k in range(9))
+        ch = _C39_REVERSE.get(els)
+        if ch is None:
+            result["note"] = f"unknown pattern {els}"
+            return result
+        chars.append(ch)
+        i += 9
+        if i < len(runs):
+            if runs[i][0] != "0" or cls(runs[i][1]) != "n":
+                result["note"] = "bad inter-character gap"
+                return result
+            i += 1
+    if len(chars) < 2 or chars[0] != "*" or chars[-1] != "*":
+        result["note"] = "missing start/stop delimiters"
+        return result
+    text = "".join(chars[1:-1])
+    result["text"] = text
+    result["ok"] = True
+    if text:
+        body, maybe = text[:-1], text[-1]
+        if body and _C39_VALUES.get(maybe) == \
+                sum(_C39_VALUES[c] for c in body) % 43:
+            result["check_ok"] = True
+            result["note"] = "mod43 checksum valid (trailing check char)"
+    return result
+
+
+def encode_itf(digits: str) -> Dict[str, Any]:
+    """Encode an even-length digit string to ITF (Interleaved 2 of 5)."""
+    if not digits.isdigit() or len(digits) % 2 != 0 or not digits:
+        raise ValueError("ITF needs a non-empty even number of digits")
+    bits = ["1", "0", "1", "0"]  # start: NnNn
+    for i in range(0, len(digits), 2):
+        bars = _ITF_DIGITS[int(digits[i])]
+        sps = _ITF_DIGITS[int(digits[i + 1])]
+        for b, s in zip(bars, sps):
+            bits.append("1" * (3 if b.upper() == "W" else 1))
+            bits.append("0" * (3 if s.upper() == "W" else 1))
+    bits.append("111" + "0" + "1")  # stop: WnN
+    out = "".join(bits)
+    return {"bits": out, "digits": digits, "length_modules": len(out)}
+
+
+def decode_itf(bits: str) -> Dict[str, Any]:
+    """Decode an ITF scanline."""
+    result: Dict[str, Any] = {
+        "symbology": "itf", "ok": False, "digits": "",
+        "check_ok": False, "note": "",
+    }
+    t = _trim_quiet(bits)
+    if len(t) < 20 or not t.startswith("1") or not t.endswith("1"):
+        result["note"] = "no ITF frame"
+        return result
+    try:
+        runs = _runs(t)
+        cls = _nw_classifier(runs)
+    except ValueError:
+        result["note"] = "run lengths are not ITF"
+        return result
+    # bar runs / space runs (t starts with a bar by construction)
+    bar_runs = [cls(n) for v, n in runs[0::2]]
+    sp_runs = [cls(n) for v, n in runs[1::2]]
+    if len(bar_runs) < 4 or len(sp_runs) < 3:
+        result["note"] = "frame too short for ITF"
+        return result
+    if bar_runs[0:2] != ["n", "n"] or sp_runs[0:2] != ["n", "n"]:
+        result["note"] = "bad ITF start pattern"
+        return result
+    if bar_runs[-2:] != ["w", "n"] or sp_runs[-1] != "n":
+        result["note"] = "bad ITF stop pattern"
+        return result
+    body_bars = bar_runs[2:-2]
+    body_sps = sp_runs[2:-1]
+    if len(body_bars) != len(body_sps) or len(body_bars) % 5 != 0:
+        result["note"] = "ITF body is not a whole number of digit pairs"
+        return result
+    digits: List[str] = []
+    for j in range(0, len(body_bars), 5):
+        d1 = _ITF_REVERSE.get("".join(body_bars[j:j + 5]))
+        d2 = _ITF_REVERSE.get("".join(body_sps[j:j + 5]))
+        if d1 is None or d2 is None:
+            result["note"] = f"unknown ITF digit pair at offset {j}"
+            return result
+        digits.append(d1 + d2)
+    result["digits"] = "".join(digits)
+    result["ok"] = True
+    return result
+
+
+def ean8_check_digit(digits7: str) -> int:
+    """Mod-10 check digit for a 7-digit EAN-8 body (weights 3,1 from the left)."""
+    if len(digits7) != 7 or not digits7.isdigit():
+        raise ValueError("need exactly 7 digits")
+    total = sum(int(d) * (3 if i % 2 == 0 else 1) for i, d in enumerate(digits7))
+    return (10 - total % 10) % 10
+
+
+def encode_ean8(digits7: str) -> Dict[str, Any]:
+    """Encode a 7-digit EAN-8 body (+ computed check digit) to modules."""
+    digits8 = digits7 + str(ean8_check_digit(digits7))
+    bits = EAN_GUARD
+    for d in (int(x) for x in digits8[:4]):
+        bits += EAN_L[d]
+    bits += EAN_CENTER
+    for d in (int(x) for x in digits8[4:]):
+        bits += EAN_R[d]
+    bits += EAN_GUARD
+    return {"bits": bits, "digits": digits8,
+            "check_digit": int(digits8[7]), "length_modules": len(bits)}
+
+
+def decode_ean8(bits: str) -> Dict[str, Any]:
+    """Decode an EAN-8 scanline (67 modules; no system digit)."""
+    result: Dict[str, Any] = {
+        "symbology": "ean8", "ok": False, "digits": "",
+        "check_ok": False, "note": "",
+    }
+    t = _trim_quiet(bits)
+    if len(t) < 67:
+        result["note"] = "too short for EAN-8 (need 67 modules)"
+        return result
+    attempts = [idx for idx in range(0, len(t) - 4)
+                if t[idx:idx + 5] == EAN_CENTER]
+    if not attempts:
+        result["note"] = "no center guard 01010 found"
+        return result
+    for center in attempts:
+        # guard(3) | left(28) | center(5) | right(28) | guard(3)
+        if center - 31 < 0 or center + 5 + 31 > len(t):
+            continue
+        if t[center - 31:center - 28] != EAN_GUARD:
+            continue
+        if t[center + 5 + 28:center + 5 + 31] != EAN_GUARD:
+            continue
+        left = t[center - 28:center]
+        right = t[center + 5:center + 5 + 28]
+        digits: List[int] = []
+        bad = False
+        for i in range(4):
+            chunk = left[i * 7:(i + 1) * 7]
+            d = EAN_L.index(chunk) if chunk in EAN_L else None
+            if d is None:
+                bad = True
+                break
+            digits.append(d)
+        if bad:
+            continue
+        for i in range(4):
+            chunk = right[i * 7:(i + 1) * 7]
+            d = EAN_R.index(chunk) if chunk in EAN_R else None
+            if d is None:
+                bad = True
+                break
+            digits.append(d)
+        if bad:
+            continue
+        digits8 = "".join(str(d) for d in digits)
+        check_ok = int(digits8[7]) == ean8_check_digit(digits8[:7])
+        result.update(digits=digits8, check_ok=check_ok, ok=check_ok,
+                      note="" if check_ok else "check digit mismatch")
+        return result
+    result["note"] = "no valid EAN-8 frame found"
+    return result
+
+
+def render_ascii(bits: str, *, height: int = 1, on: str = "█",
+                 off: str = " ") -> str:
+    """Render a scanline as text blocks — for chat previews and debugging.
+
+    ``height`` repeats the row; keep it small in chat (1–3).
+    """
+    t = _trim_quiet(bits)
+    row = "".join(on if b == "1" else off for b in t)
+    return "\n".join([row] * max(1, height))

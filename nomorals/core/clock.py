@@ -30,9 +30,12 @@ __all__ = [
     "MonotonicClock",
     "ScaledClock",
     "SystemClock",
+    "Throttle",
     "Timeout",
     "default_clock",
+    "format_duration",
     "set_default_clock",
+    "throttle",
 ]
 
 
@@ -166,6 +169,29 @@ class Deadline:
 
     def __repr__(self) -> str:
         return f"Deadline(remaining={self.remaining():.3f}s)"
+
+    def __str__(self) -> str:
+        return format_duration(self.remaining()) if not self.expired() else "expired"
+
+
+def format_duration(seconds: float) -> str:
+    """Human duration: 90 → ``"1m30s"``, 90000 → ``"1d1h"``, 0.25 → ``"250ms"``."""
+    seconds = max(0.0, float(seconds))
+    if seconds < 1.0:
+        return f"{seconds * 1000:.0f}ms"
+    parts: list[str] = []
+    days, seconds = divmod(seconds, 86400)
+    hours, seconds = divmod(seconds, 3600)
+    minutes, seconds = divmod(seconds, 60)
+    if days:
+        parts.append(f"{int(days)}d")
+    if hours:
+        parts.append(f"{int(hours)}h")
+    if minutes:
+        parts.append(f"{int(minutes)}m")
+    if seconds or not parts:
+        parts.append(f"{seconds:.0f}s" if seconds >= 10 else f"{seconds:.1f}s")
+    return "".join(parts)
 
 
 class Timeout:
@@ -343,3 +369,84 @@ def default_clock() -> Clock:
 def set_default_clock(clock: Clock) -> None:
     global _default_clock
     _default_clock = clock
+
+
+class Throttle:
+    """Allow an action at most once per ``interval`` seconds.
+
+    The polite counterpart of a rate limiter: instead of rejecting excess
+    calls, the caller checks :meth:`allowed` / :meth:`wait` and skips or
+    defers. Used for "alert me at most every X" paths, status pings, and
+    autosave — anywhere a tight loop must not spam.
+
+    Thread-safe and clock-injectable (pass a :class:`FrozenClock` in tests).
+    """
+
+    def __init__(self, interval: float, *, clock: Clock | None = None,
+                 leading: bool = True) -> None:
+        if interval <= 0:
+            raise ValueError("interval must be positive")
+        self.interval = float(interval)
+        self.clock = clock or SystemClock()
+        self.leading = leading
+        self._last = 0.0
+        self._lock = threading.Lock()
+        self._allowed_count = 0
+        self._suppressed_count = 0
+
+    def allowed(self) -> bool:
+        """True if the action may run now (records the run)."""
+        with self._lock:
+            now = self.clock.monotonic()
+            if self._last == 0.0 and not self.leading:
+                self._last = now
+                self._suppressed_count += 1
+                return False
+            if now - self._last >= self.interval:
+                self._last = now
+                self._allowed_count += 1
+                return True
+            self._suppressed_count += 1
+            return False
+
+    def wait(self) -> float:
+        """Seconds until the next allowed run (0 if now). Non-consuming."""
+        with self._lock:
+            if self._last == 0.0:
+                return 0.0
+            return max(0.0, self.interval - (self.clock.monotonic() - self._last))
+
+    def reset(self) -> None:
+        with self._lock:
+            self._last = 0.0
+
+    def stats(self) -> dict[str, float]:
+        with self._lock:
+            return {
+                "interval": self.interval,
+                "allowed": self._allowed_count,
+                "suppressed": self._suppressed_count,
+            }
+
+
+def throttle(interval: float, *, clock: Clock | None = None) -> Any:
+    """Decorator: the wrapped function runs at most once per ``interval``.
+
+    Suppressed calls return ``None`` instead of running — for fire-and-forget
+    notifications, not for calls whose result the caller needs.
+    """
+    import functools as _functools
+
+    gate = Throttle(interval, clock=clock)
+
+    def decorator(fn: Any) -> Any:
+        @_functools.wraps(fn)
+        def wrapper(*args: Any, **kwargs: Any) -> Any:
+            if gate.allowed():
+                return fn(*args, **kwargs)
+            return None
+
+        wrapper.throttle = gate  # type: ignore[attr-defined]
+        return wrapper
+
+    return decorator

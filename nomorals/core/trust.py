@@ -119,13 +119,22 @@ def domain_tier(url: str) -> tuple[float, str]:
 
 class SourceTrust:
     """Domain tiers + persistent fetch learning + corroboration, with
-    kv-store persistence so penalties survive restarts."""
+    kv-store persistence so penalties survive restarts.
+
+    ``allow(url)`` / ``block(url)`` pin hosts to the top / bottom of the
+    scale (persisted); ``explain(url)`` shows the full score breakdown.
+    """
 
     _KV = "search.trust.v1"
+    _ALLOW_KV = "search.trust.allow.v1"
+    _BLOCK_KV = "search.trust.block.v1"
 
     def __init__(self, context: Any) -> None:
         self.context = context
         self._cache: dict[str, tuple[int, int, float]] = {}  # host → (ok, fail, last)
+        # in-memory fallback when no db is attached (persistence no-ops then)
+        self._allow_mem: set[str] = set()
+        self._block_mem: set[str] = set()
 
     # ── persistence ────────────────────────────────────────────────────────
     def _load(self) -> dict[str, dict[str, Any]]:
@@ -186,20 +195,140 @@ class SourceTrust:
         return ok, fail
 
     # ── scoring ───────────────────────────────────────────────────────────
+    def _host_set(self, kv_key: str) -> set[str]:
+        mem = self._allow_mem if kv_key == self._ALLOW_KV else self._block_mem
+        db = getattr(self.context, "db", None)
+        if db is None:
+            return set(mem)
+        try:
+            data = KVStore(db).get(kv_key)
+            if isinstance(data, list):
+                return {str(h) for h in data} | mem
+        except Exception:  # noqa: BLE001
+            pass
+        return set(mem)
+
+    def _save_host_set(self, kv_key: str, hosts: set[str]) -> None:
+        if kv_key == self._ALLOW_KV:
+            self._allow_mem = set(hosts)
+        else:
+            self._block_mem = set(hosts)
+        db = getattr(self.context, "db", None)
+        if db is None:
+            return
+        try:
+            import json
+
+            KVStore(db).set_raw(kv_key, json.dumps(sorted(hosts)), "json")
+        except Exception:  # noqa: BLE001
+            _log.debug("source-trust persist failed", exc_info=True)
+
+    # ── allow / block lists ──
+    def allow(self, url: str) -> None:
+        """Pin a host to full trust (also removes it from the block list)."""
+        host = _hostname(url)
+        if not host:
+            return
+        allowed = self._host_set(self._ALLOW_KV)
+        allowed.add(host)
+        self._save_host_set(self._ALLOW_KV, allowed)
+        self.unblock(url)
+
+    def block(self, url: str) -> None:
+        """Pin a host to zero trust (also removes it from the allow list)."""
+        host = _hostname(url)
+        if not host:
+            return
+        blocked = self._host_set(self._BLOCK_KV)
+        blocked.add(host)
+        self._save_host_set(self._BLOCK_KV, blocked)
+        self.unallow(url)
+
+    def unallow(self, url: str) -> None:
+        host = _hostname(url)
+        if not host:
+            return
+        allowed = self._host_set(self._ALLOW_KV)
+        allowed.discard(host)
+        self._save_host_set(self._ALLOW_KV, allowed)
+
+    def unblock(self, url: str) -> None:
+        host = _hostname(url)
+        if not host:
+            return
+        blocked = self._host_set(self._BLOCK_KV)
+        blocked.discard(host)
+        self._save_host_set(self._BLOCK_KV, blocked)
+
+    def allowed(self) -> list[str]:
+        """Pinned-trust hosts."""
+        return sorted(self._host_set(self._ALLOW_KV))
+
+    def blocked(self) -> list[str]:
+        """Zero-trust hosts."""
+        return sorted(self._host_set(self._BLOCK_KV))
+
+    def is_allowed(self, url: str) -> bool:
+        host = _hostname(url)
+        return bool(host) and host in self._host_set(self._ALLOW_KV)
+
+    def is_blocked(self, url: str) -> bool:
+        host = _hostname(url)
+        return bool(host) and host in self._host_set(self._BLOCK_KV)
+
+    def _breakdown(self, url: str, *, corroborated_by: int = 0,
+                   age_hours: float = 0.0) -> dict[str, Any]:
+        tier, tier_note = domain_tier(url)
+        ok, fail = self._history(url)
+        learned = tier + ok * 0.02 - fail * 0.15
+        learned = max(0.05, min(tier + 0.05, learned))
+        corroboration = 0.05 * max(0, min(int(corroborated_by), 4))
+        score = learned + corroboration
+        decay = 1.0
+        if age_hours > 48:
+            decay = max(0.5, 1.0 - age_hours / 720.0)
+            score *= decay
+        pinned = None
+        if self.is_blocked(url):
+            pinned, score = "blocked", 0.0
+        elif self.is_allowed(url):
+            pinned, score = "allowed", 0.99
+        return {
+            "host": _hostname(url),
+            "tier": tier,
+            "tier_note": tier_note,
+            "history": {"ok": ok, "fail": fail},
+            "learned": round(learned, 3),
+            "corroboration_bonus": round(corroboration, 3),
+            "staleness_decay": round(decay, 3),
+            "pinned": pinned,
+            "score": round(max(0.0, min(0.99, score)), 3),
+        }
+
     def score(self, url: str, *, corroborated_by: int = 0,
               age_hours: float = 0.0) -> float:
         """The 0.0–1.0 trust score for one source."""
-        tier, _note = domain_tier(url)
-        ok, fail = self._history(url)
-        # failures sink hard; successes claw back at most to the tier
-        learned = tier + ok * 0.02 - fail * 0.15
-        learned = max(0.05, min(tier + 0.05, learned))
-        # corroboration: each agreeing domain adds a little, capped
-        score = learned + 0.05 * max(0, min(int(corroborated_by), 4))
-        # staleness: older than two days decays toward the floor
-        if age_hours > 48:
-            score *= max(0.5, 1.0 - age_hours / 720.0)
-        return round(max(0.0, min(0.99, score)), 3)
+        return self._breakdown(url, corroborated_by=corroborated_by,
+                               age_hours=age_hours)["score"]
+
+    def explain(self, url: str, *, corroborated_by: int = 0,
+                age_hours: float = 0.0) -> dict[str, Any]:
+        """The full score breakdown: tier, history, adjustments, pins.
+
+        Also renders a one-line human summary under ``"summary"``.
+        """
+        parts = self._breakdown(url, corroborated_by=corroborated_by,
+                                age_hours=age_hours)
+        h = parts["history"]
+        summary = (f"{parts['host'] or url}: tier {parts['tier']:.2f} "
+                   f"({parts['tier_note']}), history ok={h['ok']} "
+                   f"fail={h['fail']}")
+        if parts["pinned"]:
+            summary += f", PINNED {parts['pinned'].upper()}"
+        summary += f" → {parts['score']:.2f}"
+        parts["summary"] = summary
+        parts["url"] = url
+        return parts
 
     def note(self, url: str) -> str:
         tier, note = domain_tier(url)

@@ -26,11 +26,13 @@ __all__ = [
     "OWNER_IDENTITIES",
     "PASSPHRASE_SEAL",
     "MIN_PASSPHRASE_LEN",
+    "V2_ITERATIONS",
     "is_owner_identity",
     "seal_configured",
     "verify_passphrase",
     "verify_owner",
     "make_seal",
+    "make_seal_v1",
     "bake_seal",
 ]
 
@@ -55,7 +57,8 @@ def is_owner_identity(name: str) -> bool:
 
 def seal_configured() -> bool:
     """True when a passphrase seal has been baked into this file."""
-    return bool(PASSPHRASE_SEAL) and PASSPHRASE_SEAL.startswith("v1$")
+    return bool(PASSPHRASE_SEAL) and (
+        PASSPHRASE_SEAL.startswith("v1$") or PASSPHRASE_SEAL.startswith("v2$"))
 
 
 def _check_format(seal: str) -> tuple[str, str] | None:
@@ -68,10 +71,48 @@ def _check_format(seal: str) -> tuple[str, str] | None:
     return salt_hex, hash_hex
 
 
+def _check_format_v2(seal: str) -> tuple[str, int, str] | None:
+    try:
+        version, salt_hex, iters, hash_hex = (seal or "").split("$")
+    except ValueError:
+        return None
+    if version != "v2" or not salt_hex or not hash_hex:
+        return None
+    try:
+        iterations = int(iters)
+    except ValueError:
+        return None
+    if iterations < 100_000:
+        return None  # absurdly cheap — treat as malformed, not weak
+    return salt_hex, iterations, hash_hex
+
+
+#: PBKDF2 work factor for new seals (OWASP 2023 guidance: 600k for SHA-256).
+V2_ITERATIONS = 600_000
+
+
 def verify_passphrase(secret: str) -> bool:
-    """True when ``secret`` matches the baked seal.  Constant-time."""
+    """True when ``secret`` matches the baked seal.  Constant-time.
+
+    Verifies both ``v1$`` (legacy single-round SHA-256) and ``v2$``
+    (PBKDF2-HMAC-SHA256) seals.
+    """
+    if not secret or not PASSPHRASE_SEAL:
+        return False
+    if PASSPHRASE_SEAL.startswith("v2$"):
+        parsed = _check_format_v2(PASSPHRASE_SEAL)
+        if not parsed:
+            return False
+        salt_hex, iterations, hash_hex = parsed
+        try:
+            salt = bytes.fromhex(salt_hex)
+        except ValueError:
+            return False
+        digest = hashlib.pbkdf2_hmac(
+            "sha256", secret.encode("utf-8"), salt, iterations).hex()
+        return hmac.compare_digest(digest, hash_hex)
     parsed = _check_format(PASSPHRASE_SEAL)
-    if not parsed or not secret:
+    if not parsed:
         return False
     salt_hex, hash_hex = parsed
     try:
@@ -88,11 +129,26 @@ def verify_owner(identity: str, secret: str) -> bool:
 
 
 def make_seal(secret: str) -> str:
-    """Build a ``v1$`` seal string from a passphrase.
+    """Build a ``v2$`` seal string from a passphrase.
 
-    Raises :class:`ValueError` when the passphrase is too weak to serve as
+    PBKDF2-HMAC-SHA256 with 600k iterations (OWASP guidance) — a stolen
+    seal file no longer falls to a fast GPU hash. Raises
+    :class:`ValueError` when the passphrase is too weak to serve as
     the proof half.  The secret itself is never returned or stored.
     """
+    if not secret or len(secret) < MIN_PASSPHRASE_LEN:
+        raise ValueError(
+            f"passphrase must be at least {MIN_PASSPHRASE_LEN} characters"
+        )
+    salt = secrets.token_bytes(16)
+    digest = hashlib.pbkdf2_hmac(
+        "sha256", secret.encode("utf-8"), salt, V2_ITERATIONS).hex()
+    return f"v2${salt.hex()}${V2_ITERATIONS}${digest}"
+
+
+def make_seal_v1(secret: str) -> str:
+    """Legacy ``v1$`` seal (single-round SHA-256). Kept for migration
+    tooling; new seals should use :func:`make_seal` (v2)."""
     if not secret or len(secret) < MIN_PASSPHRASE_LEN:
         raise ValueError(
             f"passphrase must be at least {MIN_PASSPHRASE_LEN} characters"

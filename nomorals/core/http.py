@@ -31,7 +31,8 @@ from typing import Any, BinaryIO, Callable, Mapping, Sequence
 from .errors import NoMoralsError, ProviderError, RateLimited, TimeoutError_, classify
 from .logging_setup import get_logger
 
-__all__ = ["HttpClient", "HttpResponse", "RequestError"]
+__all__ = ["HttpClient", "HttpResponse", "RequestError", "download",
+           "url_filename"]
 
 _log = get_logger(__name__)
 
@@ -561,8 +562,14 @@ class HttpClient:
         progress: Callable[[int, int], None] | None = None,
         chunk_bytes: int = 256 * 1024,
     ) -> Path:
-        """Stream a URL to disk, resuming a partial download when possible."""
+        """Stream a URL to disk, resuming a partial download when possible.
+
+        ``destination`` may be a file path or a directory (the filename is
+        then derived from the URL via :func:`url_filename`).
+        """
         target = Path(destination).expanduser()
+        if target.is_dir():
+            target = target / url_filename(url)
         target.parent.mkdir(parents=True, exist_ok=True)
         self.request(
             "GET",
@@ -837,3 +844,41 @@ def _proxied_open(request, proxy_url: str, timeout: float,
                 yield raw
 
     return _socks_open()
+
+
+def download(
+    url: str,
+    dest: str | Path | None = None,
+    *,
+    client: HttpClient | None = None,
+    resume: bool = True,
+    progress: Any = None,
+    show_progress: bool = False,
+    timeout: float | None = None,
+) -> Path:
+    """Download a URL to disk — the one-call convenience.
+
+    ``dest`` is a file path, a directory (filename derived from the URL),
+    or None (current directory + URL filename). Streams in chunks with
+    resume support; ``show_progress=True`` prints a simple progress line.
+    Returns the final file path.
+    """
+    from pathlib import Path as _Path
+
+    target = _Path(dest).expanduser() if dest else _Path.cwd()
+    if target.is_dir():
+        target = target / url_filename(url)
+    cli = client or HttpClient(timeout=timeout or 30.0)
+    if show_progress and progress is None:
+        def progress(written: int, total: int) -> None:
+            if total > 0:
+                pct = written / total * 100
+                print(f"\r  {written:,}/{total:,} bytes ({pct:.1f}%)",
+                      end="", flush=True)
+            else:
+                print(f"\r  {written:,} bytes", end="", flush=True)
+    try:
+        return cli.download(url, target, resume=resume, progress=progress)
+    finally:
+        if show_progress:
+            print()

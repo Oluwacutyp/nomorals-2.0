@@ -21,8 +21,8 @@ import threading
 import time
 from typing import Iterable, Iterator, NamedTuple
 
-__all__ = ["ULID", "decode_time", "new_id", "new_short_id", "ulid_now",
-           "ulid_range", "PrefixResolution", "resolve_id_prefix",
+__all__ = ["ULID", "decode_time", "is_ulid", "new_id", "new_short_id", "ulid_at",
+           "ulid_now", "ulid_range", "PrefixResolution", "resolve_id_prefix",
            "min_unique_prefix_len"]
 
 _ENCODING = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
@@ -117,6 +117,31 @@ def decode_time(ulid: str) -> float:
     return _decode(ulid[:_TIMESTAMP_LEN]) / 1000.0
 
 
+def is_ulid(text: str) -> bool:
+    """Strict ULID validation per the spec.
+
+    26 chars, Crockford base32 (case-insensitive, no I/L/O/U), and the
+    first character must be ``0``–``7`` — anything larger would overflow
+    128 bits (the spec's maximum is ``7ZZ…Z``). The classic interop bug is
+    accepting a 26-char string that isn't a ULID; this rejects it.
+    """
+    if not isinstance(text, str) or len(text) != 26:
+        return False
+    if text[0].upper() not in "01234567":
+        return False
+    return all(ch.upper() in _DECODING for ch in text)
+
+
+def ulid_at(when_ms: int) -> str:
+    """A ULID stamped at an explicit millisecond timestamp.
+
+    Deterministic given the ms (random part is still fresh entropy) —
+    for backfills, migrations, and tests that need ids "from" a moment.
+    """
+    return _encode(int(when_ms), _TIMESTAMP_LEN) + _encode(
+        secrets.randbits(80), _RANDOM_LEN)
+
+
 def ulid_range(start_ms: int, end_ms: int) -> tuple[str, str]:
     """Lexicographic bounds covering every ULID created in ``[start_ms, end_ms)``.
 
@@ -152,6 +177,47 @@ class ULID:
     @classmethod
     def generate(cls) -> "ULID":
         return cls(ulid_now())
+
+    @classmethod
+    def at(cls, when_ms: int) -> "ULID":
+        """A ULID stamped at an explicit millisecond timestamp."""
+        return cls(ulid_at(when_ms))
+
+    def next(self) -> "ULID":
+        """The next monotonic ULID after this one (same ms → entropy + 1).
+
+        The spec's monotonicity primitive, exposed for id sequences that
+        must stay ordered without touching the clock.
+        """
+        entropy = (self.entropy + 1) % (1 << 80)
+        return ULID(_encode(self.datetime_ms, _TIMESTAMP_LEN)
+                    + _encode(entropy, _RANDOM_LEN))
+
+    def to_bytes(self) -> bytes:
+        """The 128-bit value as 16 big-endian bytes (spec binary layout)."""
+        return (_decode(self.raw[:_TIMESTAMP_LEN]) << 80 | self.entropy).to_bytes(16, "big")
+
+    @classmethod
+    def from_bytes(cls, raw: bytes) -> "ULID":
+        """Build from 16 big-endian bytes (inverse of :meth:`to_bytes`)."""
+        if len(raw) != 16:
+            raise ValueError(f"ULID needs 16 bytes, got {len(raw)}")
+        value = int.from_bytes(raw, "big")
+        return cls(_encode(value >> 80, _TIMESTAMP_LEN)
+                   + _encode(value & ((1 << 80) - 1), _RANDOM_LEN))
+
+    def to_uuid(self) -> str:
+        """The 128-bit value as a canonical UUID string."""
+        import uuid as _uuid
+
+        return str(_uuid.UUID(bytes=self.to_bytes()))
+
+    @classmethod
+    def from_uuid(cls, value: str) -> "ULID":
+        """Build from a UUID string (inverse of :meth:`to_uuid`)."""
+        import uuid as _uuid
+
+        return cls.from_bytes(_uuid.UUID(str(value)).bytes)
 
     @property
     def datetime_ms(self) -> int:

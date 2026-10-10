@@ -17,12 +17,16 @@ from typing import Iterable, Iterator, Sequence
 
 __all__ = [
     "Chunk",
+    "DedupResult",
+    "MinHash",
     "SimHash",
     "approx_token_count",
     "chunk_text",
     "compact_whitespace",
+    "dedupe_by_minhash",
     "dedupe_by_simhash",
     "detokenize_bytes",
+    "jaro_winkler",
     "levenshtein",
     "ngrams",
     "normalize_text",
@@ -580,3 +584,159 @@ def slugify(
         if strip_after_limit:
             slug = slug.strip(strip if strip is not None else separator)
     return slug or fallback
+
+
+# ── MinHash (datasketch-style near-duplicate estimation) ─────────────────────
+
+
+class MinHash:
+    """MinHash signature for Jaccard similarity estimation.
+
+    Complements :class:`SimHash` (Hamming-space near-dupes): MinHash
+    estimates the *Jaccard* similarity of shingle sets directly —
+    ``P(min hashes agree) = Jaccard`` — which is the right tool when you
+    need a calibrated similarity number, not just a near/far verdict.
+
+    datasketch's recipe: ``num_perm=128`` permutations, ``k=5`` char
+    shingles. Each permutation is a salted blake2b; the signature is the
+    per-permutation minimum.
+    """
+
+    __slots__ = ("signature", "num_perm")
+
+    def __init__(self, signature: list[int], num_perm: int = 128) -> None:
+        self.signature = list(signature)
+        self.num_perm = num_perm
+
+    @classmethod
+    def from_text(cls, text: str, *, num_perm: int = 128,
+                 shingle_k: int = 5) -> "MinHash":
+        norm = normalize_text(text or "", lower=True)
+        shingles = {norm[i:i + shingle_k] for i in range(max(1, len(norm) - shingle_k + 1))}
+        if not shingles:
+            shingles = {""}
+        sig: list[int] = []
+        for perm in range(num_perm):
+            salt = perm.to_bytes(4, "big")
+            best: int | None = None
+            for sh in shingles:
+                h = int.from_bytes(
+                    hashlib.blake2b(sh.encode("utf-8"), digest_size=8,
+                                    person=salt).digest(), "big")
+                if best is None or h < best:
+                    best = h
+            sig.append(best if best is not None else 0)
+        return cls(sig, num_perm)
+
+    def jaccard(self, other: "MinHash") -> float:
+        """Estimated Jaccard similarity of the two shingle sets."""
+        if self.num_perm != other.num_perm:
+            raise ValueError("MinHash signatures need the same num_perm")
+        agree = sum(1 for a, b in zip(self.signature, other.signature) if a == b)
+        return agree / self.num_perm if self.num_perm else 0.0
+
+    def lsh_bands(self, bands: int = 8) -> list[tuple[int, ...]]:
+        """Split the signature into ``bands`` for LSH bucketing.
+
+        Documents sharing a band are candidate near-dupes — the standard
+        banding trick that makes all-pairs comparison sub-quadratic.
+        """
+        rows = max(1, self.num_perm // bands)
+        return [tuple(self.signature[i * rows:(i + 1) * rows])
+                for i in range(bands)]
+
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, MinHash) and self.signature == other.signature
+
+    def __hash__(self) -> int:
+        return hash(tuple(self.signature))
+
+    def __repr__(self) -> str:
+        return f"MinHash(perm={self.num_perm}, sig={self.signature[:3]}…)"
+
+
+def dedupe_by_minhash(texts: Iterable[str], *, threshold: float = 0.8,
+                      num_perm: int = 128, bands: int = 8) -> DedupResult:
+    """Remove near-duplicates via MinHash + LSH banding.
+
+    ``threshold`` is the estimated Jaccard similarity treated as a
+    duplicate. Banding keeps it near-linear; candidates that share no band
+    are never compared exactly.
+    """
+    texts = list(texts)
+    sigs = [MinHash.from_text(t, num_perm=num_perm) for t in texts]
+    buckets: dict[tuple[int, int, tuple[int, ...]], list[int]] = {}
+    for idx, sig in enumerate(sigs):
+        for b, band in enumerate(sig.lsh_bands(bands)):
+            buckets.setdefault((b, len(band), band), []).append(idx)
+    kept: list[int] = []
+    dropped: list[int] = []
+    groups: list[list[int]] = []
+    for idx, sig in enumerate(sigs):
+        if idx in dropped:
+            continue
+        group = [idx]
+        candidates: set[int] = set()
+        for b, band in enumerate(sig.lsh_bands(bands)):
+            for other in buckets.get((b, len(band), band), ()):
+                if other > idx:
+                    candidates.add(other)
+        for other in sorted(candidates):
+            if other in dropped:
+                continue
+            if sig.jaccard(sigs[other]) >= threshold:
+                dropped.append(other)
+                group.append(other)
+        kept.append(idx)
+        groups.append(sorted(group))
+    return DedupResult(kept=kept, dropped=dropped, groups=groups)
+
+
+def jaro_winkler(a: str, b: str, *, prefix_scale: float = 0.1) -> float:
+    """Jaro-Winkler similarity — the record-linkage standard for names.
+
+    Jaro measures matching characters within a sliding window plus
+    transpositions; Winkler boosts strings that share a prefix (up to 4
+    chars). Returns 0.0–1.0. Complements :func:`levenshtein`-based
+    :func:`similarity` for short human strings (names, titles).
+    """
+    if a == b:
+        return 1.0
+    la, lb = len(a), len(b)
+    if not la or not lb:
+        return 0.0
+    window = max(la, lb) // 2 - 1
+    window = max(0, window)
+    a_match = [False] * la
+    b_match = [False] * lb
+    matches = 0
+    for i, ca in enumerate(a):
+        lo = max(0, i - window)
+        hi = min(lb, i + window + 1)
+        for j in range(lo, hi):
+            if not b_match[j] and b[j] == ca:
+                a_match[i] = True
+                b_match[j] = True
+                matches += 1
+                break
+    if not matches:
+        return 0.0
+    transpositions = 0
+    j = 0
+    for i in range(la):
+        if a_match[i]:
+            while not b_match[j]:
+                j += 1
+            if a[i] != b[j]:
+                transpositions += 1
+            j += 1
+    transpositions //= 2
+    jaro = (matches / la + matches / lb
+            + (matches - transpositions) / matches) / 3.0
+    prefix = 0
+    for ca, cb in zip(a, b):
+        if ca == cb and prefix < 4:
+            prefix += 1
+        else:
+            break
+    return jaro + prefix * prefix_scale * (1.0 - jaro)

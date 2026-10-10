@@ -44,8 +44,10 @@ __all__ = [
     "get_logger",
     "json_formatter",
     "log_context",
+    "log_event",
     "redact",
     "scrub_secrets",
+    "set_log_theme",
     "setup_logging",
     "shutdown_logging",
 ]
@@ -283,10 +285,16 @@ class SampleFilter(logging.Filter):
 
 
 class _ConsoleFormatter(logging.Formatter):
-    """Compact, readable console output with colour when the tty supports it."""
+    """Compact, readable console output with colour when the tty supports it.
 
-    # Palette note: the owner hates red — errors are magenta, never red,
-    # and nothing uses a black background.
+    Colors come from a :mod:`nomorals.core.style` theme (see
+    :func:`set_log_theme`); the default ``ember`` palette keeps the house
+    rule — errors are magenta, never red, and nothing uses a black
+    background.
+    """
+
+    #: Legacy palette kept for callers that constructed the formatter
+    #: without a theme. Prefer :func:`set_log_theme`.
     COLORS = {
         "DEBUG": "\033[36m",
         "INFO": "\033[32m",
@@ -296,10 +304,30 @@ class _ConsoleFormatter(logging.Formatter):
     }
     RESET = "\033[0m"
 
-    def __init__(self, *, color: bool = True, verbose: bool = False) -> None:
+    #: log level → style role.
+    _ROLE_FOR_LEVEL = {
+        "DEBUG": "muted",
+        "INFO": "ok",
+        "WARNING": "warn",
+        "ERROR": "error",
+        "CRITICAL": "error",
+    }
+
+    def __init__(self, *, color: bool = True, verbose: bool = False,
+                 theme: Any = None) -> None:
         super().__init__()
         self.color = color
         self.verbose = verbose
+        self._theme = theme  # a style.Theme, or a theme name, or None
+
+    def _resolve_theme(self) -> Any:
+        from .style import THEMES, active_theme
+
+        if self._theme is None:
+            return active_theme()
+        if isinstance(self._theme, str):
+            return THEMES.get(self._theme) or active_theme()
+        return self._theme
 
     def format(self, record: logging.LogRecord) -> str:
         _ContextInjectionFilter().filter(record)
@@ -310,11 +338,19 @@ class _ConsoleFormatter(logging.Formatter):
         stamp = self.formatTime(record, "%H:%M:%S")
         message = record.getMessage()
         ctx = _context_suffix(record)
-        if self.color and sys.stderr.isatty():
-            paint = self.COLORS.get(level, "")
-            head = f"{paint}{stamp} {level[:4]:<4}{self.RESET} {name}"
+        event = getattr(record, "event", "")
+        event_bit = f" {event}" if event else ""
+        use_color = self.color and sys.stderr.isatty()
+        if use_color:
+            theme = self._resolve_theme()
+            role = self._ROLE_FOR_LEVEL.get(level, "info")
+            code = theme.color(role)
+            reset = theme.reset
+            name_c = f"{theme.color('muted')}{name}{reset}" if theme.color("muted") else name
+            stamp_c = f"{theme.dim}{stamp}{reset}" if theme.dim else stamp
+            head = f"{code}{stamp_c} {level[:4]:<4}{reset} {name_c}{event_bit}"
         else:
-            head = f"{stamp} {level[:4]:<4} {name}"
+            head = f"{stamp} {level[:4]:<4} {name}{event_bit}"
         body = f"{head}{ctx} {message}" if not self.verbose else f"{head}{ctx} {message} [{record.filename}:{record.lineno}]"
         if record.exc_info:
             body = f"{body}\n{self.formatException(record.exc_info)}"
@@ -396,6 +432,7 @@ def setup_logging(
     queue_size: int = 10_000,
     sample_rates: dict[str, float] | None = None,
     bind: dict[str, str] | None = None,
+    theme: str | None = None,
     quiet_libs: Iterable[str] = (
         "urllib3",
         "asyncio",
@@ -415,6 +452,8 @@ def setup_logging(
     disk I/O. ``sample_rates`` (e.g. ``{"DEBUG": 0.1, "INFO": 0.5}``) drops a
     deterministic fraction of verbose records; ERROR+ always survive.
     ``bind`` pre-binds correlation fields for the whole process.
+    ``theme`` selects a :mod:`nomorals.core.style` palette for console
+    output (``"ninja"``, ``"ember"``, ``"paper"``, ``"plain"``).
     """
     global _CONFIGURED
     with _LOCK:
@@ -432,7 +471,11 @@ def setup_logging(
 
         console = logging.StreamHandler(stream=sys.stderr)
         console.setLevel(numeric)
-        console.setFormatter(JsonFormatter() if as_json else _ConsoleFormatter(color=color))
+        console.setFormatter(
+            JsonFormatter()
+            if as_json
+            else _ConsoleFormatter(color=color, theme=theme)
+        )
         handlers: list[logging.Handler] = [console]
 
         if file:
@@ -580,3 +623,30 @@ class LogCapture:
 
     def find(self, substring: str) -> list[str]:
         return [m for m in self.messages if substring in m]
+
+
+# ── Themes & structured events ─────────────────────────────────────────────
+
+def set_log_theme(name: str) -> Any:
+    """Switch the console palette process-wide (see :mod:`nomorals.core.style`).
+
+    ``"ninja"`` is the electric-blue ninja theme; ``"plain"`` disables color.
+    Returns the active theme.
+    """
+    from .style import set_theme
+
+    return set_theme(name)
+
+
+def log_event(logger: logging.Logger, event: str,
+              level: int = logging.INFO, **fields: Any) -> None:
+    """structlog-style structured event: stable name + typed fields.
+
+    Emits ``event`` as the message with the fields attached as a structured
+    ``payload`` (survives into JSON output; rendered as ``k=v`` in the
+    console suffix by callers that want it). Prefer this over f-strings
+    when the facts are queryable::
+
+        log_event(log, "order.created", order_id=oid, total=total)
+    """
+    logger.log(level, event, extra={"event": event, "payload": dict(fields)})

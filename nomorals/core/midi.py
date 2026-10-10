@@ -57,6 +57,8 @@ __all__ = [
     "CRASH", "RIDE", "TAMBOURINE", "COWBELL",
     "HIGH_TOM", "LOW_TOM", "LOW_FLOOR_TOM",
     "CONGA_HIGH", "CONGA_LOW", "TIMBALE_HIGH", "SHAKER",
+    "GM_INSTRUMENTS", "GM_FAMILIES", "DRUM_MAP",
+    "program_name", "program_number", "gm_family", "quantize",
 ]
 
 NOTE_NAMES = "C C# D D# E F F# G G# A A# B".split()
@@ -985,3 +987,156 @@ class MidiBuilder:
         with open(path, "wb") as fh:
             fh.write(self.build())
         return path
+
+
+# ─────────────────────── General MIDI tables ─────────────────────────────────
+
+#: The 128 General MIDI program names, in order (8 families × 16).
+#: Every MIDI tool ships this table; composition code can now say
+#: ``program_number("Nylon Guitar")`` instead of memorizing 25.
+GM_INSTRUMENTS: tuple[str, ...] = (
+    # Piano
+    "Acoustic Grand Piano", "Bright Acoustic Piano", "Electric Grand Piano",
+    "Honky-tonk Piano", "Electric Piano 1", "Electric Piano 2",
+    "Harpsichord", "Clavinet",
+    # Chromatic Percussion
+    "Celesta", "Glockenspiel", "Music Box", "Vibraphone", "Marimba",
+    "Xylophone", "Tubular Bells", "Dulcimer",
+    # Organ
+    "Drawbar Organ", "Percussive Organ", "Rock Organ", "Church Organ",
+    "Reed Organ", "Accordion", "Harmonica", "Tango Accordion",
+    # Guitar
+    "Acoustic Guitar (nylon)", "Acoustic Guitar (steel)",
+    "Electric Guitar (jazz)", "Electric Guitar (clean)",
+    "Electric Guitar (muted)", "Overdriven Guitar", "Distortion Guitar",
+    "Guitar harmonics",
+    # Bass
+    "Acoustic Bass", "Electric Bass (finger)", "Electric Bass (pick)",
+    "Fretless Bass", "Slap Bass 1", "Slap Bass 2", "Synth Bass 1",
+    "Synth Bass 2",
+    # Strings
+    "Violin", "Viola", "Cello", "Contrabass", "Tremolo Strings",
+    "Pizzicato Strings", "Orchestral Harp", "Timpani",
+    # Ensemble
+    "String Ensemble 1", "String Ensemble 2", "Synth Strings 1",
+    "Synth Strings 2", "Choir Aahs", "Voice Oohs", "Synth Voice",
+    "Orchestra Hit",
+    # Brass
+    "Trumpet", "Trombone", "Tuba", "Muted Trumpet", "French Horn",
+    "Brass Section", "Synth Brass 1", "Synth Brass 2",
+    # Reed
+    "Soprano Sax", "Alto Sax", "Tenor Sax", "Baritone Sax", "Oboe",
+    "English Horn", "Bassoon", "Clarinet",
+    # Pipe
+    "Piccolo", "Flute", "Recorder", "Pan Flute", "Blown Bottle",
+    "Shakuhachi", "Whistle", "Ocarina",
+    # Synth Lead
+    "Lead 1 (square)", "Lead 2 (sawtooth)", "Lead 3 (calliope)",
+    "Lead 4 (chiff)", "Lead 5 (charang)", "Lead 6 (voice)",
+    "Lead 7 (fifths)", "Lead 8 (bass + lead)",
+    # Synth Pad
+    "Pad 1 (new age)", "Pad 2 (warm)", "Pad 3 (polysynth)",
+    "Pad 4 (choir)", "Pad 5 (bowed)", "Pad 6 (metallic)", "Pad 7 (halo)",
+    "Pad 8 (sweep)",
+    # Synth Effects
+    "FX 1 (rain)", "FX 2 (soundtrack)", "FX 3 (crystal)", "FX 4 (atmosphere)",
+    "FX 5 (brightness)", "FX 6 (goblins)", "FX 7 (echoes)", "FX 8 (sci-fi)",
+    # Ethnic
+    "Sitar", "Banjo", "Shamisen", "Koto", "Kalimba", "Bag pipe", "Fiddle",
+    "Shanai",
+    # Percussive
+    "Tinkle Bell", "Agogo", "Steel Drums", "Woodblock", "Taiko Drum",
+    "Melodic Tom", "Synth Drum", "Reverse Cymbal",
+    # Sound Effects
+    "Guitar Fret Noise", "Breath Noise", "Seashore", "Bird Tweet",
+    "Telephone Ring", "Helicopter", "Applause", "Gunshot",
+)
+
+#: GM family names for program ranges (program // 8).
+GM_FAMILIES: tuple[str, ...] = (
+    "Piano", "Chromatic Percussion", "Organ", "Guitar", "Bass", "Strings",
+    "Ensemble", "Brass", "Reed", "Pipe", "Synth Lead", "Synth Pad",
+    "Synth Effects", "Ethnic", "Percussive", "Sound Effects",
+)
+
+#: Full GM percussion map: note number → name (channel 9/10).
+DRUM_MAP: dict[int, str] = {
+    35: "Acoustic Bass Drum", 36: "Bass Drum 1", 37: "Side Stick",
+    38: "Acoustic Snare", 39: "Hand Clap", 40: "Electric Snare",
+    41: "Low Floor Tom", 42: "Closed Hi Hat", 43: "High Floor Tom",
+    44: "Pedal Hi-Hat", 45: "Low Tom", 46: "Open Hi-Hat",
+    47: "Low-Mid Tom", 48: "Hi-Mid Tom", 49: "Crash Cymbal 1",
+    50: "High Tom", 51: "Ride Cymbal 1", 52: "Chinese Cymbal",
+    53: "Ride Bell", 54: "Tambourine", 55: "Splash Cymbal",
+    56: "Cowbell", 57: "Crash Cymbal 2", 58: "Vibraslap",
+    59: "Ride Cymbal 2", 60: "Hi Bongo", 61: "Low Bongo",
+    62: "Mute Hi Conga", 63: "Open Hi Conga", 64: "Low Conga",
+    65: "High Timbale", 66: "Low Timbale", 67: "High Agogo",
+    68: "Low Agogo", 69: "Cabasa", 70: "Maracas",
+    71: "Short Whistle", 72: "Long Whistle", 73: "Short Guiro",
+    74: "Long Guiro", 75: "Claves", 76: "Hi Wood Block",
+    77: "Low Wood Block", 78: "Mute Cuica", 79: "Open Cuica",
+    80: "Mute Triangle", 81: "Open Triangle",
+}
+
+
+def program_name(program: int) -> str:
+    """GM program number (0–127) → instrument name."""
+    if not 0 <= program <= 127:
+        raise ValueError(f"GM program must be 0–127, got {program}")
+    return GM_INSTRUMENTS[program]
+
+
+def program_number(name: str) -> int:
+    """Instrument name → GM program number (case-insensitive).
+
+    Matches exact name first, then unique prefix, then unique substring —
+    ``"nylon"`` finds ``Acoustic Guitar (nylon)``.
+    """
+    want = name.strip().lower()
+    exact = [i for i, n in enumerate(GM_INSTRUMENTS) if n.lower() == want]
+    if exact:
+        return exact[0]
+    prefix = [i for i, n in enumerate(GM_INSTRUMENTS)
+              if n.lower().startswith(want)]
+    if len(prefix) == 1:
+        return prefix[0]
+    sub = [i for i, n in enumerate(GM_INSTRUMENTS) if want in n.lower()]
+    if len(sub) == 1:
+        return sub[0]
+    cands = prefix or sub
+    raise ValueError(
+        f"ambiguous or unknown GM instrument {name!r}"
+        + (f" (matches: {', '.join(GM_INSTRUMENTS[i] for i in cands[:5])})"
+           if cands else ""))
+
+
+def gm_family(program: int) -> str:
+    """The GM family name for a program number (e.g. 25 → "Guitar")."""
+    if not 0 <= program <= 127:
+        raise ValueError(f"GM program must be 0–127, got {program}")
+    return GM_FAMILIES[program // 8]
+
+
+def quantize(events: list["NoteEvent"], grid: float = 0.25,
+             *, strength: float = 1.0) -> list["NoteEvent"]:
+    """Snap event starts (and durations) to a beat grid.
+
+    ``grid=0.25`` = 16th notes. ``strength`` 0.0–1.0 blends between the
+    original timing and full quantization — 1.0 is robotic, 0.5 keeps the
+    human feel while tightening the groove (the standard DAW control).
+    """
+    import dataclasses as _dc
+
+    if not 0.0 <= strength <= 1.0:
+        raise ValueError("strength must be 0.0–1.0")
+    out: list[NoteEvent] = []
+    for ev in events:
+        q_start = round(ev.start / grid) * grid
+        q_dur = max(grid, round(ev.duration / grid) * grid)
+        out.append(_dc.replace(
+            ev,
+            start=ev.start + (q_start - ev.start) * strength,
+            duration=ev.duration + (q_dur - ev.duration) * strength,
+        ))
+    return out

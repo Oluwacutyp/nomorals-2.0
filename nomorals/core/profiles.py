@@ -26,7 +26,7 @@ from typing import Any
 from .profile import detect_profile
 
 __all__ = ["PROFILES", "get_profile", "get_profile_kind", "profile_value",
-           "describe_profile", "KNOWN_PROFILE_NAMES"]
+           "describe_profile", "format_profile", "KNOWN_PROFILE_NAMES"]
 
 #: profile name → tuning values. ``threads: 0`` means auto-detect all cores.
 PROFILES: dict[str, dict[str, Any]] = {
@@ -191,3 +191,24 @@ def get_profile(kind: str = "") -> dict[str, Any]:
 def profile_value(name: str, default: Any = None, kind: str = "") -> Any:
     """Single tuning value for the current profile."""
     return get_profile(kind).get(name, default)
+
+
+def format_profile(pinned: str = "", *, color: bool | None = None,
+                   theme: Any = None) -> str:
+    """Styled text rendering of :func:`describe_profile` for ``nm profile``."""
+    from .style import paint, supports_color, kv_lines, header
+
+    if color is None:
+        color = supports_color()
+    info = describe_profile(pinned=pinned)
+    lines = [header(f"profile: {info['kind']}", theme, color=color), ""]
+    lines.append(paint(f"pin source: {info['pin_source']}   "
+                       f"cloud: {info['cloud']}", "muted", theme, color=color))
+    lines.append("")
+    lines.append(paint("TUNING VALUES", "label", theme, color=color))
+    lines.extend(kv_lines({k: v for k, v in info["values"].items()},
+                          theme, color=color))
+    lines.append("")
+    lines.append(paint(f"known kinds: {', '.join(info['known_kinds'])}",
+                       "muted", theme, color=color))
+    return "\n".join(lines).rstrip()

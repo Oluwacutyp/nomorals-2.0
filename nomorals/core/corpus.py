@@ -85,11 +85,18 @@ def apply_rules(word: str, rule: str | None = None) -> List[str]:
         "upper": [low.upper()],
         "rev": [low[::-1]],
         "rev_cap": [low[::-1].capitalize()],
+        "reflect": [low + low[::-1]],          # hashcat `f`
+        "toggle": [low.swapcase()],            # hashcat `t`
+        "toggle_each": [                      # hashcat `T0` … `Tn`
+            low[:i] + low[i].swapcase() + low[i + 1:]
+            for i, ch in enumerate(low) if ch.isalpha()],
+        "rotate_l": [low[1:] + low[:1]],       # hashcat `{`
+        "rotate_r": [low[-1:] + low[:-1]],     # hashcat `}`
         "leet": [_leet_all(low)],
         "leet_tail": [_leet_tail(low)],
         "leet_cap": [_leet_all(low.capitalize())],
         "d1": [f"{low}1", f"{low}12", f"{low}123", f"{low}1234",
-               f"{low}!", f"{low}!!", f"{low}!"],
+               f"{low}!", f"{low}!!", f"{low}?", f"{low}@"],
         "p1": ["1" + low, "!" + low],
         "double": [low * 2],
         "year": list(y()),
@@ -99,9 +106,10 @@ def apply_rules(word: str, rule: str | None = None) -> List[str]:
     }
     # canonical order: cheapest/most-likely first
     RULE_ORDER: list[str] = ["raw", "cap", "d1", "year", "upper",
-                             "leet_tail", "leet", "rev", "double",
-                             "p1", "cap_year", "year_rev", "leet_cap",
-                             "rev_cap", "year_cap"]
+                             "leet_tail", "leet", "rev", "reflect",
+                             "toggle", "double", "p1", "cap_year",
+                             "year_rev", "leet_cap", "rev_cap", "year_cap",
+                             "toggle_each", "rotate_l", "rotate_r"]
     if rule is not None:
         if rule not in RULES:
             raise ValueError(f"unknown rule {rule!r} (known: "
@@ -119,9 +127,10 @@ def apply_rules(word: str, rule: str | None = None) -> List[str]:
 
 #: The stable rule order (re-exported for introspection / tests).
 RULE_ORDER: tuple[str, ...] = ("raw", "cap", "d1", "year", "upper",
-                               "leet_tail", "leet", "rev", "double",
-                               "p1", "cap_year", "year_rev", "leet_cap",
-                               "rev_cap", "year_cap")
+                               "leet_tail", "leet", "rev", "reflect",
+                               "toggle", "double", "p1", "cap_year",
+                               "year_rev", "leet_cap", "rev_cap", "year_cap",
+                               "toggle_each", "rotate_l", "rotate_r")
 
 
 def rule_stream(words: Iterable[str], *, rules: Sequence[str] | None = None,

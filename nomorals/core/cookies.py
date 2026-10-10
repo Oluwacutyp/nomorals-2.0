@@ -35,7 +35,8 @@ from ..core.logging_setup import get_logger
 
 _log = get_logger(__name__)
 
-__all__ = ["CookieLab", "parse_cookies", "cookie_report"]
+__all__ = ["Cookie", "CookieJar", "CookieLab", "cookies_to_header",
+           "parse_cookies", "cookie_report"]
 
 # ── known-cookie fingerprints: name → (service, note) ───────────────────────
 # Ordered: first match wins.  Keys are matched case-insensitively.
@@ -135,6 +136,29 @@ class Cookie:
             out["decoded_value"] = self.decoded_value
             out["decode_via"] = self.decode_via
         return out
+
+    def to_header(self) -> str:
+        """The ``name=value`` pair for a ``Cookie:`` request header."""
+        return f"{self.name}={self.value}"
+
+    def is_expired(self, now: float | None = None) -> bool:
+        """True when Max-Age/Expires says this cookie is dead."""
+        import time as _time
+
+        now = _time.time() if now is None else now
+        max_age = self.flags.get("max-age", "")
+        if max_age.lstrip("-").isdigit() and int(max_age) <= 0:
+            return True
+        expires = self.flags.get("expires", "")
+        if expires:
+            for fmt in ("%a, %d %b %Y %H:%M:%S %Z", "%a, %d-%b-%Y %H:%M:%S %Z",
+                        "%a, %d %b %Y %H:%M:%S GMT"):
+                try:
+                    ts = _time.mktime(_time.strptime(expires, fmt))
+                    return ts <= now
+                except (ValueError, OverflowError):
+                    continue
+        return False
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -271,22 +295,39 @@ class CookieLab:
         out: list[Cookie] = []
         if not (text or "").strip():
             return out
-        # normalize: strip header prefixes, keep cookie parts + flags
-        lines = []
+        # normalize: strip header prefixes, keep cookie parts + flags.
+        # A plain "Cookie:" line is a *request* header: every ';'-separated
+        # part is its own cookie (no attributes). "Set-Cookie:" lines carry
+        # one cookie plus flags.
+        lines: list[tuple[bool, str]] = []
         for raw_line in (text or "").splitlines():
             line = raw_line.strip()
             if not line:
                 continue
-            m = re.match(r"^(?:set-)?cookie\s*:\s*(.+)$", line, re.I)
+            request_style = False
+            m = re.match(r"^(set-)?cookie\s*:\s*(.+)$", line, re.I)
             if m:
-                line = m.group(1).strip()
+                request_style = not m.group(1)  # "Cookie:", not "Set-Cookie:"
+                line = m.group(2).strip()
             # also handle bare "Name=value; Name2=value2" lines
-            lines.append(line)
-        joined = "\n".join(lines)
+            lines.append((request_style, line))
         # Split into individual Set-Cookie lines: a new cookie starts after
         # a flag-only segment or a newline.  We process line by line and,
         # within a line, split on ';' but keep the flag tail per cookie.
-        for line in lines:
+        for request_style, line in lines:
+            # Request-style "Cookie:" header: each part is a cookie.
+            if request_style:
+                for piece in line.split(";"):
+                    piece = piece.strip()
+                    parsed = _split_cookie_part(piece)
+                    if parsed:
+                        n, v = parsed
+                        c = Cookie(name=n, value=v)
+                        c.kind = _classify(c.name, c.value)
+                        svc, _note = _service_for(c.name)
+                        c.service = svc
+                        out.append(c)
+                continue
             # If the line is a single cookie with flags, split name=value
             # off the front, then the rest is flags.
             first_cookie: list[Cookie] = []
@@ -538,3 +579,57 @@ def parse_cookies(text: str) -> list[Cookie]:
 
 def cookie_report(text: str, *, decode: bool = True) -> dict[str, Any]:
     return _DEFAULT.report(text, decode=decode)
+
+
+def cookies_to_header(cookies: list[Cookie]) -> str:
+    """Join parsed cookies into a ``Cookie:`` request header value."""
+    return "; ".join(c.to_header() for c in cookies if c.name)
+
+
+class CookieJar:
+    """A minimal in-memory cookie jar: feed it ``Set-Cookie`` response
+    text, get a ``Cookie:`` header back.
+
+    >>> jar = CookieJar()
+    >>> jar.update("Set-Cookie: session=abc123; Path=/; HttpOnly")
+    >>> jar.header()
+    'session=abc123'
+    """
+
+    def __init__(self, cookies: list[Cookie] | None = None) -> None:
+        self._jar: dict[str, Cookie] = {}
+        if cookies:
+            for cookie in cookies:
+                self._jar[cookie.name] = cookie
+
+    def update(self, set_cookie_text: str) -> "CookieJar":
+        """Ingest ``Set-Cookie`` header text (one or many lines)."""
+        for cookie in parse_cookies(set_cookie_text):
+            if cookie.is_expired():
+                self._jar.pop(cookie.name, None)
+            else:
+                self._jar[cookie.name] = cookie
+        return self
+
+    def header(self) -> str:
+        """The ``Cookie:`` header value for the current jar contents."""
+        return "; ".join(c.to_header() for c in self._jar.values())
+
+    def get(self, name: str, default: str = "") -> str:
+        cookie = self._jar.get(name)
+        return cookie.value if cookie else default
+
+    def names(self) -> list[str]:
+        return list(self._jar.keys())
+
+    def clear(self) -> None:
+        self._jar.clear()
+
+    def __len__(self) -> int:
+        return len(self._jar)
+
+    def __contains__(self, name: str) -> bool:
+        return name in self._jar
+
+    def to_dict(self) -> dict[str, str]:
+        return {name: c.value for name, c in self._jar.items()}

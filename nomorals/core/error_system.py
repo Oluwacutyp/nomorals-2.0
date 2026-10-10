@@ -78,6 +78,14 @@ class ErrorSystem:
             top_failing = self.journal.top_failing(window_s=86400)
         except Exception:  # noqa: BLE001
             top_failing = []
+        try:
+            top_subsystems = self.journal.top_subsystems(window_s=86400)
+        except Exception:  # noqa: BLE001
+            top_subsystems = []
+        try:
+            mttr = self.journal.mttr(window_s=86400)
+        except Exception:  # noqa: BLE001
+            mttr = {}
         ok = not alerts and not degraded
         return {
             "ok": ok,
@@ -90,10 +98,57 @@ class ErrorSystem:
             "budgets": budget_status,
             "ladders": ladder_status,
             "top_failing_24h": [
-                {"subsystem": s, "failures": n} for s, n in top_failing[:10]
+                {"signature": f.get("signature"), "subsystem": f.get("subsystem"),
+                 "failures": f.get("n"), "last": f.get("last_ts")}
+                for f in top_failing[:10]
             ],
+            "top_subsystems_24h": top_subsystems[:10],
+            "mttr_24h": mttr,
             "supervised": sorted(self.supervisors),
         }
+
+    def format_health(self, *, color: bool | None = None,
+                      theme: Any = None) -> str:
+        """A styled one-screen health report for chat and dashboards."""
+        from .style import paint, supports_color, status_dot, header
+
+        if color is None:
+            color = supports_color()
+        snap = self.health()
+        dot = status_dot("ok" if snap["ok"] else "error", theme, color=color)
+        lines = [header(f"{dot} system health", theme, color=color), ""]
+        alerts = snap["alerts"]
+        if alerts:
+            lines.append(paint("ALERTS", "label", theme, color=color))
+            for a in alerts[:8]:
+                lines.append(f"  {paint(a['subsystem'], 'error', theme, color=color)}"
+                             f" [{a['severity']}] {a['rule']}: {a['detail']}")
+            lines.append("")
+        degraded = snap["degraded_subsystems"]
+        if degraded:
+            lines.append(paint("DEGRADED", "label", theme, color=color))
+            for d in degraded:
+                lines.append(f"  {paint(str(d), 'warn', theme, color=color)}")
+            lines.append("")
+        top = snap["top_subsystems_24h"]
+        if top:
+            lines.append(paint("HOT SUBSYSTEMS (24h)", "label", theme, color=color))
+            for s in top[:6]:
+                lines.append(
+                    f"  {paint(s['subsystem'], 'info', theme, color=color)}: "
+                    f"{s['n']} incidents ({s['share']:.0%} of total), "
+                    f"worst {s['worst_severity']}")
+            lines.append("")
+        mttr = snap["mttr_24h"] or {}
+        if mttr.get("recovered"):
+            lines.append(paint("RECOVERY (24h)", "label", theme, color=color))
+            lines.append(f"  MTTR {mttr['mean_human']} (median {mttr['median_human']}), "
+                         f"{mttr['recovered']} recovered / {mttr['open']} open")
+            lines.append("")
+        if snap["ok"] and not top:
+            lines.append(paint("all quiet — no alerts, no incidents in 24h",
+                               "ok", theme, color=color))
+        return "\n".join(lines).rstrip()
 
     def close(self) -> None:
         for sup in list(self.supervisors.values()):

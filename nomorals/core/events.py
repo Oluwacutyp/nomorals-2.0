@@ -160,6 +160,7 @@ class Subscription:
     sub_id: str = ""
     retries: int = 0  #: redeliveries after a handler failure before DLQ
     retry_backoff: float = 0.5  #: base backoff seconds between retries
+    predicate: Callable[[Any], bool] | None = None  #: extra data filter
 
     def matches(self, topic: str) -> bool:
         if self.pattern == "*" or self.pattern == topic:
@@ -168,6 +169,17 @@ class Subscription:
             prefix = self.pattern[:-2]
             return topic == prefix or topic.startswith(prefix + ".")
         return fnmatch.fnmatchcase(topic, self.pattern)
+
+    def accepts(self, event: Any) -> bool:
+        """Topic match *and* the data predicate (if any)."""
+        if not self.matches(event.topic):
+            return False
+        if self.predicate is None:
+            return True
+        try:
+            return bool(self.predicate(event))
+        except Exception:  # noqa: BLE001 - a broken predicate filters out
+            return False
 
 
 class EventBus:
@@ -270,13 +282,16 @@ class EventBus:
         once: bool = False,
         retries: int = 0,
         retry_backoff: float = 0.5,
+        predicate: Callable[[Event], bool] | None = None,
     ) -> str:
         """Register ``handler`` for topics matching ``pattern``.
 
         ``retries`` redelivers the event to this handler (with exponential
         ``retry_backoff``) when it raises, before the event is parked on the
-        dead-letter queue. Returns a subscription id usable with
-        :meth:`unsubscribe`.
+        dead-letter queue. ``predicate`` is an extra data filter — the
+        handler only fires when ``predicate(event)`` is truthy (blinker
+        filters by sender; this filters by payload). Returns a subscription
+        id usable with :meth:`unsubscribe`.
         """
         from .ids import new_short_id
 
@@ -289,6 +304,7 @@ class EventBus:
             sub_id=new_short_id("sub_"),
             retries=max(0, retries),
             retry_backoff=max(0.0, retry_backoff),
+            predicate=predicate,
         )
         with self._lock:
             self._subs.append(sub)
@@ -389,6 +405,29 @@ class EventBus:
         """Shorthand for :meth:`publish`."""
         return self.publish(topic, data)
 
+    def wait_for(self, pattern: str, timeout: float | None = None,
+                 predicate: Callable[[Event], bool] | None = None) -> Event | None:
+        """Block until the next event matching ``pattern`` arrives.
+
+        The orchestration primitive for "do X, then wait for Y": subscribes
+        a one-shot sync handler, waits on an event, unsubscribes. Returns
+        the event, or ``None`` on timeout. Never raises.
+        """
+        got: list[Event] = []
+        done = threading.Event()
+
+        def _handler(event: Event) -> None:
+            got.append(event)
+            done.set()
+
+        sub_id = self.subscribe(pattern, _handler, sync=True, once=True,
+                                predicate=predicate)
+        try:
+            done.wait(timeout=timeout)
+        finally:
+            self.unsubscribe(sub_id)
+        return got[0] if got else None
+
     def replay(self, events: Iterable[Event]) -> int:
         """Re-dispatch events (e.g. from :meth:`journal_replay`).
 
@@ -411,6 +450,7 @@ class EventBus:
         return count
 
     def _dispatch(self, event: Event, targets: list[Subscription]) -> None:
+        targets = [s for s in targets if s.accepts(event)]
         consumed_once: list[Subscription] = []
         async_targets: list[Subscription] = []
         for sub in targets:

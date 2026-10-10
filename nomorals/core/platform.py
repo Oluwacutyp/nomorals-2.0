@@ -58,6 +58,8 @@ class Platform:
         return {
             "name": self.name,
             "detail": self.detail,
+            "container": is_docker(),
+            "wsl": is_wsl(),
             "capabilities": {
                 "process_pool": self.capabilities.process_pool,
                 "gpu": self.capabilities.gpu,
@@ -68,6 +70,61 @@ class Platform:
                 "low_memory": self.capabilities.low_memory,
             },
         }
+
+    def describe(self, *, color: bool | None = None,
+                 theme: Any = None) -> str:
+        """A styled one-screen summary of this platform."""
+        from .style import paint, supports_color, status_dot, kv_lines
+
+        if color is None:
+            color = supports_color()
+        caps = self.capabilities
+        lines: list[str] = [
+            paint(f"platform: {self.name}", "info", theme, color=color),
+        ]
+        if self.detail:
+            lines.append(paint(f"detail: {self.detail}", "muted", theme,
+                               color=color))
+        env = []
+        if is_docker():
+            env.append("docker")
+        if is_wsl():
+            env.append("wsl")
+        if env:
+            lines.append(paint(f"environment: {', '.join(env)}", "muted",
+                               theme, color=color))
+        kv = {
+            "process pool": "yes" if caps.process_pool else "no",
+            "gpu": "yes" if caps.gpu else "no",
+            "max workers": str(caps.max_workers),
+            "storage": caps.storage_backend,
+            "background service": "yes" if caps.background_service else "no",
+            "wake lock needed": "yes" if caps.wake_lock else "no",
+            "low memory mode": "yes" if caps.low_memory else "no",
+        }
+        lines.extend(kv_lines(kv, theme, color=color))
+        return "\n".join(lines)
+
+
+def is_docker() -> bool:
+    """.dockerenv exists or the cgroup mentions docker/containerd."""
+    try:
+        if os.path.exists("/.dockerenv"):
+            return True
+        with open("/proc/1/cgroup", "r", errors="replace") as fh:
+            data = fh.read()
+        return "docker" in data or "containerd" in data or "kubepods" in data
+    except OSError:
+        return False
+
+
+def is_wsl() -> bool:
+    """Kernel release mentions microsoft (WSL1/WSL2)."""
+    try:
+        with open("/proc/version", "r", errors="replace") as fh:
+            return "microsoft" in fh.read().lower()
+    except OSError:
+        return "wsl" in (_stdlib_platform.release() or "").lower()
 
 
 def _from_profile_kind(kind: str, detail: str) -> Platform:

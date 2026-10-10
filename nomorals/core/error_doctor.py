@@ -48,7 +48,7 @@ import sys
 import traceback
 from typing import Any
 
-__all__ = ["diagnose", "diagnosis_to_text"]
+__all__ = ["diagnose", "diagnosis_to_text", "format_diagnosis"]
 
 # ---------------------------------------------------------------------------
 # bulletproofing helpers
@@ -879,3 +879,60 @@ def diagnosis_to_text(diag: dict[str, Any]) -> str:
 
     return _safe(_get, default="Error diagnosis unavailable.") or \
         "Error diagnosis unavailable."
+
+
+def format_diagnosis(diag: dict[str, Any], *, color: bool | None = None,
+                     theme: Any = None, verbose: bool = False) -> str:
+    """Render a diagnosis dict as a styled multi-section report.
+
+    Sections: error headline (magenta — never red), location, root cause,
+    evidence (key: value lines), suggested fix, and — with
+    ``verbose=True`` — the traceback frames plus any chained cause.
+    ``color=None`` auto-detects the terminal.
+    """
+    from .style import paint, supports_color, styled_box, header
+
+    if color is None:
+        color = supports_color()
+    etype = diag.get("error_type", "?")
+    loc = diag.get("location", "?")
+    lines: list[str] = []
+    lines.append(header(f"{etype} at {loc}", theme, color=color))
+    lines.append("")
+    lines.append(paint("ROOT CAUSE", "label", theme, color=color))
+    lines.append(f"  {diag.get('root_cause', '?')}")
+    lines.append("")
+    evidence = diag.get("evidence") or {}
+    if evidence:
+        lines.append(paint("EVIDENCE", "label", theme, color=color))
+        for key, val in evidence.items():
+            val_s = str(val)
+            if len(val_s) > 160:
+                val_s = val_s[:157] + "…"
+            lines.append(f"  {paint(str(key), 'info', theme, color=color)}: {val_s}")
+        lines.append("")
+    fix = diag.get("suggested_fix", "")
+    if fix:
+        lines.append(paint("SUGGESTED FIX", "label", theme, color=color))
+        lines.append(f"  {paint(fix, 'ok', theme, color=color)}")
+        lines.append("")
+    if verbose:
+        frames = diag.get("frames") or []
+        if frames:
+            lines.append(paint("TRACEBACK (innermost last)", "label", theme,
+                               color=color))
+            for f in frames:
+                fn = f.get("short") or f.get("filename", "?")
+                lines.append(f"  {paint(fn, 'info', theme, color=color)}"
+                             f":{f.get('lineno', '?')} in "
+                             f"{paint(str(f.get('func', '?')), 'muted', theme, color=color)}")
+                src = f.get("source") or []
+                for s in src[:3]:
+                    lines.append(f"    {s.strip()}")
+            lines.append("")
+    cause = diag.get("cause")
+    if isinstance(cause, dict):
+        lines.append(paint("CAUSED BY", "label", theme, color=color))
+        lines.append(format_diagnosis(cause, color=color, theme=theme,
+                                     verbose=verbose))
+    return "\n".join(lines).rstrip()

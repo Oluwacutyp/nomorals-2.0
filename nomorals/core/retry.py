@@ -33,13 +33,14 @@ import threading
 import time
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Callable, Iterable, Sequence, TypeVar
+from typing import Any, Callable, Iterable, Protocol, Sequence, TypeVar, runtime_checkable
 
 from .errors import NoMoralsError, ProviderUnavailable, RateLimited, TimeoutError_, classify
 
 __all__ = [
     "BackoffPolicy",
     "CircuitBreaker",
+    "CircuitBreakerListener",
     "CircuitOpen",
     "FallbackPolicy",
     "HedgingPolicy",
@@ -48,6 +49,8 @@ __all__ = [
     "RetryBudget",
     "RetryStats",
     "TimeoutPolicy",
+    "aretry",
+    "aretry_call",
     "retry",
     "retry_call",
 ]
@@ -92,6 +95,15 @@ class BackoffPolicy:
     and then jittered per :attr:`jitter_style`. ``retry_after`` hints from
     the error (HTTP ``Retry-After``, ``RateLimited.retry_after``) are honored
     first — the server told us when to come back; we listen.
+
+    Stopping (tenacity-style, composable):
+    * ``max_attempts`` — stop after N attempts (tenacity ``stop_after_attempt``)
+    * ``max_elapsed`` — stop when total elapsed time exceeds this
+      (tenacity ``stop_after_delay``); the sleep that would cross the line
+      is skipped and the last error raised instead
+    * ``stop_event`` — a ``threading.Event``; when set, retries stop
+      (tenacity ``stop_when_event_set``) — wire the process shutdown event
+      here so deploys don't wait out a full backoff schedule
     """
 
     base: float = 0.5
@@ -101,6 +113,16 @@ class BackoffPolicy:
     jitter: bool = True
     jitter_style: JitterStyle = JitterStyle.FULL
     respect_retry_after: bool = True
+    max_elapsed: float | None = None
+    stop_event: threading.Event | None = None
+
+    def should_stop(self, elapsed: float) -> bool:
+        """True when the deadline/event stop condition has tripped."""
+        if self.max_elapsed is not None and elapsed >= self.max_elapsed:
+            return True
+        if self.stop_event is not None and self.stop_event.is_set():
+            return True
+        return False
 
     def delay(
         self,
@@ -399,6 +421,7 @@ def retry_call(
         budget.before_call()
     last: BaseException | None = None
     prev_delay: float | None = None
+    started = time.monotonic()
 
     for attempt in range(1, policy.max_attempts + 1):
         if breaker is not None:
@@ -416,8 +439,19 @@ def retry_call(
             if budget is not None and not budget.allow_retry():
                 _log.debug("retry budget exhausted; not retrying %s", type(exc).__name__)
                 raise
+            elapsed = time.monotonic() - started
+            if policy.should_stop(elapsed):
+                _log.debug("retry stop condition tripped after %.2fs; not retrying %s",
+                           elapsed, type(exc).__name__)
+                raise
             retry_after = getattr(exc, "retry_after", None)
             delay = policy.delay(attempt, retry_after, prev_delay)
+            if policy.max_elapsed is not None:
+                # Never sleep past the deadline; stop instead.
+                remaining = policy.max_elapsed - elapsed
+                if remaining <= 0:
+                    raise
+                delay = min(delay, remaining)
             prev_delay = delay
             stats.total_delay += delay
             _log.debug(
@@ -482,6 +516,131 @@ def retry(
     return decorator
 
 
+async def aretry_call(
+    fn: Callable[..., Any],
+    *args: Any,
+    policy: BackoffPolicy | None = None,
+    retryable: Callable[[BaseException], bool] | None = None,
+    on_retry: Callable[[int, BaseException, float], None] | None = None,
+    breaker: "CircuitBreaker | None" = None,
+    stats: RetryStats | None = None,
+    budget: "RetryBudget | None" = None,
+    **kwargs: Any,
+) -> Any:
+    """Async twin of :func:`retry_call` — tenacity retries coroutines too.
+
+    ``fn`` may be an async function (awaited) or return an awaitable.
+    Sleeps use ``asyncio.sleep`` so the event loop stays responsive.
+    """
+    import asyncio
+    import inspect as _inspect
+
+    policy = policy or BackoffPolicy()
+    predicate = retryable or default_retryable
+    stats = stats or RetryStats()
+    stats.record_call()
+    if budget is not None:
+        budget.before_call()
+    last: BaseException | None = None
+    prev_delay: float | None = None
+    started = time.monotonic()
+
+    async def _invoke() -> Any:
+        out = fn(*args, **kwargs)
+        if _inspect.isawaitable(out):
+            return await out
+        return out
+
+    for attempt in range(1, policy.max_attempts + 1):
+        if breaker is not None:
+            breaker.before_call()
+        stats.record_attempt()
+        try:
+            result = await _invoke()
+        except Exception as exc:  # noqa: BLE001 - classified below
+            last = exc
+            stats.record_failure(exc)
+            if breaker is not None:
+                breaker.record_failure(exc)
+            if not predicate(exc) or attempt >= policy.max_attempts:
+                raise
+            if budget is not None and not budget.allow_retry():
+                raise
+            elapsed = time.monotonic() - started
+            if policy.should_stop(elapsed):
+                raise
+            delay = policy.delay(attempt, getattr(exc, "retry_after", None), prev_delay)
+            if policy.max_elapsed is not None:
+                remaining = policy.max_elapsed - elapsed
+                if remaining <= 0:
+                    raise
+                delay = min(delay, remaining)
+            prev_delay = delay
+            stats.total_delay += delay
+            if on_retry is not None:
+                on_retry(attempt, exc, delay)
+            if delay > 0:
+                await asyncio.sleep(delay)
+        else:
+            if breaker is not None:
+                breaker.record_success()
+            stats.record_success()
+            return result
+
+    assert last is not None  # noqa: S101
+    raise last
+
+
+def aretry(
+    policy: BackoffPolicy | None = None,
+    *,
+    retryable: Callable[[BaseException], bool] | None = None,
+    on_retry: Callable[[int, BaseException, float], None] | None = None,
+    breaker: "CircuitBreaker | None" = None,
+    budget: "RetryBudget | None" = None,
+) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+    """Async decorator form of :func:`aretry_call`::
+
+        @aretry(BackoffPolicy(max_attempts=3, base=0.1))
+        async def fetch(url): ...
+    """
+    effective = policy or BackoffPolicy()
+
+    def decorator(fn: Callable[..., Any]) -> Callable[..., Any]:
+        stats = RetryStats()
+
+        @functools.wraps(fn)
+        async def wrapper(*args: Any, **kwargs: Any) -> Any:
+            return await aretry_call(
+                fn, *args, policy=effective, retryable=retryable,
+                on_retry=on_retry, breaker=breaker, stats=stats,
+                budget=budget, **kwargs)
+
+        wrapper.stats = stats  # type: ignore[attr-defined]
+        wrapper.policy = effective  # type: ignore[attr-defined]
+        return wrapper
+
+    return decorator
+
+
+@runtime_checkable
+class CircuitBreakerListener(Protocol):
+    """Observer hooks for a breaker — pybreaker's ``CircuitBreakerListener``.
+
+    Subclass and override only what you need; every hook is optional and
+    every hook failure is swallowed (observability never breaks the breaker).
+    """
+
+    def before_call(self, cb: "CircuitBreaker", *args: Any, **kwargs: Any) -> None:
+        """A call is about to go through the breaker."""
+    def state_change(self, cb: "CircuitBreaker", old_state: str, new_state: str) -> None:
+        """The breaker moved between closed/open/half_open."""
+    def failure(self, cb: "CircuitBreaker", exc: BaseException) -> None:
+        """A guarded call failed (counts toward opening)."""
+    def success(self, cb: "CircuitBreaker") -> None:
+        """A guarded call succeeded."""
+
+
 class CircuitBreaker:
     """Three-state breaker: closed → open → half-open.
 
@@ -491,6 +650,12 @@ class CircuitBreaker:
 
     This is what stops 64 sub-agents from turning one dead endpoint into a
     self-inflicted denial of service.
+
+    Listeners (pybreaker-style) observe without subclassing::
+
+        class MetricsListener(CircuitBreakerListener):
+            def state_change(self, cb, old, new): metrics.incr("breaker.transition")
+        breaker.add_listener(MetricsListener())
     """
 
     CLOSED = "closed"
@@ -507,6 +672,7 @@ class CircuitBreaker:
         clock: Callable[[], float] = time.monotonic,
         on_open: Callable[[str], None] | None = None,
         on_close: Callable[[str], None] | None = None,
+        listeners: Iterable["CircuitBreakerListener"] | None = None,
     ) -> None:
         self.name = name
         self.failure_threshold = failure_threshold
@@ -515,6 +681,7 @@ class CircuitBreaker:
         self._clock = clock
         self._on_open = on_open
         self._on_close = on_close
+        self._listeners: list[CircuitBreakerListener] = list(listeners or [])
         self._state = self.CLOSED
         self._failures = 0
         self._opened_at = 0.0
@@ -522,15 +689,44 @@ class CircuitBreaker:
         self._lock = threading.RLock()
         self.stats = RetryStats()
 
+    # -- listeners ---------------------------------------------------------
+    def add_listener(self, listener: "CircuitBreakerListener") -> "CircuitBreakerListener":
+        """Attach a listener (pybreaker's ``add_listeners``). Returns it."""
+        with self._lock:
+            self._listeners.append(listener)
+        return listener
+
+    def remove_listener(self, listener: "CircuitBreakerListener") -> bool:
+        with self._lock:
+            try:
+                self._listeners.remove(listener)
+                return True
+            except ValueError:
+                return False
+
+    def _notify(self, method: str, *args: Any) -> None:
+        for listener in list(self._listeners):
+            try:
+                getattr(listener, method)(self, *args)
+            except Exception:  # noqa: BLE001 - observability must not break the breaker
+                _log.exception("breaker listener %s failed", method)
+
+    def _transition(self, new_state: str) -> None:
+        old = self._state
+        self._state = new_state
+        if old != new_state:
+            self._notify("state_change", old, new_state)
+
     @property
     def state(self) -> str:
         with self._lock:
             if self._state == self.OPEN and self._clock() - self._opened_at >= self.reset_timeout:
-                self._state = self.HALF_OPEN
+                self._transition(self.HALF_OPEN)
                 self._half_open_calls = 0
             return self._state
 
     def before_call(self) -> None:
+        self._notify("before_call")
         with self._lock:
             current = self.state
             if current == self.OPEN:
@@ -551,8 +747,9 @@ class CircuitBreaker:
         with self._lock:
             was_open = self._state in (self.OPEN, self.HALF_OPEN)
             self._failures = 0
-            self._state = self.CLOSED
+            self._transition(self.CLOSED)
             self.stats.record_success()
+        self._notify("success")
         if was_open and self._on_close is not None:
             try:
                 self._on_close(self.name)
@@ -560,7 +757,7 @@ class CircuitBreaker:
                 _log.exception("breaker on_close hook failed")
 
     def _open(self) -> None:
-        self._state = self.OPEN
+        self._transition(self.OPEN)
         self._opened_at = self._clock()
         _log.warning("circuit %r opened after %d failures", self.name, self._failures)
         if self._on_open is not None:
@@ -580,6 +777,8 @@ class CircuitBreaker:
                 else:
                     # already open and still failing: keep the window pushed out
                     self._opened_at = self._clock()
+        if exc is not None:
+            self._notify("failure", exc)
 
     def reset(self) -> None:
         with self._lock:

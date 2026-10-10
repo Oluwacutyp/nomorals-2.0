@@ -75,6 +75,21 @@ CREATE TABLE IF NOT EXISTS verified_fixes (
 """
 
 
+def _human_duration(seconds: float) -> str:
+    """1.5 → '1.5s', 90 → '1m30s', 3700 → '1h2m'."""
+    s = max(0.0, float(seconds))
+    if s < 60:
+        return f"{s:.1f}s" if s < 10 else f"{s:.0f}s"
+    m, sec = divmod(int(s), 60)
+    if m < 60:
+        return f"{m}m{sec:02d}s" if sec else f"{m}m"
+    h, m = divmod(m, 60)
+    if h < 48:
+        return f"{h}h{m:02d}m" if m else f"{h}h"
+    d, h = divmod(h, 24)
+    return f"{d}d{h}h" if h else f"{d}d"
+
+
 def _innermost_app_frame(exc: BaseException) -> str:
     """Code location of the innermost frame: file:function:line.
 
@@ -485,6 +500,80 @@ class IncidentJournal:
                 (now - window_s, limit),
             ).fetchall()
         return [dict(r) for r in rows]
+
+    def top_subsystems(self, window_s: float = 86400,
+                       limit: int = 10) -> list[dict[str, Any]]:
+        """Subsystems ranked by incident volume — where the fire is.
+
+        Each entry: subsystem, incident count, distinct signatures, share
+        of all incidents in the window, and worst severity seen.
+        """
+        now = time.time()
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT subsystem, COUNT(*) AS n,"
+                " COUNT(DISTINCT signature) AS signatures,"
+                " MAX(ts) AS last_ts,"
+                " MAX(CASE severity WHEN 'critical' THEN 4 WHEN 'high' THEN 3"
+                " WHEN 'medium' THEN 2 ELSE 1 END) AS sev_rank"
+                " FROM incidents"
+                " WHERE ts >= ? AND signature NOT LIKE 'heartbeat:%'"
+                " GROUP BY subsystem ORDER BY n DESC LIMIT ?",
+                (now - window_s, limit),
+            ).fetchall()
+            total = self._db.execute(
+                "SELECT COUNT(*) FROM incidents"
+                " WHERE ts >= ? AND signature NOT LIKE 'heartbeat:%'",
+                (now - window_s,),
+            ).fetchone()[0]
+        sev_names = {4: "critical", 3: "high", 2: "medium", 1: "low"}
+        out = []
+        for r in rows:
+            d = dict(r)
+            d["worst_severity"] = sev_names.get(d.pop("sev_rank", 1), "low")
+            d["share"] = round(d["n"] / total, 3) if total else 0.0
+            out.append(d)
+        return out
+
+    def mttr(self, window_s: float = 86400,
+             subsystem: str | None = None) -> dict[str, Any]:
+        """Mean time to recovery: incident → first *verified* recovery.
+
+        Only incidents with a verified recovery count as "recovered"
+        (unverified attempts don't close the loop). Returns the mean,
+        median, sample size, and the still-open count.
+        """
+        now = time.time()
+        filt = "AND i.subsystem = ?" if subsystem else ""
+        params: list[Any] = [now - window_s]
+        if subsystem:
+            params.append(subsystem)
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT i.id, i.subsystem, i.ts,"
+                " (SELECT MIN(r.ts) FROM recoveries r"
+                "  WHERE r.incident_id = i.id AND r.verified = 1) AS fixed_ts"
+                " FROM incidents i"
+                f" WHERE i.ts >= ? AND i.signature NOT LIKE 'heartbeat:%' {filt}",
+                params,
+            ).fetchall()
+        durations = [r["fixed_ts"] - r["ts"] for r in rows
+                     if r["fixed_ts"] is not None and r["fixed_ts"] >= r["ts"]]
+        open_count = sum(1 for r in rows if r["fixed_ts"] is None)
+        durations.sort()
+        n = len(durations)
+        mean = sum(durations) / n if n else 0.0
+        median = durations[n // 2] if n else 0.0
+        return {
+            "subsystem": subsystem or "*",
+            "window_s": window_s,
+            "recovered": n,
+            "open": open_count,
+            "mean_s": round(mean, 1),
+            "median_s": round(median, 1),
+            "mean_human": _human_duration(mean),
+            "median_human": _human_duration(median),
+        }
 
     def recent_incidents(self, subsystem: str | None = None,
                          limit: int = 20) -> list[dict[str, Any]]:

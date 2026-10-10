@@ -590,6 +590,101 @@ class LearningKnowledgeBase:
                            if now - 2 * window < t <= now - window)
             return recent >= min_count and recent >= ratio * max(1, previous)
 
+    def _window_times(self, fingerprint: str,
+                      window: float) -> list[float]:
+        now = datetime.now(timezone.utc).timestamp()
+        times = self._spike_times.get(fingerprint) or []
+        return sorted(t for t in times if t > now - window)
+
+    def flakiness(self, fingerprint: str,
+                  window: float = 3600.0) -> dict[str, Any]:
+        """Is this error flaky (intermittent) or steady?
+
+        Two signals: *episodes* (occurrence clusters separated by quiet
+        gaps > 5 min or > window/12) and the coefficient of variation of
+        the inter-arrival times. Evenly-spaced recurrences are "steady";
+        irregular bursts with long quiets between are "flaky". Needs ≥4
+        occurrences in the window.
+        """
+        times = self._window_times(fingerprint, window)
+        out: dict[str, Any] = {
+            "fingerprint": fingerprint, "window_s": window,
+            "occurrences": len(times), "episodes": 0,
+            "verdict": "insufficient-data", "score": 0.0,
+        }
+        if len(times) < 4:
+            return out
+        gap = max(300.0, window / 12)
+        episodes = 1
+        gaps: list[float] = []
+        for prev, cur in zip(times, times[1:]):
+            gaps.append(cur - prev)
+        # episode boundary: a quiet much longer than the typical spacing
+        # (adapts to the error's own rhythm; floor keeps one-offs apart)
+        med = sorted(gaps)[len(gaps) // 2]
+        episode_gap = max(gap, 3 * med)
+        for g in gaps:
+            if g > episode_gap:
+                episodes += 1
+        mean_gap = sum(gaps) / len(gaps)
+        var = sum((g - mean_gap) ** 2 for g in gaps) / len(gaps)
+        cv = (var ** 0.5) / mean_gap if mean_gap else 0.0
+        span = times[-1] - times[0]
+        out["episodes"] = episodes
+        out["gap_cv"] = round(cv, 2)
+        out["span_s"] = round(span, 1)
+        if episodes >= 2 and cv > 1.2:
+            verdict, score = "flaky", min(1.0, 0.4 + cv / 5)
+        elif episodes >= 2:
+            verdict, score = "intermittent", 0.4
+        elif span < window * 0.1:
+            verdict, score = "burst", 0.2
+        else:
+            verdict, score = "steady", 0.1
+        out["verdict"] = verdict
+        out["score"] = round(score, 2)
+        return out
+
+    def trend(self, fingerprint: str, window: float = 86400.0,
+              buckets: int = 12) -> dict[str, Any]:
+        """Rate trend over the window: rising / falling / stable.
+
+        Buckets the window, fits a least-squares slope to the per-bucket
+        counts, and compares the slope against the mean rate.
+        """
+        times = self._window_times(fingerprint, window)
+        now = datetime.now(timezone.utc).timestamp()
+        edges = [now - window + i * window / buckets for i in range(buckets + 1)]
+        counts = [0] * buckets
+        for t in times:
+            idx = min(buckets - 1, int((t - edges[0]) / window * buckets))
+            if idx >= 0:
+                counts[idx] += 1
+        n = buckets
+        mean_x = (n - 1) / 2
+        mean_y = sum(counts) / n if n else 0.0
+        denom = sum((i - mean_x) ** 2 for i in range(n))
+        slope = (sum((i - mean_x) * (c - mean_y) for i, c in enumerate(counts))
+                 / denom) if denom and mean_y else 0.0
+        rel = slope / mean_y if mean_y else 0.0
+        if rel > 0.15:
+            direction = "rising"
+        elif rel < -0.15:
+            direction = "falling"
+        else:
+            direction = "stable"
+        half = n // 2
+        first_half = sum(counts[:half]) or 1
+        return {
+            "fingerprint": fingerprint,
+            "window_s": window,
+            "occurrences": len(times),
+            "per_bucket": counts,
+            "slope_per_bucket": round(slope, 3),
+            "direction": direction,
+            "second_vs_first_half": round(sum(counts[half:]) / first_half, 2),
+        }
+
     def get_group(self, fingerprint: str) -> ErrorGroup | None:
         self._ensure_loaded()
         with self._lock:
@@ -1028,6 +1123,18 @@ class ErrorIntelligence:
 
     def top_groups(self, limit: int = 10) -> list[dict[str, Any]]:
         return [g.to_dict() for g in self.learning.top_groups(limit)]
+
+    def flakiness(self, fingerprint: str,
+                  window: float = 3600.0) -> dict[str, Any]:
+        """Flakiness analysis for one error fingerprint — see
+        :meth:`LearningKnowledgeBase.flakiness`."""
+        return self.learning.flakiness(fingerprint, window)
+
+    def trend(self, fingerprint: str, window: float = 86400.0,
+              buckets: int = 12) -> dict[str, Any]:
+        """Rate-trend analysis for one error fingerprint — see
+        :meth:`LearningKnowledgeBase.trend`."""
+        return self.learning.trend(fingerprint, window, buckets)
 
     def flush(self) -> None:
         """Persist learned knowledge. Called on shutdown paths."""

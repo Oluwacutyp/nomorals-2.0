@@ -149,6 +149,32 @@ class NoMoralsError(Exception):
             "retryable": self.retryable,
         }
 
+    # -- anyhow-style context chaining -------------------------------------
+    def with_context(self, note: str, **fields: Any) -> "NoMoralsError":
+        """Attach a breadcrumb as the error propagates (anyhow's ``.context()``).
+
+        Each layer adds *what it was doing* — the chain reads top-down like
+        a stack trace in prose. Returns ``self`` so it chains::
+
+            raise classify(exc).with_context("syncing memory", user=user_id)
+        """
+        trail = self.details.setdefault("context", [])
+        entry: dict[str, Any] = {"note": str(note)}
+        if fields:
+            entry["fields"] = dict(fields)
+        trail.append(entry)
+        return self
+
+    def note(self, note: str, **fields: Any) -> "NoMoralsError":
+        """Alias for :meth:`with_context`."""
+        return self.with_context(note, **fields)
+
+    @property
+    def context_trail(self) -> list[dict[str, Any]]:
+        """Breadcrumbs added by :meth:`with_context`, oldest first."""
+        trail = self.details.get("context")
+        return list(trail) if isinstance(trail, list) else []
+
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "NoMoralsError":
         """Rebuild an error from :meth:`to_dict` output. Never raises.
@@ -214,6 +240,44 @@ def resolve_error(code: str) -> type[NoMoralsError] | None:
 def error_codes() -> dict[str, str]:
     """All registered codes → class names. Useful for docs and dashboards."""
     return {code: klass.__name__ for code, klass in sorted(NoMoralsError._registry.items())}
+
+
+def cause_chain(exc: BaseException) -> list[BaseException]:
+    """The ``__cause__``/``__context__`` chain, outermost first."""
+    chain: list[BaseException] = []
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        chain.append(current)
+        nxt = current.__cause__ or current.__context__
+        current = nxt if nxt is not current else None
+    return chain
+
+
+def format_chain(exc: BaseException, *, theme: Any = None) -> str:
+    """Render the full error chain: breadcrumbs + causes, human-readable.
+
+    Reads like anyhow's ``{:?}``/``{:#}`` output — each layer's context
+    trail, then the causal chain underneath.
+    """
+    from .style import paint
+
+    lines: list[str] = []
+    for depth, err in enumerate(cause_chain(exc)):
+        prefix = "  " * depth + ("↳ " if depth else "")
+        code = getattr(err, "code", type(err).__name__)
+        lines.append(f"{prefix}{paint(type(err).__name__, 'error', theme)} "
+                     f"[{paint(str(code), 'muted', theme)}] {err}")
+        trail = getattr(err, "context_trail", [])
+        if isinstance(trail, list):
+            for crumb in trail:
+                note = crumb.get("note", "") if isinstance(crumb, dict) else str(crumb)
+                fields = crumb.get("fields", {}) if isinstance(crumb, dict) else {}
+                extra = (" " + " ".join(f"{k}={v}" for k, v in fields.items())
+                         if fields else "")
+                lines.append(f"{'  ' * (depth + 1)}· {paint(str(note), 'label', theme)}{extra}")
+    return "\n".join(lines)
 
 
 # ── Configuration ──────────────────────────────────────────────────────────────

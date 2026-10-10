@@ -57,6 +57,7 @@ __all__ = [
     "FixStrategy",
     "register_fix_strategy",
     "FIX_STRATEGIES",
+    "diff_preview",
 ]
 
 # ---------------------------------------------------------------------------
@@ -185,6 +186,26 @@ def _read_source(filename: str) -> list[str] | None:
         with open(filename, "r", encoding="utf-8", errors="replace") as f:
             return f.read().splitlines(keepends=True)
     return _safe(_get)
+
+
+def diff_preview(filename: str, old_lines: list[str], new_lines: list[str],
+                 *, context: int = 3, max_lines: int = 40) -> str:
+    """A real unified diff of a proposed source change.
+
+    Used for dry-run previews and heal reports — the owner sees exactly
+    what would change before (or after) the write. Capped at
+    ``max_lines`` diff lines so a big move doesn't flood the chat.
+    """
+    import difflib
+
+    short = filename.rsplit("/", 1)[-1]
+    diff = difflib.unified_diff(
+        old_lines, new_lines,
+        fromfile=f"a/{short}", tofile=f"b/{short}", n=context)
+    lines = list(diff)
+    if len(lines) > max_lines:
+        lines = lines[:max_lines] + [f"... (+{len(lines) - max_lines} more lines)\n"]
+    return "".join(lines)
 
 
 def _write_source(filename: str, lines: list[str]) -> bool:
@@ -331,7 +352,7 @@ def _fix_unbound_local_inner(exc, dry_run, out):
     insert_idx = body[insert_at].lineno - 1 if insert_at < len(body) else len(lines)
 
     new_lines = lines[:insert_idx] + [init_line] + lines[insert_idx:]
-    out["diff_preview"] = f"+ {init_line.strip()}   (in {func.name}(), {filename.rsplit('/', 1)[-1]})"
+    out["diff_preview"] = diff_preview(filename, lines, new_lines)
     out["detail"] = (f"initialized '{var}' to None at the top of "
                      f"{func.name}() [{filename.rsplit('/', 1)[-1]}:{target_lineno}]")
 
@@ -570,9 +591,7 @@ def _fix_dead_method_inner(exc, dry_run, out):
         block[-1] += "\n"
     final_lines = new_lines[:insert_idx] + block + new_lines[insert_idx:]
 
-    out["diff_preview"] = (f"moved 'def {attr}' from inside "
-                           f"{enclosing_func.name}() to {type_name} "
-                           f"({filename.rsplit('/', 1)[-1]})")
+    out["diff_preview"] = diff_preview(filename, lines, final_lines)
     out["detail"] = (f"rescued dead method '{attr}' → {type_name} "
                      f"[{filename.rsplit('/', 1)[-1]}]")
 

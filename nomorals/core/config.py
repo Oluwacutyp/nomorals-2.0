@@ -36,6 +36,8 @@ __all__ = [
     "ConfigWatcher",
     "watch_settings",
     "start_global_watcher",
+    "redacted_dict",
+    "validate_settings",
 ]
 
 T = TypeVar("T")
@@ -1756,3 +1758,95 @@ def env_var_path(env_var: str) -> str | None:
     # field must resolve to None (silently-ignored env vars were the bug
     # this guard exists to catch).
     return _find_field_path(Settings, remainder.lower())
+
+
+# ── redaction + validation ───────────────────────────────────────────────────
+
+#: field-name fragments that mark a value as secret (case-insensitive).
+_SECRET_HINTS = ("token", "secret", "password", "passwd", "api_key",
+                 "apikey", "private_key", "auth", "credential", "bearer")
+
+
+def _is_secret_key(key: str) -> bool:
+    low = key.lower()
+    return any(h in low for h in _SECRET_HINTS)
+
+
+def redacted_dict(settings: "Settings | None" = None,
+                  *, placeholder: str = "***") -> dict[str, Any]:
+    """Dump settings to a plain dict with secret values redacted.
+
+    Any field whose name smells like a credential (token/secret/password/
+    api_key/…) is replaced by ``placeholder`` when set, ``""`` when empty —
+    so the dump shows *which* secrets are configured without leaking them.
+    Safe to log, paste into bug reports, or show in ``/config`` output.
+    """
+    data = _settings_to_dict(settings or get_settings())
+
+    def scrub(node: Any) -> Any:
+        if isinstance(node, dict):
+            return {k: (placeholder if v else "")
+                    if _is_secret_key(k) else scrub(v)
+                    for k, v in node.items()}
+        if isinstance(node, list):
+            return [scrub(v) for v in node]
+        return node
+
+    return scrub(data)
+
+
+def validate_settings(settings: "Settings | None" = None) -> list[str]:
+    """Structural validation of a Settings tree.
+
+    Returns a list of human-readable problems (empty = valid). Checks:
+    every leaf value matches its declared dataclass type, numeric budgets
+    are non-negative, and string enums hold allowed values where the
+    codebase constrains them.
+    """
+    from dataclasses import fields, is_dataclass
+
+    problems: list[str] = []
+    root = settings or get_settings()
+
+    def check(node: Any, path: str) -> None:
+        if not is_dataclass(node):
+            return
+        for f in fields(node):
+            val = getattr(node, f.name)
+            p = f"{path}.{f.name}" if path else f.name
+            ftype = f.type
+            # unwrap Optional[X] / X | None
+            optional = False
+            origin = getattr(ftype, "__origin__", None)
+            args = getattr(ftype, "__args__", ())
+            if str(ftype).startswith("typing.Optional") or (
+                    origin is not None and type(None) in args):
+                optional = True
+                non_none = [a for a in args if a is not type(None)]
+                ftype = non_none[0] if non_none else Any
+            if val is None and optional:
+                continue
+            if is_dataclass(val):
+                check(val, p)
+                continue
+            want = ftype if isinstance(ftype, type) else None
+            if want is not None and not isinstance(val, want):
+                # bool is an int subclass; int where bool declared is wrong
+                if not (want is int and isinstance(val, bool) is False):
+                    problems.append(
+                        f"{p}: expected {want.__name__}, "
+                        f"got {type(val).__name__}")
+            if isinstance(val, (int, float)) and not isinstance(val, bool):
+                if "budget" in f.name or f.name in (
+                        "tokens", "max_tokens", "context_budget_tokens",
+                        "max_parallel", "workers"):
+                    if val < 0:
+                        problems.append(f"{p}: negative value {val}")
+        # enum-ish string fields the codebase constrains
+        mode = getattr(node, "reasoning_mode", None)
+        if isinstance(node, Settings):
+            if mode not in ("always", "auto", "off"):
+                problems.append(f"reasoning_mode: invalid {mode!r}")
+
+    check(root, "")
+    return problems

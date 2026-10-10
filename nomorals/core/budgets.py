@@ -231,6 +231,71 @@ class ErrorBudget:
             "rules": [r.name for r in self.burn_rates],
         }
 
+    # -- policy & forecasting (the part that changes behavior) ----------------
+    def policy_action(self, now: float | None = None) -> tuple[str, str]:
+        """What the budget *policy* says to do right now.
+
+        Returns ``(action, message)`` where action is one of:
+        * ``"freeze"`` — budget exhausted: no risky changes, reliability
+          work only until recovery (Google SRE "hard freeze").
+        * ``"warn"`` — budget < 20% remaining: reliability work takes
+          priority; deploys need senior approval ("soft freeze").
+        * ``"ok"`` — budget healthy.
+        """
+        remaining = self.budget_remaining(now)
+        if remaining <= 0.0:
+            return ("freeze",
+                    f"{self.subsystem}: error budget EXHAUSTED — freeze risky "
+                    "changes; reliability work only until the budget recovers.")
+        if remaining < 0.2:
+            return ("warn",
+                    f"{self.subsystem}: error budget at {remaining:.0%} — "
+                    "reliability work takes priority; risky deploys need approval.")
+        return ("ok", f"{self.subsystem}: budget healthy ({remaining:.0%} remaining).")
+
+    def forecast(self, hours: int = 72, now: float | None = None) -> list[tuple[float, float]]:
+        """Project budget-remaining over the next ``hours`` at the *current*
+        burn rate. Returns ``[(hours_from_now, remaining), …]`` — feed to
+        :func:`nomorals.core.style.sparkline` for a one-line trend.
+        """
+        now = now if now is not None else time.time()
+        fails, total, ratio = self.journal.subsystem_ratio(
+            self.subsystem, self.window_s, now)
+        budget = self.error_ratio_budget
+        burn = (ratio / budget) if budget and total else 0.0
+        remaining = self.budget_remaining(now)
+        # budget drains at burn × (allowed/window) per second; allowed = total×budget
+        drain_per_hour = (burn * total * budget / self.window_s * 3600) / (total * budget) \
+            if total and budget else 0.0
+        points = []
+        for h in range(hours + 1):
+            points.append((float(h), max(0.0, remaining - drain_per_hour * h)))
+        return points
+
+    def format_report(self, theme: Any = None) -> str:
+        """Human-readable budget card for chat/dashboards."""
+        from .style import bar, header, kv_lines, sparkline, status_dot
+
+        action, message = self.policy_action()
+        status = {"freeze": "error", "warn": "warn", "ok": "ok"}[action]
+        remaining = self.budget_remaining()
+        points = self.forecast(48)
+        spark = sparkline([p[1] for p in points][::4], theme)
+        lines = [
+            header(f"error budget — {self.subsystem}", theme),
+            f"{status_dot(status, theme)}  {message}",
+            "",
+            bar(remaining, theme=theme) + "  budget remaining",
+            f"trend (48h @ current burn): {spark}",
+            "",
+            *kv_lines({
+                "slo": f"{self.slo:.3%}",
+                "window": f"{self.window_s / 86400:.0f}d",
+                "rules": ", ".join(r.name for r in self.burn_rates),
+            }, theme),
+        ]
+        return "\n".join(lines)
+
 
 class BudgetManager:
     """Owns budgets for every subsystem. One place to check them all."""
@@ -262,3 +327,17 @@ class BudgetManager:
     def status_all(self) -> dict[str, dict[str, Any]]:
         with self._lock:
             return {name: b.status() for name, b in self._budgets.items()}
+
+    def policy_actions(self) -> dict[str, tuple[str, str]]:
+        """``policy_action()`` for every subsystem — the freeze/warn/ok map."""
+        with self._lock:
+            budgets = list(self._budgets.values())
+        return {b.subsystem: b.policy_action() for b in budgets}
+
+    def format_report(self, theme: Any = None) -> str:
+        """All budgets, one card per subsystem."""
+        with self._lock:
+            budgets = list(self._budgets.values())
+        if not budgets:
+            return "no error budgets registered"
+        return "\n\n".join(b.format_report(theme) for b in budgets)

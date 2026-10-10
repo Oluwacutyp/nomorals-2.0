@@ -87,6 +87,37 @@ class RecoveryOutcome:
             "analysis": self.analysis.to_dict() if self.analysis else None,
         }
 
+    def format_outcome(self, *, color: bool | None = None,
+                       theme: Any = None) -> str:
+        """A styled one-screen recovery report."""
+        from .style import paint, supports_color, status_dot, header
+
+        if color is None:
+            color = supports_color()
+        dot = status_dot("ok" if self.ok else "error", theme, color=color)
+        head = {RecoveryStatus.OK: "primary succeeded",
+                RecoveryStatus.RECOVERED: "recovered",
+                RecoveryStatus.DEGRADED: "degraded",
+                RecoveryStatus.FAILED: "FAILED"}.get(self.status, self.status)
+        lines = [header(f"{dot} recovery: {head}", theme, color=color), ""]
+        if self.strategy_used:
+            lines.append(f"  strategy: {paint(self.strategy_used, 'info', theme, color=color)}"
+                         f" ({self.attempts} attempt(s))")
+        if self.verify_note:
+            mark = paint("verified", "ok", theme, color=color) if self.verified \
+                else paint("unverified", "warn", theme, color=color)
+            lines.append(f"  {mark}: {self.verify_note}")
+        if self.degraded_reason:
+            lines.append(f"  degraded: {self.degraded_reason}")
+        if self.chronic:
+            lines.append(f"  {paint('chronic pattern', 'warn', theme, color=color)}"
+                         f" — seen {self.similar_past}x before")
+        elif self.similar_past:
+            lines.append(f"  seen {self.similar_past}x before")
+        if self.analysis is not None:
+            lines.append(f"  error: {type(self.analysis).__name__}")
+        return "\n".join(lines).rstrip()
+
 
 # ── recovery strategies ──────────────────────────────────────────────────
 
@@ -230,6 +261,8 @@ class SelfHealingExecutor:
         self.breaker = breaker
         self.strategies = strategies or [RetryStrategy()]
         self._lock = threading.RLock()
+        #: per-strategy track record: name → {attempts, recovered}
+        self.strategy_stats: dict[str, dict[str, int]] = {}
 
     def execute(
         self,
@@ -318,6 +351,12 @@ class SelfHealingExecutor:
             # but the known fix is authoritative).
             ok, result, note = strategy.attempt(fn, analysis, ctx)
             attempts += 1
+            with self._lock:
+                stat = self.strategy_stats.setdefault(
+                    strategy.name, {"attempts": 0, "recovered": 0})
+                stat["attempts"] += 1
+                if ok:
+                    stat["recovered"] += 1
             verified, vnote = self._verify(result, ok, verify)
             rec = RecoveryRecord(
                 incident_id=incident.id,

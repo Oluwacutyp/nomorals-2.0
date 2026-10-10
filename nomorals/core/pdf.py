@@ -182,35 +182,93 @@ _BLOCK_H1 = "h1"
 _BLOCK_H2 = "h2"
 _BLOCK_H3 = "h3"
 _BLOCK_SPACER = "spacer"
+_BLOCK_TABLE = "table"  #: one markdown table row, pre-aligned for Courier
 
 _HEADING_LINE = re.compile(r"^(#{1,6})\s+(.*)$")
+_TABLE_LINE = re.compile(r"^\|.*\|\s*$")
+_TABLE_SEP = re.compile(r":?-+:?")
+
+
+def _table_row_blocks(lines: list[str]) -> list[str]:
+    """Parse markdown pipe-table lines into pre-aligned Courier row strings.
+
+    Returns one string per rendered row: the header, a dashed rule, then
+    data rows. Column alignment markers (``:---`` / ``---:``) are honored.
+    """
+    raw: list[list[str]] = []
+    aligns: list[str] = []
+    for ln in lines:
+        cells = [c.strip() for c in ln.strip().strip("|").split("|")]
+        if all(_TABLE_SEP.fullmatch(c or "-") for c in cells):
+            aligns = ["r" if c.endswith(":") and not c.startswith(":")
+                      else "c" if c.startswith(":") and c.endswith(":")
+                      else "l" for c in cells]
+            continue
+        raw.append(cells)
+    if not raw:
+        return []
+    ncols = max(len(r) for r in raw)
+    rows = [r + [""] * (ncols - len(r)) for r in raw]
+    widths = [max(len(r[c]) for r in rows) for c in range(ncols)]
+    while len(aligns) < ncols:
+        aligns.append("l")
+
+    def fmt_row(cells: list[str]) -> str:
+        parts = []
+        for c, (cell, w, a) in enumerate(zip(cells, widths, aligns)):
+            parts.append(cell.rjust(w) if a == "r"
+                         else cell.center(w) if a == "c"
+                         else cell.ljust(w))
+        return "  ".join(parts).rstrip()
+
+    out = [fmt_row(rows[0])]
+    out.append("  ".join("-" * w for w in widths))
+    out.extend(fmt_row(r) for r in rows[1:])
+    return out
 
 
 def _parse_blocks(text: str, *, strip_title_line: bool) -> tuple[str, list[tuple[str, str]]]:
     """Markdown-ish lines to styled blocks.
 
     ``# ``/``## ``/``### `` become h1/h2/h3; a whole-line ``**...**`` wrap
-    becomes bold; other ``**`` pairs are stripped (words kept).  When
-    ``strip_title_line`` is set, the FIRST h1 is promoted to the document
-    title (legacy behaviour) and removed from the body.
+    becomes bold; other ``**`` pairs are stripped (words kept).  Pipe
+    tables (``| a | b |`` runs) become one ``table`` block per row,
+    pre-aligned for the monospaced font.  When ``strip_title_line`` is
+    set, the FIRST h1 is promoted to the document title (legacy
+    behaviour) and removed from the body.
     """
     blocks: list[tuple[str, str]] = []
     title = ""
-    for line in text.split("\n"):
+    lines = text.split("\n")
+    i = 0
+    while i < len(lines):
+        line = lines[i]
         stripped = line.strip()
         if not stripped:
+            i += 1
             continue
         if stripped.startswith("```"):
+            i += 1
             continue  # fence markers; inner lines pass through as body
+        if _TABLE_LINE.match(stripped):
+            j = i
+            while j < len(lines) and _TABLE_LINE.match(lines[j].strip()):
+                j += 1
+            for row_text in _table_row_blocks(lines[i:j]):
+                blocks.append((_BLOCK_TABLE, row_text))
+            i = j
+            continue
         m = _HEADING_LINE.match(stripped)
         if m:
             level = len(m.group(1))
             htext = re.sub(r"\*\*(.+?)\*\*", r"\1", m.group(2)).strip()
             if not htext:
+                i += 1
                 continue
             if level == 1:
                 if not title and strip_title_line:
                     title = htext
+                    i += 1
                     continue
                 blocks.append((_BLOCK_H1, htext))
             elif level == 2:
@@ -219,13 +277,16 @@ def _parse_blocks(text: str, *, strip_title_line: bool) -> tuple[str, list[tuple
                 blocks.append((_BLOCK_H3, htext))
             else:
                 blocks.append((_BLOCK_BODY, htext))
+            i += 1
             continue
         bold = (stripped.startswith("**") and stripped.endswith("**")
                 and len(stripped) > 4)
         plain = re.sub(r"\*\*(.+?)\*\*", r"\1", stripped).rstrip()
         if not plain:
+            i += 1
             continue
         blocks.append((_BLOCK_BOLD if bold else _BLOCK_BODY, plain))
+        i += 1
     return title, blocks
 
 
@@ -279,7 +340,8 @@ def _content_stream_styled(
     header: str = "",
     footer: str = "",
 ) -> bytes:
-    """One page of styled lines: F3 (bold) for headings, F1 for body."""
+    """One page of styled lines: F3 (bold) for headings, F1 for body,
+    F4 (Courier) for table rows."""
     left = 56
     top = page_height - 56
     leading = font_size + 4
@@ -301,6 +363,8 @@ def _content_stream_styled(
             font, size = "/F3", font_size + 3
         elif kind in (_BLOCK_H3, _BLOCK_BOLD):
             font, size = "/F3", font_size
+        elif kind == _BLOCK_TABLE:
+            font, size = "/F4", font_size
         else:
             font, size = "/F1", font_size
         ops.append(f"BT {font} {size} Tf 1 0 0 1 {left} {y} Tm ({_pdf_escape(out)}) Tj ET")
@@ -313,6 +377,24 @@ def _content_stream_styled(
     return ("\n".join(ops)).encode("latin-1", "replace")
 
 
+def _info_dict(metadata: dict) -> bytes:
+    """Build a PDF /Info dictionary body from a metadata mapping.
+
+    Recognized keys: title, author, subject, keywords, creator.
+    """
+    parts: list[str] = []
+    for key, pdf_key in (("title", "/Title"), ("author", "/Author"),
+                         ("subject", "/Subject"), ("keywords", "/Keywords"),
+                         ("creator", "/Creator")):
+        val = metadata.get(key)
+        if val:
+            parts.append(
+                f"{pdf_key} ({_pdf_escape(_to_pdf_text(str(val)))})")
+    parts.append("/Producer (nomorals core.pdf)")
+    parts.append(f"/CreationDate (D:{time.strftime('%Y%m%d%H%M%S', time.gmtime())}Z)")
+    return ("<< " + " ".join(parts) + " >>").encode("latin-1", "replace")
+
+
 def _assemble(
     pages: list[list[tuple[str, str]]],
     *,
@@ -322,31 +404,49 @@ def _assemble(
     header: str,
     footer: str,
     has_bold: bool,
+    metadata: dict | None = None,
 ) -> bytes:
     """Object assembly for styled pages (mirrors the legacy numbering)."""
     n_pages = len(pages)
-    first = 6 if has_bold else 5  # first page object id (fonts occupy 3..first-1)
+    has_table = any(kind == _BLOCK_TABLE for page in pages for kind, _ in page)
+    # font objects: 3 = F1 Helvetica, 4 = F2 Oblique, then optional
+    # 5 = F3 Bold and F4 Courier; page objects start after them.
+    next_id = 5
+    font_entries = ["/F1 3 0 R", "/F2 4 0 R"]
+    slots: dict[int, bytes] = {}
+    if has_bold:
+        slots[5] = (b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold "
+                    b"/Encoding /WinAnsiEncoding >>")
+        font_entries.append("/F3 5 0 R")
+        next_id = 6
+    if has_table:
+        slots[next_id] = (b"<< /Type /Font /Subtype /Type1 /BaseFont /Courier "
+                          b"/Encoding /WinAnsiEncoding >>")
+        font_entries.append(f"/F4 {next_id} 0 R")
+        next_id += 1
+    first = next_id
     page_obj_ids = [first + 2 * i for i in range(n_pages)]
     content_obj_ids = [first + 1 + 2 * i for i in range(n_pages)]
+    font_map = " ".join(font_entries)
 
-    slots: dict[int, bytes] = {}
     children = " ".join(f"{pid} 0 R" for pid in page_obj_ids)
-    slots[1] = b"<< /Type /Catalog /Pages 2 0 R >>"
+    catalog = f"<< /Type /Catalog /Pages 2 0 R"
+    info_id = first + 2 * n_pages
+    if metadata:
+        catalog += f" /Info {info_id} 0 R"
+        slots[info_id] = _info_dict(metadata)
+    slots[1] = (catalog + " >>").encode()
     slots[2] = f"<< /Type /Pages /Kids [{children}] /Count {n_pages} >>".encode()
     slots[3] = (b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica "
                 b"/Encoding /WinAnsiEncoding >>")
     slots[4] = (b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Oblique "
                 b"/Encoding /WinAnsiEncoding >>")
-    if has_bold:
-        slots[5] = (b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold "
-                    b"/Encoding /WinAnsiEncoding >>")
-    font_map = "/F1 3 0 R /F2 4 0 R" + (" /F3 5 0 R" if has_bold else "")
 
     for i in range(n_pages):
         stream = _content_stream_styled(
             pages[i], page_width=page_width, page_height=page_height,
             font_size=font_size, header=header,
-            footer=footer.replace("N", str(i + 1)),
+            footer=footer.replace("N", str(i + 1)).replace("{total}", str(n_pages)),
         )
         compressed = zlib.compress(stream)
         slots[content_obj_ids[i]] = (
@@ -389,6 +489,7 @@ def _render_structured(
     footer: str,
     chapter_break: bool,
     toc: bool,
+    metadata: dict | None = None,
 ) -> bytes:
     """Book layout: styled blocks, optional chapter page breaks, and a
     two-pass table of contents whose page numbers converge on the true
@@ -451,7 +552,7 @@ def _render_structured(
         footer = f"{title} — page N — {now}"
     return _assemble(pages, page_width=page_width, page_height=page_height,
                      font_size=font_size, header=header, footer=footer,
-                     has_bold=has_bold)
+                     has_bold=has_bold, metadata=metadata)
 
 
 def render_pdf(
@@ -465,6 +566,7 @@ def render_pdf(
     headings: bool = False,
     chapter_break: bool = False,
     toc: bool = False,
+    metadata: dict | None = None,
 ) -> bytes:
     """Render ``text`` (markdown-ish plain text) into a complete PDF file.
 
@@ -477,6 +579,12 @@ def render_pdf(
     ``chapter_break=True`` starts every h1 on a fresh page, and
     ``toc=True`` prepends a table of contents with true page numbers
     (two-pass; pagination is deterministic so the numbers always match).
+
+    Markdown pipe tables (``| a | b |``) render as monospaced tables with
+    a dashed header rule; alignment markers (``:---``/``---:``) are
+    honored.  ``metadata`` sets the document info dictionary (title,
+    author, subject, keywords, creator).  Footers may use ``N`` for the
+    page number and ``{total}`` for the page count.
     """
     if page_size not in {"A4", "Letter"}:
         raise PdfError(f"unknown page size {page_size!r}; use A4 or Letter")
@@ -485,6 +593,7 @@ def render_pdf(
             text, title=title, page_size=page_size, font_size=font_size,
             header=header, footer=footer,
             chapter_break=chapter_break and headings, toc=toc,
+            metadata=metadata,
         )
     page_width, page_height = (595, 842) if page_size == "A4" else (612, 792)
 
@@ -538,10 +647,13 @@ def render_pdf(
 
     # We must emit objects in id order; build them by index.
     slots: dict[int, bytes] = {}
+    catalog = "<< /Type /Catalog /Pages 2 0 R"
+    info_id = 5 + 2 * n_pages
+    if metadata:
+        catalog += f" /Info {info_id} 0 R"
+        slots[info_id] = _info_dict(metadata)
+    slots[1] = (catalog + " >>").encode()
     children = " ".join(f"{pid} 0 R" for pid in page_obj_ids)
-    slots[1] = (
-        b"<< /Type /Catalog /Pages 2 0 R >>"
-    )
     slots[2] = (
         f"<< /Type /Pages /Kids [{children}] /Count {n_pages} >>".encode()
     )
@@ -557,7 +669,7 @@ def render_pdf(
         stream = _content_stream(
             pages[i], page_width=page_width, page_height=page_height,
             font_size=font_size, header=header,
-            footer=footer.replace("N", str(i + 1)),
+            footer=footer.replace("N", str(i + 1)).replace("{total}", str(n_pages)),
         )
         compressed = zlib.compress(stream)
         slots[content_obj_ids[i]] = (

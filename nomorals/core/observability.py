@@ -454,6 +454,14 @@ class Span:
         flags = "01" if self.sampled else "00"
         return f"00-{self.trace_id}-{self.span_id}-{flags}"
 
+    def inject(self, headers: dict[str, str] | None = None) -> dict[str, str]:
+        """Inject W3C trace context into outbound headers (the OTel
+        ``inject`` half — pair with :meth:`Tracer.span(traceparent=...)` on
+        the receiving side). Mutates and returns ``headers``."""
+        headers = {} if headers is None else headers
+        headers["traceparent"] = self.traceparent()
+        return headers
+
     def to_dict(self, *, nested: bool = True) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "name": self.name,
@@ -550,6 +558,16 @@ class Tracer:
 
     def current(self) -> Span | None:
         return self._token.get()
+
+    def current_traceparent(self) -> str:
+        """The active span's ``traceparent`` (``""`` when no span is active).
+
+        The log-correlation idiom: attach this to every log record / outbound
+        request so traces and logs join without threading span objects
+        through the call chain (OTel's log-correlation pattern).
+        """
+        span = self._token.get()
+        return span.traceparent() if span is not None else ""
 
     def _sampled(self, trace_id: str) -> bool:
         if self.sample_rate >= 1.0:

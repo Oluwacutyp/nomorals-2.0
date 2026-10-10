@@ -22,10 +22,12 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
+from .errors import NoMoralsError
 from .logging_setup import get_logger
 
 __all__ = [
     "DegradationLadder",
+    "LadderExhausted",
     "Rung",
     "LadderManager",
 ]
@@ -88,6 +90,41 @@ class DegradationLadder:
         self._rung_idx = 0
         self._last_probe_ts = 0.0
         self._consecutive_failures = 0
+        self._transitions: list[dict[str, Any]] = []  # rung-change history
+        self._on_transition: list[Callable[[str, int, int], None]] = []
+
+    def on_transition(self, fn: Callable[[str, int, int], None]) -> Callable[[str, int, int], None]:
+        """Observe rung changes: ``fn(subsystem, old_idx, new_idx)``."""
+        with self._lock:
+            self._on_transition.append(fn)
+        return fn
+
+    def _set_rung(self, idx: int, why: str) -> None:
+        with self._lock:
+            old = self._rung_idx
+            if old == idx:
+                return
+            self._rung_idx = idx
+            self._transitions.append({
+                "ts": time.time(), "from": old, "to": idx,
+                "from_name": self.rungs[old].name, "to_name": self.rungs[idx].name,
+                "why": why,
+            })
+            del self._transitions[:-50]  # bounded history
+            hooks = list(self._on_transition)
+        _log.info("ladder %s: rung %d (%s) → %d (%s) [%s]",
+                  self.subsystem, old, self.rungs[old].name,
+                  idx, self.rungs[idx].name, why)
+        for hook in hooks:
+            try:
+                hook(self.subsystem, old, idx)
+            except Exception:  # noqa: BLE001 - observability must not break calls
+                _log.exception("ladder on_transition hook failed")
+
+    def transitions(self) -> list[dict[str, Any]]:
+        """Rung-change history, oldest first (bounded to the last 50)."""
+        with self._lock:
+            return list(self._transitions)
 
     @property
     def rung_idx(self) -> int:
@@ -123,8 +160,8 @@ class DegradationLadder:
         except Exception:  # noqa: BLE001 - a broken probe means "not healthy"
             healthy = False
         if healthy:
+            self._set_rung(0, "primary healed")
             with self._lock:
-                self._rung_idx = 0
                 self._consecutive_failures = 0
             _log.info("ladder %s: primary healed, climbed back to rung 0",
                       self.subsystem)
@@ -149,17 +186,14 @@ class DegradationLadder:
                              self.subsystem, idx, rung.name, exc)
                 continue
             # Success: settle on this rung.
+            self._set_rung(idx, "settled" if idx != start_idx else "primary ok")
             with self._lock:
-                if idx != self._rung_idx:
-                    _log.info("ladder %s: settled on rung %d (%s)",
-                              self.subsystem, idx, rung.name)
-                self._rung_idx = idx
                 self._consecutive_failures = 0
             self._record(True, idx)
             return result, self._meta(idx, errors)
         # Every rung failed.
+        self._set_rung(len(self.rungs) - 1, "all rungs failed")
         with self._lock:
-            self._rung_idx = len(self.rungs) - 1
             self._consecutive_failures += 1
         self._record(False, len(self.rungs) - 1)
         raise LadderExhausted(
@@ -180,12 +214,9 @@ class DegradationLadder:
 
     def force_rung(self, idx: int, reason: str = "") -> None:
         """Manually pin the ladder (testing, maintenance)."""
-        with self._lock:
-            if not 0 <= idx < len(self.rungs):
-                raise ValueError(f"rung {idx} out of range")
-            self._rung_idx = idx
-        _log.warning("ladder %s: manually pinned to rung %d (%s)",
-                     self.subsystem, idx, reason)
+        if not 0 <= idx < len(self.rungs):
+            raise ValueError(f"rung {idx} out of range")
+        self._set_rung(idx, f"manual pin: {reason}" if reason else "manual pin")
 
     def status(self) -> dict[str, Any]:
         with self._lock:
@@ -201,14 +232,21 @@ class DegradationLadder:
             }
 
 
-class LadderExhausted(Exception):
-    """All rungs failed. Carries structured details for escalation."""
+class LadderExhausted(NoMoralsError):
+    """All rungs failed. Carries structured details for escalation.
+
+    Now part of the one error dialect (:class:`NoMoralsError`, code
+    ``"ladder.exhausted"``) instead of a bare ``Exception`` — still
+    catchable as ``Exception``, and ``retryable`` because the primary may
+    heal while probes keep running.
+    """
+
+    code = "ladder.exhausted"
+    retryable = True
 
     def __init__(self, message: str,
                  details: dict[str, Any] | None = None) -> None:
-        super().__init__(message)
-        self.details = details or {}
-        self.retryable = True  # the primary may heal; probes keep running
+        super().__init__(message, details=details or {})
 
 
 class LadderManager:
@@ -234,3 +272,24 @@ class LadderManager:
     def degraded_subsystems(self) -> list[str]:
         with self._lock:
             return [n for n, l in self._ladders.items() if l.degraded]
+
+    def format_report(self, theme: Any = None) -> str:
+        """Every ladder as a styled status card."""
+        from .style import header, status_dot, styled_table
+
+        with self._lock:
+            ladders = list(self._ladders.values())
+        if not ladders:
+            return "no degradation ladders registered"
+        rows = []
+        for lad in ladders:
+            st = lad.status()
+            dot = status_dot("warn" if st["degraded"] else "ok", theme)
+            rows.append([
+                f"{dot} {lad.subsystem}",
+                f"{st['rung']} ({st['rung_name']})",
+                str(st["consecutive_failures"]),
+                " → ".join(st["rungs"]),
+            ])
+        return (header("degradation ladders", theme) + "\n"
+                + styled_table(["subsystem", "rung", "failures", "ladder"], rows, theme))

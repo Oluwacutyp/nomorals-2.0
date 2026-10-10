@@ -352,6 +352,38 @@ class PolicyDecision:
             "audit_id": self.audit_id,
         }
 
+    def explain(self) -> str:
+        """A human-readable explanation of this decision.
+
+        One headline line plus the gates that fired — for audit logs,
+        denial messages, and "why was I asked to confirm?" answers.
+        """
+        who = self.actor or "anonymous"
+        what = self.capability or "unknown capability"
+        if self.allowed:
+            head = f"ALLOWED: {who} may use {what}."
+        else:
+            head = f"DENIED: {who} may not use {what}."
+        lines = [head]
+        if self.reason:
+            lines.append(f"reason: {self.reason}")
+        gates = []
+        if self.needs_biometric:
+            gates.append("biometric (fingerprint) approval required")
+        elif self.needs_confirmation:
+            gates.append("operator confirmation token required")
+        if self.needs_proposal:
+            gates.append(f"proposal required"
+                         + (f" (id {self.proposal_id})" if self.proposal_id else ""))
+        if self.explicit_override:
+            gates.append("explicit owner instruction bypassed confirmation")
+        if self.gradient:
+            gates.append(f"permission gradient: {self.gradient}")
+        lines.extend(f"gate: {g}" for g in gates)
+        if self.audit_id:
+            lines.append(f"audit: {self.audit_id}")
+        return "\n".join(lines)
+
 
 @dataclass
 class _Rule:
@@ -481,6 +513,50 @@ class Policy:
     def clear_rules(self) -> None:
         with self._lock:
             self._rules.clear()
+
+    def describe(self) -> dict[str, Any]:
+        """A human- and machine-readable summary of this policy.
+
+        Rule counts by effect, the highest-priority rules, enforcement
+        state, default-grant size, and lifetime decision counters —
+        the "what does this policy actually do?" view for ``/policy``
+        output and audits.
+        """
+        with self._lock:
+            rules = list(self._rules)
+            counts = dict(self._counts)
+            audit_len = len(self._audit)
+            enforce = self.enforce
+            grant = self.default_grant
+            grant_size = len(grant.patterns) if isinstance(
+                grant, CapabilitySet) else 0
+        by_effect: dict[str, int] = {}
+        for r in rules:
+            by_effect[r.effect] = by_effect.get(r.effect, 0) + 1
+        top = [
+            {"capability": r.capability, "effect": r.effect,
+             "priority": r.priority, "note": r.note,
+             "conditional": r.when is not None}
+            for r in rules[:10]
+        ]
+        summary = (
+            f"policy: {'ENFORCING' if enforce else 'DISABLED'}; "
+            f"{len(rules)} rule(s) "
+            f"({', '.join(f'{n} {e}' for e, n in sorted(by_effect.items()))}); "
+            f"default grant covers {grant_size} capabilit(ies); "
+            f"{counts.get('allow', 0)} allowed / {counts.get('deny', 0)} denied "
+            f"lifetime; {audit_len} audit records"
+        )
+        return {
+            "enforcing": enforce,
+            "rules": len(rules),
+            "by_effect": by_effect,
+            "top_rules": top,
+            "default_grant_size": grant_size,
+            "counters": counts,
+            "audit_records": audit_len,
+            "summary": summary,
+        }
 
     # -- confirmations -------------------------------------------------------
     def issue_confirmation(self, capability: str, *, ttl: float | None = None) -> str:

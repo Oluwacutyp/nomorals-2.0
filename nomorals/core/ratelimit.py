@@ -13,12 +13,114 @@ import threading
 import time
 from collections import deque
 from dataclasses import dataclass, field
-from typing import Callable, Deque
+from typing import Any, Callable, Deque, Protocol
 
 from .errors import RateLimited
 
+# ── human presets & store protocol ─────────────────────────────────────────
+
+#: "100/minute", "10/second", "1000/hour", "5000/day" → (limit, window_s).
+_RATE_PRESETS = {
+    "second": 1.0, "sec": 1.0, "s": 1.0,
+    "minute": 60.0, "min": 60.0, "m": 60.0,
+    "hour": 3600.0, "h": 3600.0,
+    "day": 86400.0, "d": 86400.0,
+}
+
+
+def parse_rate(spec: str) -> tuple[float, float]:
+    """Parse ``"100/minute"`` → ``(100.0, 60.0)`` (limit, window seconds).
+
+    Accepts ``"<n>/<unit>"`` and ``"<n> per <unit>"``; units: second(s),
+    minute(s), hour(s), day(s) and their abbreviations.
+    """
+    import re as _re
+
+    m = _re.match(r"^\s*(\d+(?:\.\d+)?)\s*(?:/|per\s+)\s*([a-z]+)\s*$",
+                  spec.strip().lower())
+    if not m:
+        raise ValueError(f"bad rate spec {spec!r}; want like '100/minute'")
+    limit = float(m.group(1))
+    raw_unit = m.group(2)
+    # normalize plurals: "seconds"→"second", "mins"→"min"→"minute"…
+    unit = raw_unit
+    if unit.endswith("s") and unit not in _RATE_PRESETS:
+        unit = unit[:-1]
+    window = _RATE_PRESETS.get(unit)
+    if window is None:
+        raise ValueError(f"unknown rate unit {raw_unit!r} in {spec!r}")
+    if limit <= 0:
+        raise ValueError("rate limit must be positive")
+    return limit, window
+
+
+def limiter_from_preset(spec: str, *,
+                        algorithm: str = "token_bucket",
+                        burst: float | None = None) -> TokenBucket:
+    """Build a limiter from ``"100/minute"``.
+
+    ``algorithm``: ``token_bucket`` (burst-tolerant, the default),
+    ``sliding_window`` (no boundary burst — for social posting),
+    ``gcra`` (cheapest per-key). ``burst`` overrides the token bucket
+    capacity (defaults to the per-second rate, i.e. a 1-second burst).
+    """
+    limit, window = parse_rate(spec)
+    rate = limit / window
+    if algorithm == "token_bucket":
+        return TokenBucket(rate=rate, capacity=burst or max(1.0, rate))
+    if algorithm == "sliding_window":
+        return SlidingWindowLimiter(limit=max(1, int(limit)), window=window)
+    if algorithm == "gcra":
+        return GCRALimiter(rate=rate, period=1.0,
+                           burst=max(1, int(burst or rate)))
+    raise ValueError(f"unknown algorithm {algorithm!r}")
+
+
+class LimiterStore(Protocol):
+    """Pluggable per-key state backend for distributed limiting.
+
+    The in-process limiters stay allocation-free; a Redis (or SQLite)
+    implementation of this protocol lets the *same* algorithms run
+    fleet-wide later (ratelink's decoupled-backend design). Methods are
+    synchronous; a distributed backend should do one round-trip per call.
+    """
+
+    def load(self, key: str) -> dict[str, float] | None:
+        """Stored state for ``key`` (``None`` = fresh)."""
+        ...
+    def save(self, key: str, state: dict[str, float], ttl_s: float) -> None:
+        """Persist state with a TTL so dead keys evaporate."""
+        ...
+
+
+class MemoryLimiterStore:
+    """In-process :class:`LimiterStore` — the default; also the test double
+    for distributed backends."""
+
+    def __init__(self) -> None:
+        self._data: dict[str, tuple[dict[str, float], float]] = {}
+        self._lock = threading.Lock()
+
+    def load(self, key: str) -> dict[str, float] | None:
+        with self._lock:
+            entry = self._data.get(key)
+            if entry is None:
+                return None
+            state, expires = entry
+            if expires < time.monotonic():
+                del self._data[key]
+                return None
+            return dict(state)
+
+    def save(self, key: str, state: dict[str, float], ttl_s: float) -> None:
+        with self._lock:
+            self._data[key] = (dict(state), time.monotonic() + ttl_s)
+
 __all__ = [
     "GCRALimiter",
+    "LeakyBucket",
+    "LimiterStore",
+    "MemoryLimiterStore",
     "RateLimitDecision",
     "RateLimiter",
     "RateLimitExceeded",
@@ -26,7 +128,9 @@ __all__ = [
     "SlidingWindowCounter",
     "SlidingWindowLimiter",
     "TokenBucket",
+    "limiter_from_preset",
     "limiter_registry",
+    "parse_rate",
 ]
 
 
@@ -411,6 +515,88 @@ class GCRALimiter:
         }
 
 
+class LeakyBucket:
+    """Leaky bucket *shaper*: smooths bursty arrivals into a steady outflow.
+
+    The meter half (token bucket / GCRA) decides *whether* a request may go;
+    the leaky bucket decides *when*: water pours in per request and leaks at
+    ``rate``/s. Unlike the bucket-as-meter, this is used to *pace* outbound
+    work — ``throttle()`` blocks until the request's turn, so a burst of 50
+    queued posts leaves as 50 evenly-spaced posts instead of one spike that
+    gets the account flagged.
+
+    ``capacity`` bounds how much burst can queue before callers start
+    waiting; ``decide()`` never blocks and reports the wait instead.
+    """
+
+    def __init__(self, rate: float, capacity: float) -> None:
+        if rate <= 0:
+            raise ValueError("rate must be positive")
+        if capacity <= 0:
+            raise ValueError("capacity must be positive")
+        self.rate = rate
+        self.capacity = capacity
+        self._level = 0.0
+        self._updated = time.monotonic()
+        self._lock = threading.Lock()
+
+    def _leak(self, now: float) -> None:
+        elapsed = now - self._updated
+        if elapsed > 0:
+            self._level = max(0.0, self._level - elapsed * self.rate)
+            self._updated = now
+
+    def decide(self, cost: float = 1.0) -> RateLimitDecision:
+        """Admit if the pour fits; otherwise report when it would."""
+        if cost <= 0:
+            raise ValueError("cost must be positive")
+        with self._lock:
+            now = time.monotonic()
+            self._leak(now)
+            if self._level + cost <= self.capacity:
+                self._level += cost
+                return RateLimitDecision(
+                    allowed=True, limit=self.capacity,
+                    remaining=self.capacity - self._level, reset_after=0.0)
+            # wait until enough has leaked for this pour to fit
+            wait = (self._level + cost - self.capacity) / self.rate
+            return RateLimitDecision(
+                allowed=False, limit=self.capacity,
+                remaining=max(0.0, self.capacity - self._level),
+                reset_after=wait, retry_after=wait)
+
+    def wait_time(self, cost: float = 1.0) -> float:
+        """Seconds until ``cost`` would be admitted (0 if now). Non-consuming."""
+        with self._lock:
+            now = time.monotonic()
+            self._leak(now)
+            if self._level + cost <= self.capacity:
+                return 0.0
+            return (self._level + cost - self.capacity) / self.rate
+
+    def try_acquire(self, cost: float = 1.0) -> bool:
+        return self.decide(cost).allowed
+
+    def acquire_or_raise(self, cost: float = 1.0) -> RateLimitDecision:
+        return self.decide(cost).or_raise()
+
+    def throttle(self, cost: float = 1.0) -> float:
+        """Block until the pour is admitted; returns seconds waited."""
+        waited = 0.0
+        while True:
+            decision = self.decide(cost)
+            if decision.allowed:
+                return waited
+            time.sleep(min(decision.retry_after, 0.25))
+            waited += min(decision.retry_after, 0.25)
+
+    def as_dict(self) -> dict[str, float]:
+        with self._lock:
+            self._leak(time.monotonic())
+            return {"rate": self.rate, "capacity": self.capacity,
+                    "level": round(self._level, 4)}
+
+
 class SlidingWindowCounter:
     """Approximate sliding window: ~99% accurate, O(1) memory.
 
@@ -659,6 +845,24 @@ class LimiterRegistry:
     def snapshot(self) -> dict[str, dict[str, float]]:
         with self._lock:
             return {key: bucket.as_dict() for key, bucket in self._limiters.items()}
+
+    def describe(self, theme: Any = None) -> str:
+        """Human-readable limiter table for dashboards and chat."""
+        from .style import styled_table, header
+
+        snap = self.snapshot()
+        if not snap:
+            return "no limiters registered"
+        rows = []
+        for key in sorted(snap):
+            s = snap[key]
+            rows.append([
+                key,
+                f"{s.get('rate', s.get('limit', '?'))}",
+                f"{s.get('available', s.get('remaining', '?'))}",
+            ])
+        return (header("rate limiters", theme) + "\n"
+                + styled_table(["limiter", "rate", "available"], rows, theme))
 
 
 limiter_registry = LimiterRegistry()
