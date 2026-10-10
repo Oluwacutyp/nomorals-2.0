@@ -65,7 +65,7 @@ def register(registry: Any) -> None:
             "tournament (start a multi-game bracket). Games are public — "
             "anyone can play."
         ),
-        capability="",
+        capability="social.play",
     )
     def games(
         action: str,

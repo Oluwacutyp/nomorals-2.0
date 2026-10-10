@@ -430,6 +430,11 @@ class SoundCloudConnector(Connector):
                 f"SoundCloud gave no final stream URL for "
                 f"\"{summary['title']}\""
             )
+        if "/preview/" in final:
+            raise SoundCloudError(
+                f"\"{summary['title']}\" is preview-only on SoundCloud "
+                f"(~30s); falling back to full-track sources"
+            )
         fmt = chosen.get("format") or {}
         return {
             "url": final,

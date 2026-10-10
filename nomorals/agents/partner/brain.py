@@ -306,14 +306,14 @@ class PartnerBrain:
         actor = "owner" if is_owner else "outsider"
         # Restricted chats: the model only sees public-safe tools, and the
         # registry denies anything else at call time. Code-enforced, not
-        # prompt-only. Outsiders get read-only + model-call: no writes,
-        # no execution, no private memory.
+        # prompt-only. Outsiders get model-call + public game playing:
+        # no writes, no execution, no private memory.
         capabilities: Any = None
         if not is_owner:
             try:
                 capabilities = CapabilitySet.of(
                     Capability.MODEL_CALL,
-                    Capability.MEM_READ,
+                    Capability.SOCIAL_PLAY,
                     Capability.FS_READ,
                 )
             except Exception:

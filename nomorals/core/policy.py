@@ -96,6 +96,7 @@ class Capability:
     SOCIAL_READ = "social.read"
     SOCIAL_DM = "social.dm"
     SOCIAL_BULK = "social.bulk"
+    SOCIAL_PLAY = "social.play"  # public game playing — outsiders may play
     # System
     SYS_CONFIG = "sys.config"
     SYS_BACKUP = "sys.backup"

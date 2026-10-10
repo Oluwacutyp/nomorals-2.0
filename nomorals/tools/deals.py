@@ -261,10 +261,27 @@ def register(registry: Any) -> None:
     """Register the deals tool with the tool registry."""
     global _lazy_context
     _lazy_context = getattr(registry, "context", None)
+    def _deals_sync(action: str, **kwargs: Any) -> dict[str, Any]:
+        """Sync wrapper — the registry dispatches synchronously."""
+        import asyncio
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+        if loop is not None:
+            # Already in a loop (shouldn't happen via registry, but be safe):
+            # run in a fresh thread with its own loop.
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                return pool.submit(
+                    asyncio.run, deals(action, **kwargs)).result()
+        return asyncio.run(deals(action, **kwargs))
+
     registry.register(
         name="deals",
-        fn=deals,
+        fn=_deals_sync,
         description="Search, track, compare, and find steals across Nigerian marketplaces (Jumia, Konga, Jiji, Kara, SLOT, Temu, AliExpress, eBay, Banggood, Amazon)",
+        capability="net.out",
         parameters={
             "action": {
                 "type": "string",

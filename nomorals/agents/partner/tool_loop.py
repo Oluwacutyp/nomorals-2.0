@@ -263,8 +263,11 @@ class ToolCallingLoop:
         # Group admins get admin tools in groups where they hold status:
         # the sender's role is resolved per-group (cached 60s), and the
         # grant reflects it. Owner bypass is unchanged.
-        if actor != "owner" and call.name.startswith(
-            ("social_", "telegram_", "tgbot_", "whatsapp_", "game_")
+        if actor != "owner" and (
+            call.name.startswith(
+                ("social_", "telegram_", "tgbot_", "whatsapp_", "game_",
+                 "memory_")
+            ) or call.name in ("games",)
         ):
             try:
                 from ..social_gate import check_tool_call, grant_for

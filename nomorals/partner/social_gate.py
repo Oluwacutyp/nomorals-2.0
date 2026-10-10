@@ -121,10 +121,7 @@ PUBLIC_DM_TOOLS: frozenset[str] = frozenset({
 PUBLIC_GROUP_TOOLS: frozenset[str] = frozenset({
     # Games and public fun, per the user's spec: "in groups, games and
     # other public features are NOT gated."
-    "game_move",
-    "game_join",
-    "game_list",
-    "game_status",
+    "games",  # the registered game tool (list/start/move/join/…)
     "music_request",   # request a song from the DJ
     "dj_request",
 })
