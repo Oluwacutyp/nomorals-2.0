@@ -1464,6 +1464,28 @@ class TrialFlow:
         svc = BrowserService()
         return svc.open_rendered_tab("trial-signup")
 
+    @staticmethod
+    def run_browser_task(steps: list[dict[str, Any]],
+                         session: str = "trial-signup") -> dict[str, Any]:
+        """Run a declarative browser task program for a signup scenario.
+
+        ``steps`` is a list of ``{act, ...}`` — open/fill/click/submit/
+        wait/screenshot/extract/observe/scroll/press — executed on a real
+        Chromium tab via the spine ``browser`` tool's rendered engine.
+        Lets signup scenarios be expressed as data (brain-generatable)
+        instead of hardcoded Python. Raises honestly when Playwright is
+        missing.
+        """
+        from ...tools.browser import get_rendered_session
+        sess = get_rendered_session(session)
+        try:
+            return sess.task(steps=steps)
+        finally:
+            try:
+                sess.close()
+            except Exception:  # noqa: BLE001 - close is best-effort
+                pass
+
     # ── save + deliver ───────────────────────────────────────────────────────
     def save(self, platform: str, login: str, secret: str, note: str = "") -> dict:
         if not (platform and login and secret):

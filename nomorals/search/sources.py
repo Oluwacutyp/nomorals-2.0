@@ -66,6 +66,10 @@ from .base import SourceAdapter
 from .errors import SearchError
 from .model import SearchResult
 from .osint import OSINT_SPECS
+try:
+    from .osint_browser import BROWSER_OSINT_SPECS
+except Exception:  # noqa: BLE001 - browser adapters are optional
+    BROWSER_OSINT_SPECS = []
 from .web import WEB_SPECS, WebSearchSource
 
 __all__ = [
@@ -545,6 +549,12 @@ SOURCE_SPECS: list[tuple[str, str, str, type[SourceAdapter]]] = [
     *[
         (name, rtype, desc, cls)
         for name, rtype, desc, cls in OSINT_SPECS
+    ],
+    # Browser-driven OSINT: JS-heavy / form-gated public sources with no
+    # API — the rendered Chromium engine fills forms and extracts results.
+    *[
+        (name, rtype, desc, cls)
+        for name, rtype, desc, cls in BROWSER_OSINT_SPECS
     ],
 ]
 

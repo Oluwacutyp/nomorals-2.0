@@ -305,6 +305,43 @@ def _tool_text(registry: Any, name: str, **kwargs: Any) -> dict[str, Any] | None
     return value if isinstance(value, dict) else None
 
 
+def _browser_fetch_fallback(registry: Any, url: str, max_chars: int) -> str:
+    """Fetch a page through the rendered Chromium engine.
+
+    Used when the plain ``web_fetch`` can't read a page (JS-rendered,
+    bot-gated). Returns the page text, or "" when the rendered engine
+    isn't available. Never raises.
+    """
+    try:
+        outcome = registry.call("browser", actor="system", action="open",
+                                url=url, engine="rendered",
+                                session="research")
+        if not outcome.ok:
+            return ""
+        outcome = registry.call("browser", actor="system", action="wait",
+                                engine="rendered", session="research",
+                                timeout=10000)
+        # wait failing is fine — the page may already be settled
+        outcome = registry.call("browser", actor="system", action="text",
+                                engine="rendered", session="research",
+                                max_chars=max_chars)
+        if not outcome.ok:
+            return ""
+        value = outcome.value
+        if isinstance(value, dict):
+            return str(value.get("text", ""))[:max_chars]
+        return ""
+    except Exception as exc:  # noqa: BLE001 - fallback must never break research
+        _log.debug("browser fetch fallback failed for %s: %s", url, exc)
+        return ""
+    finally:
+        try:
+            registry.call("browser", actor="system", action="close",
+                          engine="rendered", session="research")
+        except Exception:  # noqa: BLE001
+            pass
+
+
 def _research_workers(n_calls: int) -> int:
     """Profile-gated concurrency for research fan-out.
 
@@ -438,6 +475,13 @@ def run_job(job: ResearchJob, rctx: ResearchContext,
         _emit_progress(progress, "fetch", finding.url)
         if not outcome.ok:
             _log.warning("research tool web_fetch failed: %s", outcome.error)
+            # Fallback: the rendered Chromium engine for JS-heavy pages
+            # that the plain fetcher can't read. She's got a browser —
+            # use it, don't just skip the source.
+            detail = _browser_fetch_fallback(rctx.registry, finding.url,
+                                             _detail_chars)
+            if detail:
+                finding.detail = detail
             continue
         payload = outcome.value
         if isinstance(payload, dict) and payload.get("text"):
