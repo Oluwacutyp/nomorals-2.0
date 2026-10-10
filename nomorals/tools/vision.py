@@ -464,7 +464,7 @@ def _vision_call(
     description, provider, model, usage, error = "", "", "", {}, ""
     if router is not None:
         try:
-            response = brain_for(self.context).describe_image(payload, instruction)
+            response = router.describe_image(payload, instruction)
             description, provider, model = response.text, response.provider, response.model
             usage_raw = response.usage.as_dict
             usage = dict(usage_raw() if callable(usage_raw) else usage_raw)
