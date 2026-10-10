@@ -20,11 +20,20 @@ from typing import Any, Callable, Sequence
 
 from ..llm.brain import brain_for
 from ..core.errors import NoMoralsError, classify
+from ..core.ids import new_id
 from ..core.jsonutil import extract_json as _extract_json
 from ..core.logging_setup import get_logger
 from ..core.result import Ok, Err
 from .base import Budget
 from .blackboard import Blackboard
+from .checkpoints import CheckpointStore
+from .debate import (
+    DEFAULT_RUBRIC,
+    Critique,
+    Debate,
+    Issue,
+    WorkArtifact,
+)
 from .role_specs import RoleRegistry, SwarmAgent
 from .runtime import ExecutionReport, HybridExecutor
 from .supervisor import Supervisor
@@ -179,6 +188,7 @@ class MasterOrchestrator:
         planner_prompt: str = "",
         roles: RoleRegistry | None = None,
         checkpoint_every: int = 1,
+        debate_critic: Callable[[WorkArtifact, tuple[str, ...]], Critique] | None = None,
     ) -> None:
         self.context = context
         self.executor = executor or (context.executor if context is not None else None)
@@ -204,6 +214,14 @@ class MasterOrchestrator:
         # result.reevaluations.
         self.checkpoint_every = max(1, int(checkpoint_every))
         self.reevaluation_log: deque[Reevaluation] = deque(maxlen=64)
+        # Injected critic for per-step debate (see _debate_step). When None,
+        # a model critic is built on demand; with no model available the
+        # debate is skipped honestly and the step result passes through.
+        self.debate_critic = debate_critic
+        # Run-state persistence (set per run() call, not at construction).
+        self._run_checkpoint_store: CheckpointStore | None = None
+        self._run_id: str = ""
+        self._run_plan: Plan | None = None
 
     # ── planning ─────────────────────────────────────────────────────────────
     def plan(self, goal: str, *, context_hint: str = "") -> Plan:
@@ -218,7 +236,10 @@ class MasterOrchestrator:
             f"{self.max_steps} concrete steps. Reply with JSON only, shaped as "
             '{"rationale": "...", "steps": [{"name": "short_id", "goal": "...", '
             '"role": "research|coding|vision|data_collection|execution|social", '
-            '"kind": "io|cpu|async", "depends_on": ["short_id"]}]}.\n'
+            '"kind": "io|cpu|async", "depends_on": ["short_id"], '
+            '"debate": true}]}.\n'
+            'Set "debate": true only on high-stakes steps whose output must '
+            'survive a critic before it counts as done.\n'
             f"Goal: {goal}"
         )
         if context_hint:
@@ -300,12 +321,16 @@ class MasterOrchestrator:
             # Step execution policies ride in the payload for the mission
             # runner: "optional" (a failed step degrades instead of failing
             # the mission) and "on_failure" ("fail_fast" | "continue").
+            # "debate": true routes the step's output through coder→critic
+            # rounds before it counts as done.
             payload: dict[str, Any] = {}
             if isinstance(entry.get("optional"), bool):
                 payload["optional"] = entry["optional"]
             on_failure = str(entry.get("on_failure") or "").strip().lower()
             if on_failure in {"fail_fast", "continue"}:
                 payload["on_failure"] = on_failure
+            if entry.get("debate") is True:
+                payload["debate"] = True
             steps.append(
                 PlanStep(
                     name=name,
@@ -378,6 +403,8 @@ class MasterOrchestrator:
         budget: Budget | None = None,
         fail_fast: bool = False,
         reflect: bool = True,
+        checkpoint_store: CheckpointStore | None = None,
+        run_id: str = "",
     ) -> OrchestrationResult:
         """Execute a goal end to end.
 
@@ -386,57 +413,118 @@ class MasterOrchestrator:
         failure) the remaining plan is re-evaluated and can be revised,
         trimmed, or aborted with a recorded reason.  A checkpoint never
         raises and never blocks the run.
+
+        With ``checkpoint_store``, the plan plus every task's state is
+        persisted at each checkpoint under ``run_id`` — a dead run can be
+        continued later with :meth:`resume` instead of restarting.
         """
         started = time.perf_counter()
         plan = plan or self.plan(goal)
         graph = plan.as_task_graph(name=goal[:48])
+        self._begin_run_state(goal, graph, plan, checkpoint_store, run_id)
         self.supervisor.budget = budget
-        # Wave F2 checkpoint state (per run).
-        self._settled = 0
-        self._run_reevaluations: list[Reevaluation] = []
-        self._run_goal = goal
-        self._run_graph = graph
 
         handler = default_handler or self._default_handler
         role_handlers = handlers or {}
-
-        def dispatch(task: Task) -> Any:
-            self.supervisor.check_budget()
-            chosen = role_handlers.get(task.role) or role_handlers.get(task.name) or handler
-            if self.context:
-                self.context.emit("task.started", task=task.name, role=task.role, goal=goal)
-            started = time.perf_counter()
-            try:
-                result = chosen(task)
-            except Exception as exc:
-                self._record_role(task.role, time.perf_counter() - started,
-                                  ok=False, denials=0)
-                # Name the step, its role, and the handler behind the
-                # failure — the surfaced error must never be a bare
-                # "something went wrong".  The original classification
-                # (code/retryable) is preserved on the wrapper.
-                raise _named_step_error(task, chosen, exc) from exc
-            elapsed = time.perf_counter() - started
-            denials = _result_denials(result)
-            reported = result.get("error") if isinstance(result, dict) else ""
-            if reported:
-                # A handler that reports failure in its result failed the
-                # step — returning it as a success would hide the failure
-                # from the supervised retry, the mid-flight re-evaluation,
-                # and the final ok flag.  Fail fast and name it.
-                self._record_role(task.role, elapsed, ok=False, denials=denials)
-                raise _named_step_error(task, chosen, str(reported))
-            self._record_role(task.role, elapsed, ok=True, denials=denials)
-            self.blackboard.post(
-                f"task.{task.name}", result, author=task.role, topic=goal,
-                metadata={"role": task.role},
-            )
-            return result
-
+        dispatch = self._make_dispatch(goal, handler, role_handlers)
         for task in graph.tasks.values():
             task.fn = dispatch
             task.args = (task,)
 
+        return self._execute_graph(
+            graph, plan=plan, goal=goal, dispatch=dispatch,
+            fail_fast=fail_fast, reflect=reflect, started=started)
+
+    def resume(
+        self,
+        run_id: str,
+        checkpoint_store: CheckpointStore,
+        *,
+        handlers: dict[str, Callable[[Task], Any]] | None = None,
+        default_handler: Callable[[Task], Any] | None = None,
+        budget: Budget | None = None,
+        fail_fast: bool = False,
+        reflect: bool = True,
+        state_id: str = "",
+    ) -> OrchestrationResult:
+        """Continue an interrupted run from a checkpoint snapshot.
+
+        Rebuilds the plan and task graph from the newest snapshot for
+        ``run_id`` (or ``state_id`` explicitly), restores DONE / FAILED /
+        SKIPPED tasks with their results, and executes only what is still
+        PENDING — finished work is never re-run. Handlers are attached
+        fresh, so new code or credentials apply to the resumed run.
+
+        Raises ``ValueError`` when no usable snapshot exists.
+        """
+        started = time.perf_counter()
+        states = checkpoint_store.list_states(run_id)
+        if state_id:
+            states = [s for s in states if s["state_id"] == state_id]
+        if not states:
+            raise ValueError(f"no checkpoint snapshots for run {run_id!r}")
+        record = checkpoint_store.load_state(states[0]["state_id"])
+        if record is None:
+            raise ValueError(
+                f"checkpoint {states[0]['state_id']!r} is missing or corrupt")
+        payload = record.get("payload") or {}
+        goal = str(payload.get("goal") or "")
+        raw_steps = payload.get("steps") or []
+        if not goal or not raw_steps:
+            raise ValueError(
+                f"checkpoint {states[0]['state_id']!r} has no goal/steps")
+
+        plan = _plan_from_state(goal, raw_steps,
+                                rationale=str(payload.get("rationale") or ""))
+        graph = plan.as_task_graph(name=goal[:48])
+        restored = self._restore_task_states(graph, payload.get("tasks") or {})
+        self._begin_run_state(goal, graph, plan, checkpoint_store, run_id)
+        self.supervisor.budget = budget
+
+        handler = default_handler or self._default_handler
+        role_handlers = handlers or {}
+        dispatch = self._make_dispatch(goal, handler, role_handlers)
+        for task in graph.tasks.values():
+            task.fn = dispatch
+            task.args = (task,)
+
+        _log.info("resuming run %s from %s: %d task(s) restored, %d pending",
+                  run_id, states[0]["state_id"], restored,
+                  sum(1 for t in graph.tasks.values()
+                      if t.state is TaskState.PENDING))
+        return self._execute_graph(
+            graph, plan=plan, goal=goal, dispatch=dispatch,
+            fail_fast=fail_fast, reflect=reflect, started=started)
+
+    # ── run internals (shared by run() and resume()) ─────────────────────
+    def _begin_run_state(self, goal: str, graph: TaskGraph, plan: Plan,
+                         store: CheckpointStore | None, run_id: str) -> None:
+        """Per-run bookkeeping shared by :meth:`run` and :meth:`resume`."""
+        self._settled = 0
+        self._run_reevaluations = []
+        self._run_goal = goal
+        self._run_graph = graph
+        self._run_plan = plan
+        self._run_checkpoint_store = store
+        self._run_id = (run_id or "").strip() or f"run-{new_id()[-8:]}"
+
+    def _execute_graph(
+        self,
+        graph: TaskGraph,
+        *,
+        plan: Plan,
+        goal: str,
+        dispatch: Callable[[Task], Any],
+        fail_fast: bool,
+        reflect: bool,
+        started: float,
+    ) -> OrchestrationResult:
+        """Execute an already-built, dispatch-wired graph to completion.
+
+        Shared tail of :meth:`run` and :meth:`resume`: parallel execution
+        with mid-flight checkpoints, supervised retry of failures,
+        aggregation, reflection, and the finished result.
+        """
         if self.executor is None:
             raise RuntimeError("orchestrator has no executor")
         report = self.executor.run(
@@ -469,6 +557,255 @@ class MasterOrchestrator:
                 "mission.finished", goal=goal, ok=result.ok, score=score, seconds=result.seconds
             )
         return result
+
+    def _make_dispatch(
+        self,
+        goal: str,
+        handler: Callable[[Task], Any],
+        role_handlers: dict[str, Callable[[Task], Any]],
+    ) -> Callable[[Task], Any]:
+        """Build the per-task dispatch closure: budget check, role routing,
+        named errors, optional coder→critic debate, blackboard posting."""
+
+        def dispatch(task: Task) -> Any:
+            self.supervisor.check_budget()
+            chosen = role_handlers.get(task.role) or role_handlers.get(task.name) or handler
+            if self.context:
+                self.context.emit("task.started", task=task.name, role=task.role, goal=goal)
+            started = time.perf_counter()
+            try:
+                result = chosen(task)
+            except Exception as exc:
+                self._record_role(task.role, time.perf_counter() - started,
+                                  ok=False, denials=0)
+                # Name the step, its role, and the handler behind the
+                # failure — the surfaced error must never be a bare
+                # "something went wrong".  The original classification
+                # (code/retryable) is preserved on the wrapper.
+                raise _named_step_error(task, chosen, exc) from exc
+            elapsed = time.perf_counter() - started
+            denials = _result_denials(result)
+            reported = result.get("error") if isinstance(result, dict) else ""
+            if reported:
+                # A handler that reports failure in its result failed the
+                # step — returning it as a success would hide the failure
+                # from the supervised retry, the mid-flight re-evaluation,
+                # and the final ok flag.  Fail fast and name it.
+                self._record_role(task.role, elapsed, ok=False, denials=denials)
+                raise _named_step_error(task, chosen, str(reported))
+            # Opt-in quality gate: high-stakes steps survive a critic
+            # before they count as done.
+            if task.payload.get("debate"):
+                result = self._debate_step(task, chosen, result)
+            self._record_role(task.role, time.perf_counter() - started,
+                              ok=True, denials=denials)
+            self.blackboard.post(
+                f"task.{task.name}", result, author=task.role, topic=goal,
+                metadata={"role": task.role},
+            )
+            return result
+
+        return dispatch
+
+    # ── per-step debate ──────────────────────────────────────────────────
+    def _debate_step(self, task: Task, handler: Callable[[Task], Any],
+                     handler_result: Any) -> Any:
+        """Route a step's output through coder→critic rounds.
+
+        The handler already did the work; the "coder" packages its output
+        as a :class:`WorkArtifact` and the critic grades it against
+        :data:`DEFAULT_RUBRIC`. ``approved`` passes the artifact through;
+        ``rejected`` fails the step loudly (the supervisor retry and the
+        mid-flight re-evaluation both see it); anything else keeps the
+        artifact but stamps the verdict on the result so it is never
+        silently accepted.
+        """
+        critic_fn = self.debate_critic
+        if critic_fn is None:
+            router = (getattr(self.context, "router", None)
+                      if self.context is not None else None)
+            if router is None:
+                _log.warning("step %r asked for debate but no model is "
+                             "available for the critic; passing the result "
+                             "through unstamped", task.name)
+                return handler_result
+            critic_fn = self._model_critic
+
+        summary = _stringify(handler_result)[:1500]
+        first = WorkArtifact(content=handler_result,
+                             summary=f"step {task.name!r}: {summary[:200]}")
+
+        def coder_fn(brief: str, feedback: list[Issue] | None,
+                     artifact: WorkArtifact | None) -> WorkArtifact:
+            # Post-hoc review: the work is already done; the coder just
+            # re-presents the artifact each round.
+            return artifact if artifact is not None else first
+
+        debate = Debate(
+            coder_fn=coder_fn,
+            critic_fn=critic_fn,
+            blackboard=self.blackboard,
+            max_rounds=2,
+            context=self.context,
+        )
+        result = debate.run(
+            f"Review the output of plan step {task.name!r} "
+            f"(role {task.role!r}) for goal: {task.payload.get('goal', '')}",
+            initial_artifact=first,
+        )
+        verdict = result.verdict
+        if verdict == "approved":
+            _log.info("debate approved step %r (%d round(s), score %.1f)",
+                      task.name, result.rounds, result.score)
+            return self._stamp_debate(handler_result, result)
+        if verdict == "rejected":
+            raise _named_step_error(
+                task, handler,
+                f"debate rejected the output: {result.reason}")
+        _log.warning("debate %s on step %r: %s",
+                     verdict, task.name, result.reason)
+        return self._stamp_debate(handler_result, result)
+
+    @staticmethod
+    def _stamp_debate(handler_result: Any, result: Any) -> Any:
+        """Stamp a debate verdict onto a step result without hiding it."""
+        stamp = {"debate_verdict": result.verdict,
+                 "debate_score": round(result.score, 1),
+                 "debate_reason": result.reason}
+        if isinstance(handler_result, dict):
+            return {**handler_result, **stamp}
+        return {"output": handler_result, **stamp}
+
+    def _model_critic(self, artifact: WorkArtifact,
+                      rubric: tuple[str, ...]) -> Critique:
+        """Default critic: grades the artifact with the brain.
+
+        Only used when a router exists (checked by the caller); the
+        no-router path degrades to an explicit request_changes instead of
+        crashing the debate contract.
+        """
+        router = getattr(self.context, "router", None) if self.context is not None else None
+        if router is None:
+            return Critique(verdict="request_changes", score=0.0,
+                            notes="no model available for the critic")
+        from ..llm.base import Message, SamplingParams
+
+        rubric_lines = "\n".join(f"- {r}" for r in rubric)
+        response = brain_for(self.context).chat(
+            [
+                Message.system(
+                    "You are a ruthless critic reviewing an agent's work. "
+                    "Grade it against this rubric:\n" + rubric_lines +
+                    "\nReply with ONLY a JSON object: "
+                    '{"verdict": "approve|request_changes|reject", '
+                    '"score": 0-100, "notes": "...", '
+                    '"issues": [{"id": "i1", "severity": "critical|major|minor", '
+                    '"location": "...", "detail": "..."}]}'),
+                Message.user(f"Work summary: {artifact.summary}\n\n"
+                             f"Content:\n{_stringify(artifact.content)[:6000]}"),
+            ],
+            SamplingParams(temperature=0.1, max_tokens=800, json_mode=True),
+        task_kind="chat")
+        if not response.ok:
+            return Critique(verdict="request_changes", score=0.0,
+                            notes="critic model call failed: "
+                                  f"{getattr(response, 'error', 'unknown')}")
+        data = _extract_json(response.text or "")
+        if not isinstance(data, dict):
+            return Critique(verdict="request_changes", score=0.0,
+                            notes="critic returned unparseable output")
+        verdict = str(data.get("verdict") or "request_changes")
+        if verdict not in {"approve", "request_changes", "reject"}:
+            verdict = "request_changes"
+        issues: list[Issue] = []
+        for raw in (data.get("issues") or [])[:12]:
+            if not isinstance(raw, dict):
+                continue
+            issues.append(Issue(
+                id=str(raw.get("id") or f"i{len(issues) + 1}"),
+                severity=str(raw.get("severity") or "minor"),
+                location=str(raw.get("location") or ""),
+                detail=str(raw.get("detail") or "")))
+        try:
+            score = float(data.get("score") or 0.0)
+        except (TypeError, ValueError):
+            score = 0.0
+        return Critique(verdict=verdict, issues=issues, score=score,
+                        notes=str(data.get("notes") or ""))
+
+    # ── run-state persistence ────────────────────────────────────────────
+    def _persist_run_state(self) -> None:
+        """Snapshot plan + task states to the checkpoint store.
+
+        Called from :meth:`_checkpoint`; best-effort and never raises —
+        persistence must not break a run.
+        """
+        store = getattr(self, "_run_checkpoint_store", None)
+        graph = getattr(self, "_run_graph", None)
+        plan = getattr(self, "_run_plan", None)
+        if store is None or graph is None or plan is None:
+            return
+        try:
+            tasks: dict[str, Any] = {}
+            for task in graph.tasks.values():
+                tasks[task.name] = {
+                    "state": task.state.value,
+                    "result": getattr(task, "result", None),
+                    "error": task.error,
+                    "attempts": task.attempts,
+                }
+            payload = {
+                "goal": self._run_goal,
+                "rationale": plan.rationale,
+                "steps": [
+                    {
+                        "name": s.name, "goal": s.goal, "role": s.role,
+                        "kind": s.kind.value, "depends_on": s.depends_on,
+                        "payload": s.payload,
+                    }
+                    for s in plan.steps
+                ],
+                "tasks": tasks,
+                "settled": self._settled,
+            }
+            # CheckpointStore.save_state coerces to JSON-safe itself.
+            outcome = store.save_state(self._run_id, payload,
+                                       label=f"checkpoint@{self._settled}")
+            if not outcome.get("ok"):
+                _log.debug("run-state snapshot failed: %s",
+                           outcome.get("error"))
+        except Exception as exc:  # noqa: BLE001 - persistence never breaks a run
+            _log.debug("run-state snapshot crashed: %s", exc)
+
+    @staticmethod
+    def _restore_task_states(graph: TaskGraph,
+                             states: dict[str, Any]) -> int:
+        """Mark tasks DONE/FAILED/SKIPPED from a snapshot. Returns count."""
+        restored = 0
+        for task in graph.tasks.values():
+            saved = states.get(task.name)
+            if not isinstance(saved, dict):
+                continue
+            state = str(saved.get("state") or "")
+            error = str(saved.get("error") or "")
+            try:
+                attempts = int(saved.get("attempts") or 0)
+            except (TypeError, ValueError):
+                attempts = 0
+            task.attempts = attempts
+            if state == TaskState.DONE.value:
+                task.result = saved.get("result")
+                task.mark_done(task.result)
+                restored += 1
+            elif state == TaskState.FAILED.value:
+                task.mark_failed(error or "failed before checkpoint")
+                restored += 1
+            elif state in (TaskState.SKIPPED.value, TaskState.CANCELLED.value):
+                task.state = TaskState.SKIPPED
+                task.error = error or "skipped before checkpoint"
+                task.finished_at = time.time()
+                restored += 1
+        return restored
 
     @staticmethod
     def _recount(graph: TaskGraph, report: ExecutionReport) -> ExecutionReport:
@@ -505,6 +842,9 @@ class MasterOrchestrator:
             return
         self._run_reevaluations.append(evaluation)
         self.reevaluation_log.append(evaluation)
+        # Persist run state at every checkpoint when a store is wired, so
+        # a dead run can resume from here instead of restarting.
+        self._persist_run_state()
         if evaluation.action == "continue":
             _log.debug("plan checkpoint @%s: %s",
                        evaluation.at_task, evaluation.reason)
@@ -878,6 +1218,36 @@ def _plan_model_failure_reason(response: Any) -> str:
     if chain and chain not in reason:
         reason += f" — {chain}"
     return reason
+
+
+def _plan_from_state(goal: str, raw_steps: list[Any],
+                     rationale: str = "") -> Plan:
+    """Rebuild a :class:`Plan` from a checkpoint snapshot's step dicts.
+
+    Tolerates the enriched step shape written by
+    :meth:`MasterOrchestrator._persist_run_state` (name/goal/role/kind/
+    depends_on/payload) and the leaner :meth:`PlanStep.to_dict` shape.
+    """
+    steps: list[PlanStep] = []
+    for entry in raw_steps:
+        if not isinstance(entry, dict):
+            continue
+        kind_raw = str(entry.get("kind") or "io").lower()
+        try:
+            kind = TaskKind(kind_raw)
+        except ValueError:
+            kind = TaskKind.IO
+        deps = entry.get("depends_on") or []
+        payload = entry.get("payload")
+        steps.append(PlanStep(
+            name=str(entry.get("name") or f"step{len(steps) + 1}"),
+            goal=str(entry.get("goal") or ""),
+            role=str(entry.get("role") or "execution"),
+            kind=kind,
+            depends_on=[str(d) for d in deps] if isinstance(deps, list) else [],
+            payload=dict(payload) if isinstance(payload, dict) else {},
+        ))
+    return Plan(goal=goal, steps=steps, rationale=rationale)
 
 
 def _named_step_error(task: Task, handler: Callable, cause: Any) -> NoMoralsError:

@@ -20,10 +20,42 @@ import time
 from typing import Any
 
 from ..core.ids import new_id
+from ..core.jsonutil import extract_json as _extract_json
+from ..core.logging_setup import get_logger
 
 __all__ = ["DirectivesAgent"]
 
+_log = get_logger(__name__)
+
 _URL = re.compile(r"https?://[^\s\"'<>]+")
+
+
+def _as_brain(router: Any) -> Any:
+    """Wrap ``router`` in a Brain unless it already is one.
+
+    Tolerates Brain being unpatchable/unimportable in odd runtimes —
+    isinstance against a non-type raises TypeError, which we treat as
+    "not a Brain".
+    """
+    from ..llm.brain import Brain
+
+    try:
+        if isinstance(router, Brain):
+            return router
+    except TypeError:  # noqa: BLE001 - Brain mocked as non-type in tests
+        pass
+    return Brain(router=router)
+
+#: Subsystems a directive can route to. The *brain* picks one per
+#: directive (see _route) — there are deliberately no keyword/regex
+#: intent shortcuts here: intent classification is the model's job.
+_DIRECTIVE_SUBSYSTEMS = (
+    ("download", "fetch a file from a URL to local storage"),
+    ("research", "investigate a topic on the web and report back with sources"),
+    ("code", "write and run a program or script that accomplishes the task"),
+    ("answer", "handle directly with the model (questions, explanations, "
+               "judgment calls, anything conversational)"),
+)
 
 
 class DirectivesAgent:
@@ -110,27 +142,83 @@ class DirectivesAgent:
             return {"ok": False, "id": row["id"], "error": str(exc)}
 
     def _execute(self, text: str) -> str:
-        lowered = text.lower()
-        # 1) download
-        m = _URL.search(text)
-        if m and any(w in lowered for w in ("download", "get ", "fetch", "grab", "save")):
-            return self._download(m.group(0))
-        if m:
-            url = m.group(0)
-            rest = (text[:m.start()] + text[m.end():]).strip(" .,!?")
-            if any(w in lowered for w in ("look", "check", "summar", "read", "research")):
-                return self._research(f"what is this about: {url}") + f"\n(source: {url})"
+        """Route the directive to a subsystem and run it.
+
+        Routing is dynamic: the brain reads the directive and picks the
+        subsystem (download / research / code / answer) plus its argument
+        as JSON. There are no keyword or regex intent shortcuts — with no
+        model available the directive cannot be understood, and that is
+        reported honestly instead of guessed.
+        """
+        route = self._route(text)
+        subsystem = route.get("subsystem", "answer")
+        argument = (route.get("argument") or "").strip()
+        if subsystem == "download":
+            url = argument or self._first_url(text)
+            if not url:
+                raise RuntimeError(
+                    "routed to download but no URL was found in the directive")
             return self._download(url)
-        # 2) research
-        if any(w in lowered for w in ("research", "find out", "look into", "what is",
-                                      "what's", "explain", "why ", "how does", "summarize")):
-            return self._research(text)
-        # 3) code
-        if any(w in lowered for w in ("write a", "write an", "code", "script",
-                                      "program", "function that", "python file")):
-            return self._code(text)
-        # 4) model handles it directly
+        if subsystem == "research":
+            return self._research(argument or text)
+        if subsystem == "code":
+            return self._code(argument or text)
+        # "answer" and anything unrecognized: the model handles it directly.
         return self._model(text)
+
+    def _route(self, text: str) -> dict[str, Any]:
+        """Ask the brain which subsystem should handle this directive.
+
+        Returns ``{"subsystem": ..., "argument": ...}``. When the router
+        is unreachable or its answer is unusable, the safe fallback is
+        ``answer`` — the model just handles the text — except when there
+        is no model at all, which raises honestly: intent cannot be
+        classified without a brain.
+        """
+        if self.router is None:
+            raise RuntimeError(
+                "no model available to understand this directive "
+                "(dynamic routing needs the brain)")
+        from ..llm.base import Message, SamplingParams
+        from ..llm.brain import Brain
+
+        catalog = "\n".join(f"- {name}: {desc}"
+                            for name, desc in _DIRECTIVE_SUBSYSTEMS)
+        brain = _as_brain(self.router)
+        try:
+            response = brain.chat(
+                [Message(
+                    role="system",
+                    content=(
+                        "You route a user directive to exactly one subsystem.\n"
+                        f"{catalog}\n\n"
+                        "Reply with ONLY a JSON object: "
+                        '{"subsystem": "<name>", "argument": "<url for '
+                        "download | search query for research | task "
+                        'description for code | empty for answer>"}')),
+                 Message(role="user", content=text)],
+                SamplingParams(temperature=0.0, max_tokens=200),
+                task_kind="chat",
+            )
+        except Exception as exc:  # noqa: BLE001 - routing must not crash run()
+            _log.warning("directive routing model call failed: %s", exc)
+            return {"subsystem": "answer", "argument": ""}
+        data = _extract_json((getattr(response, "text", "") or ""))
+        if isinstance(data, dict):
+            name = str(data.get("subsystem") or "").strip().lower()
+            if name in {n for n, _ in _DIRECTIVE_SUBSYSTEMS}:
+                return {"subsystem": name,
+                        "argument": str(data.get("argument") or "")}
+            _log.debug("directive router named unknown subsystem %r", name)
+        elif getattr(response, "error", None):
+            _log.warning("directive routing failed: %s",
+                         getattr(response, "error", ""))
+        return {"subsystem": "answer", "argument": ""}
+
+    @staticmethod
+    def _first_url(text: str) -> str:
+        m = _URL.search(text or "")
+        return m.group(0) if m else ""
 
     def _download(self, url: str) -> str:
         outcome = self.context.tools.call("web_download", url=url)
@@ -170,9 +258,8 @@ class DirectivesAgent:
         if self.router is None:
             raise RuntimeError("no model available to execute this directive")
         from ..llm.base import Message
-        from ..llm.brain import Brain
 
-        brain = self.router if isinstance(self.router, Brain) else Brain(router=self.router)
+        brain = _as_brain(self.router)
         response = brain.chat(
             [Message(role="user", content=instruction)],
             task_kind="chat",

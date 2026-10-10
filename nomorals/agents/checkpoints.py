@@ -43,6 +43,14 @@ CHECKPOINT_KEEP = 10
 #: the checkpoint metadata) — checkpoints stay small and fast.
 MAX_UNTRACKED_BYTES = 5 * 1024 * 1024
 
+#: Schema version for generic agent-state snapshots (save_state/load_state).
+#: Bump when the payload shape changes; load_state refuses older versions
+#: loudly instead of mis-resuming.
+AGENT_STATE_VERSION = 1
+
+#: How many agent-state snapshots survive pruning per run id.
+AGENT_STATE_KEEP = 5
+
 
 def _json_safe(value: Any) -> Any:
     """Coerce ``value`` into JSON-serializable form (best-effort)."""
@@ -147,6 +155,9 @@ class CheckpointStore:
 
     def _index_path(self) -> Path:
         return self.base / "index.json"
+
+    def _state_dir(self) -> Path:
+        return self.base / "agent_state"
 
     # ── git ───────────────────────────────────────────────────────────
     @staticmethod
@@ -357,6 +368,117 @@ class CheckpointStore:
             _log.info("pruned %d old checkpoint(s), keeping %d",
                       removed, keep)
         return removed
+
+    # ── generic agent-state snapshots ───────────────────────────────
+    def save_state(self, run_id: str, payload: dict[str, Any], *,
+                   label: str = "") -> dict[str, Any]:
+        """Snapshot arbitrary agent-run state (task graph, swarm legs,
+        orchestrator runs). ``payload`` must be JSON-serializable
+        (best-effort coerced via :func:`_json_safe`).
+
+        Snapshots are keyed by ``run_id`` and versioned
+        (:data:`AGENT_STATE_VERSION`); only the newest
+        :data:`AGENT_STATE_KEEP` per run id are kept. Best-effort:
+        returns ``{"ok": False, "error": ...}`` instead of raising.
+        """
+        try:
+            run_id = str(run_id or "").strip() or "adhoc"
+            stamp = datetime.fromtimestamp(time.time(),
+                                           tz=timezone.utc).strftime("%Y%m%d_%H%M%S")
+            rand = os.urandom(2).hex()
+            state_id = f"state_{run_id}_{stamp}_{rand}"
+            record = {
+                "version": AGENT_STATE_VERSION,
+                "state_id": state_id,
+                "run_id": run_id,
+                "label": label,
+                "saved_at": time.time(),
+                "payload": _json_safe(payload),
+            }
+            dest = self._state_dir()
+            dest.mkdir(parents=True, exist_ok=True)
+            (dest / f"{state_id}.json").write_text(
+                json.dumps(record, ensure_ascii=False), encoding="utf-8")
+            self._prune_states(run_id)
+            return {"ok": True, "state_id": state_id, "run_id": run_id}
+        except Exception as exc:  # noqa: BLE001 - snapshots never break a run
+            _log.warning("agent-state snapshot failed: %s", exc)
+            return {"ok": False, "error": str(exc), "run_id": run_id}
+
+    def _prune_states(self, run_id: str,
+                      keep: int = AGENT_STATE_KEEP) -> int:
+        removed = 0
+        try:
+            files = sorted(self._state_dir().glob(f"state_{run_id}_*.json"),
+                           key=lambda p: p.name)
+            while len(files) > keep:
+                files.pop(0).unlink()
+                removed += 1
+        except OSError as exc:
+            _log.debug("agent-state prune failed: %s", exc)
+        return removed
+
+    def load_state(self, state_id: str) -> dict[str, Any] | None:
+        """Load a snapshot saved by :meth:`save_state`.
+
+        Returns the full record (``version`` / ``run_id`` / ``payload``)
+        or None when missing, corrupt, or from an older schema version —
+        a stale schema resumes nothing.
+        """
+        try:
+            raw = json.loads(
+                (self._state_dir() / f"{state_id}.json").read_text(
+                    encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            _log.debug("agent-state load %s: %s", state_id, exc)
+            return None
+        if not isinstance(raw, dict):
+            return None
+        if raw.get("version") != AGENT_STATE_VERSION:
+            _log.warning("agent-state %s: schema v%s != v%s — refusing",
+                         state_id, raw.get("version"), AGENT_STATE_VERSION)
+            return None
+        return raw
+
+    def list_states(self, run_id: str = "") -> list[dict[str, Any]]:
+        """Snapshot metadata (no payloads), newest first. Best-effort.
+
+        Ordered by ``saved_at`` — filenames carry a random suffix, so
+        name order is unreliable when several snapshots land in the same
+        second.
+        """
+        out: list[dict[str, Any]] = []
+        try:
+            pattern = (f"state_{run_id}_*.json" if run_id else "state_*.json")
+            for path in self._state_dir().glob(pattern):
+                try:
+                    raw = json.loads(path.read_text(encoding="utf-8"))
+                except (OSError, ValueError):
+                    continue
+                if not isinstance(raw, dict):
+                    continue
+                out.append({
+                    "state_id": raw.get("state_id", path.stem),
+                    "run_id": raw.get("run_id", ""),
+                    "label": raw.get("label", ""),
+                    "saved_at": raw.get("saved_at", 0),
+                    "version": raw.get("version", 0),
+                })
+        except OSError as exc:
+            _log.debug("agent-state list failed: %s", exc)
+        out.sort(key=lambda s: (s["saved_at"], s["state_id"]), reverse=True)
+        return out
+
+    def delete_state(self, state_id: str) -> bool:
+        """Remove one snapshot. Returns True when something was deleted."""
+        try:
+            path = self._state_dir() / f"{state_id}.json"
+            if path.exists():
+                path.unlink()
+                return True
+        except OSError as exc:
+            _log.debug("agent-state delete %s: %s", state_id, exc)
+        return False
 
     # ── rewind ────────────────────────────────────────────────────────
     def rewind_to(self, ckpt: Checkpoint) -> str:

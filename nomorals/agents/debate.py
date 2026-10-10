@@ -24,6 +24,7 @@ from .blackboard import Blackboard
 
 __all__ = [
     "Debate", "DebateResult", "Issue", "Critique", "WorkArtifact",
+    "PanelDebate", "PanelResult", "Position",
     "DEFAULT_RUBRIC", "arbitrate", "ArbitrationResult",
 ]
 
@@ -194,6 +195,52 @@ class Debate:
                             artifact, transcript,
                             f"max_rounds ({self.max_rounds}) hit without approval")
 
+    def settle(
+        self,
+        brief: str,
+        initial_artifact: WorkArtifact | None = None,
+        *,
+        judge_fn: Callable[
+            [list[dict[str, Any]], tuple[str, ...]], dict[str, Any]] | None = None,
+        autonomous: bool = True,
+    ) -> tuple[DebateResult, ArbitrationResult | None]:
+        """Run the debate, then settle it no matter how it ends.
+
+        ``approved`` comes back untouched. Anything else
+        (``unresolved``, ``needs_arbitration``, ``rejected``) goes to
+        :func:`arbitrate` between the final artifact and the critic's
+        position, so a hard decision never dies quietly — it gets a
+        named decision with a rationale. Returns ``(debate_result,
+        arbitration_or_None)``.
+        """
+        result = self.run(brief, initial_artifact)
+        if result.verdict == "approved":
+            return result, None
+        positions: list[dict[str, Any]] = []
+        if result.final_artifact is not None:
+            positions.append({
+                "label": "coder",
+                "decision": result.final_artifact.content,
+                "evidence": result.final_artifact.summary,
+                "score": result.score,
+            })
+        if result.transcript:
+            last_critic = result.transcript[-1].get("critic", {})
+            issues = [i.get("detail", "") for i in last_critic.get("issues", [])]
+            positions.append({
+                "label": "critic",
+                "decision": None,
+                "evidence": "; ".join(issues) or last_critic.get("notes", ""),
+                "score": last_critic.get("score", 0.0),
+            })
+        arbitration = arbitrate(
+            positions, self.rubric, judge_fn=judge_fn,
+            blackboard=self.blackboard, context=self.context,
+            autonomous=autonomous, topic=self.debate_id)
+        self._post("settlement", arbitration.to_dict(), author="debate",
+                   round_no=result.rounds)
+        return result, arbitration
+
     # ── helpers ──────────────────────────────────────────────────────────────
     def _post(self, key: str, value: Any, *, author: str, round_no: int) -> None:
         self.blackboard.post(
@@ -224,6 +271,198 @@ class ArbitrationResult:
     def to_dict(self) -> dict[str, Any]:
         return {"decision": self.decision, "rationale": self.rationale,
                 "level": self.level, "judge_notes": self.judge_notes}
+
+
+@dataclass
+class Position:
+    """One contender in a panel debate: a labelled artifact plus the
+    structured claim → evidence → risk framing the research says keeps
+    debates honest (and terminating)."""
+
+    label: str
+    artifact: WorkArtifact
+    claim: str = ""
+    evidence: str = ""
+    risk: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"label": self.label, "claim": self.claim,
+                "evidence": self.evidence, "risk": self.risk,
+                "artifact": self.artifact.to_dict()}
+
+
+@dataclass
+class PanelResult:
+    """Outcome of a :class:`PanelDebate`."""
+
+    panel_id: str
+    winner: Position | None
+    scores: dict[str, float]  # label -> mean critic score
+    verdict: str  # decided | tie_arbitrated | no_contenders
+    rounds: int
+    transcript: list[dict[str, Any]] = field(default_factory=list)
+    arbitration: ArbitrationResult | None = None
+    reason: str = ""
+
+    @property
+    def decided(self) -> bool:
+        return self.verdict in {"decided", "tie_arbitrated"} and self.winner is not None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "panel_id": self.panel_id, "verdict": self.verdict,
+            "rounds": self.rounds, "reason": self.reason,
+            "scores": self.scores,
+            "winner": self.winner.to_dict() if self.winner else None,
+            "arbitration": (self.arbitration.to_dict()
+                            if self.arbitration else None),
+            "transcript": self.transcript,
+        }
+
+
+class PanelDebate:
+    """N-position debate: every position is scored by the critic(s), the
+    winner is picked by confidence-weighted vote, and a tie (or a
+    near-tie inside ``tie_margin``) escalates to :func:`arbitrate`
+    instead of pretending the vote was decisive.
+
+    Positions are injected (``position_fns``: label → callable returning a
+    :class:`Position`), so panels are fully testable without a model; in
+    production each position fn is a role-prompted model call.
+    """
+
+    def __init__(
+        self,
+        *,
+        position_fns: dict[str, Callable[[], Position]],
+        critic_fn: Callable[[WorkArtifact, tuple[str, ...]], Critique],
+        blackboard: Blackboard | None = None,
+        rubric: tuple[str, ...] = DEFAULT_RUBRIC,
+        max_rounds: int = 2,
+        tie_margin: float = 5.0,
+        judge_fn: Callable[
+            [list[dict[str, Any]], tuple[str, ...]], dict[str, Any]] | None = None,
+        context: Any = None,
+    ) -> None:
+        if not position_fns:
+            raise ValueError("PanelDebate needs at least one position")
+        self.position_fns = dict(position_fns)
+        self.critic_fn = critic_fn
+        self.blackboard = blackboard if blackboard is not None else Blackboard()
+        self.rubric = rubric
+        self.max_rounds = max(1, int(max_rounds))
+        self.tie_margin = max(0.0, float(tie_margin))
+        self.judge_fn = judge_fn
+        self.context = context
+        self.panel_id = f"panel-{new_id()[-8:]}"
+
+    # ── main loop ────────────────────────────────────────────────────
+    def run(self, brief: str) -> PanelResult:
+        transcript: list[dict[str, Any]] = []
+        positions: list[Position] = []
+        for label, make in self.position_fns.items():
+            try:
+                pos = make()
+            except Exception as exc:  # noqa: BLE001 - a dead position is a record
+                _log.warning("panel position %r failed to produce: %s", label, exc)
+                continue
+            if not isinstance(pos, Position):
+                _log.warning("panel position %r returned %s, not a Position",
+                             label, type(pos).__name__)
+                continue
+            pos.label = label
+            positions.append(pos)
+            self._post(f"position.{label}", pos.to_dict(), author=label)
+
+        if not positions:
+            return self._finish(None, {}, "no_contenders", 0, transcript,
+                                "every position failed to produce")
+
+        totals: dict[str, float] = {p.label: 0.0 for p in positions}
+        rounds = 0
+        for round_no in range(1, self.max_rounds + 1):
+            rounds = round_no
+            round_scores: dict[str, float] = {}
+            for pos in positions:
+                try:
+                    critique = self.critic_fn(pos.artifact, self.rubric)
+                    score = float(critique.score or 0.0)
+                except Exception as exc:  # noqa: BLE001 - a dead critic abstains
+                    _log.warning("panel critic failed on %r: %s", pos.label, exc)
+                    score = 0.0
+                    critique = Critique(verdict="request_changes", score=0.0,
+                                        notes=f"critic failed: {exc}")
+                totals[pos.label] += score
+                round_scores[pos.label] = round(score, 2)
+                self._post(f"round.{round_no}.critic.{pos.label}",
+                           {"score": score, **critique.to_dict()},
+                           author="critic")
+            transcript.append({"round": round_no, "scores": round_scores})
+            if self.context is not None:
+                try:
+                    self.context.emit("swarm.panel_round", panel_id=self.panel_id,
+                                      round=round_no, scores=round_scores)
+                except Exception:  # noqa: BLE001 - telemetry never breaks debate
+                    pass
+
+        mean = {label: totals[label] / rounds for label in totals}
+        ranked = sorted(mean.items(), key=lambda kv: (-kv[1], kv[0]))
+        best_label, best_score = ranked[0]
+        # A tie — or a near-tie inside tie_margin — is not a decision.
+        # The judge must decide (research: the mitigation that actually
+        # stops debate non-termination).
+        contenders = [label for label, score in ranked
+                      if best_score - score <= self.tie_margin]
+        winner = next(p for p in positions if p.label == best_label)
+        arbitration: ArbitrationResult | None = None
+        if len(contenders) > 1:
+            arbitration = arbitrate(
+                [{"label": label,
+                  "decision": next(p for p in positions if p.label == label).artifact.content,
+                  "evidence": next(p for p in positions if p.label == label).evidence,
+                  "score": round(mean[label], 2)}
+                 for label in contenders],
+                self.rubric,
+                judge_fn=self.judge_fn,
+                blackboard=self.blackboard,
+                context=self.context,
+                topic=self.panel_id,
+            )
+            decided_label = None
+            if isinstance(arbitration.decision, dict):
+                decided_label = arbitration.decision.get("label")
+            if decided_label in mean:
+                winner = next(p for p in positions if p.label == decided_label)
+            return self._finish(
+                winner, mean, "tie_arbitrated", rounds, transcript,
+                f"scores within {self.tie_margin} points "
+                f"({', '.join(f'{l}={mean[l]:.1f}' for l in contenders)}); "
+                f"judge decided: {winner.label}",
+                arbitration=arbitration)
+        return self._finish(winner, mean, "decided", rounds, transcript,
+                            f"{winner.label} won outright "
+                            f"({best_score:.1f} mean critic score)")
+
+    # ── helpers ──────────────────────────────────────────────────────
+    def _post(self, key: str, value: Any, *, author: str) -> None:
+        self.blackboard.post(
+            f"{self.panel_id}.{key}", value, author=author,
+            topic=self.panel_id,
+            metadata={"panel_id": self.panel_id})
+
+    def _finish(self, winner: Position | None, scores: dict[str, float],
+                verdict: str, rounds: int, transcript: list[dict[str, Any]],
+                reason: str,
+                arbitration: ArbitrationResult | None = None) -> PanelResult:
+        result = PanelResult(
+            panel_id=self.panel_id, winner=winner,
+            scores={k: round(v, 2) for k, v in scores.items()},
+            verdict=verdict, rounds=rounds, transcript=transcript,
+            arbitration=arbitration, reason=reason)
+        self._post("result", result.to_dict(), author="panel")
+        _log.info("panel debate %s finished: %s (%s)",
+                  self.panel_id, verdict, reason)
+        return result
 
 
 def arbitrate(

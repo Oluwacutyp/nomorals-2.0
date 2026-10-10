@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
@@ -22,7 +23,7 @@ from ..core.logging_setup import get_logger
 from .base import Agent, AgentResult, AgentState
 from ..core.tasks import Task, TaskGraph, TaskState
 
-__all__ = ["RestartPolicy", "Supervisor", "SupervisorEvent"]
+__all__ = ["RestartPolicy", "Supervisor", "SupervisorEvent", "TeamResult"]
 
 _log = get_logger(__name__)
 
@@ -57,6 +58,40 @@ class SupervisorEvent:
 
 
 @dataclass
+class TeamResult:
+    """Outcome of :meth:`Supervisor.run_all`: one supervised agent per entry.
+
+    ``results`` maps agent name → the agent's final :class:`AgentResult`
+    (a failed-then-given-up agent maps to its last failed result — failures
+    are records, never raises).
+    """
+
+    results: dict[str, AgentResult]
+    seconds: float = 0.0
+
+    @property
+    def ok(self) -> bool:
+        return bool(self.results) and all(r.ok for r in self.results.values())
+
+    @property
+    def succeeded(self) -> int:
+        return sum(1 for r in self.results.values() if r.ok)
+
+    @property
+    def failed(self) -> int:
+        return sum(1 for r in self.results.values() if not r.ok)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "ok": self.ok,
+            "succeeded": self.succeeded,
+            "failed": self.failed,
+            "seconds": round(self.seconds, 3),
+            "results": {name: r.to_dict() for name, r in self.results.items()},
+        }
+
+
+@dataclass
 class _Record:
     attempts: int = 0
     failures: int = 0
@@ -85,6 +120,11 @@ class Supervisor:
         self._lock = threading.RLock()
         self.events: list[SupervisorEvent] = []
         self.stats = {"watched": 0, "restarts": 0, "escalations": 0, "give_ups": 0, "budget_stops": 0}
+        # Optional shared blackboard: when attached, every supervisor event
+        # is also posted there so other agents can observe and react to a
+        # teammate's restarts / escalations / give-ups.
+        self._board: Any = None
+        self._board_topic: str = "supervisor"
 
     # ── bookkeeping ──────────────────────────────────────────────────────────
     def _record(self, subject: str) -> _Record:
@@ -100,15 +140,42 @@ class Supervisor:
                 record.window_start = self._clock()
             return record
 
+    def attach_blackboard(self, board: Any, *, topic: str = "supervisor") -> None:
+        """Post every supervisor event to a shared blackboard as well.
+
+        Other agents can ``watch``/``link`` the topic to react — e.g. a
+        coordinator that re-plans when a worker is given up on. Posting
+        never breaks supervision: board failures are swallowed.
+        """
+        with self._lock:
+            self._board = board
+            self._board_topic = topic or "supervisor"
+
+    def detach_blackboard(self) -> None:
+        with self._lock:
+            self._board = None
+
     def _emit(self, event: SupervisorEvent) -> None:
         with self._lock:
             self.events.append(event)
+            board, topic = self._board, self._board_topic
         _log.warning("supervisor: %s %s — %s", event.kind, event.subject, event.detail)
         if self.on_event is not None:
             try:
                 self.on_event(event)
             except Exception as exc:  # noqa: BLE001 - callback must not kill the supervisor
                 _log.debug("supervisor on_event raised: %s", exc)
+        if board is not None:
+            try:
+                board.post(
+                    f"supervisor.{event.kind}.{event.subject}",
+                    event.to_dict(),
+                    author="supervisor",
+                    topic=topic,
+                    metadata={"kind": event.kind, "subject": event.subject},
+                )
+            except Exception:  # noqa: BLE001 - telemetry never breaks supervision
+                pass
 
     # ── budget ───────────────────────────────────────────────────────────────
     def check_budget(self) -> None:
@@ -191,6 +258,61 @@ class Supervisor:
             else:
                 current.state = AgentState.IDLE
                 current.cancel_event.clear()
+
+    # ── teams ────────────────────────────────────────────────────────────────
+    def run_all(
+        self,
+        agents: list[Agent] | dict[str, Agent],
+        task_input: Any = None,
+        *,
+        factories: dict[str, Callable[[], Agent]] | None = None,
+        max_workers: int | None = None,
+    ) -> TeamResult:
+        """Run a team of agents in parallel, each under the restart policy.
+
+        Every agent is supervised exactly like :meth:`run_agent` (restart
+        within policy, escalate, give up) — the difference is they run
+        concurrently on a thread pool instead of one at a time. A dead
+        agent becomes a failed :class:`AgentResult` in the map; it never
+        kills its teammates. ``agents`` may be a list (names come from
+        ``agent.name``) or a name → agent dict; ``factories`` optionally
+        gives per-name fresh-instance factories for restarts.
+        """
+        started = time.perf_counter()
+        if isinstance(agents, dict):
+            items = list(agents.items())
+        else:
+            items = [(a.name, a) for a in agents]
+        factories = factories or {}
+        results: dict[str, AgentResult] = {}
+
+        def _one(name: str, agent: Agent) -> tuple[str, AgentResult]:
+            try:
+                result = self.run_agent(
+                    agent, task_input,
+                    factory=factories.get(name),
+                )
+            except Exception as exc:  # noqa: BLE001 - a dead agent is a record
+                _log.exception("supervised team agent %r crashed", name)
+                result = AgentResult(
+                    agent_id=name, role=getattr(agent, "role", "generic"),
+                    ok=False, error=f"{type(exc).__name__}: {exc}")
+            return name, result
+
+        workers = max_workers or max(1, len(items))
+        with ThreadPoolExecutor(max_workers=workers,
+                               thread_name_prefix="sv-team") as pool:
+            futures = {pool.submit(_one, name, agent): name
+                       for name, agent in items}
+            for future in as_completed(futures):
+                name, result = future.result()
+                results[name] = result
+
+        team = TeamResult(results=results,
+                          seconds=time.perf_counter() - started)
+        _log.info("supervised team run: %d/%d agents ok (%.1fs)",
+                  team.succeeded, len(results), team.seconds)
+        return team
 
     # ── tasks ────────────────────────────────────────────────────────────────
     def retry_task(self, graph: TaskGraph, task: Task, run: Callable[[Task], Any]) -> Task:

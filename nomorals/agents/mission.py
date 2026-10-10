@@ -15,9 +15,10 @@ Modular and callable by the main AI and sub-agents via the ``mission`` tool.
 from __future__ import annotations
 
 import time
-from typing import Any
+from typing import Any, Callable
 
 from ..core.logging_setup import get_logger
+from ..core.tasks import Task
 from .goals import Goal, GoalSystem
 
 _log = get_logger(__name__)
@@ -180,6 +181,123 @@ class MissionControl:
         """Just the pick: what to work on right now (or None)."""
         g = self.goals.next_goal()
         return {"ok": True, "next": g.to_dict() if g else None}
+
+    # ── mission glue: portfolio → execution ──────────────────────────────
+    def launch(
+        self,
+        goal_id: str,
+        *,
+        orchestrator: Any = None,
+        handlers: dict[str, Callable[[Task], Any]] | None = None,
+        default_handler: Callable[[Task], Any] | None = None,
+        budget: Any = None,
+        fail_fast: bool = False,
+        reflect: bool = True,
+        checkpoint_store: Any = None,
+        run_id: str = "",
+    ) -> dict[str, Any]:
+        """Execute a goal's pending steps and write the outcomes back.
+
+        This is the glue the portfolio view was missing: ``plan()`` knows
+        what is ready — ``launch()`` actually runs it. One plan step per
+        pending goal step (sequential, in position order — goal steps are
+        an ordered list), executed through the :class:`MasterOrchestrator`
+        with mid-flight checkpoints, then each goal step is marked done
+        (or blocked, with the error) from its task's outcome. When no
+        pending steps remain the goal is completed.
+
+        ``handlers`` maps plan-step name (``gstep-0`` …) or role to a
+        callable; without handlers the orchestrator's default role
+        routing applies. Returns a summary dict — never raises for
+        execution-level issues (they land in the per-step outcomes).
+        """
+        from .orchestrator import MasterOrchestrator, Plan, PlanStep
+
+        gs = self.goals
+        goal = gs.get(goal_id)
+        if goal is None:
+            return {"ok": False, "error": f"no goal {goal_id!r}"}
+        if goal.status != "active":
+            return {"ok": False,
+                    "error": f"goal {goal_id!r} is {goal.status}, not active"}
+        goal.steps = gs._steps(goal.id)
+        pending = [s for s in goal.steps
+                   if s.status in {"pending", "blocked"}]
+        if not pending:
+            return {"ok": True, "goal_id": goal.id, "nothing_to_do": True,
+                    "steps": []}
+        if not gs.dependencies_met(goal):
+            unmet = [d for d in goal.depends_on
+                     if (dep := gs.get(d)) is None or dep.status != "done"]
+            return {"ok": False, "error": "goal dependencies unmet",
+                    "waiting_on": unmet}
+
+        orch = orchestrator or MasterOrchestrator(self.context)
+        plan_steps: list[PlanStep] = []
+        for i, step in enumerate(pending):
+            name = f"gstep-{i}"
+            plan_steps.append(PlanStep(
+                name=name,
+                goal=f"{goal.title}: {step.description}",
+                role="execution",
+                depends_on=[f"gstep-{i - 1}"] if i else [],
+                payload={"goal_step_id": step.id,
+                         "goal_step_position": step.position},
+            ))
+        plan = Plan(goal=f"{goal.title} (goal {goal.id[:8]})",
+                    steps=plan_steps,
+                    rationale="mission launch: one plan step per pending "
+                              "goal step, in order")
+
+        try:
+            result = orch.run(
+                plan.goal, plan=plan, handlers=handlers,
+                default_handler=default_handler, budget=budget,
+                fail_fast=fail_fast, reflect=reflect,
+                checkpoint_store=checkpoint_store, run_id=run_id,
+            )
+        except Exception as exc:  # noqa: BLE001 - execution issues are outcomes
+            _log.exception("mission launch %s crashed", goal.id)
+            return {"ok": False, "error": f"orchestration crashed: {exc}",
+                    "goal_id": goal.id}
+
+        # Write outcomes back onto the goal steps.
+        outcomes: list[dict[str, Any]] = []
+        results = result.report.results or {}
+        failures = result.report.failures or {}
+        for i, step in enumerate(pending):
+            name = f"gstep-{i}"
+            if name in results:
+                gs._set_step(step.id, status="done",
+                             result=str(results[name])[:2000])
+                outcomes.append({"id": step.id, "status": "done"})
+            elif name in failures:
+                gs._set_step(step.id, status="blocked",
+                             result=str(failures[name])[:2000])
+                outcomes.append({"id": step.id, "status": "blocked",
+                                 "error": str(failures[name])[:300]})
+            else:
+                # Skipped / cancelled / never ran: leave the step alone
+                # so a later launch can pick it up.
+                outcomes.append({"id": step.id, "status": step.status,
+                                 "note": "not run"})
+
+        remaining = [s for s in gs._steps(goal.id)
+                     if s.status in {"pending", "blocked", "in_progress"}]
+        completed_goal = False
+        if not remaining:
+            gs.complete(goal.id)
+            completed_goal = True
+        return {
+            "ok": True,
+            "goal_id": goal.id,
+            "run_ok": result.ok,
+            "score": result.score,
+            "seconds": round(result.seconds, 2),
+            "steps": outcomes,
+            "goal_completed": completed_goal,
+            "answer": result.answer[:2000],
+        }
 
     # ── portfolio risk scoring (wave 64) ───────────────────────────────────
     def _unmet_depth(self, g: Goal, cache: dict[str, int],

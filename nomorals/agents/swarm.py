@@ -96,7 +96,17 @@ class SwarmResult:
 
 
 class SwarmAgent:
-    """Plan → parallel devon legs → fuse."""
+    """Plan → parallel devon legs → fuse.
+
+    When a ``blackboard`` is shared, legs stop being isolated: each leg
+    posts its digest to the board as it finishes, and legs that start
+    later read the digests already posted — cross-leg awareness without
+    point-to-point wiring. Without a board the legs run isolated, exactly
+    as before.
+    """
+
+    #: Schema version for :meth:`save_state` / :meth:`resume` payloads.
+    STATE_VERSION = 1
 
     def __init__(
         self,
@@ -105,11 +115,14 @@ class SwarmAgent:
         brain: Any = None,
         gateway: Any = None,
         wall_seconds: float = 420.0,
+        blackboard: Any = None,
     ) -> None:
         self.context = context
         self.brain = brain
         self.gateway = gateway
         self.wall_seconds = float(wall_seconds)
+        self.blackboard = blackboard
+        self._last_result: SwarmResult | None = None
 
     # ── decomposition ────────────────────────────────────────────────────────
     def _model_available(self) -> bool:
@@ -173,16 +186,76 @@ class SwarmAgent:
                 for pers in _rotate_perspectives(goal, workers)]
 
     # ── workers ──────────────────────────────────────────────────────────────
-    def _run_leg(self, subtask: str, deadline: float) -> dict[str, Any]:
+    def _prior_digests(self, run_id: str) -> str:
+        """Digests already posted by finished legs (cross-leg awareness).
+
+        Best-effort: whatever legs have posted so far. Each digest is
+        truncated so a large swarm can't blow the next leg's context.
+        """
+        board = self.blackboard
+        if board is None:
+            return ""
+        try:
+            entries = board.topic(run_id) if hasattr(board, "topic") else {}
+        except Exception:  # noqa: BLE001 - awareness is a bonus
+            return ""
+        legs: list[tuple[int, str, str]] = []
+        for key, value in entries.items():
+            if not key.startswith(f"swarm.{run_id}.leg."):
+                continue
+            try:
+                index = int(key.rsplit(".leg.", 1)[1])
+            except ValueError:
+                continue
+            digest = value.get("digest", "") if isinstance(value, dict) else str(value)
+            subtask = value.get("subtask", "") if isinstance(value, dict) else ""
+            legs.append((index, subtask, digest))
+        if not legs:
+            return ""
+        parts = []
+        for index, subtask, digest in sorted(legs):
+            snippet = str(digest)[:600].strip()
+            if snippet:
+                parts.append(f"[leg {index} — {subtask}]\n{snippet}")
+        return "\n\n".join(parts)
+
+    def _post_leg(self, run_id: str, index: int, leg: dict[str, Any]) -> None:
+        board = self.blackboard
+        if board is None:
+            return
+        try:
+            board.post(
+                f"swarm.{run_id}.leg.{index}",
+                {"subtask": leg.get("subtask", ""), "ok": leg.get("ok", False),
+                 "digest": str(leg.get("digest", ""))[:4000],
+                 "seconds": leg.get("seconds", 0)},
+                author=f"swarm-leg-{index}",
+                topic=run_id,
+                metadata={"run_id": run_id, "index": index,
+                          "ok": bool(leg.get("ok"))},
+            )
+        except Exception:  # noqa: BLE001 - posting never breaks a leg
+            _log.debug("swarm leg post failed", exc_info=True)
+
+    def _run_leg(self, subtask: str, deadline: float, *,
+                 index: int = 0, run_id: str = "") -> dict[str, Any]:
         started = time.time()
         remaining = max(20.0, deadline - started)
+        brief = subtask
+        if self.blackboard is not None and run_id:
+            prior = self._prior_digests(run_id)
+            if prior:
+                brief = (
+                    f"{subtask}\n\nFindings already reported by fellow "
+                    f"investigators — do not repeat them, build on them:\n{prior}"
+                )
         try:
             # step_timeout doubles as the per-leg wall budget (× max_steps
             # inside devon), so scale it to the swarm's remaining time.
             agent = DevonAgent(self.context, brain=self.brain, gateway=self.gateway,
                                max_steps=8, step_timeout=remaining / 8.0)
-            result: DevonResult = agent.run(subtask, chat_key="")
-            return {
+            result: DevonResult = agent.run(brief, chat_key="")
+            leg = {
                 "subtask": subtask,
                 "ok": True,
                 "digest": result.digest,
@@ -192,7 +265,7 @@ class SwarmAgent:
             }
         except Exception as exc:  # noqa: BLE001 - a dead leg is a result
             _log.exception("swarm leg failed: %r", subtask)
-            return {
+            leg = {
                 "subtask": subtask,
                 "ok": False,
                 "digest": f"leg failed: {exc}",
@@ -200,6 +273,8 @@ class SwarmAgent:
                 "steps": 0,
                 "seconds": round(time.time() - started, 1),
             }
+        self._post_leg(run_id, index, leg)
+        return leg
 
     # ── synthesis ────────────────────────────────────────────────────────────
     def _synthesize(self, goal: str, legs: list[dict[str, Any]]) -> tuple[str, bool]:
@@ -245,7 +320,9 @@ class SwarmAgent:
         result = SwarmResult(goal=goal, subtasks=subtasks)
 
         pool = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="swarm")
-        futures = [pool.submit(self._run_leg, sub, deadline) for sub in subtasks]
+        futures = [pool.submit(self._run_leg, sub, deadline,
+                               index=i, run_id=result.run_id)
+                   for i, sub in enumerate(subtasks)]
         for i, future in enumerate(futures):
             try:
                 leg = future.result(timeout=max(10.0, deadline - time.time()))
@@ -255,6 +332,7 @@ class SwarmAgent:
                     "digest": f"leg timed out: {exc}", "planned_by": "timeout",
                     "steps": 0, "seconds": 0,
                 }
+                self._post_leg(result.run_id, i, leg)
             result.legs.append(leg)
         # Don't wait on late legs past the swarm's own deadline: they are
         # bounded by devon's internal step budgets and finish on their own.
@@ -262,9 +340,96 @@ class SwarmAgent:
 
         result.synthesis, model_ok = self._synthesize(goal, result.legs)
         result.seconds = time.time() - started
+        self._last_result = result
         _log.info(
             "swarm %s done: %d/%d legs ok, %.0fs (%s planner%s)",
             result.run_id, sum(1 for l in result.legs if l["ok"]), len(result.legs),
             result.seconds, planner, ", model-synthesized" if model_ok else "",
         )
+        return result
+
+    # ── checkpoint / resume ────────────────────────────────────────────
+    def save_state(self, path: str) -> dict[str, Any]:
+        """Persist the last run's goal, subtasks, and legs as JSON.
+
+        A crashed swarm can be continued with :meth:`resume` — finished
+        legs are not re-run. Best-effort: returns ``{"ok": False,
+        "error": ...}`` instead of raising.
+        """
+        result = self._last_result
+        if result is None:
+            return {"ok": False, "error": "no swarm run to save yet"}
+        payload = {
+            "version": self.STATE_VERSION,
+            "goal": result.goal,
+            "subtasks": result.subtasks,
+            "legs": result.legs,
+            "run_id": result.run_id,
+            "saved_at": time.time(),
+        }
+        try:
+            from pathlib import Path as _Path
+            target = _Path(path)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(json.dumps(payload, ensure_ascii=False),
+                              encoding="utf-8")
+            return {"ok": True, "path": str(target),
+                    "legs": len(result.legs)}
+        except OSError as exc:
+            return {"ok": False, "error": str(exc), "path": str(path)}
+
+    def resume(self, path: str, *, workers: int = 3) -> SwarmResult:
+        """Continue an interrupted swarm from a :meth:`save_state` file.
+
+        Subtasks with a successful recorded leg keep their digest; every
+        other subtask is re-run in parallel. Raises ``ValueError`` on a
+        corrupt/foreign state file, ``FileNotFoundError`` when missing.
+        """
+        from pathlib import Path as _Path
+        raw = json.loads(_Path(path).read_text(encoding="utf-8"))
+        if not isinstance(raw, dict) or raw.get("version") != self.STATE_VERSION:
+            raise ValueError(f"not a swarm state file: {path}")
+        goal = str(raw.get("goal") or "")
+        subtasks = [str(s) for s in (raw.get("subtasks") or [])]
+        if not goal or not subtasks:
+            raise ValueError(f"swarm state file has no goal/subtasks: {path}")
+        kept = {leg.get("subtask"): leg for leg in (raw.get("legs") or [])
+                if isinstance(leg, dict) and leg.get("ok")}
+
+        started = time.time()
+        result = SwarmResult(goal=goal, subtasks=subtasks)
+        # Keep the original run id so the blackboard topic stays continuous.
+        if raw.get("run_id"):
+            result.run_id = str(raw["run_id"])
+        pending = [(i, s) for i, s in enumerate(subtasks) if s not in kept]
+        deadline = started + self.wall_seconds
+        fresh: dict[int, dict[str, Any]] = {}
+        if pending:
+            pool = ThreadPoolExecutor(max_workers=max(1, min(int(workers), 5)),
+                                      thread_name_prefix="swarm-resume")
+            futures = {pool.submit(self._run_leg, sub, deadline,
+                                   index=i, run_id=result.run_id): i
+                       for i, sub in pending}
+            for future, i in futures.items():
+                try:
+                    fresh[i] = future.result(
+                        timeout=max(10.0, deadline - time.time()))
+                except Exception as exc:  # noqa: BLE001 - a late leg is a result
+                    leg = {"subtask": subtasks[i], "ok": False,
+                           "digest": f"leg timed out: {exc}",
+                           "planned_by": "timeout", "steps": 0, "seconds": 0}
+                    self._post_leg(result.run_id, i, leg)
+                    fresh[i] = leg
+            pool.shutdown(wait=False, cancel_futures=True)
+
+        result.legs = [kept.get(s, fresh.get(i, {
+            "subtask": s, "ok": False, "digest": "leg missing from state",
+            "planned_by": "resume", "steps": 0, "seconds": 0}))
+            for i, s in enumerate(subtasks)]
+        result.synthesis, _ = self._synthesize(goal, result.legs)
+        result.seconds = time.time() - started
+        self._last_result = result
+        _log.info("swarm %s resumed: %d kept, %d re-run, %d/%d legs ok",
+                  result.run_id, len(kept), len(pending),
+                  sum(1 for l in result.legs if l["ok"]), len(result.legs))
         return result
