@@ -139,10 +139,20 @@ EASINGS: dict[str, Callable[[float], float]] = {
 
 
 def ease(name: str, t: float) -> float:
-    """Apply easing curve ``name`` to ``t`` in [0, 1]."""
-    fn = EASINGS.get((name or "smooth").lower(), _smooth)
-    t = max(0.0, min(1.0, t))
-    return fn(t)
+    """Apply easing curve ``name`` to ``t`` in [0, 1].
+
+    Consolidation (Phase 8A.8): routes through the directed easing
+    library (motion_score.EASE_FUNCS) — the single source of truth —
+    with the local table as fallback if directed is unavailable.
+    """
+    key = (name or "smooth").lower()
+    try:
+        from ..directed.motion_score import ease_value
+        return ease_value(key, t)
+    except Exception:  # noqa: BLE001 - stay importable no matter what
+        fn = EASINGS.get(key, _smooth)
+        t = max(0.0, min(1.0, t))
+        return fn(t)
 
 
 # ---------------------------------------------------------------------------

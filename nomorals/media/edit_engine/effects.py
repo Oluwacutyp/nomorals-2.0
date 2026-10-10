@@ -148,11 +148,25 @@ _GRADES: dict[str, str] = {
 
 
 def _fx_color_grade(params: dict[str, Any], ctx: dict[str, Any]) -> str:
-    grade = str(params.get("grade", "warm")).strip().lower()
-    chain = _GRADES.get(grade)
+    return color_grade_chain(str(params.get("grade", "warm")))
+
+
+def list_color_grades() -> list[str]:
+    """Canonical color-grade names (the single source of truth for the
+    shared grade definitions — motion_studio.grading delegates here)."""
+    return sorted(_GRADES)
+
+
+def color_grade_chain(name: str) -> str:
+    """ffmpeg filter chain for a canonical color grade.
+
+    Raises MediaEditError on unknown names.
+    """
+    key = str(name or "").strip().lower()
+    chain = _GRADES.get(key)
     if chain is None:
         raise MediaEditError(
-            f"unknown color grade {grade!r}; use: {sorted(_GRADES)}")
+            f"unknown color grade {name!r}; use: {sorted(_GRADES)}")
     return chain
 
 

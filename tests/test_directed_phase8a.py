@@ -431,3 +431,38 @@ def test_generate_track_with_audio_snaps_to_beats():
     assert 115 < meta["bpm"] < 125
     assert any("beat" in n for n in meta["notes"])
     assert track.frames.shape[0] == 40
+
+
+# ── consolidation (Phase 8A.8) ──────────────────────────────────────
+def test_grading_dedupes_to_edit_engine():
+    from nomorals.media.motion_studio import grading as G
+    from nomorals.media.edit_engine.effects import (
+        color_grade_chain, list_color_grades)
+    assert set(list_color_grades()) == {
+        "cool", "faded", "noir", "teal_orange", "vibrant", "warm"}
+    for shared in ("warm", "noir", "faded", "vibrant"):
+        assert G.GRADE_PRESETS[shared]["filter"] == color_grade_chain(shared)
+    # studio-only looks keep their own chains
+    assert G.GRADE_PRESETS["cinematic"]["filter"] != ""
+    assert G.GRADE_PRESETS["none"]["filter"] == ""
+    # new arrivals from the canonical set
+    assert "cool" in G.GRADE_PRESETS and "teal_orange" in G.GRADE_PRESETS
+
+
+def test_core_ease_routes_through_directed():
+    from nomorals.media.motion_studio._core import ease as core_ease
+    for n in ("linear", "smooth", "ease_in", "ease_out", "ease_in_out",
+              "sine", "spring", "anticipation", "overshoot",
+              "cubic_bezier"):
+        for t in (0.0, 0.25, 0.5, 0.75, 1.0):
+            assert abs(core_ease(n, t) - ms.ease_value(n, t)) < 1e-12, (n, t)
+    # unknown names still fall back to smooth, never raise
+    assert core_ease("nope", 0.5) == core_ease("smooth", 0.5)
+
+
+def test_multilayer_drift_uses_shared_depth():
+    import inspect as _inspect
+    from nomorals.media.motion_studio import kenburns as KB
+    src = _inspect.getsource(KB.multilayer_drift)
+    assert "estimate_depth" in src
+    assert "directed.animator" in src

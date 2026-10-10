@@ -217,7 +217,11 @@ def multilayer_drift(image: str | os.PathLike,
     """Two-layer parallax drift: blurred foreground copy moves against the bg.
 
     ``depth`` 0..1 controls how far the foreground drifts opposite the bg.
+    The foreground mask comes from the shared depth estimator
+    (:func:`nomorals.media.directed.animator.estimate_depth`) — near
+    regions drift as foreground — instead of a hand-rolled ellipse.
     """
+    from ..directed.animator import estimate_depth
     defaults = profile_defaults()
     size = size or defaults["size"]
     fps = fps or float(defaults["fps"])
@@ -227,6 +231,12 @@ def multilayer_drift(image: str | os.PathLike,
     fg = img.filter(ImageFilter.GaussianBlur(6)).copy()
     fg_arr_base = np.asarray(fg).astype(np.float32)
     depth = max(0.0, min(1.0, depth))
+    # foreground mask from the shared pseudo-depth estimator (computed
+    # once — the still doesn't change)
+    _dm = estimate_depth(img)
+    _dm_img = Image.fromarray((_dm * 255).astype(np.uint8)).resize(
+        size, Image.BILINEAR)
+    dm = np.asarray(_dm_img).astype(np.float32) / 255.0
 
     def _frame(i: int, t: float) -> np.ndarray:
         k = _ease("smooth", i / max(n - 1, 1))
@@ -238,11 +248,8 @@ def multilayer_drift(image: str | os.PathLike,
         fh, fw = fg_arr.shape[:2]
         y0, x0 = (fh - h) // 2, (fw - w) // 2
         fg_crop = fg_arr[y0:y0 + h, x0:x0 + w]
-        # soft elliptical mask: foreground shows at edges, bg stays central
-        ys, xs = np.mgrid[0:h, 0:w].astype(np.float32)
-        dx = (xs / w - 0.5) * 2.0
-        dy = (ys / h - 0.5) * 2.0
-        mask = np.clip(((dx ** 2 + dy ** 2) - 0.35) * 1.6, 0, 1)[..., None]
+        # near regions (high depth) show the drifting foreground
+        mask = np.clip((dm - 0.45) * 2.2, 0, 1)[..., None]
         comp = bg.astype(np.float32) * (1 - mask) + fg_crop * mask
         frame = Image.fromarray(np.clip(comp, 0, 255).astype(np.uint8))
         frame = add_grain(frame, amount=5.0, rng=rng)

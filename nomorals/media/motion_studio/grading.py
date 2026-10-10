@@ -4,6 +4,13 @@
 look, done with curves/colorbalance/eq so no LUT files are needed).
 ``FORMAT_SIZES`` maps aspect names to profile-aware canvases.
 
+Consolidation (Phase 8A.8): the shared grade names (warm, cool,
+teal_orange, noir, faded, vibrant) are CANONICAL in
+:mod:`nomorals.media.edit_engine.effects` — this module delegates to
+:func:`color_grade_chain` for those instead of carrying a second copy
+of each chain. Studio-only presets (cinematic, vintage, phonk, cold)
+stay here.
+
     from nomorals.media.motion_studio.grading import grade, export
     grade("clip.mp4", "graded.mp4", preset="cinematic")
     export("graded.mp4", "short.mp4", format="9:16")
@@ -30,7 +37,16 @@ __all__ = [
     "apply_grades", "export",
 ]
 
-#: name → {"label", "filter"} — every filter is a real ffmpeg -vf chain
+#: name → {"label", "filter"} — every filter is a real ffmpeg -vf chain.
+#: Shared grade names delegate to the canonical definitions in
+#: edit_engine.effects (single source of truth); studio-only looks keep
+#: their own chains here.
+def _canonical(name: str, label: str) -> dict[str, str]:
+    from ..edit_engine.effects import color_grade_chain
+    return {"label": label + " (canonical: edit_engine)",
+            "filter": color_grade_chain(name)}
+
+
 GRADE_PRESETS: dict[str, dict[str, str]] = {
     "cinematic": {
         "label": "teal-shadow / warm-highlight blockbuster",
@@ -38,36 +54,26 @@ GRADE_PRESETS: dict[str, dict[str, str]] = {
                    "bs=0.10:bm=0.02:bh=-0.06,"
                    "eq=contrast=1.08:saturation=1.12,vignette=PI/4.2"),
     },
-    "noir": {
-        "label": "black & white, crushed blacks",
-        "filter": "hue=s=0,eq=contrast=1.25:brightness=-0.03,vignette=PI/3.5",
-    },
+    "noir": _canonical("noir", "black & white, crushed blacks"),
     "vintage": {
         "label": "faded film, warm cast",
         "filter": ("curves=master='0/0 0.5/0.42 1/0.92',"
                    "colorbalance=rs=0.10:gs=0.03:bs=-0.12,"
                    "eq=saturation=0.85"),
     },
-    "vibrant": {
-        "label": "punchy saturated pop",
-        "filter": "eq=contrast=1.12:saturation=1.45:brightness=0.02",
-    },
+    "vibrant": _canonical("vibrant", "punchy saturated pop"),
     "phonk": {
         "label": "hard contrast, aggressive — phonk edits",
         "filter": "eq=contrast=1.35:saturation=1.30,unsharp=5:5:0.8",
     },
-    "faded": {
-        "label": "washed pastel fade",
-        "filter": "eq=contrast=0.92:brightness=0.06:saturation=0.75",
-    },
+    "faded": _canonical("faded", "washed pastel fade"),
     "cold": {
         "label": "icy blue push",
         "filter": "colorbalance=bs=0.15:bm=0.06,eq=saturation=1.05",
     },
-    "warm": {
-        "label": "golden-hour warmth",
-        "filter": "colorbalance=rs=0.15:rm=0.08,eq=saturation=1.10",
-    },
+    "warm": _canonical("warm", "golden-hour warmth"),
+    "cool": _canonical("cool", "cool blue push"),
+    "teal_orange": _canonical("teal_orange", "teal shadows, orange highlights"),
     "none": {"label": "no grade (passthrough)", "filter": ""},
 }
 

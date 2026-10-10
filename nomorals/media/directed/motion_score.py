@@ -362,6 +362,11 @@ def ease_smooth(u: float) -> float:
     return u * u * (3 - 2 * u)
 
 
+def ease_sine(u: float) -> float:
+    u = _clamp01(u)
+    return 0.5 - 0.5 * math.cos(math.pi * u)
+
+
 def _bezier_coord(t: float, p1: float, p2: float) -> float:
     """One coordinate of a cubic bezier with P0=0, P3=1."""
     return (3 * (1 - t) ** 2 * t * p1
@@ -480,6 +485,7 @@ EASE_FUNCS: dict[str, Callable[[float], float]] = {
     "ease_in_out": ease_in_out_cubic,
     "smooth": ease_smooth,
     "smoothstep": ease_smooth,
+    "sine": ease_sine,
     "cubic_bezier": cubic_bezier_ease,
     "css_ease": cubic_bezier_ease,
     "spring": ease_spring,
