@@ -81,6 +81,8 @@ class Database:
         cache_size_kb: int = 64_000,
         timeout: float = 30.0,
         readonly: bool = False,
+        wal_autocheckpoint: int = 1000,
+        slow_query_threshold_s: float | None = 5.0,
     ) -> None:
         self.path = Path(path) if path != ":memory:" else None
         self.wal = wal and self.path is not None
@@ -90,6 +92,11 @@ class Database:
         self.cache_size_kb = cache_size_kb
         self.readonly = readonly
         self._timeout = timeout
+        self.wal_autocheckpoint = wal_autocheckpoint
+        #: Log a warning (and bump the slow_queries stat) for any statement
+        #: slower than this. None disables. Query observability: a bot that
+        #: runs for weeks accrues slow queries silently without this.
+        self.slow_query_threshold_s = slow_query_threshold_s
 
         self._local = threading.local()
         self._write_lock = threading.RLock()
@@ -107,6 +114,7 @@ class Database:
             "transactions": 0,
             "retries": 0,
             "errors": 0,
+            "slow_queries": 0,
             "query_seconds": 0.0,
         }
 
@@ -156,11 +164,28 @@ class Database:
                 ("temp_store", "MEMORY"),
                 ("mmap_size", 256 * 1024 * 1024),
             ]
+            if self.wal:
+                pragmas.append(("wal_autocheckpoint", self.wal_autocheckpoint))
         for name, value in pragmas:
             try:
                 conn.execute(f"PRAGMA {name}={value}")
             except sqlite3.Error as exc:  # pragma: no cover - platform dependent
                 _log.debug("PRAGMA %s=%s failed: %s", name, value, exc)
+        # WAL is attempted, not assumed: on filesystems that can't hold the
+        # -shm sidecar (network shares, some FUSE mounts) SQLite silently
+        # keeps the old journal mode. A WARN here beats a mysterious
+        # "database is locked" three weeks later.
+        if self.wal and not self.readonly:
+            try:
+                actual = conn.execute("PRAGMA journal_mode").fetchone()[0]
+            except sqlite3.Error:  # pragma: no cover - introspection only
+                actual = "unknown"
+            if str(actual).lower() != "wal":
+                _log.warning(
+                    "requested WAL journal mode but database is in %r mode; "
+                    "concurrent readers will block writers",
+                    actual,
+                )
 
     def close(self) -> None:
         """Close every connection opened by any thread."""
@@ -255,11 +280,22 @@ class Database:
             self._bump_stat("errors")
             raise StorageError(str(exc)) from exc
         finally:
+            elapsed = time.perf_counter() - started
             self._bump_stat("queries")
-            self._bump_stat("query_seconds", time.perf_counter() - started)
+            self._bump_stat("query_seconds", elapsed)
+            self._note_slow(sql, elapsed)
         if sql.lstrip()[:6].upper() in {"INSERT", "UPDATE", "DELETE", "REPLAC"}:
             self._bump_stat("writes")
         return cursor
+
+    def _note_slow(self, sql: str, elapsed: float) -> None:
+        """Record and warn on statements slower than the configured threshold."""
+        threshold = self.slow_query_threshold_s
+        if threshold is None or elapsed < threshold:
+            return
+        self._bump_stat("slow_queries")
+        preview = " ".join(sql.split())[:160]
+        _log.warning("slow query (%.2fs > %.2fs): %s", elapsed, threshold, preview)
 
     def executemany(self, sql: str, seq: Iterable[Sequence[Any]]) -> sqlite3.Cursor:
         started = time.perf_counter()
@@ -275,8 +311,10 @@ class Database:
             self._bump_stat("errors")
             raise StorageError(str(exc)) from exc
         finally:
+            elapsed = time.perf_counter() - started
             self._bump_stat("queries")
-            self._bump_stat("query_seconds", time.perf_counter() - started)
+            self._bump_stat("query_seconds", elapsed)
+            self._note_slow(sql, elapsed)
         self._bump_stat("writes")
         return cursor
 
@@ -418,6 +456,69 @@ class Database:
         return getattr(self._depth, "value", 0) > 0
 
     # ── maintenance ──────────────────────────────────────────────────────────
+    def pragma(self, name: str, value: Any | None = None) -> Any:
+        """Read (or set) a PRAGMA. Read form returns the scalar value."""
+        if value is None:
+            return self.scalar(f"PRAGMA {name}")
+        self.execute(f"PRAGMA {name}={value}")
+        return self.scalar(f"PRAGMA {name}")
+
+    def journal_mode(self) -> str:
+        """The journal mode SQLite actually achieved for this database."""
+        return str(self.scalar("PRAGMA journal_mode", default="unknown"))
+
+    def optimize(self, mask: int = 0x10002) -> None:
+        """Run ``PRAGMA optimize`` so the query planner sees fresh statistics.
+
+        sqlite.org's recipe: run after every schema change / CREATE INDEX, and
+        periodically on long-lived connections. :meth:`migrate` calls this
+        automatically when it applies anything.
+        """
+        try:
+            self.execute(f"PRAGMA optimize={mask}")
+        except sqlite3.Error as exc:  # pragma: no cover - platform dependent
+            _log.debug("PRAGMA optimize failed: %s", exc)
+
+    def wal_size_bytes(self) -> int:
+        """Current size of the -wal sidecar (0 when not in WAL or no sidecar)."""
+        if self.path is None:
+            return 0
+        sidecar = self.path.with_name(self.path.name + "-wal")
+        try:
+            return sidecar.stat().st_size
+        except OSError:
+            return 0
+
+    def backup_to(self, dest: str | os.PathLike[str], *, verify: bool = True) -> Path:
+        """Copy this database to ``dest`` with the online backup API.
+
+        Safe to call while the database is live and being written to —
+        unlike ``shutil.copy``, which can capture a torn WAL state. When
+        ``verify`` is true the copy gets an ``integrity_check`` before this
+        returns; a failed verification deletes the copy and raises.
+        """
+        dest_path = Path(dest)
+        dest_path.parent.mkdir(parents=True, exist_ok=True)
+        source = self._connection()
+        target = sqlite3.connect(str(dest_path))
+        try:
+            source.backup(target)
+        finally:
+            target.close()
+        if verify:
+            probe = Database(dest_path, readonly=True)
+            try:
+                result = probe.integrity_check()
+            finally:
+                probe.close()
+            if result.strip().lower() != "ok":
+                try:
+                    dest_path.unlink()
+                except OSError:  # pragma: no cover - best effort
+                    pass
+                raise StorageError(f"backup to {dest_path} failed integrity_check: {result}")
+        return dest_path
+
     def checkpoint(self, mode: str = "TRUNCATE") -> tuple[int, int]:
         """Force a WAL checkpoint. Returns (busy, log_pages)."""
         if not self.wal:
@@ -456,12 +557,14 @@ class Database:
         return int(self.scalar(f'SELECT COUNT(*) FROM "{name}"', default=0))
 
     def migrate(self) -> "MigrationSummary":
-        """Apply all pending migrations."""
+        """Apply all pending migrations, then refresh the query planner."""
         from .migrations import MIGRATIONS
         from .schema import MigrationRunner
 
         runner = MigrationRunner(self)
         applied = runner.apply_all(MIGRATIONS)
+        if applied:
+            self.optimize()
         return MigrationSummary(applied=applied, version=runner.current_version())
 
     def stats_snapshot(self) -> dict[str, Any]:
@@ -472,7 +575,15 @@ class Database:
             "path": str(self.path) if self.path else ":memory:",
             "connections": self.connection_count(),
             "tables": len(self.tables()),
+            "journal_mode": self.journal_mode(),
+            "wal_size_bytes": self.wal_size_bytes(),
         }
+        try:
+            info["page_count"] = int(self.scalar("PRAGMA page_count", default=0))
+            info["freelist_count"] = int(self.scalar("PRAGMA freelist_count", default=0))
+            info["page_size"] = int(self.scalar("PRAGMA page_size", default=0))
+        except sqlite3.Error:  # pragma: no cover - introspection only
+            pass
         if self.path is not None and self.path.exists():
             info["size_bytes"] = self.path.stat().st_size
         with self._stats_lock:
