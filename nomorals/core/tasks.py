@@ -10,10 +10,19 @@ substrate:
 Dependencies form a DAG. The scheduler runs everything whose dependencies have
 completed, in parallel, and propagates cancellation downward — so a mission that
 is cancelled does not leave 40 orphaned subtasks burning tokens.
+
+Retries follow the scheduler discipline: timeout → retry with exponential
+backoff + full jitter (idempotent ops only) → bounded attempts AND a bounded
+retry budget for the whole graph → poison tasks become diagnosable
+dead letters instead of busy loops. Instant retries against a dying external
+dependency are the #1 homegrown scheduler bug; :class:`RetryPolicy` makes the
+delay explicit and the executor's retry path should call
+:meth:`TaskGraph.retry_later` with it rather than requeueing immediately.
 """
 
 from __future__ import annotations
 
+import random
 import threading
 import time
 from collections.abc import Callable, Sequence
@@ -27,6 +36,8 @@ from ..core.ids import new_id
 __all__ = [
     "AcceptanceCriterion",
     "AcceptanceResult",
+    "RetryBudget",
+    "RetryPolicy",
     "Task",
     "TaskGraph",
     "TaskKind",
@@ -34,6 +45,80 @@ __all__ = [
     "TaskState",
     "cycle_in",
 ]
+
+
+@dataclass
+class RetryPolicy:
+    """How a task retries, in one place the executor can read.
+
+    * ``max_retries`` — bounded attempts. Validation errors are *permanent*
+      and must never be retried; use ``retryable`` to name the transient
+      exception classes.
+    * ``backoff`` — ``base * factor**attempt``, capped at ``max_delay``,
+      plus full uniform jitter (fixed multiples build thundering herds).
+    * ``retry_after`` — when an exception carries a ``retry_after`` attribute
+      (HTTP 429), it wins over the computed backoff.
+    """
+
+    max_retries: int = 3
+    base_delay: float = 1.0
+    factor: float = 2.0
+    max_delay: float = 300.0
+    jitter: bool = True
+    retryable: tuple[type[BaseException], ...] = (Exception,)
+    rng: random.Random | None = None
+
+    def should_retry(self, exc: BaseException, attempt: int) -> bool:
+        """Attempt is the number of the attempt that just failed (1-based)."""
+        if attempt > self.max_retries:
+            return False
+        return isinstance(exc, self.retryable)
+
+    def delay_for(self, attempt: int, exc: BaseException | None = None) -> float:
+        """Seconds to wait before attempt ``attempt + 1``."""
+        if exc is not None:
+            hinted = getattr(exc, "retry_after", None)
+            if hinted:
+                try:
+                    return min(max(0.0, float(hinted)), self.max_delay)
+                except (TypeError, ValueError):
+                    pass
+        delay = self.base_delay * (self.factor ** max(0, attempt - 1))
+        delay = min(delay, self.max_delay)
+        if self.jitter:
+            rng = self.rng or random
+            delay = rng.uniform(0, delay)
+        return delay
+
+
+@dataclass
+class RetryBudget:
+    """A bounded retry *spend* for a whole graph run.
+
+    Bounded attempts per task is not enough: 500 tasks each retrying 3 times
+    against a dead dependency is 1500 doomed calls. The budget caps total
+    retries; when exhausted, tasks fail fast instead of retrying.
+    """
+
+    max_retries: int = 100
+    spent: int = 0
+    _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+
+    def spend(self) -> bool:
+        """Consume one retry. Returns False when the budget is exhausted."""
+        with self._lock:
+            if self.spent >= self.max_retries:
+                return False
+            self.spent += 1
+            return True
+
+    def remaining(self) -> int:
+        with self._lock:
+            return max(0, self.max_retries - self.spent)
+
+    def reset(self) -> None:
+        with self._lock:
+            self.spent = 0
 
 
 @dataclass
@@ -237,6 +322,17 @@ class Task:
     #: *correct*.  Empty means "ran to completion" is the only bar — and
     #: :attr:`verified` says so honestly.
     acceptance: list[AcceptanceCriterion] = field(default_factory=list)
+    #: Retry discipline for this task. When set, the executor should use
+    #: :meth:`TaskGraph.retry_later` with :meth:`RetryPolicy.delay_for`
+    #: instead of requeueing immediately. ``retries`` (the legacy plain
+    #: count) is the fallback when no policy is set.
+    retry_policy: RetryPolicy | None = None
+    #: Idempotency key: at-least-once schedulers must not run two tasks with
+    #: the same key twice. :meth:`TaskGraph.add` rejects duplicates.
+    idempotency_key: str = ""
+    #: Monotonic timestamp before which the task is not eligible for
+    #: :meth:`TaskGraph.ready` — the backoff window between retries.
+    not_before: float = 0.0
 
     @property
     def duration(self) -> float:
@@ -251,6 +347,13 @@ class Task:
     @property
     def ok(self) -> bool:
         return self.state is TaskState.DONE
+
+    @property
+    def max_attempts(self) -> int:
+        """Total attempts allowed: 1 initial + retries."""
+        if self.retry_policy is not None:
+            return 1 + self.retry_policy.max_retries
+        return 1 + max(0, self.retries)
 
     def mark_running(self) -> None:
         self.state = TaskState.RUNNING
@@ -301,6 +404,11 @@ class Task:
         self.error = reason
         self.finished_at = time.time()
 
+    def mark_skipped(self, reason: str = "skipped") -> None:
+        self.state = TaskState.SKIPPED
+        self.error = reason
+        self.finished_at = time.time()
+
     def to_dict(self, *, include_result: bool = False) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "id": self.id,
@@ -310,9 +418,11 @@ class Task:
             "deps": list(self.deps),
             "priority": self.priority,
             "attempts": self.attempts,
+            "max_attempts": self.max_attempts,
             "duration": round(self.duration, 4),
             "error": self.error,
             "role": self.role,
+            "idempotency_key": self.idempotency_key,
             "acceptance": [c.to_dict() for c in self.acceptance],
             "verified": self.verified if self.state is TaskState.DONE else False,
         }
@@ -360,17 +470,69 @@ class TaskGraph:
     """A DAG of tasks with a readiness query the scheduler polls.
 
     Thread-safe: producers may add tasks while the scheduler is draining.
+
+    State transitions that matter to operators (failures, retries, skips,
+    cancellations) are announced to ``on_state_change`` hooks registered with
+    :meth:`add_hook` — wire them to metrics/logging there, not inside the
+    graph.
     """
 
-    def __init__(self, *, name: str = "graph", mission_id: str = "") -> None:
+    def __init__(
+        self,
+        *,
+        name: str = "graph",
+        mission_id: str = "",
+        retry_budget: RetryBudget | None = None,
+    ) -> None:
         self.name = name
         self.mission_id = mission_id
         self.tasks: dict[str, Task] = {}
+        self.retry_budget = retry_budget or RetryBudget()
         self._by_name: dict[str, str] = {}
+        self._by_key: dict[str, str] = {}
         self._dependents: dict[str, set[str]] = {}
+        self._hooks: list[Callable[[Task, TaskState, TaskState], None]] = []
         self._lock = threading.RLock()
         self._cancel = threading.Event()
         self.created_at = time.time()
+
+    # ── hooks ────────────────────────────────────────────────────────────────
+    def add_hook(self, fn: Callable[[Task, TaskState, TaskState], None]) -> None:
+        """Register ``fn(task, old_state, new_state)``. Hooks never break the
+        graph: a raising hook is logged, not propagated."""
+        with self._lock:
+            self._hooks.append(fn)
+
+    def notify(self, task: Task, old: TaskState, new: TaskState) -> None:
+        """Announce a state transition the graph didn't initiate itself
+        (the executor marks tasks; it should call this afterwards)."""
+        with self._lock:
+            hooks = list(self._hooks)
+        for hook in hooks:
+            try:
+                hook(task, old, new)
+            except Exception:  # noqa: BLE001 - hooks must never break the graph
+                import logging
+
+                logging.getLogger("nomorals.tasks").debug(
+                    "state hook failed for task %s", task.name, exc_info=True
+                )
+
+    def _transition(self, task: Task, new: TaskState, note: str = "") -> None:
+        old = task.state
+        if new is TaskState.DONE:
+            task.mark_done(task.result)
+        elif new is TaskState.FAILED:
+            task.mark_failed(note or task.error)
+        elif new is TaskState.CANCELLED:
+            task.mark_cancelled(note)
+        elif new is TaskState.SKIPPED:
+            task.mark_skipped(note)
+        elif new is TaskState.RUNNING:
+            task.mark_running()
+        else:
+            task.state = new
+        self.notify(task, old, task.state)
 
     # ── construction ─────────────────────────────────────────────────────────
     def add(self, task: Task, *, depends_on: Sequence[str | Task] = ()) -> Task:
@@ -380,6 +542,13 @@ class TaskGraph:
                 raise ValidationError(f"duplicate task name {task.name!r}")
             if task.id in self.tasks:
                 raise ValidationError(f"duplicate task id {task.id!r}")
+            if task.idempotency_key:
+                owner = self._by_key.get(task.idempotency_key)
+                if owner is not None and owner != task.id:
+                    raise ValidationError(
+                        f"duplicate idempotency key {task.idempotency_key!r} "
+                        f"(task {task.name!r} vs {self.tasks[owner].name!r})"
+                    )
             for dep in depends_on:
                 key = dep.id if isinstance(dep, Task) else str(dep)
                 resolved = self.tasks.get(key) or self.tasks.get(self._by_name.get(str(dep), ""))
@@ -391,6 +560,8 @@ class TaskGraph:
                     task.deps.append(resolved.id)
             self.tasks[task.id] = task
             self._by_name[task.name] = task.id
+            if task.idempotency_key:
+                self._by_key[task.idempotency_key] = task.id
             self._dependents.setdefault(task.id, set())
             for dep_id in task.deps:
                 self._dependents.setdefault(dep_id, set()).add(task.id)
@@ -408,7 +579,8 @@ class TaskGraph:
         """Convenience: build a Task inline."""
         task_kwargs = {
             k: kwargs.pop(k)
-            for k in ("kind", "priority", "timeout", "retries", "role", "payload", "mission_id")
+            for k in ("kind", "priority", "timeout", "retries", "role", "payload",
+                      "mission_id", "retry_policy", "idempotency_key")
             if k in kwargs
         }
         task = Task(name=name, fn=fn, args=args, kwargs=kwargs, **task_kwargs)
@@ -433,11 +605,15 @@ class TaskGraph:
         return task
 
     def ready(self) -> list[Task]:
-        """Tasks whose dependencies are all satisfied, in priority order."""
+        """Tasks whose dependencies are all satisfied and whose backoff
+        window (``not_before``) has passed, in priority order."""
+        now = time.monotonic()
         with self._lock:
             out: list[Task] = []
             for task in self.tasks.values():
                 if task.state is not TaskState.PENDING:
+                    continue
+                if task.not_before > now:
                     continue
                 if all(
                     self.tasks[d].state is TaskState.DONE
@@ -465,6 +641,29 @@ class TaskGraph:
                         doomed.add(task.id)
                         changed = True
             return [self.tasks[i] for i in doomed if self.tasks[i].state is TaskState.PENDING]
+
+    def cascade_skip(self) -> int:
+        """Mark every task blocked by a failed/cancelled ancestor as SKIPPED,
+        naming the failed ancestor. Failure must be *visible*, never silently
+        dropped. Returns how many were skipped."""
+        count = 0
+        with self._lock:
+            doomed = self.blocked_by_failure()
+            failed_names = {
+                t.name for t in self.tasks.values() if t.state is TaskState.FAILED
+            }
+        for task in doomed:
+            culprits = sorted(
+                failed_names & {self.tasks[d].name for d in task.deps if d in self.tasks}
+            )
+            reason = (
+                f"skipped: dependency failed ({', '.join(culprits)})"
+                if culprits
+                else "skipped: ancestor failed or cancelled"
+            )
+            self._transition(task, TaskState.SKIPPED, reason)
+            count += 1
+        return count
 
     def is_complete(self) -> bool:
         with self._lock:
@@ -524,12 +723,67 @@ class TaskGraph:
         """Cancel every non-terminal task. Returns how many were cancelled."""
         self._cancel.set()
         with self._lock:
-            count = 0
-            for task in self.tasks.values():
-                if not task.is_terminal:
-                    task.mark_cancelled(reason)
-                    count += 1
-            return count
+            tasks = [t for t in self.tasks.values() if not t.is_terminal]
+        for task in tasks:
+            self._transition(task, TaskState.CANCELLED, reason)
+        return len(tasks)
+
+    def retry_later(self, task: Task, delay: float, reason: str = "") -> bool:
+        """Requeue a task for retry after ``delay`` seconds.
+
+        Respects the graph-wide :class:`RetryBudget`: when the budget is
+        exhausted the task fails fast instead. Returns True when requeued.
+        """
+        with self._lock:
+            if task.state not in (TaskState.FAILED, TaskState.PENDING):
+                return False
+            if not self.retry_budget.spend():
+                self._transition(
+                    task, TaskState.FAILED,
+                    f"retry budget exhausted: {reason or task.error}",
+                )
+                return False
+            old = task.state
+            task.state = TaskState.PENDING
+            task.not_before = time.monotonic() + max(0.0, delay)
+            if reason:
+                task.error = reason
+            self.notify(task, old, TaskState.PENDING)
+            return True
+
+    def requeue_dead(self, key: str) -> Task:
+        """Operational escape hatch: reset a FAILED task to PENDING so it can
+        be replayed after the cause is fixed (the manual DLQ replay)."""
+        task = self.require(key)
+        with self._lock:
+            if task.state is not TaskState.FAILED:
+                raise ValidationError(
+                    f"task {task.name!r} is {task.state.value}, not failed"
+                )
+            old = task.state
+            task.state = TaskState.PENDING
+            task.error = ""
+            task.not_before = 0.0
+            task.attempts = 0
+            self.notify(task, old, TaskState.PENDING)
+        return task
+
+    def dead_letters(self) -> list[dict[str, Any]]:
+        """Every FAILED task as a diagnosable record — the dead-letter queue."""
+        with self._lock:
+            return [
+                {
+                    "name": t.name,
+                    "id": t.id,
+                    "error": t.error,
+                    "attempts": t.attempts,
+                    "duration": round(t.duration, 4),
+                    "deps": list(t.deps),
+                    "replayable": True,
+                }
+                for t in self.tasks.values()
+                if t.state is TaskState.FAILED
+            ]
 
     @property
     def cancelled(self) -> bool:
@@ -538,14 +792,63 @@ class TaskGraph:
     def reset(self) -> None:
         """Return every task to PENDING (for re-running a graph)."""
         self._cancel.clear()
+        self.retry_budget.reset()
         with self._lock:
-            for task in self.tasks.values():
-                task.state = TaskState.PENDING
-                task.result = None
-                task.error = ""
-                task.attempts = 0
-                task.started_at = 0.0
-                task.finished_at = 0.0
+            tasks = list(self.tasks.values())
+        for task in tasks:
+            old = task.state
+            task.state = TaskState.PENDING
+            task.result = None
+            task.error = ""
+            task.attempts = 0
+            task.not_before = 0.0
+            task.started_at = 0.0
+            task.finished_at = 0.0
+            self.notify(task, old, TaskState.PENDING)
+
+    # ── execution ────────────────────────────────────────────────────────────
+    def dry_run(self, *, fail_fast: bool = False) -> dict[str, Any]:
+        """Execute the graph serially in topological order, without threads.
+
+        Dependents of a failed task are SKIPPED (visible, like the real
+        scheduler's :meth:`cascade_skip`). Returns a summary; raises nothing
+        the tasks themselves didn't raise. Use it to validate a mission plan
+        before spending tokens on parallel execution.
+        """
+        ran = failed = skipped = 0
+        started = time.monotonic()
+        for task in self.topological_order():
+            if self.cancelled:
+                break
+            if any(
+                self.tasks[d].state is not TaskState.DONE
+                for d in task.deps
+                if d in self.tasks
+            ):
+                self._transition(task, TaskState.SKIPPED, "dry run: dependency not done")
+                skipped += 1
+                if fail_fast:
+                    break
+                continue
+            self._transition(task, TaskState.RUNNING)
+            try:
+                result = task.fn(*task.args, **task.kwargs) if task.fn else None
+            except Exception as exc:  # noqa: BLE001 - dry run records, like the executor
+                self._transition(task, TaskState.FAILED, f"{type(exc).__name__}: {exc}")
+                failed += 1
+                if fail_fast:
+                    break
+                continue
+            task.result = result
+            self._transition(task, TaskState.DONE)
+            ran += 1
+        return {
+            "ran": ran,
+            "failed": failed,
+            "skipped": skipped,
+            "wall_s": round(time.monotonic() - started, 4),
+            "failures": self.failures(),
+        }
 
     # ── reporting ────────────────────────────────────────────────────────────
     def results(self) -> dict[str, Any]:
@@ -597,6 +900,7 @@ class TaskGraph:
                 "mission_id": self.mission_id,
                 "counts": self.counts(),
                 "depth": self.depth(),
+                "retry_budget_remaining": self.retry_budget.remaining(),
                 "tasks": [t.to_dict() for t in self.topological_order()],
             }
 
