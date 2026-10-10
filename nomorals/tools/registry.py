@@ -275,6 +275,7 @@ class ToolRegistry:
             "filesystem", "finance", "giftcard", "git", "hashcrack", "imagedb",
             "lint",
             "edit_loop",
+            "errorsys",  # system health / error budgets / incident history
             "error_scan",
             "macros", "media", "media_edit", "media_gen", "media_pipeline", "metadata",
             "music", "studio",

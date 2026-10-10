@@ -573,6 +573,69 @@ class SubsystemSupervisor:
             w["restarts"].append(now)
             return True
 
+    def watch(self, name: str,
+              is_alive: Callable[[], bool],
+              restart: Callable[[], None], *,
+              check_interval_s: float = 30.0,
+              strategy: str = RestartStrategy.ONE_FOR_ONE) -> None:
+        """Watchdog for an externally-managed thread.
+
+        Some components (scheduler, autonomy) own their threads already —
+        rewriting their lifecycle would be invasive. Instead the supervisor
+        watches: ``is_alive()`` reports thread health, ``restart()`` brings
+        it back. A dead thread records an incident, counts against the
+        restart budget, and triggers ``restart()``. Exceeding the budget
+        escalates (logs critical, stops watching).
+
+        The watcher itself runs on a daemon thread owned by the supervisor.
+        """
+        def _watch_loop(stop_event: threading.Event) -> None:
+            while not stop_event.is_set():
+                try:
+                    alive = is_alive()
+                except Exception:  # noqa: BLE001 - a broken probe is a failure
+                    alive = False
+                if not alive and not stop_event.is_set():
+                    try:
+                        raise RuntimeError(
+                            f"watched thread {self.subsystem}/{name} died")
+                    except RuntimeError as exc:
+                        self.journal.record_incident(
+                            exc, subsystem=f"{self.subsystem}/{name}",
+                            category="supervisor", severity="high",
+                            context={"worker": name, "mode": "watchdog"})
+                    _log.error("supervisor: watched %s/%s died", self.subsystem, name)
+                    if not self._note_restart(name):
+                        _log.critical(
+                            "supervisor: watched %s/%s exceeded %d restarts "
+                            "in %.0fs — giving up (escalate to human)",
+                            self.subsystem, name, self.max_restarts,
+                            self.restart_window_s)
+                        with self._lock:
+                            if name in self._workers:
+                                self._workers[name]["running"] = False
+                        return
+                    _log.warning("supervisor: restarting watched %s/%s",
+                                 self.subsystem, name)
+                    try:
+                        restart()
+                    except Exception:  # noqa: BLE001
+                        _log.exception("supervisor: restart of %s/%s failed",
+                                       self.subsystem, name)
+                stop_event.wait(check_interval_s)
+
+        with self._lock:
+            self._workers[name] = {
+                "fn": _watch_loop, "strategy": strategy,
+                "restart_delay_s": 0.0,
+                "restarts": [],
+                "thread": None, "running": False,
+                "stop": threading.Event(),
+                "accepts_stop": True,
+                "watchdog": True,
+            }
+        self._start_worker(name)
+
     def status(self) -> dict[str, Any]:
         with self._lock:
             return {
@@ -580,6 +643,7 @@ class SubsystemSupervisor:
                     "running": w["running"],
                     "strategy": w["strategy"],
                     "restarts_in_window": len(w["restarts"]),
+                    "watchdog": w.get("watchdog", False),
                 }
                 for name, w in self._workers.items()
             }

@@ -1570,6 +1570,39 @@ class PartnerRuntime(
             except Exception as exc:  # noqa: BLE001 - scheduler is optional
                 _log.warning("scheduler failed to start: %s", exc)
                 self._scheduler = None
+        # Supervision: watched threads get restarted on death, with incident
+        # recording and restart budgets. The supervisor watches; components
+        # keep owning their threads (no invasive lifecycle rewrites).
+        try:
+            es = getattr(self.context, "error_system", None)
+            if es is not None and not self.dry_run:
+                if self._scheduler is not None:
+                    _sched = self._scheduler
+                    es.supervisor_for("scheduler").watch(
+                        "tick_loop",
+                        is_alive=lambda: _sched.running(),
+                        restart=lambda: _sched.start(),
+                        check_interval_s=30.0,
+                    )
+                    _log.info("scheduler tick loop under supervision")
+                if getattr(self, "_autonomy", None) is not None:
+                    _auto = self._autonomy
+                    es.supervisor_for("autonomy").watch(
+                        "agent_loop",
+                        is_alive=lambda: getattr(_auto, "_running", True),
+                        restart=lambda: _auto.start(),
+                        check_interval_s=60.0,
+                    )
+                if getattr(self, "_trigger_engine", None) is not None:
+                    _eng = self._trigger_engine
+                    es.supervisor_for("triggers").watch(
+                        "engine",
+                        is_alive=lambda: getattr(_eng, "_running", True),
+                        restart=lambda: _eng.start(),
+                        check_interval_s=60.0,
+                    )
+        except Exception as exc:  # noqa: BLE001 - supervision is optional
+            _log.warning("worker supervision failed to start: %s", exc)
         # Trial assist: background signups killed by a restart are marked
         # interrupted and reported once, so no run silently disappears.
         # Idempotent — only non-terminal rows are touched.

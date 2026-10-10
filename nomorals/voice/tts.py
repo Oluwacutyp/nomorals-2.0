@@ -2127,6 +2127,21 @@ class UniversalTTS:
         / ``NM_VOICE_PUBLIC``); a non-commercial-cloned voice on the
         public audience is refused, structurally.
         """
+        try:
+            return self._speak_impl(tagged_text, voice_name=voice_name,
+                                    out_path=out_path, mood=mood,
+                                    mood_level=mood_level, audience=audience)
+        except Exception:
+            try:
+                from ..core.error_system import heartbeat
+                heartbeat("voice", False)
+            except Exception:  # noqa: BLE001 - telemetry never breaks synthesis
+                pass
+            raise
+
+    def _speak_impl(self, tagged_text: str, voice_name: Optional[str] = None,
+                    out_path: str = "", mood: str = "", mood_level: int = 5,
+                    audience: str | None = None) -> dict:
         aud = audience or self.audience
         text = mood_to_tagged_text(tagged_text, mood, mood_level) if mood \
             else tagged_text
@@ -2156,6 +2171,11 @@ class UniversalTTS:
                 os.makedirs(os.path.dirname(os.path.abspath(path)),
                             exist_ok=True)
                 written = write_wav(path, samples, sr)
+                try:
+                    from ..core.error_system import heartbeat
+                    heartbeat("voice", True)
+                except Exception:  # noqa: BLE001
+                    pass
                 return {
                     "path": path, "bytes": written,
                     "sample_rate": sr, "backend": backend.name,
@@ -2386,6 +2406,11 @@ class UniversalTTS:
             f"tts-{int(__import__('time').time() * 1000)}.wav")
         os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
         written = write_wav(path, audio, sample_rate)
+        try:
+            from ..core.error_system import heartbeat
+            heartbeat("voice", True)
+        except Exception:  # noqa: BLE001 - telemetry never breaks synthesis
+            pass
         return {
             "path": path,
             "bytes": written,

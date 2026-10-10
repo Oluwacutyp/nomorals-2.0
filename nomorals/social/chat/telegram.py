@@ -1269,12 +1269,22 @@ class TelegramAdapter(ChatAdapter):
         started = time.perf_counter()
         try:
             result = self._run_on_loop(self._send_async(client, chat, text, reply_to, parse_mode))
+            try:
+                from ...core.error_system import heartbeat
+                heartbeat("telegram", True)
+            except Exception:  # noqa: BLE001 - telemetry never breaks sends
+                pass
             return SendResult(
                 ok=True, platform=self.name, message_id=str(getattr(result, "id", "")),
                 seconds=time.perf_counter() - started,
             )
         except Exception as exc:  # noqa: BLE001 - ordinary failure, report as result
             self.stats["send_errors"] += 1
+            try:
+                from ...core.error_system import heartbeat
+                heartbeat("telegram", False)
+            except Exception:  # noqa: BLE001 - telemetry never breaks sends
+                pass
             return SendResult(ok=False, platform=self.name, error=str(exc),
                               seconds=time.perf_counter() - started)
 
@@ -2209,10 +2219,20 @@ class TelegramBotAdapter(ChatAdapter):
                 # Only the first chunk carries the reply reference.
                 params_base.pop("reply_parameters", None)
             self.stats["sent"] += 1
+            try:
+                from ...core.error_system import heartbeat
+                heartbeat("telegram", True)
+            except Exception:  # noqa: BLE001 - telemetry never breaks sends
+                pass
             return SendResult(ok=True, platform=self.name, message_id=last_id,
                               seconds=time.perf_counter() - started)
         except Exception as exc:  # noqa: BLE001 - ordinary failure, report as result
             self.stats["send_errors"] += 1
+            try:
+                from ...core.error_system import heartbeat
+                heartbeat("telegram", False)
+            except Exception:  # noqa: BLE001 - telemetry never breaks sends
+                pass
             return SendResult(ok=False, platform=self.name, error=str(exc),
                               seconds=time.perf_counter() - started)
 

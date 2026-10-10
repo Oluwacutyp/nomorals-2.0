@@ -47,6 +47,7 @@ class AgentContext:
     memory: Any = None
     tools: Any = None
     blackboard: Any = None
+    error_system: Any = None  # ErrorSystem bundle (journal/budgets/ladders)
 
     started_at: float = field(default_factory=time.time)
     actor: str = "system"
@@ -309,6 +310,19 @@ def build_context(
     from .blackboard import Blackboard
 
     context.blackboard = Blackboard()
+
+    # Error system: persistent incident journal + budgets + ladders +
+    # self-healing, wired once per process. Subsystems (LLM router,
+    # telegram, voice, scheduler) record heartbeats through the
+    # module-level accessor — no-op until this runs.
+    try:
+        from ..core.error_system import build_error_system, set_error_system
+        context.error_system = build_error_system(settings)
+        set_error_system(context.error_system)
+    except Exception as exc:  # noqa: BLE001 — error telemetry is optional
+        _log.warning("error system failed to initialize: %s", exc)
+        context.error_system = None
+
     if db_recovered:
         # Surfaced in status/diagnostics: the owner should know their data
         # was quarantined, and where the old file went.

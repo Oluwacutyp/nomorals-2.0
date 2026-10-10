@@ -1182,6 +1182,7 @@ class Scheduler:
             return []
         self._last_tick_at = time.time()
         now = self._last_tick_at
+        _tick_start_errors = self._tick_errors
         try:
             due = self.db.query(
                 "SELECT * FROM schedule_jobs WHERE enabled = 1 AND next_run IS NOT NULL "
@@ -1285,6 +1286,13 @@ class Scheduler:
         for job_id in ran_job_ids:
             self._prune_runs(job_id)
         self._maybe_redeliver()
+        # Error-budget heartbeat: a clean tick is success; any job crash
+        # or tick-level error is failure. Feeds real scheduler ratios.
+        try:
+            from ..core.error_system import heartbeat
+            heartbeat("scheduler", self._tick_errors == _tick_start_errors)
+        except Exception:  # noqa: BLE001 - telemetry never breaks the tick
+            pass
         return results
 
     def _skip_overlap(self, row: dict[str, Any], now: float) -> None:

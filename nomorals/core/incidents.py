@@ -486,6 +486,36 @@ class IncidentJournal:
             ).fetchall()
         return [dict(r) for r in rows]
 
+    def recent_incidents(self, subsystem: str | None = None,
+                         limit: int = 20) -> list[dict[str, Any]]:
+        """Newest incidents first, optionally filtered by subsystem."""
+        limit = max(1, min(100, limit))
+        with self._lock:
+            if subsystem:
+                rows = self._db.execute(
+                    "SELECT id, signature, exc_type, subsystem, location,"
+                    " message, severity, ts FROM incidents"
+                    " WHERE subsystem = ? AND signature NOT LIKE 'heartbeat:%'"
+                    " ORDER BY ts DESC LIMIT ?",
+                    (subsystem, limit),
+                ).fetchall()
+            else:
+                rows = self._db.execute(
+                    "SELECT id, signature, exc_type, subsystem, location,"
+                    " message, severity, ts FROM incidents"
+                    " WHERE signature NOT LIKE 'heartbeat:%'"
+                    " ORDER BY ts DESC LIMIT ?",
+                    (limit,),
+                ).fetchall()
+        out = []
+        for r in rows:
+            d = dict(r)
+            d["first_seen"] = d.pop("ts")
+            d["last_seen"] = d["first_seen"]
+            d["count"] = 1
+            out.append(d)
+        return out
+
     def close(self) -> None:
         with self._lock:
             self._db.close()
