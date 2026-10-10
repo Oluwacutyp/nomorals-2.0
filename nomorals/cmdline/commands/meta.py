@@ -8,6 +8,7 @@ from typing import Any
 from pathlib import Path
 from ..parser import _parser
 from ..emit import _emit
+from ..style import Table, color_enabled, title
 
 
 
@@ -524,7 +525,11 @@ def _cli_command_help(topic: str) -> str | None:
 
 
 def _cli_overview() -> str:
-    """Every top-level nm command with its aliases — generated, never stale."""
+    """Every top-level nm command with its aliases — generated, never stale.
+
+    On a TTY this renders as a styled table; when piped or captured it falls
+    back to the classic flat listing so scripts and tests see stable text.
+    """
     sub = _cli_subparsers()
     rows: list[tuple[str, str, str]] = []
     if sub is not None:
@@ -536,23 +541,27 @@ def _cli_overview() -> str:
             canonical = target.prog.split()[-1]
             aliases = sorted(k for k, v in sub.choices.items()
                              if v is target and k != canonical)
-            alias_txt = f" [{', '.join(aliases)}]" if aliases else ""
             help_txt = ""
             for choice_action in sub._choices_actions:
                 if choice_action.dest.strip() == canonical:
                     help_txt = choice_action.help or ""
                     break
-            rows.append((canonical, alias_txt, help_txt))
+            rows.append((canonical, ", ".join(aliases), help_txt))
     rows.sort()
-    lines = ["nm — the command center. Top-level commands and their aliases:",
-             ""]
-    for name, alias_txt, help_txt in rows:
-        lines.append(f"  {name}{alias_txt}")
-        if help_txt:
-            lines.append(f"      {help_txt}")
-    lines += ["",
+    footer = ["",
               "detail for one command:  nm help <command>   (aliases work too)",
               "chat command catalog:    nm help (no topic)"]
+    heading = "nm — the command center. Top-level commands and their aliases:"
+    if color_enabled():
+        table = Table(["command", "aliases", "what it does"], rows)
+        return (title(heading) + "\n\n" + table.render()
+                + "\n" + "\n".join(footer))
+    lines = [heading, ""]
+    for name, alias_txt, help_txt in rows:
+        lines.append(f"  {name}" + (f" [{alias_txt}]" if alias_txt else ""))
+        if help_txt:
+            lines.append(f"      {help_txt}")
+    lines += footer
     return "\n".join(lines)
 
 

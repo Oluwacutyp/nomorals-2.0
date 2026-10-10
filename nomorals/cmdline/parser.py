@@ -106,17 +106,24 @@ CLI_ALIASES: dict[str, list[str]] = {
     # R14 CLI mirrors of the /schedule and /db chat commands.
     "schedule": ["sched"],
     "db": ["database"],
+
+    # Shell completion scripts generated from the live parser.
+    "completion": ["complete"],
 }
 
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="nm", description="NoMorals Core — self-hosted multi-agent AI substrate."
+        prog="nm", description="NoMorals Core — self-hosted multi-agent AI substrate.",
+        epilog=("exit codes: 0 ok · 1 command failed · 2 usage error · "
+                "130 interrupted"),
     )
     parser.add_argument("--version", action="version", version=f"nomorals {__version__}")
     parser.add_argument("--config", help="path to a TOML config file")
     parser.add_argument("--log-level", default="INFO")
     parser.add_argument("--json", action="store_true", help="emit JSON instead of prose")
+    parser.add_argument("--no-color", action="store_true",
+                        help="disable colored/styled output (also: NO_COLOR=1)")
     sub = parser.add_subparsers(dest="command", required=True)
 
     doctor = sub.add_parser("doctor", aliases=CLI_ALIASES["doctor"],
@@ -3369,6 +3376,19 @@ def _parser() -> argparse.ArgumentParser:
     db.add_argument("--top", type=int, default=12,
                     help="counts: number of largest tables to show")
     db.add_argument("--json", action="store_true", help="Output as JSON")
+
+    completion = sub.add_parser(
+        "completion", aliases=CLI_ALIASES["completion"],
+        help="print shell completion scripts (bash/zsh/fish/powershell)",
+        description=("nm completion bash > ~/.local/share/bash-completion/completions/nm\n"
+                     "nm completion zsh > ~/.zsh/completions/_nm\n"
+                     "nm completion fish > ~/.config/fish/completions/nm.fish\n"
+                     "Generated from the live parser — always in sync with the CLI."),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    completion.add_argument("shell", nargs="?", default="bash",
+                            choices=["bash", "zsh", "fish", "powershell"],
+                            help="which shell's script to print (default: bash)")
 
     return parser
 

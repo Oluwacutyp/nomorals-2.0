@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import argparse
 import sys
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 from ..core.logging_setup import RedactionFilter, get_logger, setup_logging
+from . import style as _style
 from .commands.agent import _cmd_ask, _cmd_run
 from .commands.autonomy import _cmd_autonomy
 from .commands.backup import _cmd_backup
@@ -78,6 +79,7 @@ from .commands.stream import _cmd_stream
 from .commands.status import _cmd_status
 from .commands.session import _cmd_session
 from .commands.chat import _cmd_chat
+from .commands.completion import _cmd_completion
 from .commands.swarm import _cmd_swarm
 from .commands.timeline import _cmd_timeline
 from .commands.tools import _cmd_tools
@@ -102,10 +104,21 @@ _log = get_logger(__name__)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    """The ``nm`` entry point.
+
+    Exit-code contract (stable, scriptable):
+
+    * ``0`` — the command ran and succeeded.
+    * ``1`` — the command ran and failed (exception or handler error).
+    * ``2`` — usage error: bad arguments, unknown command.
+    * ``130`` — interrupted (Ctrl-C / SIGTERM).
+    """
     try:
         args = _parser().parse_args(argv)
     except SystemExit as e:
         return e.code if isinstance(e.code, int) else 2
+    if getattr(args, "no_color", False):
+        _style.set_no_color(True)
     setup_logging(args.log_level, force=True)
     # SIGTERM (supervisor stop, `kill`, Termux session end) must shut the
     # bot down the same way Ctrl-C does: context teardown, bus drain,
@@ -198,6 +211,195 @@ def _canonical_command(name: str) -> str:
     return name
 
 
+class _CommandSpec(NamedTuple):
+    """One registered ``nm`` command.
+
+    ``handler`` takes ``(args, context)`` when ``needs_context`` is true,
+    ``(args, settings)`` otherwise. Settings-only commands manage the live
+    state itself (snapshots, recovery, self-update), so they must NOT hold
+    the database open the way ``build_context`` would.
+    """
+
+    handler: Callable[[Any, Any], int]
+    needs_context: bool = True
+
+
+def _dispatch_models(args: argparse.Namespace, context: Any) -> int:
+    """``nm models`` — registry/catalog verbs, or the broker actions."""
+    if getattr(args, "model_action", ""):
+        return _cmd_model_broker(args, context)
+    return _cmd_models(args, context)
+
+
+def _dispatch_skill(args: argparse.Namespace, context: Any) -> int:
+    """``nm skill`` — executable-skill verbs go to the skills package; the
+    legacy knowledge-library verbs stay on the games handler."""
+    if args.action in {"list", "install", "enable", "disable",
+                       "run", "benchmark", "library"}:
+        return _cmd_skill_pkg(args, context)
+    return _cmd_skill(args, context)
+
+
+def _cmd_config(args: argparse.Namespace, settings: Any) -> int:
+    """``nm config`` — print the effective configuration (settings only)."""
+    _emit(args, settings.to_dict(), _render_config(settings))
+    return 0
+
+
+# The dispatch registry: canonical command name → spec. This is the single
+# source of truth for "what commands exist" — ``_dispatch`` looks handlers
+# up here instead of walking a ~100-branch if-chain, so adding a command is
+# one table entry, never a dispatcher edit. ``register_command()`` below is
+# the plugin-facing way to extend it at runtime (explicit, not import magic).
+_COMMANDS: dict[str, _CommandSpec] = {
+    # settings-only: they manage live state, never hold the DB open
+    "doctor": _CommandSpec(_cmd_doctor, needs_context=False),
+    "snapshot": _CommandSpec(_cmd_snapshot, needs_context=False),
+    "recover": _CommandSpec(_cmd_recover, needs_context=False),
+    "update": _CommandSpec(_cmd_update, needs_context=False),
+    "config": _CommandSpec(_cmd_config, needs_context=False),
+    "completion": _CommandSpec(_cmd_completion, needs_context=False),
+    # everything else runs inside build_context()
+    "setup": _CommandSpec(_cmd_setup),
+    "models": _CommandSpec(_dispatch_models),
+    "data": _CommandSpec(_cmd_data),
+    "brain": _CommandSpec(_cmd_brain),
+    "datasci": _CommandSpec(_cmd_datasci),
+    "tools": _CommandSpec(_cmd_tools),
+    "memory": _CommandSpec(_cmd_memory),
+    "owner": _CommandSpec(_cmd_owner),
+    "power": _CommandSpec(_cmd_power),
+    "pulse": _CommandSpec(_cmd_pulse),
+    "run": _CommandSpec(_cmd_run),
+    "ask": _CommandSpec(_cmd_ask),
+    "backup": _CommandSpec(_cmd_backup),
+    "golden": _CommandSpec(_cmd_golden),
+    "missions": _CommandSpec(_cmd_missions),
+    "timeline": _CommandSpec(_cmd_timeline),
+    "tui": _CommandSpec(_cmd_tui),
+    "serve": _CommandSpec(_cmd_serve),
+    "stream": _CommandSpec(_cmd_stream),
+    "queue": _CommandSpec(_cmd_queue),
+    "commands": _CommandSpec(_cmd_commands),
+    "zip": _CommandSpec(_cmd_zip),
+    "deliver": _CommandSpec(_cmd_deliver),
+    "status": _CommandSpec(_cmd_status),
+    "session": _CommandSpec(_cmd_session),
+    "chat": _CommandSpec(_cmd_chat),
+    "mind": _CommandSpec(_cmd_mind),
+    "book": _CommandSpec(_cmd_book),
+    "books": _CommandSpec(_cmd_books),
+    "hub": _CommandSpec(_cmd_hub),
+    "cipher": _CommandSpec(_cmd_cipher),
+    "osint": _CommandSpec(_cmd_osint),
+    "structure": _CommandSpec(_cmd_structure),
+    "money": _CommandSpec(_cmd_money),
+    "arena": _CommandSpec(_cmd_arena),
+    "trial": _CommandSpec(_cmd_trial),
+    "train": _CommandSpec(_cmd_train),
+    "help": _CommandSpec(_cmd_help),
+    "cookies": _CommandSpec(_cmd_cookies),
+    "reason": _CommandSpec(_cmd_reason),
+    "workspace": _CommandSpec(_cmd_workspace),
+    "monitor": _CommandSpec(_cmd_monitor),
+    "watch": _CommandSpec(_cmd_watch),
+    "crack": _CommandSpec(_cmd_crack),
+    "decode": _CommandSpec(_cmd_decode),
+    "music": _CommandSpec(_cmd_music),
+    "exec": _CommandSpec(_cmd_exec),
+    "apps": _CommandSpec(_cmd_apps),
+    "connectors": _CommandSpec(_cmd_connectors),
+    "finance": _CommandSpec(_cmd_finance),
+    "improve": _CommandSpec(_cmd_improve),
+    "trade": _CommandSpec(_cmd_trade),
+    "swarm": _CommandSpec(_cmd_swarm),
+    "native": _CommandSpec(_cmd_native),
+    "cards": _CommandSpec(_cmd_cards),
+    "autonomy": _CommandSpec(_cmd_autonomy),
+    "goal": _CommandSpec(_cmd_goal),
+    "idea": _CommandSpec(_cmd_idea),
+    "skill": _CommandSpec(_dispatch_skill),
+    "project": _CommandSpec(_cmd_project),
+    "plugin": _CommandSpec(_cmd_plugin),
+    "mission": _CommandSpec(_cmd_mission),
+    "kg": _CommandSpec(_cmd_kg),
+    "simulate": _CommandSpec(_cmd_simulate),
+    "research-loop": _CommandSpec(_cmd_research_loop),
+    "code": _CommandSpec(_cmd_code),
+    "doc": _CommandSpec(_cmd_doc),
+    "wisdom": _CommandSpec(_cmd_wisdom),
+    "mesh": _CommandSpec(_cmd_mesh),
+    "sync": _CommandSpec(_cmd_sync),
+    "trigger": _CommandSpec(_cmd_trigger),
+    "schedule": _CommandSpec(_cmd_schedule),
+    "db": _CommandSpec(_cmd_db),
+    "search": _CommandSpec(_cmd_search),
+    "browse": _CommandSpec(_cmd_browse),
+    "repo": _CommandSpec(_cmd_repo),
+    "media": _CommandSpec(_cmd_media),
+    "studio": _CommandSpec(_cmd_studio),
+    "voice": _CommandSpec(_cmd_voice),
+    "captcha": _CommandSpec(_cmd_captcha),
+    "account": _CommandSpec(_cmd_account),
+    "bet": _CommandSpec(_cmd_bet),
+    "build": _CommandSpec(_cmd_build),
+    "weather": _CommandSpec(_cmd_weather),
+    "vision": _CommandSpec(_cmd_vision),
+    "imggen": _CommandSpec(cmd_imggen),
+    "shorts": _CommandSpec(cmd_shorts),
+    "video": _CommandSpec(cmd_video),
+    "inbox": _CommandSpec(_cmd_inbox),
+    "audio": _CommandSpec(_cmd_audio),
+    "room": _CommandSpec(_cmd_room),
+    "briefing": _CommandSpec(_cmd_briefing),
+    "benchmark": _CommandSpec(_cmd_benchmark),
+}
+
+
+def register_command(name: str, handler: Callable[[Any, Any], int] | None = None, *,
+                     needs_context: bool = True) -> Callable[[Any, Any], int]:
+    """Register a new ``nm`` command handler at runtime (plugin API).
+
+    ``name`` must be the canonical command name (no aliases — those live in
+    ``CLI_ALIASES`` in ``parser.py``). Raises :class:`ValueError` if the name
+    is already registered or the handler is not callable. Works direct or as
+    a decorator factory::
+
+        register_command("mything", _cmd_mything)
+
+        @register_command("mything")
+        def _cmd_mything(args, context): ...
+    """
+    def _register(fn: Callable[[Any, Any], int]) -> Callable[[Any, Any], int]:
+        if not name or not isinstance(name, str):
+            raise ValueError("command name must be a non-empty string")
+        if not callable(fn):
+            raise ValueError(f"handler for {name!r} is not callable")
+        if name in _COMMANDS:
+            raise ValueError(f"command {name!r} is already registered")
+        _COMMANDS[name] = _CommandSpec(fn, needs_context)
+        return fn
+
+    if handler is None:
+        return _register
+    return _register(handler)
+
+
+def _suggest_command(name: str) -> list[str]:
+    """Closest command names to *name* (canonicals + aliases), for typos."""
+    from difflib import get_close_matches
+
+    candidates: list[str] = []
+    for cand in list(_COMMANDS) + list(CLI_ALIASES):
+        if cand not in candidates:
+            candidates.append(cand)
+    for aliases in CLI_ALIASES.values():
+        for alias in aliases:
+            if alias not in candidates:
+                candidates.append(alias)
+    return get_close_matches(name, candidates, n=3, cutoff=0.6)
+
+
 def _dispatch(args: argparse.Namespace) -> int:
     from ..core.config import load_settings
 
@@ -208,226 +410,26 @@ def _dispatch(args: argparse.Namespace) -> int:
     _configure_log_file(args, settings)
     args.command = _canonical_command(args.command)
 
-    if args.command == "doctor":
-        return _cmd_doctor(args, settings)
-    # Settings-only commands: they manage the live state itself (snapshots,
-    # recovery, self-update), so they must NOT hold the database open the
-    # way build_context would — restore's running/dirty detection and the
-    # transactional swap depend on seeing the system honestly.
-    if args.command == "snapshot":
-        return _cmd_snapshot(args, settings)
-    if args.command == "recover":
-        return _cmd_recover(args, settings)
-    if args.command == "update":
-        return _cmd_update(args, settings)
-    if args.command == "config":
-        _emit(args, settings.to_dict(), _render_config(settings))
-        return 0
-    if args.command == "setup":
-        from ..agents.context import build_context
-        with build_context(settings) as context:
-            return _cmd_setup(args, context)
+    spec = _COMMANDS.get(args.command)
+    if spec is None:
+        suggestions = _suggest_command(args.command)
+        lines = [f"unknown command: {args.command}"]
+        if suggestions:
+            did = ", ".join(_style.accent(s) for s in suggestions)
+            lines.append(f"did you mean: {did}?")
+        lines.append("run `nm help cli` for the full command list.")
+        print("\n".join(lines), file=sys.stderr)
+        return 2
+
+    if not spec.needs_context:
+        return spec.handler(args, settings)
 
     from ..agents.context import build_context
 
     with build_context(settings) as context:
         _attach_cli_session(context)  # best-effort os.Session for this run
         _attach_timeline(context)  # best-effort: persist bus events to the timeline
-        if args.command == "models":
-            if getattr(args, "model_action", ""):
-                return _cmd_model_broker(args, context)
-            return _cmd_models(args, context)
-        if args.command == "data":
-            return _cmd_data(args, context)
-        if args.command == "brain":
-            return _cmd_brain(args, context)
-        if args.command == "datasci":
-            return _cmd_datasci(args, context)
-        if args.command == "tools":
-            return _cmd_tools(args, context)
-        if args.command == "memory":
-            return _cmd_memory(args, context)
-        if args.command == "owner":
-            return _cmd_owner(args, context)
-        if args.command == "power":
-            return _cmd_power(args, context)
-        if args.command == "pulse":
-            return _cmd_pulse(args, context)
-        if args.command == "run":
-            return _cmd_run(args, context)
-        if args.command == "ask":
-            return _cmd_ask(args, context)
-        if args.command == "backup":
-            return _cmd_backup(args, context)
-        if args.command == "golden":
-            return _cmd_golden(args, context)
-        if args.command == "missions":
-            return _cmd_missions(args, context)
-        if args.command == "timeline":
-            return _cmd_timeline(args, context)
-        if args.command == "tui":
-            return _cmd_tui(args, context)
-        if args.command == "serve":
-            return _cmd_serve(args, context)
-        if args.command == "stream":
-            return _cmd_stream(args, context)
-        if args.command == "queue":
-            return _cmd_queue(args, context)
-        if args.command == "commands":
-            return _cmd_commands(args, context)
-        if args.command == "zip":
-            return _cmd_zip(args, context)
-        if args.command == "deliver":
-            return _cmd_deliver(args, context)
-        if args.command == "status":
-            return _cmd_status(args, context)
-        if args.command == "session":
-            return _cmd_session(args, context)
-        if args.command == "chat":
-            return _cmd_chat(args, context)
-        if args.command == "mind":
-            return _cmd_mind(args, context)
-
-        if args.command == "book":
-            return _cmd_book(args, context)
-        if args.command == "books":
-            return _cmd_books(args, context)
-        if args.command == "hub":
-            return _cmd_hub(args, context)
-        if args.command == "cipher":
-            return _cmd_cipher(args, context)
-        if args.command == "osint":
-            return _cmd_osint(args, context)
-        if args.command == "structure":
-            return _cmd_structure(args, context)
-        if args.command == "money":
-            return _cmd_money(args, context)
-        if args.command == "arena":
-            return _cmd_arena(args, context)
-        if args.command == "trial":
-            return _cmd_trial(args, context)
-        if args.command == "train":
-            return _cmd_train(args, context)
-        if args.command == "help":
-            return _cmd_help(args, context)
-        if args.command == "cookies":
-            return _cmd_cookies(args, context)
-        if args.command == "reason":
-            return _cmd_reason(args, context)
-        if args.command == "workspace":
-            return _cmd_workspace(args, context)
-        if args.command == "monitor":
-            return _cmd_monitor(args, context)
-        if args.command == "watch":
-            return _cmd_watch(args, context)
-        if args.command == "crack":
-            return _cmd_crack(args, context)
-        if args.command == "decode":
-            return _cmd_decode(args, context)
-        if args.command == "music":
-            return _cmd_music(args, context)
-        if args.command == "exec":
-            return _cmd_exec(args, context)
-        if args.command == "apps":
-            return _cmd_apps(args, context)
-        if args.command == "connectors":
-            return _cmd_connectors(args, context)
-        if args.command == "finance":
-            return _cmd_finance(args, context)
-        if args.command == "improve":
-            return _cmd_improve(args, context)
-        if args.command == "trade":
-            return _cmd_trade(args, context)
-        if args.command == "swarm":
-            return _cmd_swarm(args, context)
-        if args.command == "native":
-            return _cmd_native(args, context)
-        if args.command == "cards":
-            return _cmd_cards(args, context)
-        if args.command == "autonomy":
-            return _cmd_autonomy(args, context)
-        if args.command == "goal":
-            return _cmd_goal(args, context)
-        if args.command == "idea":
-            return _cmd_idea(args, context)
-        if args.command == "skill":
-            # New executable-skill verbs go to the skills package; the
-            # legacy knowledge-library verbs stay on the games handler.
-            if args.action in {"list", "install", "enable", "disable",
-                               "run", "benchmark", "library"}:
-                return _cmd_skill_pkg(args, context)
-            return _cmd_skill(args, context)
-        if args.command == "project":
-            return _cmd_project(args, context)
-        if args.command == "plugin":
-            return _cmd_plugin(args, context)
-        if args.command == "mission":
-            return _cmd_mission(args, context)
-        if args.command == "kg":
-            return _cmd_kg(args, context)
-        if args.command == "simulate":
-            return _cmd_simulate(args, context)
-        if args.command == "research-loop":
-            return _cmd_research_loop(args, context)
-        if args.command == "code":
-            return _cmd_code(args, context)
-        if args.command == "doc":
-            return _cmd_doc(args, context)
-        if args.command == "wisdom":
-            return _cmd_wisdom(args, context)
-        if args.command == "mesh":
-            return _cmd_mesh(args, context)
-        if args.command == "sync":
-            return _cmd_sync(args, context)
-
-        if args.command == "trigger":
-            return _cmd_trigger(args, context)
-        if args.command == "schedule":
-            return _cmd_schedule(args, context)
-        if args.command == "db":
-            return _cmd_db(args, context)
-        if args.command == "search":
-            return _cmd_search(args, context)
-        if args.command == "browse":
-            return _cmd_browse(args, context)
-        if args.command == "repo":
-            return _cmd_repo(args, context)
-        if args.command == "media":
-            return _cmd_media(args, context)
-        if args.command == "studio":
-            return _cmd_studio(args, context)
-        if args.command == "voice":
-            return _cmd_voice(args, context)
-        if args.command == "captcha":
-            return _cmd_captcha(args, context)
-        if args.command == "account":
-            return _cmd_account(args, context)
-        if args.command == "bet":
-            return _cmd_bet(args, context)
-        if args.command == "build":
-            return _cmd_build(args, context)
-        if args.command == "weather":
-            return _cmd_weather(args, context)
-        if args.command == "vision":
-            return _cmd_vision(args, context)
-        if args.command == "imggen":
-            return cmd_imggen(args, context)
-        if args.command == "shorts":
-            return cmd_shorts(args, context)
-        if args.command == "video":
-            return cmd_video(args, context)
-        if args.command == "inbox":
-            return _cmd_inbox(args, context)
-        if args.command == "audio":
-            return _cmd_audio(args, context)
-        if args.command == "room":
-            return _cmd_room(args, context)
-        if args.command == "briefing":
-            return _cmd_briefing(args, context)
-        if args.command == "benchmark":
-            return _cmd_benchmark(args, context)
-    print(f"unknown command: {args.command}", file=sys.stderr)
-    return 2
+        return spec.handler(args, context)
 
 
 def _render_config(settings: Any) -> str:
