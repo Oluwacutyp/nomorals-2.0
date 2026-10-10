@@ -25,6 +25,34 @@ from ..base import (
 )
 
 
+def _parse_usage(raw: Any) -> "Usage":
+    """Usage from an OpenAI-style ``usage`` block, incl. cache/reasoning.
+
+    Providers report ``prompt_tokens_details.cached_tokens`` and
+    ``completion_tokens_details.reasoning_tokens`` — billed tokens the
+    user never sees.  Counting only the visible text under-bills by up
+    to 50x on reasoning-heavy calls.
+    """
+    usage = raw if isinstance(raw, dict) else {}
+    prompt_details = usage.get("prompt_tokens_details") or {}
+    completion_details = usage.get("completion_tokens_details") or {}
+    try:
+        cached = int(prompt_details.get("cached_tokens") or 0)
+    except (TypeError, ValueError):
+        cached = 0
+    try:
+        reasoning = int(completion_details.get("reasoning_tokens") or 0)
+    except (TypeError, ValueError):
+        reasoning = 0
+    return Usage(
+        prompt_tokens=int(usage.get("prompt_tokens") or 0),
+        completion_tokens=int(usage.get("completion_tokens") or 0),
+        total_tokens=int(usage.get("total_tokens") or 0),
+        cached_tokens=cached,
+        reasoning_tokens=reasoning,
+    )
+
+
 class OpenAICompatProvider(LLMProvider):
     """Talks to any ``/v1/chat/completions`` endpoint."""
 
@@ -45,10 +73,22 @@ class OpenAICompatProvider(LLMProvider):
         vision_model: str = "",
         vision_base_url: str = "",
         vision_api_key: str = "",
+        api_keys: Sequence[str] | None = None,
     ) -> None:
         super().__init__(timeout=timeout, max_retries=max_retries)
         self.base_url = base_url.rstrip("/")
-        self.api_key = api_key
+        # Key pool (Bifrost pattern): several keys for one provider act as
+        # one pool — a 429 rotates to the next key before the router fails
+        # over to another provider.  The exhausted quota is usually the
+        # key's, not the provider's.
+        pool = [k for k in [api_key, *(api_keys or [])] if k]
+        seen: list[str] = []
+        for k in pool:
+            if k not in seen:
+                seen.append(k)
+        self.api_keys: list[str] = seen
+        self._key_index = 0
+        self.api_key = self.api_keys[0] if self.api_keys else ""
         self.model = model
         self.template = template
         self.extra_body = dict(extra_body or {})
@@ -58,12 +98,39 @@ class OpenAICompatProvider(LLMProvider):
         self.vision_base_url = (vision_base_url or "").rstrip("/")
         self.vision_api_key = vision_api_key
         headers = dict(extra_headers or {})
-        if api_key:
-            headers["Authorization"] = f"Bearer {api_key}"
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
         if organization:
             headers["OpenAI-Organization"] = organization
         self.http = HttpClient(timeout=timeout, headers=headers)
         self._policy = BackoffPolicy(max_attempts=max(1, max_retries), cap=30.0)
+
+    def _apply_key(self, key: str) -> None:
+        """Swap the Authorization header to ``key`` (key-pool rotation)."""
+        self.api_key = key
+        try:
+            self.http._headers["Authorization"] = f"Bearer {key}"
+        except Exception:  # noqa: BLE001 — header store is an impl detail
+            try:
+                self.http.headers["Authorization"] = f"Bearer {key}"
+            except Exception:  # noqa: BLE001
+                pass
+
+    def rotate_key(self) -> bool:
+        """Move to the next key in the pool.  True when one was available.
+
+        Called by the router on a 429 before failing over — the quota that
+        is exhausted is usually the key's, not the provider's.
+        """
+        if len(self.api_keys) < 2:
+            return False
+        self._key_index = (self._key_index + 1) % len(self.api_keys)
+        self._apply_key(self.api_keys[self._key_index])
+        return True
+
+    @property
+    def key_pool_size(self) -> int:
+        return len(self.api_keys)
 
     @property
     def model_id(self) -> str:
@@ -142,15 +209,11 @@ class OpenAICompatProvider(LLMProvider):
                 import json
 
                 content = json.dumps(message["tool_calls"])
-            usage = data.get("usage") or {}
+            usage = _parse_usage(data.get("usage"))
             response = LLMResponse(
                 text=content or "",
                 model=data.get("model", model_id),
-                usage=Usage(
-                    prompt_tokens=int(usage.get("prompt_tokens") or 0),
-                    completion_tokens=int(usage.get("completion_tokens") or 0),
-                    total_tokens=int(usage.get("total_tokens") or 0),
-                ),
+                usage=usage,
                 finish_reason=choice.get("finish_reason", "stop"),
                 raw=data,
             )

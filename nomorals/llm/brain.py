@@ -39,6 +39,7 @@ from .prompts import render_prompt, system_prompt_for
 __all__ = [
     "Brain",
     "brain_for",
+    "estimate_complexity",
     "explain_failure",
     "get_brain",
     "reset_brain",
@@ -66,8 +67,7 @@ _FIX_HINTS: tuple[tuple[str, str], ...] = (
 )
 
 
-def _fix_hint(text: str) -> str:
-    # Typed first: the failure taxonomy knows the right recovery for
+def _fix_hint(text: str) -> str:    # Typed first: the failure taxonomy knows the right recovery for
     # each class (shrink context, back off, fix the key…).
     try:
         info = classify_failure(text)
@@ -105,6 +105,64 @@ def explain_failure(response: Any) -> str:
         return "\n".join(lines)
     except Exception:  # noqa: BLE001 — the explainer itself never fails
         return "Brain unavailable — no provider served this call."
+
+
+def _with_quality(constraints: Any, quality: float | None) -> Any:
+    """Merge the complexity-tier ``quality`` knob into constraints.
+
+    Accepts a mapping, a BrokerConstraints, or None — returns the same
+    shape it was given, with ``min_quality`` set.
+    """
+    if quality is None:
+        return constraints
+    q = max(0.0, min(1.0, float(quality)))
+    if constraints is None:
+        return {"min_quality": q}
+    if isinstance(constraints, dict):
+        merged = dict(constraints)
+        merged["min_quality"] = q
+        return merged
+    try:
+        from .broker import BrokerConstraints
+
+        if isinstance(constraints, BrokerConstraints):
+            import dataclasses
+
+            return dataclasses.replace(constraints, min_quality=q)
+    except Exception:  # noqa: BLE001
+        pass
+    return constraints
+
+
+def estimate_complexity(text: str) -> float:
+    """Heuristic prompt complexity 0..1 (the query-classifier's cheap half).
+
+    A small rule-based classifier decides the quality tier: short lookups
+    → cheap models, long/code/multi-part prompts → stronger ones.  This is
+    the *suggestion*, not the decision — callers pass it as
+    ``quality=`` or let the broker rank on evidence.
+    """
+    text = text or ""
+    score = 0.15
+    length = len(text)
+    if length > 500:
+        score += 0.15
+    if length > 2000:
+        score += 0.15
+    if length > 8000:
+        score += 0.15
+    # code fences / structured asks cost reasoning
+    if "```" in text or text.count("\n") > 30:
+        score += 0.15
+    low = text.lower()
+    hard_markers = ("prove", "derive", "debug", "refactor", "compare",
+                    "trade-off", "tradeoff", "why does", "explain why",
+                    "step by step", "architecture", "algorithm")
+    if any(m in low for m in hard_markers):
+        score += 0.2
+    if low.count("?") >= 3 or len(text.split()) > 400:
+        score += 0.1
+    return round(min(1.0, score), 2)
 
 
 def _build_default_router() -> Any:
@@ -185,7 +243,7 @@ class Brain:
                        op)
         else:
             call_kw["task_kind"] = task_kind
-        for name in ("constraints", "tier"):
+        for name in ("constraints", "tier", "route"):
             if name in call_kw and not self._accepts(fn, name):
                 del call_kw[name]
         try:
@@ -354,6 +412,8 @@ class Brain:
         constraints: Any = None,
         tier: str | None = None,
         timeout_s: float | None = None,
+        quality: float | None = None,
+        route: dict[str, Any] | None = None,
     ) -> LLMResponse:
         """Chat completion.  Never raises.
 
@@ -370,8 +430,9 @@ class Brain:
         msgs = self._fit_for_send(messages, task_kind or "chat")
         resp = self._classify(self._call(
             "chat", self._get_router().chat, msgs, params,
-            task_kind=task_kind, tier=tier, constraints=constraints,
-            timeout_s=timeout_s))
+            task_kind=task_kind, tier=tier,
+            constraints=_with_quality(constraints, quality),
+            timeout_s=timeout_s, route=route))
         if (not resp.ok
                 and resp.failure_class == FailureClass.CONTEXT_OVERFLOW.value):
             # The chain failed over and every provider choked on size: the
@@ -404,10 +465,16 @@ class Brain:
         constraints: Any = None,
         tier: str | None = None,
         timeout_s: float | None = None,
+        quality: float | None = None,
+        route: dict[str, Any] | None = None,
     ) -> LLMResponse:
         """Single-prompt completion.  Never raises.
 
         ``params`` is positional to match the router's calling convention.
+        ``quality`` (0..1) is the complexity-tier knob: the broker picks the
+        cheapest model whose quality meets the bar instead of the default
+        pick.  ``route`` carries per-request routing knobs
+        (sort/only/ignore/max_price/allow_fallbacks).
         """
         text = prompt or ""
         try:
@@ -420,8 +487,9 @@ class Brain:
             _log.debug("brain: complete pre-fit failed", exc_info=True)
         return self._classify(self._call(
             "complete", self._get_router().complete, text, params,
-            task_kind=task_kind, tier=tier, constraints=constraints,
-            timeout_s=timeout_s))
+            task_kind=task_kind, tier=tier,
+            constraints=_with_quality(constraints, quality),
+            timeout_s=timeout_s, route=route))
 
     def describe_image(
         self,
@@ -507,11 +575,17 @@ class Brain:
         task_kind: str = "",
         params: SamplingParams | None = None,
         timeout_s: float | None = 90.0,
+        judge_panel: bool = False,
+        reference: str = "",
     ) -> tuple[str, Any]:
         """Fan out to ``n`` healthy providers, judge the answers, serve the winner.
 
         Returns ``(winning_text, Judgment)``.  When fan-out or judging
-        fails, falls back to a single brain call.  Never raises.
+        fails, falls back to a single brain call.  ``judge_panel=True``
+        runs one judge per provider and takes the majority vote across
+        model families (offsets single-judge bias); otherwise a single
+        debiased judge decides.  ``reference`` is the gold answer the
+        judge grades closeness to.  Never raises.
         """
         from .adjudicate import Judge, Judgment, fan_out
 
@@ -558,12 +632,107 @@ class Brain:
         # positional (messages, params) — adapt once here.
         ask = lambda messages, params, **kw: self.chat(  # noqa: E731
             messages, params=params, **kw)
-        judgment = Judge(ask).adjudicate(
-            prompt, candidates, timeout_s=timeout_s)
+        if judge_panel and len(names) >= 2:
+            # One judge per healthy provider (different families vote) —
+            # majority across families offsets any single model's bias.
+            asks = []
+            for name in names:
+                provider = router.get(name)
+                if provider is None:
+                    continue
+
+                def _judge_ask(messages: Any, p: Any,
+                               _provider: Any = provider, **kw: Any) -> LLMResponse:
+                    return _provider.chat(messages, p)
+
+                asks.append(_judge_ask)
+            judgment = Judge(ask).panel(
+                prompt, candidates, asks, timeout_s=timeout_s,
+                reference=reference)
+        else:
+            judgment = Judge(ask).adjudicate(
+                prompt, candidates, timeout_s=timeout_s,
+                reference=reference)
         winner = (candidates[judgment.winner]
                   if 0 <= judgment.winner < len(candidates)
                   else candidates[0])
         return winner, judgment
+
+    def best_of_n(
+        self,
+        prompt: str,
+        n: int = 5,
+        *,
+        task_kind: str = "",
+        params: SamplingParams | None = None,
+        timeout_s: float | None = 120.0,
+        reference: str = "",
+    ) -> tuple[str, Any]:
+        """Best-of-N sampling (OpenRouter-maximizer style): generate ``n``
+        answers across the chain, return the panel-judged best.
+
+        ``n``x the cost of one call for a meaningfully better answer on
+        hard prompts — the maximizer's headline feature, native.
+        """
+        return self.best_of(prompt, n=n, task_kind=task_kind,
+                            params=params, timeout_s=timeout_s,
+                            judge_panel=True, reference=reference)
+
+    def escalate(
+        self,
+        prompt: str,
+        *,
+        task_kind: str = "chat",
+        params: SamplingParams | None = None,
+        timeout_s: float | None = None,
+    ) -> LLMResponse:
+        """Walk the broker's escalation chain cheapest-first (nexus cascade).
+
+        The first success wins; every attempt is annotated on the
+        response's ``route_trace``/``fallback_note`` so the operator sees
+        which rung served.  Minimizes expected spend: the common case
+        succeeds on the cheapest rung.  Never raises.
+        """
+        router = self._get_router()
+        broker = getattr(router, "broker", None)
+        chain: list[Any] = []
+        if broker is not None:
+            try:
+                chain = broker.escalation_chain("chat", task_kind)
+            except Exception:  # noqa: BLE001
+                chain = []
+        if not chain:
+            return self.complete(prompt, params=params, task_kind=task_kind,
+                                 timeout_s=timeout_s)
+        attempts: list[str] = []
+        last = LLMResponse(text="", error="no attempt made")
+        for card in chain:
+            provider_name = card.provider
+            try:
+                set_active = getattr(router, "set_active", None)
+                if callable(set_active):
+                    set_active(provider_name)
+                resp = self.complete(prompt, params=params,
+                                     task_kind=task_kind,
+                                     timeout_s=timeout_s,
+                                     route={"only": [provider_name],
+                                            "allow_fallbacks": False})
+            except Exception as exc:  # noqa: BLE001
+                resp = LLMResponse(text="", error=str(exc))
+            attempts.append(provider_name)
+            if resp.ok:
+                resp.fallback_note = (
+                    f"escalation: served by {provider_name} "
+                    f"(rung {len(attempts)}/{len(chain)}"
+                    + (f"; cheaper rungs failed: {', '.join(attempts[:-1])}"
+                       if len(attempts) > 1 else "") + ")")
+                resp.failed_providers = attempts[:-1]
+                return resp
+            last = resp
+        last.fallback_note = ("escalation exhausted: "
+                              + ", ".join(attempts))
+        last.failed_providers = attempts
+        return last
 
     # ── introspection ────────────────────────────────────────────────────
     def available(self) -> bool:

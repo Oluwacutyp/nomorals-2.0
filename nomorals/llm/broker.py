@@ -66,6 +66,13 @@ class BrokerConstraints:
     #: serve.  The standing operator preference; set False to rank purely
     #: on measured evidence.
     prefer_owner: bool = True
+    #: Minimum quality 0..1 (complexity-tier selection): cards below this
+    #: are excluded.  Live benchmark scores override the card prior.
+    min_quality: float = 0.0
+    #: Tag filter (rinbarpen-style): at least one of these tags required.
+    tags_any: tuple[str, ...] = ()
+    #: Cap on USD per 1M input tokens (OpenRouter max_price shape).
+    max_price_per_1m: float = -1.0  # < 0 → no cap
 
     @classmethod
     def from_mapping(cls, raw: Mapping[str, Any] | None) -> "BrokerConstraints":
@@ -73,6 +80,9 @@ class BrokerConstraints:
         providers = raw.get("providers", ())
         if isinstance(providers, str):
             providers = (providers,)
+        tags = raw.get("tags_any", raw.get("tags", ()))
+        if isinstance(tags, str):
+            tags = (tags,)
         return cls(
             local_only=bool(raw.get("local_only", False)),
             cloud_only=bool(raw.get("cloud_only", False)),
@@ -81,6 +91,9 @@ class BrokerConstraints:
             providers=tuple(providers),
             prefer_local=bool(raw.get("prefer_local", False)),
             prefer_owner=bool(raw.get("prefer_owner", True)),
+            min_quality=max(0.0, min(1.0, float(raw.get("min_quality", 0.0) or 0.0))),
+            tags_any=tuple(str(t).lower() for t in tags),
+            max_price_per_1m=float(raw.get("max_price_per_1m", -1.0)),
         )
 
 
@@ -202,7 +215,7 @@ class ModelBroker:
             else BrokerConstraints.from_mapping(constraints)
         with self._lock:
             candidates = [c for c in self._cards.values()
-                          if c.serves(cap) and self._fits(c, cons)]
+                          if c.serves(cap) and self._fits(c, cons, cap)]
         if not candidates:
             return None
         # 2. operator override: explicit primary always wins (if it qualifies)
@@ -265,7 +278,7 @@ class ModelBroker:
         special = _TASK_KIND_CAPABILITY.get((task_kind or "").lower(), None)
         with self._lock:
             cands = [c for c in self._cards.values()
-                     if c.serves(cap) and self._fits(c, cons)]
+                     if c.serves(cap) and self._fits(c, cons, cap)]
         if cons.prefer_owner:
             owned = [c for c in cands if c.owner]
             if owned:
@@ -284,8 +297,8 @@ class ModelBroker:
         return ranked
 
     # ── internals ────────────────────────────────────────────────────────────
-    @staticmethod
-    def _fits(card: ModelCard, cons: BrokerConstraints) -> bool:
+    def _fits(self, card: ModelCard, cons: BrokerConstraints,
+              capability: Capability | None = None) -> bool:
         if cons.local_only and not card.local:
             return False
         if cons.cloud_only and card.local:
@@ -296,7 +309,197 @@ class ModelBroker:
             return False
         if cons.providers and card.provider not in cons.providers:
             return False
+        if cons.tags_any and not card.has_tags(cons.tags_any):
+            return False
+        if cons.max_price_per_1m >= 0 \
+                and card.price_per_1m_in > cons.max_price_per_1m:
+            return False
+        if cons.min_quality > 0 and capability is not None \
+                and self._quality_of(card, capability) < cons.min_quality:
+            return False
         return True
+
+    def _quality_of(self, card: ModelCard, capability: Capability) -> float:
+        """Quality 0..1: live benchmark score overrides the card prior."""
+        try:
+            rows = self.benchmarks.samples(card.id, capability)
+            if rows:
+                return BenchmarkDB.score_rows(rows[:SCORE_WINDOW])
+        except Exception:  # noqa: BLE001 — prior is the fallback
+            pass
+        return max(0.0, min(1.0, float(card.quality)))
+
+    # ── tag routing / escalation / quality-tier ──────────────────────────────
+    def select_by_tags(
+        self,
+        tags: Any,
+        task_kind: str = "",
+        constraints: Mapping[str, Any] | BrokerConstraints | None = None,
+    ) -> ModelCard | None:
+        """Tag-based routing (rinbarpen style): best card carrying every tag.
+
+        Tags like "code", "vision", "fast", "long-context", "cheap",
+        "local", "owner" live on the card; the capability is inferred from
+        the tags (code→CODE, vision→VISION, else CHAT).
+        """
+        wanted = {tags} if isinstance(tags, str) else {str(t) for t in (tags or ())}
+        wanted = {t.lower() for t in wanted if t}
+        if not wanted:
+            return None
+        cap = Capability.CHAT
+        if "code" in wanted:
+            cap = Capability.CODE
+        elif "vision" in wanted:
+            cap = Capability.VISION
+        elif "embed" in wanted:
+            cap = Capability.EMBED
+        cons = constraints if isinstance(constraints, BrokerConstraints) \
+            else BrokerConstraints.from_mapping(constraints)
+        merged = BrokerConstraints(
+            local_only=cons.local_only, cloud_only=cons.cloud_only,
+            min_context=cons.min_context,
+            max_cost_per_1k=cons.max_cost_per_1k,
+            providers=cons.providers, prefer_local=cons.prefer_local,
+            prefer_owner=cons.prefer_owner, min_quality=cons.min_quality,
+            tags_any=tuple(sorted(wanted)),
+            max_price_per_1m=cons.max_price_per_1m,
+        )
+        return self.select(cap, task_kind, merged)
+
+    def escalation_chain(
+        self,
+        capability: Capability | str,
+        task_kind: str = "",
+        constraints: Mapping[str, Any] | BrokerConstraints | None = None,
+    ) -> list[ModelCard]:
+        """Cheapest→best ordered candidates (nexus `cascade` pattern).
+
+        A failure escalates exactly one rung at a time instead of jumping
+        to the top-quality model — minimizing expected spend on the common
+        first-attempt-succeeds path, with no thresholds to tune.
+        """
+        ranked = self.ranked(capability, task_kind, constraints)
+        # ranked is best-first; cascade wants cheapest-first among the
+        # qualifying set, ordered by ascending cost then descending score.
+        cards = [card for card, _ in ranked]
+        cards.sort(key=lambda c: (c.price_per_1m_in, -self._quality_of(
+            c, capability_from(capability)
+            if isinstance(capability, str) else capability), c.id))
+        return cards
+
+    def select_for_quality(
+        self,
+        quality: float,
+        capability: Capability | str = "chat",
+        task_kind: str = "",
+        constraints: Mapping[str, Any] | BrokerConstraints | None = None,
+    ) -> ModelCard | None:
+        """Complexity-tier selection (nexus pattern): cheapest card whose
+        quality meets ``quality`` (0..1).  No thresholds to tune — the
+        catalog adapts.  Falls back to the top-quality card when the
+        target is unreachable.
+        """
+        target = max(0.0, min(1.0, float(quality)))
+        cap = capability_from(capability) if isinstance(capability, str) \
+            else capability
+        ranked = self.ranked(cap, task_kind, constraints)
+        if not ranked:
+            return None
+        meeting = [(card, score) for card, score in ranked
+                   if self._quality_of(card, cap) >= target]
+        if not meeting:
+            # Target unreachable: the top-quality card, not the cheapest.
+            return max(ranked,
+                       key=lambda t: (self._quality_of(t[0], cap), t[1],
+                                      t[0].id))[0]
+        # Cheapest first among the qualifying pool.
+        meeting.sort(key=lambda t: (t[0].price_per_1m_in, -t[1], t[0].id))
+        return meeting[0][0]
+
+    def explain(
+        self,
+        capability: Capability | str,
+        task_kind: str = "",
+        constraints: Mapping[str, Any] | BrokerConstraints | None = None,
+    ) -> dict[str, Any]:
+        """Why the winner won: full scored ranking with components.
+
+        Operators distrust black-box picks — this shows every candidate's
+        benchmark score, trajectory rate, latency rank, specialisation and
+        cost, best first.
+        """
+        cap = capability_from(capability) if isinstance(capability, str) \
+            else capability
+        cons = constraints if isinstance(constraints, BrokerConstraints) \
+            else BrokerConstraints.from_mapping(constraints)
+        special = _TASK_KIND_CAPABILITY.get((task_kind or "").lower(), None)
+        with self._lock:
+            cands = [c for c in self._cards.values()
+                     if c.serves(cap) and self._fits(c, cons, cap)]
+        if cons.prefer_owner:
+            owned = [c for c in cands if c.owner]
+            if owned:
+                cands = owned
+        rows = self.benchmarks.samples_many([c.id for c in cands], cap)
+        latency_rank = self._latency_rank(rows)
+        entries: list[dict[str, Any]] = []
+        for card in cands:
+            card_rows = rows.get(card.id, [])
+            bench = BenchmarkDB.score_rows(card_rows[:SCORE_WINDOW])
+            traj = self._trajectory_rate("", cap, card.id)
+            entries.append({
+                "id": card.id,
+                "provider": card.provider,
+                "score": round(self._score(card, cap, special, cons,
+                                           latency_rank.get(card.id),
+                                           card_rows), 4),
+                "benchmark": bench,
+                "trajectory": round(traj, 4) if traj is not None else None,
+                "latency_rank": (round(latency_rank[card.id], 3)
+                                 if card.id in latency_rank else None),
+                "specialised": special in card.capabilities
+                if special is not None else False,
+                "cost_per_1k": card.cost_per_1k,
+                "price_per_1m_in": card.price_per_1m_in,
+                "quality": round(self._quality_of(card, cap), 3),
+                "tags": sorted(card.tags),
+                "owner": card.owner,
+                "local": card.local,
+            })
+        entries.sort(key=lambda e: (-e["score"], e["id"]))
+        return {
+            "capability": cap.value,
+            "task_kind": task_kind,
+            "winner": entries[0]["id"] if entries else None,
+            "candidates": entries,
+        }
+
+    def format_ranking(
+        self,
+        capability: Capability | str,
+        task_kind: str = "",
+        constraints: Mapping[str, Any] | BrokerConstraints | None = None,
+    ) -> str:
+        """God-tier selection table for consoles and status views."""
+        info = self.explain(capability, task_kind, constraints)
+        cands = info["candidates"]
+        if not cands:
+            return f"🤖 broker: no candidate serves {info['capability']}"
+        lines = [f"🤖 broker ranking — {info['capability']}"
+                 + (f" / {task_kind}" if task_kind else "")]
+        header = (f"  {'model':<22} {'score':>6} {'bench':>6} "
+                  f"{'lat':>5} {'cost/1k':>8} {'tags'}")
+        lines.append(header)
+        for i, e in enumerate(cands):
+            marker = "🏆" if i == 0 else "  "
+            lat = (f"{e['latency_rank']:.2f}" if e["latency_rank"] is not None
+                   else "—")
+            tags = ",".join(e["tags"][:4]) if e["tags"] else "—"
+            lines.append(
+                f"{marker} {e['id']:<22} {e['score']:>6.3f} "
+                f"{e['benchmark']:>6.3f} {lat:>5} "
+                f"${e['cost_per_1k']:>7.4f} {tags}")
+        return "\n".join(lines)
 
     def _trajectory_rate(self, task_kind: str, capability: Capability,
                          model_id: str) -> float | None:

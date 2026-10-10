@@ -128,6 +128,35 @@ class OpenRouterProvider(OpenAICompatProvider):
             raise ProviderError("openrouter key lookup returned an unexpected shape")
         return info
 
+    def chat(
+        self,
+        messages: Any,
+        params: Any = None,
+        *,
+        provider_prefs: dict[str, Any] | None = None,
+        **kw: Any,
+    ) -> Any:
+        """Chat with OpenRouter-native provider routing preferences.
+
+        ``provider_prefs`` becomes the request's ``provider`` object:
+        ``order``, ``only``, ``ignore``, ``sort`` ("price"|"throughput"|
+        "latency"), ``allow_fallbacks``, ``max_price``,
+        ``require_parameters``, ``data_collection``.  This is routing
+        *inside* OpenRouter (which endpoint serves the model) — the
+        router's own ``route=`` knobs pick *which provider* gets the call.
+        """
+        if not provider_prefs:
+            return super().chat(messages, params, **kw)
+        allowed = {"order", "only", "ignore", "sort", "allow_fallbacks",
+                   "max_price", "require_parameters", "data_collection"}
+        prefs = {k: v for k, v in dict(provider_prefs).items() if k in allowed}
+        original = self.extra_body
+        try:
+            self.extra_body = {**original, "provider": prefs}
+            return super().chat(messages, params, **kw)
+        finally:
+            self.extra_body = original
+
     @property
     def is_free_model(self) -> bool:
         """True when the configured model costs nothing (``:free`` or alias)."""

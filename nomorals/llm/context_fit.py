@@ -37,14 +37,18 @@ from .base import Message, estimate_messages
 __all__ = [
     "DEFAULT_CONTEXT_TOKENS",
     "TASK_FIT_CHAINS",
+    "CaseFacts",
     "Compact",
     "ContextStrategy",
     "FitResult",
+    "PrioritizeEnds",
     "SummarizeMiddle",
     "TruncateOldest",
     "fit_messages",
     "fit_prompt",
     "strategy_for",
+    "trim_tool_results",
+    "with_cache_breakpoints",
 ]
 
 _log = get_logger(__name__)
@@ -63,10 +67,10 @@ TASK_FIT_CHAINS: dict[str, tuple[str, ...]] = {
     "chat": ("compact", "truncate_oldest"),
     "intent": ("compact", "truncate_oldest"),
     "summarize": ("compact", "truncate_oldest"),
-    "judge": ("compact", "summarize_middle", "truncate_oldest"),
-    "research": ("compact", "summarize_middle", "truncate_oldest"),
-    "reasoning": ("compact", "summarize_middle", "truncate_oldest"),
-    "plan": ("compact", "summarize_middle", "truncate_oldest"),
+    "judge": ("compact", "prioritize_ends", "summarize_middle", "truncate_oldest"),
+    "research": ("compact", "prioritize_ends", "summarize_middle", "truncate_oldest"),
+    "reasoning": ("compact", "prioritize_ends", "summarize_middle", "truncate_oldest"),
+    "plan": ("compact", "prioritize_ends", "summarize_middle", "truncate_oldest"),
     "code": ("compact", "truncate_oldest"),
     "creative": ("compact", "truncate_oldest"),
     "vision": ("compact", "truncate_oldest"),
@@ -92,9 +96,10 @@ class FitResult:
     #: How many non-system turns were dropped.
     dropped_turns: int = 0
     #: True when the middle was summarized (not just dropped).
-    summarized: bool = False
-    #: True when the result still exceeds the budget (chain exhausted).
+    summarized: bool = False    #: True when the result still exceeds the budget (chain exhausted).
     overflow: bool = False
+    #: Pinned facts that survived verbatim (case-facts block).
+    facts_kept: int = 0
 
     @property
     def ok(self) -> bool:
@@ -141,8 +146,9 @@ class Compact(ContextStrategy):
 class TruncateOldest(ContextStrategy):
     """Drop the oldest non-system turns until the budget fits.
 
-    The system prompt (first system message) and the latest user turn are
-    never dropped — they carry the instruction and the actual request.
+    Every system turn (the system prompt and the case-facts block) and
+    the latest user turn are never dropped — they carry the instruction,
+    the pinned facts, and the actual request.
     """
 
     name = "truncate_oldest"
@@ -151,7 +157,8 @@ class TruncateOldest(ContextStrategy):
               ctx: dict[str, Any]) -> list[Message]:
         if estimate_messages(messages) <= budget or len(messages) <= 2:
             return messages
-        system = [m for m in messages if m.role == "system"][:1]
+        # Every system turn is sacred — the case-facts block rides here.
+        system = [m for m in messages if m.role == "system"]
         rest = [m for m in messages if m.role != "system"]
         # keep the latest turn sacred; drop from the oldest of the rest
         sacred = rest[-1:] if rest else []
@@ -191,7 +198,7 @@ class SummarizeMiddle(ContextStrategy):
               ctx: dict[str, Any]) -> list[Message]:
         if estimate_messages(messages) <= budget:
             return messages
-        system = [m for m in messages if m.role == "system"][:1]
+        system = [m for m in messages if m.role == "system"]
         rest = [m for m in messages if m.role != "system"]
         if len(rest) <= self.keep_turns + 2:
             # too short to have a real middle — let truncation handle it
@@ -221,12 +228,176 @@ class SummarizeMiddle(ContextStrategy):
         _log.info("context_fit: summarize_middle compressed %d turn(s)",
                   len(middle))
         if estimate_messages(result) > budget:
-            return TruncateOldest().apply(result, budget, ctx)
+            # Still over budget: truncate, but the summary turn is sacred —
+            # it is the compressed memory of everything dropped.  Dropping
+            # it would silently discard the summarizer's work.
+            return self._truncate_keep_summary(result, budget, ctx,
+                                               summary_turn)
         return result
+
+    @staticmethod
+    def _truncate_keep_summary(
+        messages: list[Message], budget: int, ctx: dict[str, Any],
+        summary_turn: Message,
+    ) -> list[Message]:
+        """Truncate oldest, keeping every system turn AND the summary."""
+        system = [m for m in messages if m.role == "system"]
+        rest = [m for m in messages if m.role != "system"]
+        sacred_tail = rest[-1:] if rest else []
+        middle = [m for m in rest[:-1] if m is not summary_turn]
+        kept: list[Message] = list(system) + [summary_turn]
+        tail: list[Message] = []
+        for m in reversed(middle):
+            candidate = kept + [m] + tail + sacred_tail
+            if estimate_messages(candidate) <= budget:
+                tail.insert(0, m)
+        result = kept + tail + sacred_tail
+        dropped = len(messages) - len(result)
+        if dropped:
+            ctx["dropped_turns"] = ctx.get("dropped_turns", 0) + dropped
+        return result
+
+
+class CaseFacts(ContextStrategy):
+    """Pin facts that must survive fitting verbatim.
+
+    Progressive summarization silently strips exactly the details production
+    systems need kept exact — numbers, dates, ids, names (Anthropic's
+    context-management guidance calls this the case-facts block).  Facts
+    arrive via ``ctx["pinned_facts"]`` (a list of strings); they are
+    rendered as one verbatim system-adjacent turn right after the system
+    prompt, immune to every other strategy in the chain.  Never drops
+    content on its own — run it first.
+    """
+
+    name = "case_facts"
+
+    def apply(self, messages: list[Message], budget: int,
+              ctx: dict[str, Any]) -> list[Message]:
+        facts = [str(f).strip() for f in (ctx.get("pinned_facts") or [])
+                 if str(f).strip()]
+        if not facts:
+            return messages
+        # Don't double-pin when the block is already present.
+        if any(m.role == "system" and m.content.startswith(_FACTS_HEADER)
+               for m in messages):
+            ctx["facts_kept"] = len(facts)
+            return messages
+        block = Message(
+            role="system",
+            content=_FACTS_HEADER + "\n" + "\n".join(f"• {f}" for f in facts),
+        )
+        ctx["facts_kept"] = len(facts)
+        system_idx = next(
+            (i for i, m in enumerate(messages) if m.role == "system"), None)
+        if system_idx is None:
+            return [block] + messages
+        return messages[: system_idx + 1] + [block] + messages[system_idx + 1:]
+
+
+class PrioritizeEnds(ContextStrategy):
+    """Lost-in-the-middle reorder: long reference up top, request at bottom.
+
+    Models attend to the start and end of a long context far more than the
+    interior; Anthropic's own testing shows placing long reference material
+    at the top and the question/instructions at the bottom improves response
+    quality by up to 30% on complex multi-document tasks at zero token cost.
+    This strategy moves the longest non-system message (the reference) to
+    just after the system prompt and keeps the last user message (the
+    request) at the very bottom.  Content-preserving — it only reorders.
+    """
+
+    name = "prioritize_ends"
+
+    def apply(self, messages: list[Message], budget: int,
+              ctx: dict[str, Any]) -> list[Message]:
+        if len(messages) < 4:
+            return messages
+        system = [m for m in messages if m.role == "system"]
+        rest = [m for m in messages if m.role != "system"]
+        if len(rest) < 3:
+            return messages
+        # The request: last user message stays last.
+        request_idx = next(
+            (i for i in range(len(rest) - 1, -1, -1)
+             if rest[i].role == "user"), None)
+        # The reference: longest non-request message goes to the top.
+        pool = [m for j, m in enumerate(rest) if j != request_idx]
+        if not pool:
+            return messages
+        reference = max(pool, key=lambda m: len(m.content))
+        if len(reference.content) < 500:
+            return messages  # nothing long enough to matter
+        middle = [m for m in pool if m is not reference]
+        request = [rest[request_idx]] if request_idx is not None else []
+        return system + [reference] + middle + request
+
+
+def trim_tool_results(messages: Sequence[Message],
+                      max_chars: int = 2000) -> list[Message]:
+    """Cap verbose tool outputs before they enter context.
+
+    Tool results are the noisiest context filler: a directory listing or a
+    stack trace that was never going to be read in full.  Truncation keeps
+    head and tail (the error line usually lives at the end) and marks the
+    cut honestly.  Content-safe: pure function, never raises.
+    """
+    out: list[Message] = []
+    for m in messages:
+        if m.role == "tool" and len(m.content) > max_chars:
+            head = max_chars * 2 // 3
+            tail = max_chars - head
+            cut = (m.content[:head] + "\n…[tool output trimmed]…\n"
+                   + m.content[-tail:])
+            out.append(Message(role=m.role, content=cut, name=m.name,
+                               tool_call_id=m.tool_call_id,
+                               images=list(m.images)))
+        else:
+            out.append(m)
+    return out
+
+
+def with_cache_breakpoints(
+    messages: Sequence[Message], *, window: int = 3,
+) -> list[dict[str, Any]]:
+    """Annotate provider-agnostic prompt-cache breakpoints (X19 pattern).
+
+    Breakpoint 1: the system prompt (stable across turns — never mutate it
+    mid-conversation).  Breakpoints 2..N: the last ``window`` non-system
+    messages (the rolling window that re-establishes caching within a turn
+    or two after compression).  Returns plain dicts with a
+    ``cache_breakpoint: True`` marker; provider adapters translate the
+    marker into their native form (e.g. Anthropic ``cache_control``).
+    """
+    msgs = list(messages)
+    if not msgs:
+        return []
+    marked: set[int] = set()
+    sys_idx = next((i for i, m in enumerate(msgs) if m.role == "system"),
+                   None)
+    if sys_idx is not None:
+        marked.add(sys_idx)
+    non_system = [i for i, m in enumerate(msgs) if m.role != "system"]
+    marked.update(non_system[-max(1, window):])
+    out: list[dict[str, Any]] = []
+    for i, m in enumerate(msgs):
+        row: dict[str, Any] = {
+            "role": m.role, "content": m.content,
+            "cache_breakpoint": i in marked,
+        }
+        if m.name:
+            row["name"] = m.name
+        out.append(row)
+    return out
+
+
+_FACTS_HEADER = "[facts — keep verbatim, never summarize]"
 
 
 _STRATEGIES: dict[str, ContextStrategy] = {
     "compact": Compact(),
+    "case_facts": CaseFacts(),
+    "prioritize_ends": PrioritizeEnds(),
     "truncate_oldest": TruncateOldest(),
     "summarize_middle": SummarizeMiddle(),
 }
@@ -245,24 +416,38 @@ def fit_messages(
     summarizer: Callable[[str], str] | None = None,
     chain: Sequence[str] | None = None,
     floor: int = 256,
+    pinned_facts: Sequence[str] | None = None,
 ) -> FitResult:
     """Shrink ``messages`` to ``max_tokens`` via the task-kind's strategy chain.
 
     ``floor`` is the smallest budget ever attempted — fitting below a
     couple hundred tokens rarely leaves anything usable.  Callers doing
     aggressive post-overflow recovery may pass a smaller floor.
-    Never raises: on any internal failure the original messages come back
-    with ``overflow`` set honestly.
+    ``pinned_facts`` threads through ``ctx`` to :class:`CaseFacts`: facts
+    that survive every strategy verbatim.  Never raises: on any internal
+    failure the original messages come back with ``overflow`` set honestly.
     """
     msgs = list(messages)
     budget = max(floor, int(max_tokens * _BUDGET_FRACTION))
     names = tuple(chain) if chain is not None else \
         TASK_FIT_CHAINS.get((task_kind or "").lower(), _DEFAULT_CHAIN)
-    ctx: dict[str, Any] = {"summarizer": summarizer}
+    ctx: dict[str, Any] = {
+        "summarizer": summarizer,
+        "pinned_facts": list(pinned_facts or []),
+    }
     applied: list[str] = []
     try:
+        # Pin facts even when the budget already fits — they are cheap and
+        # must be present on every turn, not just when we are shrinking.
+        case_facts = strategy_for("case_facts")
+        if case_facts is not None and ctx["pinned_facts"]:
+            msgs = case_facts.apply(msgs, budget, ctx)
+            if ctx.get("facts_kept"):
+                applied.append(case_facts.name)
         if estimate_messages(msgs) <= budget:
-            return FitResult(messages=msgs, tokens=estimate_messages(msgs))
+            return FitResult(messages=msgs, tokens=estimate_messages(msgs),
+                             applied=applied,
+                             facts_kept=int(ctx.get("facts_kept", 0)))
         for name in names:
             strategy = strategy_for(name)
             if strategy is None:
@@ -279,6 +464,7 @@ def fit_messages(
             dropped_turns=int(ctx.get("dropped_turns", 0)),
             summarized=bool(ctx.get("summarized", False)),
             overflow=tokens > budget,
+            facts_kept=int(ctx.get("facts_kept", 0)),
         )
     except Exception as exc:  # noqa: BLE001 — fitting must never break the call
         _log.debug("context_fit failed (%s); returning original", exc)

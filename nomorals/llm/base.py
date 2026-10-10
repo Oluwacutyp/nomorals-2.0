@@ -16,12 +16,14 @@ from typing import Any, Iterable, Literal, Sequence
 from ..core.errors import ModelError
 
 __all__ = [
+    "CHAT_TEMPLATES",
     "LLMProvider",
     "LLMResponse",
     "Message",
     "Role",
     "SamplingParams",
     "Usage",
+    "detect_template",
     "messages_to_text",
     "short_error",
     "validate_messages",
@@ -65,31 +67,184 @@ class Message:
         return cls(role="tool", content=content, tool_call_id=tool_call_id, **kw)
 
 
-def messages_to_text(messages: Sequence[Message], *, template: str = "chatml") -> str:
+def messages_to_text(
+    messages: Sequence[Message],
+    *,
+    template: str = "chatml",
+    model: str = "",
+) -> str:
     """Render messages to a single prompt string.
 
     Needed for completion-only endpoints and for any model served without a chat
-    template. ChatML is the default because it is what Dolphin-family models are
-    trained on.
+    template.  ``template="auto"`` (or ``template=""``) detects the model's
+    native family from ``model`` via :func:`detect_template` — hand-rolling one
+    format for every family costs 10–30% benchmark accuracy on the wrong
+    family (ChatML tokens on a Mistral model, …), so the native template is
+    the right default when the model id is known.  ChatML stays the default
+    because it is what Dolphin-family models are trained on.
     """
-    if template == "chatml":
+    name = (template or "").strip().lower()
+    if name in ("auto", ""):
+        name = detect_template(model) if model else "chatml"
+    if name == "chatml":
         parts = [f"<|im_start|>{m.role}\n{m.content}<|im_end|>" for m in messages]
         parts.append("<|im_start|>assistant\n")
         return "\n".join(parts)
-    if template == "llama3":
+    if name == "llama3":
         parts = []
         for m in messages:
             tag = {"system": "system", "user": "user", "assistant": "assistant"}.get(m.role, m.role)
             parts.append(f"<|start_header_id|>{tag}<|end_header_id|>\n\n{m.content}<|eot_id|>")
         parts.append("<|start_header_id|>assistant<|end_header_id|>\n\n")
         return "".join(parts)
-    if template == "alpaca":
+    if name == "llama2":
+        # [INST] <<SYS>>…<</SYS>> … [/INST]
+        out: list[str] = []
+        system = next((m.content for m in messages if m.role == "system"), "")
+        turns = [m for m in messages if m.role != "system"]
+        sys_block = f"<<SYS>>\n{system}\n<</SYS>>\n\n" if system else ""
+        i = 0
+        while i < len(turns):
+            user_turns = []
+            while i < len(turns) and turns[i].role == "user":
+                user_turns.append(turns[i].content)
+                i += 1
+            prompt_part = " ".join(user_turns)
+            assistant_part = ""
+            if i < len(turns) and turns[i].role == "assistant":
+                assistant_part = " " + turns[i].content
+                i += 1
+            prefix = "<s>[INST] " if not out else "[INST] "
+            out.append(f"{prefix}{sys_block if not out else ''}{prompt_part} [/INST]{assistant_part} </s>")
+            sys_block = ""
+        if not out:
+            return f"<s>[INST] {sys_block} [/INST] "
+        # generation prompt when the last turn was a user turn
+        if turns and turns[-1].role != "assistant":
+            out.append("[INST] ")
+        return "".join(out)
+    if name == "mistral":
+        out = []
+        for m in messages:
+            if m.role == "system":
+                out.append(f"<s>[INST] {m.content} [/INST]")
+            elif m.role == "user":
+                out.append(f"[INST] {m.content} [/INST]")
+            elif m.role == "assistant":
+                out.append(f" {m.content}</s>")
+            else:
+                out.append(f"[INST] {m.content} [/INST]")
+        text = "".join(out)
+        if messages and messages[-1].role != "assistant":
+            text += " "
+        return text
+    if name == "gemma":
+        parts = []
+        for m in messages:
+            tag = "model" if m.role == "assistant" else m.role
+            if tag not in ("system", "user", "model"):
+                tag = "user"
+            parts.append(f"<start_of_turn>{tag}\n{m.content}<end_of_turn>\n")
+        parts.append("<start_of_turn>model\n")
+        return "".join(parts)
+    if name == "qwen":
+        # Qwen2/2.5/3 ChatML-family with generation prompt
+        parts = [f"<|im_start|>{m.role}\n{m.content}<|im_end|>\n" for m in messages]
+        parts.append("<|im_start|>assistant\n")
+        return "".join(parts)
+    if name == "deepseek":
+        parts = []
+        for m in messages:
+            if m.role == "system":
+                parts.append(m.content)
+            elif m.role == "user":
+                parts.append(f"### Instruction:\n{m.content}\n")
+            elif m.role == "assistant":
+                parts.append(f"### Response:\n{m.content}\n")
+            else:
+                parts.append(f"### {m.role}:\n{m.content}\n")
+        parts.append("### Response:\n")
+        return "\n".join(parts)
+    if name == "phi3":
+        parts = []
+        for m in messages:
+            parts.append(f"<|{m.role}|>\n{m.content}<|end|>\n")
+        parts.append("<|assistant|>\n")
+        return "".join(parts)
+    if name == "vicuna":
+        parts = []
+        for m in messages:
+            if m.role == "system":
+                parts.append(m.content)
+            elif m.role == "user":
+                parts.append(f"USER: {m.content}")
+            elif m.role == "assistant":
+                parts.append(f"ASSISTANT: {m.content}</s>")
+            else:
+                parts.append(f"{m.role.upper()}: {m.content}")
+        parts.append("ASSISTANT:")
+        return "\n".join(parts)
+    if name == "zephyr":
+        parts = []
+        for m in messages:
+            parts.append(f"<|{m.role}|>\n{m.content}</s>\n")
+        parts.append("<|assistant|>\n")
+        return "".join(parts)
+    if name == "openchat":
+        parts = []
+        for m in messages:
+            if m.role == "system":
+                parts.append(f"{m.content}<|end_of_turn|>")
+            else:
+                parts.append(f"GPT4 Correct {m.role.capitalize()}: {m.content}<|end_of_turn|>")
+        parts.append("GPT4 Correct Assistant:")
+        return "".join(parts)
+    if name == "alpaca":
         system = next((m.content for m in messages if m.role == "system"), "")
         turns = [m for m in messages if m.role != "system"]
         body = "\n".join(f"### {m.role.capitalize()}:\n{m.content}" for m in turns)
         header = f"{system}\n\n" if system else ""
         return f"{header}{body}\n### Assistant:\n"
+    # unknown template name → plain fallback (previous default branch)
     return "\n".join(f"{m.role}: {m.content}" for m in messages) + "\nassistant:"
+
+
+#: Model-id fragments → native chat template family.  Checked in order;
+#: first hit wins.  (HF convention: never hand-roll — the template must
+#: match what the model was trained on.)
+_TEMPLATE_FAMILY_HINTS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("llama3", ("llama-3", "llama3", "llama-3.1", "llama-3.2", "llama-3.3")),
+    ("qwen", ("qwen",)),
+    ("mistral", ("mistral", "mixtral")),
+    ("gemma", ("gemma",)),
+    ("deepseek", ("deepseek",)),
+    ("phi3", ("phi-3", "phi3", "phi-4", "phi4")),
+    ("vicuna", ("vicuna",)),
+    ("zephyr", ("zephyr",)),
+    ("openchat", ("openchat",)),
+    ("llama2", ("llama-2", "llama2", "codellama")),
+    ("chatml", ("dolphin", "chatml", "codebeast", "hermes")),
+)
+
+
+def detect_template(model_id: str) -> str:
+    """Native chat-template family for a model id (``"chatml"`` fallback).
+
+    Fragment match, first hit wins — mirrors how ``apply_chat_template``
+    picks the model's own Jinja template from its tokenizer config.
+    """
+    lowered = (model_id or "").lower()
+    for family, hints in _TEMPLATE_FAMILY_HINTS:
+        if any(h in lowered for h in hints):
+            return family
+    return "chatml"
+
+
+#: All template names :func:`messages_to_text` understands.
+CHAT_TEMPLATES: tuple[str, ...] = (
+    "chatml", "llama3", "llama2", "mistral", "gemma", "qwen",
+    "deepseek", "phi3", "vicuna", "zephyr", "openchat", "alpaca", "auto",
+)
 
 
 def validate_messages(messages: Sequence[Message], *, who: str = "chat") -> list[Message]:
@@ -180,6 +335,10 @@ class Usage:
     prompt_tokens: int = 0
     completion_tokens: int = 0
     total_tokens: int = 0
+    #: Provider-reported cache-read input tokens (billed ~0.1x).
+    cached_tokens: int = 0
+    #: Provider-reported reasoning tokens (billed, never shown to the user).
+    reasoning_tokens: int = 0
 
     @property
     def as_dict(self) -> dict[str, int]:
@@ -187,6 +346,8 @@ class Usage:
             "prompt_tokens": self.prompt_tokens,
             "completion_tokens": self.completion_tokens,
             "total_tokens": self.total_tokens,
+            "cached_tokens": self.cached_tokens,
+            "reasoning_tokens": self.reasoning_tokens,
         }
 
 
@@ -215,6 +376,12 @@ class LLMResponse:
     #: Empty on success.  Lets callers recover the RIGHT way — shrink the
     #: context on "context_overflow" instead of blindly retrying.
     failure_class: str = ""
+    #: Per-attempt routing trace, filled by the router: one dict per
+    #: provider attempt — {"provider", "ok", "latency_ms", "error"} — in
+    #: attempt order.  Langfuse-style observability without a service.
+    route_trace: list[dict[str, Any]] = field(default_factory=list)
+    #: Metered USD cost of this response (estimate_cost).  0.0 = unknown/free.
+    cost_usd: float = 0.0
 
     @property
     def ok(self) -> bool:
@@ -233,6 +400,8 @@ class LLMResponse:
             "failed_providers": list(self.failed_providers),
             "fallback_note": self.fallback_note,
             "failure_class": self.failure_class,
+            "route_trace": [dict(t) for t in self.route_trace],
+            "cost_usd": round(self.cost_usd, 9),
         }
 
 

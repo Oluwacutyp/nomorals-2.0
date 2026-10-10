@@ -2,31 +2,63 @@
 
 from __future__ import annotations
 
-from .adjudicate import Judge, Judgment, adjudicate, fan_out
-from .base import LLMProvider, LLMResponse, Message, SamplingParams, Usage
+from .adjudicate import (
+    Judge,
+    Judgment,
+    PairwiseVerdict,
+    adjudicate,
+    fan_out,
+    format_judgment,
+    pairwise,
+)
+from .base import (
+    CHAT_TEMPLATES,
+    LLMProvider,
+    LLMResponse,
+    Message,
+    SamplingParams,
+    Usage,
+    detect_template,
+)
 from .benchmarks import BenchmarkDB, BenchmarkSample, benchmark_model, seed_synthetic
-from .brain import Brain, brain_for, explain_failure, get_brain, reset_brain
+from .brain import (
+    Brain,
+    brain_for,
+    estimate_complexity,
+    explain_failure,
+    get_brain,
+    reset_brain,
+)
 from .broker import BrokerConstraints, ModelBroker, NoCandidate
 from .capabilities import Capability, ModelCard, capability_from, provider_capabilities
 from .context_fit import (
     DEFAULT_CONTEXT_TOKENS,
     TASK_FIT_CHAINS,
+    CaseFacts,
     Compact,
     ContextStrategy,
     FitResult,
+    PrioritizeEnds,
     SummarizeMiddle,
     TruncateOldest,
     fit_messages,
     fit_prompt,
     strategy_for,
+    trim_tool_results,
+    with_cache_breakpoints,
 )
 from .failures import (
     FailureClass,
     FailureInfo,
     RecoveryPolicy,
     RECOVERY,
+    RetryBudget,
+    backoff_delay,
     classify_failure,
+    is_retryable,
     parse_retry_after,
+    retry_after_s,
+    should_failover,
 )
 from .lifecycle import (
     LifecycleError,
@@ -36,15 +68,29 @@ from .lifecycle import (
     ModelProvisioner,
     STAGES,
 )
-from .router import LLMRouter, ProviderHealth
-from .prompts import render_prompt, system_prompt_for
+from .router import CostLog, LLMRouter, ProviderHealth, estimate_cost
+from .prompts import (
+    PromptLibrary,
+    get_library,
+    render_prompt,
+    rubric_prompt,
+    system_prompt_for,
+)
 from .cost_display import (
     CostDisplay,
+    budget_alert_line,
     control_cost,
     format_cost,
+    format_cost_table,
     get_display,
     maybe_cost_footer,
     parse_budget_nl,
+)
+from .download import (
+    DownloadResult,
+    HuggingFaceDownloader,
+    format_progress,
+    validate_gguf,
 )
 
 __all__ = [
@@ -52,14 +98,19 @@ __all__ = [
     "BenchmarkSample",
     "Brain",
     "BrokerConstraints",
+    "CHAT_TEMPLATES",
     "Capability",
+    "CaseFacts",
     "Compact",
     "ContextStrategy",
     "CostDisplay",
+    "CostLog",
     "DEFAULT_CONTEXT_TOKENS",
+    "DownloadResult",
     "FailureClass",
     "FailureInfo",
     "FitResult",
+    "HuggingFaceDownloader",
     "Judge",
     "Judgment",
     "LifecycleError",
@@ -74,9 +125,13 @@ __all__ = [
     "ModelLifecycle",
     "ModelProvisioner",
     "NoCandidate",
+    "PairwiseVerdict",
+    "PrioritizeEnds",
+    "PromptLibrary",
     "ProviderHealth",
     "RECOVERY",
     "RecoveryPolicy",
+    "RetryBudget",
     "SamplingParams",
     "STAGES",
     "SummarizeMiddle",
@@ -84,25 +139,42 @@ __all__ = [
     "TruncateOldest",
     "Usage",
     "adjudicate",
+    "backoff_delay",
     "benchmark_model",
     "brain_for",
+    "budget_alert_line",
     "capability_from",
     "classify_failure",
     "control_cost",
+    "detect_template",
+    "estimate_complexity",
+    "estimate_cost",
     "explain_failure",
     "fan_out",
     "fit_messages",
     "fit_prompt",
     "format_cost",
+    "format_cost_table",
+    "format_judgment",
+    "format_progress",
     "get_brain",
     "get_display",
+    "get_library",
+    "is_retryable",
     "maybe_cost_footer",
+    "pairwise",
     "parse_budget_nl",
     "parse_retry_after",
     "provider_capabilities",
     "reset_brain",
     "render_prompt",
+    "retry_after_s",
+    "rubric_prompt",
     "seed_synthetic",
+    "should_failover",
     "strategy_for",
     "system_prompt_for",
+    "trim_tool_results",
+    "validate_gguf",
+    "with_cache_breakpoints",
 ]

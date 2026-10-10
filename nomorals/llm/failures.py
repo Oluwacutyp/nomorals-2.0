@@ -28,7 +28,9 @@ of breakage instead of by raw message text.
 from __future__ import annotations
 
 import enum
+import random
 import re
+import time
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -37,8 +39,13 @@ __all__ = [
     "FailureInfo",
     "RecoveryPolicy",
     "RECOVERY",
+    "RetryBudget",
+    "backoff_delay",
     "classify_failure",
+    "is_retryable",
     "parse_retry_after",
+    "retry_after_s",
+    "should_failover",
 ]
 
 
@@ -62,6 +69,9 @@ class FailureClass(str, enum.Enum):
     SERVER = "server"
     #: 404 / not hosted / bad model name — a config error, not transient.
     CONFIG = "config"
+    #: The router's daily spend cap was reached — stop spending, not a
+    #: provider problem at all.
+    BUDGET = "budget"
     #: Anything else.
     UNKNOWN = "unknown"
 
@@ -114,6 +124,10 @@ RECOVERY: dict[FailureClass, RecoveryPolicy] = {
         FailureClass.CONFIG, retryable=False, failover=True,
         cooldown_s=600.0, reduce_context=False,
         hint="the model name or endpoint is wrong — check the configured model id"),
+    FailureClass.BUDGET: RecoveryPolicy(
+        FailureClass.BUDGET, retryable=False, failover=False,
+        cooldown_s=0.0, reduce_context=False,
+        hint="daily LLM spend cap reached — raise the budget or wait for the next UTC day"),
     FailureClass.UNKNOWN: RecoveryPolicy(
         FailureClass.UNKNOWN, retryable=True, failover=True,
         cooldown_s=30.0, reduce_context=False,
@@ -216,6 +230,107 @@ class FailureInfo:
             "cooldown_s": self.policy.cooldown_s,
             "reduce_context": self.policy.reduce_context,
             "hint": self.policy.hint,
+        }
+
+
+def retry_after_s(error: str | None) -> float | None:
+    """Seconds the server asked us to wait (Retry-After), else None.
+
+    The server knows more than we do about when it will be ready — always
+    prefer this over the computed backoff when present.
+    """
+    return parse_retry_after(error)
+
+
+def backoff_delay(
+    attempt: int,
+    *,
+    base: float = 1.0,
+    cap: float = 60.0,
+    jitter: str = "full",
+) -> float:
+    """Exponential backoff with jitter for retry attempt ``attempt`` (0-based).
+
+    ``jitter="full"`` is the AWS-recommended default: ``random(0, min(base *
+    2**attempt, cap))`` — without it, every client retries on the same beat
+    and the thundering herd takes the recovering service back down.
+    ``"equal"`` splits the difference (half fixed, half jittered);
+    ``"none"`` is deterministic (tests, not production).
+    """
+    exp = min(base * (2.0 ** max(0, attempt)), cap)
+    mode = (jitter or "full").lower()
+    if mode == "none":
+        return round(exp, 3)
+    if mode == "equal":
+        return round(exp / 2.0 + random.uniform(0, exp / 2.0), 3)
+    return round(random.uniform(0, exp), 3)
+
+
+def is_retryable(failure_class: FailureClass | str) -> bool:
+    """May this failure class be retried (possibly after recovery)?
+
+    Single source of truth: the ``RECOVERY`` table.  AUTH/CONFIG are not
+    retryable — re-probing a dead credential is quota arson.
+    """
+    fc = failure_class if isinstance(failure_class, FailureClass) \
+        else FailureClass(str(failure_class).lower())
+    policy = RECOVERY.get(fc)
+    return bool(policy.retryable) if policy is not None else True
+
+
+def should_failover(failure_class: FailureClass | str) -> bool:
+    """Continue down the failover chain for this failure class?
+
+    Mirrors Portkey's ``on_status_codes`` insight: a terminal error (bad
+    key, dead model id) fails the *call* fast instead of burning the whole
+    chain.  CONTEXT_OVERFLOW still fails over (a bigger window downstream
+    may serve it) but the caller's shrink-and-retry owns the real fix.
+    """
+    fc = failure_class if isinstance(failure_class, FailureClass) \
+        else FailureClass(str(failure_class).lower())
+    policy = RECOVERY.get(fc)
+    return bool(policy.failover) if policy is not None else True
+
+
+class RetryBudget:
+    """Wall-clock budget for a retry loop (tenaz-style total_timeout).
+
+    Retries are bounded by attempts AND by time — a provider that fails
+    fast must not spin 20 attempts in 3 seconds and call it "resilient".
+    """
+
+    def __init__(self, deadline_s: float = 60.0) -> None:
+        self.deadline_s = max(0.0, float(deadline_s))
+        self.started = time.monotonic()
+        self.attempts = 0
+
+    @property
+    def elapsed(self) -> float:
+        return time.monotonic() - self.started
+
+    @property
+    def remaining(self) -> float:
+        return max(0.0, self.deadline_s - self.elapsed)
+
+    @property
+    def exhausted(self) -> bool:
+        return self.remaining <= 0.0
+
+    def next_delay(self, *, base: float = 1.0, cap: float = 60.0,
+                   jitter: str = "full") -> float:
+        """Backoff for the next attempt, clamped to the remaining budget."""
+        self.attempts += 1
+        delay = backoff_delay(self.attempts - 1, base=base, cap=cap,
+                              jitter=jitter)
+        return min(delay, self.remaining)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "deadline_s": self.deadline_s,
+            "elapsed_s": round(self.elapsed, 3),
+            "remaining_s": round(self.remaining, 3),
+            "attempts": self.attempts,
+            "exhausted": self.exhausted,
         }
 
 

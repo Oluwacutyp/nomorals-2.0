@@ -280,6 +280,39 @@ class ModelRecord:
     def is_local(self) -> bool:
         return bool(self.path)
 
+    @property
+    def price_in_per_1m(self) -> float:
+        """USD per 1M input tokens (metadata-backed; 0 = free/unknown)."""
+        try:
+            return float((self.metadata or {}).get("price_in_per_1m", 0.0))
+        except (TypeError, ValueError):
+            return 0.0
+
+    @property
+    def price_out_per_1m(self) -> float:
+        try:
+            return float((self.metadata or {}).get("price_out_per_1m", 0.0))
+        except (TypeError, ValueError):
+            return 0.0
+
+    @property
+    def quality(self) -> float:
+        """Quality prior 0..1 (metadata-backed; 0.5 = unknown)."""
+        try:
+            return max(0.0, min(1.0, float(
+                (self.metadata or {}).get("quality", 0.5))))
+        except (TypeError, ValueError):
+            return 0.5
+
+    def estimated_cost(self, prompt_tokens: int = 0,
+                       completion_tokens: int = 1000) -> float:
+        """USD estimate for one call of the given size."""
+        return round(
+            max(0, prompt_tokens) / 1_000_000 * self.price_in_per_1m
+            + max(0, completion_tokens) / 1_000_000 * self.price_out_per_1m,
+            9,
+        )
+
 
 class ModelRegistry:
     """Persistent model registry backed by the ``models`` table."""
@@ -447,6 +480,47 @@ class ModelRegistry:
 
     def local_models(self) -> list[ModelRecord]:
         return [m for m in self.list(limit=500) if m.is_local]
+
+    def set_pricing(self, name_or_id: str, *, price_in: float = 0.0,
+                    price_out: float = 0.0,
+                    quality: float | None = None) -> ModelRecord:
+        """Stamp OpenRouter-shaped pricing onto a record's metadata.
+
+        No schema migration — pricing lives in the metadata JSON column.
+        """
+        row = self.repo.get(name_or_id) or self.repo.find_one(name=name_or_id)
+        if row is None:
+            raise NotFound(f"model {name_or_id!r} is not registered")
+        metadata = dict(row.get("metadata") or {})
+        metadata["price_in_per_1m"] = max(0.0, float(price_in))
+        metadata["price_out_per_1m"] = max(0.0, float(price_out))
+        if quality is not None:
+            metadata["quality"] = max(0.0, min(1.0, float(quality)))
+        self.repo.update(row["id"], {"metadata": metadata})
+        return self.get(row["id"])
+
+    def cheapest_local(self) -> ModelRecord | None:
+        """Cheapest local model (free first) — for cost-aware local picks."""
+        models = self.local_models()
+        if not models:
+            return None
+        return min(models,
+                   key=lambda m: (m.price_in_per_1m, m.price_out_per_1m,
+                                  m.name))
+
+    def best_eval(self, metric: str = "score") -> ModelRecord | None:
+        """Highest eval-score record for ``metric`` (None when unscored)."""
+        scored: list[tuple[float, ModelRecord]] = []
+        for m in self.list(limit=500):
+            try:
+                value = float(_scores_of(m).get(metric, float("nan")))
+            except (TypeError, ValueError):
+                continue
+            if value == value:  # drop NaN
+                scored.append((value, m))
+        if not scored:
+            return None
+        return max(scored, key=lambda t: (t[0], t[1].name))[1]
 
     def stats(self) -> dict[str, Any]:
         active = self.active()

@@ -25,12 +25,66 @@ from ..core.errors import DownloadError, NotFound, ValidationError
 from ..core.http import HttpClient
 from ..core.logging_setup import get_logger
 
-__all__ = ["DownloadResult", "HuggingFaceDownloader", "RepoFile"]
+__all__ = ["DownloadResult", "HuggingFaceDownloader", "RepoFile",
+           "format_progress", "validate_gguf"]
 
 _log = get_logger(__name__)
 
 HF_HOST = "https://huggingface.co"
 CHUNK = 1024 * 1024
+
+#: GGUF file magic (first 4 bytes, little-endian "GGUF").
+_GGUF_MAGIC = b"GGUF"
+
+
+def validate_gguf(path: str | os.PathLike[str]) -> tuple[bool, str]:
+    """Validate a GGUF file: magic header + minimum sane size.
+
+    Catches conversions/downloads that "succeeded" but wrote garbage —
+    validate before rename/serve, not at load time.  Never raises.
+    """
+    try:
+        p = Path(path)
+        size = p.stat().st_size
+        if size < 1024:
+            return False, f"file too small ({size} bytes) to be a GGUF"
+        with open(p, "rb") as fh:
+            magic = fh.read(4)
+        if magic != _GGUF_MAGIC:
+            return False, f"bad magic {magic!r} (expected b'GGUF')"
+        return True, f"ok ({format_bytes(size)})"
+    except OSError as exc:
+        return False, f"unreadable: {exc}"
+
+
+def format_progress(name: str, done: int, total: int,
+                    started: float | None = None) -> str:
+    """One-line download status, hfd-style.
+
+    ``name [ 31%] 8/26 files | 1.75GB/5.63GB | 118.40MB/s | ETA 00:32``
+    Never raises; ``total=0`` renders an indeterminate line.
+    """
+    try:
+        pct = (done / total * 100.0) if total > 0 else 0.0
+        bar = f"[{pct:5.1f}%]"
+        size = f"{format_bytes(done)}/{format_bytes(total)}" if total > 0 \
+            else format_bytes(done)
+        tail = ""
+        if started:
+            elapsed = max(0.001, time.perf_counter() - started)
+            speed = done / elapsed
+            eta = (total - done) / speed if speed > 0 and total > done else 0.0
+            tail = f" | {format_bytes(int(speed))}/s | ETA {_fmt_eta(eta)}"
+        return f"{name} {bar} {size}{tail}"
+    except Exception:  # noqa: BLE001
+        return f"{name} {done}/{total}"
+
+
+def _fmt_eta(seconds: float) -> str:
+    seconds = max(0, int(seconds))
+    h, rem = divmod(seconds, 3600)
+    m, s = divmod(rem, 60)
+    return f"{h:02d}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"
 
 
 @dataclass
@@ -163,10 +217,18 @@ class HuggingFaceDownloader:
         destination: str | os.PathLike[str] | None = None,
         expected_sha256: str = "",
         progress: Callable[[int, int], None] | None = None,
+        use_hub: bool = True,
+        validate: bool = True,
     ) -> DownloadResult:
+        """Download one repo file, preferring ``huggingface_hub`` when available.
+
+        The hub client brings resume-via-etag, token auth and proper error
+        types for free; the in-house HTTP path is the fallback.  GGUF files
+        get a magic-header validation after download (a conversion that
+        "succeeded" but wrote garbage is caught here, not at serve time).
+        """
         url = self.repo_url(repo_id, path, revision)
         target = Path(destination) if destination else self.cache_dir / repo_id / path
-        target.parent.mkdir(parents=True, exist_ok=True)
         resumed = target.exists() and target.stat().st_size > 0
 
         if expected_sha256 and target.exists() and _sha256_file(target) == expected_sha256:
@@ -180,11 +242,19 @@ class HuggingFaceDownloader:
             )
 
         started = time.perf_counter()
-        try:
-            self.http.download(url, target, resume=True, progress=progress)
-        except Exception as exc:  # noqa: BLE001
-            self.stats["errors"] += 1
-            raise DownloadError(f"download of {url} failed: {exc}", retryable=True) from exc
+        used_hub = False
+        if use_hub:
+            hub_path = self._download_via_hub(
+                repo_id, path, revision=revision, destination=target,
+                progress=progress)
+            used_hub = hub_path is not None
+        if not used_hub:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                self.http.download(url, target, resume=True, progress=progress)
+            except Exception as exc:  # noqa: BLE001
+                self.stats["errors"] += 1
+                raise DownloadError(f"download of {url} failed: {exc}", retryable=True) from exc
         elapsed = time.perf_counter() - started
         size = target.stat().st_size
         digest = _sha256_file(target)
@@ -192,6 +262,11 @@ class HuggingFaceDownloader:
         if expected_sha256 and digest != expected_sha256:
             verified = False
             _log.error("checksum mismatch for %s (expected %s, got %s)", path, expected_sha256[:16], digest[:16])
+        if validate and target.suffix.lower() == ".gguf":
+            ok, why = validate_gguf(target)
+            if not ok:
+                verified = False
+                _log.error("gguf validation failed for %s: %s", path, why)
         self.stats["files"] += 1
         self.stats["bytes"] += size
         return DownloadResult(
@@ -201,8 +276,52 @@ class HuggingFaceDownloader:
             verified=verified,
             resumed=resumed,
             seconds=elapsed,
-            source=url,
+            source="huggingface_hub" if used_hub else url,
         )
+
+    def _download_via_hub(
+        self,
+        repo_id: str,
+        path: str,
+        *,
+        revision: str,
+        destination: Path,
+        progress: Callable[[int, int], None] | None,
+    ) -> Path | None:
+        """One-file fetch through huggingface_hub.  None when unavailable."""
+        try:
+            from huggingface_hub import hf_hub_download
+        except ImportError:
+            return None
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            got = hf_hub_download(
+                repo_id=repo_id,
+                filename=path,
+                revision=revision,
+                local_dir=str(destination.parent),
+                local_dir_use_symlinks=False,
+                resume_download=True,
+                token=self.token or None,
+            )
+        except Exception as exc:  # noqa: BLE001 — fall back to HTTP
+            _log.debug("huggingface_hub download failed (%s); using HTTP", exc)
+            return None
+        got_path = Path(got)
+        if got_path.resolve() != destination.resolve():
+            try:
+                if destination.exists():
+                    destination.unlink()
+                got_path.rename(destination)
+            except OSError:
+                import shutil
+                shutil.copy2(got_path, destination)
+        if progress is not None:
+            try:
+                progress(destination.stat().st_size, destination.stat().st_size)
+            except Exception:  # noqa: BLE001
+                pass
+        return destination
 
     def download_repo(
         self,
@@ -210,13 +329,23 @@ class HuggingFaceDownloader:
         *,
         revision: str = "main",
         patterns: tuple[str, ...] = (),
+        include: tuple[str, ...] = (),
+        exclude: tuple[str, ...] = (),
         destination: str | os.PathLike[str] | None = None,
         progress: Callable[[str, int, int], None] | None = None,
     ) -> list[DownloadResult]:
-        """Download a curated set of files (weights + config + tokenizer)."""
+        """Download a curated set of files (weights + config + tokenizer).
+
+        ``include``/``exclude`` are extra glob filters applied on top of
+        ``patterns``/``select_weights`` (hfd-style).
+        """
         files = self.select_weights(repo_id, revision=revision) if not patterns else self.list_files(
             repo_id, revision=revision, patterns=patterns
         )
+        if include:
+            files = [f for f in files if any(_matches(f.path, p) for p in include)]
+        if exclude:
+            files = [f for f in files if not any(_matches(f.path, p) for p in exclude)]
         if not files:
             raise NotFound(f"no downloadable files matched in {repo_id}")
         root = Path(destination) if destination else self.cache_dir / repo_id

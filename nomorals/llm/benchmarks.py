@@ -236,6 +236,65 @@ class BenchmarkDB:
             return [r["model_id"] for r in
                     self.db.query("SELECT DISTINCT model_id FROM model_benchmarks")]
 
+    def cost_per_task(
+        self,
+        model_id: str,
+        capability: Capability | str = "",
+        *,
+        cost_per_1k: float = 0.0,
+    ) -> dict[str, Any]:
+        """USD per *successful* task for a model.
+
+        Failed runs cost ~2x a finished one and must not poison the figure:
+        cost is summed over successful runs only, and the failure rate is
+        reported as its own number.  ``cost_per_1k`` converts token counts
+        when the rows carry none (live rows from learning.py have no token
+        counts yet — pass the card's price).
+        """
+        rows = self.samples(model_id, capability, limit=SUMMARY_WINDOW)
+        ok_rows = [r for r in rows if r["success"]]
+        failures = len(rows) - len(ok_rows)
+        # Rows carry latency, not tokens: estimate cost from a per-call
+        # price when the caller knows it.
+        total_cost = len(ok_rows) * cost_per_1k / 1000.0
+        return {
+            "model_id": model_id,
+            "successful_tasks": len(ok_rows),
+            "failed_tasks": failures,
+            "failure_rate": round(failures / len(rows), 4) if rows else 0.0,
+            "cost_per_task_usd": round(total_cost / len(ok_rows), 9) if ok_rows else 0.0,
+            "median_latency_s": round(
+                statistics.median([r["latency_s"] for r in ok_rows]), 4
+            ) if ok_rows else 0.0,
+        }
+
+    def leaderboard(
+        self,
+        capability: Capability | str = "",
+        *,
+        limit: int = 10,
+        cost_per_1k_by_model: dict[str, float] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Rank models: success rate → benchmark score → cost per task.
+
+        Mirrors the Open LLM Leaderboard idea locally: every row is a real
+        measurement, nothing is invented.  ``cost_per_1k_by_model`` maps
+        model id → USD/1k tokens for the cost-per-task column.
+        """
+        prices = cost_per_1k_by_model or {}
+        board: list[dict[str, Any]] = []
+        for model_id in self.models():
+            summary = self.summary(model_id, capability)
+            cpt = self.cost_per_task(
+                model_id, capability,
+                cost_per_1k=float(prices.get(model_id, 0.0)),
+            )
+            board.append({**summary, **cpt})
+        board.sort(key=lambda r: (
+            -r["success_rate"], -r["score"], r["cost_per_task_usd"],
+            r["model_id"]))
+        return board[:max(1, limit)]
+
     def prune(self, older_than_days: float = 90.0) -> int:
         """Drop stale measurements.  Returns rows deleted."""
         cutoff = time.time() - older_than_days * 86400
@@ -293,16 +352,6 @@ def benchmark_model(
         "rounds": rounds,
         "successes": successes,
         "success_rate": successes / len(rounds) if rounds else 0.0,
-        "median_latency_s": round(statistics.median(latencies), 4) if latencies else 0.0,
-        "task_kind": task_kind,
-        "source": source,
-    }
-    return {
-        "model_id": model_id,
-        "capability": cap.value,
-        "rounds": len(latencies),
-        "successes": successes,
-        "success_rate": successes / len(latencies) if latencies else 0.0,
         "median_latency_s": round(statistics.median(latencies), 4) if latencies else 0.0,
         "latencies_s": [round(v, 4) for v in latencies],
         "task_kind": task_kind,

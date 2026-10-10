@@ -57,6 +57,7 @@ class ProviderSpec:
         context_len: int = 0,
         env_key: str = "",
         owner: bool = False,
+        api_key_pool: list[str] | None = None,
     ) -> None:
         self.name = name
         self.kind = kind
@@ -68,6 +69,10 @@ class ProviderSpec:
         #: The operator's own model — the broker prefers owner cards whenever
         #: one can serve.
         self.owner = owner
+        #: Extra API keys for the provider's key pool (Bifrost pattern: a
+        #: 429 rotates to the next key before failing over).  When empty,
+        #: :func:`specs_from_env` fills it from ``<PREFIX>_API_KEYS``.
+        self.api_key_pool = list(api_key_pool or [])
 
     def available(self) -> bool:
         """Keyed providers are only usable when their key exists."""
@@ -197,6 +202,25 @@ def specs_from_env() -> list[ProviderSpec]:
     return [s for s in specs if s.available()]
 
 
+def key_pool_from_env(env_key: str) -> list[str]:
+    """Extra keys for a provider's key pool.
+
+    ``<PREFIX>_API_KEYS`` (comma-separated) supplements the primary
+    ``<PREFIX>_API_KEY`` — e.g. ``GROQ_API_KEYS="k1,k2,k3"``.  A 429
+    rotates to the next key before the router fails over (Bifrost key
+    pooling).  Never raises.
+    """
+    try:
+        raw = os.environ.get(f"{env_key}S", "") or ""
+        keys = [k.strip() for k in raw.split(",") if k.strip()]
+        primary = (os.environ.get(env_key, "") or "").strip()
+        if primary and primary in keys:
+            keys.remove(primary)
+        return keys
+    except Exception:  # noqa: BLE001
+        return []
+
+
 def build_chain(specs: list[ProviderSpec] | None = None):
     """Build an :class:`LLMRouter` from specs (first spec is primary).
 
@@ -210,8 +234,28 @@ def build_chain(specs: list[ProviderSpec] | None = None):
     _log = get_logger(__name__)
     router = LLMRouter()
     for index, spec in enumerate(specs if specs is not None else specs_from_env()):
+        kwargs = dict(spec.kwargs)
+        # Key pool (Bifrost): extra keys from the spec or <PREFIX>_API_KEYS.
+        pool = list(spec.api_key_pool) or (
+            key_pool_from_env(spec.env_key) if spec.env_key else [])
+        if pool:
+            kwargs["api_keys"] = pool
         try:
-            provider = build_provider(spec.kind, **spec.kwargs)
+            provider = build_provider(spec.kind, **kwargs)
+        except TypeError as exc:
+            if pool and "api_keys" in str(exc):
+                # Backend has no key-pool support — build without it.
+                kwargs.pop("api_keys", None)
+                try:
+                    provider = build_provider(spec.kind, **kwargs)
+                except Exception as exc2:  # noqa: BLE001
+                    _log.warning("could not build provider %s (%s): %s",
+                                 spec.name, spec.kind, exc2)
+                    continue
+            else:
+                _log.warning("could not build provider %s (%s): %s",
+                             spec.name, spec.kind, exc)
+                continue
         except Exception as exc:  # noqa: BLE001 - one bad backend, not a dead chain
             _log.warning("could not build provider %s (%s): %s",
                          spec.name, spec.kind, exc)

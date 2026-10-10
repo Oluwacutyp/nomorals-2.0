@@ -22,6 +22,8 @@ _log = get_logger(__name__)
 
 __all__ = [
     "format_cost",
+    "format_cost_table",
+    "budget_alert_line",
     "parse_budget_nl",
     "CostDisplay",
     "get_display",
@@ -73,6 +75,80 @@ def parse_budget_nl(text: str) -> float | None:
         return val if val > 0 else None
     except Exception:  # noqa: BLE001
         return None
+
+
+def format_cost_table(breakdown: dict[str, Any],
+                      *, limit: int = 8) -> str:
+    """God-tier spend table from :meth:`CostLog.breakdown`.
+
+    Shows the total, then the top operations and providers by cost —
+    the "which feature is burning the budget" view.  Never raises.
+    """
+    try:
+        total = breakdown.get("total") or {}
+        by_op = breakdown.get("by_operation") or {}
+        by_prov = breakdown.get("by_provider") or {}
+        lines = ["💰 LLM spend"]
+        lines.append(
+            f"  total {format_cost(total.get('cost_usd', 0.0))} · "
+            f"{total.get('calls', 0)} calls · "
+            f"{int(total.get('prompt_tokens', 0) + total.get('completion_tokens', 0)):,} tokens · "
+            f"avg {total.get('avg_latency_ms', 0)}ms")
+        cached = int(total.get("cached_tokens", 0) or 0)
+        reasoning = int(total.get("reasoning_tokens", 0) or 0)
+        if cached or reasoning:
+            lines.append(
+                f"  (cached {cached:,} in · reasoning {reasoning:,} — "
+                "billed, never shown)")
+
+        def _rows(bucket: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
+            items = [(k, v) for k, v in bucket.items()
+                     if isinstance(v, dict)]
+            items.sort(key=lambda kv: -float(kv[1].get("cost_usd", 0.0)))
+            return items[:max(1, limit)]
+
+        if by_op:
+            lines.append("  by operation:")
+            for name, slot in _rows(by_op):
+                lines.append(
+                    f"    {name:<12} {format_cost(slot.get('cost_usd', 0.0)):>9} "
+                    f"· {slot.get('calls', 0)} calls · "
+                    f"avg {slot.get('avg_latency_ms', 0)}ms")
+        if by_prov:
+            lines.append("  by provider:")
+            for name, slot in _rows(by_prov):
+                lines.append(
+                    f"    {name:<12} {format_cost(slot.get('cost_usd', 0.0)):>9} "
+                    f"· {slot.get('calls', 0)} calls · "
+                    f"avg {slot.get('avg_latency_ms', 0)}ms")
+        return "\n".join(lines)
+    except Exception:  # noqa: BLE001
+        return "💰 spend unavailable"
+
+
+def budget_alert_line(spent: float, budget: float) -> str:
+    """One-line budget status with alert emoji.  Never raises."""
+    try:
+        spent = float(spent or 0.0)
+        budget = float(budget or 0.0)
+        if budget <= 0:
+            return f"💰 {format_cost(spent)} spent (no budget set)"
+        pct = spent / budget * 100.0
+        bar_len = 12
+        filled = max(0, min(bar_len, int(pct / 100 * bar_len)))
+        bar = "█" * filled + "░" * (bar_len - filled)
+        if pct >= 100:
+            emoji, word = "🛑", "EXCEEDED"
+        elif pct >= 80:
+            emoji, word = "⚠️", "warning"
+        elif pct >= 50:
+            emoji, word = "👀", "watch"
+        else:
+            emoji, word = "💰", "ok"
+        return (f"{emoji} budget {word}: {format_cost(spent)} / "
+                f"{format_cost(budget)} [{bar}] {pct:.0f}%")
+    except Exception:  # noqa: BLE001
+        return "💰 budget status unavailable"
 
 
 # ── per-user toggle + spend queries ─────────────────────────────────────────
@@ -233,6 +309,13 @@ def control_cost(tail: str, context: Any = None, chat: Any = None,
         if cmd in ("off", "disable", "no"):
             disp.set_enabled(False, user_id)
             return "💰 cost display off."
+        if cmd in ("breakdown", "table", "detail", "details"):
+            try:
+                from .router import CostLog
+                log = CostLog(cost_path) if (cost_path := kwargs.get("cost_path")) else CostLog()
+                return format_cost_table(log.breakdown(time.time() - 86400))
+            except Exception:  # noqa: BLE001
+                return "💰 breakdown unavailable."
         if cmd == "budget" and len(parts) > 1:
             amount = parse_budget_nl(" ".join(parts[1:]))
             if amount is None:

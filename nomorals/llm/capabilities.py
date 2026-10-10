@@ -96,10 +96,27 @@ class ModelCard:
     notes: str = ""
     owner: bool = False
     metadata: dict[str, Any] = field(default_factory=dict)
+    #: Routing tags (rinbarpen-style): "fast", "long-context", "code",
+    #: "vision", "owner", "local", "reasoning", "cheap", "quality".
+    #: Auto-derived in :meth:`from_provider`; operators may set explicitly.
+    tags: frozenset[str] = frozenset()
+    #: OpenRouter-shaped per-1M-token pricing (input, output).  When both
+    #: are 0, ``cost_per_1k`` is the fallback for legacy callers.
+    price_in: float = 0.0
+    price_out: float = 0.0
+    #: Quality prior 0..1 for complexity-tier selection (nexus
+    #: ``complexity-tier``): the cheapest card whose quality meets the
+    #: target wins.  Live benchmark scores override this prior.
+    quality: float = 0.5
+    #: Measured tokens/sec (best-effort, from benchmarks); 0 = unknown.
+    throughput_tps: float = 0.0
 
     def __post_init__(self) -> None:
         self.capabilities = {c if isinstance(c, Capability) else capability_from(c)
                              for c in self.capabilities}
+        if isinstance(self.tags, (list, set, tuple)):
+            self.tags = frozenset(str(t).lower() for t in self.tags)
+        self.quality = max(0.0, min(1.0, float(self.quality or 0.0)))
 
     @property
     def cloud(self) -> bool:
@@ -122,6 +139,35 @@ class ModelCard:
             return Capability.CHAT in self.capabilities
         return False
 
+    def has_tags(self, tags: Any) -> bool:
+        """True when the card carries every requested tag."""
+        if isinstance(tags, str):
+            tags = {tags}
+        wanted = {str(t).lower() for t in (tags or ())}
+        return wanted <= set(self.tags)
+
+    @property
+    def price_per_1m_in(self) -> float:
+        """USD per 1M input tokens (OpenRouter shape)."""
+        if self.price_in > 0:
+            return self.price_in
+        return self.cost_per_1k * 1000.0
+
+    @property
+    def price_per_1m_out(self) -> float:
+        if self.price_out > 0:
+            return self.price_out
+        return self.cost_per_1k * 1000.0
+
+    def estimated_call_cost(self, prompt_tokens: int = 0,
+                            completion_tokens: int = 1000) -> float:
+        """USD estimate for one call of the given size."""
+        return round(
+            max(0, prompt_tokens) / 1_000_000 * self.price_per_1m_in
+            + max(0, completion_tokens) / 1_000_000 * self.price_per_1m_out,
+            9,
+        )
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "id": self.id,
@@ -135,6 +181,11 @@ class ModelCard:
             "size_gb": self.size_gb,
             "notes": self.notes,
             "owner": self.owner,
+            "tags": sorted(self.tags),
+            "price_in_per_1m": self.price_in,
+            "price_out_per_1m": self.price_out,
+            "quality": round(self.quality, 3),
+            "throughput_tps": round(self.throughput_tps, 1),
         }
 
     @classmethod
@@ -151,6 +202,7 @@ class ModelCard:
         capabilities: Iterable[str | Capability] | None = None,
         notes: str = "",
         owner: bool = False,
+        tags: Iterable[str] | None = None,
     ) -> "ModelCard":
         """Build a card from a live provider, deriving capabilities from its
         capability tokens plus code-tuned family hints.
@@ -181,6 +233,21 @@ class ModelCard:
                 caps.add(Capability.CODE)
             if Capability.CHAT in caps and context_len >= 8192:
                 caps.add(Capability.JUDGE)
+        derived: set[str] = {str(t).lower() for t in (tags or ())}
+        if local:
+            derived.add("local")
+        if owner:
+            derived.add("owner")
+        if Capability.CODE in caps:
+            derived.add("code")
+        if Capability.VISION in caps:
+            derived.add("vision")
+        if Capability.JUDGE in caps:
+            derived.add("judge")
+        if context_len >= 32768:
+            derived.add("long-context")
+        if cost_per_1k <= 0:
+            derived.add("cheap")
         return cls(
             id=card_id or name or model_id or "model",
             capabilities=caps,
@@ -193,6 +260,7 @@ class ModelCard:
             size_gb=size_gb,
             notes=notes,
             owner=owner,
+            tags=frozenset(derived),
         )
 
 

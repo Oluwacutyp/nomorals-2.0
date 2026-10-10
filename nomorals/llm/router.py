@@ -13,8 +13,10 @@ from __future__ import annotations
 
 import json
 import random
+import statistics
 import threading
 import time
+from collections import deque
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -76,12 +78,18 @@ def estimate_cost(
     model: str,
     prompt_tokens: int,
     completion_tokens: int,
+    *,
+    cached_tokens: int = 0,
+    reasoning_tokens: int = 0,
 ) -> float:
     """Estimated USD for one LLM call.  Never raises.
 
     Token-priced when the provider/model is in the table, otherwise the
     flat research planning estimate (an overestimate for free tiers —
-    deliberately conservative).
+    deliberately conservative).  Cached input tokens are priced at 0.1x
+    (the Anthropic/OpenAI convention); reasoning tokens ride the output
+    price — they are billed even though the user never reads them, which
+    is exactly why they must be counted.
     """
     try:
         price: tuple[float, float] | None = None
@@ -97,9 +105,12 @@ def estimate_cost(
         if price is None:
             return _FLAT_LLM_CALL_USD
         per_m_prompt, per_m_completion = price
+        fresh_prompt = max(0, prompt_tokens - max(0, cached_tokens))
         return round(
-            (max(0, prompt_tokens) / 1_000_000) * per_m_prompt
-            + (max(0, completion_tokens) / 1_000_000) * per_m_completion,
+            (fresh_prompt / 1_000_000) * per_m_prompt
+            + (max(0, cached_tokens) / 1_000_000) * per_m_prompt * 0.1
+            + (max(0, completion_tokens + reasoning_tokens) / 1_000_000)
+            * per_m_completion,
             9,
         )
     except Exception:  # noqa: BLE001 — cost math never breaks the caller
@@ -124,6 +135,10 @@ class CostLog:
         completion_tokens: int = 0,
         cost_usd: float = 0.0,
         latency_ms: float = 0.0,
+        cached_tokens: int = 0,
+        reasoning_tokens: int = 0,
+        feature: str = "",
+        request_id: str = "",
     ) -> dict[str, Any]:
         """Append one call record.  Never raises; returns the entry."""
         entry: dict[str, Any] = {
@@ -136,6 +151,10 @@ class CostLog:
             "completion_tokens": int(completion_tokens),
             "cost_usd": round(float(cost_usd), 9),
             "latency_ms": round(float(latency_ms), 2),
+            "cached_tokens": int(cached_tokens),
+            "reasoning_tokens": int(reasoning_tokens),
+            "feature": feature or "",
+            "request_id": request_id or "",
         }
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -176,6 +195,91 @@ class CostLog:
         except Exception:  # noqa: BLE001
             return 0.0
 
+    def breakdown(self, since: float = 0.0) -> dict[str, Any]:
+        """Per-operation/per-provider aggregates (Langfuse/Helicone shape).
+
+        Answers "which feature is burning the budget" in one call: totals
+        plus per-operation and per-provider slices with calls, tokens,
+        cost and average latency.  Never raises.
+        """
+        rows = self.entries(since)
+        total = {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0,
+                 "cached_tokens": 0, "reasoning_tokens": 0,
+                 "cost_usd": 0.0, "latency_ms": 0.0}
+        by_operation: dict[str, dict[str, Any]] = {}
+        by_provider: dict[str, dict[str, Any]] = {}
+        for r in rows:
+            for key, val in (
+                ("calls", 1),
+                ("prompt_tokens", r.get("prompt_tokens", 0)),
+                ("completion_tokens", r.get("completion_tokens", 0)),
+                ("cached_tokens", r.get("cached_tokens", 0)),
+                ("reasoning_tokens", r.get("reasoning_tokens", 0)),
+                ("cost_usd", r.get("cost_usd", 0.0)),
+                ("latency_ms", r.get("latency_ms", 0.0)),
+            ):
+                try:
+                    total[key] += float(val)
+                except (TypeError, ValueError):
+                    pass
+            for bucket, name in (
+                (by_operation, str(r.get("operation") or "chat")),
+                (by_provider, str(r.get("provider") or "unknown")),
+            ):
+                slot = bucket.setdefault(name, {"calls": 0, "prompt_tokens": 0,
+                                                "completion_tokens": 0,
+                                                "cost_usd": 0.0,
+                                                "latency_ms": 0.0})
+                slot["calls"] += 1
+                for key in ("prompt_tokens", "completion_tokens", "cost_usd",
+                            "latency_ms"):
+                    try:
+                        slot[key] += float(r.get(key, 0.0))
+                    except (TypeError, ValueError):
+                        pass
+        for bucket in (by_operation, by_provider):
+            for slot in bucket.values():
+                calls = slot["calls"] or 1
+                slot["avg_latency_ms"] = round(slot.pop("latency_ms") / calls, 1)
+                slot["cost_usd"] = round(slot["cost_usd"], 9)
+        total["calls"] = len(rows)
+        total["cost_usd"] = round(total["cost_usd"], 9)
+        total["avg_latency_ms"] = round(
+            total.pop("latency_ms") / (len(rows) or 1), 1)
+        return {"total": total, "by_operation": by_operation,
+                "by_provider": by_provider}
+
+    def budget_report(self, daily_budget: float,
+                      since: float = 0.0) -> dict[str, Any]:
+        """Spend vs budget with alert levels (50/80/100%).
+
+        Never raises.  ``alert`` is "ok" | "watch" | "warning" | "exceeded".
+        """
+        try:
+            spent = self.total_spend(since)
+            budget = max(0.0, float(daily_budget))
+        except Exception:  # noqa: BLE001
+            return {"spent_usd": 0.0, "budget_usd": 0.0, "alert": "ok",
+                    "pct": 0.0}
+        if budget <= 0:
+            return {"spent_usd": spent, "budget_usd": 0.0, "alert": "ok",
+                    "pct": 0.0, "unlimited": True}
+        pct = spent / budget * 100.0
+        alert = "ok"
+        if pct >= 100:
+            alert = "exceeded"
+        elif pct >= 80:
+            alert = "warning"
+        elif pct >= 50:
+            alert = "watch"
+        return {
+            "spent_usd": spent,
+            "budget_usd": budget,
+            "remaining_usd": round(max(0.0, budget - spent), 9),
+            "pct": round(pct, 1),
+            "alert": alert,
+        }
+
 
 _cost_log: CostLog | None = None
 _cost_log_lock = threading.Lock()
@@ -211,14 +315,26 @@ def log_llm_call(
     usage = getattr(response, "usage", None)
     prompt_t = int(getattr(usage, "prompt_tokens", 0) or 0)
     completion_t = int(getattr(usage, "completion_tokens", 0) or 0)
+    cached_t = int(getattr(usage, "cached_tokens", 0) or 0)
+    reasoning_t = int(getattr(usage, "reasoning_tokens", 0) or 0)
+    feature = str(getattr(response, "feature", "") or "")
+    request_id = str(getattr(response, "request_id", "") or "")
     if path is None and _os.environ.get("NM_COST_LOG", "").strip().lower() in (
         "off", "0", "no",
     ):
         # Opt-out of the default home-dir log (test harnesses); an explicit
         # path always records.  The estimate is still returned.
-        return estimate_cost(provider_name, model, prompt_t, completion_t)
+        return estimate_cost(provider_name, model, prompt_t, completion_t,
+                             cached_tokens=cached_t,
+                             reasoning_tokens=reasoning_t)
     try:
-        cost = estimate_cost(provider_name, model, prompt_t, completion_t)
+        cost = estimate_cost(provider_name, model, prompt_t, completion_t,
+                             cached_tokens=cached_t,
+                             reasoning_tokens=reasoning_t)
+        try:
+            response.cost_usd = cost
+        except Exception:  # noqa: BLE001 — duck-typed responses
+            pass
         _shared_log(path).record(
             provider=provider_name,
             model=model or "",
@@ -228,6 +344,10 @@ def log_llm_call(
             completion_tokens=completion_t,
             cost_usd=cost,
             latency_ms=float(getattr(response, "latency_ms", 0.0) or 0.0),
+            cached_tokens=cached_t,
+            reasoning_tokens=reasoning_t,
+            feature=feature,
+            request_id=request_id,
         )
         return cost
     except Exception:  # noqa: BLE001
@@ -268,6 +388,11 @@ class ProviderHealth:
     #: Typed failure class of the most recent failure
     #: (``nomorals.llm.failures.FailureClass`` value, "" when none).
     failure_class: str = ""
+    #: Rolling successful-attempt latencies (bounded).  Drives the p50/p95
+    #: used by latency-SLO shedding and adaptive timeouts — the *average*
+    #: hides the tail that actually hurts interactive calls.
+    latencies: deque = field(default_factory=lambda: deque(maxlen=50),
+                             repr=False)
 
     @property
     def error_rate(self) -> float:
@@ -277,13 +402,35 @@ class ProviderHealth:
     def avg_latency_ms(self) -> float:
         return self.total_latency_ms / self.calls if self.calls else 0.0
 
+    @property
+    def p50_latency_ms(self) -> float:
+        try:
+            return round(statistics.median(self.latencies), 2) \
+                if self.latencies else 0.0
+        except statistics.StatisticsError:
+            return 0.0
+
+    @property
+    def p95_latency_ms(self) -> float:
+        try:
+            if not self.latencies:
+                return 0.0
+            ordered = sorted(self.latencies)
+            idx = min(len(ordered) - 1, int(len(ordered) * 0.95))
+            return round(ordered[idx], 2)
+        except Exception:  # noqa: BLE001
+            return 0.0
+
     def available(self, now: float | None = None) -> bool:
         return (now or time.monotonic()) >= self.cooldown_until
 
-    def record_success(self) -> None:
+    def record_success(self, latency_ms: float = 0.0) -> None:
         self.calls += 1
         self.consecutive_failures = 0
         self.last_success = time.time()
+        if latency_ms > 0:
+            self.total_latency_ms += latency_ms
+            self.latencies.append(float(latency_ms))
 
     def record_failure(self, error: str, cooldown: float,
                        now: float | None = None) -> None:
@@ -304,6 +451,8 @@ class ProviderHealth:
             "failures": self.failures,
             "error_rate": round(self.error_rate, 4),
             "avg_latency_ms": round(self.avg_latency_ms, 2),
+            "p50_latency_ms": self.p50_latency_ms,
+            "p95_latency_ms": self.p95_latency_ms,
             "consecutive_failures": self.consecutive_failures,
             "last_error": self.last_error,
             "cooling_down": not self.available(),
@@ -332,6 +481,10 @@ class LLMRouter:
         bus: EventBus | None = None,
         clock: Callable[[], float] = time.monotonic,
         repair_hooks: dict[str, Callable] | list[Callable] | None = None,
+        latency_slo_ms: float = 0.0,
+        half_open_probe_budget: int = 2,
+        daily_budget_usd: float = 0.0,
+        cost_log_path: str | Path | None = None,
     ) -> None:
         self._providers: list[LLMProvider] = []
         self._by_name: dict[str, LLMProvider] = {}
@@ -359,7 +512,27 @@ class LLMRouter:
         self.repair_hooks = repair_hooks if repair_hooks is not None else {}
         self.repair_cooldown_seconds = cooldown_seconds
         self._last_repair_time: dict[str, float] = {}
-        self.stats = {"calls": 0, "failovers": 0, "failures": 0, "repairs": 0}
+        self.stats = {"calls": 0, "failovers": 0, "failures": 0, "repairs": 0,
+                      "slo_sheds": 0, "budget_blocks": 0, "key_rotations": 0}
+        # Latency SLO shedding (nexus-llm-router `latency-slo-shed`): when
+        # set, a provider whose rolling p95 exceeds the SLO is skipped while
+        # faster alternatives exist.  0 = disabled.
+        self.latency_slo_ms = max(0.0, float(latency_slo_ms))
+        # Half-open probe budget (nexus `circuit-breaker-half-open-probe`):
+        # at most this many concurrent probes into recovering providers —
+        # a recovering provider must not absorb the whole fleet's traffic.
+        self.half_open_probe_budget = max(1, int(half_open_probe_budget))
+        self._half_open_probes: dict[str, int] = {}
+        # Daily spend cap (gateway-style budget).  0 = unlimited.  When the
+        # metered spend for the current UTC day reaches the cap, calls come
+        # back as a typed budget error instead of spending more.
+        self.daily_budget_usd = max(0.0, float(daily_budget_usd))
+        self._budget_warned: bool = False
+        self._budget_checked_at: float = 0.0
+        self._budget_cached_spent: float = 0.0
+        #: Override for the metered cost log (tests); None → the shared
+        #: ~/.nomorals/llm/cost.jsonl.
+        self._cost_log_path = Path(cost_log_path) if cost_log_path else None
         # Optional capability broker (nomorals.llm.broker.ModelBroker).  When
         # unset the router keeps its original name-based behaviour exactly.
         self._broker: Any = None
@@ -369,6 +542,11 @@ class LLMRouter:
         # routing.  While unset the dispatch path below is exactly the
         # pre-learning code.
         self._learning: Any = None
+
+    def _cost_log(self) -> CostLog:
+        if self._cost_log_path is not None:
+            return CostLog(self._cost_log_path)
+        return _shared_log()
 
     # ── registration ─────────────────────────────────────────────────────────
     def add(self, provider: LLMProvider, *, primary: bool = False, name: str = "") -> LLMRouter:
@@ -625,18 +803,20 @@ class LLMRouter:
     def chat(
         self, messages: Sequence[Message], params: SamplingParams | None = None,
         tier: str | None = None, task_kind: str = "",
-        constraints: Any = None, **kw: Any
+        constraints: Any = None,
+        route: dict[str, Any] | None = None, **kw: Any
     ) -> LLMResponse:
         return self._dispatch("chat", lambda p: p.chat(messages, params, **kw),
                               tier=tier, task_kind=task_kind,
-                              constraints=constraints)
+                              constraints=constraints, route=route)
 
     def complete(self, prompt: str, params: SamplingParams | None = None,
                  tier: str | None = None, task_kind: str = "",
-                 constraints: Any = None, **kw: Any) -> LLMResponse:
+                 constraints: Any = None,
+                 route: dict[str, Any] | None = None, **kw: Any) -> LLMResponse:
         return self._dispatch("complete", lambda p: p.complete(prompt, params, **kw),
                               tier=tier, task_kind=task_kind,
-                              constraints=constraints)
+                              constraints=constraints, route=route)
 
     def embed(self, texts: Sequence[str], **kw: Any) -> list[list[float]]:
         chain = [p for p in self._chain() if "embed" in p.capabilities]
@@ -670,7 +850,8 @@ class LLMRouter:
     def describe_image(
         self, image: bytes, prompt: str = "", params: SamplingParams | None = None,
         tier: str | None = None, task_kind: str = "vision",
-        constraints: Any = None, **kw: Any
+        constraints: Any = None,
+        route: dict[str, Any] | None = None, **kw: Any
     ) -> LLMResponse:
         return self._dispatch(
             "vision",
@@ -679,7 +860,178 @@ class LLMRouter:
             tier=tier,
             task_kind=task_kind,
             constraints=constraints,
+            route=route,
         )
+
+    # ── routing policy (OpenRouter-style per-request knobs) ──────────────────
+    def _route_price(self, provider_name: str) -> float:
+        """USD/1M input tokens for a provider (broker card when attached)."""
+        try:
+            broker = self._broker
+            if broker is not None:
+                for card in broker.cards():
+                    if card.provider == provider_name:
+                        return float(card.price_per_1m_in)
+        except Exception:  # noqa: BLE001
+            pass
+        return 0.0
+
+    def _apply_route(
+        self,
+        chain: list[LLMProvider],
+        route: dict[str, Any] | None,
+    ) -> list[LLMProvider]:
+        """Apply per-request routing knobs (OpenRouter provider-routing style).
+
+        ``route`` keys: ``sort`` ("latency"|"price"|"throughput"),
+        ``only`` / ``ignore`` (provider names), ``max_price`` (USD/1M
+        input tokens).  Then latency-SLO shedding drops slow providers
+        while faster alternatives exist.
+        """
+        route = route or {}
+        only = route.get("only")
+        ignore = route.get("ignore")
+        names_only = {only} if isinstance(only, str) else set(only or ())
+        names_ignore = {ignore} if isinstance(ignore, str) else set(ignore or ())
+        out = [p for p in chain
+               if (not names_only or p.name in names_only)
+               and p.name not in names_ignore]
+        max_price = route.get("max_price")
+        if max_price is not None:
+            try:
+                cap = float(max_price)
+                out = [p for p in out if self._route_price(p.name) <= cap]
+            except (TypeError, ValueError):
+                pass
+        if self.latency_slo_ms > 0 and len(out) > 1:
+            def _under_slo(p: LLMProvider) -> bool:
+                health = self._health.get(p.name)
+                if health is None:
+                    return True
+                p95 = health.p95_latency_ms
+                return p95 <= 0.0 or p95 <= self.latency_slo_ms
+
+            fast = [p for p in out if _under_slo(p)]
+            if fast and len(fast) < len(out):
+                shed = [p.name for p in out if p not in fast]
+                self.stats["slo_sheds"] += len(shed)
+                _log.info("slo shed (p95 > %.0fms): %s",
+                          self.latency_slo_ms, ", ".join(shed))
+                out = fast
+        sort = str(route.get("sort") or "").lower()
+        if sort in ("latency", "throughput"):
+            out.sort(key=lambda p: (
+                self._health[p.name].p50_latency_ms or float("inf"), p.name))
+        elif sort == "price":
+            out.sort(key=lambda p: (self._route_price(p.name), p.name))
+        return out
+
+    def _rotate_provider_key(self, provider: LLMProvider) -> bool:
+        """Bifrost-style key pooling: rotate to the next API key on 429.
+
+        A different key from the SAME provider is tried before failing over
+        to another provider — the quota that is exhausted is usually the
+        key's, not the provider's.  True when a rotation happened.
+        """
+        rotate = getattr(provider, "rotate_key", None)
+        if not callable(rotate):
+            return False
+        try:
+            if rotate():
+                self.stats["key_rotations"] += 1
+                _log.info("key pool rotation on %s (rate limited)",
+                          provider.name)
+                return True
+        except Exception:  # noqa: BLE001
+            _log.debug("key rotation failed on %s", provider.name,
+                       exc_info=True)
+        return False
+
+    def _attempt_with_rotation(
+        self,
+        provider: LLMProvider,
+        call: Callable[[LLMProvider], LLMResponse],
+    ) -> tuple[LLMResponse, str]:
+        """One provider attempt, rotating the key pool once on 429.
+
+        Returns (response, failure_class).  ``response.ok`` is False on
+        failure; the caller records it exactly once.
+        """
+        from .failures import FailureClass, classify_failure
+
+        for key_try in range(2):
+            try:
+                response = call(provider)
+            except Exception as exc:  # noqa: BLE001 - never let a provider crash the router
+                error = classify(exc)
+                note = f"{error.code}: {error.message}"
+                info = classify_failure(note, exc)
+                if (info.failure_class is FailureClass.RATE_LIMITED
+                        and key_try == 0
+                        and self._rotate_provider_key(provider)):
+                    continue
+                return (LLMResponse(
+                    text="",
+                    model=provider.model_id,
+                    provider=provider.name,
+                    error=note,
+                ), info.failure_class.value)
+            if response.ok:
+                return response, ""
+            note = response.error or "unknown error"
+            info = classify_failure(note)
+            if (info.failure_class is FailureClass.RATE_LIMITED
+                    and key_try == 0
+                    and self._rotate_provider_key(provider)):
+                continue
+            return response, info.failure_class.value
+        return (LLMResponse(text="", model=provider.model_id,
+                            provider=provider.name,
+                            error="key rotation exhausted"),
+                FailureClass.RATE_LIMITED.value)
+
+    def _budget_block(self, operation: str) -> LLMResponse | None:
+        """Typed budget error when the daily cap is reached, else None.
+
+        The spend check is cached for 30s so the metered log is not read on
+        every call.  Never raises — a broken budget check must not break
+        routing.
+        """
+        if self.daily_budget_usd <= 0:
+            return None
+        try:
+            from .failures import FailureClass
+
+            now = time.time()
+            if now - self._budget_checked_at < 30.0:
+                spent = self._budget_cached_spent
+            else:
+                day_start = now - (now % 86400)  # UTC day boundary
+                spent = self._cost_log().total_spend(day_start)
+                self._budget_checked_at = now
+                self._budget_cached_spent = spent
+            if spent >= self.daily_budget_usd:
+                self.stats["budget_blocks"] += 1
+                return LLMResponse(
+                    text="",
+                    error=(f"daily LLM budget ${self.daily_budget_usd:.2f} "
+                           f"reached (spent ${spent:.4f}); no further calls "
+                           f"until the next UTC day"),
+                    failure_class=FailureClass.BUDGET.value,
+                )
+            if (not self._budget_warned
+                    and spent >= 0.8 * self.daily_budget_usd
+                    and self.bus is not None):
+                self._budget_warned = True
+                try:
+                    self.bus.emit("llm.budget_warning", spent_usd=spent,
+                                  budget_usd=self.daily_budget_usd,
+                                  operation=operation)
+                except Exception:  # noqa: BLE001
+                    pass
+        except Exception:  # noqa: BLE001 — budget must never break routing
+            _log.debug("budget check failed", exc_info=True)
+        return None
 
     def _dispatch(
         self,
@@ -690,7 +1042,13 @@ class LLMRouter:
         tier: str | None = None,
         task_kind: str = "",
         constraints: Any = None,
+        route: dict[str, Any] | None = None,
     ) -> LLMResponse:
+        # Budget gate: a capped router returns a typed error instead of
+        # spending.
+        blocked = self._budget_block(operation)
+        if blocked is not None:
+            return blocked
         # Broker consult (opt-in): let the capability broker pick the starting
         # provider for this operation.  The task_kind is threaded through so
         # the broker's task specialisation (code → code-tuned, vision → VLM)
@@ -714,10 +1072,18 @@ class LLMRouter:
             chain = capable
         if not chain:
             return LLMResponse(text="", error="no providers registered")
+        chain = self._apply_route(chain, route)
+        if not chain:
+            return LLMResponse(
+                text="", error="routing rules excluded every provider",
+                failure_class="config")
+        allow_fallbacks = True if route is None \
+            else bool(route.get("allow_fallbacks", True))
 
         self.stats["calls"] += 1
         attempted = 0
         failed: list[tuple[str, str]] = []  # (provider name, error) in attempt order
+        trace: list[dict[str, Any]] = []  # per-attempt routing trace
         last = LLMResponse(text="", error="no attempt made")
         learning = self._learning  # read once; a detach mid-dispatch is harmless
         for provider in chain:
@@ -725,43 +1091,42 @@ class LLMRouter:
             if not health.available(self._clock()):
                 continue
             # Circuit breaker gate: an open breaker rejects without touching
-            # the dependency; a half-open breaker admits exactly one probe.
-            # This is what stops a dead provider from slowing every request
-            # — the failure is recorded once, then skipped until the probe.
+            # the dependency; a half-open breaker admits probes within the
+            # probe budget — a recovering provider must not absorb the whole
+            # fleet's traffic at once.
+            probing = False
             if health.breaker is not None:
                 try:
                     health.breaker.before_call()
                 except CircuitOpen:
                     continue
+                if health.breaker.state == CircuitBreaker.HALF_OPEN:
+                    with self._lock:
+                        in_flight = self._half_open_probes.get(provider.name, 0)
+                        if in_flight >= self.half_open_probe_budget:
+                            continue
+                        self._half_open_probes[provider.name] = in_flight + 1
+                    probing = True
             attempted += 1
-            # Time the attempt only when something is listening — zero cost
-            # otherwise, so the hook is free when learning is off.
-            attempt_start = self._clock() if learning is not None else 0.0
+            attempt_start = self._clock()
             try:
-                response = call(provider)
-            except Exception as exc:  # noqa: BLE001 - never let a provider crash the router
-                error = classify(exc)
-                note = f"{error.code}: {error.message}"
-                self._note_failure(provider.name, note)
-                failed.append((provider.name, note))
-                last = LLMResponse(
-                    text="",
-                    model=provider.model_id,
-                    provider=provider.name,
-                    error=note,
-                )
-                if learning is not None:
-                    self._note_learning(
-                        operation, provider.name, success=False,
-                        latency_s=self._clock() - attempt_start, error=note,
-                    )
-                continue
+                response, failure_class = self._attempt_with_rotation(
+                    provider, call)
+            finally:
+                if probing:
+                    with self._lock:
+                        self._half_open_probes[provider.name] = max(
+                            0, self._half_open_probes.get(provider.name, 1) - 1)
+            latency_ms = (self._clock() - attempt_start) * 1000.0
             if response.ok:
-                self._note_success(provider.name)
+                self._note_success(provider.name, latency_ms)
+                trace.append({"provider": provider.name, "ok": True,
+                              "latency_ms": round(latency_ms, 1), "error": ""})
+                response.route_trace = list(trace)
                 if learning is not None:
                     self._note_learning(
                         operation, provider.name, success=True,
-                        latency_s=self._clock() - attempt_start,
+                        latency_s=latency_ms / 1000.0,
                     )
                 # Per-call cost logging (build-map #18): metered spend for
                 # the call that just succeeded.  Best-effort and silent —
@@ -772,6 +1137,7 @@ class LLMRouter:
                     response,
                     tier=tier or "",
                     operation=operation,
+                    path=self._cost_log_path,
                 )
                 if failed:
                     # A failover happened: the response must say WHICH
@@ -792,19 +1158,25 @@ class LLMRouter:
                 return response
             self._note_failure(provider.name, response.error)
             failed.append((provider.name, response.error or "unknown error"))
+            trace.append({"provider": provider.name, "ok": False,
+                          "latency_ms": round(latency_ms, 1),
+                          "error": response.error or "unknown error"})
             last = response
             if learning is not None:
                 self._note_learning(
                     operation, provider.name, success=False,
-                    latency_s=self._clock() - attempt_start,
+                    latency_s=latency_ms / 1000.0,
                     error=response.error or "unknown error",
                 )
+            if not allow_fallbacks:
+                break
 
         self.stats["failures"] += 1
         if attempted == 0:
             last.error = "all providers are cooling down"
         # Even a total failure reports the whole attempt chain.
         last.failed_providers = [name for name, _ in failed]
+        last.route_trace = list(trace)
         if failed:
             chain_note = "; ".join(f"{name} failed ({err})" for name, err in failed)
             last.fallback_note = (f"{chain_note}; no provider served this call"
@@ -834,10 +1206,10 @@ class LLMRouter:
             pass
         return last
 
-    def _note_success(self, name: str) -> None:
+    def _note_success(self, name: str, latency_ms: float = 0.0) -> None:
         health = self._health.get(name)
         if health is not None:
-            health.record_success()
+            health.record_success(latency_ms)
             if health.breaker is not None:
                 # A success closes the breaker — including after a half-open
                 # probe, which is how a recovered provider rejoins rotation.
@@ -935,12 +1307,21 @@ class LLMRouter:
 
     def stats_snapshot(self) -> dict[str, Any]:
         with self._lock:
-            return {
+            snapshot = {
                 **self.stats,
                 "active": self._active,
                 "chain": [p.name for p in self._providers],
                 "health": {n: h.to_dict() for n, h in self._health.items()},
             }
+        if self.daily_budget_usd > 0:
+            try:
+                now = time.time()
+                day_start = now - (now % 86400)
+                snapshot["budget"] = self._cost_log().budget_report(
+                    self.daily_budget_usd, day_start)
+            except Exception:  # noqa: BLE001
+                pass
+        return snapshot
 
     def reset_cooldowns(self) -> None:
         with self._lock:
