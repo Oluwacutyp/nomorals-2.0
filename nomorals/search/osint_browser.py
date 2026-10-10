@@ -17,6 +17,7 @@ from typing import Any
 
 from .base import SourceAdapter
 from .model import SearchResult
+from .osint import build_osint_hit
 from ..core.logging_setup import get_logger
 
 _log = get_logger(__name__)
@@ -99,12 +100,12 @@ class BrowserPeopleSearchAdapter(SourceAdapter):
                     link = m.group(1)
                     if len(out) >= limit:
                         break
-                    out.append(SearchResult(
-                        source=self.name,
-                        title=f"{name} — {label} result",
-                        url=link[:500],
-                        snippet=f"Public people-search hit for '{name}' via {label}.",
-                        score=0.6,
+                    out.append(build_osint_hit(
+                        self, name,
+                        f"{name} — {label} result",
+                        link[:500],
+                        f"Public people-search hit for '{name}' via {label}.",
+                        0.6, confidence="low", engine=label,
                     ))
                     if len(out) >= 3:  # a few links per engine is enough
                         break
@@ -165,12 +166,12 @@ class BrowserSiteSearchAdapter(SourceAdapter):
                     text = link.get("text", "") if isinstance(link, dict) else ""
                     if not href.startswith("http"):
                         continue
-                    out.append(SearchResult(
-                        source=self.name,
-                        title=text[:120] or href[:120],
-                        url=href[:500],
-                        snippet=f"Archived capture related to '{q}' ({label}).",
-                        score=0.5,
+                    out.append(build_osint_hit(
+                        self, q,
+                        text[:120] or href[:120],
+                        href[:500],
+                        f"Archived capture related to '{q}' ({label}).",
+                        0.5, confidence="low", engine=label,
                     ))
                     if len(out) >= limit:
                         break

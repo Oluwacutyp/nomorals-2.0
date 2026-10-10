@@ -100,24 +100,71 @@ class CharacterMemory:
                 return [t for t in out if t][:limit]
             except Exception as exc:  # noqa: BLE001
                 _log.debug("character deep recall failed: %s", exc)
-        # flat fallback — word overlap, mirrors Character.recall
-        words = {w for w in (query or "").lower().split() if len(w) > 2}
-        mem = getattr(self.char, "memory", None) or []
-        scored: list[tuple[float, float, str]] = []
-        for m in mem:
-            if not isinstance(m, dict):
-                continue
-            text = str(m.get("text", ""))
-            overlap = len(words & {w for w in text.lower().split()
-                                  if len(w) > 2})
-            sal = m.get("salience", 0.5)
-            try:
-                sal = float(sal)
-            except (TypeError, ValueError):
-                sal = 0.5
-            scored.append((overlap * 2.0 + sal, float(m.get("ts", 0)), text))
-        scored.sort(reverse=True)
-        return [t for _, _, t in scored[:limit] if t]
+        # flat fallback — three-factor scoring (Stanford gold), mirrors
+        # Character.recall so both paths rank the same way
+        try:
+            return self.char.recall(query, limit=limit)
+        except Exception:
+            return []
+
+    # ── consolidate ──────────────────────────────────────────────────
+    def consolidate(self) -> dict[str, int]:
+        """Background tidy: dedupe near-duplicates, merge the trivial,
+        keep the list honest. MIRIX/Mem0 gold — memory quality is
+        retrieval quality, and retrieval drowns in duplicates.
+
+        Returns {"merged": n, "dropped": n}. Never raises.
+        """
+        stats = {"merged": 0, "dropped": 0}
+        try:
+            mem = getattr(self.char, "memory", None)
+            if not isinstance(mem, list) or len(mem) < 2:
+                return stats
+            if self._manager is not None:
+                # deep backend owns its lifecycle; only trim the flat mirror
+                return stats
+            seen: dict[str, dict[str, Any]] = {}
+            kept: list[dict[str, Any]] = []
+            for m in mem:
+                if not isinstance(m, dict):
+                    continue
+                text = str(m.get("text", "")).strip()
+                if not text:
+                    stats["dropped"] += 1
+                    continue
+                key = " ".join(text.lower().split())
+                try:
+                    sal = float(m.get("salience", 0.5))
+                except (TypeError, ValueError):
+                    sal = 0.5
+                if key in seen:
+                    # near-duplicate: keep the stronger salience, newer ts
+                    old = seen[key]
+                    try:
+                        old_sal = float(old.get("salience", 0.5))
+                    except (TypeError, ValueError):
+                        old_sal = 0.5
+                    if sal > old_sal:
+                        old["salience"] = sal
+                    try:
+                        if float(m.get("ts", 0)) > float(old.get("ts", 0)):
+                            old["ts"] = m.get("ts")
+                    except (TypeError, ValueError):
+                        pass
+                    stats["merged"] += 1
+                else:
+                    seen[key] = m
+                    kept.append(m)
+            # drop the truly trivial when the list is crowded
+            if len(kept) > 80:
+                kept.sort(key=lambda m: float(m.get("salience", 0.5) or 0.5))
+                before = len(kept)
+                kept = kept[-80:]
+                stats["dropped"] += before - len(kept)
+            mem[:] = kept
+        except Exception as exc:  # noqa: BLE001
+            _log.debug("character consolidate failed: %s", exc)
+        return stats
 
     # ── proactive ────────────────────────────────────────────────────
     def proactive(self, message_text: str, limit: int = 2) -> list[str]:

@@ -19,8 +19,60 @@ BRAIN_KEY = "brain:devon"
 
 __all__ = [
     "CHAR_KEY_PREFIX", "BRAIN_KEY", "AgentSeat", "MatchResult",
-    "run_agent_match",
+    "run_agent_match", "match_intro",
 ]
+
+
+def match_intro(game_name: str, seats: list[AgentSeat],
+                suggest: SuggestFn | None,
+                graph: Any = None,
+                rng: Any = None) -> list[str]:
+    """Game-night intro: every seat gets a one-liner in character, and
+    real rivalries get called out. Game night has culture — the table
+    should feel like one before the first move.
+
+    Rivalry comes from the relationship graph (kind == "rival" or high
+    friction), not from vibes — callouts are earned.
+    """
+    r = rng or random.Random()
+    lines = [f"🎮 {game_name} — seats taken:"]
+    chars = [s.character for s in seats
+             if s.kind == "character" and s.character]
+    for s in seats:
+        if s.kind == "brain":
+            lines.append("  Devon cracks her knuckles. \"Let's play.\"")
+        elif s.character:
+            c = s.character
+            try:
+                one = c.speak(
+                    f"You're sitting down to play {game_name} with "
+                    f"{', '.join(x.display for x in seats if x.display != c.name)}. "
+                    f"Say ONE cocky line as you take your seat. One sentence.",
+                    suggest)
+            except Exception:
+                one = c._fallback_line(f"ready for {game_name}")
+            lines.append(f"  {c.name}: \"{one[:140]}\"")
+    # rivalry callouts — earned from the graph
+    if graph is not None and len(chars) >= 2:
+        for i, a in enumerate(chars):
+            for b in chars[i + 1:]:
+                try:
+                    e = graph.edge(a.id, b.id)
+                    kind = getattr(e, "kind", "")
+                    fric = float((getattr(e, "dims", None) or {})
+                                     .get("friction", 0.0))
+                    if kind == "rival" or fric > 0.6:
+                        pick = r.choice([
+                            f"⚔️ Grudge match: {a.name} vs {b.name} — "
+                            f"the table goes quiet.",
+                            f"⚔️ {a.name} and {b.name} have history. "
+                            f"This one's personal.",
+                            f"⚔️ All eyes on {a.name} vs {b.name}.",
+                        ])
+                        lines.append("  " + pick)
+                except Exception:
+                    continue
+    return lines
 
 
 @dataclass
@@ -80,7 +132,8 @@ def run_agent_match(game_name: str, seats: list[AgentSeat],
                     seed: int | None = None,
                     store: Any = None,
                     max_turns: int = 200,
-                    context: Any = None) -> MatchResult:
+                    context: Any = None,
+                    graph: Any = None) -> MatchResult:
     """Play a full game with agent seats. Returns the result + transcript."""
     from ..games import engine as engine_mod
     from ..games.players import Player
@@ -107,7 +160,12 @@ def run_agent_match(game_name: str, seats: list[AgentSeat],
     # bypass human requirements — all seats are agents
     room.status = "active"
     room.state = game.new_state(room.rng())
-    transcript: list[str] = [game.setup(room, eng._mind)]
+    try:
+        transcript: list[str] = match_intro(
+            game.name, seats, suggest, graph=graph, rng=rng)
+    except Exception:
+        transcript = []
+    transcript.append(game.setup(room, eng._mind))
     seat_by_key = {s.key: s for s in seats}
     moves = 0
 

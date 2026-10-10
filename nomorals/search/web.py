@@ -293,6 +293,18 @@ class SearXNGWebSource(WebSearchSource):
 
     ``NM_SEARXNG_URL`` — one URL or comma-separated list (failover in
     order), e.g. ``https://searx.example.com,http://localhost:8888``.
+
+    Per-query vertical routing (the part every programmatic SearXNG
+    integration uses, and we were missing):
+
+    - ``NM_SEARXNG_CATEGORY`` — ``general`` (default), ``news``,
+      ``science``, ``it``, ``videos``, ``images``, ``map``, ``music``,
+      ``files``, ``"social media"``;
+    - ``NM_SEARXNG_TIME_RANGE`` — ``day``, ``week``, ``month``, ``year``
+      (recency filter; most useful with the ``news`` category);
+    - ``NM_SEARXNG_ENGINES`` — comma-separated engine pinning, e.g.
+      ``google,bing``;
+    - ``NM_SEARXNG_LANGUAGE`` — e.g. ``en``, ``fr`` (default ``auto``).
     """
 
     name = "web_searxng"
@@ -301,9 +313,34 @@ class SearXNGWebSource(WebSearchSource):
         "NM_SEARXNG_URL; self-hosted recommended)"
     )
 
+    #: valid categories per the SearXNG query API
+    CATEGORIES = frozenset({
+        "general", "images", "videos", "news", "map", "music",
+        "science", "social media", "files", "it",
+    })
+    #: valid time ranges per the SearXNG query API
+    TIME_RANGES = frozenset({"day", "week", "month", "year"})
+
     def _instances(self) -> list[str]:
         raw = _env("NM_SEARXNG_URL", "SEARXNG_URL")
         return [u.strip().rstrip("/") for u in raw.split(",") if u.strip()]
+
+    def _category(self) -> str:
+        cat = _env("NM_SEARXNG_CATEGORY", "SEARXNG_CATEGORY",
+                   default="general").strip().lower()
+        return cat if cat in self.CATEGORIES else "general"
+
+    def _time_range(self) -> str:
+        tr = _env("NM_SEARXNG_TIME_RANGE", "SEARXNG_TIME_RANGE",
+                  default="").strip().lower()
+        return tr if tr in self.TIME_RANGES else ""
+
+    def _engines(self) -> str:
+        return _env("NM_SEARXNG_ENGINES", "SEARXNG_ENGINES", default="").strip()
+
+    def _language(self) -> str:
+        return _env("NM_SEARXNG_LANGUAGE", "SEARXNG_LANGUAGE",
+                    default="auto").strip() or "auto"
 
     def probe(self) -> str | None:
         if not self._instances():
@@ -316,14 +353,20 @@ class SearXNGWebSource(WebSearchSource):
 
     def _fetch(self, query: str, limit: int) -> list[dict[str, Any]]:
         timeout = _timeout(12.0)
+        params: dict[str, Any] = {
+            "q": query, "format": "json", "language": self._language(),
+            "safesearch": "1", "pageno": "1",
+            "categories": self._category(),
+        }
+        if self._time_range():
+            params["time_range"] = self._time_range()
+        if self._engines():
+            params["engines"] = self._engines()
         errors: list[str] = []
         for instance in self._instances():
             status, body = _http(
                 "GET", f"{instance}/search",
-                params={
-                    "q": query, "format": "json", "language": "auto",
-                    "safesearch": "1", "pageno": "1",
-                },
+                params=params,
                 timeout=timeout,
             )
             if status == 403:
@@ -361,15 +404,24 @@ class SearXNGWebSource(WebSearchSource):
 class DdgsWebSource(WebSearchSource):
     """``ddgs`` package (ex-duckduckgo_search): keyless multi-engine text
     search — backends include bing, brave, duckduckgo, google, mojeek,
-    startpage, yandex, yahoo, wikipedia. Optional dependency."""
+    startpage, yandex, yahoo, wikipedia. Optional dependency.
+
+    ``NM_DDGS_KIND`` routes the vertical: ``text`` (default), ``news``,
+    ``images``, ``videos`` — the ``ddgs`` package's own methods, so a
+    news or media query gets engines tuned for it instead of generic
+    text results.
+    """
 
     name = "web_ddgs"
     description = (
         "ddgs multi-engine web search (keyless; pip install ddgs; "
-        "NM_DDGS_BACKEND to pin engines)"
+        "NM_DDGS_BACKEND to pin engines; NM_DDGS_KIND=text|news|images|videos)"
     )
 
     _ddgs_missing: bool | None = None
+
+    #: the ddgs vertical methods we route to
+    KINDS = frozenset({"text", "news", "images", "videos"})
 
     def probe(self) -> str | None:
         if DdgsWebSource._ddgs_missing is None:
@@ -393,27 +445,54 @@ class DdgsWebSource(WebSearchSource):
         # dual-scope transport: NM_DDGS_REGION="ng-ng" pins Nigeria-flavoured
         # results, "us-en" the US; default "wt-wt" (no region) keeps it global
         region = _env("NM_DDGS_REGION", "DDGS_REGION", default="wt-wt") or "wt-wt"
+        kind = _env("NM_DDGS_KIND", "DDGS_KIND", default="text").strip().lower()
+        if kind not in self.KINDS:
+            kind = "text"
         timeout = _timeout(15.0)
         try:
             client = DDGS(timeout=int(timeout))
-            try:
-                rows = client.text(
+            if kind == "text":
+                try:
+                    rows = client.text(
+                        query, region=region, safesearch="moderate",
+                        backend=backend, max_results=limit,
+                    )
+                except TypeError:
+                    # older ddgs without the backend kwarg
+                    rows = client.text(
+                        query, region=region, safesearch="moderate",
+                        max_results=limit,
+                    )
+            elif kind == "news":
+                rows = client.news(
                     query, region=region, safesearch="moderate",
-                    backend=backend, max_results=limit,
+                    max_results=limit,
                 )
-            except TypeError:
-                # older ddgs without the backend kwarg
-                rows = client.text(
+            elif kind == "images":
+                rows = client.images(
+                    query, region=region, safesearch="moderate",
+                    max_results=limit,
+                )
+            else:  # videos
+                rows = client.videos(
                     query, region=region, safesearch="moderate",
                     max_results=limit,
                 )
             out = []
             for r in rows or []:
+                # news/images/videos rows use the same title/body keys;
+                # image/video rows carry the media URL in "image"/"content"
+                url = r.get("href") or r.get("image") or r.get("content")
+                if kind in ("images", "videos"):
+                    snippet = r.get("title") or ""
+                else:
+                    snippet = r.get("body")
                 out.append({
                     "title": r.get("title"),
-                    "url": r.get("href"),
-                    "snippet": r.get("body"),
+                    "url": url,
+                    "snippet": snippet,
                     "engine": r.get("backend") or backend,
+                    "kind": kind,
                 })
             return out
         except WebBackendError:

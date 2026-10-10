@@ -42,6 +42,7 @@ response records exactly which sources were searched.
 
 from __future__ import annotations
 
+import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from typing import Any
@@ -60,6 +61,7 @@ from .model import (
 from .sources import (
     SourceAdapter,
     build_adapters,
+    build_osint_adapter,
     list_sources,
     valid_source_names,
     valid_types,
@@ -137,6 +139,28 @@ def _search_one(
         raise SearchError(f"source {name!r} failed: {exc}") from exc
 
 
+def _resolve_weights(
+    source_weights: dict[str, float] | list[float] | None,
+    names: list[str],
+) -> list[float] | None:
+    """Align user-supplied RRF weights with the searched source order."""
+    if source_weights is None:
+        return None
+    if isinstance(source_weights, dict):
+        try:
+            return [float(source_weights[name]) for name in names]
+        except KeyError as exc:
+            raise SearchError(
+                f"source_weights missing source {exc}; searched: {names}"
+            ) from exc
+    if len(source_weights) != len(names):
+        raise SearchError(
+            f"source_weights length {len(source_weights)} != "
+            f"sources searched {len(names)}"
+        )
+    return [float(w) for w in source_weights]
+
+
 def federated_search(
     query: str,
     *,
@@ -152,6 +176,7 @@ def federated_search(
     adapters: dict[str, SourceAdapter] | None = None,
     fusion: str = "legacy",
     parallel: bool = False,
+    source_weights: dict[str, float] | list[float] | None = None,
 ) -> SearchResponse:
     """Run ``query`` across the selected sources and return merged results.
 
@@ -162,7 +187,16 @@ def federated_search(
     contract) or ``"rrf"`` (reciprocal rank fusion across sources).
     ``parallel=True`` fans the source searches out on a thread pool while
     preserving canonical order and failure semantics.
+    ``source_weights`` (RRF only) trusts some sources more than others —
+    a dict keyed by source name or a list aligned with ``sources`` order;
+    each weight scales that source's ``1/(k+rank)`` contributions (the
+    Elasticsearch weighted-RRF extension).
+
+    ``SearchResponse.timings`` records per-source wall-clock seconds and
+    ``SearchResponse.elapsed`` the total — every metasearch reports
+    per-engine latency, and operators need it to spot a slow backend.
     """
+    t_start = time.perf_counter()
     query = (query or "").strip()
     if not query:
         raise SearchError("search query must not be empty")
@@ -200,7 +234,14 @@ def federated_search(
         )
     for name in names:
         if name not in adapters:
-            raise SearchError(f"no adapter built for source {name!r}")
+            # OSINT adapters are context-free (no constructor arguments),
+            # so they build on demand instead of living in the
+            # context-bound adapter set — this is what makes osint_*
+            # sources reachable through the standard query path.
+            lazy = build_osint_adapter(name)
+            if lazy is None:
+                raise SearchError(f"no adapter built for source {name!r}")
+            adapters[name] = lazy
 
     response = SearchResponse(query=query)
     per_source = max(limit * 2, 10)
@@ -221,6 +262,7 @@ def federated_search(
         )
 
     per_source_hits: list[list[SearchResult]] = []
+    hit_source_names: list[str] = []
     if parallel and searchable:
         with ThreadPoolExecutor(
             max_workers=min(len(searchable), 8),
@@ -231,23 +273,34 @@ def federated_search(
             # is the one that surfaces, exactly like the sequential path.
             for name in searchable:
                 try:
+                    t0 = time.perf_counter()
                     hits = futures[name].result()
+                    response.timings[name] = time.perf_counter() - t0
                 except Exception:
                     for f in futures.values():
                         f.cancel()
                     raise
                 per_source_hits.append(hits)
+                hit_source_names.append(name)
                 response.sources_searched.append(name)
     else:
         for name in searchable:
+            t0 = time.perf_counter()
             per_source_hits.append(_run(name))
+            response.timings[name] = time.perf_counter() - t0
+            hit_source_names.append(name)
             response.sources_searched.append(name)
 
     if fusion == "rrf":
-        merged, dropped = reciprocal_rank_fusion(per_source_hits)
+        weights = _resolve_weights(source_weights, hit_source_names)
+        merged, dropped = reciprocal_rank_fusion(per_source_hits, weights=weights)
         response.deduped = dropped
         kept = merged
     else:
+        if source_weights is not None:
+            raise SearchError(
+                "source_weights only applies to fusion='rrf'"
+            )
         merged = []
         for hits in per_source_hits:
             normalize_scores(hits)
@@ -264,6 +317,7 @@ def federated_search(
         kept = [h for h in kept if h.timestamp is None or h.timestamp <= before_ts]
 
     response.hits = rank_results(kept, valid_source_names())[:limit]
+    response.elapsed = time.perf_counter() - t_start
     _emit("search.performed", {
         "query": query,
         "sources": list(response.sources_searched),
@@ -272,5 +326,6 @@ def federated_search(
         "deduped": response.deduped,
         "fusion": fusion,
         "parallel": parallel,
+        "elapsed": response.elapsed,
     })
     return response

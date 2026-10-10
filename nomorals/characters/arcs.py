@@ -93,6 +93,53 @@ def arc_summary(char: Character) -> str:
     return "\n".join(lines)
 
 
+def arc_story(char: Character) -> str:
+    """The character's arc as a STORY — who they were, what's changing,
+    where they're headed. This is the god-tier version of arc_summary:
+    narrative, not bullets."""
+    name = char.name or "They"
+    parts = [f"📖 The story of {name} so far."]
+    # reflections are the spine of the story (Stanford gold)
+    refs = [r.get("text", "") for r in (char.reflections or [])
+            if r.get("text")][-3:]
+    if refs:
+        parts.append("What " + name + " has figured out lately:")
+        parts.extend(f"  💭 \"{r[:140]}\"" for r in refs)
+    # scar tissue: heavily-revised beliefs
+    scarred = sorted(
+        (b for b in char.beliefs if int(b.get("revisions") or 0) >= 2),
+        key=lambda b: -int(b.get("revisions") or 0))[:3]
+    if scarred:
+        parts.append("Scar tissue — beliefs life rewrote:")
+        for b in scarred:
+            parts.append(f"  🩹 \"{b.get('text','')[:90]}\" "
+                         f"(revised {b.get('revisions')}×, now "
+                         f"{float(b.get('confidence', 0)):.0%} sure)")
+    # milestones as chapters
+    stones = [str(m.get("text", "")).replace("🏛️ MILESTONE — ", "")
+              for m in char.memory
+              if str(m.get("text", "")).startswith("🏛️ MILESTONE")][-4:]
+    if stones:
+        parts.append("Chapters:")
+        parts.extend(f"  🏛️ {s[:110]}" for s in stones)
+    # goals: the road ahead
+    try:
+        agenda = char.goal_agenda()
+    except Exception:
+        agenda = ""
+    if agenda:
+        parts.append(f"Where {name} is headed: {agenda}.")
+    achieved = [g for g, s in (char.goal_states or {}).items()
+                if s.get("status") == "achieved"][-3:]
+    if achieved:
+        parts.append("Already done: " + "; ".join(a[:60] for a in achieved) + ".")
+    if len(parts) == 1:
+        parts.append(f"{name}'s story is still being written — early days.")
+    elif char.core_motive:
+        parts.append(f"Through it all, one thing never changed: {char.core_motive}")
+    return "\n".join(parts)
+
+
 def grow_from_interaction(char: Character, other: str, event: str,
                           outcome: str = "") -> None:
     """Lightweight growth hook: notable interactions can seed or shift

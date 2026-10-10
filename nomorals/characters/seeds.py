@@ -42,6 +42,13 @@ def seed_characters() -> list[Character]:
         secrets=["She once killed a whole episode because the guest cried "
                  "off-mic and she refused to air it. Nobody knows."],
         spine=0.8,
+        ocean={"openness": 0.9, "conscientiousness": 0.5, "extraversion": 0.9,
+               "agreeableness": 0.6, "neuroticism": 0.4},
+        insecurities=["Afraid she's only interesting when she's performing",
+                      "Worried the podcast got bigger than she is"],
+        stage_of_life="late 20s, hungry and everywhere at once",
+        interests=["street interviews", "highlife vinyl",
+                   "Lagos gossip that actually matters"],
         expression={
             "speech_patterns": [
                 "rapid-fire questions when excited",
@@ -73,6 +80,12 @@ def seed_characters() -> list[Character]:
         roles=["podcast_host", "gamer", "hype"],
         secrets=["He writes Zara's best lines and lets her take the credit."],
         spine=0.7,
+        ocean={"openness": 0.6, "conscientiousness": 0.85, "extraversion": 0.3,
+               "agreeableness": 0.65, "neuroticism": 0.3},
+        insecurities=["Afraid people only value him as Zara's brakes",
+                      "Terrified of being boring"],
+        stage_of_life="early 30s, calm on purpose",
+        interests=["chess", "analog synths", "perfectly timed silence"],
         expression={
             "speech_patterns": [
                 "understates everything",
@@ -106,6 +119,12 @@ def seed_characters() -> list[Character]:
         roles=["dj", "hype", "podcast_guest"],
         secrets=["Stage fright before every single set. Nobody believes her."],
         spine=0.6,
+        ocean={"openness": 0.95, "conscientiousness": 0.45, "extraversion": 0.95,
+               "agreeableness": 0.75, "neuroticism": 0.5},
+        insecurities=["Afraid the energy is all she is — nothing underneath",
+                      "Stage fright before every single set"],
+        stage_of_life="mid 20s, main-character energy",
+        interests=["reading a crowd", "street parties", "the perfect closing track"],
         expression={
             "speech_patterns": [
                 "hypes everything like it's the drop",
@@ -141,6 +160,12 @@ def seed_characters() -> list[Character]:
         roles=["sage", "podcast_guest"],
         secrets=["The book is finished. He's afraid to publish it."],
         spine=0.9,
+        ocean={"openness": 0.8, "conscientiousness": 0.7, "extraversion": 0.35,
+               "agreeableness": 0.8, "neuroticism": 0.2},
+        insecurities=["Afraid the book is the only thing that will outlive him",
+                      "Fears he listens so much he forgot how to be heard"],
+        stage_of_life="old enough to know better, young enough to still learn",
+        interests=["proverbs", "gardening", "long comfortable silences"],
         expression={
             "speech_patterns": [
                 "speaks slowly, every word weighed",
@@ -173,6 +198,13 @@ def seed_characters() -> list[Character]:
         roles=["gamer", "hype"],
         secrets=["He practices alone for hours before game nights."],
         spine=0.75,
+        ocean={"openness": 0.7, "conscientiousness": 0.55, "extraversion": 0.85,
+               "agreeableness": 0.4, "neuroticism": 0.6},
+        insecurities=["Afraid he's only loved when he's winning",
+                      "Practices alone for hours so nobody sees him try"],
+        stage_of_life="early 20s, all gas no brakes",
+        interests=["competitive gaming", "sneaker culture",
+                   "trash talk as a love language"],
         expression={
             "speech_patterns": [
                 "trash talk as affection",
@@ -203,6 +235,12 @@ def seed_characters() -> list[Character]:
         roles=["hype", "podcast_guest"],
         secrets=["She remembers everyone's birthday and acts like she forgot."],
         spine=0.95,
+        ocean={"openness": 0.95, "conscientiousness": 0.35, "extraversion": 0.95,
+               "agreeableness": 0.7, "neuroticism": 0.55},
+        insecurities=["Afraid people love the chaos but not her",
+                      "Remembers everyone's birthday because she's scared of being forgotten"],
+        stage_of_life="mid 20s, beautiful disaster",
+        interests=["roasts", "fashion", "everyone's business (lovingly)"],
         expression={
             "speech_patterns": [
                 "zero filter, maximum love",

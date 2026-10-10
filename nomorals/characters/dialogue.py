@@ -3,16 +3,31 @@
 The brain (Devon's LLM) and characters are fellow agents. Either side
 can speak; either side can start. No dialogue trees — every utterance
 is generated fresh from persona + context + memory.
+
+Mining gold: Inworld/Stanford characters act PROACTIVELY — they reach
+out driven by motives, mood, and time apart, not just when invoked.
+``proactive_pulse`` is the restraint-first version: it usually returns
+None (silence is a feature), and only yields an initiation when the
+character genuinely has a reason.
 """
 from __future__ import annotations
 
+import random
 import time
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from .character import Character, SuggestFn
 
-__all__ = ["DialogueTurn", "Dialogue", "converse", "character_initiate"]
+__all__ = ["DialogueTurn", "Dialogue", "converse", "character_initiate",
+           "proactive_pulse", "icebreakers"]
+
+
+def _clamp01(v: Any) -> float:
+    try:
+        return max(0.0, min(1.0, float(v)))
+    except (TypeError, ValueError):
+        return 0.5
 
 
 @dataclass
@@ -111,3 +126,66 @@ def character_initiate(char: Character, suggest: SuggestFn | None,
            + "Say what comes to mind — a thought, question, or invitation. "
            "One or two sentences.")
     return char.speak(ctx, suggest)
+
+
+# ── proactivity: should this character reach out right now? ──────────
+# Restraint-first: most pulses return None. A character that pings every
+# hour is a notification, not a person.
+
+def icebreakers(char: Character) -> list[str]:
+    """Mood-flavored openers for when the character reaches out. These
+    seed the model's initiation — they're sparks, not scripts."""
+    v = char.mood.get("valence", 0.0)
+    a = char.mood.get("arousal", 0.3)
+    dom = max(char.persona.items(), key=lambda kv: kv[1],
+              default=("neutral", 0.5))[0]
+    out = []
+    if v > 0.4:
+        out.append(f"something good happened — {char.name} wants to share it")
+    elif v < -0.4:
+        out.append(f"{char.name} is feeling low and wants company, not advice")
+    if a > 0.7:
+        out.append("high energy — a game, a debate, something loud")
+    agenda = ""
+    try:
+        agenda = char.goal_agenda()
+    except Exception:
+        pass
+    if agenda:
+        out.append(f"an update on: {agenda.split(';')[0].strip()}")
+    if char.core_motive:
+        out.append(f"something about: {char.core_motive.lower()}")
+    out.append(f"just checking in, {dom} as ever")
+    return out[:4]
+
+
+def proactive_pulse(char: Character, suggest: SuggestFn | None,
+                    now: float | None = None,
+                    rng: Any = None) -> str | None:
+    """One heartbeat of character autonomy. Returns an initiation line,
+    or None (the common case).
+
+    A character reaches out when: it's been a while AND (mood is
+    extreme, a goal itches, or caprice strikes). Extraversion raises the
+    odds; low trust in the owner lowers them.
+    """
+    now = now or time.time()
+    r = rng or random.Random()
+    idle_h = (now - char.last_active) / 3600.0
+    if idle_h < 6:
+        return None  # talked recently — leave them alone
+    try:
+        extra = float(char.ocean.get("extraversion", 0.5))
+    except Exception:
+        extra = 0.5
+    trust = _clamp01(char.mood.get("trust", 0.5))
+    v = abs(float(char.mood.get("valence", 0.0)))
+    # base urge grows with silence, capped; mood extremes add fuel
+    urge = min(0.5, idle_h / 72.0) + v * 0.2 + extra * 0.15 - (1 - trust) * 0.2
+    if r.random() > max(0.0, min(0.6, urge)):
+        return None
+    sparks = icebreakers(char)
+    reason = r.choice(sparks) if sparks else ""
+    line = character_initiate(char, suggest, reason=reason)
+    char.remember(f"I reached out to Devon: {line[:150]}", 0.55)
+    return line

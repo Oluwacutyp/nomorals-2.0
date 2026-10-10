@@ -618,3 +618,20 @@ def build_adapters(
         if wanted is None or name in wanted:
             adapters[name] = cls(context)
     return adapters
+
+
+def build_osint_adapter(name: str) -> SourceAdapter | None:
+    """Lazily construct a context-free OSINT adapter by source name.
+
+    The OSINT adapters take no constructor arguments (pure keyless HTTP),
+    so they are *not* part of :func:`build_adapters`' context-bound set —
+    :func:`~nomorals.search.federated.federated_search` builds them on
+    demand when a query names them. Returns ``None`` for non-OSINT names.
+    """
+    for spec_name, _rtype, _desc, cls in OSINT_SPECS:
+        if spec_name == name:
+            return cls()
+    for spec_name, _rtype, _desc, cls in BROWSER_OSINT_SPECS:
+        if spec_name == name:
+            return cls()
+    return None

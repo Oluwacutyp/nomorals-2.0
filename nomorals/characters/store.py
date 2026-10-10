@@ -69,3 +69,53 @@ class CharacterStore:
                 p.unlink()
                 return True
         return False
+
+    def find(self, *, role: str = "", trait: str = "",
+             skill: str = "", min_value: float = 0.5,
+             name_contains: str = "") -> list[Character]:
+        """Query the bank without loading everything into the caller:
+        by role, by trait/skill strength, or by name fragment."""
+        out = []
+        for c in self.all():
+            if role and role not in (c.roles or []):
+                continue
+            if trait and float(c.persona.get(trait, 0.0)) < min_value:
+                continue
+            if skill and float(c.skills.get(skill, 0.0)) < min_value:
+                continue
+            if name_contains and name_contains.lower() not in c.name.lower():
+                continue
+            out.append(c)
+        return out
+
+    def export_all(self) -> list[dict[str, Any]]:
+        """Whole bank as plain dicts — for backups, migration, inspection."""
+        return [c.to_dict() for c in self.all()]
+
+    def import_all(self, dicts: list[dict[str, Any]],
+                   overwrite: bool = False) -> dict[str, int]:
+        """Restore from export_all(). Skips existing names unless
+        ``overwrite``. Returns counts."""
+        stats = {"created": 0, "skipped": 0, "overwritten": 0}
+        for d in dicts or []:
+            try:
+                c = Character.from_dict(d)
+            except Exception:
+                continue
+            existing = self.get_by_name(c.name)
+            if existing and not overwrite:
+                stats["skipped"] += 1
+                continue
+            if existing and overwrite:
+                try:
+                    self.delete(existing.id)
+                except Exception:
+                    pass
+                stats["overwritten"] += 1
+            else:
+                stats["created"] += 1
+            try:
+                self.save(c)
+            except Exception:
+                pass
+        return stats

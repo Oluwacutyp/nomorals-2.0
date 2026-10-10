@@ -78,6 +78,11 @@ class SearchResponse:
     sources_searched: list[str] = field(default_factory=list)
     sources_skipped: dict[str, str] = field(default_factory=dict)
     deduped: int = 0
+    #: per-source wall-clock seconds (search only, probes excluded). Additive
+    #: metadata for operators — every metasearch reports per-engine latency.
+    timings: dict[str, float] = field(default_factory=dict)
+    #: total wall-clock seconds for the whole federated call.
+    elapsed: float = 0.0
 
     @property
     def total(self) -> int:
@@ -90,6 +95,8 @@ class SearchResponse:
             "deduped": self.deduped,
             "sources_searched": list(self.sources_searched),
             "sources_skipped": dict(self.sources_skipped),
+            "timings": dict(self.timings),
+            "elapsed": self.elapsed,
             "hits": [h.to_dict() for h in self.hits],
         }
 
@@ -146,17 +153,26 @@ def rank_results(
 
 
 def reciprocal_rank_fusion(
-    ranked_lists: list[list[SearchResult]], k: int = 60
+    ranked_lists: list[list[SearchResult]],
+    k: int = 60,
+    weights: list[float] | None = None,
 ) -> tuple[list[SearchResult], int]:
     """Fuse per-source ranked lists with reciprocal rank fusion (RRF).
 
     Each input list must already be ordered best-first (rank 1 = first
     element); a hit appearing at rank ``r`` in a source contributes
-    ``1 / (k + r)`` to its fused score, summed across every source that
-    returned it. Cross-source content duplicates (same
+    ``weight * (1 / (k + r))`` to its fused score, summed across every
+    source that returned it. Weights default to 1.0 per list — the plain
+    Cormack/Clarke/Büttcher form; per-list weights are the Elasticsearch
+    weighted-RRF extension, letting a trusted engine count more than a
+    long-tail one. Cross-source content duplicates (same
     :meth:`SearchResult.dedupe_key`) fuse into one hit — the kept
     representative is the one with the strongest single-source
     contribution, and its ``score`` is set to the fused total.
+
+    Each hit's ``provenance["source_rank"]`` records its 1-based rank in
+    its own source list (additive metadata for debugging and second-stage
+    rerankers — never overwritten when already set).
 
     Unlike per-source min-max normalization, RRF scores are comparable
     *across* sources without assuming anything about the native scales,
@@ -169,15 +185,24 @@ def reciprocal_rank_fusion(
     """
     if k <= 0:
         raise ValueError(f"RRF k must be positive, got {k}")
+    if weights is not None and len(weights) != len(ranked_lists):
+        raise ValueError(
+            f"RRF weights length {len(weights)} != ranked_lists length "
+            f"{len(ranked_lists)}"
+        )
+    if weights is not None and any(w < 0 for w in weights):
+        raise ValueError(f"RRF weights must be non-negative, got {weights}")
     fused: dict[str, float] = {}
     best: dict[str, tuple[SearchResult, float]] = {}
     total = 0
-    for hits in ranked_lists:
+    for list_idx, hits in enumerate(ranked_lists):
+        weight = 1.0 if weights is None else weights[list_idx]
         for rank, hit in enumerate(hits, start=1):
             total += 1
             key = hit.dedupe_key()
-            contrib = 1.0 / (k + rank)
+            contrib = weight * (1.0 / (k + rank))
             fused[key] = fused.get(key, 0.0) + contrib
+            hit.provenance.setdefault("source_rank", rank)
             prev = best.get(key)
             if prev is None or contrib > prev[1]:
                 best[key] = (hit, contrib)

@@ -45,15 +45,41 @@ class CharacterContextBuilder:
         lines = [f"You are {char.name}."]
         if char.backstory:
             lines.append(f"Background: {char.backstory[:400]}")
+        stage = getattr(char, "stage_of_life", "")
+        if stage:
+            lines.append(f"Stage of life: {stage}.")
         traits = _trait_line(char.persona or {})
         if traits:
             lines.append(f"Personality: {traits}.")
+        # OCEAN numeric conditioning (Big5-Scaler gold)
+        try:
+            lines.append(char.ocean_line())
+        except Exception:
+            pass
         if char.core_motive:
             lines.append(f"Above all, you want: {char.core_motive}")
+        # goals as a live agenda, not a wish list
+        try:
+            agenda = char.goal_agenda()
+        except Exception:
+            agenda = ""
+        if agenda:
+            lines.append(f"Right now you're pursuing: {agenda}.")
         if char.roles:
             lines.append(f"You can play these roles: {', '.join(char.roles[:5])}.")
         if char.knowledge:
             lines.append(f"You know about: {', '.join(char.knowledge[:8])}.")
+        interests = getattr(char, "interests", None) or []
+        if interests:
+            lines.append(f"You're into: {', '.join(str(i) for i in interests[:6])}.")
+        # insecurities shape behavior quietly (Inworld gold)
+        insecs = getattr(char, "insecurities", None) or []
+        if insecs:
+            lines.append(
+                "Things you'd never admit unprompted: "
+                + "; ".join(str(s) for s in insecs[:3])
+                + ". They leak out as defensiveness or overcompensation — "
+                  "you never name them outright.")
         # beliefs shape voice — the strong ones
         strong = [b for b in (char.beliefs or [])
                   if isinstance(b, dict)
@@ -159,17 +185,32 @@ class CharacterContextBuilder:
         return ("Reply as the character, first person. No narration, no "
                 "stage directions, no quoting your own name. Stay in voice.")
 
+    @staticmethod
+    def _voice_drift_block(char: Character) -> str:
+        """If the fingerprint says the voice is drifting, say so plainly."""
+        fp = getattr(char, "voice_fingerprint", None) or {}
+        drift = fp.get("drift_flag")
+        if drift:
+            return ("Note: you've been sounding a little off lately "
+                    f"({drift}). Get back to your real voice.")
+        return ""
+
     # ── build ────────────────────────────────────────────────────────
     def build(self, char: Character, *,
               memories: Sequence[str] = (),
               graph: Any | None = None,
-              owner_id: str = "owner") -> str:
+              owner_id: str = "owner",
+              other: Any | None = None) -> str:
+        """``other``: another Character present in the scene — renders how
+        this character feels about *them*, not just the owner."""
         blocks = [
             self._identity_block(char),
             self._expression_block(char),
             self._mood_block(char),
             self._relationship_block(char, owner_id, graph),
+            self._other_block(char, other, graph),
             self._memory_block(memories),
+            self._voice_drift_block(char),
             self._output_contract(),
         ]
         blocks = [b for b in blocks if b]
@@ -182,8 +223,33 @@ class CharacterContextBuilder:
                 self._expression_block(char),
                 self._mood_block(char),
                 self._relationship_block(char, owner_id, graph),
+                self._other_block(char, other, graph),
                 mem_block,
+                self._voice_drift_block(char),
                 self._output_contract(),
             ]
             text = "\n\n".join(b for b in blocks if b)
         return text
+
+    @staticmethod
+    def _other_block(char: Character, other: Any,
+                     graph: Any | None) -> str:
+        if other is None or graph is None:
+            return ""
+        try:
+            e = graph.edge(char.id, other.id)
+            d = getattr(e, "dims", None) or {}
+            if not d:
+                return ""
+            kind = getattr(e, "kind", "acquaintance")
+            trust = float(d.get("trust", 0.5))
+            friction = float(d.get("friction", 0.1))
+            tone = ("you trust them deeply" if trust > 0.75
+                    else "you're still figuring them out" if trust < 0.4
+                    else "you get along fine")
+            if friction > 0.6:
+                tone += ", though there's real tension between you"
+            return (f"{other.name} is here — {kind}, {tone}. "
+                    f"Let that history color how you talk to them.")
+        except Exception:
+            return ""

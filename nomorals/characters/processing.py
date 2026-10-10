@@ -48,6 +48,15 @@ MOOD_DELTAS: dict[str, dict[str, float]] = {
     "lost_game": {"valence": -0.15, "arousal": 0.1},
     "praised": {"valence": 0.25},
     "insulted": {"valence": -0.3, "arousal": 0.25},
+    # ── sweep additions ──
+    "secret_shared": {"valence": 0.2, "trust": 0.15, "arousal": 0.1},
+    "opened_up": {"valence": 0.2, "trust": 0.12},
+    "defended": {"valence": 0.2, "trust": 0.1, "arousal": 0.15},
+    "celebrated": {"valence": 0.35, "arousal": 0.3},
+    "forgave": {"valence": 0.25, "arousal": -0.1},
+    "abandoned": {"valence": -0.45, "trust": -0.25, "arousal": 0.2},
+    "stood_up_to": {"valence": -0.05, "arousal": 0.25},
+    "missed_them": {"valence": -0.1},
 }
 
 
@@ -79,9 +88,16 @@ def decay_moods(chars: list[Character],
 
 def process_session(events: list[SessionEvent],
                     chars: dict[str, Character],
-                    graph: RelationshipGraph) -> dict[str, Any]:
-    """Background pass over a session's events. Never raises."""
+                    graph: RelationshipGraph,
+                    suggest: Any = None) -> dict[str, Any]:
+    """Background pass over a session's events. Never raises.
+
+    ``suggest`` (optional): model for the reflection step — Stanford's
+    critical piece. Without it, reflection falls back to a heuristic.
+    """
     processed = 0
+    reflections = 0
+    drift_flags: list[str] = []
     try:
         for ev in events:
             char = chars.get(ev.char_id)
@@ -115,9 +131,22 @@ def process_session(events: list[SessionEvent],
             _refresh_voice(chars, events)
         except Exception:
             pass
+        # 7. voice drift check — fingerprint exists to be USED
+        try:
+            drift_flags = _check_drift(chars, events)
+        except Exception:
+            pass
+        # 8. reflection — Stanford gold: salient sessions get synthesized
+        # into insight, not just logged. This is what keeps characters
+        # coherent over months instead of drifting into amnesiacs.
+        try:
+            reflections = _reflect_session(chars, events, suggest)
+        except Exception:
+            pass
     except Exception:
         pass
-    return {"processed": processed}
+    return {"processed": processed, "reflections": reflections,
+            "drift_flags": drift_flags}
 
 
 def _refresh_voice(chars: dict[str, Character],
@@ -156,6 +185,12 @@ def _refresh_voice(chars: dict[str, Character],
                     merged[w] += int(c * w_old)
                 for w, c in fp.top_words:
                     merged[w] += int(c * w_new)
+                # function-word rates merge as weighted averages
+                func: dict[str, float] = {}
+                for w, r in old_fp.function_words:
+                    func[w] = func.get(w, 0.0) + r * w_old
+                for w, r in fp.function_words:
+                    func[w] = func.get(w, 0.0) + r * w_new
                 char.voice_fingerprint = {
                     "top_words": [[w, c] for w, c in merged.most_common(25)],
                     "mean_sentence_len": (
@@ -172,11 +207,90 @@ def _refresh_voice(chars: dict[str, Character],
                     "catchphrase_hits": (old_fp.catchphrase_hits * w_old
                                          + fp.catchphrase_hits * w_new),
                     "n_samples": total,
+                    "function_words": [[w, round(r, 2)]
+                                       for w, r in sorted(
+                                           func.items(), key=lambda kv: -kv[1])[:20]],
+                    "ttr": old_fp.ttr * w_old + fp.ttr * w_new,
+                    "mean_word_len": (old_fp.mean_word_len * w_old
+                                      + fp.mean_word_len * w_new),
                 }
+                # preserve any active drift flag across refreshes
+                if old.get("drift_flag"):
+                    char.voice_fingerprint["drift_flag"] = old["drift_flag"]
             else:
                 char.voice_fingerprint = fp.to_dict()
         except Exception:
             pass
+
+
+def _check_drift(chars: dict[str, Character],
+                 events: list[SessionEvent]) -> list[str]:
+    """Score this session's utterances against each character's stored
+    fingerprint. Flags drift — the fingerprint finally gets USED, not
+    just accumulated. Sets ``drift_flag`` on the fingerprint dict so
+    the context builder can nudge the character back into voice."""
+    from .voice import VoiceFingerprint, consistency
+    flags: list[str] = []
+    by_char: dict[str, list[str]] = {}
+    for ev in events:
+        note = getattr(ev, "note", "") or ""
+        for part in note.split(" | "):
+            part = part.strip()
+            if part:
+                by_char.setdefault(ev.char_id, []).append(part)
+    for char_id, utterances in by_char.items():
+        char = chars.get(char_id)
+        if char is None or len(utterances) < 2:
+            continue
+        old = getattr(char, "voice_fingerprint", None)
+        if not isinstance(old, dict) or int(old.get("n_samples", 0)) < 5:
+            continue
+        try:
+            fp = VoiceFingerprint.from_dict(old)
+            catchphrases = list(
+                (getattr(char, "expression", None) or {}).get(
+                    "catchphrases", ()))
+            scores = [consistency(fp, u, catchphrases) for u in utterances]
+            avg = sum(scores) / len(scores)
+            if avg < 0.45:
+                note = (f"sounding off-session (consistency {avg:.2f} "
+                        f"over {len(utterances)} lines)")
+                char.voice_fingerprint["drift_flag"] = note
+                flags.append(f"{char.name}: {note}")
+            else:
+                char.voice_fingerprint.pop("drift_flag", None)
+        except Exception:
+            continue
+    return flags
+
+
+def _reflect_session(chars: dict[str, Character],
+                     events: list[SessionEvent],
+                     suggest: Any) -> int:
+    """Stanford gold: after a salient session, each involved character
+    synthesizes what happened into insight. Only fires when the session
+    was actually notable — reflection is for meaning, not logistics."""
+    notable_kinds = {"deep_conversation", "betrayed", "argument", "made_up",
+                     "secret_shared", "opened_up", "celebrated", "forgave",
+                     "abandoned"}
+    per_char: dict[str, float] = {}
+    for ev in events:
+        w = 1.5 if ev.event in notable_kinds else 1.0
+        per_char[ev.char_id] = per_char.get(ev.char_id, 0.0) + \
+            ev.salience * w
+    made = 0
+    for char_id, weight in per_char.items():
+        if weight < 1.2:  # not notable enough to reflect on
+            continue
+        char = chars.get(char_id)
+        if char is None:
+            continue
+        try:
+            insights = char.reflect(suggest)
+            made += len(insights)
+        except Exception:
+            continue
+    return made
 
 
 def events_from_dialogue(char_id: str, other_id: str,

@@ -27,9 +27,12 @@ primitives above plus web-search dorking via the existing web source.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
+import shutil
 import socket
+import subprocess
 import urllib.parse
 import urllib.request
 from typing import Any
@@ -69,6 +72,90 @@ def _get_json(url: str, timeout: float = 15) -> Any:
         return json.loads(body)
     except Exception:  # noqa: BLE001
         return None
+
+
+def _parse_ts(value: Any) -> float | None:
+    """Best-effort ISO-8601 / epoch → epoch seconds; never raises."""
+    if value is None or value is False or isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        return float(text)
+    except ValueError:
+        pass
+    try:
+        from datetime import datetime, timezone
+
+        iso = text[:-1] + "+00:00" if text.endswith(("Z", "z")) else text
+        dt = datetime.fromisoformat(iso)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.timestamp()
+
+
+def build_osint_hit(
+    adapter: SourceAdapter,
+    query: str,
+    title: str,
+    url: str,
+    snippet: str,
+    score: float,
+    *,
+    confidence: str = "medium",
+    timestamp: float | None = None,
+    **extra_provenance: Any,
+) -> SearchResult:
+    """Build a well-formed :class:`SearchResult` for an OSINT hit.
+
+    ``url`` and ``confidence`` land in provenance (they are not
+    ``SearchResult`` fields); ``type`` comes from the adapter's
+    ``result_type``; ``source_id`` is a stable per-source hash.
+    """
+    url = str(url or "")
+    sid = hashlib.sha1(
+        f"{adapter.name}:{url or title}".encode("utf-8"), usedforsecurity=False
+    ).hexdigest()[:12]
+    provenance: dict[str, Any] = {"url": url, "confidence": confidence}
+    provenance.update(extra_provenance)
+    return SearchResult(
+        query=query,
+        title=str(title or "(untitled)")[:300],
+        snippet=str(snippet or "")[:1200],
+        source=adapter.name,
+        type=adapter.result_type,
+        score=float(score),
+        raw_score=float(score),
+        provenance=provenance,
+        timestamp=timestamp,
+        source_id=f"{adapter.name}:{sid}",
+    )
+
+
+def _cli_found_lines(exe: str, args: list[str], timeout_s: int) -> list[tuple[str, str]]:
+    """Run a username CLI (sherlock/maigret) and parse its ``[+]`` lines.
+
+    Returns ``(site, url)`` pairs. Returns ``[]`` on any failure, ``None``
+    is never returned — callers distinguish "CLI absent" via which().
+    """
+    try:
+        proc = subprocess.run(
+            [exe, *args], capture_output=True, text=True, timeout=timeout_s
+        )
+    except Exception as exc:  # noqa: BLE001 - CLI failed, fall back
+        _log.debug("%s CLI failed: %s", exe, exc)
+        return []
+    out: list[tuple[str, str]] = []
+    for line in proc.stdout.splitlines():
+        m = re.match(r"\[\+\]\s*(.+?):\s*(https?://\S+)", line.strip())
+        if m:
+            out.append((m.group(1).strip(), m.group(2).strip()))
+    return out
 
 
 # ── username sweep ───────────────────────────────────────────────────
@@ -140,16 +227,61 @@ def _looks_like_ip(q: str) -> str | None:
 
 
 class UsernameSweepAdapter(SourceAdapter):
-    """Username → which platforms have that profile (keyless sweep)."""
+    """Username → which platforms have that profile (keyless sweep).
+
+    Delegation order, best-first (mined from the OSINT arsenal):
+
+    1. ``sherlock`` CLI (400+ sites) when installed;
+    2. ``maigret`` CLI (3000+ sites) when installed;
+    3. the built-in 25-site hand sweep (zero-dependency fallback — the
+       not-found markers rot over time, which is exactly why the CLIs,
+       with their maintained site lists, go first).
+    """
 
     name = "osint_username"
     result_type = "profile"
     description = "Username sweep: which sites have a profile for this handle (keyless, public pages only)."
 
+    def _via_cli(self, user: str, query: str, limit: int) -> list[SearchResult] | None:
+        """sherlock then maigret; ``None`` when neither CLI is installed."""
+        sherlock = shutil.which("sherlock")
+        if sherlock:
+            found = _cli_found_lines(
+                sherlock, [user, "--print-found", "--timeout", "10"], 120)
+            if found:
+                return [
+                    build_osint_hit(
+                        self, query, f"{user} on {site}", url,
+                        f"Public profile found for '{user}' on {site} (sherlock).",
+                        0.85, confidence="high", engine="sherlock",
+                    )
+                    for site, url in found[:limit]
+                ]
+            return []  # CLI ran, nothing found — honest empty, no fallback
+        maigret = shutil.which("maigret")
+        if maigret:
+            found = _cli_found_lines(
+                maigret, [user, "--no-progressbar", "--timeout", "10"], 180)
+            if found:
+                return [
+                    build_osint_hit(
+                        self, query, f"{user} on {site}", url,
+                        f"Public profile found for '{user}' on {site} (maigret).",
+                        0.85, confidence="high", engine="maigret",
+                    )
+                    for site, url in found[:limit]
+                ]
+            return []
+        return None
+
     def search(self, query: str, *, limit: int, since=None, before=None):
         user = _looks_like_username(query)
         if not user:
             return []
+        via_cli = self._via_cli(user, query, limit)
+        if via_cli is not None:
+            return via_cli
+        # zero-dependency fallback: hand-rolled site sweep
         out: list[SearchResult] = []
         for site, tmpl, nf_marker in _USERNAME_SITES:
             if len(out) >= limit:
@@ -157,10 +289,10 @@ class UsernameSweepAdapter(SourceAdapter):
             url = tmpl.format(u=urllib.parse.quote(user))
             status, body, final = _get(url, timeout=10)
             if status == 200 and nf_marker.lower() not in body.lower():
-                out.append(SearchResult(
-                    source=self.name, title=f"{user} on {site}",
-                    url=final, snippet=f"Public profile found for '{user}' on {site}.",
-                    score=0.8,
+                out.append(build_osint_hit(
+                    self, query, f"{user} on {site}", final,
+                    f"Public profile found for '{user}' on {site}.",
+                    0.8, confidence="medium", engine="hand-sweep",
                 ))
             elif status in (404, 410):
                 continue
@@ -186,11 +318,10 @@ class EmailCheckAdapter(SourceAdapter):
             mx_ok = bool(mx)
         except OSError:
             mx_ok = False
-        out.append(SearchResult(
-            source=self.name, title=f"mail server for {domain}",
-            url=f"https://{domain}",
-            snippet=(f"Domain {domain} {'resolves for mail delivery' if mx_ok else 'does NOT resolve — address likely invalid'}."),
-            score=0.6,
+        out.append(build_osint_hit(
+            self, query, f"mail server for {domain}", f"https://{domain}",
+            (f"Domain {domain} {'resolves for mail delivery' if mx_ok else 'does NOT resolve — address likely invalid'}."),
+            0.6, confidence="medium",
         ))
         if len(out) >= limit:
             return out
@@ -203,25 +334,82 @@ class EmailCheckAdapter(SourceAdapter):
             if isinstance(data, dict):
                 steals = data.get("stealers") or []
                 if steals:
-                    out.append(SearchResult(
-                        source=self.name,
-                        title=f"breach exposure for {email}",
-                        url="https://hudsonrock.com",
-                        snippet=(f"Found in {len(steals)} infostealer log(s) via Hudson Rock free API. "
-                                 "Compromised — rotate passwords."),
-                        score=0.95,
+                    out.append(build_osint_hit(
+                        self, query, f"breach exposure for {email}",
+                        "https://hudsonrock.com",
+                        (f"Found in {len(steals)} infostealer log(s) via Hudson Rock free API. "
+                         "Compromised — rotate passwords."),
+                        0.95, confidence="high",
                     ))
                 else:
-                    out.append(SearchResult(
-                        source=self.name,
-                        title=f"breach exposure for {email}",
-                        url="https://hudsonrock.com",
-                        snippet="No infostealer logs found in Hudson Rock free database.",
-                        score=0.5,
+                    out.append(build_osint_hit(
+                        self, query, f"breach exposure for {email}",
+                        "https://hudsonrock.com",
+                        "No infostealer logs found in Hudson Rock free database.",
+                        0.5, confidence="medium",
                     ))
         except Exception as exc:  # noqa: BLE001
             _log.debug("hudsonrock check failed: %s", exc)
         return out[:limit]
+
+
+class XposedOrNotAdapter(SourceAdapter):
+    """Email → known data breaches via XposedOrNot's free API.
+
+    Mined as the keyless breach-check gold: ``GET
+    api.xposedornot.com/v1/check-email/{email}`` needs no API key and is
+    free for personal/low-volume use (HIBP has had no free tier since
+    2024 — not attempted). Returns breach *names*; counts only, never
+    credentials. Rate limits are 2/s, 25/hr, 100/day per endpoint — a 429
+    is logged and yields no hit rather than an error.
+    """
+
+    name = "osint_xon"
+    result_type = "breach"
+    description = "XposedOrNot free breach check: which known data breaches exposed this email (no key, no account)."
+
+    def search(self, query: str, *, limit: int, since=None, before=None):
+        email = _looks_like_email(query)
+        if not email:
+            return []
+        status, body, _ = _get(
+            "https://api.xposedornot.com/v1/check-email/"
+            + urllib.parse.quote(email), timeout=15)
+        if status == 429:
+            _log.debug("xposedornot rate-limited for %s", email)
+            return []
+        if status != 200 or not body:
+            return []
+        try:
+            data = json.loads(body)
+        except Exception:  # noqa: BLE001
+            return []
+        breaches: list[str] = []
+        raw = data.get("breaches") if isinstance(data, dict) else None
+        if isinstance(raw, list):
+            # documented shape: {"breaches": [["Adobe", "LinkedIn"]]} —
+            # tolerate a flat list too (defensive, per mining notes)
+            for item in raw:
+                if isinstance(item, list):
+                    breaches.extend(str(b) for b in item if b)
+                elif isinstance(item, str) and item:
+                    breaches.append(item)
+        if breaches:
+            shown = ", ".join(breaches[:12])
+            more = f" (+{len(breaches) - 12} more)" if len(breaches) > 12 else ""
+            return [build_osint_hit(
+                self, query, f"breach exposure: {email}",
+                "https://xposedornot.com",
+                (f"Exposed in {len(breaches)} known breach(es): {shown}{more}. "
+                 "Rotate this password everywhere it was reused."),
+                0.95, confidence="high",
+            )][:limit]
+        return [build_osint_hit(
+            self, query, f"breach exposure: {email}",
+            "https://xposedornot.com",
+            "Not found in XposedOrNot's known-breach corpus.",
+            0.5, confidence="medium",
+        )][:limit]
 
 
 class DomainReconAdapter(SourceAdapter):
@@ -246,11 +434,11 @@ class DomainReconAdapter(SourceAdapter):
                                for e in data if e.get("name_value")})
                 subs = [s for s in subs if s and "*" not in s][: max(limit - 1, 1)]
                 if subs:
-                    out.append(SearchResult(
-                        source=self.name, title=f"subdomains of {domain}",
-                        url=f"https://crt.sh/?q=%25.{domain}",
-                        snippet=f"Certificate-transparency subdomains ({len(subs)} shown): " + ", ".join(subs),
-                        score=0.85,
+                    out.append(build_osint_hit(
+                        self, query, f"subdomains of {domain}",
+                        f"https://crt.sh/?q=%25.{domain}",
+                        f"Certificate-transparency subdomains ({len(subs)} shown): " + ", ".join(subs),
+                        0.85, confidence="high",
                     ))
         except Exception as exc:  # noqa: BLE001
             _log.debug("crt.sh failed: %s", exc)
@@ -269,13 +457,13 @@ class DomainReconAdapter(SourceAdapter):
                             for item in vcard[1]:
                                 if item[0] == "fn":
                                     registrar = item[3]
-                out.append(SearchResult(
-                    source=self.name, title=f"registration for {domain}",
-                    url=f"https://rdap.org/domain/{domain}",
-                    snippet=("Registrar: " + (registrar or "unknown")
-                             + "; registered: " + str(events.get("registration", "?"))
-                             + "; expires: " + str(events.get("expiration", "?"))),
-                    score=0.8,
+                out.append(build_osint_hit(
+                    self, query, f"registration for {domain}",
+                    f"https://rdap.org/domain/{domain}",
+                    ("Registrar: " + (registrar or "unknown")
+                     + "; registered: " + str(events.get("registration", "?"))
+                     + "; expires: " + str(events.get("expiration", "?"))),
+                    0.8, confidence="high",
                 ))
         except Exception as exc:  # noqa: BLE001
             _log.debug("rdap failed: %s", exc)
@@ -298,13 +486,13 @@ class IpIntelAdapter(SourceAdapter):
             data = _get_json(f"https://ipwho.is/{ip}", timeout=15)
             if isinstance(data, dict) and data.get("success"):
                 conn = data.get("connection", {})
-                out.append(SearchResult(
-                    source=self.name, title=f"geolocation for {ip}",
-                    url=f"https://ipwho.is/{ip}",
-                    snippet=(f"{data.get('country', '?')}, {data.get('city', '?')} — "
-                             f"ASN {conn.get('asn', '?')} ({conn.get('org', '?')}), "
-                             f"ISP: {conn.get('isp', '?')}"),
-                    score=0.85,
+                out.append(build_osint_hit(
+                    self, query, f"geolocation for {ip}",
+                    f"https://ipwho.is/{ip}",
+                    (f"{data.get('country', '?')}, {data.get('city', '?')} — "
+                     f"ASN {conn.get('asn', '?')} ({conn.get('org', '?')}), "
+                     f"ISP: {conn.get('isp', '?')}"),
+                    0.85, confidence="high",
                 ))
         except Exception as exc:  # noqa: BLE001
             _log.debug("ipwho.is failed: %s", exc)
@@ -313,13 +501,13 @@ class IpIntelAdapter(SourceAdapter):
         try:
             data = _get_json(f"https://internetdb.shodan.io/{ip}", timeout=15)
             if isinstance(data, dict) and (data.get("ports") or data.get("hostnames")):
-                out.append(SearchResult(
-                    source=self.name, title=f"open ports for {ip}",
-                    url=f"https://internetdb.shodan.io/{ip}",
-                    snippet=("Open ports: " + str(data.get("ports", []))
-                             + "; hostnames: " + str(data.get("hostnames", []))
-                             + "; vulns: " + str(data.get("vulns", []))),
-                    score=0.9,
+                out.append(build_osint_hit(
+                    self, query, f"open ports for {ip}",
+                    f"https://internetdb.shodan.io/{ip}",
+                    ("Open ports: " + str(data.get("ports", []))
+                     + "; hostnames: " + str(data.get("hostnames", []))
+                     + "; vulns: " + str(data.get("vulns", []))),
+                    0.9, confidence="high",
                 ))
         except Exception as exc:  # noqa: BLE001
             _log.debug("internetdb failed: %s", exc)
@@ -335,15 +523,6 @@ def _looks_like_phone(q: str) -> str | None:
     if _re.match(r"^\+?\d{7,15}$", digits):
         return digits
     return None
-
-
-def _confidence(sources: int, keyless_verified: bool = False) -> str:
-    """Rate finding confidence: high (2+ sources), medium (1 verified), low."""
-    if sources >= 2:
-        return "high"
-    if keyless_verified:
-        return "medium"
-    return "low"
 
 
 class PhoneIntelAdapter(SourceAdapter):
@@ -366,16 +545,15 @@ class PhoneIntelAdapter(SourceAdapter):
             parsed = phonenumbers.parse(phone, None)
             carrier = phonenumbers.carrier.name_for_number(parsed, "en")
             region = phonenumbers.geocoder.description_for_number(parsed, "en")
-            out.append(SearchResult(
-                source=self.name,
-                title=f"phone intel for {phone}",
-                url=f"https://www.truecaller.com/search/{phone}",
-                snippet=(f"Carrier: {carrier or 'unknown'}, "
-                         f"Region: {region or 'unknown'}, "
-                         f"Valid: {phonenumbers.is_valid_number(parsed)}, "
-                         f"Type: {phonenumbers.number_type(parsed)} "
-                         f"[confidence: {_confidence(1, True)}]"),
-                score=0.7,
+            out.append(build_osint_hit(
+                self, query,
+                f"phone intel for {phone}",
+                f"https://www.truecaller.com/search/{phone}",
+                (f"Carrier: {carrier or 'unknown'}, "
+                 f"Region: {region or 'unknown'}, "
+                 f"Valid: {phonenumbers.is_valid_number(parsed)}, "
+                 f"Type: {phonenumbers.number_type(parsed)}"),
+                0.7, confidence="medium",
             ))
         except ImportError:
             _log.debug("phonenumbers not installed, skipping phone parse")
@@ -399,17 +577,16 @@ class GitHubReconAdapter(SourceAdapter):
         try:
             user = _get_json(f"https://api.github.com/users/{q}", timeout=15)
             if isinstance(user, dict) and user.get("login"):
-                out.append(SearchResult(
-                    source=self.name,
-                    title=f"GitHub: {user.get('login')}",
-                    url=user.get("html_url", ""),
-                    snippet=(f"{user.get('name', '')} — {user.get('bio', '')} | "
-                             f"Repos: {user.get('public_repos', 0)}, "
-                             f"Followers: {user.get('followers', 0)}, "
-                             f"Location: {user.get('location', '?')}, "
-                             f"Blog: {user.get('blog', '')} "
-                             f"[confidence: {_confidence(1, True)}]"),
-                    score=0.9,
+                out.append(build_osint_hit(
+                    self, query,
+                    f"GitHub: {user.get('login')}",
+                    user.get("html_url", ""),
+                    (f"{user.get('name', '')} — {user.get('bio', '')} | "
+                     f"Repos: {user.get('public_repos', 0)}, "
+                     f"Followers: {user.get('followers', 0)}, "
+                     f"Location: {user.get('location', '?')}, "
+                     f"Blog: {user.get('blog', '')}"),
+                    0.9, confidence="high",
                 ))
                 # Recent repos for tech stack hints
                 repos = _get_json(
@@ -421,12 +598,12 @@ class GitHubReconAdapter(SourceAdapter):
                         if isinstance(r, dict) and r.get("language"):
                             langs.add(r["language"])
                     if langs:
-                        out.append(SearchResult(
-                            source=self.name,
-                            title=f"GitHub tech stack: {q}",
-                            url=f"https://github.com/{q}?tab=repositories",
-                            snippet=f"Languages: {', '.join(sorted(langs))}",
-                            score=0.6,
+                        out.append(build_osint_hit(
+                            self, query,
+                            f"GitHub tech stack: {q}",
+                            f"https://github.com/{q}?tab=repositories",
+                            f"Languages: {', '.join(sorted(langs))}",
+                            0.6, confidence="medium",
                         ))
         except Exception as exc:  # noqa: BLE001
             _log.debug("github recon failed: %s", exc)
@@ -434,11 +611,16 @@ class GitHubReconAdapter(SourceAdapter):
 
 
 class WaybackAdapter(SourceAdapter):
-    """URL/domain → Wayback Machine snapshots (historical versions)."""
+    """URL/domain → Wayback Machine snapshots (historical versions).
+
+    Two layers: the ``available`` API gives the closest snapshot, and the
+    CDX API lists every 200-OK capture (deduped by digest) so the full
+    history of a page is visible, not just one snapshot.
+    """
 
     name = "osint_wayback"
     result_type = "wayback"
-    description = "Wayback Machine: historical snapshots of URLs/domains."
+    description = "Wayback Machine: historical snapshots of URLs/domains (closest snapshot + full CDX capture list)."
 
     def search(self, query: str, *, limit: int, since=None, before=None):
         q = query.strip()
@@ -452,16 +634,48 @@ class WaybackAdapter(SourceAdapter):
                 f"https://archive.org/wayback/available?url={q}", timeout=15)
             snap = (data.get("archived_snapshots") or {}).get("closest", {})
             if snap.get("url"):
-                out.append(SearchResult(
-                    source=self.name,
-                    title=f"Wayback snapshot: {q}",
-                    url=snap["url"],
-                    snippet=(f"Closest snapshot: {snap.get('timestamp', '?')} "
-                             f"[confidence: {_confidence(1, True)}]"),
-                    score=0.75,
+                out.append(build_osint_hit(
+                    self, query,
+                    f"Wayback snapshot: {q}",
+                    snap["url"],
+                    f"Closest snapshot: {snap.get('timestamp', '?')}",
+                    0.75, confidence="high",
                 ))
         except Exception as exc:  # noqa: BLE001
             _log.debug("wayback failed: %s", exc)
+        if len(out) >= limit:
+            return out
+        # CDX: full capture list, 200s only, digest-collapsed
+        try:
+            data = _get_json(
+                "https://web.archive.org/cdx/search/cdx"
+                f"?url={urllib.parse.quote(q)}"
+                f"&output=json&limit={max(limit * 3, 10)}"
+                "&filter=statuscode:200&collapse=digest",
+                timeout=20)
+            if isinstance(data, list) and len(data) > 1:
+                rows = data[1:]  # first row is the header
+                seen: list[tuple[str, str]] = []
+                for row in rows:
+                    if isinstance(row, list) and len(row) >= 3:
+                        ts, original = str(row[1]), str(row[2])
+                        if ts and original and (ts, original) not in seen:
+                            seen.append((ts, original))
+                    if len(seen) >= limit:
+                        break
+                if seen:
+                    lines = "\n".join(
+                        f"{ts}: https://web.archive.org/web/{ts}/{orig}"
+                        for ts, orig in seen)
+                    out.append(build_osint_hit(
+                        self, query,
+                        f"Wayback capture history: {q}",
+                        f"https://web.archive.org/web/*/{q}",
+                        f"{len(seen)} captures (200 OK, digest-deduped):\n{lines}",
+                        0.7, confidence="high",
+                    ))
+        except Exception as exc:  # noqa: BLE001
+            _log.debug("wayback cdx failed: %s", exc)
         return out[:limit]
 
 
@@ -476,21 +690,19 @@ class GravatarAdapter(SourceAdapter):
         email = _looks_like_email(query)
         if not email:
             return []
-        import hashlib as _hl
-        h = _hl.md5(email.lower().encode()).hexdigest()
+        h = hashlib.md5(email.lower().encode()).hexdigest()
         out: list[SearchResult] = []
         try:
             data = _get_json(f"https://www.gravatar.com/{h}.json", timeout=15)
             entry = (data.get("entry") or [{}])[0]
             if entry.get("displayName") or entry.get("preferredUsername"):
-                out.append(SearchResult(
-                    source=self.name,
-                    title=f"Gravatar: {entry.get('displayName', email)}",
-                    url=entry.get("profileUrl", f"https://www.gravatar.com/{h}"),
-                    snippet=(f"Username: {entry.get('preferredUsername', '?')}, "
-                             f"Name: {entry.get('displayName', '?')} "
-                             f"[confidence: {_confidence(1, True)}]"),
-                    score=0.8,
+                out.append(build_osint_hit(
+                    self, query,
+                    f"Gravatar: {entry.get('displayName', email)}",
+                    entry.get("profileUrl", f"https://www.gravatar.com/{h}"),
+                    (f"Username: {entry.get('preferredUsername', '?')}, "
+                     f"Name: {entry.get('displayName', '?')}"),
+                    0.8, confidence="high",
                 ))
         except Exception as exc:  # noqa: BLE001
             _log.debug("gravatar failed: %s", exc)
@@ -519,18 +731,214 @@ class LeakCheckAdapter(SourceAdapter):
                 if sources:
                     names = [s.get("name", "?") for s in sources[:5]
                              if isinstance(s, dict)]
-                    out.append(SearchResult(
-                        source=self.name,
-                        title=f"Breach exposure: {q}",
-                        url="https://leakcheck.net",
-                        snippet=(f"Found in {len(sources)} breach(es): "
-                                 f"{', '.join(names)} "
-                                 f"[confidence: {_confidence(len(sources))}]"),
-                        score=0.85,
+                    out.append(build_osint_hit(
+                        self, query,
+                        f"Breach exposure: {q}",
+                        "https://leakcheck.net",
+                        (f"Found in {len(sources)} breach(es): "
+                         f"{', '.join(names)}"),
+                        0.85, confidence="high" if len(sources) >= 2 else "medium",
                     ))
         except Exception as exc:  # noqa: BLE001
             _log.debug("leakcheck failed: %s", exc)
         return out[:limit]
+
+
+class DisifyAdapter(SourceAdapter):
+    """Email → validity via Disify's free no-key API.
+
+    Returns format validity, MX/DNS resolution, disposable-address and
+    whitelist flags — the "is this address real" check that the MX
+    socket probe alone can't answer.
+    """
+
+    name = "osint_disify"
+    result_type = "email"
+    description = "Disify free email validation: format, MX/DNS, disposable, whitelist (no key)."
+
+    def search(self, query: str, *, limit: int, since=None, before=None):
+        email = _looks_like_email(query)
+        if not email:
+            return []
+        try:
+            data = _get_json(
+                "https://www.disify.com/api/email/"
+                + urllib.parse.quote(email), timeout=15)
+            if not isinstance(data, dict):
+                return []
+            verdict = (
+                "valid" if data.get("format") and data.get("dns")
+                else "invalid")
+            return [build_osint_hit(
+                self, query,
+                f"email validation: {email}",
+                "https://www.disify.com",
+                (f"Verdict: {verdict} — format: {bool(data.get('format'))}, "
+                 f"MX/DNS: {bool(data.get('dns'))}, "
+                 f"disposable: {bool(data.get('disposable'))}, "
+                 f"whitelisted: {bool(data.get('whitelist'))}"),
+                0.7, confidence="high",
+            )][:limit]
+        except Exception as exc:  # noqa: BLE001
+            _log.debug("disify failed: %s", exc)
+            return []
+
+
+class EdgarAdapter(SourceAdapter):
+    """Company → SEC EDGAR identity (free, no key).
+
+    Uses the SEC's published ``company_tickers.json`` (ticker → CIK →
+    legal name) so any public-company name or ticker resolves to its
+    CIK and filing index. EDGAR is the free gold for US corporate
+    identity; nothing here needs an account.
+    """
+
+    name = "osint_edgar"
+    result_type = "company"
+    description = "SEC EDGAR: US public-company lookup — ticker, CIK, filing index (free, no key)."
+
+    def search(self, query: str, *, limit: int, since=None, before=None):
+        q = query.strip()
+        if len(q) < 2 or "@" in q or " " in q and len(q.split()) > 4:
+            return []
+        try:
+            data = _get_json(
+                "https://www.sec.gov/files/company_tickers.json", timeout=20)
+            if not isinstance(data, dict):
+                return []
+            ql = q.lower()
+            matches: list[dict[str, Any]] = []
+            for entry in data.values():
+                if not isinstance(entry, dict):
+                    continue
+                ticker = str(entry.get("ticker", ""))
+                title = str(entry.get("title", ""))
+                if ql == ticker.lower() or ql in title.lower():
+                    matches.append(entry)
+                    if len(matches) >= limit:
+                        break
+            out = []
+            for entry in matches:
+                ticker = str(entry.get("ticker", ""))
+                title = str(entry.get("title", ""))
+                cik = str(entry.get("cik_str", "")).zfill(10)
+                out.append(build_osint_hit(
+                    self, query,
+                    f"{title} ({ticker})",
+                    ("https://www.sec.gov/cgi-bin/browse-edgar"
+                     f"?action=getcompany&CIK={ticker}&type=&dateb="
+                     "&owner=include&count=10"),
+                    (f"US SEC EDGAR — CIK {cik}, ticker {ticker}. "
+                     f"Public filings: 10-K, 10-Q, 8-K, insider trades."),
+                    0.9, confidence="high",
+                    cik=cik, ticker=ticker,
+                ))
+            return out
+        except Exception as exc:  # noqa: BLE001
+            _log.debug("edgar failed: %s", exc)
+            return []
+
+
+class GleifAdapter(SourceAdapter):
+    """Company → Legal Entity Identifier via GLEIF (free, no key).
+
+    The GLEIF API is the authoritative LEI registry: legal name,
+    registration status, and legal address for any registered entity,
+    worldwide. JSON:API format, no authentication.
+    """
+
+    name = "osint_gleif"
+    result_type = "company"
+    description = "GLEIF: legal-entity (LEI) lookup — official identity, status, address (free, no key)."
+
+    def search(self, query: str, *, limit: int, since=None, before=None):
+        q = query.strip()
+        if len(q) < 2 or "@" in q:
+            return []
+        try:
+            data = _get_json(
+                "https://api.gleif.org/api/v1/lei-records"
+                f"?filter[entity.legal-name]={urllib.parse.quote(q)}"
+                f"&page[size]={min(max(limit, 1), 10)}",
+                timeout=20)
+            records = data.get("data") if isinstance(data, dict) else None
+            if not records:
+                return []
+            out = []
+            for rec in records[:limit]:
+                attrs = rec.get("attributes", {}) or {}
+                entity = attrs.get("entity", {}) or {}
+                lei = attrs.get("lei", "?")
+                legal = entity.get("legalName", {}) or {}
+                name = legal.get("name", "?")
+                status = (attrs.get("registration", {}) or {}).get("status", "?")
+                addr = entity.get("legalAddress", {}) or {}
+                addr_str = ", ".join(
+                    str(addr.get(k, "")) for k in
+                    ("addressLine1", "city", "country")
+                    if addr.get(k))
+                out.append(build_osint_hit(
+                    self, query,
+                    f"{name} (LEI {lei})",
+                    f"https://search.gleif.org/#/record/{lei}",
+                    (f"Legal name: {name}; LEI: {lei}; "
+                     f"registration: {status}; address: {addr_str or '?'}"),
+                    0.9, confidence="high", lei=lei,
+                ))
+            return out
+        except Exception as exc:  # noqa: BLE001
+            _log.debug("gleif failed: %s", exc)
+            return []
+
+
+class CourtListenerAdapter(SourceAdapter):
+    """Name/company → US court opinions via CourtListener (free, no key).
+
+    The structured-identity gap in the OSINT arsenal: court opinions are
+    public, citable, and free to search. Returns the top opinion matches
+    with court, filing date, and a snippet.
+    """
+
+    name = "osint_courtlistener"
+    result_type = "legal"
+    description = "CourtListener: US court opinions mentioning a name/company (free legal API, no key)."
+
+    def search(self, query: str, *, limit: int, since=None, before=None):
+        q = query.strip()
+        if len(q) < 2:
+            return []
+        try:
+            data = _get_json(
+                "https://www.courtlistener.com/api/rest/v3/search/"
+                f"?q={urllib.parse.quote(q)}&type=o&order_by=score%20desc",
+                timeout=20)
+            results = data.get("results") if isinstance(data, dict) else None
+            if not results:
+                return []
+            out = []
+            for r in results[:limit]:
+                if not isinstance(r, dict):
+                    continue
+                case = r.get("caseName") or "court opinion"
+                abs_url = r.get("absolute_url") or ""
+                url = ("https://www.courtlistener.com" + abs_url
+                       if abs_url.startswith("/") else abs_url)
+                snippet = re.sub(
+                    r"<[^>]+>", "",
+                    str(r.get("snippet") or r.get("plain_text", "") or ""))
+                out.append(build_osint_hit(
+                    self, query,
+                    str(case)[:300],
+                    url,
+                    (f"{r.get('court', '?')} — filed "
+                     f"{r.get('dateFiled', '?')}: {snippet[:500]}"),
+                    0.75, confidence="medium",
+                    timestamp=_parse_ts(r.get("dateFiled")),
+                ))
+            return out
+        except Exception as exc:  # noqa: BLE001
+            _log.debug("courtlistener failed: %s", exc)
+            return []
 
 
 #: adapter classes in canonical order
@@ -539,8 +947,18 @@ OSINT_SPECS: list[tuple[str, str, str, type[SourceAdapter]]] = [
      UsernameSweepAdapter.description, UsernameSweepAdapter),
     (EmailCheckAdapter.name, EmailCheckAdapter.result_type,
      EmailCheckAdapter.description, EmailCheckAdapter),
+    (XposedOrNotAdapter.name, XposedOrNotAdapter.result_type,
+     XposedOrNotAdapter.description, XposedOrNotAdapter),
+    (DisifyAdapter.name, DisifyAdapter.result_type,
+     DisifyAdapter.description, DisifyAdapter),
     (DomainReconAdapter.name, DomainReconAdapter.result_type,
      DomainReconAdapter.description, DomainReconAdapter),
+    (EdgarAdapter.name, EdgarAdapter.result_type,
+     EdgarAdapter.description, EdgarAdapter),
+    (GleifAdapter.name, GleifAdapter.result_type,
+     GleifAdapter.description, GleifAdapter),
+    (CourtListenerAdapter.name, CourtListenerAdapter.result_type,
+     CourtListenerAdapter.description, CourtListenerAdapter),
     (IpIntelAdapter.name, IpIntelAdapter.result_type,
      IpIntelAdapter.description, IpIntelAdapter),
     (PhoneIntelAdapter.name, PhoneIntelAdapter.result_type,

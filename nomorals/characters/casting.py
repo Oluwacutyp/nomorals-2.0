@@ -67,13 +67,20 @@ def cast_for(chars: list[Character], *, role: str = "",
              skills: list[str] | None = None,
              topic: str = "", n: int = 1,
              exclude: set[str] | None = None,
-             graph: RelationshipGraph | None = None) -> list[tuple[Character, float, str]]:
+             graph: RelationshipGraph | None = None,
+             recent: set[str] | None = None,
+             rotation_penalty: float = 0.25) -> list[tuple[Character, float, str]]:
     """Pick the best-fit character(s) for a moment.
 
     Returns [(character, score, reason)]. For ensembles (n>1),
     optimizes for group chemistry, not just individual fit.
+
+    ``recent``: ids/names cast lately — they get a ``rotation_penalty``
+    so recurring shows rotate the spotlight instead of running the
+    same faces every time.
     """
     exclude = exclude or set()
+    recent = recent or set()
     cands = [c for c in chars if c.id not in exclude and c.name not in exclude]
     if not cands:
         return []
@@ -104,6 +111,10 @@ def cast_for(chars: list[Character], *, role: str = "",
             if hits:
                 s += 0.1
                 reasons.append("knows the topic")
+        # rotation: the recently-cast pay a penalty
+        if c.id in recent or c.name in recent:
+            s = max(0.0, s - rotation_penalty)
+            reasons.append("rotation pick — fresh face")
         return min(1.0, s), "; ".join(reasons) or "solid all-rounder"
 
     scored = [(c, *fit(c)) for c in cands]
@@ -158,9 +169,102 @@ def cast_preset(chars: list[Character], preset: str, n: int = 1,
                 topic: str = "",
                 graph: RelationshipGraph | None = None,
                 exclude: set[str] | None = None,
+                recent: set[str] | None = None,
                 ) -> list[tuple[Character, float, str]]:
     """Shorthand: cast_for with a named preset."""
     p = ROLE_PRESETS.get(preset, {})
     return cast_for(chars, role=p.get("role", ""), traits=p.get("traits"),
                     skills=p.get("skills"), topic=topic, n=n,
-                    exclude=exclude, graph=graph)
+                    exclude=exclude, graph=graph, recent=recent)
+
+
+def cast_against(chars: list[Character], *,
+                 avoid_traits: dict[str, float] | None = None,
+                 avoid_skills: list[str] | None = None,
+                 topic: str = "",
+                 n: int = 1,
+                 exclude: set[str] | None = None) -> list[tuple[Character, float, str]]:
+    """Negative casting: who must NOT be in this room.
+
+    Scores how badly each character fits the AVOIDED profile — the
+    highest scorers are the worst picks. Use it to keep the wrong
+    energy out, or invert it to find deliberate chaos picks.
+    Returns [(character, badness_score, reason)] — higher = worse fit.
+    """
+    exclude = exclude or set()
+    cands = [c for c in chars if c.id not in exclude and c.name not in exclude]
+    if not cands:
+        return []
+
+    def badness(c: Character) -> tuple[float, str]:
+        reasons: list[str] = []
+        s = 0.0
+        if avoid_traits:
+            for trait, w in avoid_traits.items():
+                v = c.persona.get(trait, 0.3)
+                s += v * w
+                if v > 0.7:
+                    reasons.append(f"too {trait}")
+        if avoid_skills:
+            for sk in avoid_skills:
+                v = c.skills.get(sk, 0.0)
+                s += v * 0.5
+                if v > 0.7:
+                    reasons.append(f"brings {sk} energy")
+        if topic:
+            tl = topic.lower()
+            hits = [k for k in c.knowledge if any(
+                w in k.lower() for w in tl.split() if len(w) > 3)]
+            if hits:
+                s += 0.3
+                reasons.append("will hijack the topic")
+        return min(1.0, s), "; ".join(reasons) or "wrong room, wrong time"
+
+    scored = [(c, *badness(c)) for c in cands]
+    scored.sort(key=lambda t: -t[1])
+    return scored[:n]
+
+
+def cast_for_audience(chars: list[Character],
+                      audience_traits: dict[str, float],
+                      n: int = 2,
+                      graph: RelationshipGraph | None = None,
+                      exclude: set[str] | None = None) -> list[tuple[Character, float, str]]:
+    """Audience-aware casting: pick the characters THIS audience will
+    love. Matches character traits to what the audience vibes with —
+    a hype crowd wants energy, a late-night crowd wants depth."""
+    exclude = exclude or set()
+    cands = [c for c in chars if c.id not in exclude and c.name not in exclude]
+    if not cands:
+        return []
+
+    def appeal(c: Character) -> tuple[float, str]:
+        s = _trait_fit(c, audience_traits)
+        top = max(audience_traits, key=lambda k: audience_traits[k]) \
+            if audience_traits else ""
+        reason = (f"the crowd wants {top} — {c.name} brings it"
+                  if top and c.persona.get(top, 0) > 0.6
+                  else "crowd-pleaser")
+        # extraverts play better to a crowd
+        try:
+            s = min(1.0, s + float(c.ocean.get("extraversion", 0.5)) * 0.1)
+        except Exception:
+            pass
+        return s, reason
+
+    scored = [(c, *appeal(c)) for c in cands]
+    scored.sort(key=lambda t: -t[1])
+    if n <= 1 or len(scored) <= 1:
+        return scored[:n]
+    # keep the chemistry pass — a crowd loves a duo that sparks
+    picked: list[tuple[Character, float, str]] = [scored[0]]
+    remaining = scored[1:]
+    while len(picked) < n and remaining:
+        def ensemble_score(t: tuple) -> float:
+            c, s, _ = t
+            chem = sum(chemistry(c, p[0], graph) for p in picked) / len(picked)
+            return s * 0.6 + chem * 0.4
+        remaining.sort(key=lambda t: -ensemble_score(t))
+        nxt = remaining.pop(0)
+        picked.append((nxt[0], nxt[1], nxt[2]))
+    return picked
