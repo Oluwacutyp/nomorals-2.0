@@ -161,9 +161,22 @@ class Character:
         """Say something in character. Model-backed when available,
         deterministic fallback when not — a character always has a voice."""
         self.last_active = time.time()
-        prompt = (self.persona_block() + "\n"
-                  + (f"Relevant memories:\n{memories}\n" if memories else "")
-                  + f"Situation: {context}\n{self.name}:")
+        try:
+            from .context import CharacterContextBuilder
+            mems = [memories] if memories else []
+            # pull the character's own relevant memories for depth
+            try:
+                own = self.recall(context, limit=3)
+                mems.extend(m for m in own if m not in mems)
+            except Exception:
+                pass
+            prompt = (CharacterContextBuilder().build(self, memories=mems)
+                      + f"\n\nSituation: {context}\n{self.name}:")
+        except Exception:
+            # builder is best-effort; fall back to the simple block
+            prompt = (self.persona_block() + "\n"
+                      + (f"Relevant memories:\n{memories}\n" if memories else "")
+                      + f"Situation: {context}\n{self.name}:")
         if suggest is not None:
             try:
                 out = (suggest(prompt) or "").strip().strip('"').strip()
