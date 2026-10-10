@@ -65,6 +65,7 @@ from ..wisdom import WisdomKeeper
 from .base import SourceAdapter
 from .errors import SearchError
 from .model import SearchResult
+from .osint import OSINT_SPECS
 from .web import WEB_SPECS, WebSearchSource
 
 __all__ = [
@@ -538,6 +539,12 @@ SOURCE_SPECS: list[tuple[str, str, str, type[SourceAdapter]]] = [
     *[
         (name, WebSearchSource.result_type, cls.description, cls)
         for name, cls in WEB_SPECS
+    ],
+    # OSINT primitives (keyless): username sweep, email check,
+    # domain recon (crt.sh + RDAP), IP intel (ipwho.is + InternetDB).
+    *[
+        (name, rtype, desc, cls)
+        for name, rtype, desc, cls in OSINT_SPECS
     ],
 ]
 
