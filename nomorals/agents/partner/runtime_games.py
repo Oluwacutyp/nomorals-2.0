@@ -1181,7 +1181,19 @@ class RuntimeGamesMixin:
                 else:
                     is_engine_command = False
                 if player is None:
-                    return None
+                    # A live room OWNS this message — it must never silently
+                    # fall through to the general brain. In a DM the chat key
+                    # is a stable one-human identity, so resolve a
+                    # best-effort player from it. In groups/channels we cannot
+                    # tell humans apart without a sender id, so say so
+                    # honestly instead of dropping the move.
+                    if str(kind).lower() == ChatKind.DM:
+                        player = self._game_player_for_key(chat_key)
+                    else:
+                        return ("i couldn't tell who you are in this chat, "
+                                "so your move didn't register — the table is "
+                                "still open. Try again, or /game quit to "
+                                "walk away.")
                 msgs: list[str] = []
                 # a group auto-seats a new human the moment they SPEAK —
                 # engine commands don't seat, they just work
