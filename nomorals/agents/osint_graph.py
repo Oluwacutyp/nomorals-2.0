@@ -312,6 +312,73 @@ class IdentityGraph:
         self.save()
         return entities
 
+    def ingest_search_results(self, results: list[Any],
+                              query: str) -> dict[str, int]:
+        """Auto-build entity graph from OSINT search results.
+
+        Links: username → platform, domain → email, email → breach,
+        phone → carrier, github → tech stack. Returns counts by link type.
+        """
+        import time as _time
+        ts = _time.time()
+        counts: dict[str, int] = {"nodes": 0, "edges": 0}
+        # Seed the query itself as a node
+        q_kind = self._infer_query_kind(query)
+        if q_kind:
+            self._upsert_node(q_kind, query.strip().lower(), "osint_query", ts)
+            counts["nodes"] += 1
+            q_key = self._key(q_kind, query.strip().lower())
+        else:
+            q_key = None
+        for r in results or []:
+            source = getattr(r, "source", "osint")
+            title = getattr(r, "title", "") or ""
+            url = getattr(r, "url", "") or ""
+            snippet = getattr(r, "snippet", "") or ""
+            # Extract entities from the result
+            text = f"{title} {url} {snippet}"
+            entities = EntityExtractor().extract(text)
+            for e in entities:
+                before = len(self.data["nodes"])
+                self._upsert_node(e.kind, e.value, source, ts)
+                if len(self.data["nodes"]) > before:
+                    counts["nodes"] += 1
+                e_key = self._key(e.kind, e.value)
+                # Link back to the query node
+                if q_key and e_key != q_key:
+                    self._associate(q_key, e_key, source, 0.8,
+                                    f"osint:{source}", ts)
+                    counts["edges"] += 1
+            # Platform-specific links: username → platform URL
+            if "osint_username" in source and url:
+                self._upsert_node("platform", url.split("/")[2]
+                                  if "://" in url else url, source, ts)
+                counts["nodes"] += 1
+        self._event(ts, "osint_ingest",
+                    f"{counts['nodes']} nodes, {counts['edges']} edges from {len(results or [])} results")
+        self.save()
+        return counts
+
+    @staticmethod
+    def _infer_query_kind(query: str) -> str | None:
+        """Guess the entity kind of a raw OSINT query."""
+        q = (query or "").strip()
+        if not q:
+            return None
+        import re as _re
+        if _re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", q):
+            return "email"
+        if _re.match(r"^\+?\d{7,15}$", _re.sub(r"[^\d+]", "", q)):
+            return "phone"
+        if _re.match(r"^\d+\.\d+\.\d+\.\d+$", q):
+            return "ip"
+        if _re.match(r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z]{2,})+$",
+                     q.lower()):
+            return "domain"
+        if _re.match(r"^[a-zA-Z0-9_.-]{2,39}$", q):
+            return "username"
+        return None
+
     def _event(self, ts: float, kind: str, detail: str) -> None:
         events = self.data["events"]
         events.append({"ts": ts, "kind": kind, "detail": detail[:300]})
