@@ -93,7 +93,7 @@ class TestGroupAdminGrant:
     def test_group_admin_gets_public_tools(self):
         grant = grant_for(is_owner=False, chat_kind="group",
                           group_role="admin")
-        allowed, _ = check_tool_call("game_move", grant=grant)
+        allowed, _ = check_tool_call("games", grant=grant)
         assert allowed is True
 
     def test_group_admin_denied_private(self):
@@ -115,7 +115,7 @@ class TestGroupAdminGrant:
     def test_regular_member_gets_public_tools(self):
         grant = grant_for(is_owner=False, chat_kind="group",
                           group_role="member")
-        allowed, _ = check_tool_call("game_move", grant=grant)
+        allowed, _ = check_tool_call("games", grant=grant)
         assert allowed is True
 
     def test_unknown_role_fails_closed(self):
