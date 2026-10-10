@@ -135,9 +135,51 @@ LESSONS: tuple[dict, ...] = (
         ),
         "conditions_to_revisit": (
             "Backtest on range-bound XAU periods (not just bull market). "
-            "Try higher confidence threshold (>70). Add trend filter: "
-            "no shorts when HTF is strongly bullish. Each change needs "
-            "a fresh walk-forward backtest before the block lifts."
+            "Try higher confidence threshold (>70). "
+            "TREND FILTER TESTED 2026-10-10 AND REJECTED — see "
+            "'xau-trend-filter-rejected' lesson. Do not re-test the "
+            "same filter without a new hypothesis."
+        ),
+    },
+    {
+        "id": "xau-trend-filter-rejected",
+        "symbol": "XAUUSD",
+        "timeframes": ("1h",),
+        "verdict": "DO NOT TRADE",
+        "evidence": (
+            "Trend-filter backtest (2026-10-10): XAUUSD 1h, 2 years, "
+            "11,449 bars (GC=F). 4h trend filter: strong_bull = close > "
+            "EMA200 & ADX > 25 (37.7% of bars); bull = close > EMA200 "
+            "(67.1% of bars). "
+            "A baseline (no filter): 760 trades, +106.44%, PF 1.12, "
+            "WR 42.2%, MaxDD 46.12%. "
+            "B (no shorts in strong bull): 718 trades, +90.04%, PF 1.11. "
+            "C (longs only in any bull): 674 trades, +62.81%, PF 1.09. "
+            "Buy & hold: +56.58%. "
+            "Walk-forward, no lookahead (4h bars shifted by 1), $0.35 "
+            "spread + $0.10 slippage, 1% risk/trade, 500-bar window."
+        ),
+        "why": (
+            "The trend filter HURTS, it does not help. Removing shorts "
+            "in bull markets removes profitable trades (A > B > C on "
+            "every metric). The hypothesis that 'the system fights the "
+            "trend' is wrong — the shorts are contributing positively. "
+            "Do not add a trend filter to 'fix' XAUUSD."
+        ),
+        "what_was_tried": (
+            "4h EMA200 + ADX(14) > 25 for strong bull; 4h EMA200 alone "
+            "for bull. Filter applied post-signal (no shorts when flagged). "
+            "Same execution as baseline: next-open entry, invalidation "
+            "stop, 1.5R/2.5R/4R partials (50/30/20)."
+        ),
+        "conditions_to_revisit": (
+            "METHODOLOGICAL CAVEAT: this run's baseline (+106%, 760 trades) "
+            "differs sharply from v1 (-6.53%, 123 trades). Likely cause: "
+            "v1's session gate used wall-clock time for all historical bars; "
+            "this run uses each bar's own timestamp. The v1 'no edge' "
+            "conclusion may be an artifact of that bug. Do NOT lift the "
+            "XAUUSD block on this run alone — reconcile the session-gate "
+            "methodology and re-validate before changing the verdict."
         ),
     },
     {
