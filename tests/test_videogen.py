@@ -218,3 +218,113 @@ def test_chain_neural_unavailable_says_so(cover_png, tmp_path):
     )
     assert report.neural_scenes == 0
     assert "neural" in report.note.lower()
+
+
+# -- temporal consistency ------------------------------------------------------
+
+@pytest.fixture()
+def _clip_pair(tmp_path):
+    """Two 1s clips with deliberately different color casts."""
+    import subprocess
+    from shutil import which
+    ff = which("ffmpeg")
+    if not ff:
+        pytest.skip("ffmpeg not available")
+    a = str(tmp_path / "a.mp4")
+    b = str(tmp_path / "b.mp4")
+    for path, color in ((a, "0xB06030"), (b, "0x3060B0")):
+        subprocess.run(
+            [ff, "-hide_banner", "-loglevel", "error", "-y",
+             "-f", "lavfi", "-i",
+             f"color=c={color}:s=160x120:d=1:r=8",
+             "-pix_fmt", "yuv420p", path],
+            check=True, capture_output=True, timeout=60)
+    return a, b
+
+
+def test_boundary_metric_identical_frames():
+    from nomorals.media.videogen.consistency import boundary_metric
+    img = Image.new("RGB", (160, 160), (120, 80, 200))
+    m = boundary_metric(img, img)
+    assert m["score"] > 0.99
+    assert m["color_shift"] < 0.01
+
+
+def test_boundary_metric_mismatched_frames():
+    from nomorals.media.videogen.consistency import boundary_metric
+    warm = Image.new("RGB", (160, 160), (200, 120, 60))
+    cool = Image.new("RGB", (160, 160), (60, 120, 200))
+    m = boundary_metric(warm, cool)
+    assert m["score"] < 0.7
+    assert m["color_shift"] > 0.2
+
+
+def test_reinhard_match_moves_palette():
+    import numpy as np
+    from nomorals.media.videogen.consistency import reinhard_match
+    src = Image.new("RGB", (64, 64), (100, 100, 100))
+    ref = Image.new("RGB", (64, 64), (180, 90, 60))
+    out = reinhard_match(src, ref, strength=1.0)
+    arr = np.asarray(out).mean(axis=(0, 1))
+    assert arr[0] > 150 and arr[2] < 90  # warm cast adopted
+    untouched = reinhard_match(src, ref, strength=0.0)
+    assert np.asarray(untouched).mean() == 100.0
+
+
+def test_consistency_pass_reports_and_improves(_clip_pair):
+    from nomorals.media.videogen.consistency import (
+        consistency_pass, boundary_metric, boundary_frames)
+    a, b = _clip_pair
+    before_a, before_b = boundary_frames(a, b)
+    score_before = boundary_metric(before_a, before_b)["score"]
+    paths, report = consistency_pass([a, b], head_frames=4)
+    assert len(paths) == 2 and len(report["boundaries"]) == 1
+    entry = report["boundaries"][0]
+    assert "score_before" in entry and "score_after" in entry
+    assert abs(entry["score_before"] - score_before) < 0.05
+    assert entry["score_after"] >= entry["score_before"] - 0.05
+    assert os.path.getsize(paths[1]) > 500
+
+
+def test_consistency_pass_single_clip_noop(tmp_path):
+    from nomorals.media.videogen.consistency import consistency_pass
+    paths, report = consistency_pass(["only.mp4"])
+    assert paths == ["only.mp4"] and report["boundaries"] == []
+
+
+def test_chain_scenes_consistency_wired(cover_png, tmp_path):
+    """chain_scenes runs the boundary pass and reports scores."""
+    report = chain_scenes(
+        [
+            {"prompt": "warm desert", "mode": "image", "image": cover_png,
+             "duration_s": 1.0},
+            {"prompt": "cool ocean", "mode": "image", "image": cover_png,
+             "duration_s": 1.0},
+        ],
+        out=str(tmp_path / "film2.mp4"),
+        backend="motion",
+        grade_preset="",
+        format="",
+        size=(160, 120),
+        fps=8,
+        consistency=True,
+    )
+    bnds = report.consistency.get("boundaries") or []
+    assert len(bnds) == 1
+    assert "score_after" in bnds[0]
+    assert "consistency" in report.summary()
+    # opting out keeps the old behavior
+    report2 = chain_scenes(
+        [{"prompt": "one", "mode": "image", "image": cover_png,
+          "duration_s": 1.0},
+         {"prompt": "two", "mode": "image", "image": cover_png,
+          "duration_s": 1.0}],
+        out=str(tmp_path / "film3.mp4"),
+        backend="motion",
+        grade_preset="",
+        format="",
+        size=(160, 120),
+        fps=8,
+        consistency=False,
+    )
+    assert report2.consistency == {}

@@ -67,6 +67,7 @@ class ChainReport:
     grade_preset: str = ""
     format: str = ""
     note: str = ""
+    consistency: dict = field(default_factory=dict)  # boundary scores
 
     def summary(self) -> str:
         lines = [
@@ -76,6 +77,13 @@ class ChainReport:
         ]
         for s in self.scenes:
             lines.append(f"   {s.index + 1}. [{s.engine}] {s.prompt[:64]}")
+        bnds = (self.consistency or {}).get("boundaries") or []
+        for b in bnds:
+            if "score_after" in b:
+                lines.append(
+                    f"   boundary {b['a'] + 1}→{b['b'] + 1}: "
+                    f"consistency {b['score_before']:.2f} → "
+                    f"{b['score_after']:.2f}")
         if self.note:
             lines.append(f"   note: {self.note}")
         return "\n".join(lines)
@@ -98,12 +106,16 @@ def chain_scenes(scenes: Sequence[dict[str, Any] | str],
                  format: str = "16:9",
                  seed: int = 100,
                  size: tuple[int, int] | None = None,
-                 fps: float | None = None) -> ChainReport:
+                 fps: float | None = None,
+                 consistency: bool = True) -> ChainReport:
     """Assemble a multi-scene film. Returns a :class:`ChainReport`.
 
     Each scene: ``{"prompt", "mode": "t2v"|"i2v"|"image"|"text",
     "image"|"text", "duration_s", "seed"}`` — or a bare prompt string
     (t2v, 5s). ``backend``: auto | ltx | wan | motion (force motion studio).
+    ``consistency``: grade each clip's opening frames toward the
+    previous clip's closing frame so cuts don't pop (color + structure
+    matched on the boundary frames; skipped honestly without ffmpeg).
     """
     if not scenes:
         raise VideogenError("no scenes — nothing to chain")
@@ -178,6 +190,21 @@ def chain_scenes(scenes: Sequence[dict[str, Any] | str],
         from ..motion_studio._core import probe_duration
         seg.duration = max(1.0, probe_duration(res.path))
 
+    # temporal-consistency pass: color + structure match on boundary
+    # frames so chained cuts don't pop. Never fatal.
+    consistency_report: dict = {}
+    if consistency and len(clips) > 1:
+        try:
+            from .consistency import consistency_pass
+            new_clips, consistency_report = consistency_pass(clips)
+            for seg, new_path in zip(timeline, new_clips):
+                seg.src = new_path
+            clips = new_clips
+        except Exception as exc:  # noqa: BLE001 - the chain goes on
+            note = (note + "; " if note else "") + \
+                f"consistency pass skipped ({exc})"
+            _log.info("chain: consistency pass skipped: %s", exc)
+
     final = assemble(timeline, size=size, fps=fps)
     if grade_preset:
         final = grade(final, preset=grade_preset)
@@ -194,7 +221,8 @@ def chain_scenes(scenes: Sequence[dict[str, Any] | str],
 
     report = ChainReport(final_path=final, scenes=results,
                          neural_scenes=neural_n, motion_scenes=motion_n,
-                         grade_preset=grade_preset, format=format, note=note)
+                         grade_preset=grade_preset, format=format, note=note,
+                         consistency=consistency_report)
     record_ledger({"kind": "videogen.chain", "path": final,
                    "scenes": len(results), "neural": neural_n,
                    "motion": motion_n, "backend": engine_name})
