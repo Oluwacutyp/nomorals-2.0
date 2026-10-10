@@ -24,10 +24,12 @@ keyless Kraken/Bybit feeds with disk cache, and a chat-native briefing
 renderer.
 """
 
-from . import (backtest, data, feeds, indicators, math, meta, patterns,
-               pipeline, regime, risk, signals, strategies)
+from . import (analyst, backtest, data, feeds, indicators, math, meta,
+               patterns, pipeline, regime, risk, sessions, signals, smc,
+               strategies, structure)
 
 __all__ = [
+    "analyst",
     "backtest",
     "data",
     "feeds",
@@ -38,6 +40,9 @@ __all__ = [
     "pipeline",
     "regime",
     "risk",
+    "sessions",
     "signals",
+    "smc",
     "strategies",
+    "structure",
 ]
