@@ -110,7 +110,9 @@ per step. Jumping: no plant (both feet leave the ground).
 RULES:
 - Output ONLY valid JSON, no prose, no markdown fences.
 - "phases": ordered list. Each phase: "name", "t": [start,end] in [0,1],
-  "moves": list of joint/hand moves, "easing": ease_in|ease_out|ease_in_out.
+  "moves": list of joint/hand moves, "easing": ease name (ease_in,
+  ease_out, ease_in_out, linear, smooth, cubic_bezier, spring, overshoot,
+  anticipation, ease_in_back, ease_out_back).
 - Joint targets are ABSOLUTE normalized positions, not offsets.
 - Keep targets within max_travel of where the joint was at phase start.
 - Limbs cannot stretch: don't place wrist farther from elbow than ~1.3x rest.
@@ -291,14 +293,188 @@ def _parse_phase(raw: dict[str, Any]) -> _CompiledPhase:
 
 
 def _eased(u: float, kind: str) -> float:
-    u = max(0.0, min(1.0, u))
-    if kind == "ease_in":
-        return u * u * u
-    if kind == "ease_out":
-        return 1 - (1 - u) ** 3
-    if kind == "linear":
-        return u
-    return _ease(u)  # ease_in_out default
+    """Route a phase easing name through the easing library.
+
+    Backwards compatible: ease_in / ease_out / ease_in_out / linear keep
+    their exact historical curves; new names (cubic_bezier, spring,
+    overshoot, anticipation) come from EASE_FUNCS.
+    """
+    return ease_value(kind, u)
+
+
+# ── easing library ─────────────────────────────────────────────────
+# Beyond the basics: cubic-bezier (CSS-style curves), spring (real
+# damped-harmonic physics), overshoot (easeOutBack), anticipation
+# (wind-up then overshoot — the animator's "anticipation" principle).
+# All are pure functions of u in [0,1]; endpoints are exact so phase
+# handoffs in compile_score stay continuous.
+
+
+def _clamp01(u: float) -> float:
+    return max(0.0, min(1.0, u))
+
+
+def ease_linear(u: float) -> float:
+    return _clamp01(u)
+
+
+def ease_in_cubic(u: float) -> float:
+    u = _clamp01(u)
+    return u * u * u
+
+
+def ease_out_cubic(u: float) -> float:
+    u = _clamp01(u)
+    return 1 - (1 - u) ** 3
+
+
+def ease_in_out_cubic(u: float) -> float:
+    u = _clamp01(u)
+    return 4 * u * u * u if u < 0.5 else 1 - ((-2.0 * u + 2.0) ** 3) / 2.0
+
+
+def ease_smooth(u: float) -> float:
+    u = _clamp01(u)
+    return u * u * (3 - 2 * u)
+
+
+def _bezier_coord(t: float, p1: float, p2: float) -> float:
+    """One coordinate of a cubic bezier with P0=0, P3=1."""
+    return (3 * (1 - t) ** 2 * t * p1
+            + 3 * (1 - t) * t ** 2 * p2
+            + t ** 3)
+
+
+def _bezier_deriv(t: float, p1: float, p2: float) -> float:
+    return (3 * (1 - t) ** 2 * p1
+            + 6 * (1 - t) * t * (p2 - p1)
+            + 3 * t ** 2 * (1 - p2))
+
+
+def cubic_bezier_ease(u: float, x1: float = 0.25, y1: float = 0.1,
+                      x2: float = 0.25, y2: float = 1.0) -> float:
+    """CSS-style cubic-bezier easing.
+
+    Solves bezier_x(t) = u for t (Newton-Raphson, bisection fallback),
+    returns bezier_y(t). Defaults are the CSS `ease` curve. Endpoints
+    are exact: (0,0) and (1,1).
+    """
+    u = _clamp01(u)
+    if u <= 0.0:
+        return 0.0
+    if u >= 1.0:
+        return 1.0
+    t = u  # Newton seed
+    for _ in range(8):
+        x = _bezier_coord(t, x1, x2) - u
+        if abs(x) < 1e-7:
+            break
+        d = _bezier_deriv(t, x1, x2)
+        if abs(d) < 1e-7:
+            break
+        t = max(0.0, min(1.0, t - x / d))
+    else:
+        t = u
+    if abs(_bezier_coord(t, x1, x2) - u) > 1e-4:
+        # Newton failed to converge — bisection fallback
+        lo, hi = 0.0, 1.0
+        t = u
+        for _ in range(24):
+            x = _bezier_coord(t, x1, x2)
+            if abs(x - u) < 1e-7:
+                break
+            if x < u:
+                lo = t
+            else:
+                hi = t
+            t = (lo + hi) / 2.0
+    return _clamp01(_bezier_coord(t, y1, y2))
+
+
+def ease_spring(u: float, stiffness: float = 170.0,
+                damping_ratio: float = 0.22) -> float:
+    """Damped-harmonic-oscillator spring: overshoots, oscillates, settles.
+
+    Closed-form underdamped solution, normalized so u=0 -> 0 and u=1 -> 1.
+    stiffness sets oscillation frequency (higher = snappier),
+    damping_ratio < 1 gives the bounce (lower = bouncier).
+    """
+    u = _clamp01(u)
+    if u <= 0.0:
+        return 0.0
+    if u >= 1.0:
+        return 1.0
+    zeta = max(0.02, min(0.95, damping_ratio))
+    omega = math.sqrt(max(1.0, stiffness))
+    wd = omega * math.sqrt(1 - zeta * zeta)
+    t = u
+    decay = math.exp(-zeta * omega * t)
+    osc = (math.cos(wd * t)
+           + zeta / math.sqrt(1 - zeta * zeta) * math.sin(wd * t))
+    return 1.0 - decay * osc
+
+
+def ease_overshoot(u: float, s: float = 1.70158) -> float:
+    """easeOutBack: passes the target, then settles back onto it."""
+    u = _clamp01(u)
+    if u <= 0.0:
+        return 0.0
+    if u >= 1.0:
+        return 1.0
+    c3 = s + 1.0
+    return 1.0 + c3 * (u - 1.0) ** 3 + s * (u - 1.0) ** 2
+
+
+def ease_anticipation(u: float, s: float = 1.70158) -> float:
+    """Wind-up then strike: dips slightly backward first (the animator's
+    anticipation principle), then overshoots into the target."""
+    u = _clamp01(u)
+    windup, dip = 0.35, 0.12
+    if u < windup:
+        k = u / windup
+        return -dip * (k * k * (3 - 2 * k))  # smoothstep into the dip
+    k = (u - windup) / (1.0 - windup)
+    return -dip + (1.0 + dip) * ease_overshoot(k, s)
+
+
+def ease_in_back(u: float, s: float = 1.70158) -> float:
+    """Classic easeInBack: dips below the start, then arrives at 1."""
+    u = _clamp01(u)
+    if u <= 0.0:
+        return 0.0
+    if u >= 1.0:
+        return 1.0
+    c3 = s + 1.0
+    return c3 * u ** 3 - s * u ** 2
+
+
+#: every easing the motion-score compiler understands
+EASE_FUNCS: dict[str, Callable[[float], float]] = {
+    "linear": ease_linear,
+    "ease_in": ease_in_cubic,
+    "ease_out": ease_out_cubic,
+    "ease_in_out": ease_in_out_cubic,
+    "smooth": ease_smooth,
+    "smoothstep": ease_smooth,
+    "cubic_bezier": cubic_bezier_ease,
+    "css_ease": cubic_bezier_ease,
+    "spring": ease_spring,
+    "overshoot": ease_overshoot,
+    "ease_out_back": ease_overshoot,
+    "anticipation": ease_anticipation,
+    "ease_in_back": ease_in_back,
+}
+
+
+def ease_value(name: str, u: float) -> float:
+    """Evaluate easing ``name`` at ``u``. Unknown names -> smoothstep."""
+    fn = EASE_FUNCS.get((name or "").strip().lower(), ease_smooth)
+    return fn(u)
+
+
+def list_easings() -> list[str]:
+    """Canonical easing names (aliases included)."""
+    return sorted(EASE_FUNCS)
 
 
 def _two_bone_ik(hip: np.ndarray, target: np.ndarray,
