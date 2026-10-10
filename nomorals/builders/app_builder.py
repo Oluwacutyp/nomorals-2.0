@@ -54,7 +54,7 @@ from ..storage.kv import KVStore
 
 _log = get_logger(__name__)
 
-__all__ = ["AppBuilder", "STACKS", "register"]
+__all__ = ["AppBuilder", "STACKS", "THEMES", "register"]
 
 STACKS = ("static", "flask", "fastapi", "express", "react-vite",
           "cli-python", "django", "nextjs", "bot-telegram", "go-cli")
@@ -82,12 +82,62 @@ def _features_json(features: list[str]) -> str:
     return json.dumps(features or ["core functionality"], indent=2)
 
 
+#: UI themes for the generated front-ends (static / react-vite / nextjs).
+THEMES = ("dark", "light", "neon")
+
+_THEME_PALETTES = {
+    "dark": {"bg": "#0d1117", "panel": "#161b22", "text": "#e6edf3",
+             "muted": "#8b949e", "accent": "#58a6ff", "border": "#30363d",
+             "button": "#238636", "button_hover": "#2ea043",
+             "input_bg": "#0d1117"},
+    "light": {"bg": "#ffffff", "panel": "#f6f8fa", "text": "#1f2328",
+              "muted": "#59636e", "accent": "#0969da", "border": "#d0d7de",
+              "button": "#1f883d", "button_hover": "#1c8139",
+              "input_bg": "#ffffff"},
+    "neon": {"bg": "#05010f", "panel": "#0d0221", "text": "#e8fffc",
+             "muted": "#9d8cff", "accent": "#00f0ff", "border": "#2d1b69",
+             "button": "#7b2ff7", "button_hover": "#9d4edd",
+             "input_bg": "#05010f"},
+}
+
+
+def _theme_css(theme: str) -> str:
+    """One shared stylesheet, themed (dark / light / neon)."""
+    p = _THEME_PALETTES.get(theme, _THEME_PALETTES["dark"])
+    return f"""* {{ box-sizing: border-box; margin: 0; padding: 0; }}
+body {{ font-family: system-ui, sans-serif; background: {p['bg']};
+       color: {p['text']}; min-height: 100vh; display: flex;
+       flex-direction: column; }}
+header {{ padding: 2.5rem 2rem 1rem; }}
+h1 {{ font-size: 2.4rem; }}
+.tagline {{ color: {p['muted']}; margin-top: .5rem; max-width: 60ch; }}
+main {{ padding: 1rem 2rem; flex: 1; max-width: 760px; width: 100%;
+        margin: 0 auto; }}
+section {{ background: {p['panel']}; border: 1px solid {p['border']};
+          border-radius: 10px; padding: 1.25rem 1.5rem;
+          margin-bottom: 1.25rem; }}
+h2 {{ font-size: 1.1rem; margin-bottom: .75rem; color: {p['accent']}; }}
+li {{ margin: .35rem 0 .35rem 1.25rem; }}
+.muted {{ color: {p['muted']}; list-style: none; margin-left: 0; }}
+.value {{ font-size: 2rem; font-variant-numeric: tabular-nums; }}
+button {{ background: {p['button']}; color: #fff; border: 0;
+         border-radius: 6px; padding: .5rem 1rem; margin-right: .5rem;
+         cursor: pointer; }}
+button:hover {{ background: {p['button_hover']}; }}
+input {{ padding: .5rem; border-radius: 6px; border: 1px solid {p['border']};
+        background: {p['input_bg']}; color: {p['text']}; margin-right: .5rem; }}
+footer {{ padding: 1rem 2rem; color: {p['muted']}; font-size: .85rem; }}
+a {{ color: {p['accent']}; }}
+"""
+
+
 # ── template generators: spec → {relative path: content} ─────────────────
 
 def _static(spec: dict) -> dict[str, str]:
     title = spec.get("title") or spec["name"]
     desc = spec.get("description") or f"{title} — built with the No-Morals " \
         "builder system."
+    theme = spec.get("theme", "dark")
     return {
         "index.html": f"""<!doctype html>
 <html lang="en">
@@ -123,24 +173,7 @@ def _static(spec: dict) -> dict[str, str]:
 </body>
 </html>
 """,
-        "style.css": """* { box-sizing: border-box; margin: 0; padding: 0; }
-body { font-family: system-ui, sans-serif; background: #0d1117; color: #e6edf3;
-       min-height: 100vh; display: flex; flex-direction: column; }
-header { padding: 2.5rem 2rem 1rem; }
-h1 { font-size: 2.4rem; }
-.tagline { color: #8b949e; margin-top: .5rem; max-width: 60ch; }
-main { padding: 1rem 2rem; flex: 1; }
-section { background: #161b22; border: 1px solid #30363d; border-radius: 10px;
-          padding: 1.25rem 1.5rem; margin-bottom: 1.25rem; max-width: 720px; }
-h2 { font-size: 1.1rem; margin-bottom: .75rem; color: #58a6ff; }
-li { margin: .35rem 0 .35rem 1.25rem; }
-.muted { color: #8b949e; list-style: none; margin-left: 0; }
-.value { font-size: 2rem; font-variant-numeric: tabular-nums; }
-button { background: #238636; color: #fff; border: 0; border-radius: 6px;
-         padding: .5rem 1rem; margin-right: .5rem; cursor: pointer; }
-button:hover { background: #2ea043; }
-footer { padding: 1rem 2rem; color: #8b949e; font-size: .85rem; }
-""",
+        "style.css": _theme_css(theme),
         "app.js": """let count = 0;
 const el = document.getElementById("count");
 document.getElementById("inc").addEventListener("click", () => {
@@ -199,6 +232,14 @@ def index():
 @app.route("/api/health")
 def health():
     return jsonify({{"status": "ok"}})
+
+
+@app.route("/readyz")
+def readyz():
+    # readiness: safe to send traffic (liveness is /api/health).
+    # The in-memory store needs no warmup, so this is always ok;
+    # real apps would check DB / dependency reachability here.
+    return jsonify({{"status": "ok", "ready": True}})
 
 
 @app.route("/api/features")
@@ -264,7 +305,7 @@ pip install -r requirements.txt
 python app.py
 ```
 
-Endpoints: `GET /`, `GET /api/health`, `GET /api/features`,
+Endpoints: `GET /`, `GET /api/health`, `GET /readyz`, `GET /api/features`,
 `GET|POST /api/items`, `PATCH|DELETE /api/items/<id>`.
 
 ## Features
@@ -303,6 +344,14 @@ class Item(ItemIn):
 @app.get("/health")
 def health():
     return {{"status": "ok"}}
+
+
+@app.get("/readyz")
+def readyz():
+    # readiness: safe to send traffic (liveness is /health).
+    # The in-memory store needs no warmup; real apps would check
+    # DB / dependency reachability here.
+    return {{"status": "ok", "ready": True}}
 
 
 @app.get("/features")
@@ -363,7 +412,7 @@ pip install -r requirements.txt
 uvicorn main:app --host 0.0.0.0 --port {spec.get('port', 8000)}
 ```
 
-Interactive docs at `/docs`.
+Interactive docs at `/docs`. Liveness: `/health`, readiness: `/readyz`.
 
 ## Features
 
@@ -403,6 +452,8 @@ app.get("/", (req, res) => {{
 }});
 
 app.get("/health", (req, res) => res.json({{ status: "ok" }}));
+// readiness: safe to send traffic (liveness is /health)
+app.get("/readyz", (req, res) => res.json({{ status: "ok", ready: true }}));
 app.get("/features", (req, res) =>
   res.json({{ features: {json.dumps(feats)} }}));
 
@@ -449,7 +500,7 @@ npm install
 npm start
 ```
 
-Endpoints: `GET /`, `GET /health`, `GET /features`,
+Endpoints: `GET /`, `GET /health`, `GET /readyz`, `GET /features`,
 `GET|POST /items`, `PATCH|DELETE /items/:id`.
 
 ## Features
@@ -462,6 +513,7 @@ Endpoints: `GET /`, `GET /health`, `GET /features`,
 def _react_vite(spec: dict) -> dict[str, str]:
     name, title = spec["name"], spec.get("title") or spec["name"]
     feats = spec.get("features", [])
+    theme = spec.get("theme", "dark")
     return {
         "package.json": json.dumps({
             "name": name,
@@ -541,19 +593,7 @@ export default function App() {{
   );
 }}
 ''',
-        "src/style.css": """* { box-sizing: border-box; margin: 0; padding: 0; }
-body { font-family: system-ui, sans-serif; background: #0d1117; color: #e6edf3; }
-main { max-width: 720px; margin: 0 auto; padding: 2.5rem 1.5rem; }
-h1 { font-size: 2.2rem; }
-.tagline { color: #8b949e; margin: .5rem 0 1.5rem; }
-section { background: #161b22; border: 1px solid #30363d; border-radius: 10px;
-          padding: 1.25rem 1.5rem; margin-bottom: 1.25rem; }
-h2 { font-size: 1.05rem; color: #58a6ff; margin-bottom: .75rem; }
-li { margin: .35rem 0 .35rem 1.25rem; }
-.value { font-size: 2rem; font-variant-numeric: tabular-nums; }
-button { background: #238636; color: #fff; border: 0; border-radius: 6px;
-         padding: .5rem 1rem; margin-right: .5rem; cursor: pointer; }
-""",
+        "src/style.css": _theme_css(theme),
         "README.md": f"""# {title}
 
 React + Vite app built by the No-Morals builder.
@@ -757,6 +797,11 @@ def health(request):
     return JsonResponse({"status": "ok", "app": @@NAME@@})
 
 
+def readyz(request):
+    # readiness: safe to send traffic (liveness is /health/).
+    return JsonResponse({"status": "ok", "ready": True})
+
+
 class ItemListView(ListView):
     model = Item
     template_name = "items/item_list.html"
@@ -907,6 +952,7 @@ urlpatterns = [
     path("", views.ItemListView.as_view(), name="item-list"),
     path("new/", views.ItemCreateView.as_view(), name="item-create"),
     path("health/", views.health, name="health"),
+    path("readyz/", views.readyz, name="readyz"),
 ]
 ''',
         "items/templates/items/item_list.html": list_html,
@@ -925,7 +971,7 @@ python manage.py migrate
 python manage.py runserver 0.0.0.0:{spec.get('port', 8000)}
 ```
 
-Visit `/` (item list), `/new/` (create), `/health/` (JSON), `/admin/`
+Visit `/` (item list), `/new/` (create), `/health/` + `/readyz/` (JSON), `/admin/`
 (create a superuser with `python manage.py createsuperuser`).
 
 ## Features
@@ -939,6 +985,7 @@ def _nextjs(spec: dict) -> dict[str, str]:
     name, title = spec["name"], spec.get("title") or spec["name"]
     feats = spec.get("features", [])
     desc = spec.get("description") or f"{title} — built with the No-Morals builder."
+    theme = spec.get("theme", "dark")
     # plain strings + @@PLACEHOLDER@@ replaces: TSX is brace-heavy.
     layout_tsx = """import type { Metadata } from "next";
 import "./globals.css";
@@ -1098,23 +1145,16 @@ export default nextConfig;
         ".gitignore": "node_modules/\n.next/\n",
         "app/layout.tsx": layout_tsx,
         "app/page.tsx": page_tsx,
-        "app/globals.css": """* { box-sizing: border-box; margin: 0; padding: 0; }
-body { font-family: system-ui, sans-serif; background: #0d1117; color: #e6edf3; }
-main { max-width: 720px; margin: 0 auto; padding: 2.5rem 1.5rem; }
-h1 { font-size: 2.2rem; }
-section { background: #161b22; border: 1px solid #30363d; border-radius: 10px;
-          padding: 1.25rem 1.5rem; margin: 1.25rem 0; }
-h2 { font-size: 1.05rem; color: #58a6ff; margin-bottom: .75rem; }
-li { margin: .35rem 0 .35rem 1.25rem; }
-input { padding: .5rem; border-radius: 6px; border: 1px solid #30363d;
-        background: #0d1117; color: #e6edf3; margin-right: .5rem; }
-button { background: #238636; color: #fff; border: 0; border-radius: 6px;
-         padding: .5rem 1rem; margin-right: .5rem; cursor: pointer; }
-""",
+        "app/globals.css": _theme_css(theme),
         "app/api/health/route.ts": """export async function GET() {
   return Response.json({ status: "ok", app: "@@NAME@@" });
 }
 """.replace("@@NAME@@", name),
+        "app/api/readyz/route.ts": """export async function GET() {
+  // readiness: safe to send traffic (liveness is /api/health)
+  return Response.json({ status: "ok", ready: true });
+}
+""",
         "app/api/items/_store.ts": """export type Item = { id: number; name: string; done: boolean };
 
 // in-memory store shared by the items routes (resets on restart)
@@ -1180,7 +1220,7 @@ npm run dev
 ```
 
 Open http://localhost:{spec.get('port', 3000)}.
-API: `GET /api/health`, `GET|POST /api/items`,
+API: `GET /api/health`, `GET /api/readyz`, `GET|POST /api/items`,
 `GET|PATCH|DELETE /api/items/:id`.
 
 ## Features
@@ -1521,12 +1561,6 @@ class AppBuilder:
         root.mkdir(parents=True, exist_ok=True)
         return root
 
-    def stacks(self) -> list[dict[str, Any]]:
-        return [
-            {"stack": s, "description": _TEMPLATES[s].__doc__ or ""}
-            for s in STACKS
-        ]
-
     def build(self, spec: dict[str, Any], *,
               verify: bool = True) -> dict[str, Any]:
         """Generate the app, statically validate it, and runtime-verify it.
@@ -1548,11 +1582,16 @@ class AppBuilder:
         if stack not in _TEMPLATES:
             raise ToolError(f"unknown stack {stack!r} — one of "
                             f"{', '.join(STACKS)}")
+        theme = str(spec.get("theme") or "dark").strip().lower()
+        if theme not in THEMES:
+            raise ToolError(f"unknown theme {theme!r} — one of "
+                            f"{', '.join(THEMES)}")
         spec = {
             "name": name,
             "title": str(spec.get("title") or name),
             "description": str(spec.get("description") or ""),
             "features": [str(f) for f in (spec.get("features") or [])][:20],
+            "theme": theme,
             "port": int(spec.get("port") or
                         {"flask": 5000, "fastapi": 8000,
                          "express": 3000, "react-vite": 5173,
@@ -1584,8 +1623,11 @@ class AppBuilder:
             "description": spec["description"],
             "features": spec["features"],
             "port": spec["port"],
+            "theme": spec["theme"],
             "built_at": time.time(),
             "files": written,
+            "dockerfile": False,
+            "ci": False,
             "run": {
                 "static": "open index.html (or: python3 -m http.server 8000)",
                 "flask": "pip install -r requirements.txt && python app.py",
@@ -2081,6 +2123,298 @@ class AppBuilder:
         self._set_deployed(data)
         return {"deployments": out, "count": len(out)}
 
+    # ── stacks: rich metadata ──────────────────────────────────────
+    def stacks(self) -> list[dict[str, Any]]:
+        meta = {
+            "static": ("Static site", "html/css/js", False),
+            "flask": ("Flask API", "python", True),
+            "fastapi": ("FastAPI API", "python", True),
+            "express": ("Express API", "node", True),
+            "react-vite": ("React + Vite SPA", "node", True),
+            "cli-python": ("Python CLI", "python", False),
+            "django": ("Django project", "python", True),
+            "nextjs": ("Next.js app", "node", True),
+            "bot-telegram": ("Telegram bot", "python", False),
+            "go-cli": ("Go CLI", "go", False),
+        }
+        return [
+            {"stack": s,
+             "description": _TEMPLATES[s].__doc__ or "",
+             "title": meta[s][0], "language": meta[s][1],
+             "server": meta[s][2],
+             "themes": list(THEMES)
+             if s in ("static", "react-vite", "nextjs") else [],
+             "health_path": _health_path(s),
+             "dockerizable": True}
+            for s in STACKS
+        ]
+
+    # ── dockerize: production container for a generated app ────────
+    def dockerize(self, name: str, *, overwrite: bool = False) -> dict[str, Any]:
+        """Write a production Dockerfile + .dockerignore into the app.
+
+        cookiecutter-django gold: generated apps should be containerizable
+        in one command.  Skips (honestly) when the app already ships one.
+        """
+        man = self.info(name)
+        slug, stack = _slug(name), man["stack"]
+        app_dir = self._apps_dir / slug
+        dockerfile = app_dir / "Dockerfile"
+        if dockerfile.exists() and not overwrite:
+            return {"app": slug, "stack": stack, "dockerfile": str(dockerfile),
+                    "skipped": True,
+                    "detail": "Dockerfile already exists (pass overwrite=true)"}
+        content = _dockerfile_for(stack, man)
+        if content is None:
+            raise ToolError(f"no Dockerfile template for stack {stack!r}")
+        dockerfile.write_text(content, encoding="utf-8")
+        (app_dir / ".dockerignore").write_text(
+            ".git\n__pycache__\n*.pyc\n.venv/\nvenv/\nnode_modules/\n"
+            "*.log\n.env\n", encoding="utf-8")
+        man["dockerfile"] = True
+        man["files"] = sorted({*man.get("files", []),
+                               "Dockerfile", ".dockerignore"})
+        (app_dir / "manifest.json").write_text(
+            json.dumps(man, indent=2), encoding="utf-8")
+        return {"app": slug, "stack": stack,
+                "dockerfile": str(dockerfile),
+                "detail": "Dockerfile + .dockerignore written; "
+                          f"build with: docker build -t {slug} {app_dir}"}
+
+    # ── ci: GitHub Actions workflow for a generated app ────────────
+    def ci(self, name: str, *, overwrite: bool = False) -> dict[str, Any]:
+        """Write ``.github/workflows/ci.yml`` for the app.
+
+        Python servers get install + compile + boot-and-curl-health;
+        node builds get install + build; CLIs get a real run.  A CI file
+        that only echoes is decoration — this one actually exercises
+        the app.
+        """
+        man = self.info(name)
+        slug, stack = _slug(name), man["stack"]
+        app_dir = self._apps_dir / slug
+        workflow = app_dir / ".github" / "workflows" / "ci.yml"
+        if workflow.exists() and not overwrite:
+            return {"app": slug, "stack": stack, "workflow": str(workflow),
+                    "skipped": True,
+                    "detail": "ci.yml already exists (pass overwrite=true)"}
+        content = _ci_for(stack, man)
+        workflow.parent.mkdir(parents=True, exist_ok=True)
+        workflow.write_text(content, encoding="utf-8")
+        man["ci"] = True
+        man["files"] = sorted({*man.get("files", []),
+                               ".github/workflows/ci.yml"})
+        (app_dir / "manifest.json").write_text(
+            json.dumps(man, indent=2), encoding="utf-8")
+        return {"app": slug, "stack": stack, "workflow": str(workflow),
+                "detail": "ci.yml written"}
+
+    # ── patch: iterate on a built app (Bolt-style) ─────────────────
+    def patch(self, name: str, files: dict[str, str]) -> dict[str, Any]:
+        """Overwrite/add files in the app, then re-validate + update manifest.
+
+        The iterate-don't-regenerate primitive: fix a typo or add a route
+        without rebuilding from scratch.
+        """
+        man = self.info(name)
+        slug = _slug(name)
+        app_dir = self._apps_dir / slug
+        if not files:
+            raise ToolError("patch needs files={path: content}")
+        patched = []
+        for rel, content in files.items():
+            rel = str(rel).lstrip("/")
+            if ".." in Path(rel).parts:
+                raise ToolError(f"refusing path traversal: {rel!r}")
+            target = app_dir / rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(content, encoding="utf-8")
+            patched.append(rel)
+        validated, failed = self._validate(app_dir, man["stack"])
+        man["files"] = sorted({*man.get("files", []), *patched})
+        man["validation"] = {"ok": not failed, "validated": validated,
+                             "failed": failed,
+                             "patched_at": time.time()}
+        (app_dir / "manifest.json").write_text(
+            json.dumps(man, indent=2), encoding="utf-8")
+        return {"app": slug, "patched": patched,
+                "validation": man["validation"]}
+
+    # ── duplicate / remove ─────────────────────────────────────────
+    def duplicate(self, name: str, new_name: str) -> dict[str, Any]:
+        """Clone an app under a new name (remix starting point)."""
+        man = self.info(name)
+        slug = _slug(name)
+        app_dir = self._apps_dir / slug
+        new_slug = _slug(new_name)
+        if not new_slug:
+            raise ToolError("duplicate needs a new name")
+        dest = self._apps_dir / new_slug
+        if dest.exists():
+            raise ToolError(f"{new_slug} already exists")
+        shutil.copytree(app_dir, dest)
+        new_man = dict(man)
+        new_man["name"] = new_name
+        new_man["built_at"] = time.time()
+        new_man.pop("validation", None)
+        (dest / "manifest.json").write_text(
+            json.dumps(new_man, indent=2), encoding="utf-8")
+        return {"app": new_slug, "stack": man["stack"], "dir": str(dest),
+                "from": slug}
+
+    def remove(self, name: str) -> dict[str, Any]:
+        """Delete a generated app (stops its server/proxy first)."""
+        slug = _slug(name)
+        app_dir = self._apps_dir / slug
+        if not app_dir.is_dir():
+            raise ToolError(f"no app named {name!r}")
+        for fn in (self.stop, self.stop_deploy):
+            try:
+                fn(name)
+            except ToolError:
+                pass
+        shutil.rmtree(app_dir)
+        return {"app": slug, "removed": True, "dir": str(app_dir)}
+
+
+def _dockerfile_for(stack: str, man: dict[str, Any]) -> str | None:
+    """Production Dockerfile per stack (cookiecutter-django gold)."""
+    port = man.get("port", 8000)
+    if stack == "static":
+        return ("FROM nginx:alpine\nCOPY . /usr/share/nginx/html\n"
+                "EXPOSE 80\n")
+    if stack == "flask":
+        return (f"FROM python:3.12-slim\nWORKDIR /app\n"
+                "COPY requirements.txt .\n"
+                "RUN pip install --no-cache-dir -r requirements.txt\n"
+                "COPY app.py .\n"
+                f"ENV PORT={port}\nEXPOSE {port}\n"
+                'CMD ["python", "app.py"]\n')
+    if stack == "fastapi":
+        return (f"FROM python:3.12-slim\nWORKDIR /app\n"
+                "COPY requirements.txt .\n"
+                "RUN pip install --no-cache-dir -r requirements.txt\n"
+                "COPY main.py .\n"
+                f"ENV PORT={port}\nEXPOSE {port}\n"
+                'CMD sh -c "uvicorn main:app --host 0.0.0.0 --port ${PORT}"\n')
+    if stack == "express":
+        return (f"FROM node:20-slim\nWORKDIR /app\n"
+                "COPY package.json .\n"
+                "RUN npm install --omit=dev --no-audit --no-fund\n"
+                "COPY server.js .\n"
+                f"ENV PORT={port}\nEXPOSE {port}\n"
+                'CMD ["npm", "start"]\n')
+    if stack == "react-vite":
+        return ("FROM node:20-slim AS build\nWORKDIR /app\n"
+                "COPY package.json .\n"
+                "RUN npm install --no-audit --no-fund\n"
+                "COPY . .\nRUN npm run build\n"
+                "FROM nginx:alpine\nCOPY --from=build /app/dist "
+                "/usr/share/nginx/html\nEXPOSE 80\n")
+    if stack == "django":
+        return (f"FROM python:3.12-slim\nWORKDIR /app\n"
+                "COPY requirements.txt .\n"
+                "RUN pip install --no-cache-dir -r requirements.txt\n"
+                "COPY . .\n"
+                f"ENV PORT={port} DJANGO_DEBUG=0\nEXPOSE {port}\n"
+                'CMD sh -c "python manage.py migrate --noinput && '
+                'python manage.py runserver 0.0.0.0:${PORT}"\n')
+    if stack == "nextjs":
+        return ("FROM node:20-slim\nWORKDIR /app\n"
+                "COPY package.json .\n"
+                "RUN npm install --no-audit --no-fund\n"
+                "COPY . .\nRUN npm run build\n"
+                "EXPOSE 3000\n"
+                'CMD ["npm", "start"]\n')
+    if stack == "bot-telegram":
+        return None  # ships its own Dockerfile already
+    if stack == "cli-python":
+        name = man.get("name", "app")
+        return ("FROM python:3.12-slim\nWORKDIR /app\n"
+                f"COPY {name}.py .\n"
+                f'ENTRYPOINT ["python", "{name}.py"]\n'
+                'CMD ["--help"]\n')
+    if stack == "go-cli":
+        name = man.get("name", "app")
+        return ("FROM golang:1.21 AS build\nWORKDIR /src\n"
+                "COPY go.mod main.go ./\n"
+                f"RUN go build -o /app/{name} .\n"
+                "FROM alpine:3\n"
+                f"COPY --from=build /app/{name} /usr/local/bin/{name}\n"
+                f'ENTRYPOINT ["/usr/local/bin/{name}"]\n'
+                'CMD ["--help"]\n')
+    return None
+
+
+def _ci_for(stack: str, man: dict[str, Any]) -> str:
+    """GitHub Actions workflow per stack family — actually exercises the app."""
+    port = man.get("port", 8000)
+    health = _health_path(stack)
+    name = man.get("name", "app")
+    header = ("name: ci\non: [push, pull_request]\n\njobs:\n"
+              "  build:\n    runs-on: ubuntu-latest\n    steps:\n"
+              "      - uses: actions/checkout@v4\n")
+    if stack in ("flask", "fastapi", "django"):
+        entry = {"flask": "app.py", "fastapi": "main.py",
+                 "django": "manage.py"}[stack]
+        boot = {"flask": f"python {entry} &",
+                "fastapi": f"uvicorn main:app --port {port} &",
+                "django": f"python {entry} migrate --noinput && "
+                          f"python {entry} runserver 0.0.0.0:{port} &"}[stack]
+        return (header +
+                '      - uses: actions/setup-python@v5\n'
+                '        with: {python-version: "3.12"}\n'
+                '      - run: pip install -r requirements.txt\n'
+                '      - run: python -m compileall -q .\n'
+                f'      - run: |\n          {boot}\n'
+                f'          for i in $(seq 1 30); do\n'
+                f'            curl -fsS http://127.0.0.1:{port}{health} && break\n'
+                '            sleep 1\n          done\n'
+                f'          curl -fsS http://127.0.0.1:{port}{health}\n')
+    if stack in ("cli-python", "bot-telegram"):
+        extra = (f'      - run: python {name}.py --help\n'
+                 if stack == "cli-python" else
+                 '      - run: python -m py_compile bot.py\n')
+        return (header +
+                '      - uses: actions/setup-python@v5\n'
+                '        with: {python-version: "3.12"}\n'
+                '      - run: pip install -r requirements.txt\n'
+                '      - run: python -m compileall -q .\n' + extra)
+    if stack == "express":
+        return (header +
+                '      - uses: actions/setup-node@v4\n'
+                '        with: {node-version: "20"}\n'
+                '      - run: npm install --no-audit --no-fund\n'
+                '      - run: node --check server.js\n'
+                '      - run: |\n'
+                f'          node server.js &\n'
+                '          for i in $(seq 1 30); do\n'
+                f'            curl -fsS http://127.0.0.1:{port}{health} && break\n'
+                '            sleep 1\n          done\n'
+                f'          curl -fsS http://127.0.0.1:{port}{health}\n')
+    if stack in ("react-vite", "nextjs"):
+        return (header +
+                '      - uses: actions/setup-node@v4\n'
+                '        with: {node-version: "20"}\n'
+                '      - run: npm install --no-audit --no-fund\n'
+                '      - run: npm run build\n')
+    if stack == "static":
+        return (header +
+                '      - uses: actions/setup-python@v5\n'
+                '        with: {python-version: "3.12"}\n'
+                '      - run: |\n'
+                '          python3 -m http.server 8901 &\n'
+                '          sleep 2\n'
+                '          curl -fsS http://127.0.0.1:8901/ | grep -q "<html"\n')
+    if stack == "go-cli":
+        return (header +
+                '      - uses: actions/setup-go@v5\n'
+                '        with: {go-version: "1.21"}\n'
+                '      - run: go vet ./...\n'
+                '      - run: go build -o app .\n'
+                '      - run: ./app list\n')
+    return header + '      - run: echo "no CI template for this stack"\n'
+
 
 @contextlib.contextmanager
 def _run_server(app_dir: Path, stack: str, port: int):
@@ -2229,22 +2563,33 @@ def _find_child_pid(app_dir: Path, cmd: list[str]) -> int | None:
 
 def _wait_for_http(port: int, stack: str, *, timeout: float = 20.0,
                    path: str = "", tls: bool = False) -> dict[str, Any]:
-    from ..core.http import HttpClient
+    # stdlib urllib on purpose: these are health checks against servers
+    # this module itself spawned on localhost — they must not pass
+    # through the SSRF-guarded core HttpClient.
+    import ssl
+    import urllib.request
 
     scheme = "https" if tls else "http"
     # a self-signed local cert is the EXPECTED identity for tls deploys —
     # verification is what would fail, not the app
     path = path or _health_path(stack)
+    ctx = None
+    if tls:
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
     deadline = time.time() + timeout
     last = ""
     while time.time() < deadline:
         try:
-            resp = HttpClient(timeout=2.0,
-                              verify_tls=not tls).get(
-                f"{scheme}://127.0.0.1:{port}{path}")
-            if resp.status < 500:
-                return {"ok": True, "status": resp.status, "path": path}
-            last = f"http {resp.status}"
+            req = urllib.request.Request(
+                f"{scheme}://127.0.0.1:{port}{path}", method="GET")
+            with urllib.request.urlopen(req, timeout=2.0,
+                                        context=ctx) as resp:
+                status = resp.status
+            if status < 500:
+                return {"ok": True, "status": status, "path": path}
+            last = f"http {status}"
         except Exception as exc:  # noqa: BLE001
             last = str(exc).splitlines()[0][:120]
         time.sleep(0.5)
@@ -2254,13 +2599,20 @@ def _wait_for_http(port: int, stack: str, *, timeout: float = 20.0,
 def _quick_http(port: int, path: str = "/", *, tls: bool = False) -> dict[str, Any] | None:
     if not port:
         return None
-    from ..core.http import HttpClient
+    import ssl
+    import urllib.request
 
     scheme = "https" if tls else "http"
+    ctx = None
+    if tls:
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
     try:
-        resp = HttpClient(timeout=2.0, verify_tls=not tls).get(
-            f"{scheme}://127.0.0.1:{port}{path}")
-        return {"status": resp.status}
+        req = urllib.request.Request(f"{scheme}://127.0.0.1:{port}{path}",
+                                     method="GET")
+        with urllib.request.urlopen(req, timeout=2.0, context=ctx) as resp:
+            return {"status": resp.status}
     except Exception:  # noqa: BLE001
         return None
 
@@ -2290,14 +2642,20 @@ def register(registry: Any) -> None:
             "static|flask|fastapi|express|react-vite|cli-python|django|"
             "nextjs|bot-telegram|go-cli. Params: "
             "action=build (name, stack, title, description, features "
-            "(comma-separated), port, overwrite, verify=true) | stacks | list | info "
+            "(comma-separated), port, theme=dark|light|neon, overwrite, "
+            "verify=true) | stacks | list | info "
             "(name) | serve (name, port) — starts the server detached, "
             "health-checks it, returns a live URL + log path | stop "
             "(name) | served (what's running) | deploy (name, host, "
             "port, domain, path, tls) — puts the app behind a real "
             "reverse proxy; tls serves HTTPS (self-signed cert "
             "generated + cached per app) | stop_deploy "
-            "(name) | deployed (what's proxying). Generated code is "
+            "(name) | deployed (what's proxying) | dockerize (name) — "
+            "write a production Dockerfile + .dockerignore | ci (name) — "
+            "write .github/workflows/ci.yml that actually exercises the "
+            "app | patch (name, files_json) — overwrite/add files "
+            "(JSON {path: content}), re-validate | duplicate "
+            "(name, new_name) | remove (name). Generated code is "
             "validated (py_compile/node --check/JSON); with verify=true "
             "(default) the built app is also runtime-verified — server "
             "stacks are started and health-checked, cli-python gets a "
@@ -2313,10 +2671,12 @@ def register(registry: Any) -> None:
                   features: str = "", port: int = 0,
                   overwrite: bool = False, domain: str = "",
                   path: str = "", host: str = "0.0.0.0",
-                  tls: bool = False, verify: bool = True) -> dict[str, Any]:
+                  tls: bool = False, verify: bool = True,
+                  theme: str = "dark", new_name: str = "",
+                  files_json: str = "") -> dict[str, Any]:
         b = AppBuilder(context)
         if action == "stacks":
-            return {"stacks": list(STACKS)}
+            return {"stacks": b.stacks()}
         if action == "list":
             return b.list_apps()
         if action == "info":
@@ -2342,10 +2702,38 @@ def register(registry: Any) -> None:
             return b.stop_deploy(name)
         if action == "deployed":
             return b.deployed()
+        if action == "dockerize":
+            if not name:
+                raise ToolError("build_app dockerize needs name=")
+            return b.dockerize(name, overwrite=overwrite)
+        if action == "ci":
+            if not name:
+                raise ToolError("build_app ci needs name=")
+            return b.ci(name, overwrite=overwrite)
+        if action == "patch":
+            if not name:
+                raise ToolError("build_app patch needs name=")
+            try:
+                files = json.loads(files_json or "{}")
+            except json.JSONDecodeError as exc:
+                raise ToolError(f"files_json is not valid JSON: {exc}")
+            if not isinstance(files, dict):
+                raise ToolError("files_json must be a JSON object "
+                                "{path: content}")
+            return b.patch(name, files)
+        if action == "duplicate":
+            if not name or not new_name:
+                raise ToolError("build_app duplicate needs name= and new_name=")
+            return b.duplicate(name, new_name)
+        if action == "remove":
+            if not name:
+                raise ToolError("build_app remove needs name=")
+            return b.remove(name)
         if action != "build":
             raise ToolError(f"unknown build_app action {action!r}")
         feats = [f.strip() for f in features.split(",") if f.strip()]
         spec = {"name": name, "stack": stack, "title": title,
                 "description": description, "features": feats,
-                "port": int(port or 0), "overwrite": overwrite}
+                "port": int(port or 0), "overwrite": overwrite,
+                "theme": theme}
         return b.build(spec, verify=verify)

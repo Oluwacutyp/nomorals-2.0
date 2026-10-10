@@ -18,6 +18,7 @@ the runtime's canonical location (``context.gateway`` does not exist).
 
 from __future__ import annotations
 
+import hashlib
 import time
 import zipfile
 from dataclasses import dataclass, field
@@ -52,10 +53,16 @@ class ZipResult:
     archive: Path
     files: list[str] = field(default_factory=list)
     bytes: int = 0
+    #: Multi-part pieces when split_mb was used (else [archive]).
+    parts: list[Path] = field(default_factory=list)
+    #: sha256 of the archive (lets receivers verify integrity).
+    sha256: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {"archive": str(self.archive), "files": list(self.files),
-                "bytes": self.bytes}
+                "bytes": self.bytes,
+                "parts": [str(p) for p in self.parts],
+                "sha256": self.sha256}
 
 
 @dataclass
@@ -67,6 +74,8 @@ class DeliverResult:
     message_id: str = ""
     detail: str = ""
     problems: list[str] = field(default_factory=list)
+    #: How many send attempts were made (1 when the first try worked).
+    attempts: int = 1
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -75,6 +84,7 @@ class DeliverResult:
             "message_id": self.message_id,
             "detail": self.detail,
             "problems": list(self.problems),
+            "attempts": self.attempts,
         }
 
 
@@ -113,6 +123,23 @@ class DeliveryReport:
             lines.append("broken: " + ", ".join(self.broken))
         return "\n".join(lines)
 
+    def fancy_summary(self, theme: str | None = None) -> str:
+        """God-tier styled rendering of the delivery report."""
+        from .style import banner, render_kv, render_steps, resolve_theme
+
+        th = resolve_theme(theme)
+        head = banner(f"deliver {self.kind}/{self.name}",
+                      "OK" if self.ok else "BROKEN — see failed steps",
+                      theme=th)
+        body = render_steps([s.to_dict() for s in self.steps], theme=th)
+        kv = render_kv([
+            ("elapsed", f"{self.elapsed:.1f}s"),
+            ("zip", str(self.zip_path) if self.zip_path else "—"),
+            ("message_id", self.message_id or "—"),
+            ("broken", ", ".join(self.broken) or "none"),
+        ], theme=th)
+        return "\n".join([head, body, kv])
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "kind": self.kind, "name": self.name,
@@ -125,14 +152,39 @@ class DeliveryReport:
         }
 
 
+def _split_archive(archive: Path, split_mb: float) -> list[Path]:
+    """Split ``archive`` into ``split_mb``-sized ``.partNN`` pieces.
+
+    Chat platforms cap file uploads (Telegram bots: 50MB) — multi-part
+    archives are the honest answer, not silent truncation.
+    """
+    chunk = int(split_mb * 1024 * 1024)
+    data = archive.read_bytes()
+    if len(data) <= chunk:
+        return [archive]
+    parts: list[Path] = []
+    total = (len(data) + chunk - 1) // chunk
+    for i in range(total):
+        piece = archive.with_name(f"{archive.name}.part{i:02d}of{total:02d}")
+        piece.write_bytes(data[i * chunk:(i + 1) * chunk])
+        parts.append(piece)
+    _log.info("split %s into %d parts of ~%.1fMB", archive.name, total, split_mb)
+    return parts
+
+
 def zip_project(project_dir: str | Path,
-                dest: str | Path | None = None) -> ZipResult:
+                dest: str | Path | None = None,
+                split_mb: float = 0.0) -> ZipResult:
     """Create ``<name>.zip`` from ``project_dir``; return a :class:`ZipResult`.
 
     ``dest`` may be a directory (archive lands inside it) or a full file
     path.  Defaults to ``<parent>/<name>.zip``.  Excludes the same junk
     as :func:`nomorals.builders.export.export_project` plus the archive
     itself.
+
+    ``split_mb > 0`` splits the finished zip into ``split_mb``-sized
+    ``.partNNofMM`` pieces for chat size limits; ``parts`` lists them
+    (reassemble with ``cat``).
     """
     project_dir = Path(project_dir).expanduser().resolve()
     if not project_dir.is_dir():
@@ -162,9 +214,32 @@ def zip_project(project_dir: str | Path,
 
     size = archive.stat().st_size
     files = [rel for rel, _ in entries]
-    _log.info("zipped %s -> %s (%d files, %d bytes)",
-              project_dir, archive, len(files), size)
-    return ZipResult(archive=archive, files=files, bytes=size)
+    digest = _sha256_file(archive)
+    parts = _split_archive(archive, split_mb) if split_mb > 0 else [archive]
+    _log.info("zipped %s -> %s (%d files, %d bytes%s)",
+              project_dir, archive, len(files), size,
+              f", {len(parts)} parts" if len(parts) > 1 else "")
+    return ZipResult(archive=archive, files=files, bytes=size,
+                     parts=parts, sha256=digest)
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(65536), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _render_caption(template: str, *, name: str, kind: str,
+                    archive: Path, size: int, parts: int) -> str:
+    """Caption templating: {name} {kind} {archive} {bytes} {mb} {parts}."""
+    try:
+        return template.format(name=name, kind=kind, archive=archive.name,
+                               bytes=size, mb=f"{size / 1048576:.1f}",
+                               parts=parts)
+    except (KeyError, ValueError, IndexError):
+        return template
 
 
 def _resolve_gateway(gateway: Any = None, context: Any = None) -> Any:
@@ -188,30 +263,59 @@ def _resolve_gateway(gateway: Any = None, context: Any = None) -> Any:
 
 
 def _send_zip(gw: Any, zipped: ZipResult, *, platform: str, chat: str,
-              caption: str, max_send_mb: float) -> DeliverResult:
-    """Send an already-built zip through the gateway; captures send failures."""
-    try:
-        result = gw.send_file(platform, chat, str(zipped.archive),
-                              caption=caption, max_send_mb=max_send_mb)
-    except Exception as exc:  # noqa: BLE001 -- captured, never raised
-        problems = [f"send_file raised {type(exc).__name__}: {exc}"]
-        _log.warning("deliver_project send failed: %s", problems[0])
-        return DeliverResult(ok=False, zip=zipped, problems=problems,
-                             detail=problems[0])
+              caption: str, max_send_mb: float,
+              retries: int = 2, backoff: float = 1.0) -> DeliverResult:
+    """Send an already-built zip through the gateway; captures send failures.
 
-    ok = bool(getattr(result, "ok", False))
-    message_id = str(getattr(result, "message_id", "") or "")
-    problems = []
-    if not ok:
-        error = str(getattr(result, "error", "") or "send failed")
-        problems.append(f"send_file failed: {error}")
-    detail = (f"sent {zipped.archive.name} ({zipped.bytes} bytes) "
-              f"to {chat} as {message_id}" if ok
-              else "; ".join(problems))
-    _log.info("deliver_project %s -> %s", zipped.archive,
-              "OK" if ok else "FAIL")
-    return DeliverResult(ok=ok, zip=zipped, message_id=message_id,
-                         detail=detail, problems=problems)
+    Transient send failures are retried with exponential backoff
+    (``retries`` extra attempts); the attempt count lands in the result.
+    When the zip was split, every part is sent in order and the message
+    ids are joined.
+    """
+    attempts = 0
+    problems: list[str] = []
+    message_ids: list[str] = []
+    targets = zipped.parts or [zipped.archive]
+    for idx, piece in enumerate(targets):
+        piece_caption = (caption if len(targets) == 1
+                         else f"{caption} (part {idx + 1}/{len(targets)})")
+        sent = False
+        last_error = ""
+        for attempt in range(retries + 1):
+            attempts += 1
+            try:
+                result = gw.send_file(platform, chat, str(piece),
+                                      caption=piece_caption,
+                                      max_send_mb=max_send_mb)
+            except Exception as exc:  # noqa: BLE001 -- captured, never raised
+                last_error = f"send_file raised {type(exc).__name__}: {exc}"
+                _log.warning("deliver send attempt %d failed: %s",
+                             attempt + 1, last_error)
+            else:
+                if bool(getattr(result, "ok", False)):
+                    message_ids.append(
+                        str(getattr(result, "message_id", "") or ""))
+                    sent = True
+                    break
+                last_error = (f"send_file failed: "
+                              f"{getattr(result, 'error', '') or 'send failed'}")
+                _log.warning("deliver send attempt %d failed: %s",
+                             attempt + 1, last_error)
+            if attempt < retries:
+                time.sleep(backoff * (2 ** attempt))
+        if not sent:
+            problems.append(f"{piece.name}: {last_error} "
+                            f"({retries + 1} attempts)")
+    ok = not problems
+    detail = (f"sent {zipped.archive.name} ({zipped.bytes} bytes, "
+              f"{len(targets)} part(s)) to {chat} as "
+              f"{', '.join(message_ids)}" if ok else "; ".join(problems))
+    _log.info("deliver_project %s -> %s (%d attempts)", zipped.archive,
+              "OK" if ok else "FAIL", attempts)
+    return DeliverResult(ok=ok, zip=zipped,
+                         message_id=",".join(message_ids),
+                         detail=detail, problems=problems,
+                         attempts=attempts)
 
 
 def deliver_project(project_dir: str | Path, *,
@@ -219,8 +323,14 @@ def deliver_project(project_dir: str | Path, *,
                     gateway: Any = None, context: Any = None,
                     caption: str = "",
                     max_send_mb: float = 0.0,
-                    dest: str | Path | None = None) -> DeliverResult:
+                    dest: str | Path | None = None,
+                    split_mb: float = 0.0,
+                    retries: int = 2) -> DeliverResult:
     """Zip ``project_dir`` and send the archive to ``chat`` via the gateway.
+
+    ``caption`` supports ``{name}`` ``{kind}`` ``{archive}`` ``{bytes}``
+    ``{mb}`` ``{parts}`` templating.  ``split_mb`` splits the zip for
+    chat size limits; ``retries`` controls send retry attempts.
 
     Returns a :class:`DeliverResult`; raises :class:`ToolError` only for a
     bad project dir, an existing archive, or a missing/broken gateway.  A
@@ -228,10 +338,14 @@ def deliver_project(project_dir: str | Path, *,
     """
     gw = _resolve_gateway(gateway=gateway, context=context)
     project_dir = Path(project_dir).expanduser().resolve()
-    zipped = zip_project(project_dir, dest=dest)
+    zipped = zip_project(project_dir, dest=dest, split_mb=split_mb)
+    caption = _render_caption(
+        caption or "{name} — built project archive",
+        name=project_dir.name, kind="", archive=zipped.archive,
+        size=zipped.bytes, parts=len(zipped.parts))
     return _send_zip(gw, zipped, platform=platform, chat=chat,
-                     caption=caption or f"{project_dir.name} -- built project archive",
-                     max_send_mb=max_send_mb)
+                     caption=caption, max_send_mb=max_send_mb,
+                     retries=retries)
 
 
 def build_zip_and_deliver(kind: str, name: str, dest: str | Path, *,
@@ -242,7 +356,11 @@ def build_zip_and_deliver(kind: str, name: str, dest: str | Path, *,
                           export_dir: str | Path | None = None,
                           startup_timeout: float = 10.0,
                           policy: Any = None,
-                          confirmation: str | None = None) -> DeliveryReport:
+                          confirmation: str | None = None,
+                          split_mb: float = 0.0,
+                          retries: int = 2,
+                          steps: list[str] | None = None,
+                          skip: list[str] | None = None) -> DeliveryReport:
     """Scaffold, verify, zip, and deliver -- the full pipeline.
 
     The build/verify portion (scaffold -> install_deps -> project tests
@@ -259,7 +377,8 @@ def build_zip_and_deliver(kind: str, name: str, dest: str | Path, *,
     started = time.monotonic()
     verified = build_and_verify(
         kind, name, dest, policy=policy, confirmation=confirmation,
-        export_dir=export_dir, startup_timeout=startup_timeout)
+        export_dir=export_dir, startup_timeout=startup_timeout,
+        steps=steps, skip=skip)
     report = DeliveryReport(kind=kind, name=name,
                             project_dir=verified.project_dir,
                             steps=list(verified.steps))
@@ -275,12 +394,15 @@ def build_zip_and_deliver(kind: str, name: str, dest: str | Path, *,
     zipped: ZipResult | None = None
     try:
         zipped = zip_project(verified.project_dir,
-                             dest=export_dir or verified.project_dir.parent)
+                             dest=export_dir or verified.project_dir.parent,
+                             split_mb=split_mb)
         report.zip_path = zipped.archive
         report.steps.append(BuildStep(
             "zip", True,
             f"{zipped.archive.name} ({zipped.bytes} bytes, "
-            f"{len(zipped.files)} files)",
+            f"{len(zipped.files)} files"
+            + (f", {len(zipped.parts)} parts" if len(zipped.parts) > 1 else "")
+            + f", sha256 {zipped.sha256[:16]}…",
             time.monotonic() - step_started))
     except Exception as exc:  # noqa: BLE001
         report.steps.append(BuildStep("zip", False,
@@ -295,8 +417,11 @@ def build_zip_and_deliver(kind: str, name: str, dest: str | Path, *,
         gw = _resolve_gateway(gateway=gateway, context=context)
         delivered = _send_zip(
             gw, zipped, platform=platform, chat=chat,
-            caption=caption or f"{name} ({kind}) -- built project archive",
-            max_send_mb=max_send_mb)
+            caption=_render_caption(
+                caption or "{name} ({kind}) — built project archive",
+                name=name, kind=kind, archive=zipped.archive,
+                size=zipped.bytes, parts=len(zipped.parts)),
+            max_send_mb=max_send_mb, retries=retries)
     except Exception as exc:  # noqa: BLE001
         report.steps.append(BuildStep("deliver", False,
                                       f"{type(exc).__name__}: {exc}",

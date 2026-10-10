@@ -20,31 +20,50 @@ backward compatibility.
 
 from __future__ import annotations
 
-from .app_builder import STACKS, AppBuilder, register
+from .app_builder import STACKS, THEMES, AppBuilder, register
 from .deliver import (
     DeliverResult, DeliveryReport, ZipResult,
     build_zip_and_deliver, deliver_project, zip_project,
 )
-from .export import ExportResult, VerifyResult, export_project, verify_export
-from .install import InstallResult, install_deps, parse_requirements
-from .run import RunConfig, ServeError, ServeHandle, find_free_port, run_config, serve
-from .scaffold import KINDS, ScaffoldResult, scaffold, template_dir
-from .smoke import Check, SmokeResult, smoke_test
-from .verify import BuildReport, BuildStep, build_and_verify, run_project_tests
+from .export import (ExportResult, VerifyResult, export_project,
+                     verify_export, verify_reproducible, source_date_epoch)
+from .install import (InstallResult, ensure_venv, generate_lock,
+                      install_deps, parse_requirements, resolve_installer,
+                      verify_lock)
+from .run import (HttpProbe, ProbeResult, RunConfig, ServeError, ServeHandle,
+                  TcpProbe, find_free_port, run_config, run_probe, serve,
+                  stop_all)
+from .scaffold import (KINDS, ScaffoldResult, TemplateInfo, describe,
+                       list_templates, scaffold, template_dir)
+from .smoke import Check, HttpExpectation, SmokeResult, smoke_test, tcp_probe
+from .style import (Theme, banner, paint, render_kv, render_steps,
+                    resolve_theme, rule, spinner_frames, status_glyph,
+                    theme_names)
+from .verify import (STEP_NAMES, BuildReport, BuildStep, build_and_verify,
+                     run_project_tests, validate_sources)
 
 __all__ = [
     # top-level API
     "scaffold", "build_and_verify",
     "ScaffoldResult", "BuildReport", "BuildStep",
+    # template catalog
+    "TemplateInfo", "list_templates", "describe",
     # lifecycle pieces
     "KINDS", "template_dir",
-    "RunConfig", "run_config", "serve", "ServeHandle", "ServeError", "find_free_port",
-    "Check", "SmokeResult", "smoke_test",
+    "RunConfig", "run_config", "serve", "ServeHandle", "ServeError",
+    "find_free_port", "stop_all",
+    "HttpProbe", "TcpProbe", "ProbeResult", "run_probe",
+    "Check", "HttpExpectation", "SmokeResult", "smoke_test", "tcp_probe",
     "InstallResult", "install_deps", "parse_requirements",
+    "resolve_installer", "ensure_venv", "generate_lock", "verify_lock",
     "ExportResult", "VerifyResult", "export_project", "verify_export",
+    "verify_reproducible", "source_date_epoch",
     "ZipResult", "DeliverResult", "DeliveryReport",
     "zip_project", "deliver_project", "build_zip_and_deliver",
-    "run_project_tests",
+    "run_project_tests", "validate_sources", "STEP_NAMES",
+    # presentation
+    "Theme", "theme_names", "resolve_theme", "paint", "banner", "rule",
+    "render_kv", "render_steps", "spinner_frames", "status_glyph",
     # legacy ten-stack generator (moved from nomorals/builders.py)
-    "AppBuilder", "STACKS", "register",
+    "AppBuilder", "STACKS", "THEMES", "register",
 ]
