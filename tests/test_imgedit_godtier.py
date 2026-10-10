@@ -233,3 +233,123 @@ def test_feather_mask_edges():
     # radius 0 keeps it binary
     b = np.asarray(edit.feather_mask(m, radius=0))
     assert set(np.unique(b).tolist()) <= {0, 255}
+
+
+# ---------------------------------------------------------------------------
+# ControlNet-style conditioning interface (torch-free parts)
+# ---------------------------------------------------------------------------
+
+def test_control_condition_validation():
+    from nomorals.media.imggen.pipeline import ControlCondition
+    c = ControlCondition("canny", Image.new("L", (8, 8), 0))
+    assert c.kind == "canny" and c.strength == 1.0
+    with pytest.raises(ImgGenError):
+        ControlCondition("scribble", None)
+    with pytest.raises(ImgGenError):
+        ControlCondition("depth", None, strength=3.0)
+
+
+def test_extract_canny_finds_real_edges():
+    from nomorals.media.imggen.pipeline import extract_canny
+    img = Image.new("RGB", (64, 64), (20, 20, 20))
+    ImageDraw.Draw(img).rectangle([16, 16, 48, 48],
+                                  fill=(220, 220, 220))
+    e = extract_canny(img)
+    assert e.size == (64, 64) and e.mode == "L"
+    ea = np.asarray(e)
+    n = (ea > 127).sum()
+    assert 60 < n < 400           # ~perimeter, not noise, not empty
+    assert ea[16, 16] == 255      # corner is an edge
+    assert ea[32, 32] == 0        # solid center is not
+    assert ea[4, 4] == 0          # solid background is not
+
+
+def test_extract_canny_blank_is_empty():
+    from nomorals.media.imggen.pipeline import extract_canny
+    e = extract_canny(Image.new("RGB", (32, 32), (50, 50, 50)))
+    assert (np.asarray(e) > 127).sum() == 0
+
+
+def test_extract_depth_pose_fail_honestly():
+    from nomorals.media.imggen.pipeline import extract_depth, extract_pose
+    img = Image.new("RGB", (16, 16), (0, 0, 0))
+    with pytest.raises(ImgGenError, match="depth"):
+        extract_depth(img)
+    with pytest.raises(ImgGenError, match="pose"):
+        extract_pose(img)
+
+
+def test_attach_controlnet_validates():
+    from unittest.mock import MagicMock
+
+    from nomorals.media.imggen.pipeline import (
+        ControlCondition, NativePipeline)
+    # can't build a real pipeline without torch — exercise the
+    # registration logic on an uninitialized instance
+    pipe = NativePipeline.__new__(NativePipeline)
+    pipe.controlnets = {}
+    with pytest.raises(ImgGenError):
+        pipe.attach_controlnet("scribble", MagicMock())
+    with pytest.raises(ImgGenError):
+        pipe.attach_controlnet("canny", object())  # not callable
+    fake = MagicMock()
+    pipe.attach_controlnet("canny", fake)
+    assert pipe.controlnets["canny"] is fake
+    # conditioning without an attached net fails honestly
+    pipe.controlnets = {}
+    with pytest.raises(ImgGenError, match="no controlnet attached"):
+        pipe._check_conditioning(
+            [ControlCondition("canny", Image.new("L", (8, 8), 0))])
+    # ...and passes once attached
+    pipe.attach_controlnet("canny", fake)
+    out = pipe._check_conditioning(
+        [ControlCondition("canny", Image.new("L", (8, 8), 0))])
+    assert len(out) == 1
+    with pytest.raises(ImgGenError):
+        pipe._check_conditioning(["not-a-condition"])
+
+
+def test_attach_diffusers_controlnet_needs_diffusers():
+    from unittest.mock import MagicMock
+
+    from nomorals.media.imggen.pipeline import NativePipeline
+    pipe = NativePipeline.__new__(NativePipeline)
+    pipe.controlnets = {}
+    pipe.device = "cpu"
+    try:
+        import diffusers  # noqa: F401
+        has_diffusers = True
+    except ImportError:
+        has_diffusers = False
+    if not has_diffusers:
+        with pytest.raises(ImgGenError, match="diffusers"):
+            pipe.attach_diffusers_controlnet("canny", MagicMock())
+    else:
+        pipe.attach_diffusers_controlnet("canny", MagicMock())
+        assert "canny" in pipe.controlnets
+
+
+# ---------------------------------------------------------------------------
+# creativity slider
+# ---------------------------------------------------------------------------
+
+def test_creativity_to_strength_mapping():
+    from nomorals.media.imggen.upscale import creativity_to_strength
+    assert creativity_to_strength(0.0) == pytest.approx(0.12)
+    assert creativity_to_strength(1.0) == pytest.approx(0.62)
+    mid = creativity_to_strength(0.5)
+    assert 0.12 < mid < 0.62
+    assert creativity_to_strength(0.25) < creativity_to_strength(0.75)
+    with pytest.raises(ImgGenError):
+        creativity_to_strength(1.5)
+    with pytest.raises(ImgGenError):
+        creativity_to_strength(-0.1)
+
+
+def test_upscale_classical_still_fine():
+    from nomorals.media.imggen.upscale import upscale_classical
+    img = Image.new("RGB", (32, 32), (90, 110, 130))
+    out = upscale_classical(img, scale=2.0)
+    assert out.size == (64, 64)
+    with pytest.raises(ImgGenError):
+        upscale_classical(img, scale=0)

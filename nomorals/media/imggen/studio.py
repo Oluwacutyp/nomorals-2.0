@@ -168,8 +168,13 @@ class Studio:
 
     def upscale(self, image_path: str, scale: float = 2.0,
                 diffusion: bool = False, prompt: str = "",
+                creativity: float | None = None,
                 save_to: str | None = None) -> list[str]:
-        """Upscale. Classical is instant; diffusion synthesizes detail."""
+        """Upscale. Classical is instant; diffusion synthesizes detail.
+
+        ``creativity`` (0..1, diffusion only): structure-preserving →
+        creative reinterpretation slider (see upscale.upscale_diffusion).
+        """
         from PIL import Image
 
         from .upscale import upscale_classical, upscale_diffusion
@@ -178,8 +183,13 @@ class Studio:
         if diffusion:
             self._gate("diffusion upscaling", "laptop")
             out = upscale_diffusion(self.pipeline(), img, prompt,
-                                    scale=scale)
+                                    scale=scale,
+                                    creativity=creativity)
         else:
+            if creativity is not None:
+                raise ImgGenError(
+                    "creativity needs diffusion=True (classical "
+                    "upscale is always structure-preserving)")
             out = upscale_classical(img, scale=scale)
         return self._finalize([out], f"upscale x{scale}", save_to)
 

@@ -13,6 +13,11 @@ Capabilities:
 - Aspect ratios: ``--ar 16:9`` style specs resolved to pixel dims that
   stay on the model's native grid (multiple of 8 / 2**depth).
 - Tiled sampling hooks for images larger than the training size.
+- ControlNet-style conditioning: :class:`ControlCondition`
+  (canny/depth/pose) + ``NativePipeline.attach_controlnet``. Canny
+  maps are extracted in numpy (:func:`extract_canny`); depth/pose
+  need a real model and fail honestly. A controlnet attached from
+  diffusers steers the conditional branch during sampling.
 
 Two model families:
 - **Native**: Devon's own UNet (:mod:`.unet`) + :class:`TextEncoder`
@@ -36,6 +41,10 @@ from . import ImgGenError, TORCH_AVAILABLE, checkpoint_dir
 __all__ = [
     "TextEncoder",
     "PipelineConfig",
+    "ControlCondition",
+    "extract_canny",
+    "extract_depth",
+    "extract_pose",
     "parse_weighted_prompt",
     "resolve_aspect_ratio",
     "NativePipeline",
@@ -201,6 +210,138 @@ class TextEncoder(nn.Module if TORCH_AVAILABLE else object):
 
 
 # ---------------------------------------------------------------------------
+# ControlNet-style conditioning
+# ---------------------------------------------------------------------------
+# Interface (ControlCondition + NativePipeline.attach_controlnet /
+# generate(conditioning=...)) is fully defined and wired. The NATIVE
+# UNet has no ControlNet branch trained into it, so the hand-rolled
+# path accepts conditioning maps and applies them only when a
+# controlnet module is attached; without one it fails honestly
+# instead of silently ignoring your control image. Real extractors:
+# Canny is implemented in numpy below. Depth and pose NEED a neural
+# model (no honest classical substitute) — extract_depth/extract_pose
+# say exactly that and point at the diffusers route.
+
+#: conditioning kinds the interface knows.
+CONTROL_KINDS = ("canny", "depth", "pose")
+
+
+@dataclass
+class ControlCondition:
+    """One ControlNet-style conditioning input.
+
+    ``kind``: "canny" | "depth" | "pose". ``map``: the control image
+    (PIL L/RGB or numpy array) — edges, depth map, or pose skeleton.
+    ``strength``: how hard the control steers the denoising (0..2,
+    1.0 = normal).
+    """
+
+    kind: str
+    map: object
+    strength: float = 1.0
+
+    def __post_init__(self):
+        if self.kind not in CONTROL_KINDS:
+            raise ImgGenError(
+                f"unknown conditioning kind {self.kind!r}; "
+                f"use one of {CONTROL_KINDS}")
+        if not 0.0 <= self.strength <= 2.0:
+            raise ImgGenError("conditioning strength must be in [0, 2]")
+
+
+def extract_canny(image, low: int = 100, high: int = 200):
+    """Canny edge map, pure numpy (torch-free).
+
+    Gaussian smoothing → Sobel gradients → non-maximum suppression
+    → double threshold → hysteresis. Returns a PIL L image (white =
+    edge). This one is REAL — no model needed, runs on the phone.
+    """
+    import numpy as np
+    from PIL import Image, ImageFilter
+
+    gray = np.asarray(image.convert("RGB")).astype(np.float64)
+    lum = gray @ np.array([0.299, 0.587, 0.114])
+    sm = np.asarray(Image.fromarray(lum.astype(np.uint8))
+                    .filter(ImageFilter.GaussianBlur(1.2))
+                    ).astype(np.float64)
+
+    # Sobel via shifted differences (standard kernel sums; a step of
+    # height H gives magnitude ≈ 4H, so 100/200 thresholds behave
+    # like classic Canny).
+    px = np.pad(sm, 1, mode="edge")
+    gx = (px[:-2, 2:] + 2 * px[1:-1, 2:] + px[2:, 2:]
+          - px[:-2, :-2] - 2 * px[1:-1, :-2] - px[2:, :-2])
+    gy = (px[2:, :-2] + 2 * px[2:, 1:-1] + px[2:, 2:]
+          - px[:-2, :-2] - 2 * px[:-2, 1:-1] - px[:-2, 2:])
+    mag = np.hypot(gx, gy)
+    ang = (np.degrees(np.arctan2(gy, gx)) + 180) % 180
+
+    # Non-maximum suppression: quantize the gradient direction to
+    # 4 bins, suppress pixels that aren't local maxima along it.
+    # (angle ~0 → gradient horizontal → compare left/right, etc.)
+    q = np.full(ang.shape, 2, dtype=np.int64)  # default: vertical grad
+    q[(ang < 22.5) | (ang >= 157.5)] = 0
+    q[(ang >= 22.5) & (ang < 67.5)] = 1
+    q[(ang >= 112.5) & (ang < 157.5)] = 3
+    nms = np.zeros_like(mag)
+    for bin_, (dy1, dx1, dy2, dx2) in {
+            0: (0, 1, 0, -1), 1: (-1, 1, 1, -1),
+            2: (-1, 0, 1, 0), 3: (-1, -1, 1, 1)}.items():
+        band = q == bin_
+        if not band.any():
+            continue
+        n1 = np.roll(np.roll(mag, dy1, 0), dx1, 1)
+        n2 = np.roll(np.roll(mag, dy2, 0), dx2, 1)
+        keep = band & (mag >= n1) & (mag >= n2)
+        nms[keep] = mag[keep]
+
+    strong = nms > high
+    weak = (nms > low) & ~strong
+    # Hysteresis: keep weak pixels connected to strong ones.
+    kept = strong.copy()
+    prev = np.zeros_like(kept)
+    while not np.array_equal(kept, prev):
+        prev = kept.copy()
+        grown = kept.copy()
+        for dy in (-1, 0, 1):
+            for dx in (-1, 0, 1):
+                grown |= np.roll(np.roll(kept, dy, 0), dx, 1)
+        kept |= weak & grown
+    return Image.fromarray((kept * 255).astype(np.uint8), "L")
+
+
+def extract_depth(image):
+    """Depth map — HONEST GAP, not implemented.
+
+    Real monocular depth needs a trained model (MiDaS/DPT); there is
+    no classical algorithm that produces depth from a single image.
+    Route: install diffusers and use
+    ``DPTForDepthEstimation``/``pipeline("depth-estimation")``,
+    then pass the result as
+    ``ControlCondition("depth", depth_map)``.
+    """
+    raise ImgGenError(
+        "depth conditioning needs a monocular-depth model "
+        "(no classical substitute exists): pip install diffusers, "
+        "run DPTForDepthEstimation, pass the map as "
+        "ControlCondition('depth', map).")
+
+
+def extract_pose(image):
+    """Pose skeleton — HONEST GAP, not implemented.
+
+    Needs a pose detector (DWPose/OpenPose via controlnet-aux).
+    There is no classical substitute: pass a skeleton image you
+    already have as ``ControlCondition('pose', skeleton)``.
+    """
+    raise ImgGenError(
+        "pose conditioning needs a pose detector (no classical "
+        "substitute exists): pip install controlnet-aux, run "
+        "DWposeDetector/OpenposeDetector, pass the skeleton as "
+        "ControlCondition('pose', skeleton).")
+
+
+# ---------------------------------------------------------------------------
 # Pipeline
 # ---------------------------------------------------------------------------
 
@@ -218,6 +359,41 @@ class PipelineConfig:
     negative_prompt: str = ""
     sampler: str = "ddim"  # ddim | ddpm
     extra: dict = field(default_factory=dict)
+
+
+class _DiffusersControlNetAdapter:
+    """Wraps a diffusers ``ControlNetModel`` into Devon's protocol.
+
+    ``(x, t, context, condition) -> residual``. Approximation,
+    documented on :meth:`NativePipeline.attach_diffusers_controlnet`:
+    only the mid-block residual is added to the noise prediction —
+    the native UNet has no per-block injection points.
+    """
+
+    def __init__(self, net, device: str) -> None:
+        self.net = net
+        self.device = device
+
+    def __call__(self, x, t, context, condition):
+        t1 = t[:1] if hasattr(t, "__getitem__") else t
+        out = self.net(sample=x, timestep=t1,
+                       encoder_hidden_states=context,
+                       controlnet_cond=condition,
+                       return_dict=False)
+        # diffusers returns (down_block_res_samples,
+        # mid_block_res_sample); the mid residual is the additive term.
+        mid = (out[1] if isinstance(out, (tuple, list))
+               else out.mid_block_res_sample)
+        if mid.shape != x.shape:
+            # Spatial/channel mismatch: resize + collapse channels.
+            import torch.nn.functional as F
+
+            mid = F.interpolate(mid, size=x.shape[-2:],
+                                mode="bilinear", align_corners=False)
+            if mid.shape[1] != x.shape[1]:
+                mid = mid.mean(dim=1, keepdim=True).expand(
+                    -1, x.shape[1], -1, -1)
+        return mid
 
 
 class NativePipeline:
@@ -248,6 +424,91 @@ class NativePipeline:
             p.requires_grad_(False)
         for p in self.text_encoder.parameters():
             p.requires_grad_(False)
+        #: kind → controlnet module. Protocol: a callable
+        #: ``(x, t, context, condition) -> residual`` where ``x`` is
+        #: the (B, C, H, W) noisy latent, ``t`` the timestep tensor,
+        #: ``context`` the (B, seq, dim) text context, ``condition``
+        #: the (B, C, H, W) control map, and ``residual`` is added to
+        #: the noise prediction (scaled by ControlCondition.strength).
+        #: Empty = no ControlNet branch (the native UNet is trained
+        #: without one — see generate() for the honest behavior).
+        self.controlnets: dict = {}
+
+    # ------------------------------------------------------------------
+    # ControlNet-style conditioning
+    # ------------------------------------------------------------------
+
+    def attach_controlnet(self, kind: str, controlnet) -> None:
+        """Attach a controlnet module for ``kind`` (canny|depth|pose).
+
+        ``controlnet`` follows the protocol documented on
+        ``self.controlnets``. Use :meth:`attach_diffusers_controlnet`
+        for HuggingFace diffusers ControlNetModels.
+        """
+        if kind not in CONTROL_KINDS:
+            raise ImgGenError(
+                f"unknown conditioning kind {kind!r}; "
+                f"use one of {CONTROL_KINDS}")
+        if not callable(controlnet):
+            raise ImgGenError("controlnet must be callable: "
+                              "(x, t, context, condition) -> residual")
+        self.controlnets[kind] = controlnet
+
+    def attach_diffusers_controlnet(self, kind: str,
+                                    diffusers_controlnet) -> None:
+        """Wrap a diffusers ``ControlNetModel`` into Devon's protocol.
+
+        Needs the ``diffusers`` package. Approximation, documented:
+        a full ControlNet injects residuals at every UNet block; the
+        native UNet has no such injection points, so the adapter adds
+        the mid-block residual to the noise prediction. Real control,
+        not full-fidelity ControlNet.
+        """
+        try:
+            import diffusers  # noqa: F401
+        except ImportError:
+            raise ImgGenError(
+                "attach_diffusers_controlnet needs the diffusers "
+                "package (pip install diffusers)") from None
+        self.attach_controlnet(
+            kind, _DiffusersControlNetAdapter(diffusers_controlnet,
+                                             self.device))
+
+    def _condition_tensor(self, cond: ControlCondition, h: int, w: int):
+        """ControlCondition.map → torch tensor (1, C, h, w) in [0, 1]."""
+        import numpy as np
+        from PIL import Image
+
+        m = cond.map
+        if isinstance(m, Image.Image):
+            arr = np.asarray(m.convert("RGB"))
+        else:
+            arr = np.asarray(m)
+            if arr.ndim == 2:
+                arr = np.stack([arr] * 3, axis=-1)
+        pil = Image.fromarray(
+            np.clip(arr, 0, 255).astype(np.uint8)).resize((w, h),
+                                                         Image.BILINEAR)
+        t = (torch.from_numpy(np.asarray(pil).astype("float32") / 255.0)
+             .permute(2, 0, 1).unsqueeze(0).to(self.device))
+        return t
+
+    def _check_conditioning(self, conditioning) -> list[ControlCondition]:
+        conds = list(conditioning or [])
+        for c in conds:
+            if not isinstance(c, ControlCondition):
+                raise ImgGenError(
+                    "conditioning must be a list of ControlCondition; "
+                    f"got {type(c).__name__}")
+            if c.kind not in self.controlnets:
+                raise ImgGenError(
+                    f"no controlnet attached for {c.kind!r}: the native "
+                    "pipeline has no ControlNet branch trained in. "
+                    "Attach one with attach_controlnet() / "
+                    "attach_diffusers_controlnet(), or leave "
+                    "conditioning=None. (Not silently ignored — "
+                    "that would fake control you don't have.)")
+        return conds
 
     def _scheduler(self, sampler: str):
         from .diffusion import DDPMScheduler, DDIMScheduler
@@ -261,23 +522,37 @@ class NativePipeline:
         raise ImgGenError(f"unknown sampler {sampler!r}; use ddim|ddpm")
 
     def generate(self, prompt: str | list[str],
-                 cfg: "PipelineConfig | None" = None) -> list:
-        """Generate PIL images. Returns a list of PIL.Image."""
+                 cfg: "PipelineConfig | None" = None,
+                 conditioning: list[ControlCondition] | None = None
+                 ) -> list:
+        """Generate PIL images. Returns a list of PIL.Image.
+
+        ``conditioning``: optional list of :class:`ControlCondition`
+        (canny/depth/pose). Each kind needs an attached controlnet
+        (see :meth:`attach_controlnet`); otherwise generation raises
+        instead of silently ignoring your control image.
+        """
         if not TORCH_AVAILABLE:
             raise ImgGenError("generation needs torch")
         from PIL import Image
 
         with torch.no_grad():
-            return self._generate_inner(prompt, cfg)
+            return self._generate_inner(prompt, cfg,
+                                        conditioning=conditioning)
 
     def _generate_inner(self, prompt: str | list[str],
-                        cfg: "PipelineConfig | None" = None) -> list:
+                        cfg: "PipelineConfig | None" = None,
+                        conditioning=None) -> list:
         from PIL import Image
 
         cfg = cfg or PipelineConfig()
         prompts = [prompt] if isinstance(prompt, str) else list(prompt)
         n = len(prompts) * cfg.batch_size
         all_prompts = [p for p in prompts for _ in range(cfg.batch_size)]
+        conds = self._check_conditioning(conditioning)
+        cond_tensors = [(c, self._condition_tensor(c, cfg.height,
+                                                  cfg.width))
+                        for c in conds]
 
         sched = self._scheduler(cfg.sampler)
         s = sched.schedule
@@ -326,6 +601,11 @@ class NativePipeline:
                     return self.unet(x, t_batch, context)
 
                 eps_cond, eps_uncond = _model(x_in, t_batch).chunk(2)
+                # ControlNet-style steering on the conditional branch.
+                for c, cmap in cond_tensors:
+                    residual = self.controlnets[c.kind](
+                        xt, t_batch[:1], ctx[i:i + 1], cmap)
+                    eps_cond = eps_cond + c.strength * residual
                 eps = (eps_uncond
                        + cfg.guidance_scale * (eps_cond - eps_uncond))
                 xt = sched.p_sample(

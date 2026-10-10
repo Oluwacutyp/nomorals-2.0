@@ -20,10 +20,26 @@ from . import ImgGenError, TORCH_AVAILABLE
 __all__ = [
     "upscale_classical",
     "upscale_diffusion",
+    "creativity_to_strength",
     "MAX_CLASSICAL_SCALE",
 ]
 
 MAX_CLASSICAL_SCALE = 4
+
+#: creativity slider range → img2img strength range.
+_CREATIVITY_STRENGTH = (0.12, 0.62)
+
+
+def creativity_to_strength(creativity: float) -> float:
+    """Map a 0..1 creativity slider to an img2img strength.
+
+    0.0 → 0.12 (structure-preserving, near-faithful), 1.0 → 0.62
+    (creative reinterpretation that keeps composition).
+    """
+    if not 0.0 <= creativity <= 1.0:
+        raise ImgGenError("creativity must be in [0, 1]")
+    lo, hi = _CREATIVITY_STRENGTH
+    return lo + creativity * (hi - lo)
 
 
 def upscale_classical(image, scale: float = 2.0,
@@ -46,12 +62,22 @@ def upscale_classical(image, scale: float = 2.0,
 def upscale_diffusion(pipeline, image, prompt: str = "",
                       scale: float = 2.0, strength: float = 0.35,
                       tile: int = 64, overlap: int = 16,
+                      creativity: float | None = None,
                       **gen_kwargs):
     """Tile-based diffusion upscaling with detail synthesis.
 
     Each tile is classically upscaled, lightly re-noised (img2img at
     ``strength``), denoised with the prompt, and blended back with a
     cosine-feathered overlap so tile seams disappear.
+
+    ``creativity`` (0..1, optional) is the Magnific/Krea-style slider:
+    0.0 = structure-preserving (low img2img strength, output stays
+    close to the classical upscale), 1.0 = creative reinterpretation
+    (high strength, the model re-imagines detail). It drives BOTH the
+    per-tile img2img strength (via :func:`creativity_to_strength`)
+    AND a final pixel blend between the classical base and the
+    refined tiles, so 0.5 is a genuine halfway mix. When ``None``
+    (default), the legacy ``strength`` path is used unchanged.
     """
     if not TORCH_AVAILABLE:  # pragma: no cover
         raise ImgGenError("diffusion upscaling needs torch")
@@ -63,6 +89,8 @@ def upscale_diffusion(pipeline, image, prompt: str = "",
 
     if scale <= 1.0 or scale > 4:
         raise ImgGenError("diffusion scale must be in (1, 4]")
+    if creativity is not None:
+        strength = creativity_to_strength(creativity)
     base = upscale_classical(image, scale=scale, sharpen=0.0)
     w, h = base.size
     tw, th = tile, tile
@@ -103,5 +131,9 @@ def upscale_diffusion(pipeline, image, prompt: str = "",
             weight[y:y + th, x:x + tw] += window
             n += 1
     weight = np.maximum(weight, 1e-6)
-    out = (acc / weight).clip(0, 255).astype(np.uint8)
-    return Image.fromarray(out, "RGB")
+    out = (acc / weight).clip(0, 255)
+    if creativity is not None:
+        # Blend factor: classical base ↔ refined tiles.
+        base_arr = np.asarray(base).astype(np.float64)
+        out = (1.0 - creativity) * base_arr + creativity * out
+    return Image.fromarray(out.astype(np.uint8), "RGB")
