@@ -3,28 +3,45 @@
 The main system's hot paths run on a phone with no numpy, so by default
 they are pure Python.  This package provides the C++ replacements:
 
-* ``vecsim.cpp``   — C ABI top-k cosine search (memory recall)
+* ``vecsim.cpp``   — C ABI top-k cosine search (memory recall); the dot
+                     product dispatches at runtime to AVX2/SSE2/NEON via
+                     ``__builtin_cpu_supports`` (one portable binary, never
+                     ``-march=native``).  ``simd_level()`` reports the live
+                     kernel.
 * ``mlptrain.cpp`` — C ABI batch forward/backward + SGD step for the
                      native next-token MLP trainer (phone model training)
-* ``load()`` / ``load_mlp()`` — load each shared library if built
-* ``build()``     — compiles both with the local C++ compiler (Termux: clang)
-* ``topk()`` / ``mlp_batch()`` — native when available, pure-Python otherwise
+* ``bpe.cpp``      — C ABI BPE trainer/encoder: incremental pair counting
+                     with a max-heap (lazy refresh), exactly matching the
+                     Python reference's merge order
+* ``memextract.cpp`` — C ABI heuristic memory-extraction pass
+* ``load()`` / ``load_mlp()`` / ``load_bpe()`` / ``load_mem()`` — load each
+                     shared library if built
+* ``build()``     — compiles all four in parallel with the local C++
+                     compiler (Termux: clang)
+* ``topk()`` / ``topk_flat()`` / ``dot()`` / ``normalize()`` — native when
+                     available, pure-Python otherwise
+* ``mlp_batch()`` / ``bpe_train()`` / ``bpe_encode_word()`` /
+  ``mem_heuristic()`` — kernel entry points with strict fallback contracts
 
 The Python fallback is the reference implementation: every test that runs
 the native path also runs this one and compares the results (loss AND
-every gradient element), so a broken build or ABI mismatch cannot
-silently change what the bot remembers or what it learns.
+every gradient element for the MLP; list-equal merges for BPE; scores to
+1e-4 for top-k), so a broken build or ABI mismatch cannot silently change
+what the bot remembers or what it learns.
 """
 
 from __future__ import annotations
 
 import array
+import concurrent.futures
 import ctypes
 import heapq
+import math
 import os
 import platform
 import shutil
 import subprocess
+import threading
 import time
 from pathlib import Path
 from typing import Any, Sequence
@@ -55,9 +72,12 @@ __all__ = [
     "mlp_available",
     "mlp_batch",
     "mlp_lib_path",
+    "normalize",
     "python_dot",
     "python_topk",
+    "simd_level",
     "topk",
+    "topk_flat",
 ]
 
 _log = get_logger(__name__)
@@ -109,6 +129,9 @@ _LIBS: dict[str, ctypes.CDLL | None | _NotGiven] = {
     "vec": _NOT_GIVEN, "mlp": _NOT_GIVEN, "bpe": _NOT_GIVEN,
     "mem": _NOT_GIVEN,
 }
+#: Guards the lazy _load_one() probes: two threads racing load() must not
+#: CDLL() the same path twice (or interleave the _NOT_GIVEN → value swap).
+_LOAD_LOCK = threading.Lock()
 
 
 def find_compiler() -> str | None:
@@ -121,45 +144,65 @@ def find_compiler() -> str | None:
 
 
 def build(force: bool = False) -> tuple[bool, str]:
-    """Compile every C++ source next to this package.  Returns (ok, message)."""
+    """Compile every C++ source next to this package.  Returns (ok, message).
+
+    The four targets compile in parallel.  Flags are deliberately portable
+    (``-O3 -fPIC -shared``): the SIMD kernels dispatch at *runtime* via
+    ``__builtin_cpu_supports`` (usearch/SimSIMD pattern), so ``-march=native``
+    is never used — on an AVX-512 host it would auto-vectorize the scalar
+    fallback and SIGILL on older CPUs.
+    """
     compiler = find_compiler()
     if compiler is None:
         return False, "no C++ compiler found (need c++ / clang++ / g++ on PATH)"
-    results: list[str] = []
-    all_ok = True
-    for source, stem in BUILD_TARGETS:
+    is_clang = "clang" in os.path.basename(compiler)
+
+    def _compile_one(source: Path, stem: str) -> str:
         target = _HERE / _lib_name(stem)
         if target.exists() and not force:
-            results.append(f"already built: {target.name}")
-            continue
+            return f"already built: {target.name}"
         if not source.is_file():
-            all_ok = False
-            results.append(f"source missing: {source.name}")
-            continue
-        cmd = [compiler, "-O2", "-fPIC", "-shared", "-std=c++17",
-               str(source), "-o", str(target)]
+            raise FileNotFoundError(f"source missing: {source.name}")
+        # -O3: the kernels are strict-aliasing-clean (plain float/double/int
+        # arrays, no type punning); -fno-semantic-interposition keeps the
+        # hot loop intra-library on ELF.
+        cmd = [compiler, "-O3", "-fPIC", "-shared", "-std=c++17"]
+        if not is_clang and platform.system() != "Darwin":
+            cmd.append("-fno-semantic-interposition")
+        cmd += [str(source), "-o", str(target)]
         started = time.time()
-        try:
-            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
-        except Exception as exc:  # noqa: BLE001 - a broken toolchain must not crash a chat
-            all_ok = False
-            results.append(f"compiler failed to run for {source.name}: {exc}")
-            continue
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
         if proc.returncode != 0:
             detail = (proc.stderr or proc.stdout or "").strip()[-400:]
-            all_ok = False
-            results.append(f"compilation failed for {source.name}:\n{detail}")
-            continue
+            raise RuntimeError(
+                f"compilation failed for {source.name}:\n{detail}")
         if not target.exists():
-            all_ok = False
-            results.append(f"compiler reported success but {target.name} is missing")
-            continue
-        results.append(f"built {target.name} with {compiler} in {time.time() - started:.1f}s")
+            raise RuntimeError(
+                f"compiler reported success but {target.name} is missing")
+        return (f"built {target.name} with {compiler} "
+                f"in {time.time() - started:.1f}s")
+
+    results: list[str] = []
+    all_ok = True
+    with concurrent.futures.ThreadPoolExecutor(
+            max_workers=len(BUILD_TARGETS)) as pool:
+        future_of = {pool.submit(_compile_one, src, stem): (src, stem)
+                     for src, stem in BUILD_TARGETS}
+        # Collect in BUILD_TARGETS order for a stable message.
+        ordered = {stem: fut for fut, (src, stem) in future_of.items()}
+        for _, stem in BUILD_TARGETS:
+            fut = ordered[stem]
+            try:
+                results.append(fut.result())
+            except Exception as exc:  # noqa: BLE001 - report, don't crash
+                all_ok = False
+                results.append(str(exc))
     if all_ok:
         # A probe that ran before this build may have cached "absent";
         # the next load() must re-probe the freshly built libraries.
-        for slot in _LIBS:
-            _LIBS[slot] = _NOT_GIVEN
+        with _LOAD_LOCK:
+            for slot in _LIBS:
+                _LIBS[slot] = _NOT_GIVEN
     return all_ok, "; ".join(results)
 
 
@@ -167,25 +210,30 @@ def _load_one(slot: str) -> ctypes.CDLL | None | _NotGiven:
     current = _LIBS[slot]
     if current is not _NOT_GIVEN:
         return current
-    target = _HERE / _lib_name({"vec": "libvecsim", "mlp": "libmlptrain",
-                                "bpe": "libbpe", "mem": "libmemextract"}[slot])
-    if not target.exists():
-        # LOUD fallback: the .so isn't built (common on Termux/aarch64
-        # where the shipped .so is x86-64-only).  Log at INFO so operators
-        # see it in normal startup logs, not buried in debug.
-        _log.info("native %s not built (%s missing) — using pure-Python "
-                  "fallback (no acceleration). Run `nm native --build` "
-                  "to compile for this machine.", slot, target.name)
-        value: ctypes.CDLL | None | _NotGiven = None
-    else:
-        try:
-            value = ctypes.CDLL(str(target))
-        except OSError as exc:
-            _log.warning("could not load %s: %s — using pure-Python fallback",
-                         target.name, exc)
-            value = None
-    _LIBS[slot] = value
-    return value
+    with _LOAD_LOCK:
+        # Re-check under the lock: another thread may have probed first.
+        current = _LIBS[slot]
+        if current is not _NOT_GIVEN:
+            return current
+        target = _HERE / _lib_name({"vec": "libvecsim", "mlp": "libmlptrain",
+                                    "bpe": "libbpe", "mem": "libmemextract"}[slot])
+        if not target.exists():
+            # LOUD fallback: the .so isn't built (common on Termux/aarch64
+            # where the shipped .so is x86-64-only).  Log at INFO so operators
+            # see it in normal startup logs, not buried in debug.
+            _log.info("native %s not built (%s missing) — using pure-Python "
+                      "fallback (no acceleration). Run `nm native --build` "
+                      "to compile for this machine.", slot, target.name)
+            value: ctypes.CDLL | None | _NotGiven = None
+        else:
+            try:
+                value = ctypes.CDLL(str(target))
+            except OSError as exc:
+                _log.warning("could not load %s: %s — using pure-Python fallback",
+                             target.name, exc)
+                value = None
+        _LIBS[slot] = value
+        return value
 
 
 def load() -> ctypes.CDLL | None:
@@ -195,6 +243,12 @@ def load() -> ctypes.CDLL | None:
         return None
     lib = value
     lib.nm_vecsim_version.restype = ctypes.c_char_p
+    try:
+        lib.nm_vecsim_simd_level.restype = ctypes.c_char_p
+    except AttributeError:
+        # v1 .so predates the dispatch reporting; simd_level() falls back
+        # to "unknown" for it.  Rebuild with `nm native --build`.
+        pass
     lib.nm_vecsim_dot.restype = ctypes.c_float
     lib.nm_vecsim_dot.argtypes = [ctypes.POINTER(ctypes.c_float),
                                   ctypes.POINTER(ctypes.c_float),
@@ -267,6 +321,45 @@ def mlp_available() -> bool:
 
 def bpe_available() -> bool:
     return load_bpe() is not None
+
+
+def simd_level() -> str:
+    """The dot-product kernel actually executing: ``"avx2"`` / ``"sse2"`` /
+    ``"neon"`` / ``"scalar"`` — the usearch ``metricImplementation()`` idea.
+    ``"unknown"`` when the vecsim library is absent or predates dispatch
+    reporting (v1 .so — rebuild with ``nm native --build``).
+    """
+    lib = load()
+    if lib is None:
+        return "unknown"
+    fn = getattr(lib, "nm_vecsim_simd_level", None)
+    if fn is None:
+        return "unknown"
+    try:
+        return fn().decode("utf-8", "replace")
+    except Exception:  # noqa: BLE001 - never break a status probe
+        return "unknown"
+
+
+def normalize(values: Sequence[float]) -> list[float]:
+    """L2-normalize ``values``.  A zero vector is returned unchanged.
+
+    Native C++ (``nm_vecsim_normalize``) when the library is built, pure
+    Python otherwise.  Mirrors ``storage/vectors.py:normalize`` so callers
+    can normalize without a Python loop over the vector.
+    """
+    buf = _to_f32(values)
+    n = len(buf)
+    if n == 0:
+        return []
+    lib = load()
+    if lib is not None:
+        lib.nm_vecsim_normalize(_fptr(buf), n)
+        return list(buf)
+    norm = math.sqrt(sum(v * v for v in buf))
+    if norm == 0.0:
+        return list(buf)
+    return [v / norm for v in buf]
 
 
 # ── BPE wire format ──────────────────────────────────────────────────────────
@@ -590,6 +683,42 @@ def topk(matrix: Sequence[Sequence[float]] | bytes, query: Sequence[float] | byt
     return python_topk([[float(v) for v in row] for row in matrix], q, k)
 
 
+def topk_flat(data: bytes | bytearray | memoryview | array.array,
+              dim: int, query: Sequence[float] | bytes,
+              k: int) -> list[tuple[float, int]]:
+    """Top-k over a packed float32 row-major buffer with EXPLICIT ``dim``.
+
+    Unlike ``topk()`` on raw bytes (which must infer ``dim == len(query)``),
+    the caller states the dimension, so a query longer than ``dim`` is
+    truncated safely instead of misreading the row layout.  Trailing bytes
+    that don't fill a whole row are ignored.  Native C++ when the library
+    is built, pure Python otherwise.  ``k <= 0`` or no full rows → ``[]``.
+    """
+    if dim <= 0:
+        raise ValueError(f"topk_flat: dim must be positive, got {dim}")
+    flat = bytes(data) if not isinstance(data, bytes) else data
+    rows = len(flat) // (dim * 4)
+    if rows == 0 or k <= 0:
+        return []
+    q = _to_f32(query)
+    if len(q) < dim:
+        raise ValueError(
+            f"topk_flat: query dim {len(q)} < matrix dim {dim}")
+    q = q[:dim]
+    kk = min(k, rows)
+    lib = load()
+    if lib is not None:
+        buf = array.array("f")
+        buf.frombytes(flat[: rows * dim * 4])
+        scores = (ctypes.c_float * kk)()
+        indices = (ctypes.c_int32 * kk)()
+        count = lib.nm_vecsim_topk(_fptr(buf), rows, dim, _fptr(q), kk,
+                                   scores, indices)
+        return [(float(scores[i]), int(indices[i])) for i in range(count)]
+    rows_list = [list(chunk) for chunk in _chunk(flat, dim)]
+    return python_topk(rows_list, list(q), k)
+
+
 def _topk_packed(flat: bytes, query: Sequence[float] | bytes,
                  k: int) -> list[tuple[float, int]]:
     """Top-k over a raw float32 buffer when dim is not known: impossible to
@@ -598,19 +727,7 @@ def _topk_packed(flat: bytes, query: Sequence[float] | bytes,
     dim = len(q)
     if dim == 0:
         return []
-    rows = len(flat) // (dim * 4)
-    lib = load()
-    if lib is not None and rows:
-        buf = array.array("f")
-        buf.frombytes(flat[: rows * dim * 4])
-        kk = min(k, rows)
-        scores = (ctypes.c_float * kk)()
-        indices = (ctypes.c_int32 * kk)()
-        count = lib.nm_vecsim_topk(_fptr(buf), rows, dim, _fptr(q), kk,
-                                   scores, indices)
-        return [(float(scores[i]), int(indices[i])) for i in range(count)]
-    rows_list = [list(buf2) for buf2 in _chunk(flat, dim)]
-    return python_topk(rows_list, list(q), k)
+    return topk_flat(flat, dim, query, k)
 
 
 def _chunk(data: bytes, dim: int):
@@ -652,6 +769,7 @@ def info() -> dict[str, Any]:
         "loaded": lib is not None,
         "compiler": find_compiler(),
         "backend": "native-cpp" if lib is not None else "pure-python",
+        "simd": simd_level(),
         "mlp": _kernel_block(mlp, mlp_lib_path()),
         "bpe": _kernel_block(bpe, bpe_lib_path()),
         "mem": _kernel_block(mem, mem_lib_path()),
@@ -763,6 +881,7 @@ def benchmark(n: int = 2000, dim: int = 128) -> dict[str, Any]:
         "native_ms": round(nat_ms, 3),
         "speedup": round(py_ms / nat_ms, 1) if nat_ms > 0 else 0,
         "backend": "native-cpp" if available() else "pure-python",
+        "simd": simd_level(),
         "native": [h[1] for h in nat_hits],
         "python": [h[1] for h in py_hits],
         "match": [h[1] for h in nat_hits] == [h[1] for h in py_hits],

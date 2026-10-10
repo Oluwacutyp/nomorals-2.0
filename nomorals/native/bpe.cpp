@@ -1,18 +1,22 @@
-// bpe.cpp — C ABI kernel for the byte-level BPE tokenizer.
+// bpe.cpp — C ABI kernel for the BPE tokenizer.
 //
 // The Python tokenizer (nomorals/training/tokenize.py) is deterministic
 // but slow: every merge rescans every word of the corpus in pure Python.
 // This kernel runs the identical algorithm — same counting, same
 // tie-breaks (highest count, then the LEXICALLY LARGER (left, right)
-// string pair), same single left-to-right merge pass per word — and the
-// encode side applies merges in rank order with the first minimum-rank
-// index winning.  Python remains the reference: tests compare merge
-// lists and encodings exactly.
+// string pair), same single left-to-right merge pass per word — with the
+// Hugging Face `tokenizers` trainer's optimization: pair counts are kept
+// in a max-heap with lazy deletion and updated incrementally (only words
+// containing the merged pair are re-processed).  Symbols are Unicode
+// characters, exactly like the Python reference's list(w) split; the wire
+// format carries them as UTF-8 bytes.  Python remains the reference:
+// tests compare merge lists and encodings exactly.
 //
 // Build: c++ -O2 -fPIC -shared -std=c++17 bpe.cpp -o libbpe.so
 
 #include <algorithm>
 #include <cstdint>
+#include <queue>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -58,7 +62,7 @@ std::vector<std::string> decode_words(const int32_t* words, const int32_t* lens,
 
 extern "C" {
 
-const char* nm_bpe_version() { return "1.0.0"; }
+const char* nm_bpe_version() { return "2.0.0"; }
 
 // Train BPE merges.
 //
@@ -90,8 +94,18 @@ int32_t nm_bpe_train(const int32_t* words, const int32_t* lens, const int32_t* f
         const std::string& s = word_strs[w];
         std::vector<int32_t> syms;
         syms.reserve(s.size());
-        for (size_t i = 0; i < s.size(); i++) {
-            std::string ch(1, s[i]);
+        // One symbol per CHARACTER (Unicode codepoint), not per UTF-8
+        // byte: the Python reference splits words with list(w), i.e. by
+        // codepoint, and parity with it is the contract.  (A byte split
+        // made multi-byte characters unmergeable and diverged from the
+        // reference on any non-ASCII corpus.)
+        for (size_t i = 0; i < s.size();) {
+            unsigned char lead = static_cast<unsigned char>(s[i]);
+            size_t seqlen = 1;
+            if ((lead >> 5) == 0x6) seqlen = 2;
+            else if ((lead >> 4) == 0xE) seqlen = 3;
+            else if ((lead >> 3) == 0x1E) seqlen = 4;
+            std::string ch = s.substr(i, seqlen);
             auto it = char_to_id.find(ch);
             int32_t id;
             if (it == char_to_id.end()) {
@@ -102,6 +116,7 @@ int32_t nm_bpe_train(const int32_t* words, const int32_t* lens, const int32_t* f
                 id = it->second;
             }
             syms.push_back(id);
+            i += seqlen;
         }
         splits[w] = std::move(syms);
     }
@@ -126,94 +141,115 @@ int32_t nm_bpe_train(const int32_t* words, const int32_t* lens, const int32_t* f
     std::vector<Merge> merges;
     merges.reserve(target_merges > 0 ? target_merges : 1);
 
-    int64_t n0_base = static_cast<int64_t>(word_sets.size());
-
-    // Pair counting.  CPython's dict-of-tuples is the reference speed; to
-    // actually beat it we index a DENSE vector by l*N0 + r with N0 a FIXED
-    // upper bound on the symbol count (distinct initial characters + all
-    // planned merges), so keys stay valid for the whole run and the array
-    // is allocated ONCE.  An epoch stamp replaces per-merge zeroing.
-    // Above the memory limit we fall back to a hash map (still exact).
+    // Pair counting — the Hugging Face `tokenizers` trainer pattern: a
+    // max-heap keyed by (count, pair) with LAZY deletion, and counts
+    // updated INCREMENTALLY.  After each merge only the words containing
+    // the merged pair are re-processed (their overlapping pair counts are
+    // decremented, the merge is applied, the new overlapping pairs are
+    // incremented).  Training goes from O(merges x corpus) to
+    // O(corpus + total changed symbols).
+    //
+    // Exactness: counts are exact int64 sums; pairs whose count reaches
+    // zero are ERASED, mirroring Python's per-merge recount (a pair that
+    // no longer occurs simply has no entry); and the heap comparator
+    // replicates Python's max(counts.items(), key=(count, (l, r))) —
+    // higher count wins, ties go to the lexicographically LARGER
+    // (left, right) string pair.  A popped entry whose count no longer
+    // matches `counts` is stale and discarded.  The merge list stays
+    // list-equal to the Python reference.
+    auto pair_key = [](int32_t l, int32_t r) -> uint64_t {
+        return (static_cast<uint64_t>(static_cast<uint32_t>(l)) << 32) |
+               static_cast<uint32_t>(r);
+    };
+    struct HeapEntry {
+        int64_t count;
+        int32_t l, r;
+    };
+    struct HeapCmp {
+        const SymTable* table;
+        // true -> a has LOWER priority (priority_queue pops the "largest").
+        bool operator()(const HeapEntry& a, const HeapEntry& b) const {
+            if (a.count != b.count) return a.count < b.count;
+            const std::string& al = (*table)[a.l];
+            const std::string& ar = (*table)[a.r];
+            const std::string& bl = (*table)[b.l];
+            const std::string& br = (*table)[b.r];
+            if (al != bl) return al < bl;
+            return ar < br;
+        }
+    };
+    std::unordered_map<uint64_t, int64_t> counts;
+    counts.reserve(8192);
+    std::priority_queue<HeapEntry, std::vector<HeapEntry>, HeapCmp>
+        heap((HeapCmp{&table}));
     {
-        std::unordered_set<uint8_t> byte_set;
-        for (const auto& s : word_strs)
-            for (unsigned char c : s) byte_set.insert(c);
-        n0_base = static_cast<int64_t>(byte_set.size());
-    }
-    int64_t n0 = n0_base + target_merges + 2;
-    const int64_t DENSE_LIMIT = 20 * 1024 * 1024;  // cells (160 MB at int64)
-    bool use_dense = n0 * n0 <= DENSE_LIMIT;
-    std::vector<int64_t> dense;
-    std::vector<int32_t> seen;
-    std::vector<int32_t> touched;
-    std::unordered_map<uint64_t, int64_t> sparse;
-    int32_t epoch = 0;
-    if (use_dense) {
-        dense.assign(static_cast<size_t>(n0) * static_cast<size_t>(n0), 0);
-        seen.assign(static_cast<size_t>(n0) * static_cast<size_t>(n0), 0);
-    }
-
-    int32_t produced = 0;
-    while (static_cast<int32_t>(merges.size()) < target_merges) {
-        touched.clear();
-        int64_t best_count = -1;
-        int32_t best_l = -1, best_r = -1;
-        if (use_dense) {
-            epoch += 1;
-            for (int32_t w = 0; w < nwords; w++) {
-                const auto& syms = splits[w];
-                int64_t f = freqs[w];
-                for (size_t i = 0; i + 1 < syms.size(); i++) {
-                    int64_t cell = static_cast<int64_t>(syms[i]) * n0 + syms[i + 1];
-                    if (seen[cell] != epoch) {
-                        seen[cell] = epoch;
-                        dense[cell] = 0;
-                        touched.push_back(static_cast<int32_t>(cell));
-                    }
-                    dense[cell] += f;
-                }
-            }
-        } else {
-            sparse.clear();
-            for (int32_t w = 0; w < nwords; w++) {
-                const auto& syms = splits[w];
-                int64_t f = freqs[w];
-                for (size_t i = 0; i + 1 < syms.size(); i++) {
-                    uint64_t k = (static_cast<uint64_t>(static_cast<uint32_t>(syms[i])) << 32) |
-                                 static_cast<uint32_t>(syms[i + 1]);
-                    sparse[k] += f;
+        std::unordered_set<uint64_t> pushed;
+        for (int32_t w = 0; w < nwords; w++) {
+            const auto& syms = splits[w];
+            int64_t f = freqs[w];
+            for (size_t i = 0; i + 1 < syms.size(); i++) {
+                uint64_t k = pair_key(syms[i], syms[i + 1]);
+                int64_t c = (counts[k] += f);
+                if (pushed.insert(k).second) {
+                    heap.push(HeapEntry{c, syms[i], syms[i + 1]});
                 }
             }
         }
+        // Entries pushed mid-loop carry partial counts; push the finals so
+        // the heap top is usually valid on the first pop (stale entries are
+        // still discarded by the pop loop — this is only a depth trim).
+        for (uint64_t k : pushed) {
+            heap.push(HeapEntry{counts[k],
+                                static_cast<int32_t>(k >> 32),
+                                static_cast<int32_t>(k & 0xFFFFFFFF)});
+        }
+    }
 
-        // Highest count wins; tie → the lexicographically LARGER
-        // (left, right) string pair (python: max by (count, (l, r))).
-        auto consider = [&](int32_t l, int32_t r, int64_t count) {
-            if (count > best_count) {
-                best_count = count;
-                best_l = l;
-                best_r = r;
-            } else if (count == best_count) {
-                const std::string& cl = table[l];
-                const std::string& cr = table[r];
-                const std::string& sl = table[best_l];
-                const std::string& sr = table[best_r];
-                if (cl > sl || (cl == sl && cr > sr)) {
-                    best_l = l;
-                    best_r = r;
-                }
+    // One pair's count changes; increments push a fresh heap entry (the old
+    // one goes stale and is discarded on pop).  Zero-count pairs are erased
+    // to mirror Python's recount.
+    // One pair's count changes.  Increments push a fresh heap entry (the
+    // old lower-count entry goes stale).  Decrements do NOT push: the pop
+    // loop lazily refreshes a stale entry with the pair's current count
+    // instead of discarding it, so the heap stays shallow.  Zero-count
+    // pairs are erased to mirror Python's recount.
+    auto dec_pair = [&](int32_t l, int32_t r, int64_t f) {
+        uint64_t k = pair_key(l, r);
+        auto it = counts.find(k);
+        if (it == counts.end()) return;  // defensive; cannot happen
+        it->second -= f;
+        if (it->second <= 0) counts.erase(it);
+    };
+    auto inc_pair = [&](int32_t l, int32_t r, int64_t f) {
+        uint64_t k = pair_key(l, r);
+        int64_t c = (counts[k] += f);
+        heap.push(HeapEntry{c, l, r});
+    };
+
+    int32_t produced = 0;
+    while (static_cast<int32_t>(merges.size()) < target_merges) {
+        // Best VALID heap entry wins (lazy deletion + lazy refresh): a
+        // popped entry whose count no longer matches `counts` is either
+        // gone (discard) or changed — reinsert it with the current count
+        // and keep looking.  This is exactly Python's
+        // max(counts.items(), key=(count, (l, r))) — higher count wins,
+        // ties go to the lexicographically LARGER string pair.
+        int64_t best_count = -1;
+        int32_t best_l = -1, best_r = -1;
+        for (;;) {
+            if (heap.empty()) break;
+            HeapEntry e = heap.top();
+            heap.pop();
+            auto it = counts.find(pair_key(e.l, e.r));
+            if (it == counts.end()) continue;  // pair no longer occurs
+            if (it->second != e.count) {
+                heap.push(HeapEntry{it->second, e.l, e.r});  // refresh
+                continue;
             }
-        };
-        if (use_dense) {
-            for (int32_t cell : touched) {
-                consider(static_cast<int32_t>(cell / n0),
-                         static_cast<int32_t>(cell % n0), dense[cell]);
-            }
-        } else {
-            for (const auto& kv : sparse) {
-                consider(static_cast<int32_t>(kv.first >> 32),
-                         static_cast<int32_t>(kv.first & 0xFFFFFFFF), kv.second);
-            }
+            best_count = e.count;
+            best_l = e.l;
+            best_r = e.r;
+            break;
         }
         if (best_l < 0 || best_count < min_frequency) break;
 
@@ -238,18 +274,63 @@ int32_t nm_bpe_train(const int32_t* words, const int32_t* lens, const int32_t* f
         // survive the clear below.
         std::vector<int32_t> r_holders =
             (best_r == best_l) ? std::vector<int32_t>() : word_sets[best_r];
+        // Incremental count maintenance: only words containing an actual
+        // (best_l, best_r) adjacency change any pair count.  For each merge
+        // site at i, the pairs (i-1,i), (i,i+1), (i+1,i+2) are decremented;
+        // after the rewrite, the pairs around each new merged symbol are
+        // incremented.  Every other pair's count is untouched and stays
+        // exact.  (Python's `pair[0] not in syms` skip is the `affected`
+        // check below — such words rewrite to themselves.)
         for (int32_t w : touched_words) {
             const auto& syms = splits[w];
+            int64_t f = freqs[w];
+            bool affected = false;
+            for (size_t i = 0; i + 1 < syms.size(); i++) {
+                if (syms[i] == best_l && syms[i + 1] == best_r) {
+                    affected = true;
+                    break;
+                }
+            }
+            if (!affected) continue;
+            // Mark every symbol position consumed by a merge site, then
+            // decrement each adjacent pair touching a consumed position
+            // exactly once.  (A pair sitting between two sites is the
+            // right-overlap of the left site AND the left-overlap of the
+            // right site — decrementing per-site would count it twice.)
+            std::vector<char> consumed(syms.size(), 0);
+            for (size_t i = 0; i + 1 < syms.size(); i++) {
+                if (syms[i] == best_l && syms[i + 1] == best_r) {
+                    consumed[i] = 1;
+                    consumed[i + 1] = 1;
+                    i++;  // sites are non-overlapping, left to right
+                }
+            }
+            for (size_t i = 0; i + 1 < syms.size(); i++) {
+                if (consumed[i] || consumed[i + 1]) {
+                    dec_pair(syms[i], syms[i + 1], f);
+                }
+            }
+            // Apply the merge, tracking where merged symbols land.
             std::vector<int32_t> out;
             out.reserve(syms.size());
+            std::vector<char> is_merged;
+            is_merged.reserve(syms.size());
             size_t i = 0;
             while (i < syms.size()) {
                 if (i + 1 < syms.size() && syms[i] == best_l && syms[i + 1] == best_r) {
                     out.push_back(merged_id);
+                    is_merged.push_back(1);
                     i += 2;
                 } else {
                     out.push_back(syms[i]);
+                    is_merged.push_back(0);
                     i += 1;
+                }
+            }
+            // Increment each new adjacent pair touching a merged symbol.
+            for (size_t j = 0; j + 1 < out.size(); j++) {
+                if (is_merged[j] || is_merged[j + 1]) {
+                    inc_pair(out[j], out[j + 1], f);
                 }
             }
             splits[w] = std::move(out);
