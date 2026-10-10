@@ -57,6 +57,75 @@ def _str_list(name: str, props: dict[str, Any]) -> dict[str, Any]:
 
 def register(registry: Any) -> None:
     """Register all WhatsApp group/community/channel tools."""
+    from ..social.render import (
+        render_channel, render_community, render_group_card,
+        render_group_list, render_members,
+    )
+
+    def _wa() -> Any:
+        gw = _require_gateway()
+        return (gw._snapshot_adapters() or {}).get("whatsapp")
+
+    # ── reads (rendered, god-tier output) ─────────────────────────────
+
+    @registry.register(
+        "whatsapp_groups",
+        description="List WhatsApp groups. Returns a rendered group list.",
+        capability=Capability.SOCIAL_READ,
+        parameters={"type": "object", "properties": {}},
+    )
+    def whatsapp_groups() -> dict[str, Any]:
+        adapter = _wa()
+        if adapter is None:
+            return {"ok": False, "error": "whatsapp not connected"}
+        groups = adapter.groups()
+        return {"ok": True, "rendered": render_group_list(groups, "whatsapp"),
+                "count": len(groups)}
+
+    @registry.register(
+        "whatsapp_group_info",
+        description="Show a rich info card for a WhatsApp group.",
+        capability=Capability.SOCIAL_READ,
+        parameters={
+            "type": "object",
+            "properties": {
+                "chat": {"type": "string", "description": "group JID or name"},
+            },
+            "required": ["chat"],
+        },
+    )
+    def whatsapp_group_info(chat: str) -> dict[str, Any]:
+        adapter = _wa()
+        if adapter is None:
+            return {"ok": False, "error": "whatsapp not connected"}
+        info = adapter.group_info(chat)
+        if not info:
+            return {"ok": False, "error": f"no group info for {chat!r}"}
+        members = adapter.group_participants(chat)
+        return {"ok": True,
+                "rendered": render_group_card(info, members, "whatsapp"),
+                "info": info}
+
+    @registry.register(
+        "whatsapp_group_roster",
+        description="Show the member roster for a WhatsApp group, with roles.",
+        capability=Capability.SOCIAL_READ,
+        parameters={
+            "type": "object",
+            "properties": {
+                "chat": {"type": "string", "description": "group JID or name"},
+            },
+            "required": ["chat"],
+        },
+    )
+    def whatsapp_group_roster(chat: str) -> dict[str, Any]:
+        adapter = _wa()
+        if adapter is None:
+            return {"ok": False, "error": "whatsapp not connected"}
+        members = adapter.group_participants(chat)
+        return {"ok": True,
+                "rendered": render_members(members, "whatsapp"),
+                "count": len(members)}
 
     # ── groups ────────────────────────────────────────────────────────
 

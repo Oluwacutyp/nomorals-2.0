@@ -713,3 +713,50 @@ def register(registry: Any) -> None:
     )
     def tgbot_invite_link(chat_key: str) -> dict[str, Any]:
         return _tgbot_admin(chat_key, "admin_invite_link")
+
+    @registry.register(
+        "tgbot_group_info",
+        description="Show a rich info card for a Telegram group/channel. Returns rendered HTML.",
+        capability=Capability.SOCIAL_READ,
+        parameters={
+            "type": "object",
+            "properties": {"chat_key": {"type": "string"}},
+            "required": ["chat_key"],
+        },
+    )
+    def tgbot_group_info(chat_key: str) -> dict[str, Any]:
+        from ..social.render import render_group_card
+        from ..social.chat.base import ChatRef
+        gw = _require_gateway()
+        platform, _, rest = chat_key.partition(":")
+        if platform != "telegram-bot":
+            return {"ok": False,
+                    "error": "needs a telegram-bot:<chat_id> key"}
+        adapter = (gw._snapshot_adapters() or {}).get("telegram-bot")
+        if adapter is None:
+            return {"ok": False, "error": "telegram bot not connected"}
+        try:
+            chat = adapter._api("getChat", chat_id=rest)
+            count = adapter._api("getChatMemberCount", chat_id=rest)
+            admins_raw = adapter._api("getChatAdministrators", chat_id=rest)
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "error": str(exc)[:200]}
+        info = {
+            "subject": str(chat.get("title") or ""),
+            "desc": str(chat.get("description") or ""),
+            "size": int(count or 0),
+            "admins": [str(a.get("user", {}).get("id") or "")
+                       for a in (admins_raw or [])],
+            "invite": str(chat.get("invite_link") or ""),
+        }
+        members = [
+            {"jid": str(a.get("user", {}).get("id") or ""),
+             "name": str((a.get("user") or {}).get("first_name") or ""),
+             "role": "admin"
+             if str(a.get("status") or "") in ("creator", "administrator")
+             else ""}
+            for a in (admins_raw or [])
+        ]
+        return {"ok": True,
+                "rendered": render_group_card(info, members, "telegram"),
+                "info": info}
