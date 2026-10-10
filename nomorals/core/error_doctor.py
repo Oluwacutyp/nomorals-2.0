@@ -12,6 +12,16 @@ ROOT CAUSE by inspecting the failing code itself:
 * for ``ModuleNotFoundError``: tells you the exact ``pip install`` command
 * for ``ConnectionError``/``TimeoutError``: extracts the host/endpoint
 * for ``TypeError``: reports the operand types involved
+* for ``IndexError``: shows the index vs the sequence length
+* for ``ZeroDivisionError``: shows the divisor's live value
+* for ``RecursionError``: identifies the recursive cycle in the traceback
+* for ``FileNotFoundError``: suggests the closest real filename (did-you-mean)
+* for ``JSONDecodeError``: points at the offending character with a snippet
+* for ``UnicodeDecodeError``: shows the undecodable byte range
+* for ``AssertionError``: shows the failed expression and its operand values
+* for ``OSError``: names the errno
+* for ``ValueError``: extracts the offending literal (e.g. int("abc"))
+* chained exceptions (``__cause__``/``__context__``) are diagnosed recursively
 
 Pure stdlib. ``diagnose()`` never raises — the diagnostician is wrapped
 end-to-end so a broken diagnosis can never break an error reply.
@@ -32,6 +42,7 @@ import ast
 import difflib
 import importlib.util
 import linecache
+import os
 import re
 import sys
 import traceback
@@ -501,6 +512,248 @@ def _analyze_name_error(exc: BaseException, frames, target):
     return root, evidence, fix
 
 
+def _analyze_index_error(exc: BaseException, frames, target):
+    f_locals: dict[str, Any] = target.get("raw_locals", {}) if target else {}
+    seqs = {k: len(v) for k, v in f_locals.items()
+            if isinstance(v, (list, tuple, str, bytes)) and not k.startswith("_")}
+    evidence: dict[str, Any] = {"sequences_in_scope": dict(list(seqs.items())[:8])}
+    # static pass: find the subscript on the failing line
+    index_repr = None
+    if target:
+        tree, _func, _src = _parse_function_ast(target["filename"], target["lineno"])
+        if tree is not None:
+            for node in ast.walk(tree):
+                if getattr(node, "lineno", None) != target["lineno"]:
+                    continue
+                if isinstance(node, ast.Subscript):
+                    sl = node.slice
+                    if isinstance(sl, ast.Constant):
+                        index_repr = repr(sl.value)
+                    elif isinstance(sl, ast.Name) and sl.id in f_locals:
+                        index_repr = f"{sl.id}={_trunc(f_locals[sl.id], 40)}"
+                    elif isinstance(sl, ast.Name):
+                        index_repr = sl.id
+                    break
+    evidence["index"] = index_repr
+    if seqs and index_repr:
+        biggest = max(seqs.items(), key=lambda kv: kv[1])
+        root = (f"Index {index_repr} is out of range "
+                f"(sequences in scope: {', '.join(f'{k}[len {v}]' for k, v in list(seqs.items())[:5])}).")
+        fix = (f"Bounds-check before indexing (0 <= i < len(seq)), or use "
+               f"a slice / .get-style access that tolerates the edge.")
+    elif seqs:
+        root = f"Index out of range. Sequences in scope: {evidence['sequences_in_scope']}."
+        fix = "Bounds-check the index against len(seq) before indexing."
+    else:
+        root = f"Index out of range: {exc}."
+        fix = "Bounds-check the index against len(seq) before indexing."
+    return root, evidence, fix
+
+
+def _analyze_zero_division(exc: BaseException, frames, target):
+    f_locals: dict[str, Any] = target.get("raw_locals", {}) if target else {}
+    divisor_repr = None
+    op_name = "/"
+    if target:
+        tree, _func, _src = _parse_function_ast(target["filename"], target["lineno"])
+        if tree is not None:
+            for node in ast.walk(tree):
+                if getattr(node, "lineno", None) != target["lineno"]:
+                    continue
+                if isinstance(node, ast.BinOp) and isinstance(
+                        node.op, (ast.Div, ast.Mod, ast.FloorDiv)):
+                    op_name = {ast.Div: "/", ast.Mod: "%",
+                               ast.FloorDiv: "//"}[type(node.op)]
+                    right = node.right
+                    if isinstance(right, ast.Name):
+                        val = f_locals.get(right.id, "<unknown>")
+                        divisor_repr = f"{right.id}={_trunc(val, 40)}"
+                    elif isinstance(right, ast.Constant):
+                        divisor_repr = repr(right.value)
+                    else:
+                        divisor_repr = _src_segment(right, _src) or "expression"
+                    break
+    evidence: dict[str, Any] = {"operator": op_name, "divisor": divisor_repr}
+    if divisor_repr:
+        root = f"Division by zero: the divisor ({divisor_repr}) was 0 in `{op_name}`."
+    else:
+        root = f"Division by zero at {target['short']}:{target['lineno']}." if target else \
+            "Division by zero."
+    fix = ("Guard the divisor (`if divisor != 0:`) or decide what the "
+           "expression should yield when it is zero.")
+    return root, evidence, fix
+
+
+def _analyze_recursion(exc: BaseException, frames, target):
+    func = target["func"] if target else "?"
+    # Walk the FULL traceback: `frames` is capped at 32, but a recursion
+    # error can have thousands. Count the cycle directly.
+    total = 0
+    in_cycle = 0
+    others: set[str] = set()
+    tb = getattr(exc, "__traceback__", None)
+    seen_tb = 0
+    while tb is not None and seen_tb < 100000:
+        seen_tb += 1
+        total += 1
+        name = _safe(lambda: tb.tb_frame.f_code.co_name, default="?")
+        if name == func:
+            in_cycle += 1
+        else:
+            others.add(str(name))
+        tb = tb.tb_next
+    evidence: dict[str, Any] = {
+        "recursive_function": func,
+        "frames_in_cycle": in_cycle,
+        "total_frames": total,
+        "other_frames": sorted(others)[:8],
+    }
+    root = (f"Maximum recursion depth exceeded: `{func}` called itself "
+            f"{in_cycle} times without returning — the base case never hit.")
+    fix = (f"Check the base case of `{func}` (does every path return without "
+           f"recursing?), or rewrite the loop iteratively to remove the "
+           f"depth limit entirely.")
+    return root, evidence, fix
+
+
+def _analyze_file_not_found(exc: BaseException, frames, target):
+    filename = getattr(exc, "filename", None) or (exc.args[0] if exc.args else "?")
+    evidence: dict[str, Any] = {"filename": _trunc(filename, 120)}
+    suggestions: list[str] = []
+    directory = _safe(
+        lambda: os.path.dirname(os.path.abspath(str(filename)))) \
+        if filename else None
+    if directory:
+        entries = _safe(lambda: os.listdir(directory), default=[]) or []
+        base = str(filename).rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
+        suggestions = difflib.get_close_matches(base, entries, n=3, cutoff=0.6)
+    evidence["close_matches"] = suggestions
+    evidence["directory"] = directory
+    if suggestions:
+        root = (f"File not found: {filename!r}. Did you mean "
+                f"{', '.join(repr(s) for s in suggestions)} in {directory}?")
+        fix = f"Check the filename spelling — {suggestions[0]!r} exists in that directory."
+    else:
+        root = f"File not found: {filename!r}."
+        fix = ("Verify the path is correct and the file exists (check the "
+               "working directory — relative paths resolve against it).")
+    return root, evidence, fix
+
+
+def _analyze_json_error(exc: BaseException, frames, target):
+    doc = getattr(exc, "doc", "") or ""
+    pos = getattr(exc, "pos", 0) or 0
+    lineno = getattr(exc, "lineno", "?")
+    colno = getattr(exc, "colno", "?")
+    msg = getattr(exc, "msg", str(exc))
+    start = max(0, pos - 30)
+    snippet = doc[start:pos + 30]
+    caret = " " * min(30, pos - start) + "^"
+    evidence: dict[str, Any] = {
+        "message": _trunc(msg, 80),
+        "line": lineno, "column": colno, "char": pos,
+        "snippet": snippet[:80],
+    }
+    root = (f"Invalid JSON at line {lineno}, column {colno} ({msg}):\n"
+            f"    ...{snippet}...\n"
+            f"    {' ' * 4}{caret}")
+    fix = ("The input is not valid JSON at the marked character — check for "
+           "truncated responses, HTML error pages, or trailing commas. "
+           "Validate with a JSON linter before parsing.")
+    return root, evidence, fix
+
+
+def _analyze_unicode_error(exc: BaseException, frames, target):
+    encoding = getattr(exc, "encoding", "?")
+    start = getattr(exc, "start", None)
+    end = getattr(exc, "end", None)
+    obj = getattr(exc, "object", b"")
+    bad = _safe(lambda: bytes(obj[start:end]) if isinstance(obj, (bytes, bytearray))
+                and start is not None else b"", default=b"") or b""
+    evidence: dict[str, Any] = {
+        "encoding": encoding,
+        "byte_range": [start, end],
+        "bad_bytes": repr(bad)[:60],
+    }
+    root = (f"Cannot decode bytes {start}:{end} ({bad!r}) as {encoding} — "
+            f"the input is not valid {encoding}.")
+    fix = ("Decode with the correct encoding, or use "
+           "`data.decode(encoding, errors='replace')` to tolerate bad bytes.")
+    return root, evidence, fix
+
+
+def _analyze_assertion(exc: BaseException, frames, target):
+    f_locals: dict[str, Any] = target.get("raw_locals", {}) if target else {}
+    expr_src = None
+    values: dict[str, str] = {}
+    if target:
+        tree, _func, source = _parse_function_ast(target["filename"], target["lineno"])
+        if tree is not None and source:
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Assert) and node.lineno == target["lineno"]:
+                    expr_src = _src_segment(node.test, source)
+                    for n in ast.walk(node.test):
+                        if isinstance(n, ast.Name) and n.id in f_locals \
+                                and n.id not in values and len(values) < 8:
+                            values[n.id] = _trunc(f_locals[n.id], 40)
+                    break
+    evidence: dict[str, Any] = {"expression": expr_src, "operand_values": values}
+    detail = f": {exc}" if str(exc) else ""
+    if expr_src:
+        root = f"Assertion failed{detail}: `{expr_src}` was False."
+        if values:
+            root += f" Values: {', '.join(f'{k}={v}' for k, v in values.items())}."
+        fix = ("The asserted condition does not hold — inspect the operand "
+               "values above to see which side broke the invariant.")
+    else:
+        root = f"Assertion failed{detail}."
+        fix = "The asserted condition does not hold; add a message to the assert to say what was expected."
+    return root, evidence, fix
+
+
+def _analyze_os_error(exc: BaseException, frames, target):
+    import errno as _errno
+    err_no = getattr(exc, "errno", None)
+    name = _errno.errorcode.get(err_no, "?") if err_no else "?"
+    strerror = getattr(exc, "strerror", None) or str(exc)
+    filename = getattr(exc, "filename", None)
+    evidence: dict[str, Any] = {"errno": err_no, "errno_name": name,
+                                "strerror": _trunc(strerror, 100)}
+    if filename:
+        evidence["filename"] = _trunc(filename, 120)
+    hints = {
+        "EACCES": "Check file permissions / ownership.",
+        "ENOENT": "The path does not exist — verify it.",
+        "EEXIST": "The path already exists — handle the collision.",
+        "ENOSPC": "Disk is full — free space.",
+        "EPIPE": "The reader closed the pipe — handle broken pipes.",
+        "EADDRINUSE": "The port is already bound — pick another or kill the holder.",
+    }
+    root = f"OS error [{name}]: {strerror}" + (f" ({filename})" if filename else "")
+    fix = hints.get(name, "Check the OS-level cause above; it is outside Python's control.")
+    return root, evidence, fix
+
+
+_INT_LITERAL_RE = re.compile(
+    r"invalid literal for (int|float)\(\) with base \d+: (.*)")
+
+
+def _analyze_value_error(exc: BaseException, frames, target):
+    import json as _json
+    if isinstance(exc, _json.JSONDecodeError):
+        return _analyze_json_error(exc, frames, target)
+    m = _INT_LITERAL_RE.search(str(exc))
+    if not m:
+        return _analyze_generic(exc, frames, target)
+    kind, literal = m.group(1), m.group(2)
+    evidence: dict[str, Any] = {"literal": _trunc(literal, 80), "target_type": kind}
+    root = (f"Cannot convert {literal} to {kind} — the string is not a valid "
+            f"{kind} literal (empty string? commas? units like 'px'?).")
+    fix = (f"Clean the string before converting (strip whitespace/units), or "
+           f"guard with try/except {kind.title()}Error / a regex check.")
+    return root, evidence, fix
+
+
 def _analyze_generic(exc: BaseException, frames, target):
     loc = f"{target['short']}:{target['lineno']}" if target else "?"
     root = f"{type(exc).__name__}: {exc} (raised at {loc})"
@@ -514,12 +767,20 @@ _ANALYZERS: list[tuple[type, Any]] = [
     (UnboundLocalError, _analyze_unbound_local),
     (ModuleNotFoundError, _analyze_import_error),
     (ImportError, _analyze_import_error),
+    (FileNotFoundError, _analyze_file_not_found),   # before OSError
+    (UnicodeDecodeError, _analyze_unicode_error),   # before ValueError
+    (ZeroDivisionError, _analyze_zero_division),
+    (RecursionError, _analyze_recursion),
+    (IndexError, _analyze_index_error),
     (AttributeError, _analyze_attribute_error),
     (KeyError, _analyze_key_error),
     (ConnectionError, _analyze_connection_error),
     (TimeoutError, _analyze_connection_error),
+    (OSError, _analyze_os_error),
+    (AssertionError, _analyze_assertion),
     (TypeError, _analyze_type_error),
     (NameError, _analyze_name_error),
+    (ValueError, _analyze_value_error),             # JSONDecodeError routes via here
 ]
 
 
@@ -527,11 +788,12 @@ _ANALYZERS: list[tuple[type, Any]] = [
 # public API
 # ---------------------------------------------------------------------------
 
-def diagnose(exc: Any, context: dict[str, Any] | None = None) -> dict[str, Any]:
+def diagnose(exc: Any, context: dict[str, Any] | None = None,
+             _depth: int = 0) -> dict[str, Any]:
     """Diagnose an exception. NEVER raises — on any internal failure returns
     a minimal generic diagnosis."""
     try:
-        return _diagnose_inner(exc, context or {})
+        return _diagnose_inner(exc, context or {}, _depth)
     except Exception as fatal:  # noqa: BLE001 - the doctor never gets sick
         etype = _safe(lambda: type(exc).__name__, default="?")
         return {
@@ -545,7 +807,7 @@ def diagnose(exc: Any, context: dict[str, Any] | None = None) -> dict[str, Any]:
         }
 
 
-def _diagnose_inner(exc: Any, context: dict[str, Any]) -> dict[str, Any]:
+def _diagnose_inner(exc: Any, context: dict[str, Any], _depth: int = 0) -> dict[str, Any]:
     if not isinstance(exc, BaseException):
         return {
             "error_type": type(exc).__name__,
@@ -590,6 +852,15 @@ def _diagnose_inner(exc: Any, context: dict[str, Any]) -> dict[str, Any]:
     }
     if context.get("command"):
         diag["evidence"]["command"] = context["command"]
+    # Chained exceptions: the visible error is often just the messenger.
+    # Diagnose the cause too (depth-limited; the doctor never gets sick).
+    if _depth < 2 and isinstance(exc, BaseException):
+        cause = exc.__cause__
+        if cause is None and not exc.__suppress_context__:
+            cause = exc.__context__
+        if cause is not None and cause is not exc:
+            diag["cause"] = _safe(
+                lambda: diagnose(cause, context, _depth=_depth + 1), default=None)
     diag["summary"] = diagnosis_to_text(diag)
     return diag
 
