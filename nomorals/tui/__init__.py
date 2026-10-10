@@ -13,18 +13,28 @@ from __future__ import annotations
 from .app import TuiApp, run
 from .model import (
     KEY_HELP,
+    SLASH_COMMANDS,
     SLASH_HELP,
+    SPINNER_FRAMES,
+    SPINNER_FRAMES_ASCII,
     KeyAction,
     Line,
+    PaletteItem,
+    PaletteState,
     Panel,
     Rendered,
+    SearchState,
     TuiState,
     action_for,
+    fuzzy_match,
     help_overlay,
+    palette_overlay,
     render,
 )
 
 __all__ = [
-    "KEY_HELP", "SLASH_HELP", "KeyAction", "Line", "Panel", "Rendered",
-    "TuiApp", "TuiState", "action_for", "help_overlay", "render", "run",
+    "KEY_HELP", "SLASH_COMMANDS", "SLASH_HELP", "SPINNER_FRAMES",
+    "SPINNER_FRAMES_ASCII", "KeyAction", "Line", "PaletteItem", "PaletteState",
+    "Panel", "Rendered", "SearchState", "TuiState", "action_for",
+    "fuzzy_match", "help_overlay", "palette_overlay", "render", "run",
 ]
