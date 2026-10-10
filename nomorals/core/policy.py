@@ -29,7 +29,7 @@ import threading
 import time
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from typing import Any, Callable, Protocol
+from typing import Any, Callable, Protocol, runtime_checkable
 
 from .logging_setup import get_logger
 
@@ -975,6 +975,7 @@ def narrow_grant(parent: CapabilitySet | TimedGrant,
     return preset.intersect(CapabilitySet(parent.patterns))
 
 
+@runtime_checkable
 class PolicyStore(Protocol):
     """Persistence for permission-gradient proposals.
 
