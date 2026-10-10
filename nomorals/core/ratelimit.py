@@ -15,22 +15,69 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Callable, Deque
 
+from .errors import RateLimited
+
 __all__ = [
+    "GCRALimiter",
+    "RateLimitDecision",
     "RateLimiter",
     "RateLimitExceeded",
     "SemaphorePool",
+    "SlidingWindowCounter",
     "SlidingWindowLimiter",
     "TokenBucket",
     "limiter_registry",
 ]
 
 
-class RateLimitExceeded(Exception):
-    """Raised by non-blocking acquisition when the bucket is empty."""
+class RateLimitExceeded(RateLimited):
+    """Non-blocking acquisition failed.
+
+    Unifies with :class:`nomorals.core.errors.RateLimited` (one error
+    dialect): it is ``retryable`` and carries ``retry_after``, so the retry
+    loop in :mod:`nomorals.core.retry` honors it automatically.
+    """
+
+    code = "rate_limited"
 
     def __init__(self, retry_after: float) -> None:
-        super().__init__(f"rate limited; retry after {retry_after:.3f}s")
-        self.retry_after = retry_after
+        super().__init__(
+            f"rate limited; retry after {max(0.0, retry_after):.3f}s",
+            retry_after=max(0.0, float(retry_after)),
+        )
+
+
+@dataclass
+class RateLimitDecision:
+    """Outcome of one admission check, with client-facing signals.
+
+    A bare 429 forces every integration to guess when it is safe to retry;
+    these headers let well-behaved clients back off correctly instead of
+    tight-looping.
+    """
+
+    allowed: bool
+    limit: float
+    remaining: float
+    reset_after: float  # seconds until the allowance meaningfully refills
+    retry_after: float = 0.0  # >0 only when not allowed
+
+    def to_headers(self) -> dict[str, str]:
+        """``Retry-After`` + ``X-RateLimit-*`` headers for a 429 response."""
+        headers = {
+            "X-RateLimit-Limit": str(self.limit),
+            "X-RateLimit-Remaining": f"{max(0.0, self.remaining):.4f}",
+            "X-RateLimit-Reset": str(int(time.time() + max(0.0, self.reset_after))),
+        }
+        if not self.allowed:
+            headers["Retry-After"] = f"{max(0.0, self.retry_after):.3f}"
+        return headers
+
+    def or_raise(self) -> "RateLimitDecision":
+        """Raise :class:`RateLimitExceeded` when not allowed; else return self."""
+        if not self.allowed:
+            raise RateLimitExceeded(self.retry_after)
+        return self
 
 
 @dataclass
@@ -126,6 +173,42 @@ class TokenBucket:
             "available": round(self.available, 4),
         }
 
+    def decide(self, tokens: float = 1.0) -> RateLimitDecision:
+        """Single atomic admission check that consumes on allow.
+
+        ``tokens`` is the *cost* of the operation — an expensive search can
+        cost more budget than a cheap lookup, so a handful of heavy calls
+        cannot do more damage than a thousand light ones.
+        """
+        with self._lock:
+            now = time.monotonic()
+            self._refill(now)
+            if self._tokens >= tokens:
+                self._tokens -= tokens
+                return RateLimitDecision(
+                    allowed=True,
+                    limit=self.capacity,
+                    remaining=self._tokens,
+                    reset_after=0.0,
+                )
+            deficit = tokens - self._tokens
+            wait = deficit / self.rate
+            return RateLimitDecision(
+                allowed=False,
+                limit=self.capacity,
+                remaining=self._tokens,
+                reset_after=wait,
+                retry_after=wait,
+            )
+
+    def acquire_or_raise(self, tokens: float = 1.0) -> RateLimitDecision:
+        """Like :meth:`decide`, but raises :class:`RateLimitExceeded`.
+
+        The raised error is ``retryable`` with ``retry_after`` set, so the
+        retry loop honors it — one error dialect across the codebase.
+        """
+        return self.decide(tokens).or_raise()
+
 
 class RateLimiter(TokenBucket):
     """Alias with a name that reads better at call sites."""
@@ -193,8 +276,253 @@ class SlidingWindowLimiter:
         with self._lock:
             self._events.clear()
 
+    def decide(self) -> RateLimitDecision:
+        """Atomic admission check that consumes on allow."""
+        with self._lock:
+            now = time.monotonic()
+            self._prune(now)
+            if len(self._events) < self.limit:
+                self._events.append(now)
+                return RateLimitDecision(
+                    allowed=True,
+                    limit=float(self.limit),
+                    remaining=float(self.limit - len(self._events)),
+                    reset_after=0.0,
+                )
+            wait = max(0.0, self._events[0] + self.window - now)
+            return RateLimitDecision(
+                allowed=False,
+                limit=float(self.limit),
+                remaining=0.0,
+                reset_after=wait,
+                retry_after=wait,
+            )
+
+    def acquire_or_raise(self) -> RateLimitDecision:
+        return self.decide().or_raise()
+
     def as_dict(self) -> dict[str, float]:
         return {"limit": self.limit, "window": self.window, "remaining": self.remaining}
+
+
+class GCRALimiter:
+    """Generic Cell Rate Algorithm — token-bucket-equivalent rate meter.
+
+    State is a single timestamp (TAT, the theoretical arrival time): O(1)
+    memory per key, exact, and cheaper than a token bucket at high key
+    counts. ``rate`` events per ``period`` seconds sustained, with bursts up
+    to ``burst`` absorbed.
+
+    (ATM Forum TM 4.0; the same math as token bucket / leaky bucket as a
+    meter — pick this for high-throughput per-key limiting, token bucket for
+    app code.)
+    """
+
+    def __init__(self, rate: float, period: float = 1.0, burst: int = 1) -> None:
+        if rate <= 0:
+            raise ValueError("rate must be positive")
+        if period <= 0:
+            raise ValueError("period must be positive")
+        if burst < 1:
+            raise ValueError("burst must be >= 1")
+        self.rate = rate
+        self.period = period
+        self.burst = burst
+        self._emission_interval = period / rate
+        # Tolerance L: exactly `burst` back-to-back cells conform, the
+        # (burst+1)-th does not. Proof: after k cells TAT = t0 + k*T and the
+        # k-th conforms iff t0 >= t0 + (k-1)*T - L, i.e. L >= (k-1)*T;
+        # the (burst+1)-th needs L >= burst*T. So (burst-1)*T <= L < burst*T.
+        self._tolerance = (burst - 1) * self._emission_interval
+        self._tat: float | None = None
+        self._lock = threading.Lock()
+
+    def _simulate(self, tat: float, at: float, cost: int) -> tuple[bool, float]:
+        """Would ``cost`` cells arriving at ``at`` conform? Returns
+        (conforms, resulting TAT) — or (False, TAT-at-first-failure)."""
+        t = tat
+        for _ in range(cost):
+            if at < t - self._tolerance:
+                return False, t
+            t = max(at, t) + self._emission_interval
+        return True, t
+
+    def _wait_for(self, tat: float, now: float, cost: int) -> float:
+        """Seconds until ``cost`` cells arriving together would conform."""
+        at = now
+        for _ in range(cost + 1):  # converges in <= cost steps
+            ok, t = self._simulate(tat, at, cost)
+            if ok:
+                return max(0.0, at - now)
+            at = max(at, t - self._tolerance)
+        return max(0.0, at - now)
+
+    def _remaining(self, tat: float, now: float) -> int:
+        """How many more single cells could arrive right now."""
+        t = tat
+        n = 0
+        while n <= self.burst and now >= t - self._tolerance:
+            n += 1
+            t = max(now, t) + self._emission_interval
+        return n
+
+    def decide(self, cost: int = 1) -> RateLimitDecision:
+        """Atomic admission check that consumes ``cost`` cells on allow."""
+        if cost < 1:
+            raise ValueError("cost must be >= 1")
+        with self._lock:
+            now = time.monotonic()
+            tat = self._tat if self._tat is not None else now
+            ok, new_tat = self._simulate(tat, now, cost)
+            if ok:
+                self._tat = new_tat
+                return RateLimitDecision(
+                    allowed=True, limit=float(self.burst),
+                    remaining=float(self._remaining(new_tat, now)),
+                    reset_after=0.0)
+            wait = self._wait_for(tat, now, cost)
+            return RateLimitDecision(
+                allowed=False, limit=float(self.burst), remaining=0.0,
+                reset_after=wait, retry_after=wait)
+
+    def try_acquire(self, cost: int = 1) -> bool:
+        return self.decide(cost).allowed
+
+    def wait_time(self, cost: int = 1) -> float:
+        with self._lock:
+            now = time.monotonic()
+            tat = self._tat if self._tat is not None else now
+            ok, _ = self._simulate(tat, now, cost)
+            if ok:
+                return 0.0
+            return self._wait_for(tat, now, cost)
+
+    def acquire_or_raise(self, cost: int = 1) -> RateLimitDecision:
+        return self.decide(cost).or_raise()
+
+    def reset(self) -> None:
+        with self._lock:
+            self._tat = None
+
+    def as_dict(self) -> dict[str, float]:
+        return {
+            "rate": self.rate, "period": self.period, "burst": float(self.burst),
+            "wait": round(self.wait_time(), 4),
+        }
+
+
+class SlidingWindowCounter:
+    """Approximate sliding window: ~99% accurate, O(1) memory.
+
+    Keeps two fixed-window counters (previous + current) and weights the
+    previous window by its overlap with the sliding window. No 2x boundary
+    burst like a naive fixed window, no O(limit) timestamp log. The best
+    default for distributed per-key limiting.
+    """
+
+    def __init__(self, limit: int, window: float) -> None:
+        if limit <= 0:
+            raise ValueError("limit must be positive")
+        if window <= 0:
+            raise ValueError("window must be positive")
+        self.limit = limit
+        self.window = window
+        self._prev_count = 0
+        self._cur_count = 0
+        self._window_start = time.monotonic()
+        self._lock = threading.Lock()
+
+    def _roll(self, now: float) -> None:
+        elapsed = now - self._window_start
+        if elapsed >= self.window:
+            windows = int(elapsed // self.window)
+            if windows >= 2:
+                self._prev_count = 0
+            else:
+                self._prev_count = self._cur_count
+            self._cur_count = 0
+            self._window_start += windows * self.window
+
+    def _estimate(self, now: float) -> float:
+        self._roll(now)
+        overlap = max(0.0, 1.0 - (now - self._window_start) / self.window)
+        return self._prev_count * overlap + self._cur_count
+
+    def decide(self, cost: int = 1) -> RateLimitDecision:
+        if cost < 1:
+            raise ValueError("cost must be >= 1")
+        with self._lock:
+            now = time.monotonic()
+            estimate = self._estimate(now)
+            if estimate + cost <= self.limit:
+                self._cur_count += cost
+                return RateLimitDecision(
+                    allowed=True, limit=float(self.limit),
+                    remaining=max(0.0, self.limit - estimate - cost),
+                    reset_after=0.0)
+            # wait until enough of the previous window slides out
+            wait = self._window_start + self.window - now
+            return RateLimitDecision(
+                allowed=False, limit=float(self.limit), remaining=0.0,
+                reset_after=max(0.0, wait), retry_after=max(0.0, wait))
+
+    def try_acquire(self, cost: int = 1) -> bool:
+        return self.decide(cost).allowed
+
+    def wait_time(self, cost: int = 1) -> float:
+        """Exact seconds until ``cost`` would be admitted (``inf`` if never).
+
+        Accounts for window rolls during the wait: events slide into the
+        previous window with decaying weight, so the answer is not simply
+        "until the window ends".
+        """
+        if cost < 1:
+            raise ValueError("cost must be >= 1")
+        if cost > self.limit:
+            return float("inf")  # can never be admitted
+        with self._lock:
+            now = time.monotonic()
+            ws, prev, cur = self._window_start, self._prev_count, self._cur_count
+            # roll the *snapshot* forward to now (no mutation)
+            while now - ws >= self.window:
+                prev, cur = cur, 0
+                ws += self.window
+            t = now
+            for _ in range(4):  # at most ~2 rolls needed; bounded regardless
+                if prev <= 0:
+                    if cur + cost <= self.limit:
+                        return max(0.0, t - now)
+                    # constant within this segment — advance past the roll
+                    t = ws + self.window
+                    prev, cur = cur, 0
+                    ws = t
+                    continue
+                # solve prev*(1-(s-ws)/w) + cur + cost <= limit for s
+                target = (self.limit - cur - cost) / prev
+                s_needed = ws + self.window * (1.0 - target)
+                # s_needed is the exact crossing point; never report a time
+                # before the already-simulated t.
+                if s_needed < ws + self.window:
+                    return max(0.0, max(s_needed, t) - now)
+                t = ws + self.window
+                prev, cur = cur, 0
+                ws = t
+            return max(0.0, t - now)
+
+    def acquire_or_raise(self, cost: int = 1) -> RateLimitDecision:
+        return self.decide(cost).or_raise()
+
+    def reset(self) -> None:
+        with self._lock:
+            self._prev_count = 0
+            self._cur_count = 0
+            self._window_start = time.monotonic()
+
+    def as_dict(self) -> dict[str, float]:
+        with self._lock:
+            now = time.monotonic()
+            return {"limit": float(self.limit), "window": self.window,
+                    "estimated": round(self._estimate(now), 3)}
 
 
 class SemaphorePool:
