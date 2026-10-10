@@ -1425,16 +1425,18 @@ class PartnerRuntime(
                     check_catchup(self.context)
                 except Exception as exc:  # noqa: BLE001 - optional
                     _log.warning("briefing job not registered: %s", exc)
-                # Morning pulse — the autonomous daily briefing with voice
-                # (daily 23:00 America/Denver = 06:00 WAT).  Idempotent by
-                # name; the pipeline is news → briefing → voice → delivery.
+                # Briefing slots — morning pulse (news → briefing → voice,
+                # daily 23:00 America/Denver = 06:00 WAT) plus afternoon
+                # (markets + fresh news, 13:00) and evening (day wrap +
+                # tomorrow, 19:00).  Idempotent by name; catch-up covers
+                # slots whose time passed without delivery.
                 try:
                     from ..morning_pulse import (
-                        ensure_pulse_job, check_pulse_catchup)
-                    ensure_pulse_job(self.context)
-                    check_pulse_catchup(self.context)
+                        ensure_pulse_jobs, check_all_catchup)
+                    ensure_pulse_jobs(self.context)
+                    check_all_catchup(self.context)
                 except Exception as exc:  # noqa: BLE001 - optional
-                    _log.warning("morning-pulse job not registered: %s",
+                    _log.warning("briefing-slot jobs not registered: %s",
                                  exc)
                 # Finance: alert watchtower (every 15m, delivers via
                 # Notifier) + weekly money digest (Sundays 09:00 local).
