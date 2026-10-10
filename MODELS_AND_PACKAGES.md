@@ -153,6 +153,21 @@ Source: `nomorals/media/vocals.py`, `nomorals/media/ace_step.py`.
 
 ---
 
+## 4b. Directed Animation + Lip Sync Models
+
+Source: `nomorals/media/directed/`.
+
+| Model | For | Size 💰 | Platform | Install |
+|-------|-----|---------|----------|---------|
+| **MimicMotion_1-1.pth** + DWPose onnx | Pose-guided video (photo + pose → directed motion) | ~5 GB + ~200 MB 💰 | 🖥️ (16GB VRAM) | `git clone https://github.com/Tencent/MimicMotion ~/.devon-models/mimicmotion/repo` + download weights into `~/.devon-models/mimicmotion/` |
+| **Wav2Lip** (wav2lip.pth + s3fd.pth) | Video lip sync | ~960 MB 💰 | 💻🖥️ (8GB VRAM) | `git clone https://github.com/zdh6090/Wav2Lip ~/.devon-models/wav2lip/repo` + weights. ⚠️ Research/non-commercial license |
+| **LatentSync 1.5** (latentsync_unet.pt + whisper tiny.pt) | Higher-quality lip sync | ~2-3 GB 💰 | 💻🖥️ (8GB VRAM; v1.6 needs 18GB) | `git clone https://github.com/bytedance/LatentSync ~/.devon-models/latentsync/repo` + `source setup_env.sh`. Apache 2.0 |
+| **SadTalker** | Photo → talking head | ~2 GB + checkpoints 💰 | 💻🖥️ | `git clone https://github.com/OpenTalker/SadTalker ~/.devon-models/sadtaker/repo` + checkpoint script |
+
+**CPU fallbacks (no model):** pose-guided mesh warp (directed motion) + audio-envelope jaw warp (lip sync). Honest 2D, labeled `warp`.
+
+---
+
 ## 5. Image Models
 
 Source: `nomorals/media/imggen/`. Devon's own UNet/DDPM implementation; can load open SD1.5 weights.

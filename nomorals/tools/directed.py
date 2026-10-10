@@ -106,3 +106,82 @@ def register(registry: Any) -> None:
         except Exception as exc:  # noqa: BLE001
             return {"ok": False, "error": str(exc)}
         return {"ok": True, "timeline": path}
+
+    # ── lip sync ─────────────────────────────────────────────────────
+
+    @registry.register(
+        "lip_sync",
+        description=(
+            "Lip-sync a video to new audio — the subject's lips move in "
+            "sync with the audio. ('sync this video to the new voiceover', "
+            "'make her lips match this audio'). Neural when a GPU backend "
+            "is installed (Wav2Lip/LatentSync), honest CPU envelope warp "
+            "otherwise. face_box is (x0,y0,x1,y1) normalized; omit it and "
+            "the tool estimates from the pose track when animating, or "
+            "asks."
+        ),
+        capability=Capability.MEDIA,
+    )
+    def lip_sync(video: str, audio: str, *,
+                 face_box: list[float] | None = None,
+                 prefer: str = "auto") -> dict[str, Any]:
+        from ..media.directed.lipsync import (
+            lip_sync as _ls, ModelUnavailable)
+        try:
+            res = _ls(video, audio,
+                      face_box=tuple(face_box) if face_box else None,
+                      prefer=prefer)
+        except ModelUnavailable as exc:
+            return {"ok": False, "error": str(exc)}
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "error": str(exc)}
+        return {"ok": True, "path": res.path, "backend": res.backend,
+                "note": res.note}
+
+    @registry.register(
+        "talk_photo",
+        description=(
+            "Animate a still photo into a talking head from audio. "
+            "('make this photo speak this audio'). SadTalker backend: full "
+            "head motion + lip movement. Needs GPU + SadTalker install; "
+            "honest error otherwise."
+        ),
+        capability=Capability.MEDIA,
+    )
+    def talk_photo(image: str, audio: str) -> dict[str, Any]:
+        from ..media.directed.lipsync import (
+            sadtaker_animate, ModelUnavailable)
+        try:
+            res = sadtaker_animate(image, audio)
+        except ModelUnavailable as exc:
+            return {"ok": False, "error": str(exc)}
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "error": str(exc)}
+        return {"ok": True, "path": res.path, "backend": res.backend,
+                "note": res.note}
+
+    @registry.register(
+        "dub_video",
+        description=(
+            "Dub a video: translated text is spoken in a catalogue voice, "
+            "then lip-synced to the footage. ('dub this video into Yoruba "
+            "with my voice'). Pass the already-translated text — the brain "
+            "translates, this tool voices + syncs + muxes."
+        ),
+        capability=Capability.MEDIA,
+    )
+    def dub_video(video: str, translated_text: str, voice: str, *,
+                  face_box: list[float] | None = None,
+                  prefer: str = "auto") -> dict[str, Any]:
+        from ..media.directed.lipsync import (
+            dub_video as _dub, ModelUnavailable)
+        try:
+            res = _dub(video, translated_text, voice,
+                       face_box=tuple(face_box) if face_box else None,
+                       prefer=prefer)
+        except ModelUnavailable as exc:
+            return {"ok": False, "error": str(exc)}
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "error": str(exc)}
+        return {"ok": True, "path": res.path, "backend": res.backend,
+                "note": res.note}

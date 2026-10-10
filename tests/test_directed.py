@@ -121,3 +121,69 @@ def test_warp_end_to_end(tmp_path):
     assert os.path.exists(res.path)
     # last frame differs from first (directed motion happened)
     assert os.path.getsize(res.path) > 1000
+
+
+def test_lipsync_backends_report_unavailable():
+    from nomorals.media.directed.lipsync import (
+        wav2lip_status, latentsync_status, sadtaker_status)
+    for fn in (wav2lip_status, latentsync_status, sadtaker_status):
+        s = fn()
+        assert s["available"] is False
+        assert "Install" in s["reason"] or "install" in s["reason"].lower()
+
+
+def test_envelope_speech_vs_silence(tmp_path):
+    import subprocess, wave
+    from nomorals.media.directed.lipsync import audio_envelope
+    sr = 16000
+    t = __import__("numpy").arange(sr * 2) / sr
+    sig = __import__("numpy").zeros_like(t)
+    sig[int(0.2*sr):int(0.7*sr)] = 0.5
+    p = tmp_path / "s.wav"
+    with wave.open(str(p), 'w') as w:
+        w.setnchannels(1); w.setsampwidth(2); w.setframerate(sr)
+        w.writeframes((sig*32767).astype(__import__("numpy").int16).tobytes())
+    env = audio_envelope(str(p), 12.0, 24)
+    assert env.shape == (24,)
+    assert env[5] > 0.5          # speech burst -> open
+    assert env[23] < 0.05        # trailing silence -> closed
+
+
+def test_face_box_from_pose():
+    from nomorals.media.directed.pose_rig import build_track
+    from nomorals.media.directed.lipsync import face_box_from_pose
+    tr = build_track("nod", n_frames=8)
+    box = face_box_from_pose(tr)
+    assert len(box) == 4
+    x0, y0, x1, y1 = box
+    assert 0 <= x0 < x1 <= 1 and 0 <= y0 < y1 <= 1
+    # face is in the upper part of the frame
+    assert y1 < 0.5
+
+
+def test_warp_lipsync_changes_mouth(tmp_path):
+    import subprocess
+    from PIL import Image, ImageDraw
+    from nomorals.media.directed.lipsync import envelope_warp_sync
+    for i in range(12):
+        img = Image.new("RGB", (120, 120), (30, 30, 40))
+        d = ImageDraw.Draw(img)
+        d.ellipse([40, 20, 80, 80], fill=(210, 160, 130))
+        img.save(tmp_path / f"f_{i:04d}.png")
+    subprocess.run(["ffmpeg","-hide_banner","-loglevel","error","-y",
+                    "-framerate","12","-i",str(tmp_path/"f_%04d.png"),
+                    "-pix_fmt","yuv420p",str(tmp_path/"v.mp4")],
+                   check=True, capture_output=True)
+    import wave
+    import numpy as np
+    sr = 16000
+    sig = (np.sin(2*np.pi*440*np.arange(sr)/sr) * 0.5).astype(np.float32)
+    with wave.open(str(tmp_path/"a.wav"),'w') as w:
+        w.setnchannels(1); w.setsampwidth(2); w.setframerate(sr)
+        w.writeframes((sig*32767).astype(np.int16).tobytes())
+    res = envelope_warp_sync(str(tmp_path/"v.mp4"), str(tmp_path/"a.wav"),
+                             (0.33, 0.17, 0.67, 0.67),
+                             out_path=str(tmp_path/"out.mp4"), fps=12)
+    assert res.backend == "warp"
+    import os
+    assert os.path.getsize(res.path) > 1000
