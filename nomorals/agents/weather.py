@@ -43,6 +43,12 @@ GEOCODE_URL = "https://geocoding-api.open-meteo.com/v1/search"
 FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
 NWS_ALERTS_URL = "https://api.weather.gov/alerts/active"
 
+#: Fallback weather sources (keyless). Open-Meteo is primary; these kick in
+#: when it's unreachable. All return current + daily in a normalized shape.
+WTTR_URL = "https://wttr.in"
+METNO_URL = "https://api.met.no/weatherapi/locationforecast/2.0/complete"
+METNO_UA = "DevonWeather/1.0 (github.com/Oluwacutyp/nomorals-2.0)"
+
 #: WMO weather-code → (plain description, emoji)
 WMO: dict[int, tuple[str, str]] = {
     0: ("Clear sky", "☀️"),
@@ -264,6 +270,24 @@ def parse_daily(payload: dict[str, Any],
 def fetch_forecast(lat: float, lon: float, days: int = 3,
                    units: str = "imperial",
                    timeout: float = 20.0) -> dict[str, Any] | None:
+    """Current + daily forecast with automatic source fallback.
+
+    Tries Open-Meteo → wttr.in → met.no. Returns None only when all
+    sources fail. Each fallback normalizes to the same shape.
+    """
+    result = _fetch_openmeteo(lat, lon, days, units, timeout)
+    if result is not None:
+        return result
+    _log.debug("open-meteo failed, trying wttr.in for %s,%s", lat, lon)
+    result = _fetch_wttr(lat, lon, days, units, timeout)
+    if result is not None:
+        return result
+    _log.debug("wttr.in failed, trying met.no for %s,%s", lat, lon)
+    return _fetch_metno(lat, lon, days, units, timeout)
+
+
+def _fetch_openmeteo(lat: float, lon: float, days: int,
+                     units: str, timeout: float) -> dict[str, Any] | None:
     params = {
         "latitude": lat, "longitude": lon,
         "current": ("temperature_2m,relative_humidity_2m,apparent_temperature,"
@@ -285,7 +309,189 @@ def fetch_forecast(lat: float, lon: float, days: int = 3,
         "timezone": str(payload.get("timezone") or "UTC"),
         "current": parse_current(payload, units),
         "daily": parse_daily(payload, units),
+        "source": "open-meteo",
     }
+
+
+def _fetch_wttr(lat: float, lon: float, days: int,
+                units: str, timeout: float) -> dict[str, Any] | None:
+    """wttr.in fallback — keyless JSON API."""
+    try:
+        payload = _get_json(f"{WTTR_URL}/{lat},{lon}", {"format": "j1"},
+                            timeout=timeout)
+    except Exception as exc:  # noqa: BLE001
+        _log.debug("wttr.in failed for %s,%s: %s", lat, lon, exc)
+        return None
+    try:
+        current_list = payload.get("current_condition") or []
+        if not current_list:
+            return None
+        cc = current_list[0]
+        # wttr.in gives both C and F; pick based on units
+        temp_key = "temp_F" if units == "imperial" else "temp_C"
+        feels_key = "FeelsLikeF" if units == "imperial" else "FeelsLikeC"
+        weather_desc = (cc.get("weatherDesc") or [{}])[0].get("value", "")
+        # Map wttr.in weather code to WMO-ish code for emoji lookup
+        wttr_code = int(cc.get("weatherCode") or 0)
+        wmo = _wttr_to_wmo(wttr_code)
+        current = {
+            "temperature": float(cc.get(temp_key) or 0),
+            "feels_like": float(cc.get(feels_key) or 0),
+            "humidity": int(cc.get("humidity") or 0),
+            "weather_code": wmo,
+            "description": weather_desc,
+            "wind_speed": float(cc.get("windspeedMiles" if units == "imperial"
+                                      else "windspeedKmph") or 0),
+            "wind_direction": int(cc.get("winddirDegree") or 0),
+        }
+        daily = []
+        for w in (payload.get("weather") or [])[:days]:
+            tmax_key = "maxtempF" if units == "imperial" else "maxtempC"
+            tmin_key = "mintempF" if units == "imperial" else "mintempC"
+            hourly = w.get("hourly") or []
+            # Average chance of rain across hourly slots
+            chances = [int(h.get("chanceofrain") or 0) for h in hourly]
+            avg_rain = sum(chances) // len(chances) if chances else 0
+            daily.append({
+                "date": str(w.get("date", "")),
+                "temp_max": float(w.get(tmax_key) or 0),
+                "temp_min": float(w.get(tmin_key) or 0),
+                "precipitation_probability": avg_rain,
+                "weather_code": _wttr_to_wmo(int((hourly[4] if len(hourly) > 4
+                                                  else {}).get("weatherCode") or 0)),
+            })
+        tz_name = str((payload.get("nearest_area") or [{}])[0].get("timezone")
+                      or "UTC")
+        return {
+            "timezone": tz_name,
+            "current": current,
+            "daily": daily,
+            "source": "wttr.in",
+        }
+    except Exception as exc:  # noqa: BLE001
+        _log.debug("wttr.in parse failed: %s", exc)
+        return None
+
+
+def _wttr_to_wmo(wttr_code: int) -> int:
+    """Map wttr.in weather codes to WMO codes for emoji lookup."""
+    mapping = {
+        113: 0,    # Sunny → Clear sky
+        116: 1,    # Partly cloudy → Mainly clear
+        119: 3,    # Cloudy → Overcast
+        122: 3,    # Overcast → Overcast
+        143: 45,   # Mist → Fog
+        176: 80,   # Patchy rain → Light showers
+        179: 71,   # Patchy snow → Light snow
+        182: 66,   # Patchy sleet → Freezing rain
+        185: 56,   # Patchy freezing drizzle → Freezing drizzle
+        200: 95,   # Thundery outbreaks → Thunderstorm
+        227: 75,   # Blowing snow → Heavy snow
+        230: 75,   # Blizzard → Heavy snow
+        248: 45,   # Fog → Fog
+        260: 48,   # Freezing fog → Rime fog
+        263: 51,   # Patchy light drizzle → Light drizzle
+        266: 53,   # Light drizzle → Drizzle
+        281: 57,   # Freezing drizzle → Dense freezing drizzle
+        284: 67,   # Heavy freezing drizzle → Heavy freezing rain
+        293: 51,   # Patchy light rain → Light drizzle
+        296: 61,   # Light rain → Light rain
+        299: 81,   # Moderate rain at times → Showers
+        302: 63,   # Moderate rain → Rain
+        305: 82,   # Heavy rain at times → Violent showers
+        308: 65,   # Heavy rain → Heavy rain
+        311: 66,   # Light freezing rain → Freezing rain
+        314: 67,   # Moderate/heavy freezing rain → Heavy freezing rain
+        317: 71,   # Light sleet → Light snow
+        320: 73,   # Moderate/heavy sleet → Snow
+        323: 71,   # Patchy light snow → Light snow
+        326: 73,   # Light snow → Snow
+        329: 75,   # Patchy moderate snow → Heavy snow
+        332: 75,   # Moderate snow → Heavy snow
+        335: 75,   # Patchy heavy snow → Heavy snow
+        338: 75,   # Heavy snow → Heavy snow
+        350: 77,   # Ice pellets → Snow grains
+        353: 80,   # Light rain shower → Light showers
+        356: 81,   # Moderate/heavy rain shower → Showers
+        359: 82,   # Torrential rain shower → Violent showers
+        362: 66,   # Light sleet showers → Freezing rain
+        365: 73,   # Moderate/heavy sleet showers → Snow
+        368: 85,   # Light snow showers → Light snow showers
+        371: 86,   # Moderate/heavy snow showers → Snow showers
+        374: 77,   # Light showers of ice pellets → Snow grains
+        377: 77,   # Moderate/heavy showers of ice pellets → Snow grains
+        386: 95,   # Patchy light rain with thunder → Thunderstorm
+        389: 95,   # Moderate/heavy rain with thunder → Thunderstorm
+        392: 96,   # Patchy light snow with thunder → Thunderstorm with hail
+        395: 99,   # Moderate/heavy snow with thunder → Thunderstorm heavy hail
+    }
+    return mapping.get(wttr_code, 3)  # default to overcast
+
+
+def _fetch_metno(lat: float, lon: float, days: int,
+                 units: str, timeout: float) -> dict[str, Any] | None:
+    """Norwegian Met Institute fallback — keyless, government infrastructure."""
+    try:
+        req = urllib.request.Request(
+            f"{METNO_URL}?lat={lat}&lon={lon}",
+            headers={"User-Agent": METNO_UA},
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            payload = json.loads(resp.read().decode("utf-8", "replace"))
+    except Exception as exc:  # noqa: BLE001
+        _log.debug("met.no failed for %s,%s: %s", lat, lon, exc)
+        return None
+    try:
+        timeseries = (payload.get("properties") or {}).get("timeseries") or []
+        if not timeseries:
+            return None
+        # Current = first entry
+        first = timeseries[0]
+        details = (first.get("data") or {}).get("instant", {}).get("details", {})
+        temp_c = float(details.get("air_temperature") or 0)
+        current = {
+            "temperature": temp_c * 9/5 + 32 if units == "imperial" else temp_c,
+            "feels_like": temp_c * 9/5 + 32 if units == "imperial" else temp_c,
+            "humidity": int(details.get("relative_humidity") or 0),
+            "weather_code": 3,  # met.no uses symbol codes, not WMO
+            "description": str((first.get("data") or {}).get("next_1_hours", {})
+                               .get("summary", {}).get("symbol_code", "")
+                               .replace("_", " ")),
+            "wind_speed": float(details.get("wind_speed") or 0),
+            "wind_direction": int(details.get("wind_from_direction") or 0),
+        }
+        # Daily = group by date, take min/max
+        by_date: dict[str, list[float]] = {}
+        for entry in timeseries:
+            ts = str(entry.get("time", ""))[:10]
+            d = (entry.get("data") or {}).get("instant", {}).get("details", {})
+            t = d.get("air_temperature")
+            if t is not None:
+                by_date.setdefault(ts, []).append(float(t))
+        daily = []
+        for date_str in sorted(by_date)[:days]:
+            temps = by_date[date_str]
+            tmax = max(temps)
+            tmin = min(temps)
+            if units == "imperial":
+                tmax = tmax * 9/5 + 32
+                tmin = tmin * 9/5 + 32
+            daily.append({
+                "date": date_str,
+                "temp_max": tmax,
+                "temp_min": tmin,
+                "precipitation_probability": 0,  # met.no needs separate calc
+                "weather_code": 3,
+            })
+        return {
+            "timezone": "UTC",  # met.no doesn't provide tz in this endpoint
+            "current": current,
+            "daily": daily,
+            "source": "met.no",
+        }
+    except Exception as exc:  # noqa: BLE001
+        _log.debug("met.no parse failed: %s", exc)
+        return None
 
 
 # ── NWS alerts ───────────────────────────────────────────────────────────
