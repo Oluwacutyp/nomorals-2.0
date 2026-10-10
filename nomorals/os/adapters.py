@@ -23,7 +23,13 @@ from .session import Session
 
 _log = logging.getLogger(__name__)
 
-__all__ = ["AccountSessionAdapter", "VoiceSessionAdapter"]
+__all__ = [
+    "AccountSessionAdapter",
+    "VoiceSessionAdapter",
+    "GenericSessionAdapter",
+    "ADAPTERS",
+    "adapter_kinds",
+]
 
 
 def _safe_view(error: Exception, *, frontend: str, principal: str,
@@ -185,3 +191,83 @@ class VoiceSessionAdapter:
             conversation_id=str(_opt("session_id", "")),
             state=state,
         )
+
+
+# ── generic ────────────────────────────────────────────────────────────────
+
+class GenericSessionAdapter:
+    """Project any mapping-shaped session concept as an OS session.
+
+    For frontends and integrations that do not have a dedicated adapter:
+    pass a dict (or anything with ``.get``/attribute access) and a kind
+    label, and get a best-effort :class:`Session` view.  Never raises.
+    """
+
+    def __init__(self, kind: str = "generic",
+                 frontend: str = "api") -> None:
+        self.kind = kind
+        self.frontend = frontend
+
+    def to_os_session(self, payload: Any, *,
+                      frontend: str | None = None,
+                      principal: str = "owner",
+                      project_id: str = "",
+                      conversation_id: str = "") -> Session:
+        """Build an OS-session view of ``payload``.  Never raises."""
+        try:
+            return self._project(payload, frontend=frontend or self.frontend,
+                                 principal=principal, project_id=project_id,
+                                 conversation_id=conversation_id)
+        except Exception as exc:  # noqa: BLE001 — adapters never raise
+            _log.warning("GenericSessionAdapter degraded: %r", exc)
+            return _safe_view(exc, frontend=frontend or self.frontend,
+                              principal=principal, project_id=project_id,
+                              extra={"kind": self.kind})
+
+    def _project(self, payload: Any, *, frontend: str, principal: str,
+                 project_id: str, conversation_id: str) -> Session:
+        if payload is None:
+            raise ValueError("no session payload was provided")
+
+        def _opt(name: str, default: Any = None) -> Any:
+            if isinstance(payload, dict):
+                return payload.get(name, default)
+            try:
+                return getattr(payload, name, default)
+            except Exception:  # noqa: BLE001 — property may raise
+                return default
+
+        state: dict[str, Any] = {
+            "kind": self.kind,
+            "payload_keys": (sorted(str(k) for k in payload.keys())
+                             if isinstance(payload, dict) else []),
+        }
+        for name in ("session_id", "user_id", "device_id", "status",
+                     "created_at", "last_used", "metadata"):
+            value = _opt(name)
+            if value is not None:
+                state[name] = value
+        return Session(
+            id=new_short_id("sess_"),
+            principal=principal,
+            frontend=frontend,
+            project_id=project_id,
+            conversation_id=(conversation_id
+                             or str(_opt("conversation_id", "")
+                                    or _opt("session_id", "")
+                                    or _opt("chat_id", ""))),
+            state=state,
+        )
+
+
+#: All shipped adapters: (kind, adapter class).
+ADAPTERS: tuple[tuple[str, type], ...] = (
+    ("account", AccountSessionAdapter),
+    ("voice", VoiceSessionAdapter),
+    ("generic", GenericSessionAdapter),
+)
+
+
+def adapter_kinds() -> list[str]:
+    """Names of every session kind with a dedicated adapter."""
+    return [kind for kind, _ in ADAPTERS]

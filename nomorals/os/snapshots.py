@@ -28,6 +28,7 @@ import os
 import shutil
 import sqlite3
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -82,7 +83,18 @@ class Snapshot:
             "path": str(self.path) if self.path else "",
             "size_bytes": self.size_bytes,
             "schema_version": self.manifest.get("schema_version"),
+            "tags": list(self.manifest.get("tags", []) or []),
         }
+
+
+def _human_bytes(n: int) -> str:
+    units = ["B", "KB", "MB", "GB", "TB"]
+    value = float(max(0, n))
+    for unit in units:
+        if value < 1024 or unit == units[-1]:
+            return f"{value:.1f}{unit}" if unit != "B" else f"{int(value)}B"
+        value /= 1024
+    return f"{value:.1f}TB"  # pragma: no cover - unreachable
 
 
 def _sha256_file(path: Path) -> str:
@@ -168,6 +180,11 @@ class SnapshotManager:
 
     def create(self, label: str = "") -> Snapshot:
         """Record a new snapshot of the current live state."""
+        return self._create(label=label, tags=())
+
+    def _create(self, *, label: str = "",
+                tags: tuple[str, ...] | list[str] = ()) -> Snapshot:
+        """Record a new snapshot of the current live state, with tags."""
         snap_id = _new_id()
         dest = self.root / snap_id
         dest.mkdir(parents=True, exist_ok=False)
@@ -217,6 +234,7 @@ class SnapshotManager:
         manifest = {
             "id": snap_id,
             "label": label,
+            "tags": sorted(set(tags)),
             "created_at": time.time(),
             "nomorals_version": self._version(),
             "schema_version": self._schema_version(db_dest),
@@ -294,6 +312,9 @@ class SnapshotManager:
                     manifest=manifest,
                 )
             )
+        # Creation order, not filesystem order: snapshot ids created within
+        # the same second sort by their random suffix otherwise.
+        snaps.sort(key=lambda s: (s.created_at, s.id))
         return snaps
 
     def get(self, snapshot_id: str) -> Snapshot:
@@ -311,6 +332,170 @@ class SnapshotManager:
         assert snap.path is not None
         shutil.rmtree(snap.path, ignore_errors=False)
         _log.info("snapshot %s deleted", snap.id)
+
+    # ── tags & retention ─────────────────────────────────────────────────
+    def _write_manifest(self, snap: Snapshot) -> None:
+        assert snap.path is not None
+        (snap.path / MANIFEST_FILENAME).write_text(
+            json.dumps(snap.manifest, indent=2), encoding="utf-8")
+
+    def tag(self, snapshot_id: str, *tags: str) -> Snapshot:
+        """Add Timeshift-style tags to a snapshot (idempotent)."""
+        snap = self.get(snapshot_id)
+        current = set(snap.manifest.get("tags", []) or [])
+        current.update(t for t in tags if t)
+        snap.manifest["tags"] = sorted(current)
+        self._write_manifest(snap)
+        return snap
+
+    def untag(self, snapshot_id: str, *tags: str) -> Snapshot:
+        """Remove tags from a snapshot."""
+        snap = self.get(snapshot_id)
+        current = set(snap.manifest.get("tags", []) or [])
+        current.difference_update(tags)
+        snap.manifest["tags"] = sorted(current)
+        self._write_manifest(snap)
+        return snap
+
+    def with_tag(self, tag: str) -> list[Snapshot]:
+        """All snapshots carrying ``tag``."""
+        return [s for s in self.list()
+                if tag in (s.manifest.get("tags", []) or [])]
+
+    def create_tagged(self, label: str = "", *tags: str) -> Snapshot:
+        """Create a snapshot already carrying tags (e.g. "pre-update")."""
+        return self._create(label=label, tags=tags)
+
+    def prune(self, *, keep_last: int = 5,
+              keep_tags: tuple[str, ...] | list[str] = ("pre-update",),
+              dry_run: bool = False) -> list[str]:
+        """Retention policy: keep the newest ``keep_last`` snapshots plus
+        every snapshot carrying one of ``keep_tags``; delete the rest.
+
+        Returns the ids that were (or, with ``dry_run=True``, would be)
+        deleted.
+        """
+        keep_tags = set(keep_tags)
+        snaps = self.list()
+        keep: set[str] = set()
+        for snap in snaps[-max(0, int(keep_last)):]:
+            keep.add(snap.id)
+        for snap in snaps:
+            if keep_tags & set(snap.manifest.get("tags", []) or []):
+                keep.add(snap.id)
+        victims = [s.id for s in snaps if s.id not in keep]
+        if not dry_run:
+            for snap_id in victims:
+                try:
+                    self.delete(snap_id)
+                except Exception:  # noqa: BLE001 — prune keeps going
+                    _log.warning("prune could not delete %s", snap_id,
+                                 exc_info=True)
+        return victims
+
+    # ── diff ─────────────────────────────────────────────────────────────
+    def diff(self, old_id: str, new_id: str) -> dict[str, Any]:
+        """What changed between two snapshots: files added / removed /
+        changed (by checksum), blob count delta, size delta."""
+        old = self.get(old_id)
+        new = self.get(new_id)
+        old_files = old.manifest.get("files", {})
+        new_files = new.manifest.get("files", {})
+        added = sorted(set(new_files) - set(old_files))
+        removed = sorted(set(old_files) - set(new_files))
+        changed = sorted(
+            name for name in set(old_files) & set(new_files)
+            if old_files[name].get("sha256") != new_files[name].get("sha256")
+            and name != BLOBS_DIRNAME)
+        return {
+            "old": old.id,
+            "new": new.id,
+            "added": added,
+            "removed": removed,
+            "changed": changed,
+            "size_delta_bytes": int(new.manifest.get("total_bytes", 0))
+            - int(old.manifest.get("total_bytes", 0)),
+            "old_tags": list(old.manifest.get("tags", []) or []),
+            "new_tags": list(new.manifest.get("tags", []) or []),
+        }
+
+    # ── export / import ──────────────────────────────────────────────────
+    def export_tar(self, snapshot_id: str, dest: str | os.PathLike[str],
+                   *, compress: str = "gz") -> Path:
+        """Pack a snapshot into a portable tarball for off-machine backup."""
+        import tarfile
+
+        snap = self.get(snapshot_id)
+        assert snap.path is not None
+        dest = Path(dest)
+        mode = {"gz": "w:gz", "bz2": "w:bz2", "": "w"}.get(compress, "w:gz")
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        with tarfile.open(dest, mode) as tar:
+            tar.add(snap.path, arcname=snap.id)
+        _log.info("snapshot %s exported to %s", snap.id, dest)
+        return dest
+
+    def import_tar(self, tarball: str | os.PathLike[str]) -> Snapshot:
+        """Import a snapshot from an :meth:`export_tar` tarball."""
+        import tarfile
+
+        self.root.mkdir(parents=True, exist_ok=True)
+        with tarfile.open(tarball, "r:*") as tar:
+            members = tar.getmembers()
+            top = {m.name.split("/")[0] for m in members if m.name}
+            if len(top) != 1:
+                raise SnapshotError("tarball must contain exactly one snapshot")
+            snap_id = next(iter(top))
+            if (self.root / snap_id).exists():
+                raise SnapshotError(f"snapshot {snap_id} already exists")
+            tar.extractall(self.root, filter="data")
+        snap = self.get(snap_id)
+        problems = self.verify(snap.id)
+        if problems:
+            raise SnapshotError(
+                f"imported snapshot failed verification: {'; '.join(problems)}")
+        _log.info("snapshot %s imported", snap.id)
+        return snap
+
+    # ── pre/post pairs ───────────────────────────────────────────────────
+    @contextmanager
+    def pre_post(self, label: str = "", *, tag: str = "auto"):
+        """Take a pre snapshot, run the block, take a post snapshot.
+
+        Yields a dict ``{"pre": Snapshot, "post": Snapshot | None}`` — the
+        post entry is filled when the block exits.  On exception the post
+        snapshot is still taken (tagged ``"failed"``) so the damage is
+        reviewable, then the exception propagates.  Timeshift-style
+        pre/post pairs around risky operations.
+        """
+        holder: dict[str, Snapshot | None] = {
+            "pre": self._create(label=f"{label} (pre)".strip(),
+                                tags=(tag, "pre")),
+            "post": None,
+        }
+        try:
+            yield holder
+        except Exception:
+            holder["post"] = self._create(
+                label=f"{label} (post)".strip(), tags=(tag, "post", "failed"))
+            raise
+        holder["post"] = self._create(label=f"{label} (post)".strip(),
+                                      tags=(tag, "post"))
+
+    # ── presentation ─────────────────────────────────────────────────────
+    def render_list(self) -> str:
+        """Plain-text snapshot table."""
+        snaps = self.list()
+        lines = [f"snapshots ({len(snaps)})"]
+        for snap in snaps:
+            created = time.strftime("%Y-%m-%d %H:%M",
+                                    time.localtime(snap.created_at or 0))
+            size = _human_bytes(snap.size_bytes)
+            tags = snap.manifest.get("tags", []) or []
+            tag_s = f" [{','.join(tags)}]" if tags else ""
+            label = f" — {snap.label}" if snap.label else ""
+            lines.append(f"  {snap.id}  {created}  {size}{tag_s}{label}")
+        return "\n".join(lines)
 
     # ── verify ─────────────────────────────────────────────────────────────
 

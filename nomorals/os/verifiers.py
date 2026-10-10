@@ -16,6 +16,14 @@ Two production verifiers ship here:
   15% of the values measured from the tree. Reuses
   ``tests/test_docs_consistency.py`` when that module is importable;
   otherwise reimplements its (~20-line) measurement logic locally.
+
+Plus pre-flight gates (bundled in :func:`gate_registry` as the
+``pre_update_gates`` :class:`CompositeVerifier`):
+
+* :class:`LintVerifier` — every ``.py`` file byte-compiles.
+* :class:`GitCleanVerifier` — the working tree has no uncommitted changes.
+* :class:`DiskSpaceVerifier` — enough free disk for the operation.
+* :class:`CompositeVerifier` — all/any suites of other verifiers.
 """
 
 from __future__ import annotations
@@ -38,8 +46,13 @@ __all__ = [
     "Verifier",
     "VerifierRegistry",
     "default_registry",
+    "gate_registry",
     "CodeTestsVerifier",
     "DocsRenderVerifier",
+    "CompositeVerifier",
+    "LintVerifier",
+    "GitCleanVerifier",
+    "DiskSpaceVerifier",
 ]
 
 _log = get_logger(__name__)
@@ -58,6 +71,16 @@ class Verdict:
     def to_dict(self) -> dict[str, Any]:
         return {"passed": self.passed, "details": self.details,
                 "artifacts": list(self.artifacts)}
+
+    def render(self) -> str:
+        """One-block human rendering of the verdict."""
+        mark = "✓" if self.passed else "✗"
+        lines = [f"{mark} {'PASS' if self.passed else 'FAIL'}"]
+        for line in str(self.details or "").splitlines():
+            lines.append(f"  {line}")
+        for artifact in self.artifacts:
+            lines.append(f"  artifact: {artifact}")
+        return "\n".join(lines)
 
 
 @runtime_checkable
@@ -100,10 +123,28 @@ class VerifierRegistry:
 
 
 def default_registry() -> VerifierRegistry:
-    """Registry with the two shipped verifiers pre-registered."""
+    """Registry with the two core verifiers pre-registered.
+
+    (Unchanged by the sweep: the pre-flight gates live in
+    :func:`gate_registry` so this contract stays stable.)
+    """
     registry = VerifierRegistry()
     registry.register(CodeTestsVerifier())
     registry.register(DocsRenderVerifier())
+    return registry
+
+
+def gate_registry() -> VerifierRegistry:
+    """Registry with the pre-flight gate verifiers: lint, git_clean,
+    disk_space, plus the ``pre_update_gates`` all-of composite."""
+    registry = VerifierRegistry()
+    lint = LintVerifier()
+    git_clean = GitCleanVerifier()
+    disk_space = DiskSpaceVerifier()
+    for verifier in (lint, git_clean, disk_space):
+        registry.register(verifier)
+    registry.register(CompositeVerifier(
+        "pre_update_gates", [lint, git_clean, disk_space], mode="all"))
     return registry
 
 
@@ -340,6 +381,165 @@ class DocsRenderVerifier:
                 f"{tolerance * 100:.0f}%)")
 
 
+# ── composite ──────────────────────────────────────────────────────────────
+
+class CompositeVerifier:
+    """Run several verifiers as one suite.
+
+    ``mode="all"`` passes only when every member passes; ``mode="any"``
+    passes when at least one passes.  The verdict detail carries each
+    member's outcome so failures stay attributable.
+    """
+
+    def __init__(self, name: str, verifiers: list[Any],
+                 *, mode: str = "all") -> None:
+        if mode not in ("all", "any"):
+            raise ValueError(f"unknown composite mode {mode!r}")
+        self.name = name
+        self.verifiers = list(verifiers)
+        self.mode = mode
+
+    def verify(self, target: dict[str, Any]) -> Verdict:
+        results: list[tuple[str, Verdict]] = []
+        for verifier in self.verifiers:
+            vname = str(getattr(verifier, "name", None)
+                        or type(verifier).__name__)
+            try:
+                verdict = verifier.verify(target)
+            except Exception as exc:  # noqa: BLE001 — a raising member fails
+                verdict = Verdict(passed=False,
+                                  details=f"verifier raised: {exc!r}")
+            results.append((vname, verdict))
+        passed = (all(v.passed for _, v in results) if self.mode == "all"
+                  else any(v.passed for _, v in results))
+        lines = [f"{'PASS' if v.passed else 'FAIL'} {name}"
+                 for name, v in results]
+        details = (f"composite({self.mode}) "
+                   f"{sum(v.passed for _, v in results)}/{len(results)} passed"
+                   + ("\n" + "\n".join(lines) if lines else ""))
+        artifacts = [a for _, v in results for a in v.artifacts]
+        return Verdict(passed=passed, details=details, artifacts=artifacts)
+
+
+# ── pre-flight gates ─────────────────────────────────────────────────────────
+
+class LintVerifier:
+    """Every ``.py`` file under the tree must byte-compile.
+
+    Target keys: ``root`` (default: repo root), ``paths`` (explicit file or
+    dir list instead of the tree walk).
+    """
+
+    name = "lint"
+
+    def verify(self, target: dict[str, Any]) -> Verdict:
+        import py_compile
+
+        root = Path(target.get("root") or _repo_root())
+        paths = target.get("paths")
+        if paths:
+            candidates = [Path(p) for p in paths]
+        else:
+            candidates = [root / "nomorals"]
+        files: list[Path] = []
+        for candidate in candidates:
+            candidate = candidate if candidate.is_absolute() else root / candidate
+            if candidate.is_file() and candidate.suffix == ".py":
+                files.append(candidate)
+            elif candidate.is_dir():
+                files.extend(sorted(p for p in candidate.rglob("*.py")
+                                    if p.is_file() and ".git" not in p.parts))
+        failures: list[str] = []
+        for path in files:
+            try:
+                py_compile.compile(str(path), doraise=True)
+            except py_compile.PyCompileError as exc:
+                failures.append(f"{path}: {exc.msg}")
+            except OSError as exc:
+                failures.append(f"{path}: unreadable ({exc})")
+        if failures:
+            detail = (f"{len(failures)}/{len(files)} file(s) failed to compile"
+                      + "\n" + "\n".join(failures[:10]))
+            if len(failures) > 10:
+                detail += f"\n… and {len(failures) - 10} more"
+            return Verdict(passed=False, details=detail)
+        return Verdict(passed=True,
+                       details=f"{len(files)} python file(s) compile clean")
+
+
+class GitCleanVerifier:
+    """The working tree must be clean (no uncommitted changes).
+
+    Target keys: ``repo_dir`` (default: repo root), ``allow_untracked``
+    (default False).
+    """
+
+    name = "git_clean"
+
+    def __init__(self, *, git_bin: str = "git") -> None:
+        self.git_bin = git_bin
+
+    def verify(self, target: dict[str, Any]) -> Verdict:
+        repo = str(target.get("repo_dir") or _repo_root())
+        allow_untracked = bool(target.get("allow_untracked", False))
+        try:
+            proc = subprocess.run(
+                [self.git_bin, "-C", repo, "status", "--porcelain"],
+                capture_output=True, text=True, timeout=30,
+            )
+        except FileNotFoundError:
+            return Verdict(passed=False, details="git not found")
+        except subprocess.TimeoutExpired:
+            return Verdict(passed=False, details="git status timed out")
+        if proc.returncode != 0:
+            return Verdict(passed=False,
+                           details=f"git status failed: {proc.stderr.strip()}")
+        dirty = [line for line in proc.stdout.splitlines() if line.strip()]
+        if not allow_untracked:
+            dirty = [line for line in dirty
+                     if not line.startswith("??")]
+        if dirty:
+            detail = (f"working tree dirty ({len(dirty)} change(s)):\n"
+                      + "\n".join(dirty[:10]))
+            if len(dirty) > 10:
+                detail += f"\n… and {len(dirty) - 10} more"
+            return Verdict(passed=False, details=detail)
+        return Verdict(passed=True, details="working tree clean")
+
+
+class DiskSpaceVerifier:
+    """Enough free disk for the operation ahead.
+
+    Target keys: ``path`` (default: repo root), ``min_free_mb`` (default
+    500), ``min_free_pct`` (default 0.05 — at least 5% free).
+    """
+
+    name = "disk_space"
+
+    def verify(self, target: dict[str, Any]) -> Verdict:
+        import shutil
+
+        path = str(target.get("path") or _repo_root())
+        try:
+            min_free_mb = float(target.get("min_free_mb", 500))
+        except (TypeError, ValueError):
+            min_free_mb = 500.0
+        try:
+            min_free_pct = float(target.get("min_free_pct", 0.05))
+        except (TypeError, ValueError):
+            min_free_pct = 0.05
+        try:
+            usage = shutil.disk_usage(path)
+        except OSError as exc:
+            return Verdict(passed=False, details=f"disk_usage failed: {exc}")
+        free_mb = usage.free / (1024 * 1024)
+        free_pct = usage.free / usage.total if usage.total else 0.0
+        ok = free_mb >= min_free_mb and free_pct >= min_free_pct
+        detail = (f"{free_mb:.0f} MB free ({free_pct * 100:.1f}%) at {path};"
+                  f" need ≥{min_free_mb:.0f} MB and ≥{min_free_pct * 100:.0f}%")
+        return Verdict(passed=ok, details=detail)
+
+
 def register(registry: Any) -> None:
     """Expose the verifier registry as agent tools."""
 
@@ -348,7 +548,10 @@ def register(registry: Any) -> None:
         description=(
             "Run a named verifier against a target. Verifiers: code_tests "
             "(run python -m unittest on test_ids), docs_render (check README "
-            "metrics match measured repo state). Target is a JSON dict."
+            "metrics match measured repo state), lint (py_compile the tree), "
+            "git_clean (working tree clean), disk_space (enough free disk), "
+            "pre_update_gates (all-of lint+git_clean+disk_space). "
+            "Target is a JSON dict."
         ),
         capability="verify.run",
         parameters={
@@ -364,6 +567,10 @@ def register(registry: Any) -> None:
         except Exception as exc:  # noqa: BLE001
             return {"ok": False, "error": f"bad target_json: {exc}"}
         reg = default_registry()
+        for gate in gate_registry().list():
+            verifier_obj = gate_registry().get(gate)
+            if verifier_obj is not None and gate not in reg:
+                reg.register(verifier_obj)
         try:
             verdict = reg.verify((verifier or "").strip(), target)
             return {"ok": True, "verdict": verdict.to_dict()}
@@ -382,4 +589,6 @@ def register(registry: Any) -> None:
         parameters={},
     )
     def _verify_list() -> dict[str, Any]:
-        return {"ok": True, "verifiers": default_registry().list()}
+        reg = default_registry()
+        names = set(reg.list()) | set(gate_registry().list())
+        return {"ok": True, "verifiers": sorted(names)}

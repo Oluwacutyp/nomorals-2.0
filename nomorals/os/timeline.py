@@ -58,7 +58,7 @@ import sqlite3
 import threading
 import time
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -84,12 +84,29 @@ CREATE TABLE IF NOT EXISTS event_log (
     project_id TEXT,
     mission_id TEXT,
     artifact_id TEXT,
+    causation_id TEXT,
+    correlation_id TEXT,
+    actor TEXT NOT NULL DEFAULT '',
     data_json  TEXT NOT NULL DEFAULT '{}'
 );
 CREATE INDEX IF NOT EXISTS idx_event_log_ts ON event_log (ts);
 CREATE INDEX IF NOT EXISTS idx_event_log_topic ON event_log (topic);
 CREATE INDEX IF NOT EXISTS idx_event_log_mission ON event_log (mission_id);
 CREATE INDEX IF NOT EXISTS idx_event_log_session ON event_log (session_id);
+CREATE INDEX IF NOT EXISTS idx_event_log_correlation ON event_log (correlation_id);
+"""
+
+#: Optional envelope columns backfilled onto older event_log tables.
+_ENVELOPE_COLUMNS = (
+    ("causation_id", "TEXT"),
+    ("correlation_id", "TEXT"),
+    ("actor", "TEXT NOT NULL DEFAULT ''"),
+)
+
+_FTS_SCHEMA = """
+CREATE VIRTUAL TABLE IF NOT EXISTS event_log_fts
+    USING fts5(event_id UNINDEXED, topic, data_json,
+               tokenize='unicode61');
 """
 
 _ROW_COLUMNS = (
@@ -101,8 +118,19 @@ _ROW_COLUMNS = (
     "project_id",
     "mission_id",
     "artifact_id",
+    "causation_id",
+    "correlation_id",
+    "actor",
     "data_json",
 )
+
+
+def _ensure_envelope_columns(conn: "sqlite3.Connection") -> None:
+    """ALTER older event_log tables up to the envelope schema."""
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(event_log)")}
+    for column, ddl in _ENVELOPE_COLUMNS:
+        if column not in cols:
+            conn.execute(f"ALTER TABLE event_log ADD COLUMN {column} {ddl}")
 
 
 def _new_event_id() -> str:
@@ -151,6 +179,37 @@ def _glob_to_like(pattern: str) -> str:
     return "".join(out)
 
 
+def _fmt_ts(ts: Any) -> str:
+    try:
+        return datetime.fromtimestamp(float(ts or 0), tz=timezone.utc).strftime(
+            "%Y-%m-%d %H:%M:%SZ")
+    except (TypeError, ValueError, OverflowError, OSError):
+        return "?"
+
+
+def _event_summary(topic: str, data: dict[str, Any]) -> str:
+    """One-line human summary of an event payload."""
+    for key in ("summary", "detail", "note", "message", "step", "task",
+                "name", "status", "tool", "verdict"):
+        value = data.get(key)
+        if value:
+            return f"{key}={value}"
+    items = [f"{k}={v}" for k, v in list(data.items())[:3]]
+    return " ".join(items) if items else topic
+
+
+class _DictEvent:
+    """Minimal event-like shim for re-importing exported rows."""
+
+    def __init__(self, *, event_id: Any, topic: str, ts: Any, source: str,
+                 data: dict[str, Any]) -> None:
+        self.event_id = event_id
+        self.topic = topic
+        self.ts = ts
+        self.source = source
+        self.data = data
+
+
 class Timeline:
     """A durable, queryable log of bus events.
 
@@ -171,8 +230,21 @@ class Timeline:
         )
         self._conn.row_factory = sqlite3.Row
         self._sub_ids: list[str] = []
+        self._fts_ok = False
         with self._lock:
             self._conn.executescript(_SCHEMA)
+            _ensure_envelope_columns(self._conn)
+            self._conn.commit()
+            try:
+                self._conn.executescript(_FTS_SCHEMA)
+                self._fts_ok = True
+            except sqlite3.Error:  # noqa: BLE001 — FTS5 may be unavailable
+                _log.debug("timeline: FTS5 unavailable, search() disabled",
+                           exc_info=True)
+
+    @property
+    def fts_available(self) -> bool:
+        return self._fts_ok
 
     # -- lifecycle ------------------------------------------------------
     def close(self) -> None:
@@ -225,8 +297,9 @@ class Timeline:
                 self._conn.execute(
                     "INSERT OR REPLACE INTO event_log "
                     "(event_id, topic, ts, source, session_id, project_id, "
-                    " mission_id, artifact_id, data_json) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    " mission_id, artifact_id, causation_id, correlation_id,"
+                    " actor, data_json) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         row["event_id"],
                         row["topic"],
@@ -236,9 +309,18 @@ class Timeline:
                         row["project_id"],
                         row["mission_id"],
                         row["artifact_id"],
+                        row["causation_id"],
+                        row["correlation_id"],
+                        row["actor"],
                         row["data_json"],
                     ),
                 )
+                if self._fts_ok:
+                    self._conn.execute(
+                        "INSERT OR REPLACE INTO event_log_fts"
+                        " (event_id, topic, data_json) VALUES (?, ?, ?)",
+                        (row["event_id"], row["topic"], row["data_json"]),
+                    )
                 self._conn.commit()
         except Exception:  # noqa: BLE001 - a full/corrupt db must not kill the bus
             _log.debug("timeline: could not persist event", exc_info=True)
@@ -282,6 +364,9 @@ class Timeline:
             "project_id": _str("project_id"),
             "mission_id": _str("mission_id"),
             "artifact_id": _str("artifact_id"),
+            "causation_id": _str("causation_id"),
+            "correlation_id": _str("correlation_id"),
+            "actor": _str("actor") or "",
             "data_json": data_json,
         }
 
@@ -343,6 +428,170 @@ class Timeline:
     def recent(self, limit: int = 50) -> list[dict[str, Any]]:
         """Newest-first convenience wrapper over :meth:`query`."""
         return self.query(limit=limit)
+
+    # -- full-text search -------------------------------------------------
+    def search(self, query: str, *, limit: int = 50) -> list[dict[str, Any]]:
+        """Full-text search over topics and payloads (FTS5).
+
+        ``query`` uses FTS5 syntax (``"exact phrase"``, ``a OR b``,
+        ``prefix*``).  Returns newest-first rows with a ``rank`` field.
+        Raises RuntimeError when FTS5 is unavailable.
+        """
+        if not self._fts_ok:
+            raise RuntimeError("FTS5 full-text search is unavailable")
+        sql = (
+            "SELECT " + ", ".join(f"e.{c}" for c in _ROW_COLUMNS)
+            + ", f.rank AS fts_rank FROM event_log_fts f"
+            " JOIN event_log e ON e.event_id = f.event_id"
+            " WHERE event_log_fts MATCH ?"
+            " ORDER BY f.rank, e.ts DESC LIMIT ?"
+        )
+        with self._lock:
+            rows = self._conn.execute(sql, (query, max(1, int(limit)))).fetchall()
+        out = [self._row_to_dict(r) for r in rows]
+        for row in out:
+            row.pop("fts_rank", None)
+        return out
+
+    def trace(self, correlation_id: str, *,
+              limit: int = 500) -> list[dict[str, Any]]:
+        """All events sharing a correlation id — the causal chain, oldest
+        first.  Event-sourcing style: follow one operation end to end."""
+        rows = self.query(limit=limit)
+        rows = [r for r in rows if r.get("correlation_id") == correlation_id]
+        return sorted(rows, key=lambda r: (r.get("ts") or 0.0,
+                                           str(r.get("event_id") or "")))
+
+    # -- retention --------------------------------------------------------
+    def prune_older_than(self, cutoff: Any) -> int:
+        """Delete events at or before ``cutoff`` (epoch/ISO/datetime).
+
+        Returns the number of rows deleted.  The FTS index is rebuilt for
+        the removed ids.
+        """
+        cutoff_ts = _coerce_ts(cutoff)
+        if cutoff_ts is None:
+            raise ValueError(f"cannot parse cutoff {cutoff!r}")
+        with self._lock:
+            if self._fts_ok:
+                self._conn.execute(
+                    "DELETE FROM event_log_fts WHERE event_id IN"
+                    " (SELECT event_id FROM event_log WHERE ts <= ?)",
+                    (cutoff_ts,))
+            cur = self._conn.execute("DELETE FROM event_log WHERE ts <= ?",
+                                     (cutoff_ts,))
+            deleted = cur.rowcount or 0
+            self._conn.commit()
+        return deleted
+
+    def prune_keep_latest(self, keep: int) -> int:
+        """Keep only the newest ``keep`` events.  Returns rows deleted."""
+        keep = max(0, int(keep))
+        with self._lock:
+            cur = self._conn.execute(
+                "SELECT event_id FROM event_log ORDER BY ts DESC, rowid DESC"
+                " LIMIT -1 OFFSET ?", (keep,))
+            victims = [r[0] for r in cur.fetchall()]
+            if not victims:
+                return 0
+            placeholders = ",".join("?" for _ in victims)
+            if self._fts_ok:
+                self._conn.execute(
+                    f"DELETE FROM event_log_fts WHERE event_id IN"
+                    f" ({placeholders})", victims)
+            cur = self._conn.execute(
+                f"DELETE FROM event_log WHERE event_id IN ({placeholders})",
+                victims)
+            deleted = cur.rowcount or 0
+            self._conn.commit()
+        return deleted
+
+    # -- export / import --------------------------------------------------
+    def export_jsonl(self, path: str | Path) -> int:
+        """Dump every event as one JSON object per line.  Returns the count."""
+        path = Path(path)
+        rows = self.query(limit=10**9)
+        with open(path, "w", encoding="utf-8") as fh:
+            for row in rows:
+                fh.write(json.dumps(row, ensure_ascii=False, default=str)
+                         + "\n")
+        return len(rows)
+
+    def import_jsonl(self, path: str | Path) -> int:
+        """Re-import an :meth:`export_jsonl` dump.  Returns rows imported."""
+        imported = 0
+        with open(path, encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    row = json.loads(line)
+                except ValueError:
+                    continue
+                data = row.get("data") or {}
+                event = _DictEvent(
+                    event_id=row.get("event_id"),
+                    topic=row.get("topic", ""),
+                    ts=row.get("ts", time.time()),
+                    source=row.get("source", ""),
+                    data={
+                        **(data if isinstance(data, dict) else {}),
+                        "session_id": row.get("session_id"),
+                        "project_id": row.get("project_id"),
+                        "mission_id": row.get("mission_id"),
+                        "artifact_id": row.get("artifact_id"),
+                        "causation_id": row.get("causation_id"),
+                        "correlation_id": row.get("correlation_id"),
+                        "actor": row.get("actor"),
+                    },
+                )
+                if self.record(event):
+                    imported += 1
+        return imported
+
+    # -- stats / presentation ---------------------------------------------
+    def topic_counts(self, *, since: Any = None) -> list[tuple[str, int]]:
+        """(topic, count) pairs, most frequent first, optionally since."""
+        clauses: list[str] = []
+        params: list[Any] = []
+        since_ts = _coerce_ts(since)
+        if since_ts is not None:
+            clauses.append("ts >= ?")
+            params.append(since_ts)
+        sql = ("SELECT topic, COUNT(*) FROM event_log"
+               + (" WHERE " + " AND ".join(clauses) if clauses else "")
+               + " GROUP BY topic ORDER BY COUNT(*) DESC")
+        with self._lock:
+            rows = self._conn.execute(sql, params).fetchall()
+        return [(r[0], int(r[1])) for r in rows]
+
+    def stats(self) -> dict[str, Any]:
+        """Size, time span, topic count, FTS availability."""
+        with self._lock:
+            total = self._conn.execute(
+                "SELECT COUNT(*), MIN(ts), MAX(ts) FROM event_log").fetchone()
+            topics = self._conn.execute(
+                "SELECT COUNT(DISTINCT topic) FROM event_log").fetchone()
+        return {
+            "events": int(total[0] or 0),
+            "topics": int(topics[0] or 0),
+            "span_from": total[1],
+            "span_to": total[2],
+            "fts_available": self._fts_ok,
+        }
+
+    def render(self, limit: int = 20) -> str:
+        """Plain-text event feed, newest first."""
+        rows = self.recent(limit)
+        lines = [f"timeline — {len(rows)} shown"]
+        for row in rows:
+            ts = _fmt_ts(row.get("ts"))
+            topic = str(row.get("topic") or "?")
+            data = row.get("data") or {}
+            summary = _event_summary(topic, data)
+            lines.append(f"  [{ts}] {topic} — {summary}")
+        return "\n".join(lines)
 
     @staticmethod
     def _row_to_dict(row: sqlite3.Row) -> dict[str, Any]:

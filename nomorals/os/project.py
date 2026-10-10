@@ -43,11 +43,33 @@ CREATE TABLE IF NOT EXISTS os_projects (
     description TEXT NOT NULL DEFAULT '',
     mission_ids TEXT NOT NULL DEFAULT '[]',
     state       TEXT NOT NULL DEFAULT 'active',
+    tags        TEXT NOT NULL DEFAULT '[]',
     created_at  REAL NOT NULL,
     updated_at  REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_os_projects_state ON os_projects(state);
 """
+
+
+def _ensure_project_columns(db: Any) -> None:
+    """ALTER older os_projects tables up to the current schema."""
+    try:
+        cols = {row["name"] for row in db.query("PRAGMA table_info(os_projects)")}
+    except Exception:  # noqa: BLE001 — table may not exist yet
+        return
+    if "tags" not in cols:
+        try:
+            db.execute("ALTER TABLE os_projects ADD COLUMN tags TEXT NOT NULL DEFAULT '[]'")
+        except Exception:  # noqa: BLE001 — best effort
+            pass
+
+
+def _json_list(text: Any) -> list[str]:
+    try:
+        items = json.loads(text or "[]") or []
+    except (TypeError, ValueError):
+        return []
+    return [str(i) for i in items if isinstance(i, (str, int, float))]
 
 
 @dataclass
@@ -59,8 +81,16 @@ class Project:
     description: str = ""
     mission_ids: list[str] = field(default_factory=list)
     state: str = "active"  # active | paused | archived
+    tags: list[str] = field(default_factory=list)
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
+
+    @property
+    def archived(self) -> bool:
+        return self.state == "archived"
+
+    def has_tag(self, tag: str) -> bool:
+        return tag in (self.tags or [])
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -69,6 +99,7 @@ class Project:
             "description": self.description,
             "mission_ids": list(self.mission_ids),
             "state": self.state,
+            "tags": list(self.tags),
             "created_at": self.created_at,
             "updated_at": self.updated_at,
         }
@@ -81,22 +112,20 @@ class Project:
             description=str(data.get("description", "")),
             mission_ids=list(data.get("mission_ids", []) or []),
             state=str(data.get("state", "active")),
+            tags=list(data.get("tags", []) or []),
             created_at=float(data.get("created_at", time.time())),
             updated_at=float(data.get("updated_at", time.time())),
         )
 
     @classmethod
     def _from_row(cls, row: dict[str, Any]) -> "Project":
-        try:
-            mission_ids = list(json.loads(row.get("mission_ids") or "[]") or [])
-        except (TypeError, ValueError):
-            mission_ids = []
         return cls(
             id=row["id"],
             name=row.get("name", "") or "",
             description=row.get("description", "") or "",
-            mission_ids=mission_ids,
+            mission_ids=_json_list(row.get("mission_ids")),
             state=row.get("state", "active") or "active",
+            tags=_json_list(row.get("tags")),
             created_at=float(row.get("created_at", time.time())),
             updated_at=float(row.get("updated_at", time.time())),
         )
@@ -111,25 +140,29 @@ class ProjectStore:
         else:
             self.db = Database(":memory:" if db is None else str(db))
         self.db.executescript(_OS_PROJECTS_DDL)
+        _ensure_project_columns(self.db)
         self._lock = threading.RLock()
 
     def create(self, name: str, *, description: str = "",
                mission_ids: list[str] | None = None,
-               state: str = "active") -> Project:
+               state: str = "active",
+               tags: list[str] | None = None) -> Project:
         project = Project(
             id=new_short_id("proj_"),
             name=name,
             description=description or "",
             mission_ids=list(mission_ids or []),
             state=state or "active",
+            tags=list(tags or []),
         )
         with self._lock:
             self.db.execute(
                 "INSERT INTO os_projects (id, name, description, mission_ids,"
-                " state, created_at, updated_at)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?)",
+                " state, tags, created_at, updated_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (project.id, project.name, project.description,
                  json.dumps(project.mission_ids), project.state,
+                 json.dumps(project.tags),
                  project.created_at, project.updated_at),
             )
         _log.info("os project %s created (%r)", project.id, project.name)
@@ -155,11 +188,124 @@ class ProjectStore:
         with self._lock:
             self.db.execute(
                 "UPDATE os_projects SET name = ?, description = ?,"
-                " mission_ids = ?, state = ?, updated_at = ? WHERE id = ?",
+                " mission_ids = ?, state = ?, tags = ?, updated_at = ?"
+                " WHERE id = ?",
                 (project.name, project.description,
                  json.dumps(project.mission_ids), project.state,
+                 json.dumps(project.tags),
                  project.updated_at, project.id),
             )
+
+    def search(self, query: str, *, state: str | None = None) -> list[Project]:
+        """Case-insensitive substring search over project names."""
+        needle = f"%{query.lower()}%"
+        if state:
+            rows = self.db.query(
+                "SELECT * FROM os_projects WHERE lower(name) LIKE ?"
+                " AND state = ? ORDER BY created_at", (needle, state))
+        else:
+            rows = self.db.query(
+                "SELECT * FROM os_projects WHERE lower(name) LIKE ?"
+                " ORDER BY created_at", (needle,))
+        return [Project._from_row(r) for r in rows]
+
+    def with_tag(self, tag: str) -> list[Project]:
+        """All projects carrying ``tag``."""
+        return [p for p in self.list() if p.has_tag(tag)]
+
+    def tag(self, project_id: str, tag: str) -> bool:
+        """Add a tag (idempotent). False when the project is unknown."""
+        project = self.get(project_id)
+        if project is None:
+            return False
+        if tag not in project.tags:
+            project.tags.append(tag)
+            self._save(project)
+        return True
+
+    def untag(self, project_id: str, tag: str) -> bool:
+        """Remove a tag. False when the project is unknown."""
+        project = self.get(project_id)
+        if project is None:
+            return False
+        if tag in project.tags:
+            project.tags.remove(tag)
+            self._save(project)
+        return True
+
+    def rename(self, project_id: str, name: str) -> bool:
+        """Rename a project. False when unknown."""
+        project = self.get(project_id)
+        if project is None:
+            return False
+        project.name = name
+        self._save(project)
+        return True
+
+    def archive(self, project_id: str) -> bool:
+        """Archive a project (soft — it stays queryable, out of the way)."""
+        return self.set_state(project_id, "archived")
+
+    def summary(self, project_id: str, *,
+                mission_store: Any = None,
+                session_store: Any = None,
+                artifact_store: Any = None) -> dict[str, Any] | None:
+        """Project dashboard: missions by status, sessions, artifact count.
+
+        The stores are duck-typed and optional — whatever is passed in is
+        counted, whatever is missing is reported as unknown.
+        """
+        project = self.get(project_id)
+        if project is None:
+            return None
+        missions: dict[str, Any] = {"total": len(project.mission_ids),
+                                   "by_status": {}}
+        if mission_store is not None:
+            get = getattr(mission_store, "get", None)
+            if callable(get):
+                for mid in project.mission_ids:
+                    try:
+                        m = get(mid)
+                        status = str(getattr(m, "status", "?") or "?")
+                    except Exception:  # noqa: BLE001
+                        status = "unknown"
+                    by = missions["by_status"]
+                    by[status] = by.get(status, 0) + 1
+        sessions = -1
+        if session_store is not None:
+            list_for = getattr(session_store, "list_for_project", None)
+            if callable(list_for):
+                try:
+                    sessions = len(list_for(project.id))
+                except Exception:  # noqa: BLE001
+                    sessions = -1
+        artifacts = -1
+        if artifact_store is not None:
+            try:
+                artifacts = len(artifact_scope(artifact_store, project))
+            except Exception:  # noqa: BLE001
+                artifacts = -1
+        return {
+            "id": project.id,
+            "name": project.name,
+            "state": project.state,
+            "tags": list(project.tags),
+            "missions": missions,
+            "sessions": sessions,
+            "artifacts": artifacts,
+        }
+
+    def render(self) -> str:
+        """Plain-text project list."""
+        projects = self.list()
+        lines = [f"projects ({len(projects)})"]
+        for p in projects:
+            mark = {"active": "▶", "paused": "⏸",
+                    "archived": "▣"}.get(p.state, "?")
+            tags = f" [{','.join(p.tags)}]" if p.tags else ""
+            lines.append(f"  {mark} {p.name}{tags}"
+                         f" — {len(p.mission_ids)} mission(s)")
+        return "\n".join(lines)
 
     def add_mission(self, project_id: str, mission_id: str) -> bool:
         """Attach a mission to the project (idempotent)."""

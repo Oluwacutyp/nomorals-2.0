@@ -44,12 +44,22 @@ __all__ = [
     "LEGAL_TRANSITIONS",
     "OS_STATE_TO_MISSION_STATUS",
     "InvalidTransition",
+    "GuardFailed",
     "MissionAcceptance",
     "current_state",
     "transition",
     "attach_runner",
     "evaluate_acceptance",
     "verify_repair_loop",
+    "guard",
+    "on_enter",
+    "on_exit",
+    "on_transition",
+    "clear_guards",
+    "clear_callbacks",
+    "to_mermaid",
+    "describe",
+    "transition_log",
 ]
 
 _log = get_logger(__name__)
@@ -103,6 +113,114 @@ class InvalidTransition(Exception):
     """Raised when a mission move is not in ``LEGAL_TRANSITIONS``."""
 
 
+class GuardFailed(InvalidTransition):
+    """A transition guard vetoed the move."""
+
+
+# ── guards & callbacks ───────────────────────────────────────────────────────
+# Guards and callbacks are module-level registries (cleared via clear_* for
+# tests).  A guard is ``fn(mission, from_state, to_state, note) -> bool``;
+# a falsy return vetoes the transition with GuardFailed.  Callbacks are
+# ``fn(mission, from_state, to_state, note)`` and never veto — a raising
+# callback is logged, not propagated.
+
+_Guards: list[tuple[str | None, str | None, Callable[..., Any]]] = []
+_EnterCallbacks: list[tuple[str | None, Callable[..., Any]]] = []
+_ExitCallbacks: list[tuple[str | None, Callable[..., Any]]] = []
+_TransitionCallbacks: list[Callable[..., Any]] = []
+
+
+def guard(from_state: str | None = None, to_state: str | None = None):
+    """Decorator registering a transition guard.
+
+    ``@guard("RUNNING", "COMPLETED")`` — ``fn(mission, from, to, note)``
+    must return truthy or the move is vetoed with :class:`GuardFailed`.
+    ``None`` matches any state.
+    """
+    def _register(fn: Callable[..., Any]) -> Callable[..., Any]:
+        _Guards.append((
+            from_state.upper() if from_state else None,
+            to_state.upper() if to_state else None,
+            fn,
+        ))
+        return fn
+    return _register
+
+
+def on_enter(state: str | None = None):
+    """Decorator: ``fn(mission, from, to, note)`` runs after entering."""
+    def _register(fn: Callable[..., Any]) -> Callable[..., Any]:
+        _EnterCallbacks.append((state.upper() if state else None, fn))
+        return fn
+    return _register
+
+
+def on_exit(state: str | None = None):
+    """Decorator: ``fn(mission, from, to, note)`` runs before exiting."""
+    def _register(fn: Callable[..., Any]) -> Callable[..., Any]:
+        _ExitCallbacks.append((state.upper() if state else None, fn))
+        return fn
+    return _register
+
+
+def on_transition(fn: Callable[..., Any]) -> Callable[..., Any]:
+    """Decorator: ``fn(mission, from, to, note)`` runs on every move."""
+    _TransitionCallbacks.append(fn)
+    return fn
+
+
+def clear_guards() -> None:
+    _Guards.clear()
+
+
+def clear_callbacks() -> None:
+    _EnterCallbacks.clear()
+    _ExitCallbacks.clear()
+    _TransitionCallbacks.clear()
+
+
+def _check_guards(mission: "Mission", current: str, target: str,
+                  note: str) -> None:
+    for from_s, to_s, fn in _Guards:
+        if from_s is not None and from_s != current:
+            continue
+        if to_s is not None and to_s != target:
+            continue
+        try:
+            allowed = fn(mission, current, target, note)
+        except Exception as exc:  # noqa: BLE001 — a raising guard vetoes
+            raise GuardFailed(
+                f"guard {getattr(fn, '__name__', 'guard')} raised: {exc!r}"
+            ) from exc
+        if not allowed:
+            raise GuardFailed(
+                f"guard {getattr(fn, '__name__', 'guard')} vetoed"
+                f" {current} -> {target}")
+
+
+def _run_callbacks(mission: "Mission", current: str, target: str,
+                   note: str, *, phase: str) -> None:
+    if phase == "exit":
+        hooks = [(state, fn) for state, fn in _ExitCallbacks
+                 if state is None or state == current]
+    elif phase == "enter":
+        hooks = [(state, fn) for state, fn in _EnterCallbacks
+                 if state is None or state == target]
+    else:
+        hooks = [(None, fn) for fn in _TransitionCallbacks]
+    for _state, fn in hooks:
+        _safe_callback(fn, mission, current, target, note)
+
+
+def _safe_callback(fn: Callable[..., Any], mission: "Mission", current: str,
+                   target: str, note: str) -> None:
+    try:
+        fn(mission, current, target, note)
+    except Exception:  # noqa: BLE001 — callbacks never break transitions
+        _log.debug("mission state callback %r raised", getattr(fn, "__name__", fn),
+                   exc_info=True)
+
+
 # ── transitions ──────────────────────────────────────────────────────────────
 
 def current_state(mission: "Mission") -> str:
@@ -112,14 +230,16 @@ def current_state(mission: "Mission") -> str:
 
 
 def transition(store: "MissionStore", mission_id: str, to: str,
-               note: str = "") -> "Mission":
+               note: str = "", *, actor: str = "") -> "Mission":
     """Move ``mission_id`` to ``to``.
 
-    Raises :class:`InvalidTransition` on an illegal move. Transitioning to
-    the current state is a no-op success (idempotent — safe to call twice).
-    Persists the os state + appends ``{from, to, ts, note}`` to the
-    mission's ``transition_log``, syncs the coarse ``MissionStatus`` via
-    ``store.set_status``, and emits ``mission.transition`` on the bus.
+    Raises :class:`InvalidTransition` on an illegal move and
+    :class:`GuardFailed` when a registered guard vetoes it. Transitioning
+    to the current state is a no-op success (idempotent — safe to call
+    twice). Persists the os state + appends ``{from, to, ts, note, actor}``
+    to the mission's ``transition_log``, syncs the coarse ``MissionStatus``
+    via ``store.set_status``, runs exit/enter/transition callbacks, and
+    emits ``mission.transition`` on the bus.
     """
     target = str(to or "").upper()
     if target not in LEGAL_TRANSITIONS:
@@ -131,26 +251,70 @@ def transition(store: "MissionStore", mission_id: str, to: str,
     if target not in LEGAL_TRANSITIONS[current]:
         raise InvalidTransition(
             f"illegal mission transition {current} -> {target}")
+    _check_guards(mission, current, target, note)
+    _run_callbacks(mission, current, target, note, phase="exit")
     mission.state[_OS_STATE_KEY] = target
     log = mission.state.setdefault(_TRANSITION_LOG_KEY, [])
-    entry = {"from": current, "to": target, "ts": time.time(), "note": note}
+    entry = {"from": current, "to": target, "ts": time.time(), "note": note,
+             "actor": actor or ""}
     log.append(entry)
     # Save the os fields first: set_status re-reads the row and would drop
     # in-memory-only mutations.
     store.save(mission)
     mission = store.set_status(mission_id, OS_STATE_TO_MISSION_STATUS[target],
                                note=note or f"os: {current}->{target}")
-    _emit_transition(mission_id, current, target, note)
+    _run_callbacks(mission, current, target, note, phase="enter")
+    _run_callbacks(mission, current, target, note, phase="transition")
+    _emit_transition(mission_id, current, target, note, actor=actor)
     return mission
 
 
+# ── introspection ────────────────────────────────────────────────────────────
+
+def to_mermaid() -> str:
+    """The legal transition graph as a Mermaid state diagram."""
+    lines = ["stateDiagram-v2"]
+    lines.append("    [*] --> CREATED")
+    for state in (CREATED, PLANNED, RUNNING, VERIFYING, PAUSED):
+        lines.append(f"    state {state}")
+    for state in TERMINAL_STATES:
+        lines.append(f"    state {state}")
+    for from_state in sorted(LEGAL_TRANSITIONS):
+        for to_state in sorted(LEGAL_TRANSITIONS[from_state]):
+            lines.append(f"    {from_state} --> {to_state}")
+    for state in TERMINAL_STATES:
+        lines.append(f"    {state} --> [*]")
+    return "\n".join(lines)
+
+
+def describe() -> str:
+    """Plain-text table of states, legal moves, and terminal states."""
+    lines = ["mission state machine"]
+    for state in (CREATED, PLANNED, RUNNING, VERIFYING, PAUSED,
+                  COMPLETED, FAILED, CANCELLED):
+        moves = sorted(LEGAL_TRANSITIONS[state])
+        terminal = " (terminal)" if state in TERMINAL_STATES else ""
+        lines.append(f"  {state}{terminal}")
+        lines.append(f"    → {', '.join(moves) if moves else '—'}")
+    return "\n".join(lines)
+
+
+def transition_log(mission: "Mission") -> list[dict[str, Any]]:
+    """The mission's recorded transition history (oldest first)."""
+    return list(mission.state.get(_TRANSITION_LOG_KEY) or [])
+
+
 def _emit_transition(mission_id: str, from_state: str, to_state: str,
-                     note: str) -> None:
+                     note: str, *, actor: str = "") -> None:
+    data: dict[str, Any] = {"mission_id": mission_id,
+                            "from_state": from_state,
+                            "to_state": to_state, "note": note}
+    if actor:
+        data["actor"] = actor
     try:
         global_bus.publish(Event(
             topic="mission.transition",
-            data={"mission_id": mission_id, "from_state": from_state,
-                  "to_state": to_state, "note": note},
+            data=data,
             source="nomorals.os.mission_state",
         ))
     except Exception:  # noqa: BLE001 - events never break transitions

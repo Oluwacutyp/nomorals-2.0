@@ -33,6 +33,12 @@ __all__ = ["SessionBridge", "conversation_id_for"]
 _log = get_logger(__name__)
 
 
+def _now() -> float:
+    import time
+
+    return time.time()
+
+
 def conversation_id_for(platform: str, chat_id: str) -> str:
     """Deterministic conversation ID for a (platform, chat) pair."""
     return f"{platform}:{chat_id}"
@@ -106,6 +112,60 @@ class SessionBridge:
     def end_session(self, session_id: str) -> bool:
         """End a session by ID. Returns False when it did not exist."""
         return self.store.end(session_id)
+
+    def handoff_session(self, session_id: str, platform: str, chat_id: str,
+                        *, is_owner: bool | None = None) -> Session | None:
+        """Move a conversation to a different (platform, chat) — phone to
+        desktop, Telegram to CLI — keeping its session, history and state.
+
+        The conversation id becomes ``"{platform}:{chat_id}"``; the old
+        binding is recorded in ``state["handoff_history"]``.  Returns the
+        updated session, or None when the session is unknown.
+        """
+        session = self.store.get(session_id)
+        if session is None:
+            return None
+        old_conv = session.conversation_id
+        new_conv = conversation_id_for(platform, chat_id)
+        history = list(session.state.get("handoff_history") or [])
+        history.append({
+            "from": old_conv, "to": new_conv, "ts": _now(),
+            "from_frontend": session.frontend,
+        })
+        session.state["handoff_history"] = history
+        session.conversation_id = new_conv
+        session.frontend = platform
+        if is_owner is not None:
+            session.principal = "owner" if is_owner else "guest"
+        session.touch(activity=True)
+        self.store.update(session)
+        _log.info("session %s handed off %s -> %s", session_id, old_conv,
+                  new_conv)
+        return session
+
+    def sessions_for_principal(self, principal: str) -> list[Session]:
+        """Every active session belonging to ``principal``."""
+        return [s for s in self.store.list_active()
+                if s.principal == principal]
+
+    def session_counts(self) -> dict[str, Any]:
+        """Active sessions by frontend and by principal."""
+        by_frontend: dict[str, int] = {}
+        by_principal: dict[str, int] = {}
+        active = self.store.list_active()
+        for s in active:
+            by_frontend[s.frontend] = by_frontend.get(s.frontend, 0) + 1
+            by_principal[s.principal] = by_principal.get(s.principal, 0) + 1
+        return {"total": len(active), "by_frontend": by_frontend,
+                "by_principal": by_principal}
+
+    def render(self) -> str:
+        """Plain-text bridge overview."""
+        counts = self.session_counts()
+        lines = [f"session bridge — {counts['total']} active"]
+        for frontend, n in sorted(counts["by_frontend"].items()):
+            lines.append(f"  {frontend}: {n}")
+        return "\n".join(lines)
 
     # ── internals ─────────────────────────────────────────────────────
     def _create(self, platform: str, chat_id: str, conv_id: str,

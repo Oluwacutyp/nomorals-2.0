@@ -1216,6 +1216,9 @@ class ResourceManager:
         self.budgets = ResourceBudgets(
             self, reserve_pct=self.reserve_pct,
             reserve_min_mb=self.reserve_min_mb)
+        # alert subscriptions: list of (key, threshold, comparator, fn)
+        self._alerts: list[dict[str, Any]] = []
+        self._alert_state: dict[str, bool] = {}  # alert-id -> currently firing
 
     # -- platform ----------------------------------------------------------
     def _platform_obj(self) -> Any:
@@ -1462,6 +1465,11 @@ class ResourceManager:
             environment=env,
         )
         self._record(s)
+        if self._alerts:
+            try:
+                self._eval_alerts(s, self.pressure(s))
+            except Exception:  # noqa: BLE001 — alerts never break sampling
+                pass
         return s
 
     def _record(self, s: ResourceSample) -> None:
@@ -1962,6 +1970,144 @@ class ResourceManager:
             return max(0.0, float(mem or 0.0)), max(0.0, float(cpu or 0.0))
         except (TypeError, ValueError):
             return 0.0, 0.0
+
+    # -- alerts ------------------------------------------------------------
+    def on_alert(self, key: str, threshold: float,
+                 fn: Callable[[dict[str, Any]], Any], *,
+                 above: bool = True,
+                 alert_id: str = "") -> str:
+        """Subscribe to a resource alert.
+
+        ``key`` is a pressure key (``"cpu"``, ``"mem"``, ``"disk"``,
+        ``"overall"``) or a sample key (``"battery_percent"``,
+        ``"thermal_c"``...).  ``fn`` receives
+        ``{"key", "value", "threshold", "firing"}`` whenever the value
+        crosses the threshold (edge-triggered: it fires once per crossing,
+        and again when it re-arms).  Evaluated on every :meth:`sample`.
+        Returns the alert id (for :meth:`clear_alert`).
+        """
+        aid = alert_id or f"{key}:{threshold:g}:{'above' if above else 'below'}"
+        self._alerts.append({"id": aid, "key": key, "threshold": threshold,
+                             "above": above, "fn": fn})
+        self._alert_state.setdefault(aid, False)
+        return aid
+
+    def clear_alert(self, alert_id: str) -> bool:
+        """Remove an alert subscription.  Returns True when one existed."""
+        before = len(self._alerts)
+        self._alerts = [a for a in self._alerts if a["id"] != alert_id]
+        self._alert_state.pop(alert_id, None)
+        return len(self._alerts) < before
+
+    def _eval_alerts(self, sample: "ResourceSample",
+                     pressures: dict[str, float]) -> None:
+        sample_d = sample.to_dict()
+        for alert in self._alerts:
+            key = alert["key"]
+            value = pressures.get(key, sample_d.get(key))
+            if value is None:
+                continue
+            try:
+                firing = (float(value) >= alert["threshold"]
+                          if alert["above"]
+                          else float(value) <= alert["threshold"])
+            except (TypeError, ValueError):
+                continue
+            was = self._alert_state.get(alert["id"], False)
+            self._alert_state[alert["id"]] = firing
+            if firing != was:  # edge-triggered
+                try:
+                    alert["fn"]({"key": key, "value": float(value),
+                                 "threshold": alert["threshold"],
+                                 "firing": firing,
+                                 "above": alert["above"]})
+                except Exception:  # noqa: BLE001 — alerts never break sampling
+                    pass
+
+    # -- presentation ------------------------------------------------------
+    @staticmethod
+    def _gauge(frac: Optional[float], width: int = 16) -> str:
+        """Unicode pressure bar.  ``None`` renders as unknown."""
+        if frac is None:
+            return "░" * width + "  n/a"
+        frac = max(0.0, min(1.0, float(frac)))
+        filled = int(round(frac * width))
+        bar = "█" * filled + "░" * (width - filled)
+        if frac >= 0.92:
+            mark = "!!"
+        elif frac >= 0.70:
+            mark = " !"
+        else:
+            mark = "  "
+        return f"{bar}{mark} {frac * 100:5.1f}%"
+
+    def render(self, sample: Optional["ResourceSample"] = None,
+               pressures: Optional[dict[str, float]] = None) -> str:
+        """God-tier plain-text resource dashboard with pressure gauges."""
+        try:
+            sample = sample or self.sample()
+            pressures = (pressures if pressures is not None
+                         else self.pressure(sample))
+        except Exception:  # noqa: BLE001 — render degrades, never raises
+            return "resources — unavailable"
+        g = self._gauge
+        lines = ["resources"]
+        cpu = sample.cpu_util_percent if sample.cpu_util_percent is not None \
+            else sample.cpu_percent
+        lines.append(f"  cpu     {g((cpu or 0) / 100)}"
+                     + (f"  steal {sample.steal_percent:.1f}%"
+                        if sample.steal_percent else ""))
+        mem_line = f"  mem     {g(pressures.get('mem'))}"
+        if sample.mem_available_mb is not None:
+            mem_line += f"  {sample.mem_available_mb:.0f}MB avail"
+        if sample.effective_mem_mb is not None:
+            mem_line += f" / {sample.effective_mem_mb:.0f}MB effective"
+        lines.append(mem_line)
+        lines.append(f"  disk    {g(pressures.get('disk'))}"
+                     + (f"  {sample.disk_free_mb:.0f}MB free"
+                        if sample.disk_free_mb else ""))
+        if sample.battery_percent is not None:
+            status = f" ({sample.battery_status})" if sample.battery_status \
+                else ""
+            lines.append(f"  battery {g(sample.battery_percent / 100)}"
+                         f"{status}")
+        if sample.thermal_c is not None or sample.thermal_state:
+            lines.append(f"  thermal {sample.thermal_c if sample.thermal_c is not None else '?'}°C"
+                         f" [{sample.thermal_state or 'unknown'}]")
+        psi = sample.psi or {}
+        mem_psi = (psi.get("memory") or {})
+        if mem_psi:
+            some = mem_psi.get("some", {}).get("avg10")
+            full = mem_psi.get("full", {}).get("avg10")
+            lines.append(f"  psi     mem some {some if some is not None else '?'}%"
+                         f" / full {full if full is not None else '?'}% (avg10)")
+        overall = pressures.get("overall")
+        ladder = self.ladder.step()
+        lines.append(f"  overall {g(overall)}  ladder: {ladder.name}")
+        lines.append(f"  net     {'online' if sample.network_online else 'offline'}"
+                     + (" · metered" if sample.metered else ""))
+        return "\n".join(lines)
+
+    def summary_line(self) -> str:
+        """One-line status-bar summary: ``cpu 34% · mem 61% · ok``."""
+        try:
+            sample = self.sample()
+            pressures = self.pressure(sample)
+            overall = pressures.get("overall")
+            if overall is None:
+                return "resources n/a"
+            state = "ok"
+            if overall >= 0.92:
+                state = "critical"
+            elif overall >= 0.70:
+                state = "pressured"
+            cpu = sample.cpu_util_percent if sample.cpu_util_percent is not None \
+                else sample.cpu_percent
+            return (f"cpu {cpu:.0f}% · mem {(pressures.get('mem') or 0) * 100:.0f}%"
+                    f" · disk {(pressures.get('disk') or 0) * 100:.0f}%"
+                    f" · {state}")
+        except Exception:  # noqa: BLE001
+            return "resources n/a"
 
 
 # ---------------------------------------------------------------------------
