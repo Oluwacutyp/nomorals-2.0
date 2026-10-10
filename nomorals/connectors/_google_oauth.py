@@ -25,7 +25,7 @@ import urllib.parse
 from typing import Any
 
 from ..core.logging_setup import get_logger
-from .auth import prompt_secret
+from .auth import new_state, pkce_pair, prompt_secret
 from .base import Connector, ConnectorError
 
 __all__ = [
@@ -87,8 +87,17 @@ class GoogleOAuth:
     def google_authorize_url(
         self, client_id: str, scopes: list[str],
         redirect_uri: str = "",
+        *,
+        code_challenge: str = "",
+        state: str = "",
     ) -> str:
-        """The URL the owner opens to grant access."""
+        """The URL the owner opens to grant access.
+
+        Pass ``code_challenge`` (from :func:`pkce_pair`) to use PKCE S256 —
+        recommended for every authorization-code flow (RFC 9700 baseline).
+        Pass ``state`` (from :func:`new_state`) for CSRF binding; the
+        loopback flow generates and validates one automatically.
+        """
         params = {
             "client_id": client_id,
             "redirect_uri": redirect_uri or _OOB_REDIRECT,
@@ -97,18 +106,28 @@ class GoogleOAuth:
             "access_type": "offline",  # ask for a refresh token
             "prompt": "consent",  # re-issue the refresh token every time
         }
+        if code_challenge:
+            params["code_challenge"] = code_challenge
+            params["code_challenge_method"] = "S256"
+        if state:
+            params["state"] = state
         return f"{GOOGLE_AUTH_URL}?{urllib.parse.urlencode(params)}"
 
     def google_loopback_flow(
         self, client_id: str, client_secret: str, scopes: list[str],
         *,
         timeout: float = 300.0,
+        use_pkce: bool = True,
     ) -> dict[str, Any]:
         """OAuth flow via loopback redirect (replaces deprecated OOB).
 
         Spins up a temporary ``http://127.0.0.1:<port>/`` listener,
         returns the auth URL for the owner to open, waits for Google's
         redirect with the authorization code, then exchanges it for tokens.
+
+        With ``use_pkce=True`` (default) the flow uses PKCE S256 and a
+        one-time ``state`` that is validated before the code is accepted
+        (RFC 8252 §8 / RFC 9700 baseline).
 
         Returns the token dict from ``_google_exchange_code``.
         """
@@ -117,11 +136,26 @@ class GoogleOAuth:
 
         code_holder: dict[str, str] = {}
         error_holder: dict[str, str] = {}
+        verifier = ""
+        expected_state = ""
+        if use_pkce:
+            verifier, challenge = pkce_pair()
+            expected_state = new_state()
+        else:
+            challenge = ""
 
         class _Handler(http.server.BaseHTTPRequestHandler):
             def do_GET(self):  # noqa: N802
                 query = urllib.parse.urlparse(self.path).query
                 params = urllib.parse.parse_qs(query)
+                if use_pkce:
+                    got_state = params.get("state", [""])[0]
+                    if got_state != expected_state:
+                        # State validated FIRST, before anything else in
+                        # the callback is accepted; the flow keeps waiting.
+                        self._respond(400, "State mismatch — authorization "
+                                          "request not recognized.")
+                        return
                 if "code" in params:
                     code_holder["code"] = params["code"][0]
                     self._respond(200, "Authorization complete — you can close this tab.")
@@ -149,7 +183,10 @@ class GoogleOAuth:
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         try:
-            auth_url = self.google_authorize_url(client_id, scopes, redirect_uri=redirect_uri)
+            auth_url = self.google_authorize_url(
+                client_id, scopes, redirect_uri=redirect_uri,
+                code_challenge=challenge, state=expected_state,
+            )
             print(f"\nOpen this URL to authorize:\n{auth_url}\n")
             print(f"Waiting for authorization (timeout {timeout:.0f}s)...")
 
@@ -170,6 +207,7 @@ class GoogleOAuth:
 
             return self._google_exchange_code_loopback(
                 client_id, client_secret, code_holder["code"], redirect_uri,
+                code_verifier=verifier,
             )
         finally:
             server.shutdown()
@@ -181,21 +219,26 @@ class GoogleOAuth:
         client_secret: str,
         code: str,
         redirect_uri: str,
+        *,
+        code_verifier: str = "",
     ) -> dict[str, Any]:
         """Swap an authorization code for tokens (loopback redirect)."""
         code = (code or "").strip()
         if not code:
             raise ConnectorError("empty authorization code from loopback redirect")
+        form: dict[str, Any] = {
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "code": code,
+            "grant_type": "authorization_code",
+            "redirect_uri": redirect_uri,
+        }
+        if code_verifier:
+            form["code_verifier"] = code_verifier
         try:
             resp = self.http.post_form(  # type: ignore[attr-defined]
                 GOOGLE_TOKEN_URL,
-                {
-                    "client_id": client_id,
-                    "client_secret": client_secret,
-                    "code": code,
-                    "grant_type": "authorization_code",
-                    "redirect_uri": redirect_uri,
-                },
+                form,
             )
         except Exception as exc:
             raise ConnectorError(f"Google token exchange failed: {exc}") from exc

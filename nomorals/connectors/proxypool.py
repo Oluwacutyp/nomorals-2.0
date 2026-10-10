@@ -106,6 +106,7 @@ class ProxyPoolConnector(Connector):
         "SOCKS4/SOCKS4a/SOCKS5. Local service — no external auth."
     )
     auth_methods = (AuthMethod.NONE,)
+    CATEGORY = "network"
     PROVISIONABLE = ("proxy",)
 
     #: Proxy protocols this pool can store and actively health-check.
@@ -118,9 +119,18 @@ class ProxyPoolConnector(Connector):
     #: Password placeholder used in every non-secret view.
     MASK = "***"
 
+    #: Rotation strategies for select(): power-of-two-choices (proxyhive
+    #: default — avoids hotspotting), round-robin, random, least-latency.
+    STRATEGIES = ("p2c", "round_robin", "random", "least_latency")
+
+    #: EWMA smoothing for latency (proxyhive default 0.3).
+    LATENCY_EWMA_ALPHA = 0.3
+
     def __init__(self, vault: Any, http: Any = None) -> None:
         super().__init__(vault, http=http)
         self._rr = 0  # round-robin cursor (in-memory; resets on disconnect)
+        #: sticky sessions: key -> (proxy_id, expires_at), in-memory.
+        self._sticky: dict[str, tuple[str, float]] = {}
 
     # ── lifecycle ────────────────────────────────────────────────
 
@@ -252,6 +262,8 @@ class ProxyPoolConnector(Connector):
         password: str | None = None,
         protocol: str = "http",
         tags: list[str] | tuple[str, ...] | None = None,
+        country: str = "",
+        city: str = "",
     ) -> dict[str, Any]:
         """Store a proxy endpoint. Re-adding an endpoint updates it in place.
 
@@ -261,6 +273,9 @@ class ProxyPoolConnector(Connector):
         and SOCKS4a have no password authentication by protocol design —
         passing a password with them raises immediately (use SOCKS5 for
         user/pass proxies).
+
+        ``country``/``city`` (ISO-3166 / free text) power geo-filtered
+        selection via :meth:`select` — proxyhive-style geo targeting.
 
         The proxy password is encrypted into the vault; list/status views
         never expose it. Returns the stored proxy with the password masked.
@@ -302,6 +317,8 @@ class ProxyPoolConnector(Connector):
             "protocol": protocol,
             "proxy_username": proxy_user,
             "tags": clean_tags,
+            "country": (country or "").strip().upper(),
+            "city": (city or "").strip(),
             "health": health,
         }
         cred = self.vault.store(
@@ -780,17 +797,43 @@ class ProxyPoolConnector(Connector):
         meta = dict(cred.metadata or {})
         health = dict(meta.get("health") or {}) or self._blank_health()
         now = time.time()
+        prev_ewma = health.get("latency_ewma_ms")
+        ewma = prev_ewma
+        if ok and latency_ms is not None:
+            alpha = self.LATENCY_EWMA_ALPHA
+            ewma = (latency_ms if prev_ewma is None
+                    else alpha * latency_ms + (1 - alpha) * prev_ewma)
+        checks = int(health.get("checks", 0) or 0) + 1
+        successes = int(health.get("successes", 0) or 0) + (1 if ok else 0)
+        consecutive = (0 if ok
+                       else int(health.get("consecutive_failures", 0) or 0) + 1)
         health.update(
             {
                 "status": HEALTHY if ok else UNHEALTHY,
                 "latency_ms": latency_ms,
+                "latency_ewma_ms": ewma,
                 "status_code": status_code,
                 "last_checked": now,
                 "last_error": error if not ok else "",
-                "consecutive_failures": 0 if ok else int(health.get("consecutive_failures", 0) or 0) + 1,
-                "checks": int(health.get("checks", 0) or 0) + 1,
+                "consecutive_failures": consecutive,
+                "checks": checks,
+                "successes": successes,
+                "score": self._health_score(successes, checks, ewma),
             }
         )
+        # Automatic exponential backoff: 3+ consecutive failures parks the
+        # proxy in quarantine with a growing cooldown (production proxy
+        # practice) instead of letting rotation keep tripping over it.
+        if consecutive >= 3:
+            cooldown = min(300.0 * (2 ** (consecutive - 3)), 3600.0)
+            health["quarantined_until"] = now + cooldown
+            health["quarantine_reason"] = (
+                f"auto: {consecutive} consecutive failures"
+                + (f" ({error[:80]})" if error else "")
+            )
+        elif ok:
+            health["quarantined_until"] = 0.0
+            health["quarantine_reason"] = ""
         meta["health"] = health
         return self.vault.store(
             service=self._service,
@@ -801,7 +844,249 @@ class ProxyPoolConnector(Connector):
             metadata=meta,
         )
 
+    @staticmethod
+    def _health_score(
+        successes: int, checks: int, ewma_ms: float | None
+    ) -> float:
+        """0–100 proxy quality score (proxyhub formula).
+
+        ``score = success_rate * 60 + latency_score * 40`` where the
+        latency curve maps 100ms→~100 and 2000ms+→0. Unchecked proxies
+        score a neutral 50 so new entries are selectable.
+        """
+        if checks <= 0:
+            return 50.0
+        success_rate = max(0.0, min(1.0, successes / checks))
+        if ewma_ms is None:
+            latency_score = 50.0
+        else:
+            latency_score = max(0.0, min(100.0, 100.0 * (2000.0 - ewma_ms) / 1900.0))
+        return round(success_rate * 60.0 + latency_score * 0.4, 1)
+
     # ── rotation ───────────────────────────────────────────────
+
+    def _quarantined(self, health: dict[str, Any],
+                     now: float | None = None) -> bool:
+        until = float(health.get("quarantined_until", 0.0) or 0.0)
+        return until > (time.time() if now is None else now)
+
+    def _eligible_proxies(
+        self,
+        *,
+        country: str | None = None,
+        protocol: str | None = None,
+        max_latency_ms: float | None = None,
+        min_score: float = 0.0,
+        include_unchecked: bool = False,
+    ) -> list[Credential]:
+        """Healthy, un-quarantined proxies matching the filters.
+
+        ``include_unchecked=True`` also admits never-checked proxies
+        (neutral score 50) — useful for bootstrapping a fresh pool.
+        """
+        now = time.time()
+        wanted_country = (country or "").strip().upper()
+        wanted_proto = (protocol or "").strip().lower()
+        out: list[Credential] = []
+        for cred in sorted(self._load_all(), key=lambda c: c.id):
+            meta = cred.metadata or {}
+            health = dict(meta.get("health") or {})
+            if self._quarantined(health, now):
+                continue
+            status = health.get("status", UNKNOWN)
+            if status != HEALTHY and not (
+                    include_unchecked and status == UNKNOWN):
+                continue
+            if wanted_country and str(meta.get("country", "")).upper() != wanted_country:
+                continue
+            if wanted_proto and str(meta.get("protocol", "")) != wanted_proto:
+                continue
+            if max_latency_ms is not None:
+                ewma = health.get("latency_ewma_ms")
+                if ewma is not None and float(ewma) > max_latency_ms:
+                    continue
+            if float(health.get("score", 50.0) or 50.0) < min_score:
+                continue
+            out.append(cred)
+        return out
+
+    @staticmethod
+    def _proxy_score(cred: Credential) -> float:
+        return float(((cred.metadata or {}).get("health") or {}).get(
+            "score", 50.0) or 50.0)
+
+    def select(
+        self,
+        strategy: str = "p2c",
+        *,
+        country: str | None = None,
+        protocol: str | None = None,
+        max_latency_ms: float | None = None,
+        min_score: float = 0.0,
+        include_unchecked: bool = False,
+    ) -> dict[str, Any]:
+        """Pick one proxy by strategy (proxyhive-style).
+
+        Strategies: ``p2c`` (power of two choices — sample two at random,
+        take the higher score; the default, avoids hotspotting),
+        ``round_robin``, ``random``, ``least_latency`` (lowest EWMA).
+        Filters: ``country`` (ISO-3166), ``protocol``, ``max_latency_ms``
+        (EWMA ceiling), ``min_score``. Raises :class:`ProxyPoolError`
+        when nothing is eligible.
+        """
+        import random as _random
+
+        strategy = (strategy or "p2c").strip().lower()
+        if strategy not in self.STRATEGIES:
+            raise ProxyPoolError(
+                f"unknown rotation strategy {strategy!r}: "
+                f"use one of {', '.join(self.STRATEGIES)}"
+            )
+        eligible = self._eligible_proxies(
+            country=country, protocol=protocol,
+            max_latency_ms=max_latency_ms, min_score=min_score,
+            include_unchecked=include_unchecked,
+        )
+        if not eligible:
+            raise ProxyPoolError(
+                "no eligible proxies for "
+                f"strategy={strategy} country={country} protocol={protocol} "
+                "— run health_check() or loosen the filters"
+            )
+        if strategy == "round_robin":
+            pick = eligible[self._rr % len(eligible)]
+            self._rr += 1
+        elif strategy == "random":
+            pick = _random.choice(eligible)
+        elif strategy == "least_latency":
+            def _lat(c: Credential) -> float:
+                ewma = ((c.metadata or {}).get("health") or {}).get(
+                    "latency_ewma_ms")
+                return float(ewma) if ewma is not None else float("inf")
+            pick = min(eligible, key=_lat)
+        else:  # p2c: two random candidates, higher score wins
+            a, b = (_random.choice(eligible), _random.choice(eligible))
+            pick = a if self._proxy_score(a) >= self._proxy_score(b) else b
+        cred = self.vault.get(self._service, pick.username, mark_used=False)
+        _log.info("proxypool: selected %s via %s", pick.username, strategy)
+        details = self._details(cred, include_secret=True)
+        details["selection_strategy"] = strategy
+        return details
+
+    def sticky_acquire(
+        self, key: str, *, ttl: float = 600.0, **filters: Any
+    ) -> dict[str, Any]:
+        """Pin ``key`` to one proxy for ``ttl`` seconds (sticky session).
+
+        Login flows, carts, multi-step scrapes — anywhere rotating the IP
+        mid-session would look incoherent (identity discipline: the proxy
+        rotates as part of the session, not independently of it). The pin
+        survives as long as the proxy stays eligible; a dead or
+        quarantined proxy transparently re-pins to a fresh one.
+        """
+        key = (key or "").strip()
+        if not key:
+            raise ProxyPoolError("sticky_acquire needs a non-empty key")
+        now = time.time()
+        pinned = self._sticky.get(key)
+        if pinned:
+            proxy_id, expires_at = pinned
+            if expires_at > now:
+                try:
+                    cred = self.vault.get(self._service, proxy_id,
+                                          mark_used=False)
+                    health = dict((cred.metadata or {}).get("health") or {})
+                    if (health.get("status") == HEALTHY
+                            and not self._quarantined(health, now)):
+                        details = self._details(cred, include_secret=True)
+                        details["sticky"] = True
+                        details["sticky_key"] = key
+                        return details
+                except Exception:  # noqa: BLE001 - re-pin on any problem
+                    pass
+            self._sticky.pop(key, None)
+        details = self.select(**filters)
+        self._sticky[key] = (details["id"], now + ttl)
+        details["sticky"] = True
+        details["sticky_key"] = key
+        details["sticky_ttl"] = ttl
+        return details
+
+    def sticky_release(self, key: str) -> bool:
+        """Drop the sticky pin for ``key``. Returns True when one existed."""
+        return self._sticky.pop((key or "").strip(), None) is not None
+
+    def quarantine(
+        self, proxy_id: str, seconds: float = 300.0, reason: str = ""
+    ) -> dict[str, Any]:
+        """Park a proxy for ``seconds`` (ban/block cooldown).
+
+        Quarantined proxies are skipped by :meth:`select` and
+        :meth:`rotate` until the cooldown expires; health status is
+        untouched, so a later successful check re-admits them. Use for
+        BLOCK/CHALLENGE classifications — the proxy isn't dead, the target
+        just doesn't want to see it right now.
+        """
+        pid = self._normalize_id(proxy_id)
+        cred = self.vault.get(self._service, pid, mark_used=False)
+        meta = dict(cred.metadata or {})
+        health = dict(meta.get("health") or {}) or self._blank_health()
+        health["quarantined_until"] = time.time() + max(1.0, seconds)
+        health["quarantine_reason"] = reason or "manual quarantine"
+        meta["health"] = health
+        self.vault.store(
+            service=self._service, username=pid, password=cred.password,
+            credential_type=cred.credential_type,
+            tags=list(cred.tags or []), metadata=meta,
+        )
+        _log.info("proxypool: quarantined %s for %.0fs (%s)", pid, seconds,
+                  health["quarantine_reason"])
+        return self._public_view(
+            self.vault.get(self._service, pid, mark_used=False))
+
+    def stats(self) -> dict[str, Any]:
+        """Pool rollup: totals, health mix, latency, geo/protocol spread."""
+        creds = self._load_all()
+        now = time.time()
+        healthy = unhealthy = unknown = quarantined = 0
+        latencies: list[float] = []
+        countries: dict[str, int] = {}
+        protocols: dict[str, int] = {}
+        scores: list[float] = []
+        for cred in creds:
+            meta = cred.metadata or {}
+            health = dict(meta.get("health") or {})
+            status = health.get("status", UNKNOWN)
+            if self._quarantined(health, now):
+                quarantined += 1
+            if status == HEALTHY:
+                healthy += 1
+            elif status == UNHEALTHY:
+                unhealthy += 1
+            else:
+                unknown += 1
+            ewma = health.get("latency_ewma_ms")
+            if ewma is not None:
+                latencies.append(float(ewma))
+            scores.append(float(health.get("score", 50.0) or 50.0))
+            c = str(meta.get("country", "")).upper() or "??"
+            countries[c] = countries.get(c, 0) + 1
+            p = str(meta.get("protocol", "http"))
+            protocols[p] = protocols.get(p, 0) + 1
+        return {
+            "total": len(creds),
+            "healthy": healthy,
+            "unhealthy": unhealthy,
+            "unchecked": unknown,
+            "quarantined": quarantined,
+            "avg_latency_ms": (round(sum(latencies) / len(latencies), 1)
+                               if latencies else None),
+            "avg_score": (round(sum(scores) / len(scores), 1)
+                          if scores else None),
+            "countries": dict(sorted(countries.items())),
+            "protocols": dict(sorted(protocols.items())),
+            "sticky_pins": len(self._sticky),
+        }
 
     def record_failure(self, proxy_id: str, error: str = "") -> dict[str, Any]:
         """Demote a proxy that just failed a real request.
@@ -847,20 +1132,13 @@ class ProxyPoolConnector(Connector):
     def rotate(self) -> dict[str, Any]:
         """Next healthy proxy, round-robin. Includes the credential.
 
-        Skips proxies whose last recorded check was not healthy. Raises
-        :class:`ProxyPoolError` when no healthy proxy exists — run
-        :meth:`health_check` to refresh the pool first.
+        Skips proxies whose last recorded check was not healthy and any
+        under quarantine. Raises :class:`ProxyPoolError` when no healthy
+        proxy exists — run :meth:`health_check` to refresh the pool first.
+        For strategy-based picking (p2c, least-latency, geo) use
+        :meth:`select`.
         """
-        healthy = sorted(
-            (
-                c
-                for c in self._load_all()
-                if ((c.metadata or {}).get("health") or {}).get("status") == HEALTHY
-            ),
-            # Insertion order (auto-increment id), not alphabetical: the user
-            # expects round-robin to follow the order they added proxies.
-            key=lambda c: c.id,
-        )
+        healthy = self._eligible_proxies()
         if not healthy:
             total = len(self._load_all())
             raise ProxyPoolError(
@@ -891,11 +1169,16 @@ class ProxyPoolConnector(Connector):
         return {
             "status": UNKNOWN,
             "latency_ms": None,
+            "latency_ewma_ms": None,
             "status_code": None,
             "last_checked": 0.0,
             "last_error": "",
             "consecutive_failures": 0,
             "checks": 0,
+            "successes": 0,
+            "score": 50.0,
+            "quarantined_until": 0.0,
+            "quarantine_reason": "",
         }
 
     @staticmethod
@@ -1007,6 +1290,8 @@ class ProxyPoolConnector(Connector):
             "host": meta.get("host", ""),
             "port": meta.get("port", 0),
             "protocol": meta.get("protocol", "http"),
+            "country": str(meta.get("country", "") or ""),
+            "city": str(meta.get("city", "") or ""),
             "username": str(meta.get("proxy_username") or ""),
             "password": self.MASK if authed else "",
             "has_auth": authed,

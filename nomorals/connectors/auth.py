@@ -13,8 +13,11 @@ silently continuing without credentials.
 
 from __future__ import annotations
 
+import base64
 import getpass
+import hashlib
 import os
+import secrets
 import sys
 import time
 from collections.abc import Callable
@@ -26,11 +29,37 @@ from .base import ConnectorError
 
 __all__ = [
     "device_flow_token",
+    "new_state",
     "pick_scopes",
+    "pkce_pair",
     "prompt_secret",
 ]
 
 _log = get_logger(__name__)
+
+
+def pkce_pair() -> tuple[str, str]:
+    """Generate a PKCE code verifier + S256 challenge (RFC 7636).
+
+    Returns ``(verifier, challenge)``. The verifier is 64 chars of
+    high-entropy urlsafe text (within the 43–128 range); the challenge is
+    ``BASE64URL(SHA256(verifier))`` with padding stripped. Recommended for
+    *all* authorization-code flows (RFC 9700 baseline) — public clients
+    must use it, confidential clients should.
+    """
+    verifier = secrets.token_urlsafe(48)[:64]
+    digest = hashlib.sha256(verifier.encode("ascii")).digest()
+    challenge = base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
+    return verifier, challenge
+
+
+def new_state(nbytes: int = 32) -> str:
+    """High-entropy ``state`` for an authorization request (CSRF binding).
+
+    Validate it *before* accepting anything else in the callback — a
+    mismatch gets rejected and the flow keeps waiting.
+    """
+    return secrets.token_urlsafe(nbytes)
 
 
 def prompt_secret(prompt: str, *, env_var: str | None = None) -> str:

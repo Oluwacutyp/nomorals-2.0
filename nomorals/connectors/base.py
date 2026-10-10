@@ -37,12 +37,22 @@ from ..core.logging_setup import get_logger
 __all__ = [
     "AuthMethod",
     "Connector",
+    "ConnectorAuthError",
     "ConnectorError",
+    "ConnectorNetworkError",
+    "ConnectorNotFoundError",
+    "ConnectorRateLimitError",
     "ConnectorStatus",
+    "ConnectorValidationError",
     "ConnectResult",
+    "paginate",
+    "request_with_retry",
 ]
 
 _log = get_logger(__name__)
+
+#: HTTP statuses worth one more try (plus 429 handled separately).
+_RETRYABLE_STATUSES = frozenset({408, 425, 429, 500, 502, 503, 504})
 
 
 def _emit(topic: str, data: dict[str, Any]) -> None:
@@ -91,6 +101,203 @@ def _emitting_lifecycle(
 
 class ConnectorError(NoMoralsError):
     """Anything wrong in the connector layer: auth, API, provisioning."""
+
+
+class ConnectorAuthError(ConnectorError):
+    """The credential is missing, invalid, expired, or revoked.
+
+    Callers treat this as "re-authenticate", never "retry the request":
+    it drives the reauth flow the way Home Assistant's
+    ``ConfigEntryAuthFailed`` does. Never carries secret material.
+    """
+
+
+class ConnectorRateLimitError(ConnectorError):
+    """The service throttled us. Back off for :attr:`retry_after` seconds.
+
+    Mirrors ccxt's ``RateLimitExceeded`` / HA's
+    ``UpdateFailed(retry_after=...)``: the error itself carries the wait,
+    so callers don't have to parse headers.
+    """
+
+    def __init__(self, message: str, *, retry_after: float = 0.0) -> None:
+        super().__init__(message)
+        self.retry_after = max(0.0, float(retry_after))
+
+
+class ConnectorNetworkError(ConnectorError):
+    """Transport-level failure: DNS, TLS, connect timeout, reset.
+
+    Safe to retry with backoff; distinct from auth (don't re-auth) and
+    rate limits (don't wait on Retry-After).
+    """
+
+
+class ConnectorNotFoundError(ConnectorError, NotFound):
+    """The remote object (repo, chat, order, file) does not exist.
+
+    Subclasses both so ``except NotFound`` and ``except ConnectorError``
+    handlers keep working.
+    """
+
+
+class ConnectorValidationError(ConnectorError):
+    """The request was rejected: bad arguments, bad state, 4xx semantics.
+
+    Retrying the identical request will fail identically — fix the call.
+    """
+
+
+def request_with_retry(
+    do_request: Callable[[], Any],
+    *,
+    op: str = "request",
+    max_attempts: int = 4,
+    base_delay: float = 1.0,
+    max_delay: float = 30.0,
+    retry_after: Callable[[Any], float] | None = None,
+) -> Any:
+    """Run ``do_request`` with exponential backoff + jitter.
+
+    Retries :class:`ConnectorRateLimitError` (honoring its ``retry_after``),
+    :class:`ConnectorNetworkError`, and provider ``RequestError``-shaped
+    failures carrying a retryable ``status`` attribute (429/5xx). Anything
+    else — auth errors, validation errors, 4xx — fails fast and loud, the
+    way ccxt refuses silent fallbacks.
+
+    ``retry_after`` optionally extracts a server-advised wait from the raw
+    response/exception when the raised error doesn't carry one.
+    """
+    import random
+    import time as _time
+
+    attempt = 0
+    while True:
+        attempt += 1
+        try:
+            return do_request()
+        except ConnectorAuthError:
+            raise
+        except ConnectorValidationError:
+            raise
+        except ConnectorNotFoundError:
+            raise
+        except (ConnectorRateLimitError, ConnectorNetworkError) as exc:
+            wait = getattr(exc, "retry_after", 0.0) or 0.0
+            if retry_after is not None:
+                try:
+                    advised = float(retry_after(exc) or 0.0)
+                    wait = max(wait, advised)
+                except Exception:  # noqa: BLE001 - advisory only
+                    pass
+            if attempt >= max_attempts:
+                raise ConnectorError(
+                    f"{op} failed after {attempt} attempts (rate "
+                    f"limited/unreachable): {exc}"
+                ) from exc
+            sleep_for = min(max(wait, base_delay * (2 ** (attempt - 1))), max_delay)
+            sleep_for *= 0.8 + random.random() * 0.4  # ±20% jitter
+            _log.debug("%s: attempt %d failed (%s); retry in %.1fs",
+                       op, attempt, exc, sleep_for)
+            _time.sleep(sleep_for)
+        except Exception as exc:  # noqa: BLE001 - provider errors are opaque
+            status = getattr(exc, "status", getattr(exc, "status_code", 0))
+            try:
+                status = int(status or 0)
+            except (TypeError, ValueError):
+                status = 0
+            if status in _RETRYABLE_STATUSES and attempt < max_attempts:
+                sleep_for = min(base_delay * (2 ** (attempt - 1)), max_delay)
+                sleep_for *= 0.8 + random.random() * 0.4
+                _log.debug("%s: HTTP %s, retry %d in %.1fs",
+                           op, status, attempt, sleep_for)
+                _time.sleep(sleep_for)
+                continue
+            raise
+
+
+def _parse_link_next(headers: Any) -> str:
+    """Extract the ``rel="next"`` URL from a Link header, or ""."""
+    get = getattr(headers, "get", None)
+    link = get("link", "") if callable(get) else ""
+    if not link and isinstance(headers, dict):
+        link = headers.get("Link", "") or headers.get("link", "")
+    for part in str(link).split(","):
+        segments = [s.strip() for s in part.split(";")]
+        if len(segments) >= 2 and 'rel="next"' in segments[1]:
+            url = segments[0].strip()
+            if url.startswith("<") and url.endswith(">"):
+                return url[1:-1]
+    return ""
+
+
+def paginate(
+    fetch_page: Callable[..., Any],
+    *,
+    style: str = "link",
+    page_param: str = "page",
+    per_page: int = 100,
+    max_pages: int = 50,
+    items_key: Callable[[Any], list[Any]] | str = "",
+) -> Any:
+    """Yield items across a paginated REST list endpoint.
+
+    Two styles (Octokit/PyGithub teach both):
+
+    * ``style="link"`` — ``fetch_page(url=...)`` returns ``(items, headers)``
+      and pagination follows the ``Link: <...>; rel="next"`` header.
+    * ``style="page"`` — ``fetch_page(page=n, per_page=m)`` returns a list
+      (or a dict; then ``items_key`` names the list field); stops on a
+      short/empty page.
+
+    ``items_key`` may also be a callable mapping the raw page to a list.
+    Bounded by ``max_pages`` so a misbehaving API can't loop forever.
+    """
+    if style == "link":
+        pages = 0
+        next_url: str | None = None
+        first = True
+        while pages < max_pages:
+            if first:
+                raw = fetch_page()
+                first = False
+            else:
+                if not next_url:
+                    return
+                raw = fetch_page(url=next_url)
+            pages += 1
+            if isinstance(raw, tuple):
+                items, headers = raw[0], (raw[1] if len(raw) > 1 else {})
+            else:
+                items, headers = raw, {}
+            if callable(items_key):
+                items = items_key(items)
+            elif isinstance(items_key, str) and items_key and isinstance(items, dict):
+                items = items.get(items_key, [])
+            yield from items if isinstance(items, list) else []
+            next_url = _parse_link_next(headers)
+            if not next_url:
+                return
+        return
+    # style == "page"
+    page = 1
+    pages = 0
+    while pages < max_pages:
+        raw = fetch_page(page=page, per_page=per_page)
+        pages += 1
+        if callable(items_key):
+            items = items_key(raw)
+        elif isinstance(items_key, str) and items_key and isinstance(raw, dict):
+            items = raw.get(items_key, [])
+        else:
+            items = raw
+        batch = items if isinstance(items, list) else []
+        if not batch:
+            return
+        yield from batch
+        if len(batch) < per_page:
+            return
+        page += 1
 
 
 class AuthMethod(StrEnum):
@@ -178,6 +385,11 @@ class Connector(ABC):
     #: ("repo", "webhook", "deploy_key"). Empty means no provisioning.
     PROVISIONABLE: tuple[str, ...] = ()
 
+    #: n8n/HA-style grouping for fleet views: "payments", "trading",
+    #: "social", "messaging", "cloud", "media", "travel", "data",
+    #: "network", "productivity", ... Empty = uncategorized.
+    CATEGORY: str = ""
+
     def __init__(
         self,
         vault: CredentialVault,
@@ -216,6 +428,45 @@ class Connector(ABC):
     def connect_url(self) -> str | None:
         """OAuth authorize URL when the flow starts in a browser, else None."""
         return None
+
+    def capabilities(self) -> dict[str, Any]:
+        """What this connector can do, in one standard shape.
+
+        Several connectors historically defined their own ad-hoc
+        ``capabilities()`` dicts; this is the unified contract they
+        converge on::
+
+            {
+                "id": ..., "name": ..., "category": ...,
+                "auth_methods": [...],
+                "provisionable": [...],
+                "features": ["send_message", "get_updates", ...],
+                "webhooks": {"inbound": bool, "outbound": bool},
+            }
+
+        ``features`` defaults to the connector's public action methods
+        (lifecycle methods excluded); subclasses override to curate.
+        """
+        lifecycle = {
+            "connect", "disconnect", "status", "test_connection",
+            "connect_url", "can_provision", "provision",
+            "request_human", "resume_checkpoint", "capabilities",
+        }
+        features = sorted(
+            name for name in dir(self)
+            if not name.startswith("_")
+            and name not in lifecycle
+            and callable(getattr(self, name, None))
+        )
+        return {
+            "id": self.id,
+            "name": self.name,
+            "category": self.CATEGORY,
+            "auth_methods": [m.value for m in self.auth_methods],
+            "provisionable": list(self.PROVISIONABLE),
+            "features": features,
+            "webhooks": {"inbound": False, "outbound": False},
+        }
 
     # ── provisioning ───────────────────────────────────────────────
 

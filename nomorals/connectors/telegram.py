@@ -24,6 +24,7 @@ from .base import (
     AuthMethod,
     Connector,
     ConnectorError,
+    ConnectorRateLimitError,
     ConnectorStatus,
     ConnectResult,
 )
@@ -60,11 +61,13 @@ class TelegramConnector(Connector):
     id = "telegram"
     name = "Telegram"
     description = (
-        "Telegram Bot API: verify the bot, send messages to chats, poll "
-        "updates, inspect chats, and leave chats. Authenticates with a "
-        "bot token from @BotFather."
+        "Telegram Bot API: verify the bot, send messages and media (photo, "
+        "video, document, albums), edit/delete messages, answer inline "
+        "keyboard callbacks, manage webhooks, poll updates, inspect chats, "
+        "and leave chats. Authenticates with a bot token from @BotFather."
     )
     auth_methods = (AuthMethod.API_KEY,)
+    CATEGORY = "messaging"
 
     # ── lifecycle ────────────────────────────────────────────────
 
@@ -225,6 +228,196 @@ class TelegramConnector(Connector):
         """Leave a group/supergroup/channel (``leaveChat``)."""
         return bool(self._api("leaveChat", params={"chat_id": chat_id}))
 
+    # ── media ────────────────────────────────────────────────────
+
+    @staticmethod
+    def _media_params(
+        chat_id: str | int, caption: str, parse_mode: str
+    ) -> dict[str, Any]:
+        if len(caption) > 1024:
+            raise ConnectorError(
+                f"caption is {len(caption)} chars; telegram caps captions "
+                "at 1024 — shorten it first"
+            )
+        if parse_mode and parse_mode not in ("HTML", "MarkdownV2"):
+            raise ConnectorError(
+                f"invalid parse_mode {parse_mode!r}: use 'HTML' or 'MarkdownV2'"
+            )
+        params: dict[str, Any] = {"chat_id": chat_id}
+        if caption:
+            params["caption"] = caption
+        if parse_mode:
+            params["parse_mode"] = parse_mode
+        return params
+
+    @staticmethod
+    def _is_local_file(value: str) -> bool:
+        from pathlib import Path
+        return not value.startswith(("http://", "https://", "file_id:")) and bool(
+            value) and Path(value).is_file()
+
+    def send_photo(
+        self, chat_id: str | int, photo: str,
+        *, caption: str = "", parse_mode: str = "",
+        disable_notification: bool = False,
+    ) -> dict[str, Any]:
+        """Send a photo (``sendPhoto``).
+
+        ``photo`` is a local file path (uploaded), an ``https://`` URL, or
+        a Telegram ``file_id``. Photos cap at 10 MB server-side.
+        """
+        params = self._media_params(chat_id, caption, parse_mode)
+        if disable_notification:
+            params["disable_notification"] = True
+        if self._is_local_file(photo):
+            return self._api_multipart(
+                "sendPhoto", params, {"photo": photo})
+        params["photo"] = photo
+        return self._api("sendPhoto", params=params)
+
+    def send_document(
+        self, chat_id: str | int, document: str,
+        *, caption: str = "", parse_mode: str = "",
+        filename: str = "",
+    ) -> dict[str, Any]:
+        """Send a file (``sendDocument``) — up to 50 MB via Bot API."""
+        params = self._media_params(chat_id, caption, parse_mode)
+        if self._is_local_file(document):
+            return self._api_multipart(
+                "sendDocument", params, {"document": document})
+        params["document"] = document
+        if filename:
+            params["filename"] = filename
+        return self._api("sendDocument", params=params)
+
+    def send_video(
+        self, chat_id: str | int, video: str,
+        *, caption: str = "", parse_mode: str = "",
+        supports_streaming: bool = True,
+    ) -> dict[str, Any]:
+        """Send a video (``sendVideo``) — up to 50 MB via Bot API."""
+        params = self._media_params(chat_id, caption, parse_mode)
+        params["supports_streaming"] = supports_streaming
+        if self._is_local_file(video):
+            return self._api_multipart(
+                "sendVideo", params, {"video": video})
+        params["video"] = video
+        return self._api("sendVideo", params=params)
+
+    def send_media_group(
+        self, chat_id: str | int, media: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        """Send an album of 2–10 photos/videos (``sendMediaGroup``).
+
+        Each item: ``{"type": "photo"|"video", "media": <path|url|file_id>,
+        "caption": "..."}``. Local files are uploaded with ``attach://``
+        references.
+        """
+        import json as _json
+
+        if not 2 <= len(media) <= 10:
+            raise ConnectorError(
+                f"media groups need 2–10 items, got {len(media)}")
+        upload_fields: dict[str, str] = {}
+        wire: list[dict[str, Any]] = []
+        for i, item in enumerate(media):
+            kind = str(item.get("type", "photo"))
+            if kind not in ("photo", "video"):
+                raise ConnectorError(
+                    f"media group item {i}: bad type {kind!r}")
+            src = str(item.get("media", ""))
+            entry: dict[str, Any] = {"type": kind}
+            if self._is_local_file(src):
+                ref = f"attach://upload{i}"
+                entry["media"] = ref
+                upload_fields[f"upload{i}"] = src
+            else:
+                entry["media"] = src
+            if item.get("caption"):
+                entry["caption"] = item["caption"][:1024]
+            wire.append(entry)
+        fields = {
+            "chat_id": str(chat_id),
+            "media": _json.dumps(wire),
+        }
+        if upload_fields:
+            return self._api_multipart("sendMediaGroup", fields, upload_fields)
+        result = self._api("sendMediaGroup", params=fields)
+        return result if isinstance(result, list) else []
+
+    # ── message management ───────────────────────────────────────
+
+    def edit_message_text(
+        self, chat_id: str | int, message_id: int, text: str,
+        *, parse_mode: str = "",
+    ) -> dict[str, Any]:
+        """Edit a sent message (``editMessageText``)."""
+        if not str(text):
+            raise ConnectorError("refusing to set an empty message text")
+        if len(text) > 4096:
+            raise ConnectorError(
+                f"text is {len(text)} chars; telegram caps messages at 4096")
+        params: dict[str, Any] = {
+            "chat_id": chat_id, "message_id": message_id, "text": text}
+        if parse_mode:
+            if parse_mode not in ("HTML", "MarkdownV2"):
+                raise ConnectorError(
+                    f"invalid parse_mode {parse_mode!r}")
+            params["parse_mode"] = parse_mode
+        return self._api("editMessageText", params=params)
+
+    def delete_message(self, chat_id: str | int, message_id: int) -> bool:
+        """Delete a message (``deleteMessage``)."""
+        return bool(self._api("deleteMessage", params={
+            "chat_id": chat_id, "message_id": message_id}))
+
+    def answer_callback_query(
+        self, callback_query_id: str, *, text: str = "",
+        show_alert: bool = False,
+    ) -> bool:
+        """Acknowledge an inline-keyboard button press.
+
+        Always answer callbacks — an unanswered button spins forever on
+        the user's client. ``text`` ≤ 200 chars.
+        """
+        params: dict[str, Any] = {"callback_query_id": callback_query_id}
+        if text:
+            params["text"] = text[:200]
+        if show_alert:
+            params["show_alert"] = True
+        return bool(self._api("answerCallbackQuery", params=params))
+
+    # ── webhooks ─────────────────────────────────────────────────
+
+    def set_webhook(
+        self, url: str, *, secret_token: str = "",
+        allowed_updates: list[str] | None = None,
+    ) -> bool:
+        """Register a webhook URL (``setWebhook``).
+
+        ``secret_token`` (1–256 chars) makes Telegram send
+        ``X-Telegram-Bot-Api-Secret-Token`` with every update — validate
+        it on the endpoint. Empty url switches back to polling.
+        """
+        params: dict[str, Any] = {"url": url}
+        if secret_token:
+            if not 1 <= len(secret_token) <= 256:
+                raise ConnectorError(
+                    "secret_token must be 1–256 characters")
+            params["secret_token"] = secret_token
+        if allowed_updates:
+            params["allowed_updates"] = allowed_updates
+        return bool(self._api("setWebhook", params=params))
+
+    def delete_webhook(self) -> bool:
+        """Remove the webhook (``deleteWebhook``) — back to polling."""
+        return bool(self._api("deleteWebhook"))
+
+    def get_webhook_info(self) -> dict[str, Any]:
+        """Current webhook status (``getWebhookInfo``)."""
+        result = self._api("getWebhookInfo")
+        return result if isinstance(result, dict) else {}
+
     # ── HTTP plumbing ────────────────────────────────────────────
 
     def _require_credential(self):
@@ -263,9 +456,19 @@ class TelegramConnector(Connector):
                 status_code=401,
             )
         if resp.status == 429:
-            raise TelegramError(
+            # Telegram returns 429 with {"parameters": {"retry_after": N}} —
+            # the taxonomy carries the wait so callers back off properly.
+            retry_after = 1.0
+            try:
+                body429 = resp.json()
+                params = (body429.get("parameters") or {}) if isinstance(
+                    body429, dict) else {}
+                retry_after = float(params.get("retry_after", 1) or 1)
+            except Exception:  # noqa: BLE001 - advisory only
+                pass
+            raise ConnectorRateLimitError(
                 "telegram rate limit hit (429) — back off before retrying",
-                status_code=429,
+                retry_after=retry_after,
             )
         if not resp.ok:
             raise TelegramError(
@@ -294,5 +497,52 @@ class TelegramConnector(Connector):
                 f"telegram {method} failed: {description}",
                 status_code=resp.status,
                 error_code=code,
+            )
+        return body.get("result")
+
+    def _api_multipart(
+        self,
+        method: str,
+        fields: dict[str, Any],
+        uploads: dict[str, str],
+    ) -> Any:
+        """One Bot API call with file uploads (multipart/form-data).
+
+        ``uploads`` maps form field name → local file path.
+        """
+        from pathlib import Path
+
+        secret = self._require_credential().password
+        url = f"{API_BASE}/bot{secret}/{method}"
+        str_fields = {k: str(v) for k, v in fields.items()}
+        files = [
+            (name, Path(path), "")
+            for name, path in uploads.items()
+        ]
+        try:
+            resp = self.http.post_multipart(
+                url, fields=str_fields, files=files)
+        except ConnectorError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - network layer is opaque
+            raise TelegramError(
+                f"telegram upload failed: {exc}") from exc
+        if resp.status == 401:
+            raise TelegramError(
+                "telegram rejected the bot token (401)",
+                status_code=401,
+            )
+        try:
+            body = resp.json()
+        except Exception as exc:  # noqa: BLE001 - invalid JSON is an error
+            raise TelegramError(
+                f"telegram {method} returned invalid JSON") from exc
+        if not isinstance(body, dict) or not body.get("ok"):
+            description = (
+                body.get("description", "unknown error")
+                if isinstance(body, dict) else "non-dict response")
+            raise TelegramError(
+                f"telegram {method} failed: {description}",
+                status_code=resp.status,
             )
         return body.get("result")

@@ -28,8 +28,6 @@ listen for.
 
 from __future__ import annotations
 
-import hashlib
-import hmac
 import time
 from typing import Any
 
@@ -98,6 +96,7 @@ class PaystackConnector(Connector):
         "Authenticates with a Paystack secret key (Bearer header)."
     )
     auth_methods = (AuthMethod.API_KEY,)
+    CATEGORY = "payments"
 
     # ── lifecycle ────────────────────────────────────────────────
 
@@ -711,12 +710,25 @@ class PaystackConnector(Connector):
         ``raw_body`` is the exact request bytes; the HMAC-SHA512 is keyed
         with the vaulted secret key. Returns False (does not raise) on
         mismatch — the receiver should answer 401 and ignore the payload.
+        Delegates to the shared :mod:`webhooks` verifier (one HMAC
+        implementation per provider, tested once).
         """
+        from .webhooks import verify_signature
+
         cred = self._require_credential()
-        expected = hmac.new(
-            cred.password.encode("utf-8"), raw_body, hashlib.sha512
-        ).hexdigest()
-        return hmac.compare_digest(expected, (signature or "").strip())
+        try:
+            verify_signature("paystack", raw_body, signature, cred.password)
+        except ConnectorError:
+            return False
+        return True
+
+    def parse_webhook_event(
+        self, raw_body: bytes | str | dict[str, Any]
+    ) -> dict[str, Any]:
+        """Parse a Paystack webhook body into a normalized event dict."""
+        from .webhooks import parse_event
+
+        return parse_event("paystack", raw_body).to_dict()
 
     # ── HTTP plumbing ────────────────────────────────────────────
 

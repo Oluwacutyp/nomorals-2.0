@@ -221,6 +221,33 @@ class CheckpointStore:
             )
         return [self._from_row(r) for r in rows]
 
+    def history(
+        self, connector_id: str | None = None, *, limit: int = 50
+    ) -> list[HumanCheckpoint]:
+        """Resolved/cancelled/expired checkpoints, newest first.
+
+        The audit trail for human-in-the-loop flows — what the owner was
+        asked, what they did, and when. Pairs with :meth:`list_pending`
+        (the queue) for dashboard views.
+        """
+        self.expire_stale()
+        limit = max(1, min(limit, 500))
+        if connector_id:
+            rows = self.db.query(
+                "SELECT * FROM connector_checkpoints "
+                "WHERE state != 'pending' AND connector_id = ? "
+                "ORDER BY updated_at DESC LIMIT ?",
+                (connector_id, limit),
+            )
+        else:
+            rows = self.db.query(
+                "SELECT * FROM connector_checkpoints "
+                "WHERE state != 'pending' "
+                "ORDER BY updated_at DESC LIMIT ?",
+                (limit,),
+            )
+        return [self._from_row(r) for r in rows]
+
     def resolve(
         self, checkpoint_id: str, note: str = ""
     ) -> HumanCheckpoint:

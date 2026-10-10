@@ -366,6 +366,30 @@ class DuffelConnector(Connector):
         )
         return "\n".join(lines)
 
+    def format_order(self, order: Order) -> str:
+        """Human-readable ticket confirmation for a booked order."""
+        lines = [
+            "🎫 Flight booked:",
+            f"  Booking ref: {order.booking_reference or order.id or '?'}",
+            f"  {order.origin} → {order.destination}",
+            f"  Total paid: {order.total}",
+        ]
+        passengers = (order.raw.get("passengers") or [])
+        names = [
+            f"{p.get('given_name', '')} {p.get('family_name', '')}".strip()
+            for p in passengers if isinstance(p, dict)
+        ]
+        names = [n for n in names if n]
+        if names:
+            lines.append(f"  Passengers: {', '.join(names)}")
+        if order.created_at:
+            lines.append(f"  Booked: {order.created_at}")
+        lines.append(
+            "Manage this booking (changes/cancellation) with "
+            "request_order_change() / cancel_order()."
+        )
+        return "\n".join(lines)
+
     def create_order(
         self,
         offer_id: str,

@@ -13,6 +13,7 @@ Capabilities:
 
 from __future__ import annotations
 
+import base64
 import contextlib
 import json
 import os
@@ -30,8 +31,10 @@ from .base import (
     AuthMethod,
     Connector,
     ConnectorError,
+    ConnectorRateLimitError,
     ConnectorStatus,
     ConnectResult,
+    paginate,
 )
 from .registry import register_connector
 
@@ -72,6 +75,7 @@ class GitHubConnector(Connector):
         "personal access token."
     )
     auth_methods = (AuthMethod.PAT,)
+    CATEGORY = "dev"
     PROVISIONABLE = (
         "repo",
         "branch",
@@ -382,6 +386,327 @@ class GitHubConnector(Connector):
         """One repository by ``owner/name``."""
         return self._api("GET", f"/repos/{full_name}")
 
+    # ── issues / pull requests / contents / search ─────────────
+
+    def _api_page(
+        self, path: str, params: dict[str, Any] | None = None
+    ) -> tuple[list[dict[str, Any]], dict[str, str]]:
+        """One GET page returning ``(items, headers)`` for Link walking."""
+        pat = self._require_credential().password
+        url = f"{API_BASE}{path}"
+        try:
+            resp = self.http.get(url, headers=self._headers(pat), params=params)
+        except ConnectorError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - network layer is opaque
+            raise GitHubError(f"github request failed: {exc}") from exc
+        if not resp.ok:
+            # Reuse the same error mapping as _api via a synthetic call.
+            self._api("GET", path, params=params)
+            raise GitHubError("unreachable")  # pragma: no cover
+        data = resp.json()
+        items = data if isinstance(data, list) else []
+        return items, dict(resp.headers)
+
+    def _list_all(
+        self, path: str, params: dict[str, Any] | None = None,
+        *, limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        """All pages of a list endpoint (Link-header walk, bounded)."""
+        collected: list[dict[str, Any]] = []
+
+        def fetch_page(url: str = "") -> tuple[list[dict[str, Any]], dict[str, str]]:
+            if url:
+                # Follow the absolute next URL from the Link header.
+                pat = self._require_credential().password
+                try:
+                    resp = self.http.get(url, headers=self._headers(pat))
+                except Exception as exc:  # noqa: BLE001
+                    raise GitHubError(f"github request failed: {exc}") from exc
+                if not resp.ok:
+                    raise GitHubError(
+                        f"github GET {url} failed ({resp.status})",
+                        status_code=resp.status,
+                    )
+                data = resp.json()
+                return (data if isinstance(data, list) else [],
+                        dict(resp.headers))
+            return self._api_page(path, params)
+
+        for item in paginate(fetch_page, style="link", max_pages=50):
+            collected.append(item)
+            if len(collected) >= limit:
+                break
+        return collected
+
+    @staticmethod
+    def _summarize_issue(raw: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "number": raw.get("number"),
+            "title": raw.get("title", ""),
+            "state": raw.get("state", ""),
+            "is_pull_request": "pull_request" in raw,
+            "labels": [l.get("name", "") for l in raw.get("labels", [])
+                       if isinstance(l, dict)],
+            "author": (raw.get("user") or {}).get("login", ""),
+            "comments": raw.get("comments", 0),
+            "created_at": raw.get("created_at", ""),
+            "updated_at": raw.get("updated_at", ""),
+            "url": raw.get("html_url", ""),
+            "body": (raw.get("body") or "")[:2000],
+        }
+
+    def list_issues(
+        self, full_name: str, *, state: str = "open",
+        labels: str = "", limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        """Issues for a repo — pull requests filtered out (Octokit rule).
+
+        GitHub's issues endpoint returns PRs too (they carry a
+        ``pull_request`` key); this filters them so "issues" means issues.
+        """
+        params: dict[str, Any] = {"state": state, "per_page": 100,
+                                  "sort": "updated", "direction": "desc"}
+        if labels:
+            params["labels"] = labels
+        items = self._list_all(f"/repos/{full_name}/issues", params,
+                               limit=limit * 2)
+        issues = [i for i in items if "pull_request" not in i][:limit]
+        return [self._summarize_issue(i) for i in issues]
+
+    def get_issue(self, full_name: str, number: int) -> dict[str, Any]:
+        """One issue (or PR — the endpoint serves both) with its body."""
+        raw = self._api("GET", f"/repos/{full_name}/issues/{number}")
+        return self._summarize_issue(raw if isinstance(raw, dict) else {})
+
+    def create_issue(
+        self, full_name: str, title: str, *, body: str = "",
+        labels: list[str] | None = None,
+        assignees: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Open an issue. Returns the summary shape."""
+        payload: dict[str, Any] = {"title": title}
+        if body:
+            payload["body"] = body
+        if labels:
+            payload["labels"] = labels
+        if assignees:
+            payload["assignees"] = assignees
+        raw = self._api("POST", f"/repos/{full_name}/issues", payload)
+        _log.info("github issue created: %s#%s", full_name,
+                  raw.get("number"))
+        return self._summarize_issue(raw if isinstance(raw, dict) else {})
+
+    def comment_issue(
+        self, full_name: str, number: int, body: str
+    ) -> dict[str, Any]:
+        """Add a comment to an issue or pull request."""
+        if not body.strip():
+            raise GitHubError("refusing to post an empty comment")
+        return self._api(
+            "POST", f"/repos/{full_name}/issues/{number}/comments",
+            {"body": body},
+        )
+
+    def close_issue(self, full_name: str, number: int) -> dict[str, Any]:
+        """Close an issue (state=closed)."""
+        raw = self._api(
+            "PATCH", f"/repos/{full_name}/issues/{number}",
+            {"state": "closed"},
+        )
+        return self._summarize_issue(raw if isinstance(raw, dict) else {})
+
+    @staticmethod
+    def _summarize_pr(raw: dict[str, Any]) -> dict[str, Any]:
+        head = raw.get("head") or {}
+        base = raw.get("base") or {}
+        return {
+            "number": raw.get("number"),
+            "title": raw.get("title", ""),
+            "state": raw.get("state", ""),
+            "author": (raw.get("user") or {}).get("login", ""),
+            "head": head.get("ref", "") if isinstance(head, dict) else "",
+            "base": base.get("ref", "") if isinstance(base, dict) else "",
+            "mergeable": raw.get("mergeable"),
+            "merged": raw.get("merged", False),
+            "additions": raw.get("additions", 0),
+            "deletions": raw.get("deletions", 0),
+            "changed_files": raw.get("changed_files", 0),
+            "created_at": raw.get("created_at", ""),
+            "url": raw.get("html_url", ""),
+            "body": (raw.get("body") or "")[:2000],
+        }
+
+    def list_pull_requests(
+        self, full_name: str, *, state: str = "open", limit: int = 50
+    ) -> list[dict[str, Any]]:
+        """Pull requests for a repo (newest first)."""
+        items = self._list_all(
+            f"/repos/{full_name}/pulls",
+            {"state": state, "per_page": 100,
+             "sort": "created", "direction": "desc"},
+            limit=limit,
+        )
+        return [self._summarize_pr(i) for i in items]
+
+    def get_pull_request(
+        self, full_name: str, number: int
+    ) -> dict[str, Any]:
+        """One pull request with merge state and diff stats."""
+        raw = self._api("GET", f"/repos/{full_name}/pulls/{number}")
+        return self._summarize_pr(raw if isinstance(raw, dict) else {})
+
+    def list_pull_files(
+        self, full_name: str, number: int, *, limit: int = 100
+    ) -> list[dict[str, Any]]:
+        """Files changed in a pull request."""
+        items = self._list_all(
+            f"/repos/{full_name}/pulls/{number}/files",
+            {"per_page": 100}, limit=limit,
+        )
+        return [
+            {
+                "filename": i.get("filename", ""),
+                "status": i.get("status", ""),
+                "additions": i.get("additions", 0),
+                "deletions": i.get("deletions", 0),
+                "patch": (i.get("patch") or "")[:4000],
+            }
+            for i in items
+        ]
+
+    def create_pull_request(
+        self, full_name: str, head: str, base: str, title: str,
+        *, body: str = "", draft: bool = False,
+    ) -> dict[str, Any]:
+        """Open a pull request from ``head`` into ``base``."""
+        payload: dict[str, Any] = {
+            "head": head, "base": base, "title": title,
+        }
+        if body:
+            payload["body"] = body
+        if draft:
+            payload["draft"] = True
+        raw = self._api("POST", f"/repos/{full_name}/pulls", payload)
+        _log.info("github PR created: %s#%s", full_name, raw.get("number"))
+        return self._summarize_pr(raw if isinstance(raw, dict) else {})
+
+    def merge_pull_request(
+        self, full_name: str, number: int, *,
+        method: str = "squash", commit_title: str = "",
+    ) -> dict[str, Any]:
+        """Merge a pull request (``merge`` | ``squash`` | ``rebase``)."""
+        if method not in ("merge", "squash", "rebase"):
+            raise GitHubError(
+                f"invalid merge method {method!r}: use merge, squash, or rebase"
+            )
+        payload: dict[str, Any] = {"merge_method": method}
+        if commit_title:
+            payload["commit_title"] = commit_title
+        return self._api(
+            "PUT", f"/repos/{full_name}/pulls/{number}/merge", payload
+        )
+
+    def get_file_content(
+        self, full_name: str, path: str, *, ref: str = ""
+    ) -> dict[str, Any]:
+        """Read a file from the repo (base64-decoded, with its sha).
+
+        The ``sha`` is needed for optimistic-concurrency writes via
+        :meth:`create_or_update_file`.
+        """
+        params = {"ref": ref} if ref else None
+        raw = self._api(
+            "GET", f"/repos/{full_name}/contents/{path}", params=params
+        )
+        if not isinstance(raw, dict) or raw.get("type") != "file":
+            raise GitHubError(
+                f"{path} in {full_name} is not a file "
+                f"(type={raw.get('type') if isinstance(raw, dict) else '?'})"
+            )
+        encoding = raw.get("encoding", "")
+        content_b64 = (raw.get("content") or "").strip()
+        try:
+            content = base64.b64decode(content_b64).decode(
+                "utf-8", errors="replace") if encoding == "base64" else content_b64
+        except Exception as exc:  # noqa: BLE001 - corrupt payload
+            raise GitHubError(
+                f"could not decode {path}: {exc}") from exc
+        return {
+            "path": raw.get("path", path),
+            "sha": raw.get("sha", ""),
+            "size": raw.get("size", 0),
+            "content": content,
+            "url": raw.get("html_url", ""),
+        }
+
+    def create_or_update_file(
+        self, full_name: str, path: str, content: str, message: str,
+        *, branch: str = "", sha: str = "",
+    ) -> dict[str, Any]:
+        """Create or update a file via the contents API.
+
+        Pass the ``sha`` from :meth:`get_file_content` when updating —
+        GitHub rejects the write on sha mismatch (optimistic concurrency),
+        so a stale read can't clobber a newer write.
+        """
+        payload: dict[str, Any] = {
+            "message": message,
+            "content": base64.b64encode(
+                content.encode("utf-8")).decode("ascii"),
+        }
+        if branch:
+            payload["branch"] = branch
+        if sha:
+            payload["sha"] = sha
+        return self._api(
+            "PUT", f"/repos/{full_name}/contents/{path}", payload
+        )
+
+    def search_repositories(
+        self, query: str, *, limit: int = 20, sort: str = "updated"
+    ) -> list[dict[str, Any]]:
+        """Search repositories (``/search/repositories``)."""
+        raw = self._api("GET", "/search/repositories", params={
+            "q": query, "per_page": max(1, min(limit, 100)),
+            "sort": sort, "order": "desc",
+        })
+        items = raw.get("items", []) if isinstance(raw, dict) else []
+        return [
+            {
+                "full_name": i.get("full_name", ""),
+                "description": (i.get("description") or "")[:200],
+                "stars": i.get("stargazers_count", 0),
+                "language": i.get("language", ""),
+                "updated_at": i.get("updated_at", ""),
+                "url": i.get("html_url", ""),
+            }
+            for i in items[:limit]
+        ]
+
+    def search_issues(
+        self, query: str, *, limit: int = 20
+    ) -> list[dict[str, Any]]:
+        """Search issues and PRs (``/search/issues``)."""
+        raw = self._api("GET", "/search/issues", params={
+            "q": query, "per_page": max(1, min(limit, 100)),
+            "sort": "updated", "order": "desc",
+        })
+        items = raw.get("items", []) if isinstance(raw, dict) else []
+        return [self._summarize_issue(i) for i in items[:limit]]
+
+    def verify_webhook_signature(
+        self, payload: bytes, signature: str, secret: str
+    ) -> None:
+        """Verify an inbound GitHub webhook (``x-hub-signature-256``)."""
+        from .webhooks import verify_signature
+        verify_signature("github", payload, signature, secret)
+
+    def capabilities(self) -> dict[str, Any]:
+        caps = super().capabilities()
+        caps["webhooks"] = {"inbound": True, "outbound": True}
+        return caps
+
     def create_branch(
         self, full_name: str, branch: str, *, from_branch: str = "main"
     ) -> dict[str, Any]:
@@ -620,6 +945,18 @@ class GitHubConnector(Connector):
                 resp = self.http.post_json(
                     url, payload or {}, headers=self._headers(pat)
                 )
+            elif method == "PUT":
+                resp = self.http.put_json(
+                    url, payload or {}, headers=self._headers(pat)
+                )
+            elif method == "PATCH":
+                headers = dict(self._headers(pat))
+                headers["Content-Type"] = "application/json"
+                resp = self.http.request(
+                    "PATCH", url,
+                    data=json.dumps(payload or {}).encode("utf-8"),
+                    headers=headers,
+                )
             elif method == "DELETE":
                 resp = self.http.request(
                     "DELETE", url, headers=self._headers(pat)
@@ -635,6 +972,18 @@ class GitHubConnector(Connector):
                 "github rejected the token (401): it is invalid, expired, "
                 "or revoked — reconnect with a fresh token",
                 status_code=401,
+            )
+        if resp.status == 429:
+            # Secondary rate limit — the taxonomy carries the wait so
+            # callers back off instead of hammering.
+            try:
+                advised = float(resp.headers.get("retry-after", 60) or 60)
+            except (TypeError, ValueError):
+                advised = 60.0
+            raise ConnectorRateLimitError(
+                "github secondary rate limit hit (429) — back off before "
+                "retrying mutations",
+                retry_after=advised,
             )
         if resp.status == 403 and "rate limit" in resp.text.lower():
             reset = resp.headers.get("x-ratelimit-reset", "")

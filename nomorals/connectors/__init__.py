@@ -18,14 +18,21 @@ AWS, Dropbox, YouTube, Spotify, AudD (music recognition), Duffel
 
 from __future__ import annotations
 
-from .auth import device_flow_token, pick_scopes, prompt_secret
+from .auth import device_flow_token, new_state, pick_scopes, pkce_pair, prompt_secret
 from .audd import AudDConnector, AudDError
 from .base import (
     AuthMethod,
     Connector,
+    ConnectorAuthError,
     ConnectorError,
+    ConnectorNetworkError,
+    ConnectorNotFoundError,
+    ConnectorRateLimitError,
     ConnectorStatus,
+    ConnectorValidationError,
     ConnectResult,
+    paginate,
+    request_with_retry,
 )
 from .checkpoints import (
     CheckpointKind,
@@ -43,10 +50,29 @@ from .mono import MonoConnector
 from .plaid import PlaidConnector
 from .proxypool import ProxyPoolConnector
 from .registry import (
+    connector_categories,
     create_connector,
+    describe_connector,
     get_connector,
+    health_snapshot,
     list_connectors,
     register_connector,
+    search_connectors,
+)
+from .present import (
+    render_capabilities,
+    render_checkpoint_list,
+    render_connect_guide,
+    render_connector_table,
+    render_health_snapshot,
+    render_status,
+)
+from .webhooks import (
+    WebhookDeduper,
+    WebhookEvent,
+    parse_event,
+    supported_providers,
+    verify_signature,
 )
 from .virtualcards import VirtualCardsConnector
 from .binance import BinanceConnector, BinanceError
@@ -94,7 +120,12 @@ __all__ = [
     "CoinbaseConnector",
     "CoinbaseError",
     "Connector",
+    "ConnectorAuthError",
     "ConnectorError",
+    "ConnectorNetworkError",
+    "ConnectorNotFoundError",
+    "ConnectorRateLimitError",
+    "ConnectorValidationError",
     "ConnectorStatus",
     "ConnectResult",
     "DiscordConnector",
@@ -160,12 +191,31 @@ __all__ = [
     "YouTubeError",
     "XConnector",
     "XError",
+    "connector_categories",
     "create_connector",
+    "describe_connector",
     "device_flow_token",
     "get_connector",
+    "health_snapshot",
     "list_connectors",
+    "new_state",
+    "paginate",
+    "parse_event",
     "pick_scopes",
+    "pkce_pair",
     "prompt_secret",
     "register_connector",
+    "render_capabilities",
+    "render_checkpoint_list",
+    "render_connect_guide",
+    "render_connector_table",
+    "render_health_snapshot",
+    "render_status",
     "request_human_action",
+    "request_with_retry",
+    "search_connectors",
+    "supported_providers",
+    "verify_signature",
+    "WebhookDeduper",
+    "WebhookEvent",
 ]

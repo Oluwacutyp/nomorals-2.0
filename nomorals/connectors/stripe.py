@@ -37,6 +37,7 @@ status line reports).
 
 from __future__ import annotations
 
+import hashlib
 import time
 from typing import Any
 from urllib.parse import urlencode
@@ -53,6 +54,7 @@ from .base import (
     ConnectResult,
 )
 from .registry import register_connector
+from .webhooks import WebhookEvent, parse_event, verify_signature
 
 __all__ = ["StripeConnector", "StripeError"]
 
@@ -114,6 +116,7 @@ class StripeConnector(Connector):
         "invoices, transfers and payouts (money moves are gated)"
     )
     auth_methods = (AuthMethod.API_KEY,)
+    CATEGORY = "payments"
 
     # ── REST ─────────────────────────────────────────────────────────
 
@@ -135,11 +138,27 @@ class StripeConnector(Connector):
         *,
         key: str | None = None,
         params: dict[str, Any] | None = None,
+        idempotency_key: str | None = None,
     ) -> Any:
+        """One Stripe call.
+
+        Every POST/DELETE automatically carries an ``Idempotency-Key``
+        (Stripe best practice — a network retry after a timeout must not
+        create a duplicate charge/subscription). The key is derived
+        deterministically from the method + path + canonical params, so
+        the *same logical operation retried* replays safely; pass an
+        explicit ``idempotency_key`` (or a distinct one) when two calls
+        with identical params are intentionally different operations.
+        """
         secret = key if key is not None else self._require_key()
         url = f"{API_BASE}{path}"
         headers = {"Authorization": f"Bearer {secret}"}
         clean = {k: v for k, v in (params or {}).items() if v is not None}
+        if method in ("POST", "DELETE"):
+            headers["Idempotency-Key"] = (
+                idempotency_key or self.idempotency_key_for(
+                    method, path, _flatten(clean))
+            )
         try:
             if method == "GET":
                 qs = urlencode(_flatten(clean), doseq=True)
@@ -182,6 +201,43 @@ class StripeConnector(Connector):
                 code=str(err.get("code", "")),
             )
         return data
+
+    @staticmethod
+    def idempotency_key_for(*parts: Any) -> str:
+        """Stable idempotency key derived from the logical operation.
+
+        Feed it business ids (``order_id``, ``webhook event id``,
+        ``customer+price``) — a fresh UUID per request *defeats*
+        idempotency on retry, which is the whole point of the key.
+        """
+        canonical = "|".join(
+            str(p) if not isinstance(p, dict)
+            else "|".join(f"{k}={p[k]}" for k in sorted(p))
+            for p in parts
+        )
+        return "nm-" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:32]
+
+    def verify_webhook_signature(
+        self, payload: bytes, signature: str, secret: str
+    ) -> None:
+        """Verify an inbound Stripe webhook (``Stripe-Signature`` header).
+
+        Raises :class:`ConnectorError` on missing/malformed/stale/
+        mismatched signatures. ``payload`` must be the raw request body.
+        """
+        verify_signature("stripe", payload, signature, secret)
+
+    def parse_webhook_event(
+        self, payload: bytes | str | dict[str, Any]
+    ) -> WebhookEvent:
+        """Parse a verified Stripe webhook body into a normalized event."""
+        return parse_event("stripe", payload)
+
+    def capabilities(self) -> dict[str, Any]:
+        caps = super().capabilities()
+        caps["webhooks"] = {"inbound": True, "outbound": False}
+        caps["idempotency"] = "Idempotency-Key on every POST/DELETE"
+        return caps
 
     # ── lifecycle ────────────────────────────────────────────────────
 

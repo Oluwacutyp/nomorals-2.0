@@ -9,7 +9,7 @@ from typing import Any
 from unittest import mock
 
 from nomorals.accounts.vault import CredentialVault
-from nomorals.connectors.base import ConnectorError
+from nomorals.connectors.base import ConnectorError, ConnectorRateLimitError
 from nomorals.connectors.registry import get_connector
 from nomorals.connectors.telegram import TelegramConnector, TelegramError
 from nomorals.storage.db import Database
@@ -270,10 +270,15 @@ class ApiTests(unittest.TestCase):
         conn, http = _connected()
         http.route("POST", "/sendMessage", FakeResponse(429, {
             "ok": False, "description": "Too Many Requests",
+            "parameters": {"retry_after": 5},
         }))
-        with self.assertRaises(TelegramError) as ctx:
+        # Sweep: 429 now raises the shared ConnectorRateLimitError (carries
+        # the wait) instead of a plain TelegramError — still a
+        # ConnectorError for existing handlers.
+        with self.assertRaises(ConnectorRateLimitError) as ctx:
             conn.send_message(1, "hi")
-        self.assertEqual(ctx.exception.status_code, 429)
+        self.assertEqual(ctx.exception.retry_after, 5.0)
+        self.assertIsInstance(ctx.exception, ConnectorError)
 
 
 if __name__ == "__main__":
