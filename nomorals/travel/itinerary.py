@@ -45,10 +45,40 @@ __all__ = [
     "Flight", "HotelStay", "CarRental", "Trip",
     "parse_confirmation", "ItineraryBuilder",
     "confirmation_hook", "TRIP_VAULT_DIR",
+    "AIRLINE_CODES", "airline_for_flight_number",
+    "trip_status", "trip_timeline", "detect_conflicts",
+    "export_ics", "packing_list", "format_countdown",
 ]
 
 TRIP_VAULT_DIR = os.path.expanduser("~/.nomorals/travel/vault")
 TRIP_DB = os.path.expanduser("~/.nomorals/travel/trips.db")
+
+#: Curated IATA flight-number prefix → airline. Nigerian carriers first,
+#: then the majors — fills ``Flight.airline`` when the confirmation only
+#: gives a flight number (TripIt-style enrichment).
+AIRLINE_CODES = {
+    # Nigeria
+    "P4": "Air Peace", "W3": "Arik Air", "9J": "Dana Air",
+    "QI": "Ibom Air", "VM": "Max Air", "OJ": "Overland Airways",
+    "VK": "ValueJet", "Q9": "Green Africa", "R4": "Rano Air",
+    # Africa / Middle East / Europe / Americas majors
+    "BA": "British Airways", "VS": "Virgin Atlantic",
+    "AF": "Air France", "KL": "KLM", "LH": "Lufthansa",
+    "EK": "Emirates", "QR": "Qatar Airways", "ET": "Ethiopian Airlines",
+    "TK": "Turkish Airlines", "MS": "EgyptAir", "AT": "Royal Air Maroc",
+    "SA": "South African Airways", "KQ": "Kenya Airways",
+    "DL": "Delta", "UA": "United Airlines", "AA": "American Airlines",
+    "WN": "Southwest", "B6": "JetBlue", "AC": "Air Canada",
+}
+
+
+def airline_for_flight_number(flight_number: str) -> str:
+    """'BA075' → 'British Airways'. '' when the prefix is unknown."""
+    fn = (flight_number or "").upper().strip()
+    m = re.match(r"^([A-Z]{2})", fn)
+    if m:
+        return AIRLINE_CODES.get(m.group(1), "")
+    return ""
 
 
 # ── data model ──────────────────────────────────────────────────────────────
@@ -245,6 +275,11 @@ def _parse(text: str) -> dict[str, Any]:
         for f in flights:
             f.setdefault("pnr", pnr)
 
+    # Airline names from flight-number prefixes
+    for f in flights:
+        if not f.get("airline") and f.get("flight_number"):
+            f["airline"] = airline_for_flight_number(f["flight_number"])
+
     # Hotels
     hotel_m = _HOTEL_RE.search(text)
     if hotel_m:
@@ -327,10 +362,25 @@ class ItineraryBuilder:
     # ── ingestion ──
 
     def ingest_email(self, body: str, *, subject: str = "",
-                     sender: str = "") -> Trip:
-        """Parse a forwarded booking-confirmation email."""
+                     sender: str = "", auto_merge: bool = True) -> Trip:
+        """Parse a forwarded booking-confirmation email.
+
+        TripIt-style merging: when the booking shares a PNR/booking
+        reference with an existing trip, it folds into that trip instead
+        of fragmenting the vault. Date-proximity matches are surfaced via
+        find_merge_candidate() as suggestions, never silent merges.
+        """
         text = f"{subject}\n{body}" if subject else (body or "")
         parsed = parse_confirmation(text)
+        if auto_merge:
+            candidate = self.find_merge_candidate(parsed)
+            if (candidate is not None
+                    and self._pnr_merge_ok(candidate, parsed)):
+                trip = self._absorb(candidate, parsed)
+                self._vault_text(trip, "email.txt", text,
+                                 meta={"subject": subject, "from": sender,
+                                       "merged": True})
+                return trip
         trip = self._new_trip(parsed, name=self._trip_name(parsed))
         self._vault_text(trip, "email.txt", text,
                          meta={"subject": subject, "from": sender})
@@ -501,6 +551,181 @@ class ItineraryBuilder:
         trip = self.get_trip(trip_id)
         return list(trip.docs) if trip else []
 
+    # ── TripIt-style merging ──────────────────────────────────────────
+
+    def delete_trip(self, trip_id: str) -> bool:
+        """Remove a trip record (used by merges). Returns True on delete."""
+        try:
+            cur = self._db.execute("DELETE FROM trips WHERE id = ?",
+                                   (trip_id,))
+            self._db.commit()
+            return cur.rowcount > 0
+        except Exception:  # noqa: BLE001
+            return False
+
+    def _parsed_dates(self, parsed: dict[str, Any]) -> set[str]:
+        ds: set[str] = set()
+        for f in parsed.get("flights", []):
+            d = _parse_dt(f.get("departs", ""))
+            if d:
+                ds.add(d.strftime("%Y-%m-%d"))
+        for h in parsed.get("hotels", []):
+            d = _parse_dt(h.get("check_in", ""))
+            if d:
+                ds.add(d.strftime("%Y-%m-%d"))
+        return ds
+
+    def find_merge_candidate(self, parsed: dict[str, Any],
+                             exclude_id: str = "") -> Trip | None:
+        """Best existing trip this booking probably belongs to — for the
+        'looks like your Lagos→London trip, merge?' suggestion (TripIt).
+
+        PNR/booking-reference match first (precise), then date proximity
+        within 3 days (the usual flight-lands / hotel-next-morning case).
+        ``exclude_id`` skips the trip the booking just landed in.
+        """
+        import datetime as _dt
+        trips = [t for t in self.list_trips() if t.id != exclude_id]
+        pnr = (parsed.get("pnr") or "").upper()
+        if pnr:
+            for trip in trips:
+                if pnr in self._trip_pnrs(trip):
+                    return trip
+
+        def _ord(d: str) -> int:
+            return _dt.datetime.strptime(d, "%Y-%m-%d").toordinal()
+
+        want = self._parsed_dates(parsed)
+        if not want:
+            return None
+        wmin, wmax = min(want), max(want)
+        for trip in trips:
+            start, end = trip_dates(trip)
+            if not start:
+                continue
+            if (_ord(wmin) <= _ord(end) + 3
+                    and _ord(wmax) >= _ord(start) - 3):
+                return trip
+        return None
+
+    @staticmethod
+    def _trip_pnrs(trip: Trip) -> set[str]:
+        """Every booking reference on a trip (flights + hotels + cars)."""
+        codes: set[str] = set()
+        for f in trip.flights:
+            if f.pnr:
+                codes.add(f.pnr.upper())
+        for h in trip.hotels:
+            if h.confirmation:
+                codes.add(h.confirmation.upper())
+        for c in trip.cars:
+            if c.confirmation:
+                codes.add(c.confirmation.upper())
+        return codes
+
+    def _pnr_merge_ok(self, trip: Trip, parsed: dict[str, Any]) -> bool:
+        """Auto-merge only on a shared booking reference — precise, never a
+        surprise. Date-proximity candidates are suggestions, not merges."""
+        pnr = (parsed.get("pnr") or "").upper()
+        return bool(pnr) and pnr in self._trip_pnrs(trip)
+
+    def merge_trips(self, trip_ids: list[str]) -> Trip | None:
+        """Fold several trips into the first one; delete the rest."""
+        ids = [i for i in (trip_ids or []) if i]
+        if not ids:
+            return None
+        base = self.get_trip(ids[0])
+        if base is None:
+            return None
+        for tid in ids[1:]:
+            other = self.get_trip(tid)
+            if other is None or other.id == base.id:
+                continue
+            for f in other.flights:
+                if asdict(f) not in [asdict(x) for x in base.flights]:
+                    base.flights.append(f)
+            for h in other.hotels:
+                if asdict(h) not in [asdict(x) for x in base.hotels]:
+                    base.hotels.append(h)
+            for c in other.cars:
+                if asdict(c) not in [asdict(x) for x in base.cars]:
+                    base.cars.append(c)
+            for doc in other.docs:
+                if doc not in base.docs:
+                    base.docs.append(doc)
+            self.delete_trip(other.id)
+        self._save(base)
+        return base
+
+    def _absorb(self, trip: Trip, parsed: dict[str, Any]) -> Trip:
+        """Fold a freshly parsed booking into an existing trip."""
+        have_f = [asdict(f) for f in trip.flights]
+        for f in parsed.get("flights", []):
+            clean = {k: v for k, v in f.items()
+                     if k in Flight.__dataclass_fields__}
+            if clean not in have_f:
+                trip.flights.append(Flight(**clean))
+                have_f.append(clean)
+        have_h = [asdict(h) for h in trip.hotels]
+        for h in parsed.get("hotels", []):
+            clean = {k: v for k, v in h.items()
+                     if k in HotelStay.__dataclass_fields__}
+            if clean not in have_h:
+                trip.hotels.append(HotelStay(**clean))
+                have_h.append(clean)
+        have_c = [asdict(c) for c in trip.cars]
+        for c in parsed.get("cars", []):
+            clean = {k: v for k, v in c.items()
+                     if k in CarRental.__dataclass_fields__}
+            if clean not in have_c:
+                trip.cars.append(CarRental(**clean))
+                have_c.append(clean)
+        self._save(trip)
+        return trip
+
+    # ── trip intelligence wrappers ────────────────────────────────────
+
+    def timeline(self, trip_id: str) -> str:
+        trip = self.get_trip(trip_id)
+        if trip is None:
+            return "no such trip."
+        events = trip_timeline(trip)
+        if not events:
+            return f"🧳 {trip.name or trip.id} — no timed events yet."
+        lines = [f"🧳 {trip.name or trip.id} — travel timeline"]
+        for e in events:
+            cd = f" ({e['countdown']})" if e["countdown"] else ""
+            det = f" — {e['detail']}" if e["detail"] else ""
+            lines.append(f"  {e['text']}{cd}{det}")
+        return "\n".join(lines)
+
+    def conflicts(self, trip_id: str) -> list[str]:
+        trip = self.get_trip(trip_id)
+        return detect_conflicts(trip) if trip else []
+
+    def export_ics(self, trip_id: str) -> str:
+        """Write the trip's .ics calendar file into the vault. '' on miss."""
+        trip = self.get_trip(trip_id)
+        if trip is None:
+            return ""
+        path = os.path.join(self._trip_dir(trip), f"{trip.id}.ics")
+        try:
+            return export_ics(trip, path)
+        except Exception:  # noqa: BLE001
+            _log.debug("ics export failed", exc_info=True)
+            return ""
+
+    def packing(self, trip_id: str) -> str:
+        trip = self.get_trip(trip_id)
+        if trip is None:
+            return "no such trip."
+        items = packing_list(trip)
+        if not items:
+            return "Nothing to pack yet — add a flight or hotel first. 🎒"
+        lines = [f"🎒 Packing for {trip.name or trip.id}:"]
+        lines += [f"  • {item} — {reason}" for item, reason in items]
+        return "\n".join(lines)
+
     # ── calendar ──
 
     def to_calendar(self, trip_id: str, gcal: Any, *,
@@ -567,7 +792,16 @@ class ItineraryBuilder:
         trip = self.get_trip(trip_id)
         if trip is None:
             return "no such trip."
-        lines = [f"🧳 {trip.name or trip.id}"]
+        status = trip_status(trip)
+        lines = [f"{_STATUS_EMOJI.get(status, '🧳')} {trip.name or trip.id}"]
+        # next event countdown — the travel-day card
+        upcoming = [e for e in trip_timeline(trip)
+                    if e["when"] and e["when"] >= time.time() - 3600]
+        if upcoming:
+            nxt = upcoming[0]
+            lines.append(f"   next: {nxt['text']}"
+                         + (f" — {nxt['countdown']}" if nxt["countdown"]
+                            else ""))
         if total_kobo:
             from .display import _naira, points_vs_cash
             lines.append(f"💰 Total: {_naira(total_kobo)}")
@@ -583,11 +817,14 @@ class ItineraryBuilder:
                 if pvc:
                     lines.append(f"🎖️ {pvc}")
         for f in trip.flights:
-            lines.append(f"  ✈️ {f.one_line()}")
+            al = f" ({f.airline})" if f.airline else ""
+            lines.append(f"  ✈️ {f.one_line()}{al}")
         for h in trip.hotels:
             lines.append(f"  🏨 {h.one_line()}")
         for c in trip.cars:
             lines.append(f"  🚗 {c.one_line()}")
+        for w in detect_conflicts(trip)[:3]:
+            lines.append(f"  {w}")
         if trip.is_empty():
             lines.append("  (nothing parsed yet — forward a confirmation)")
         if trip.docs:
@@ -689,3 +926,255 @@ def added_message(trip: Trip) -> str:
     if trip.flights:
         msg += " Want me to track it?"
     return msg
+
+
+# ── trip intelligence: status, timeline, conflicts, export, packing ──────────
+
+def _parse_dt(raw: str):
+    """'2026-12-01T22:45' → datetime; '2026-12-01' → midnight; else None."""
+    import datetime as _dt
+    raw = (raw or "").strip()
+    for fmt in ("%Y-%m-%dT%H:%M", "%Y-%m-%d %H:%M", "%Y-%m-%d"):
+        try:
+            return _dt.datetime.strptime(raw[:16], fmt)
+        except ValueError:
+            continue
+    return None
+
+
+def format_countdown(ts: float, now: float | None = None) -> str:
+    """'in 3d 4h' / 'tomorrow' / 'in 2h' / 'boarding soon' / '3d ago'."""
+    import datetime as _dt
+    now = now if now is not None else time.time()
+    delta = ts - now
+    if delta < -86400:
+        return f"{int(-delta // 86400)}d ago"
+    if delta < -3600:
+        return f"{int(-delta // 3600)}h ago"
+    if delta <= 0:
+        return "now"
+    if delta < 3600:
+        return f"in {int(delta // 60)}m"
+    if delta < 86400:
+        return f"in {int(delta // 3600)}h"
+    days = int(delta // 86400)
+    if days == 1:
+        return "tomorrow"
+    return f"in {days}d"
+
+
+def trip_dates(trip: Trip) -> tuple[str, str]:
+    """(earliest, latest) YYYY-MM-DD across flights + hotels. ('','') if none."""
+    ds: list[str] = []
+    for f in trip.flights:
+        for raw in (f.departs, f.arrives):
+            d = _parse_dt(raw)
+            if d:
+                ds.append(d.strftime("%Y-%m-%d"))
+    for h in trip.hotels:
+        for raw in (h.check_in, h.check_out):
+            d = _parse_dt(raw)
+            if d:
+                ds.append(d.strftime("%Y-%m-%d"))
+    if not ds:
+        return "", ""
+    return min(ds), max(ds)
+
+
+def trip_status(trip: Trip, now: float | None = None) -> str:
+    """upcoming | in-progress | past | unknown — from booking dates."""
+    import datetime as _dt
+    now = now if now is not None else time.time()
+    start, end = trip_dates(trip)
+    if not start:
+        return "unknown"
+    s_ts = _dt.datetime.strptime(start, "%Y-%m-%d").timestamp()
+    e_ts = (_dt.datetime.strptime(end, "%Y-%m-%d").timestamp()
+            + 86399)
+    if now < s_ts:
+        return "upcoming"
+    if now <= e_ts:
+        return "in-progress"
+    return "past"
+
+
+_STATUS_EMOJI = {"upcoming": "🗓️", "in-progress": "✈️",
+                 "past": "🗂️", "unknown": "🧳"}
+
+
+def trip_timeline(trip: Trip,
+                  now: float | None = None) -> list[dict[str, Any]]:
+    """Chronological travel-day cards with countdowns. Pure."""
+    import datetime as _dt
+    now = now if now is not None else time.time()
+    events: list[dict[str, Any]] = []
+    for f in trip.flights:
+        d = _parse_dt(f.departs)
+        route = f"{f.origin}→{f.destination}" if f.origin else "flight"
+        label = f"{f.airline + ' ' if f.airline else ''}{f.flight_number or ''}".strip()
+        events.append({
+            "kind": "flight", "when": d.timestamp() if d else 0.0,
+            "text": f"🛫 {label} {route}".strip(),
+            "countdown": format_countdown(d.timestamp(), now) if d else "",
+            "detail": f"PNR {f.pnr}" if f.pnr else "",
+        })
+        da = _parse_dt(f.arrives)
+        if da:
+            events.append({
+                "kind": "arrival", "when": da.timestamp(),
+                "text": f"🛬 lands {f.destination or ''}".strip(),
+                "countdown": format_countdown(da.timestamp(), now),
+                "detail": "",
+            })
+    for h in trip.hotels:
+        ci = _parse_dt(h.check_in)
+        if ci:
+            events.append({
+                "kind": "hotel", "when": ci.timestamp(),
+                "text": f"🏨 check in — {h.name or 'hotel'}",
+                "countdown": format_countdown(ci.timestamp(), now),
+                "detail": (f"conf {h.confirmation}"
+                           if h.confirmation else ""),
+            })
+        co = _parse_dt(h.check_out)
+        if co:
+            events.append({
+                "kind": "hotel-out", "when": co.timestamp() + 86399,
+                "text": f"🏨 check out — {h.name or 'hotel'}",
+                "countdown": format_countdown(co.timestamp() + 86399, now),
+                "detail": "",
+            })
+    for c in trip.cars:
+        events.append({
+            "kind": "car", "when": 0.0,
+            "text": f"🚗 {c.company or 'car rental'}",
+            "countdown": "",
+            "detail": (f"conf {c.confirmation}"
+                       if c.confirmation else ""),
+        })
+    events.sort(key=lambda e: (e["when"] or float("inf")))
+    return events
+
+
+def detect_conflicts(trip: Trip) -> list[str]:
+    """Real schedule problems: overlapping flights, hotel/check-in gaps."""
+    warns: list[str] = []
+    segs: list[tuple[float, float, str]] = []
+    for f in trip.flights:
+        d, a = _parse_dt(f.departs), _parse_dt(f.arrives)
+        if d and a:
+            if a <= d:
+                warns.append(
+                    f"⚠️ {f.flight_number or 'flight'} lands before it "
+                    f"departs — check the dates.")
+            segs.append((d.timestamp(), a.timestamp(),
+                         f.flight_number or "flight"))
+    for i, (s1, e1, n1) in enumerate(segs):
+        for s2, e2, n2 in segs[i + 1:]:
+            if s1 < e2 and s2 < e1:
+                warns.append(
+                    f"⚠️ {n1} and {n2} overlap — double-booked?")
+    for h in trip.hotels:
+        ci, co = _parse_dt(h.check_in), _parse_dt(h.check_out)
+        if ci and co and co <= ci:
+            warns.append(
+                f"⚠️ {h.name or 'hotel'}: check-out is not after check-in.")
+    # hotel check-in before the last flight lands?
+    if segs and trip.hotels:
+        last_land = max(e for _, e, _ in segs)
+        for h in trip.hotels:
+            ci = _parse_dt(h.check_in)
+            if ci and ci.timestamp() < last_land - 86400:
+                warns.append(
+                    f"⚠️ {h.name or 'hotel'} check-in is a day+ before "
+                    f"you land — confirm the date.")
+    return warns
+
+
+def _ics_escape(text: str) -> str:
+    return (text or "").replace("\\", "\\\\").replace(";", "\\;") \
+        .replace(",", "\\,").replace("\n", "\\n")
+
+
+def export_ics(trip: Trip, path: str) -> str:
+    """Write a TripIt-style .ics calendar file for the trip. Pure I/O."""
+    import datetime as _dt
+    lines = ["BEGIN:VCALENDAR", "VERSION:2.0",
+             "PRODID:-//Devon//Travel//EN"]
+    uid_base = trip.id.replace(" ", "_")
+    n = 0
+
+    def event(uid: str, start: _dt.datetime, end: _dt.datetime,
+              summary: str, desc: str = "", all_day: bool = False) -> None:
+        nonlocal n
+        n += 1
+        lines.append("BEGIN:VEVENT")
+        lines.append(f"UID:{uid}-{n}@devon.travel")
+        lines.append("DTSTAMP:" + _dt.datetime.now(_dt.timezone.utc).strftime(
+            "%Y%m%dT%H%M%SZ"))
+        if all_day:
+            lines.append("DTSTART;VALUE=DATE:" + start.strftime("%Y%m%d"))
+            lines.append("DTEND;VALUE=DATE:" + end.strftime("%Y%m%d"))
+        else:
+            lines.append("DTSTART:" + start.strftime("%Y%m%dT%H%M%S"))
+            lines.append("DTEND:" + end.strftime("%Y%m%dT%H%M%S"))
+        lines.append("SUMMARY:" + _ics_escape(summary))
+        if desc:
+            lines.append("DESCRIPTION:" + _ics_escape(desc))
+        lines.append("END:VEVENT")
+
+    for f in trip.flights:
+        d, a = _parse_dt(f.departs), _parse_dt(f.arrives)
+        if not d:
+            continue
+        end = a if a and a > d else d + _dt.timedelta(hours=2)
+        label = f"{f.airline + ' ' if f.airline else ''}" \
+                f"{f.flight_number or 'Flight'}"
+        route = f"{f.origin}→{f.destination}" if f.origin else ""
+        event(uid_base, d, end, f"✈️ {label} {route}".strip(),
+              f"PNR {f.pnr}" if f.pnr else "")
+    for h in trip.hotels:
+        ci, co = _parse_dt(h.check_in), _parse_dt(h.check_out)
+        if not ci:
+            continue
+        end = co if co and co > ci else ci + _dt.timedelta(days=1)
+        event(uid_base, ci, end, f"🏨 {h.name or 'Hotel'}",
+              f"Confirmation {h.confirmation}" if h.confirmation else "",
+              all_day=True)
+    lines.append("END:VCALENDAR")
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write("\r\n".join(lines) + "\r\n")
+    return path
+
+
+def packing_list(trip: Trip) -> list[tuple[str, str]]:
+    """Rule-based packing checklist from trip facts. (item, reason)."""
+    items: list[tuple[str, str]] = []
+    intl = any(f.origin and f.destination and len(f.origin) == 3
+               and len(f.destination) == 3 and f.origin[:2] != f.destination[:2]
+               for f in trip.flights)
+    # crude but honest: different country-ish routes → travel docs
+    if trip.flights and not intl:
+        intl = len({f.destination for f in trip.flights if f.destination}) > 1
+    nights = 0
+    for h in trip.hotels:
+        ci, co = _parse_dt(h.check_in), _parse_dt(h.check_out)
+        if ci and co and co > ci:
+            nights = max(nights, (co - ci).days)
+    if intl or trip.flights:
+        items.append(("passport / ID", "flying — travel documents"))
+    if trip.flights:
+        items += [("phone charger + power bank", "long travel day"),
+                  ("snacks + water", "airport time"),
+                  ("boarding pass (offline copy)", "spotty airport wifi")]
+    if nights:
+        items.append((f"clothes for {nights} night{'s' if nights != 1 else ''}",
+                      f"{nights}-night stay"))
+        items += [("toiletries", f"{nights}-night stay"),
+                  ("medications", "daily routine")]
+    if trip.hotels:
+        items.append(("hotel confirmation (offline copy)",
+                      "front-desk check-in"))
+    if trip.cars:
+        items.append(("driver's licence", "car rental pickup"))
+    return items

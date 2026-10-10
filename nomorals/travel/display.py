@@ -28,6 +28,14 @@ __all__ = [
     "enrich_offers_text",
     "enrich_alert_text",
     "enrich_itinerary_text",
+    "cpp",
+    "rate_redemption",
+    "best_redemption",
+    "TRANSFER_PARTNERS",
+    "bank_partners",
+    "OutputTheme",
+    "THEMES",
+    "themed",
 ]
 
 
@@ -90,17 +98,157 @@ def points_vs_cash(cash_kobo: int, programs: list[LoyaltyProgram]) -> str:
     """Loyalty comparison in the same view as the cash price.
 
     "₦450k cash or 65k miles + ₦80k." Only programs with enough
-    balance for the award are shown. Empty programs → "".
+    balance for the award are shown. Every option carries its
+    cents-per-point so you can see if it's actually a good deal
+    (point.me/pointsyeah rule: ≥1.5¢ is good, ≥2.0¢ is great).
+    Empty programs → "".
     """
     options: list[str] = []
     for p in programs:
         if p.award_points <= 0 or p.balance < p.award_points:
             continue
         cash_bit = f" + {_short(p.award_cash_kobo)}" if p.award_cash_kobo else ""
-        options.append(f"{p.award_points:,} {p.name}{cash_bit}")
+        value = cpp(cash_kobo, p.award_points, p.award_cash_kobo)
+        star = _cpp_star(value)
+        options.append(f"{p.award_points:,} {p.name}{cash_bit}"
+                       f" ({value:.0f} kobo/pt{star})")
     if not options:
         return ""
     return f"{_short(cash_kobo)} cash or " + " / ".join(options)
+
+
+# ── award valuation (point.me / pointsyeah gold) ────────────────────────────
+
+def cpp(cash_kobo: int, award_points: int, award_cash_kobo: int = 0) -> float:
+    """Kobo-per-point: (cash − taxes/fees) / points. Pure.
+
+    The naira-native analog of the US cents-per-point rule — the single
+    number that says whether a redemption is actually worth it.
+    """
+    if award_points <= 0:
+        return 0.0
+    net_kobo = max(0, cash_kobo - award_cash_kobo)
+    return net_kobo / award_points
+
+
+def rate_redemption(value_kobo_pt: float) -> str:
+    """great ≥ ₦5/pt · good ≥ ₦3/pt · fair ≥ ₦1.50/pt · poor below."""
+    if value_kobo_pt >= 500:
+        return "great"
+    if value_kobo_pt >= 300:
+        return "good"
+    if value_kobo_pt >= 150:
+        return "fair"
+    return "poor"
+
+
+def _cpp_star(value_cpp: float) -> str:
+    return {"great": " ⭐", "good": " ✅"}.get(rate_redemption(value_cpp), "")
+
+
+#: Transferable bank currencies → airline programs (curated subset).
+#: Lets the recommendation name a *move*, not just a program.
+TRANSFER_PARTNERS: dict[str, list[str]] = {
+    "Amex Membership Rewards": ["Flying Blue", "Virgin Atlantic",
+                                 "British Airways Avios", "Delta SkyMiles",
+                                 "Etihad Guest"],
+    "Chase Ultimate Rewards": ["United MileagePlus", "British Airways Avios",
+                               "Virgin Atlantic", "Flying Blue"],
+    "Capital One miles": ["Flying Blue", "Virgin Atlantic",
+                          "British Airways Avios", "Etihad Guest"],
+    "Citi ThankYou": ["Virgin Atlantic", "Flying Blue", "Qatar Privilege"],
+}
+
+
+def bank_partners(program_name: str) -> list[str]:
+    """Banks whose points transfer into this program. Pure."""
+    want = (program_name or "").lower()
+    return [bank for bank, progs in TRANSFER_PARTNERS.items()
+            if any(want in p.lower() or p.lower() in want for p in progs)]
+
+
+def best_redemption(cash_kobo: int,
+                    programs: list[LoyaltyProgram]) -> dict[str, Any]:
+    """The single best award across programs — with the point.me rule.
+
+    Returns {} when nothing is redeemable. Includes the transfer warning:
+    never move points speculatively — confirm the award seat first.
+    """
+    best: dict[str, Any] | None = None
+    for p in programs:
+        if p.award_points <= 0 or p.balance < p.award_points:
+            continue
+        value = cpp(cash_kobo, p.award_points, p.award_cash_kobo)
+        if best is None or value > best["cpp"]:
+            best = {"program": p.name, "points": p.award_points,
+                    "cash_kobo": p.award_cash_kobo, "cpp": round(value, 2),
+                    "rating": rate_redemption(value)}
+    if best is None:
+        return {}
+    banks = bank_partners(best["program"])
+    best["transfer_from"] = banks
+    best["warning"] = ("confirm the award seat is still there before "
+                       "transferring — transfers are irreversible")
+    return best
+
+
+def format_best_redemption(best: dict[str, Any]) -> str:
+    if not best:
+        return ""
+    star = _cpp_star(best["cpp"])
+    move = ""
+    if best.get("transfer_from"):
+        move = f" (move {best['transfer_from'][0]} → {best['program']})"
+    return (f"🎖️ best redemption: {best['points']:,} {best['program']}"
+            f"{move} — {best['cpp']:.0f} kobo/pt, {best['rating']}{star}."
+            f" {best['warning']}.")
+
+
+# ── output themes ───────────────────────────────────────────────────────────
+
+_THEME_NAMES = ("rich", "compact", "minimal")
+
+
+class OutputTheme:
+    """A named presentation style for travel output.
+
+    rich:    emoji + structure + verdict banners (default for chat)
+    compact: one-liners, prices only
+    minimal: bare numbers — for embedding in other flows
+    """
+
+    def __init__(self, name: str = "rich") -> None:
+        self.name = name if name in _THEME_NAMES else "rich"
+
+    def header(self, text: str) -> str:
+        if self.name == "rich":
+            return f"✈️ {text}"
+        if self.name == "compact":
+            return f"» {text}"
+        return text
+
+    def price(self, kobo: int) -> str:
+        return _naira(kobo) if self.name != "minimal" else str(kobo // 100)
+
+    def verdict(self, text: str) -> str:
+        return text if self.name == "rich" else text.split(" — ")[0]
+
+    def ok(self) -> str:
+        return "✅" if self.name == "rich" else ("ok" if self.name == "compact"
+                                                else "")
+
+    def warn(self) -> str:
+        return "⚠️" if self.name == "rich" else ("!" if self.name == "compact"
+                                                else "")
+
+
+THEMES = {"rich": OutputTheme("rich"), "compact": OutputTheme("compact"),
+          "minimal": OutputTheme("minimal")}
+
+
+def themed(name: str = "rich") -> OutputTheme:
+    """Pick an output theme by name. Unknown → rich."""
+    return THEMES.get(name, THEMES["rich"])
 
 
 def multi_origin_search(
