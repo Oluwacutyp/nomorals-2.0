@@ -163,15 +163,116 @@ def _mesh_for_frame(base_img: Image.Image, kp0: np.ndarray, kp1: np.ndarray,
     return Image.fromarray(out)
 
 
+# ── depth-aware warp ─────────────────────────────────────────────────
+# Layered foreground/background warp. The gaussian-falloff displacement
+# core (_displacement_field) is unchanged; depth only modulates HOW MUCH
+# each layer follows it (near = 1.0x, far = 0.35x) and each layer is
+# warped + composited back-to-front, so a moving foreground reveals the
+# (less-moving) background instead of smearing it. Depth is a heuristic
+# pseudo-depth map (documented, not neural) unless the caller supplies
+# a real one.
+
+
+def estimate_depth(image: Image.Image,
+                   keypoints: np.ndarray | None = None) -> np.ndarray:
+    """Heuristic pseudo-depth map, HxW float32 in [0,1] (1 = near).
+
+    Base field: bottom-of-frame is nearer + center weighting, heavily
+    smoothed (no hard edges). When ``keypoints`` (N,2 normalized) are
+    given, gaussian splats at each joint pull the map near — the
+    person reads as foreground. This is a compositional heuristic for
+    layered warping, NOT neural depth (no MiDaS/Depth-Anything here).
+    """
+    W, H = image.size
+    # work small, then upsample — the map must be smooth
+    sw, sh = 64, 64
+    ys, xs = np.mgrid[0:sh, 0:sw].astype(np.float64)
+    # bottom nearer + gentle center pull
+    depth = 0.35 + 0.45 * (ys / sh)
+    cx = np.exp(-(((xs / sw - 0.5) * 2) ** 2
+                  + ((ys / sh - 0.5) * 2) ** 2) * 1.2)
+    depth = depth * 0.7 + cx * 0.3
+    if keypoints is not None:
+        kp = np.asarray(keypoints, dtype=np.float64)
+        kx = (kp[:, 0] * sw)[None, None, :]
+        ky = (kp[:, 1] * sh)[None, None, :]
+        d2 = (kx - xs[:, :, None]) ** 2 + (ky - ys[:, :, None]) ** 2
+        splat = np.exp(-d2 / (2 * (sw * 0.06) ** 2)).max(axis=2)
+        depth = np.maximum(depth, splat * 0.95 + 0.05)
+    depth = np.clip(depth, 0, 1)
+    big = Image.fromarray((depth * 255).astype(np.uint8)).resize(
+        (W, H), Image.BILINEAR)
+    return np.array(big).astype(np.float64) / 255.0
+
+
+def depth_aware_warp(base_img: Image.Image, kp0: np.ndarray, kp1: np.ndarray,
+                     depth: np.ndarray | None = None,
+                     n_layers: int = 3, grid: int = 10,
+                     radius: float = 0.25,
+                     strength: float = 1.0) -> Image.Image:
+    """Warp with layered foreground/background separation.
+
+    The displacement field comes from the shared gaussian-falloff core;
+    each depth layer follows it at 0.35x (far) .. 1.0x (near) and layers
+    composite back-to-front, so foreground motion uncovers background
+    instead of dragging it along. ``depth``: HxW [0,1], 1 = near.
+    """
+    W, H = base_img.size
+    if depth is None:
+        depth = estimate_depth(base_img, kp0)
+    depth = np.asarray(depth, dtype=np.float64)
+    if depth.shape != (H, W):
+        depth = np.array(Image.fromarray(
+            (np.clip(depth, 0, 1) * 255).astype(np.uint8)
+        ).resize((W, H), Image.BILINEAR)).astype(np.float64) / 255.0
+    depth = np.clip(depth, 0, 1)
+
+    n_layers = max(1, int(n_layers))
+    mean_d = float(depth.mean())
+    if n_layers == 1 or float(depth.max() - depth.min()) < 1e-6:
+        # degenerate depth: single warp, weight from mean depth
+        w = 0.35 + 0.65 * mean_d
+        return _mesh_for_frame(base_img, kp0, kp1, grid=grid,
+                               radius=radius, strength=strength * w)
+
+    dx, dy = _displacement_field(kp0, kp1, W, H, grid=grid, radius=radius)
+    ys, xs = np.mgrid[0:H, 0:W].astype(np.float64)
+    arr = np.array(base_img)
+    edges = np.quantile(depth, np.linspace(0, 1, n_layers + 1))
+    feather = 0.08
+    composite: np.ndarray | None = None
+    for li in range(n_layers - 1, -1, -1):  # far -> near
+        lo, hi = float(edges[li]), float(edges[li + 1])
+        m = (np.clip((depth - (lo - feather)) / max(1e-9, feather), 0, 1)
+             * np.clip(((hi + feather) - depth) / max(1e-9, feather), 0, 1))
+        if m.max() <= 0:
+            continue
+        w = 0.35 + 0.65 * (li / max(1, n_layers - 1))
+        sx = xs - dx * strength * w
+        sy = ys - dy * strength * w
+        warped = _bilinear_sample(arr, sx, sy)
+        if composite is None:
+            composite = warped
+        else:
+            composite = warped * m[..., None] + composite * (1 - m[..., None])
+    out = composite if composite is not None else arr.astype(np.float64)
+    return Image.fromarray(np.clip(out, 0, 255).astype(np.uint8))
+
+
 def warp_animate(image: str, track: PoseTrack, *,
                  out_path: str | None = None,
                  workdir: str | None = None,
-                 grid: int = 10) -> AnimResult:
+                 grid: int = 10,
+                 depth_layers: int = 0) -> AnimResult:
     """CPU fallback: pose-guided mesh warp. Real directed motion, honest label.
 
     Each frame warps the still toward the cumulative keypoint displacement
     from frame 0. The arm rises, the hand morphs — driven by the actual
     pose track, not random motion.
+
+    ``depth_layers`` >= 2 enables the depth-aware layered warp
+    (foreground/background separation from a pose-derived pseudo-depth
+    map); 0/1 keeps the classic single-grid warp.
     """
     ff = _ffmpeg()
     if not ff:
@@ -182,9 +283,17 @@ def warp_animate(image: str, track: PoseTrack, *,
     wd.mkdir(parents=True, exist_ok=True)
     kp0 = track.frames[0]
     n = track.n_frames
+    depth = None
+    if depth_layers >= 2:
+        depth = estimate_depth(base, kp0)
     for i in range(n):
         # cumulative displacement from rest; warp is directed by the track
-        frame = _mesh_for_frame(base, kp0, track.frames[i], grid=grid)
+        if depth is not None:
+            frame = depth_aware_warp(base, kp0, track.frames[i],
+                                     depth=depth, n_layers=depth_layers,
+                                     grid=grid)
+        else:
+            frame = _mesh_for_frame(base, kp0, track.frames[i], grid=grid)
         frame.save(wd / f"w_{i:04d}.png")
     out = out_path or str(wd / "warp.mp4")
     subprocess.run(
@@ -194,9 +303,11 @@ def warp_animate(image: str, track: PoseTrack, *,
         check=True, capture_output=True, timeout=600)
     return AnimResult(
         path=out, backend="warp", action=track.action,
-        note=("CPU mesh-warp: directed by the pose track (arm rises, hand "
-              "morphs). Honest 2.5D warp — not neural. For photoreal, run "
-              "on a workstation with MimicMotion."))
+        note=("CPU mesh-warp"
+              + (" (depth-layered)" if depth is not None else "")
+              + ": directed by the pose track (arm rises, hand "
+                "morphs). Honest 2.5D warp — not neural. For photoreal, run "
+                "on a workstation with MimicMotion."))
 
 
 def direct_animate(image: str, track: PoseTrack, *,

@@ -295,3 +295,57 @@ def test_warp_mouth_shapes_differ():
     w_out = ls._warp_mouth(frame, box, ls.mouth_shape_for_viseme("W"))
     iy_out = ls._warp_mouth(frame, box, ls.mouth_shape_for_viseme("IY"))
     assert not (w_out == iy_out).all()
+
+
+# ── depth-aware warp ─────────────────────────────────────────────────
+from nomorals.media.directed import animator as an
+
+
+def _warp_setup():
+    rng = np.random.RandomState(0)
+    img = _PILImage.fromarray(
+        rng.randint(0, 255, (120, 160, 3)).astype(np.uint8))
+    kp0 = pr.rest_pose()
+    kp1 = kp0.copy()
+    kp1[4] += np.array([0.10, -0.15])  # r_wrist moves
+    return img, kp0, kp1
+
+
+def test_estimate_depth_sane():
+    img, kp0, _ = _warp_setup()
+    dep = an.estimate_depth(img, kp0)
+    assert dep.shape == (120, 160)
+    assert dep.min() >= 0.0 and dep.max() <= 1.0
+    assert dep.max() > dep.min() + 0.2  # person pops as foreground
+    dep2 = an.estimate_depth(img)  # no keypoints -> still valid
+    assert dep2.shape == (120, 160) and dep2.min() >= 0
+
+
+def test_depth_warp_identity():
+    img, kp0, _ = _warp_setup()
+    out = an.depth_aware_warp(img, kp0, kp0, n_layers=3)
+    d = np.abs(np.array(out).astype(float)
+               - np.array(img).astype(float)).max()
+    assert d < 3.0
+
+
+def test_depth_warp_layers_separate():
+    img, kp0, kp1 = _warp_setup()
+    dep = np.zeros((120, 160))
+    dep[:, :80] = 1.0  # left half near, right half far
+    out = an.depth_aware_warp(img, kp0, kp1, depth=dep, n_layers=2)
+    full = an._mesh_for_frame(img, kp0, kp1, strength=1.0)
+    soft = an._mesh_for_frame(img, kp0, kp1, strength=0.35)
+    a_out = np.array(out).astype(float)
+    dl = np.abs(a_out[:, :80] - np.array(full).astype(float)[:, :80]).mean()
+    dr = np.abs(a_out[:, 80:] - np.array(soft).astype(float)[:, 80:]).mean()
+    assert dl < 12.0 and dr < 12.0  # near follows, far lags
+
+
+def test_depth_warp_degenerate_depth():
+    img, kp0, kp1 = _warp_setup()
+    out = an.depth_aware_warp(img, kp0, kp1,
+                              depth=np.full((120, 160), 0.5), n_layers=3)
+    assert out.size == img.size
+    out1 = an.depth_aware_warp(img, kp0, kp1, n_layers=1)
+    assert out1.size == img.size
