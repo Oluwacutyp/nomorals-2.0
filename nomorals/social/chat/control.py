@@ -268,6 +268,8 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     # new layer: voice, scheduler, db, api, vision, swarm
     "tts": (1, None),        # /tts <text> — speak it (sends the audio file)
     "stt": (1, 5),           # /stt <path> — transcribe an audio file
+    "sing": (1, None),       # /sing <melody> — sing it (C4:0.5:hello …)
+    "say": (1, None),        # /say <text> — rich voice: emotion/accent/ambience
     "look": (1, None),       # /look <path|url> [focus] — screen-reader analysis
     "schedule": (0, None),   # /schedule add|list|rm|enable|disable|run|status
     "db": (0, None),         # /db tables | schema <t> | query <sql> | counts
@@ -1457,7 +1459,15 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
                  "related": "/spend /budget"},
     "tts": {"what": "speak text aloud and send the audio file back.",
             "usage": "/tts <text>", "example": "/tts morning",
-            "related": "/speak /stt"},
+            "related": "/speak /stt /say"},
+    "sing": {"what": "sing a melody with neural singing voice.",
+             "usage": "/sing C4:0.5:hello D4:0.5:world",
+             "example": "/sing C4:0.5:la E4:0.5:la G4:1:laaa",
+             "related": "/tts /say"},
+    "say": {"what": "rich voice: emotion, accent, ambience, room reverb.",
+            "usage": "/say [said angrily] <text> | /say accent=british ambient=\"light rain\" <text>",
+            "example": "/say [whispers fearfully] don't go in there",
+            "related": "/tts /sing"},
     "stt": {"what": "transcribe an audio file to text.",
             "usage": "/stt <path>", "example": "/stt /sdcard/audio/voice.ogg",
             "related": "/tts"},

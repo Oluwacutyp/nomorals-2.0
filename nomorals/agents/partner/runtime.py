@@ -2932,6 +2932,10 @@ class PartnerRuntime(
                                          chat_key=chat_key)
         if kind == "tts":
             return self._control_tts(command.tail or arg, chat_key=chat_key)
+        if kind == "sing":
+            return self._control_sing(command.tail or arg, chat_key=chat_key)
+        if kind == "say":
+            return self._control_say(command.tail or arg, chat_key=chat_key)
         if kind == "stt":
             return self._control_stt(command.tail or arg)
         if kind == "look":

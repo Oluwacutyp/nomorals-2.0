@@ -585,6 +585,103 @@ def register(registry: Any) -> None:
 
     # ── voice design + morphing (God-tier voice lab) ─────────────────────
 
+    # ── god-tier voice: sing / long-form / rich ──────────────────────────
+
+    @registry.register(
+        "voice_sing",
+        description=(
+            "Sing a melody with DiffSinger (open-source neural singing): "
+            "melody = 'C4:0.5:hello D4:0.5:world' (note:seconds:lyric). "
+            "Needs a DiffSinger voicebank in ~/.nomorals/svs/ and "
+            "onnxruntime. rvc_model swaps in the user's timbre."
+        ),
+        capability=Capability.FS_WRITE,
+        parameters={
+            "melody": "str — 'C4:0.5:hello D4:0.5:world' or MIDI numbers",
+            "rvc_model": "str (optional) — RVC model for the singer's timbre",
+            "out_name": "str (optional) — output file name",
+        },
+    )
+    def voice_sing(melody: str, *, rvc_model: str = "",
+                   out_name: str = "") -> dict[str, Any]:
+        from ..voice.tts import UniversalTTS
+        if not (melody or "").strip():
+            raise ToolError("voice_sing needs a melody")
+        engine = UniversalTTS(backend="auto", voices_dir=voices_dir())
+        out_path = str(audio_dir() / f"{out_name or 'song'}.wav") \
+            if out_name else ""
+        try:
+            return engine.sing(melody, rvc_model=rvc_model,
+                               out_path=out_path)
+        except RuntimeError as exc:
+            raise ToolError(f"singing unavailable: {exc}") from exc
+
+    @registry.register(
+        "voice_long",
+        description=(
+            "Long-form TTS without voice drift: chapters, audiobooks, "
+            "briefings. Sentence-boundary chunking, rolling prosody "
+            "context, crossfade stitching, degenerate-chunk regeneration."
+        ),
+        capability=Capability.FS_WRITE,
+        parameters={
+            "text": "str — the full text (any length)",
+            "voice": "str (optional) — registered voice profile name",
+            "mood": "str (optional, neutral)",
+            "out_name": "str (optional) — output file name",
+        },
+    )
+    def voice_long(text: str, *, voice: str = "", mood: str = "",
+                   out_name: str = "") -> dict[str, Any]:
+        from ..voice.tts import UniversalTTS
+        if not (text or "").strip():
+            raise ToolError("voice_long needs text")
+        engine = UniversalTTS(backend="auto", voices_dir=voices_dir())
+        out_path = str(audio_dir() / f"{out_name or 'longform'}.wav") \
+            if out_name else ""
+        try:
+            return engine.speak_long(text, voice_name=voice or None,
+                                     out_path=out_path,
+                                     mood=mood or "neutral")
+        except RuntimeError as exc:
+            raise ToolError(f"long-form TTS failed: {exc}") from exc
+
+    @registry.register(
+        "voice_rich",
+        description=(
+            "God-tier one-call voice: neural emotion ('[said angrily]'), "
+            "accent ('british'), procedural ambience ('light rain'), room "
+            "reverb ('hall'), and mastering. Every stage reports its "
+            "honest tier."
+        ),
+        capability=Capability.FS_WRITE,
+        parameters={
+            "text": "str — what to say",
+            "voice": "str (optional) — registered voice profile name",
+            "direction": "str (optional) — '[said angrily in British accent]'",
+            "accent": "str (optional) — british | nigerian | french | …",
+            "ambient": "str (optional) — light rain | crowd | wind | …",
+            "room": "str (optional) — small | room | hall | cave | phone",
+            "out_name": "str (optional) — output file name",
+        },
+    )
+    def voice_rich(text: str, *, voice: str = "", direction: str = "",
+                   accent: str = "", ambient: str = "", room: str = "",
+                   out_name: str = "") -> dict[str, Any]:
+        from ..voice.tts import UniversalTTS
+        if not (text or "").strip():
+            raise ToolError("voice_rich needs text")
+        engine = UniversalTTS(backend="auto", voices_dir=voices_dir())
+        out_path = str(audio_dir() / f"{out_name or 'rich'}.wav") \
+            if out_name else ""
+        try:
+            return engine.speak_rich(
+                text, voice_name=voice or None, out_path=out_path,
+                direction=direction, accent=accent,
+                ambient=ambient, room=room)
+        except RuntimeError as exc:
+            raise ToolError(f"voice_rich failed: {exc}") from exc
+
     @registry.register(
         "design_voice",
         description=(

@@ -44,6 +44,70 @@ class RuntimeVoiceMixin:
         text = value.get("text") or "(no speech detected)"
         return f"🎧 [{value.get('provider')}, {value.get('seconds')}s]\n{text[:1500]}"
 
+    # ── voice: /sing /say (god-tier) ─────────────────────────────────────
+
+    def _control_sing(self, tail: str, *, chat_key: str) -> str:
+        """Sing a melody: /sing C4:0.5:hello D4:0.5:world"""
+        melody = (tail or "").strip()
+        if not melody:
+            return "usage: /sing <melody> — e.g. /sing C4:0.5:la E4:0.5:la G4:1:laaa"
+        outcome = self.context.tools.call("voice_sing", melody=melody)
+        if not outcome.ok:
+            return f"singing failed: {getattr(outcome.error, 'message', outcome.error)}"
+        info = outcome.value
+        chat = self._ref_from_key(chat_key)
+        try:
+            result = self.gateway.send_file(chat.platform, chat, info["path"],
+                                            caption="🎤")
+            if getattr(result, "ok", False):
+                return f"🎤 sung ({info.get('notes', '?')} notes)"
+        except Exception:  # noqa: BLE001
+            pass
+        return f"🎤 sung — saved at {info.get('path')}"
+
+    def _control_say(self, tail: str, *, chat_key: str) -> str:
+        """Rich voice: /say [said angrily] text | /say accent=british … text"""
+        import re
+        rest = (tail or "").strip()
+        if not rest:
+            return ("usage: /say [direction] [accent=X] [ambient=Y] [room=Z] <text>\n"
+                    "e.g. /say [whispers fearfully] don't go in there")
+        kwargs: dict[str, str] = {}
+        # Pull leading key=value options
+        while True:
+            m = re.match(r"(\w+)=(?:\"([^\"]+)\"|(\S+))\s+", rest)
+            if not m:
+                break
+            kwargs[m.group(1).lower()] = m.group(2) or m.group(3)
+            rest = rest[m.end():]
+        # Leading [direction] tag
+        direction = ""
+        m = re.match(r"\[[^\]]+\]\s*", rest)
+        if m:
+            direction = m.group(0).strip()
+            rest = rest[m.end():]
+        if not rest:
+            return "usage: /say [direction] [options] <text to say>"
+        outcome = self.context.tools.call(
+            "voice_rich", text=rest[:4000],
+            direction=direction,
+            accent=kwargs.get("accent", ""),
+            ambient=kwargs.get("ambient", ""),
+            room=kwargs.get("room", ""))
+        if not outcome.ok:
+            return f"say failed: {getattr(outcome.error, 'message', outcome.error)}"
+        info = outcome.value
+        chat = self._ref_from_key(chat_key)
+        try:
+            result = self.gateway.send_file(chat.platform, chat, info["path"],
+                                            caption="🔊")
+            if getattr(result, "ok", False):
+                post = ", ".join(info.get("post", []))
+                return f"🔊 said ({post or info.get('tier', '?')})"
+        except Exception:  # noqa: BLE001
+            pass
+        return f"🔊 said — saved at {info.get('path')}"
+
     # ── vision: /look (screen reader) ────────────────────────────────────────
     def _control_look(self, tail: str, *, chat_key: str) -> str:
         """Screen-reader analysis of a screenshot (path or URL)."""
