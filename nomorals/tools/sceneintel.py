@@ -206,7 +206,7 @@ def register(registry: Any) -> None:
                      "night'), image-to-video ('animate this image'), or "
                      "video-to-video restyle ('restyle this clip as anime'). "
                      "Returns a clip file ready to cut into a timeline."),
-        capability=Capability.GEN,
+        capability=Capability.MEDIA,
     )
     def gen_shot(mode: str, prompt: str, *, image: str = "",
                  video: str = "", duration_s: float = 5.0,

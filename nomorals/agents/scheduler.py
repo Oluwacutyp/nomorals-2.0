@@ -14,25 +14,49 @@ Three payload kinds:
 * ``tool``    — call any registered tool with JSON args
 * ``command`` — run a shell command through the sandboxed shell tool
 
-Advanced features:
+Execution policies (per-job data, not code branches):
 
-* **Dependencies** — a job can declare ``depends_on`` (another job's id);
-  it only fires when the dependency's last run succeeded.
-* **Retries** — ``max_retries`` + ``retry_delay``: failed jobs retry with
-  linear backoff before the failure is reported.
-* **Missed-job catch-up** — ``catch_up_on_startup()`` runs jobs whose
-  ``next_run`` passed while the bot was down (within a max age).
+* **Dependencies** — ``depends_on`` accepts one job id or a list; it fires
+  when the dependency gate opens under ``depends_policy``:
+  ``all_ok`` (every dependency's last run succeeded),
+  ``any_ok`` (at least one did), ``latest_ok`` (the most recent run among
+  them succeeded).
+* **Retries** — ``max_retries`` + ``retry_delay`` with a selectable
+  ``backoff`` strategy: ``constant`` | ``linear`` | ``exponential``
+  (default), capped at ``backoff_max_s``, with ``backoff_jitter``
+  fractional jitter.  Native implementation, no external deps.
+* **Missed-fire policy** — when a firing is missed (bot down, tick
+  stalled, pressure deferral), ``missed_fire_policy`` decides:
+  ``fire_now`` (coalesce and run once), ``skip`` (drop it, reschedule
+  from now), ``next_only`` (advance the schedule past the missed firing
+  without running).
+* **Overlap policy** — when a job is due while its previous run is still
+  executing: ``concurrent`` (run anyway), ``skip`` (drop this firing),
+  ``queue`` (leave for the next tick).
+* **Run timeout** — ``run_timeout_s`` caps one execution's wall clock
+  (0 = the scheduler default).  A timed-out run is marked failed and its
+  worker abandoned; the tick loop is never blocked forever.
+* **Resource-aware** — pass a ``resources`` advisor (duck-typed
+  ``consult() -> dict``, e.g. the injected ``ResourceManager``); heavy
+  jobs (``heavy=True`` or ``weight >= HEAVY_WEIGHT_THRESHOLD``) defer
+  under pressure — never dropped, retried on later ticks.
 
-Jobs live in the ``schedule_jobs`` table (migration 15, upgraded by 81):
-a restart resumes them, a disabled job stays put, and one-shot jobs
-disable themselves after firing. The tick loop runs on a daemon thread
-and every due job's outcome is published through the Notifier, so alerts
-are durable and multi-channel.
+Jobs live in the ``schedule_jobs`` table (migration 15, upgraded by 81
+and 85): a restart resumes them, a disabled job stays put, and one-shot
+jobs disable themselves after firing.  Every execution lands one row in
+``schedule_runs``; every run is journaled to the autonomy ledger; and
+``scheduler.job.started`` / ``scheduler.job.finished`` events go out on
+the global event bus so other systems (triggers, the ledger, the
+timeline) can react — cross-system triggering for real.  The tick loop
+runs on a daemon thread and every due job's outcome is published through
+the Notifier, so alerts are durable and multi-channel.
 """
 
 from __future__ import annotations
 
 import json
+import os
+import random
 import re
 import threading
 import time
@@ -41,14 +65,105 @@ from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from ..core.errors import AmbiguousRef
+from ..core.events import Event, global_bus
 from ..core.ids import min_unique_prefix_len, new_id, resolve_id_prefix
 from ..core.logging_setup import get_logger
 from ..core.policy import CapabilitySet
+from .autonomy_ledger import record_ledger
 from .notifier import Notifier
 
 _log = get_logger(__name__)
 
-__all__ = ["Scheduler", "parse_schedule_spec"]
+__all__ = [
+    "Scheduler",
+    "parse_schedule_spec",
+    "HEAVY_WEIGHT_THRESHOLD",
+    "MISSED_FIRE_POLICIES",
+    "OVERLAP_POLICIES",
+    "BACKOFF_STRATEGIES",
+    "DEPENDS_POLICIES",
+]
+
+# ── execution policies (per-job data) ────────────────────────────────────────
+
+#: What to do with a missed firing.
+MISSED_FIRE_POLICIES = frozenset({"fire_now", "skip", "next_only"})
+#: What to do when a job is due but its previous run is still executing.
+OVERLAP_POLICIES = frozenset({"concurrent", "skip", "queue"})
+#: Retry-delay strategies.
+BACKOFF_STRATEGIES = frozenset({"constant", "linear", "exponential"})
+#: How a multi-job depends_on list gates firing.
+DEPENDS_POLICIES = frozenset({"all_ok", "any_ok", "latest_ok"})
+
+#: Metadata ``weight`` at or above this value marks a job as heavy.
+HEAVY_WEIGHT_THRESHOLD = 1.0
+
+#: A job this late (seconds) is merely late, not missed — it runs normally.
+#: Older than this, the job's ``missed_fire_policy`` decides.
+MISSED_GRACE_SECONDS = 300.0
+
+
+def _backoff_delay(
+    strategy: str,
+    base_delay: float,
+    attempt: int,
+    *,
+    max_s: float = 3600.0,
+    jitter: float = 0.25,
+    rng: random.Random | None = None,
+) -> float:
+    """Native retry-delay computation for one attempt (1-based).
+
+    ``constant`` → base every time; ``linear`` → base × attempt;
+    ``exponential`` → base × 2^(attempt-1).  The result is capped at
+    ``max_s`` and perturbed by ±``jitter`` fractionally so a fleet of
+    failed jobs does not retry in lockstep.  Never raises; floors at 1s.
+    """
+    strategy = (strategy or "exponential").strip().lower()
+    base = max(1.0, float(base_delay or 1.0))
+    attempt = max(1, int(attempt or 1))
+    if strategy == "constant":
+        delay = base
+    elif strategy == "linear":
+        delay = base * attempt
+    else:  # exponential (and any unknown value degrades to it, loudly)
+        if strategy != "exponential":
+            _log.warning("unknown backoff strategy %r — using exponential",
+                         strategy)
+        delay = base * (2.0 ** (attempt - 1))
+    delay = min(delay, max(1.0, float(max_s or 1.0)))
+    jitter = min(0.9, max(0.0, float(jitter or 0.0)))
+    if jitter > 0:
+        r = rng if rng is not None else random
+        factor = 1.0 + (r.random() * 2.0 - 1.0) * jitter
+        delay = delay * max(0.1, factor)
+    return max(1.0, delay)
+
+
+def _parse_depends(raw: Any) -> list[str]:
+    """Normalize ``depends_on`` to a list of job ids.
+
+    Accepts a single id, a comma-separated string, a JSON list string, or
+    a real list.  Never raises — garbage becomes an empty list (and the
+    gate then treats "no dependencies" as open, matching history).
+    """
+    if not raw:
+        return []
+    if isinstance(raw, (list, tuple)):
+        return [str(x).strip() for x in raw if str(x).strip()]
+    text = str(raw).strip()
+    if not text:
+        return []
+    if text.startswith("["):
+        try:
+            parsed = json.loads(text)
+            if isinstance(parsed, list):
+                return [str(x).strip() for x in parsed if str(x).strip()]
+        except (ValueError, TypeError):
+            pass
+    if "," in text:
+        return [p.strip() for p in text.split(",") if p.strip()]
+    return [text]
 
 _INTERVAL_RE = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*(s|m|h|d|sec|min|mins|hr|hrs|hours?|days?|seconds?|minutes?)\s*$", re.IGNORECASE)
 _TIME_RE = re.compile(r"^\s*(\d{1,2}):(\d{1,2})\s*$")
@@ -317,31 +432,145 @@ def _like_escape(text: str) -> str:
                 .replace("_", "\\_"))
 
 
+def _profile_name(context: Any) -> str:
+    """Runtime profile: termux | laptop | workstation (default).
+
+    ``NM_PROFILE`` wins, then ``settings.profile`` — the same dial the
+    profile-aware runtime uses.  The scheduler uses it to gate default
+    parallelism instead of designing down to the weakest machine.
+    """
+    env = (os.environ.get("NM_PROFILE") or "").strip().lower()
+    if env:
+        return env
+    try:
+        prof = getattr(getattr(context, "settings", None), "profile", "")
+        if prof:
+            return str(prof).strip().lower()
+    except Exception:  # noqa: BLE001
+        pass
+    return "workstation"
+
+
 class Scheduler:
     """Owns the schedule_jobs table and the tick loop."""
 
     def __init__(self, context: Any, *, gateway: Any = None,
-                 tick_seconds: float = 20.0, max_concurrent: int = 2,
+                 tick_seconds: float = 20.0, max_concurrent: int | None = None,
                  wall_seconds: float = 300.0,
-                 redeliver_interval: float = 120.0) -> None:
+                 redeliver_interval: float = 120.0,
+                 resources: Any = None,
+                 missed_grace_s: float = MISSED_GRACE_SECONDS) -> None:
         self.context = context
         self.db = getattr(context, "db", None)
         self.notifier = Notifier(context, gateway=gateway)
         self.tick_seconds = max(5.0, float(tick_seconds))
+        # Profile-gated parallelism instead of designing down: the phone
+        # (termux) runs one job at a time; bigger machines keep the default.
+        # An explicit max_concurrent always wins.
+        if max_concurrent is None:
+            max_concurrent = 1 if _profile_name(context) == "termux" else 2
         self.max_concurrent = max(1, int(max_concurrent))
-        self.wall_seconds = float(wall_seconds)
+        #: Default per-execution wall-clock cap (seconds).  Enforced for
+        #: real in _execute — a job may override it with run_timeout_s.
+        self.wall_seconds = max(10.0, float(wall_seconds))
         #: how often the tick loop sweeps the notification redelivery
         #: queue (throttled: one sweep per interval, not per tick).
         self.redeliver_interval = max(15.0, float(redeliver_interval))
+        #: Optional resource advisor (duck-typed: consult() -> dict with
+        #: ok/throttled/reasons).  Injected by L7 entry points; heavy jobs
+        #: defer (never drop) while it reports pressure.
+        self._resources = resources
+        #: Grace window: a job this late is merely late, not missed.
+        self.missed_grace_s = max(0.0, float(missed_grace_s))
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
         self._running_jobs = 0
         self._lock = threading.Lock()
+        #: job ids with a run in flight right now (overlap policies).
+        self._active: set[str] = set()
+        #: job id -> consecutive deferrals under resource pressure.
+        self._deferrals: dict[str, int] = {}
+        #: jitter source for backoff (seedable in tests).
+        self._rng = random.Random()
         #: health bookkeeping — the numbers behind ``/schedule health``
         self._started_at: float | None = None
         self._last_tick_at: float | None = None
         self._last_redeliver_at = 0.0
         self._tick_errors = 0
+
+    # ── cross-system wiring (bus + ledger; both fail-open) ────────────────
+
+    def _emit_bus(self, topic: str, data: dict[str, Any]) -> None:
+        """Publish a scheduler event.  Telemetry/control for other
+        systems — a broken bus or subscriber must never break a job."""
+        try:
+            global_bus.publish(Event(topic=topic, data=data,
+                                     source="nomorals.agents.scheduler"))
+        except Exception:  # noqa: BLE001
+            _log.debug("scheduler bus publish %s failed", topic,
+                       exc_info=True)
+
+    def _ledger(self, kind: str, ref_id: str, summary: str, *,
+                cost_seconds: float = 0.0, cost_tokens: int = 0,
+                ok: bool = True, learned: str = "",
+                metadata: dict[str, Any] | None = None) -> str:
+        """Journal one entry to the unified autonomy ledger. Never raises."""
+        try:
+            return record_ledger(self.db, "scheduler", kind, ref_id,
+                                 summary, cost_seconds=cost_seconds,
+                                 cost_tokens=cost_tokens, ok=ok,
+                                 learned=learned, metadata=metadata)
+        except Exception:  # noqa: BLE001
+            _log.debug("scheduler ledger write failed", exc_info=True)
+            return ""
+
+    # ── resource pressure ────────────────────────────────────────────────
+
+    def _pressure_gate(self) -> tuple[bool, list[str]]:
+        """Consult the injected resource advisor once per tick.
+
+        Returns ``(defer_heavy, reasons)``.  Heavy jobs defer when the
+        advisory reports ``throttled`` or ``ok == False``.  Never raises
+        and never blocks: with no advisor there is no gating, and a
+        failing advisor fails closed for heavy work while light jobs
+        still run.
+        """
+        advisor = self._resources
+        if advisor is None:
+            return False, []
+        try:
+            advisory = advisor.consult()
+        except Exception as exc:  # noqa: BLE001
+            _log.warning("scheduler resource consult failed (%s); "
+                         "deferring heavy jobs this tick", exc)
+            return True, [f"consult failed: {exc}"]
+        if not isinstance(advisory, dict):
+            return True, ["consult returned non-dict advisory"]
+        throttled = bool(advisory.get("throttled", False))
+        ok = bool(advisory.get("ok", True))
+        reasons = [str(r) for r in (advisory.get("reasons") or [])]
+        if throttled or not ok:
+            return True, reasons
+        return False, reasons
+
+    @staticmethod
+    def _is_heavy(row: dict[str, Any]) -> bool:
+        """True when the job row marks heavy work.
+
+        Explicit ``heavy`` wins; otherwise a numeric ``weight`` at or
+        above :data:`HEAVY_WEIGHT_THRESHOLD` counts as heavy.  The
+        default (neither set) is light.
+        """
+        try:
+            if int(row.get("heavy") or 0):
+                return True
+        except (TypeError, ValueError):
+            pass
+        try:
+            weight = float(row.get("weight") or 0.0)
+        except (TypeError, ValueError):
+            return False
+        return weight >= HEAVY_WEIGHT_THRESHOLD
 
     # ── CRUD ─────────────────────────────────────────────────────────────────
     def add(
@@ -352,9 +581,18 @@ class Scheduler:
         payload: dict[str, Any],
         *,
         timezone: str = "",
-        depends_on: str = "",
+        depends_on: str | list[str] = "",
+        depends_policy: str = "all_ok",
         max_retries: int = 0,
         retry_delay: float = 60.0,
+        backoff: str = "exponential",
+        backoff_max_s: float = 3600.0,
+        backoff_jitter: float = 0.25,
+        missed_fire_policy: str = "fire_now",
+        overlap_policy: str = "concurrent",
+        run_timeout_s: float = 0.0,
+        heavy: bool = False,
+        weight: float = 0.0,
     ) -> dict[str, Any]:
         if self.db is None:
             raise RuntimeError("scheduler needs a database context")
@@ -367,15 +605,39 @@ class Scheduler:
             raise ValueError("tool payloads need a 'tool' name")
         if payload_kind == "command" and not str(payload.get("command") or "").strip():
             raise ValueError("command payloads need a 'command'")
-        # dependency must name an existing job
-        depends_on = (depends_on or "").strip()
-        if depends_on:
-            dep = self._find(depends_on)
-            if dep is None:
-                raise ValueError(f"depends_on: no job {depends_on!r}")
-            depends_on = dep["id"]  # canonicalize to the full id
+        # dependency: one id or a list; every named job must exist
+        dep_ids = _parse_depends(depends_on)
+        canonical_deps: list[str] = []
+        for dep in dep_ids:
+            row = self._find(dep)
+            if row is None:
+                raise ValueError(f"depends_on: no job {dep!r}")
+            canonical_deps.append(row["id"])  # canonicalize to the full id
+        depends_policy = (depends_policy or "all_ok").strip().lower()
+        if depends_policy not in DEPENDS_POLICIES:
+            raise ValueError(
+                f"depends_policy must be one of {sorted(DEPENDS_POLICIES)}, "
+                f"got {depends_policy!r}")
         max_retries = max(0, int(max_retries))
         retry_delay = max(10.0, float(retry_delay))
+        backoff = (backoff or "exponential").strip().lower()
+        if backoff not in BACKOFF_STRATEGIES:
+            raise ValueError(
+                f"backoff must be one of {sorted(BACKOFF_STRATEGIES)}, "
+                f"got {backoff!r}")
+        backoff_max_s = max(60.0, float(backoff_max_s or 3600.0))
+        backoff_jitter = min(0.9, max(0.0, float(backoff_jitter or 0.0)))
+        missed_fire_policy = (missed_fire_policy or "fire_now").strip().lower()
+        if missed_fire_policy not in MISSED_FIRE_POLICIES:
+            raise ValueError(
+                f"missed_fire_policy must be one of "
+                f"{sorted(MISSED_FIRE_POLICIES)}, got {missed_fire_policy!r}")
+        overlap_policy = (overlap_policy or "concurrent").strip().lower()
+        if overlap_policy not in OVERLAP_POLICIES:
+            raise ValueError(
+                f"overlap_policy must be one of {sorted(OVERLAP_POLICIES)}, "
+                f"got {overlap_policy!r}")
+        run_timeout_s = max(0.0, float(run_timeout_s or 0.0))
         # explicit timezone arg wins; daily spec may also embed one
         timezone = (timezone or "").strip()
         if timezone:
@@ -403,16 +665,27 @@ class Scheduler:
             self.db.execute(
                 "INSERT INTO schedule_jobs (id, name, kind, spec, payload_kind, payload, "
                 "enabled, next_run, last_run, last_result, created_at, updated_at, "
-                "timezone, depends_on, max_retries, retry_delay, retry_count) "
-                "VALUES (?, ?, ?, ?, ?, ?, 1, ?, NULL, '', ?, ?, ?, ?, ?, ?, 0)",
+                "timezone, depends_on, depends_policy, max_retries, retry_delay, "
+                "retry_count, backoff, backoff_max_s, backoff_jitter, "
+                "missed_fire_policy, overlap_policy, run_timeout_s, heavy, weight) "
+                "VALUES (?, ?, ?, ?, ?, ?, 1, ?, NULL, '', ?, ?, ?, ?, ?, ?, ?, "
+                "0, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     job_id, (name or "").strip() or "job", kind,
                     spec_str,
                     payload_kind, json.dumps(payload),
                     next_run, now, now,
-                    timezone, depends_on, max_retries, retry_delay,
+                    timezone, json.dumps(canonical_deps), depends_policy,
+                    max_retries, retry_delay,
+                    backoff, backoff_max_s, backoff_jitter,
+                    missed_fire_policy, overlap_policy, run_timeout_s,
+                    1 if heavy else 0, float(weight or 0.0),
                 ),
             )
+        self._ledger("schedule", job_id,
+                     f"scheduled {name!r} ({kind} {spec_str})",
+                     metadata={"kind": kind, "spec": spec_str,
+                               "payload_kind": payload_kind})
         return {"id": job_id, "name": (name or "").strip() or "job", "kind": kind,
                 "next_run": next_run}
 
@@ -536,27 +809,143 @@ class Scheduler:
         return _next_daily(str(row["spec"]), datetime.fromtimestamp(now), tz), True
 
     def _dependency_ok(self, row: dict[str, Any]) -> bool:
-        """True when the job's ``depends_on`` target last succeeded (or none)."""
-        dep_id = str(row.get("depends_on") or "").strip()
-        if not dep_id:
+        """True when the job's ``depends_on`` gate is open.
+
+        ``depends_on`` is a list of job ids (a lone id is one entry).
+        ``depends_policy`` decides the gate:
+
+        * ``all_ok`` — every dependency's last run succeeded;
+        * ``any_ok`` — at least one dependency's last run succeeded;
+        * ``latest_ok`` — the most recently-run dependency succeeded.
+
+        A deleted dependency, or one that never ran, keeps the gate shut —
+        the job waits instead of silently running.
+        """
+        dep_ids = _parse_depends(row.get("depends_on"))
+        if not dep_ids:
             return True
         if self.db is None:
             return False
-        dep = self.db.query_one(
-            "SELECT last_result FROM schedule_jobs WHERE id = ?", (dep_id,))
-        if not dep:
-            # dependency was deleted — treat as unmet, don't silently run
-            return False
-        last = str(dep.get("last_result") or "")
-        # never ran counts as unmet; only an explicit success opens the gate
-        return bool(last) and not last.startswith("job failed")
+        policy = str(row.get("depends_policy") or "all_ok").strip().lower()
+        if policy not in DEPENDS_POLICIES:
+            policy = "all_ok"
+        results: list[tuple[bool, float]] = []  # (succeeded, last_run)
+        for dep_id in dep_ids:
+            dep = self.db.query_one(
+                "SELECT last_result, last_run FROM schedule_jobs WHERE id = ?",
+                (dep_id,))
+            if not dep:
+                # dependency was deleted — treat as unmet, don't silently run
+                return False
+            last = str(dep.get("last_result") or "")
+            # never ran counts as unmet; only an explicit success opens the gate
+            succeeded = bool(last) and not last.startswith("job failed")
+            try:
+                last_run = float(dep.get("last_run") or 0.0)
+            except (TypeError, ValueError):
+                last_run = 0.0
+            results.append((succeeded, last_run))
+        if policy == "any_ok":
+            return any(ok for ok, _ in results)
+        if policy == "latest_ok":
+            # the most recently executed dependency decides
+            latest = max(results, key=lambda r: r[1])
+            return bool(latest[0]) and latest[1] > 0
+        return all(ok for ok, _ in results)  # all_ok
+
+    # ── missed-fire policies ───────────────────────────────────────────────
+
+    def _apply_missed_fire(
+        self,
+        row: dict[str, Any],
+        now: float,
+        *,
+        cutoff: float | None = None,
+        trigger_source: str = "tick",
+    ) -> dict[str, Any] | None:
+        """Apply the job's ``missed_fire_policy`` to a stale ``next_run``.
+
+        Returns the execution outcome when the policy fired the job
+        (``fire_now``), else None (the schedule was advanced without
+        running).  ``cutoff`` (used by catch-up) degrades ``fire_now`` to
+        ``skip`` for firings older than the bound — a job missed by days
+        is stale, not merely late.
+        """
+        job_id = row["id"]
+        next_run = float(row.get("next_run") or now)
+        lateness = now - next_run
+        policy = str(row.get("missed_fire_policy") or "fire_now").strip().lower()
+        if policy not in MISSED_FIRE_POLICIES:
+            policy = "fire_now"
+        too_stale = cutoff is not None and next_run < cutoff
+        if policy == "fire_now" and not too_stale:
+            # coalesce: one run now, no matter how many periods were missed
+            _log.info("scheduler: job %s (%s) missed its firing by %ds — "
+                      "firing now (missed_fire_policy=fire_now)",
+                      job_id, row.get("name"), int(lateness))
+            return self._execute(row, trigger_source=trigger_source)
+        # skip / next_only / stale fire_now: advance without executing
+        self._advance_past_missed(row, now, policy)
+        reason = (f"skipped: firing missed by {int(lateness)}s "
+                  f"(missed_fire_policy={policy}"
+                  f"{', too stale to fire' if too_stale else ''})")
+        self._record_run(job_id, now, 0.0, True, reason, 0, trigger_source)
+        self._ledger("skipped", job_id,
+                     f"{row.get('name')}: {reason}",
+                     metadata={"policy": policy, "lateness_s": int(lateness)})
+        _log.info("scheduler: job %s (%s) %s", job_id, row.get("name"), reason)
+        return None
+
+    def _advance_past_missed(self, row: dict[str, Any], now: float,
+                             policy: str) -> None:
+        """Move the schedule past a missed firing without executing.
+
+        ``skip`` reschedules from *now*; ``next_only`` keeps the
+        schedule's phase by stepping forward from the missed firing
+        itself (the next firing after the missed one).  One-shot jobs
+        simply disable — a missed one-shot never fires late.
+        """
+        kind = row["kind"]
+        if kind == "at":
+            next_run: float | None = None
+            still_enabled = False
+        elif kind == "every":
+            interval = max(10.0, float(row["spec"] or 10.0))
+            if policy == "skip":
+                next_run, still_enabled = now + interval, True
+            else:  # next_only — keep phase
+                nxt = float(row.get("next_run") or now)
+                while nxt <= now:
+                    nxt += interval
+                next_run, still_enabled = nxt, True
+        elif kind == "cron":
+            tz = str(row.get("timezone") or "")
+            base = (datetime.fromtimestamp(now)
+                    if policy == "skip"
+                    else datetime.fromtimestamp(float(row.get("next_run") or now)))
+            next_run = _next_cron(str(row["spec"]), base, tz)
+            still_enabled = True
+        else:  # daily
+            tz = str(row.get("timezone") or "")
+            base = (datetime.fromtimestamp(now)
+                    if policy == "skip"
+                    else datetime.fromtimestamp(float(row.get("next_run") or now)))
+            next_run = _next_daily(str(row["spec"]), base, tz)
+            still_enabled = True
+        with self.db.transaction():
+            self.db.execute(
+                "UPDATE schedule_jobs SET next_run = ?, enabled = ?, "
+                "retry_count = 0, updated_at = ? WHERE id = ?",
+                (next_run, 1 if still_enabled else 0, time.time(), row["id"]),
+            )
 
     def catch_up_on_startup(self, *, max_age_hours: float = 24.0) -> list[dict[str, Any]]:
         """Run jobs whose ``next_run`` passed while the bot was down.
 
-        Only catches up jobs missed within ``max_age_hours`` — anything
-        older is assumed stale and just gets rescheduled forward.
-        Returns the outcomes of the catch-up runs.
+        Each missed job's own ``missed_fire_policy`` decides what happens
+        (``fire_now`` / ``skip`` / ``next_only``); ``max_age_hours`` is the
+        staleness bound beyond which even ``fire_now`` degrades to
+        ``skip``.  Returns the outcomes of the jobs that actually fired.
         """
         if self.db is None:
             return []
@@ -566,8 +955,8 @@ class Scheduler:
             rows = self.db.query(
                 "SELECT * FROM schedule_jobs WHERE enabled = 1 "
                 "AND next_run IS NOT NULL AND next_run <= ? "
-                "AND next_run >= ? ORDER BY next_run ASC",
-                (now, cutoff),
+                "ORDER BY next_run ASC",
+                (now,),
             )
         except Exception:  # noqa: BLE001
             return []
@@ -576,27 +965,16 @@ class Scheduler:
             row = dict(row)
             if not self._dependency_ok(row):
                 continue
+            # every due job goes through its missed-fire policy — a merely
+            # late job with the default fire_now policy simply fires, which
+            # is the historical catch-up contract.
             try:
-                results.append(self._execute(row))
+                outcome = self._apply_missed_fire(
+                    row, now, cutoff=cutoff, trigger_source="catchup")
+                if outcome is not None:
+                    results.append(outcome)
             except Exception:  # noqa: BLE001
                 _log.exception("scheduler catch-up crashed: %s", row.get("id"))
-        # reschedule anything missed *before* the cutoff (too stale to run)
-        try:
-            with self.db.transaction():
-                stale = self.db.query(
-                    "SELECT * FROM schedule_jobs WHERE enabled = 1 "
-                    "AND next_run IS NOT NULL AND next_run < ?",
-                    (cutoff,),
-                )
-                for row in stale:
-                    nxt, _ = self._next_after_run(dict(row), now)
-                    self.db.execute(
-                        "UPDATE schedule_jobs SET next_run = ?, updated_at = ? "
-                        "WHERE id = ?",
-                        (nxt, now, row["id"]),
-                    )
-        except Exception:  # noqa: BLE001
-            _log.debug("scheduler stale reschedule failed")
         return results
 
     # ── execution ────────────────────────────────────────────────────────────
@@ -620,11 +998,52 @@ class Scheduler:
             )
         except Exception:  # noqa: BLE001
             return []
+        defer_heavy, pressure_reasons = self._pressure_gate()
         results = []
         for row in due:
             row = dict(row)
+            job_id = row["id"]
             if not self._dependency_ok(row):
                 # dependency hasn't succeeded yet — leave for a later tick
+                continue
+            # missed firing?  the job's own policy decides (fire/skip/advance)
+            lateness = now - float(row.get("next_run") or now)
+            if lateness > self.missed_grace_s:
+                try:
+                    outcome = self._apply_missed_fire(row, now)
+                    if outcome is not None:
+                        results.append(outcome)
+                except Exception:  # noqa: BLE001
+                    self._tick_errors += 1
+                    _log.exception("scheduler missed-fire handling crashed: %s",
+                                   job_id)
+                continue
+            # overlap: a previous run of THIS job is still executing
+            with self._lock:
+                overlapping = job_id in self._active
+            if overlapping:
+                policy = str(row.get("overlap_policy") or "concurrent").strip().lower()
+                if policy == "skip":
+                    self._skip_overlap(row, now)
+                    continue
+                if policy == "queue":
+                    # leave it for the next tick rather than dropping it
+                    continue
+                # concurrent: fall through and run
+            # resource pressure: heavy jobs defer (never drop) this tick
+            if defer_heavy and self._is_heavy(row):
+                self._deferrals[job_id] = self._deferrals.get(job_id, 0) + 1
+                n = self._deferrals[job_id]
+                _log.warning(
+                    "scheduler: deferring heavy job %s (%s, deferral #%d) — "
+                    "resource pressure [%s]; stays pending, retried next tick",
+                    job_id, row.get("name"), n,
+                    "; ".join(pressure_reasons) if pressure_reasons else "no reasons")
+                if n == 1 or n % 10 == 0:
+                    self._ledger("deferred", job_id,
+                                 f"{row.get('name')}: deferred under resource "
+                                 f"pressure (#{n})",
+                                 metadata={"reasons": pressure_reasons})
                 continue
             with self._lock:
                 if self._running_jobs >= self.max_concurrent:
@@ -641,6 +1060,69 @@ class Scheduler:
                     self._running_jobs -= 1
         self._maybe_redeliver()
         return results
+
+    def _skip_overlap(self, row: dict[str, Any], now: float) -> None:
+        """Drop this firing because the previous run is still active
+        (``overlap_policy=skip``); the schedule advances normally."""
+        job_id = row["id"]
+        next_run, still_enabled = self._next_after_run(row, now)
+        with self.db.transaction():
+            self.db.execute(
+                "UPDATE schedule_jobs SET next_run = ?, enabled = ?, "
+                "updated_at = ? WHERE id = ?",
+                (next_run, 1 if still_enabled else 0, time.time(), job_id),
+            )
+        reason = "skipped: previous run still active (overlap_policy=skip)"
+        self._record_run(job_id, now, 0.0, True, reason, 0, "tick")
+        self._ledger("skipped", job_id, f"{row.get('name')}: {reason}")
+        _log.info("scheduler: job %s (%s) %s", job_id, row.get("name"), reason)
+
+    def _record_run(self, job_id: str, started: float, seconds: float,
+                    ok: bool, result: str, retry_attempt: int,
+                    trigger_source: str) -> None:
+        """Land one row in ``schedule_runs`` — the durable per-execution
+        history.  Best-effort: a broken history table must never break a
+        job's bookkeeping."""
+        try:
+            with self.db.transaction():
+                self.db.execute(
+                    """INSERT INTO schedule_runs
+                       (id, job_id, started_at, finished_at, seconds, ok,
+                        result, retry_attempt, trigger_source)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (new_id("run"), job_id, started, started + seconds,
+                     seconds, 1 if ok else 0, (result or "")[:2000],
+                     int(retry_attempt or 0), trigger_source),
+                )
+        except Exception:  # noqa: BLE001
+            _log.debug("schedule_runs record failed for %s", job_id,
+                       exc_info=True)
+
+    def recent_runs(self, ref: str, *, limit: int = 20) -> list[dict[str, Any]]:
+        """Per-execution history for one job, newest first."""
+        row = self._find(ref)
+        if row is None or self.db is None:
+            return []
+        try:
+            rows = self.db.query(
+                "SELECT * FROM schedule_runs WHERE job_id = ? "
+                "ORDER BY started_at DESC LIMIT ?",
+                (row["id"], max(1, int(limit))),
+            )
+        except Exception:  # noqa: BLE001
+            return []
+        return [
+            {
+                "job_id": r["job_id"],
+                "started_at": r["started_at"],
+                "seconds": round(float(r.get("seconds") or 0.0), 2),
+                "ok": bool(r.get("ok")),
+                "result": (r.get("result") or "")[:300],
+                "retry_attempt": int(r.get("retry_attempt") or 0),
+                "trigger_source": r.get("trigger_source") or "",
+            }
+            for r in rows
+        ]
 
     def _maybe_redeliver(self) -> int:
         """Throttled sweep of the notification redelivery queue.
@@ -667,39 +1149,95 @@ class Scheduler:
         row = self._find(ref)
         if not row:
             raise LookupError(f"no job {ref!r}")
-        return self._execute(dict(row))
+        return self._execute(dict(row), trigger_source="manual")
 
-    def _execute(self, row: dict[str, Any]) -> dict[str, Any]:
+    def _run_payload_guarded(
+        self, row: dict[str, Any], timeout_s: float
+    ) -> tuple[bool, str, bool]:
+        """Execute the job payload with a wall-clock cap.
+
+        Returns ``(ok, summary, timed_out)``.  With ``timeout_s <= 0``
+        the payload runs inline (no cap); otherwise it runs on a daemon
+        worker thread and a join past the cap abandons the worker — the
+        tick loop is never blocked forever by a stuck tool or command.
+        """
+        box: dict[str, Any] = {}
+
+        def _target() -> None:
+            try:
+                payload = json.loads(row.get("payload") or "{}")
+                if row["payload_kind"] == "message":
+                    box["result"] = self._run_message(payload)
+                elif row["payload_kind"] == "tool":
+                    box["result"] = self._run_tool(payload)
+                else:
+                    box["result"] = self._run_command(payload)
+            except Exception as exc:  # noqa: BLE001 - a job failure is a result
+                box["error"] = exc
+
+        if timeout_s <= 0:
+            _target()
+        else:
+            worker = threading.Thread(
+                target=_target, daemon=True,
+                name=f"sched-job-{str(row.get('id') or '?')[:8]}")
+            worker.start()
+            worker.join(timeout_s)
+            if worker.is_alive():
+                return (False,
+                        f"job failed: timed out after {timeout_s:g}s "
+                        "(worker abandoned; the job is marked failed but the "
+                        "stuck call may still be running)",
+                        True)
+        if "error" in box:
+            return False, f"job failed: {box['error']}", False
+        return True, str(box.get("result") or ""), False
+
+    def _execute(self, row: dict[str, Any], *,
+                 trigger_source: str = "tick") -> dict[str, Any]:
         started = time.time()
         now = started
+        job_id = row["id"]
+        job_name = row["name"]
+        # a real run clears any pressure-deferral streak
+        self._deferrals.pop(job_id, None)
+        self._emit_bus("scheduler.job.started", {
+            "job_id": job_id, "name": job_name, "kind": row.get("kind"),
+            "payload_kind": row.get("payload_kind"),
+            "trigger_source": trigger_source,
+        })
+        with self._lock:
+            self._active.add(job_id)
         try:
-            payload = json.loads(row.get("payload") or "{}")
-            if row["payload_kind"] == "message":
-                summary = self._run_message(payload)
-            elif row["payload_kind"] == "tool":
-                summary = self._run_tool(payload)
-            else:
-                summary = self._run_command(payload)
-            ok = True
-        except Exception as exc:  # noqa: BLE001
-            summary = f"job failed: {exc}"
-            ok = False
-        # ── retry policy ──────────────────────────────────────────────
-        # On failure, if retries remain, schedule the retry with linear
-        # backoff instead of reporting the failure.  retry_count tracks
+            # the per-job cap wins; 0 falls back to the scheduler default
+            timeout_s = float(row.get("run_timeout_s") or 0.0) or self.wall_seconds
+            ok, summary, timed_out = self._run_payload_guarded(row, timeout_s)
+        finally:
+            with self._lock:
+                self._active.discard(job_id)
+        # -- retry policy -------------------------------------------------
+        # On failure, if retries remain, schedule the retry with the job's
+        # backoff strategy (constant | linear | exponential, capped,
+        # jittered) instead of reporting the failure.  retry_count tracks
         # consecutive failures; it resets on success.
         max_retries = int(row.get("max_retries") or 0)
         retry_delay = max(10.0, float(row.get("retry_delay") or 60))
+        backoff = str(row.get("backoff") or "exponential")
+        backoff_max_s = max(60.0, float(row.get("backoff_max_s") or 3600.0))
+        backoff_jitter = min(0.9, max(0.0, float(row.get("backoff_jitter") or 0.0)))
         retry_count = int(row.get("retry_count") or 0)
         will_retry = False
         if not ok and retry_count < max_retries:
             will_retry = True
             retry_count += 1
-            next_run = now + retry_delay * retry_count  # linear backoff
+            delay = _backoff_delay(backoff, retry_delay, retry_count,
+                                  max_s=backoff_max_s, jitter=backoff_jitter,
+                                  rng=self._rng)
+            next_run = now + delay
             still_enabled = True
             # mark the in-flight retry in the result so the owner sees it
             summary = (f"{summary} (retry {retry_count}/{max_retries} "
-                       f"in {int(retry_delay * retry_count)}s)")
+                       f"in {int(delay)}s, {backoff} backoff)")
         else:
             if ok:
                 retry_count = 0  # success resets the streak
@@ -716,38 +1254,65 @@ class Scheduler:
                 (now, summary[:2000], next_run, 1 if still_enabled else 0,
                  retry_count, time.time(), row["id"]),
             )
-        # alert the owner — durable + multi-channel via the notifier.
+        seconds = round(time.time() - started, 2)
+        # durable per-execution history + unified autonomy ledger
+        self._record_run(job_id, started, seconds, ok, summary,
+                         retry_count if will_retry else 0, trigger_source)
+        learned = ""
+        if will_retry:
+            learned = (f"failed; retry {retry_count}/{max_retries} scheduled "
+                       f"({backoff} backoff)")
+        elif not ok and not will_retry and max_retries:
+            learned = "retries exhausted - owner alerted"
+        elif timed_out:
+            learned = "run timed out; worker abandoned"
+        self._ledger("run", job_id,
+                     f"{job_name}: {summary[:160]}",
+                     cost_seconds=seconds, ok=ok, learned=learned,
+                     metadata={"kind": row.get("kind"),
+                               "payload_kind": row.get("payload_kind"),
+                               "trigger_source": trigger_source,
+                               "will_retry": will_retry,
+                               "timed_out": timed_out})
+        self._emit_bus("scheduler.job.finished", {
+            "job_id": job_id, "name": job_name, "kind": row.get("kind"),
+            "ok": ok, "seconds": seconds, "will_retry": will_retry,
+            "retry_count": retry_count, "timed_out": timed_out,
+            "trigger_source": trigger_source,
+        })
+        # alert the owner - durable + multi-channel via the notifier.
         # Failures alert on the failure transition only (a stuck job must
         # not page every run). Successes notify too, except for routine
         # tick/heartbeat jobs which would spam.  Message payloads are the
         # exception the other way round: the message itself was already
-        # delivered to the owner's DM by _run_message — a second "job ran"
+        # delivered to the owner's DM by _run_message - a second "job ran"
         # alert would double-send.
-        job_name = row['name'].lower()
-        is_routine_tick = 'tick' in job_name or 'heartbeat' in job_name or 'sweep' in job_name
+        lname = job_name.lower()
+        is_routine_tick = 'tick' in lname or 'heartbeat' in lname or 'sweep' in lname
         alert = True
         if will_retry:
-            alert = False  # retry pending — don't page until retries exhaust
+            alert = False  # retry pending - don't page until retries exhaust
         if not ok and prev_failed:
-            alert = False  # still failing — the owner already knows
+            alert = False  # still failing - the owner already knows
         if ok and is_routine_tick:
-            alert = False  # routine tick succeeded — silent
+            alert = False  # routine tick succeeded - silent
         if ok and row.get("payload_kind") == "message":
             alert = False  # the message itself already went out
         if alert:
             try:
                 self.notifier.publish(
                     "schedule",
-                    f"{'✅' if ok else '❌'} scheduled: {row['name']}",
+                    f"{'✅' if ok else '❌'} scheduled: {job_name}",
                     summary[:1500],
                 )
             except Exception:  # noqa: BLE001
                 _log.debug("scheduler notification failed")
         return {
-            "id": row["id"], "name": row["name"], "ok": ok,
-            "result": summary[:2000], "seconds": round(time.time() - started, 2),
+            "id": job_id, "name": job_name, "ok": ok,
+            "result": summary[:2000], "seconds": seconds,
             "next_run": next_run, "will_retry": will_retry,
-            "retry_count": retry_count,
+            "retry_count": retry_count, "timed_out": timed_out,
+            "trigger_source": trigger_source,
         }
 
     def _run_message(self, payload: dict[str, Any]) -> str:
@@ -857,6 +1422,9 @@ class Scheduler:
             "jobs": {"total": 0, "enabled": 0, "due_now": 0},
             "next_job": None,
             "last_job": None,
+            "overlaps": {"active": [], "count": 0},
+            "deferred": {},
+            "recent_runs": [],
             "delivery": {
                 "queue": {"retryable": 0, "held": 0, "dead": 0},
                 "live_owner_channels": [],
@@ -911,6 +1479,37 @@ class Scheduler:
                 out["delivery"]["termux_fallback"] = bool(
                     self.notifier.termux_fallback_available())
             except Exception:  # noqa: BLE001
+                pass
+            # execution depth: what is running now, what pressure deferred,
+            # and the last few executions across all jobs.
+            try:
+                with self._lock:
+                    active_ids = sorted(self._active)
+                by_id = {j["id"]: j.get("name", j["id"]) for j in jobs}
+                out["overlaps"] = {
+                    "active": [by_id.get(i, i) for i in active_ids],
+                    "count": len(active_ids),
+                }
+            except Exception:  # noqa: BLE001
+                pass
+            out["deferred"] = dict(self._deferrals)
+            try:
+                rows = self.db.query(
+                    "SELECT r.*, j.name AS job_name FROM schedule_runs r "
+                    "LEFT JOIN schedule_jobs j ON j.id = r.job_id "
+                    "ORDER BY r.started_at DESC LIMIT 5",
+                ) if self.db is not None else []
+                out["recent_runs"] = [
+                    {
+                        "job": r.get("job_name") or r["job_id"],
+                        "ok": bool(r.get("ok")),
+                        "seconds": round(float(r.get("seconds") or 0.0), 2),
+                        "result": (r.get("result") or "")[:100],
+                        "trigger_source": r.get("trigger_source") or "",
+                    }
+                    for r in rows
+                ]
+            except Exception:  # noqa: BLE001 - history is best-effort
                 pass
             # verdict — "stopped" degrades; "not-started" is informational
             # (CLI/test contexts never spin the loop; the live runtime does).
@@ -992,10 +1591,19 @@ class Scheduler:
             "last_run": row.get("last_run"),
             "last_result": (row.get("last_result") or "")[:300],
             "timezone": tz,
-            "depends_on": str(row.get("depends_on") or ""),
+            "depends_on": _parse_depends(row.get("depends_on")),
+            "depends_policy": str(row.get("depends_policy") or "all_ok"),
             "max_retries": int(row.get("max_retries") or 0),
             "retry_delay": float(row.get("retry_delay") or 60),
             "retry_count": int(row.get("retry_count") or 0),
+            "backoff": str(row.get("backoff") or "exponential"),
+            "backoff_max_s": float(row.get("backoff_max_s") or 3600.0),
+            "backoff_jitter": float(row.get("backoff_jitter") or 0.0),
+            "missed_fire_policy": str(row.get("missed_fire_policy") or "fire_now"),
+            "overlap_policy": str(row.get("overlap_policy") or "concurrent"),
+            "run_timeout_s": float(row.get("run_timeout_s") or 0.0),
+            "heavy": bool(int(row.get("heavy") or 0)),
+            "weight": float(row.get("weight") or 0.0),
         }
 
 
