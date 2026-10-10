@@ -21,6 +21,7 @@ import importlib.util
 import json
 import mimetypes
 import os
+import random
 import re
 import time
 import urllib.error
@@ -450,8 +451,150 @@ _WEBDRIVER_HIDE_JS = (
     "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"
 )
 
+#: window.chrome runtime stub — real Chrome exposes this; headless
+#: Chromium's object is missing or incomplete, and bot scripts check.
+_CHROME_RUNTIME_JS = """(() => {
+  if (window.chrome && window.chrome.runtime) return;
+  window.chrome = window.chrome || {};
+  window.chrome.runtime = {
+    onMessage: { addListener: function () {}, removeListener: function () {} },
+    onConnect: { addListener: function () {} },
+    sendMessage: function () {},
+    connect: function () {
+      return { onMessage: { addListener: function () {} }, postMessage: function () {} };
+    },
+  };
+  window.chrome.loadTimes = window.chrome.loadTimes || function () { return {}; };
+  window.chrome.csi = window.chrome.csi || function () { return {}; };
+  window.chrome.app = window.chrome.app || {};
+})();"""
+
+#: Realistic plugin list — headless Chromium reports zero plugins.
+_PLUGINS_SPOOF_JS = """(() => {
+  const makePlugin = (name, filename, description) => {
+    const p = { name, filename, description, length: 1,
+                item: function () { return null; },
+                namedItem: function () { return null; } };
+    return p;
+  };
+  const plugins = [
+    makePlugin('PDF Viewer', 'internal-pdf-viewer', 'Portable Document Format'),
+    makePlugin('Chrome PDF Viewer', 'mhjfbmdgcfjbbpaeojofohoefgiehjai', ''),
+    makePlugin('Native Client', 'internal-nacl-plugin', ''),
+  ];
+  plugins.item = function (i) { return this[i] || null; };
+  plugins.namedItem = function (n) {
+    return this.find((p) => p.name === n) || null;
+  };
+  Object.defineProperty(navigator, 'plugins', { get: () => plugins });
+  Object.defineProperty(navigator, 'mimeTypes', {
+    get: () => ({ length: 0, item: function () { return null; },
+                  namedItem: function () { return null; } }),
+  });
+})();"""
+
+#: Permissions override — headless denies everything; real browsers vary.
+_PERMISSIONS_SPOOF_JS = """(() => {
+  try {
+    const original = navigator.permissions && navigator.permissions.query;
+    if (!original) return;
+    const grants = { notifications: 'granted', geolocation: 'prompt',
+                     camera: 'prompt', microphone: 'prompt' };
+    navigator.permissions.query = function (params) {
+      const name = params && params.name;
+      if (name && Object.prototype.hasOwnProperty.call(grants, name)) {
+        return Promise.resolve({ state: grants[name] });
+      }
+      return original.call(this, params);
+    };
+  } catch (e) {}
+})();"""
+
 #: chromium flags for rendered tabs (stealth).
 _STEALTH_CHROME_ARGS = ["--disable-blink-features=AutomationControlled"]
+
+#: Fallback accessibility-tree walker for snapshot() when the driver has
+#: no aria_snapshot (older playwright). Produces the same ref-handle
+#: shape as playwright's tree — ``- role "name" [ref=fN]`` — so agents
+#: interact identically either way.
+_SNAPSHOT_FALLBACK_JS = """() => {
+  const lines = [];
+  let n = 0;
+  const seen = new Set();
+  const nameOf = (el) => {
+    const aria = el.getAttribute('aria-label');
+    if (aria) return aria.trim().slice(0, 80);
+    const tag = (el.tagName || '').toUpperCase();
+    if (tag === 'INPUT' || tag === 'TEXTAREA') {
+      const ph = el.getAttribute('placeholder');
+      if (ph) return ph.trim().slice(0, 80);
+      if (el.value && !/password/i.test(el.type || ''))
+        return String(el.value).slice(0, 40);
+    }
+    if (tag === 'IMG') return (el.getAttribute('alt') || '').slice(0, 80);
+    const t = (el.innerText || '').trim().replace(/\\s+/g, ' ');
+    return t.slice(0, 80);
+  };
+  const roleOf = (el) => {
+    const r = el.getAttribute('role');
+    if (r) return r;
+    const tag = (el.tagName || '').toUpperCase();
+    const type = (el.getAttribute('type') || '').toLowerCase();
+    if (tag === 'A') return 'link';
+    if (tag === 'BUTTON') return 'button';
+    if (tag === 'INPUT') {
+      if (type === 'checkbox') return 'checkbox';
+      if (type === 'radio') return 'radio';
+      if (type === 'submit' || type === 'button') return 'button';
+      return 'textbox';
+    }
+    if (tag === 'TEXTAREA') return 'textbox';
+    if (tag === 'SELECT') return 'combobox';
+    if (/^H[1-6]$/.test(tag)) return 'heading';
+    if (tag === 'IMG') return 'img';
+    if (tag === 'FORM') return 'form';
+    return '';
+  };
+  const walk = (node, depth) => {
+    if (depth > 10 || lines.length >= 500) return;
+    let kids = [];
+    try { kids = node.children || []; } catch (e) { return; }
+    for (const el of kids) {
+      if (seen.has(el)) continue;
+      seen.add(el);
+      try { if (el.shadowRoot) walk(el.shadowRoot, depth + 1); } catch (e) {}
+      const role = roleOf(el);
+      const interactive = role && role !== 'heading' && role !== 'img'
+        && role !== 'form';
+      const ref = interactive ? ('f' + (++n)) : '';
+      if (role) {
+        const nm = nameOf(el);
+        lines.push('  '.repeat(Math.min(depth, 6)) + '- ' + role
+          + (nm ? ' "' + nm.replace(/"/g, "'") + '"' : '')
+          + (ref ? ' [ref=' + ref + ']' : ''));
+        if (ref) {
+          let sel = el.tagName.toLowerCase();
+          if (el.id) sel += '#' + el.id;
+          else {
+            const parent = el.parentElement;
+            if (parent) {
+              const sibs = Array.from(parent.children).filter(
+                (s) => s.tagName === el.tagName);
+              if (sibs.length > 1) sel += ':nth-of-type(' + (sibs.indexOf(el) + 1) + ')';
+            }
+          }
+          lines.push('__REF__' + ref + '__SEL__' + sel);
+        }
+      }
+      walk(el, depth + 1);
+    }
+  };
+  walk(document.body || document.documentElement, 0);
+  return lines.join('\\n');
+}"""
+
+#: snapshot() caps the tree so one call cannot flood the caller.
+_SNAPSHOT_MAX_CHARS = 60_000
 
 
 def _merge_stealth(base: dict[str, Any] | None,
@@ -523,7 +666,18 @@ class RenderedTab:
     Stealth: unless disabled via the ``stealth`` profile, the tab launches
     chromium with a realistic user agent, viewport, locale, and timezone,
     disables the AutomationControlled blink feature, and hides
-    ``navigator.webdriver`` — the cheap, obvious headless tells.
+    ``navigator.webdriver`` — plus a ``window.chrome`` runtime stub, a
+    realistic ``navigator.plugins`` list, and a permissions override. These
+    hide the cheap, obvious headless tells; they do not forge a different
+    device's fingerprint.
+
+    Telemetry: console messages, network requests/responses, and dialogs
+    are captured from page creation into ring buffers (see
+    :meth:`console_messages`, :meth:`network_requests`, :meth:`dialogs`) —
+    the evidence trio for debugging agent runs. Unexpected dialogs
+    (alert/confirm/prompt) are auto-accepted by default and recorded, so
+    a stray ``alert()`` never hangs automation; :meth:`set_dialog_policy`
+    changes that.
 
     Error recovery: ``navigate`` retries with backoff; when
     ``shot_on_error`` is true (default), a failed navigate/fill/click/
@@ -573,9 +727,106 @@ class RenderedTab:
         #: True while trigger_download() runs its explicit expect_download
         #: click — the context-level auto-capture must not double-save it.
         self._auto_suppress = False
+        #: ring buffers for page telemetry (capped; oldest dropped first).
+        self._console_log: list[dict[str, Any]] = []
+        self._network_log: list[dict[str, Any]] = []
+        self._dialog_log: list[dict[str, Any]] = []
+        #: dialog policy: accept (default) | dismiss | record. "record"
+        #: leaves the dialog open and only logs it — the caller must
+        #: handle it, or the page will hang on the modal.
+        self._dialog_policy = "accept"
+        #: ref -> playwright selector from the last snapshot() call, so
+        #: click/fill/hover accept "ref:e7" targets.
+        self._snap_refs: dict[str, str] = {}
         self._browser: Any = None
         self._context: Any = None
         self._page: Any = None
+
+    # -- page telemetry ------------------------------------------------------
+    def _remember(self, buf: list[dict[str, Any]], entry: dict[str, Any],
+                  cap: int) -> None:
+        buf.append(entry)
+        if len(buf) > cap:
+            del buf[: len(buf) - cap]
+
+    def _on_console_msg(self, msg: Any) -> None:
+        try:
+            text = msg.text if isinstance(msg.text, str) else str(msg.text())
+        except Exception:  # noqa: BLE001 - cosmetic
+            text = ""
+        try:
+            kind = msg.type if isinstance(msg.type, str) else str(msg.type())
+        except Exception:  # noqa: BLE001 - cosmetic
+            kind = ""
+        try:
+            loc = msg.location or {}
+        except Exception:  # noqa: BLE001 - cosmetic
+            loc = {}
+        self._remember(self._console_log, {
+            "type": kind or "log",
+            "text": (text or "")[:2000],
+            "location": {k: loc.get(k) for k in ("url", "lineNumber",
+                                                "columnNumber")
+                         if isinstance(loc, dict)},
+            "ts": time.time(),
+        }, 300)
+
+    def _on_request(self, request: Any) -> None:
+        try:
+            url = request.url
+            method = request.method
+        except Exception:  # noqa: BLE001 - cosmetic
+            return
+        self._remember(self._network_log, {
+            "kind": "request",
+            "method": method if isinstance(method, str) else str(method),
+            "url": url if isinstance(url, str) else str(url),
+            "ts": time.time(),
+        }, 500)
+
+    def _on_response(self, response: Any) -> None:
+        try:
+            url = response.url
+            status = response.status
+        except Exception:  # noqa: BLE001 - cosmetic
+            return
+        try:
+            request = response.request
+            method = request.method if request else ""
+        except Exception:  # noqa: BLE001 - cosmetic
+            method = ""
+        self._remember(self._network_log, {
+            "kind": "response",
+            "method": method if isinstance(method, str) else str(method),
+            "url": url if isinstance(url, str) else str(url),
+            "status": int(status) if isinstance(status, int) else status,
+            "ts": time.time(),
+        }, 500)
+
+    def _on_dialog(self, dialog: Any) -> None:
+        try:
+            kind = dialog.type
+            message = dialog.message
+        except Exception:  # noqa: BLE001 - cosmetic
+            kind, message = "", ""
+        record = {
+            "type": kind if isinstance(kind, str) else str(kind),
+            "message": (message if isinstance(message, str)
+                        else str(message))[:2000],
+            "policy": self._dialog_policy,
+            "ts": time.time(),
+        }
+        self._remember(self._dialog_log, record, 50)
+        if self._dialog_policy == "record":
+            return  # caller handles it; the page stays on the modal
+        try:
+            if self._dialog_policy == "dismiss":
+                dialog.dismiss()
+            else:
+                dialog.accept()
+        except Exception as exc:  # noqa: BLE001 - dialog handling best-effort
+            _log.debug("rendered tab %s: dialog %s failed: %r",
+                       self.tab_id, self._dialog_policy, exc)
 
     def _pace(self, action: str) -> None:
         """Sleep the pacing cadence before an action (no-op when pacing
@@ -618,7 +869,39 @@ class RenderedTab:
             self._context = self._browser.new_context(**ctx_kwargs)
             add_init = getattr(self._context, "add_init_script", None)
             if callable(add_init) and self._stealth.get("enabled"):
-                add_init(_WEBDRIVER_HIDE_JS)
+                # Every stealth script is a passive property stub that
+                # hides the automation tell — none forges a device's
+                # fingerprint. The languages stub follows the locale so
+                # navigator.languages agrees with Accept-Language. All
+                # stubs ship as ONE init script.
+                locale = str(self._stealth.get("locale") or "en-US")
+                stealth_script = "\n".join([
+                    _WEBDRIVER_HIDE_JS,
+                    _CHROME_RUNTIME_JS,
+                    _PLUGINS_SPOOF_JS,
+                    ("Object.defineProperty(navigator, 'languages', "
+                     f"{{ get: () => [{locale!r}, 'en'] }});"),
+                    _PERMISSIONS_SPOOF_JS,
+                ])
+                try:
+                    add_init(stealth_script)
+                except Exception as exc:  # noqa: BLE001 - best effort
+                    _log.debug("rendered tab %s: stealth init failed: %r",
+                               self.tab_id, exc)
+            self._page = self._context.new_page()
+            # Page telemetry: console, network, and dialogs from creation.
+            on_page = getattr(self._page, "on", None)
+            if callable(on_page):
+                for event, handler in (
+                        ("console", self._on_console_msg),
+                        ("request", self._on_request),
+                        ("response", self._on_response),
+                        ("dialog", self._on_dialog)):
+                    try:
+                        on_page(event, handler)
+                    except Exception as exc:  # noqa: BLE001 - best effort
+                        _log.debug("rendered tab %s: %s listener failed: %r",
+                                   self.tab_id, event, exc)
             # Intercept download events at the context level: any download
             # the page triggers (JS blob saves, location-href file hits,
             # not just explicit trigger_download clicks) is auto-captured
@@ -1177,6 +1460,23 @@ class RenderedTab:
         """
         page = self._require_loaded()
         self._pace("fill")
+        ref_name = (name or "").strip()
+        if ref_name.lower().startswith("ref:") or re.fullmatch(
+                r"\[ref=[^\]]+\]", ref_name):
+            # Snapshot-ref fill: the agent already picked the element in
+            # snapshot(); no name resolution, no type routing — a direct
+            # fill of the resolved selector.
+            selector = self.resolve_ref(
+                ref_name[4:] if ref_name.lower().startswith("ref:")
+                else ref_name[5:-1])
+            try:
+                page.fill(selector, str(value))
+            except Exception as exc:  # noqa: BLE001 - selector errors opaque
+                raise self._action_error(
+                    "fill", exc, detail=f"field {name!r}") from exc
+            _notify_action(self, f"filled {name!r}")
+            return {"ok": True, "field": name, "tab_id": self.tab_id,
+                    "verified": False, "matched_via": "snapshot-ref"}
         if wait_ms > 0:
             selector, info = self._resolve_field_wait(
                 name, timeout=wait_ms, poll_ms=250)
@@ -1528,16 +1828,13 @@ class RenderedTab:
                 "verified": verified, "tab_id": self.tab_id}
 
     def click(self, target: str) -> dict[str, Any]:
-        """Click a link/button: CSS selector when it looks like one
-        (starts with ``#``, ``.``, ``[``, or contains ``>>``), otherwise
-        visible text match. The tab's URL/title/history refresh after the
-        click, like :meth:`Tab.click`."""
+        """Click a link/button: ``ref:<id>`` from the last :meth:`snapshot`,
+        CSS selector when it looks like one (starts with ``#``, ``.``,
+        ``[``, or contains ``>>``), otherwise visible text match. The
+        tab's URL/title/history refresh after the click, like
+        :meth:`Tab.click`."""
         page = self._require_loaded()
-        target = (target or "").strip()
-        if not target:
-            raise BrowserError("rendered click needs a target")
-        selector = (target if target[:1] in {"#", ".", "["} or ">>" in target
-                    else f"text={target}")
+        selector = self._target_selector(target, "click")
         self._pace("click")
         before = page.url
         try:
@@ -1703,6 +2000,487 @@ class RenderedTab:
             raise BrowserError(
                 f"rendered screenshot of {self.url} produced no image")
         return {"path": str(out), "url": self.url, "tab_id": self.tab_id}
+
+    # -- accessibility snapshot (agent interaction model) ----------------------
+    def snapshot(self, max_chars: int = _SNAPSHOT_MAX_CHARS) -> dict[str, Any]:
+        """The page as an accessibility tree with ``[ref=..]`` handles —
+        the browser-use / Playwright-MCP interaction model.
+
+        Token-efficient and deterministic: the agent picks an element by
+        ref and passes ``ref:<id>`` to :meth:`click`, :meth:`fill`,
+        :meth:`hover`, :meth:`dblclick` or :meth:`press` instead of
+        guessing selectors. Uses playwright's ``aria_snapshot`` when the
+        driver has it, else a JS walker producing the same ref shape
+        (source is reported). Refs expire on navigation — take a fresh
+        snapshot after the DOM changes.
+        """
+        page = self._require_loaded()
+        max_chars = max(1000, int(max_chars or _SNAPSHOT_MAX_CHARS))
+        text: Any = ""
+        source = "fallback"
+        locator_fn = getattr(page, "locator", None)
+        if callable(locator_fn):
+            try:
+                aria_fn = getattr(locator_fn("body"), "aria_snapshot", None)
+                if callable(aria_fn):
+                    text = aria_fn()
+                    source = "aria"
+            except Exception as exc:  # noqa: BLE001 - fall back to JS
+                _log.debug("rendered tab %s: aria_snapshot failed: %r",
+                           self.tab_id, exc)
+                text = ""
+        if not text and self._can_evaluate():
+            try:
+                text = self.evaluate(_SNAPSHOT_FALLBACK_JS)
+            except Exception as exc:  # noqa: BLE001 - honest failure
+                raise BrowserError(
+                    f"rendered snapshot of {self.url} failed: {exc}"
+                ) from exc
+        if not text:
+            raise BrowserError(
+                "rendered snapshot needs a page driver with aria_snapshot "
+                "or JS evaluation")
+        text = str(text)
+        refs: dict[str, str] = {}
+        if source == "aria":
+            for match in re.finditer(r"\[ref=([^\]]+)\]", text):
+                ref = match.group(1)
+                refs[ref] = f"aria-ref={ref}"
+        else:
+            cleaned: list[str] = []
+            for line in text.splitlines():
+                match = re.match(r"__REF__(.+)__SEL__(.+)", line)
+                if match:
+                    refs[match.group(1)] = match.group(2)
+                else:
+                    cleaned.append(line)
+            text = "\n".join(cleaned)
+        truncated = len(text) > max_chars
+        self._snap_refs = refs
+        return {
+            "snapshot": text[:max_chars],
+            "refs": dict(refs),
+            "source": source,
+            "truncated": truncated,
+            "url": self.url,
+            "tab_id": self.tab_id,
+        }
+
+    def resolve_ref(self, ref: str) -> str:
+        """A snapshot ``[ref=..]`` handle (or ``ref:<id>``) to the
+        playwright selector it maps to. Raises BrowserError listing the
+        live refs when the handle is unknown or no snapshot was taken."""
+        key = (ref or "").strip()
+        if key.lower().startswith("ref:"):
+            key = key[4:]
+        selector = self._snap_refs.get(key)
+        if selector is None:
+            known = ", ".join(sorted(self._snap_refs)[:20])
+            raise BrowserError(
+                f"unknown snapshot ref {ref!r} on tab {self.tab_id} — "
+                f"{'take snapshot() first' if not self._snap_refs else 'known refs: ' + known}")
+        return selector
+
+    def _target_selector(self, target: str, action: str) -> str:
+        """A click/fill/hover-style target to a playwright selector.
+
+        ``ref:<id>`` (or a bare ``[ref=..]`` handle from the last
+        :meth:`snapshot`) resolves through the snapshot's ref map;
+        otherwise the existing convention holds: CSS when it looks like
+        a selector, visible-text match otherwise.
+        """
+        target = (target or "").strip()
+        if not target:
+            raise BrowserError(f"rendered {action} needs a target")
+        low = target.lower()
+        if low.startswith("ref:") or re.fullmatch(r"\[ref=[^\]]+\]", target):
+            ref = (target[4:] if low.startswith("ref:")
+                   else target[5:-1])
+            return self.resolve_ref(ref)
+        if target[:1] in {"#", ".", "["} or ">>" in target:
+            return target
+        return f"text={target}"
+
+    # -- evidence: console, network, dialogs -----------------------------------
+    def console_messages(self, limit: int = 100,
+                         level: str = "") -> dict[str, Any]:
+        """Console messages captured since the page was created (the
+        Playwright-MCP ``console_messages`` evidence). ``level`` filters
+        to one type: log|info|warning|error|debug."""
+        level = (level or "").strip().lower()
+        if level and level not in {"log", "info", "warning", "error",
+                                   "debug"}:
+            raise BrowserError(
+                f"unknown console level {level!r} "
+                "(want log|info|warning|error|debug)")
+        msgs = [m for m in self._console_log
+                if not level or m.get("type") == level]
+        return {"messages": msgs[-max(1, int(limit or 100)):],
+                "count": len(msgs), "tab_id": self.tab_id}
+
+    def network_requests(self, limit: int = 100,
+                         failed_only: bool = False) -> dict[str, Any]:
+        """Network requests/responses captured since the page was created
+        (the Playwright-MCP ``network_requests`` evidence). A console
+        with no errors proves nothing about network failures — this is
+        where non-2xx responses on the page's own origin show up.
+        ``failed_only`` keeps just responses with status >= 400."""
+        entries = self._network_log
+        if failed_only:
+            entries = [e for e in entries
+                       if e.get("kind") == "response"
+                       and isinstance(e.get("status"), int)
+                       and e["status"] >= 400]
+        return {"requests": entries[-max(1, int(limit or 100)):],
+                "count": len(entries), "tab_id": self.tab_id}
+
+    def dialogs(self, limit: int = 20,
+                clear: bool = False) -> dict[str, Any]:
+        """Dialogs (alert/confirm/prompt) seen since page creation, with
+        the policy that handled each one."""
+        out = list(self._dialog_log[-max(1, int(limit or 20)):])
+        if clear:
+            del self._dialog_log[:]
+        return {"dialogs": out, "count": len(self._dialog_log),
+                "policy": self._dialog_policy, "tab_id": self.tab_id}
+
+    def set_dialog_policy(self, policy: str = "accept") -> dict[str, Any]:
+        """How unexpected dialogs are handled: ``accept`` (default — a
+        stray alert() never hangs automation), ``dismiss``, or
+        ``record`` (leave the modal open for manual handling; the page
+        will block until it is handled)."""
+        policy = (policy or "accept").strip().lower()
+        if policy not in {"accept", "dismiss", "record"}:
+            raise BrowserError(
+                f"unknown dialog policy {policy!r} "
+                "(want accept|dismiss|record)")
+        self._dialog_policy = policy
+        return {"policy": policy, "tab_id": self.tab_id}
+
+    # -- richer interaction ------------------------------------------------------
+    def hover(self, target: str) -> dict[str, Any]:
+        """Hover over an element (reveals tooltips, opens hover menus)."""
+        page = self._require_loaded()
+        selector = self._target_selector(target, "hover")
+        self._pace("hover")
+        try:
+            page.hover(selector)
+        except Exception as exc:  # noqa: BLE001 - hover errors are opaque
+            raise self._action_error(
+                "hover", exc, detail=f"target {target!r}") from exc
+        _notify_action(self, f"hovered {target!r}")
+        return {"ok": True, "target": target, "tab_id": self.tab_id}
+
+    def dblclick(self, target: str) -> dict[str, Any]:
+        """Double-click an element (text selection, zoom, edit-in-place)."""
+        page = self._require_loaded()
+        selector = self._target_selector(target, "dblclick")
+        self._pace("dblclick")
+        try:
+            page.dblclick(selector)
+        except Exception as exc:  # noqa: BLE001 - opaque
+            raise self._action_error(
+                "dblclick", exc, detail=f"target {target!r}") from exc
+        _notify_action(self, f"double-clicked {target!r}")
+        return {"ok": True, "target": target, "tab_id": self.tab_id}
+
+    def press(self, key: str, target: str = "") -> dict[str, Any]:
+        """Press a keyboard key — Enter, Escape, Tab, arrows, F-keys.
+
+        With ``target`` the key goes to that element (focused first);
+        without it, to the page itself. This is keyboard navigation the
+        way a human does it, not a form fill.
+        """
+        page = self._require_loaded()
+        key = (key or "").strip()
+        if not key:
+            raise BrowserError("rendered press needs a key")
+        self._pace("press")
+        try:
+            keyboard = getattr(page, "keyboard", None)
+            if target.strip():
+                selector = self._target_selector(target, "press")
+                press_fn = getattr(page, "press", None)
+                if callable(press_fn):
+                    press_fn(selector, key)
+                elif keyboard is not None:
+                    page.click(selector)
+                    keyboard.press(key)
+                else:
+                    raise BrowserError(
+                        "this page driver cannot press keys")
+            else:
+                if keyboard is None:
+                    raise BrowserError(
+                        "this page driver cannot press keys")
+                keyboard.press(key)
+        except BrowserError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - press errors are opaque
+            raise self._action_error(
+                "press", exc, detail=f"key {key!r}") from exc
+        _notify_action(self, f"pressed {key!r}")
+        return {"ok": True, "key": key, "tab_id": self.tab_id}
+
+    def drag(self, source: str, target: str) -> dict[str, Any]:
+        """Drag ``source`` onto ``target`` (sliders, kanban, file drops)."""
+        page = self._require_loaded()
+        src_sel = self._target_selector(source, "drag source")
+        tgt_sel = self._target_selector(target, "drag target")
+        self._pace("drag")
+        drag_fn = getattr(page, "drag_and_drop", None)
+        if not callable(drag_fn):
+            raise BrowserError("this page driver cannot drag and drop")
+        try:
+            drag_fn(src_sel, tgt_sel)
+        except Exception as exc:  # noqa: BLE001 - opaque
+            raise self._action_error(
+                "drag", exc,
+                detail=f"{source!r} -> {target!r}") from exc
+        _notify_action(self, f"dragged {source!r} onto {target!r}")
+        return {"ok": True, "source": source, "target": target,
+                "tab_id": self.tab_id}
+
+    def type_text(self, target: str, text: str,
+                  delay_ms: int = 40) -> dict[str, Any]:
+        """Type into a field character-by-character, like a human.
+
+        Unlike :meth:`fill` (instant value set), this clicks into the
+        field and types with per-character timing plus occasional
+        "thinking" pauses between word groups — the behavioral-mimicry
+        shape sites' bot checks actually measure. ``delay_ms`` is the
+        per-character delay (0 = as fast as the driver goes).
+        """
+        page = self._require_loaded()
+        selector = self._target_selector(target, "type")
+        text = str(text or "")
+        delay_ms = max(0, int(delay_ms))
+        if not text:
+            raise BrowserError("rendered type_text needs text to type")
+        self._pace("type")
+        keyboard = getattr(page, "keyboard", None)
+        locator_fn = getattr(page, "locator", None)
+        if keyboard is None or not callable(locator_fn):
+            raise BrowserError("this page driver cannot type text")
+        try:
+            locator_fn(selector).click()
+            # word-group chunks with thinking pauses between them read as
+            # human cadence; a flat delay reads as a metronome.
+            chunks: list[str] = []
+            current = ""
+            for word in text.split(" "):
+                current = f"{current} {word}".strip()
+                if len(current) >= 14:
+                    chunks.append(current + " ")
+                    current = ""
+            if current:
+                chunks.append(current)
+            if not chunks:
+                chunks = [text]
+            for i, chunk in enumerate(chunks):
+                keyboard.type(chunk, delay=delay_ms)
+                if i < len(chunks) - 1:
+                    time.sleep(random.uniform(0.15, 0.6))
+            verified = False
+            if self._can_evaluate():
+                try:
+                    readback = page.evaluate(
+                        "(sel) => { const el = document.querySelector(sel);"
+                        " return el ? el.value : null; }", selector)
+                    verified = readback == text
+                except Exception:  # noqa: BLE001 - verification best-effort
+                    verified = False
+        except BrowserError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - type errors are opaque
+            raise self._action_error(
+                "type", exc, detail=f"target {target!r}") from exc
+        _notify_action(self, f"typed into {target!r}")
+        return {"ok": True, "target": target, "chars": len(text),
+                "verified": verified, "tab_id": self.tab_id}
+
+    def scroll(self, direction: str = "down",
+               pixels: int = 600) -> dict[str, Any]:
+        """Scroll the page in natural stepped chunks (accelerate-feel via
+        small wheel steps, not one jump). ``direction``: down|up|top|
+        bottom; ``pixels`` per scroll for down/up."""
+        page = self._require_loaded()
+        direction = (direction or "down").strip().lower()
+        if direction not in {"down", "up", "top", "bottom"}:
+            raise BrowserError(
+                f"unknown scroll direction {direction!r} "
+                "(want down|up|top|bottom)")
+        pixels = max(50, int(pixels or 600))
+        mouse = getattr(page, "mouse", None)
+        evaluate = getattr(page, "evaluate", None)
+        try:
+            if direction in {"top", "bottom"} and callable(evaluate):
+                evaluate(
+                    "(toBottom) => window.scrollTo({top: toBottom ? "
+                    "document.body.scrollHeight : 0, behavior: 'smooth'});",
+                    direction == "bottom")
+            elif mouse is not None and callable(getattr(mouse, "wheel", None)):
+                signed = pixels if direction == "down" else -pixels
+                # stepped wheel: cruise in chunks, ease the last one
+                remaining = abs(signed)
+                step_sign = 1 if signed > 0 else -1
+                while remaining > 0:
+                    step = min(220, remaining)
+                    mouse.wheel(0, step_sign * step)
+                    remaining -= step
+                    time.sleep(random.uniform(0.03, 0.09))
+            elif callable(evaluate):
+                evaluate("(d) => window.scrollBy({top: d, behavior: 'smooth'});",
+                         pixels if direction == "down" else -pixels)
+            else:
+                raise BrowserError("this page driver cannot scroll")
+        except BrowserError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - scroll errors are opaque
+            raise self._action_error("scroll", exc) from exc
+        _notify_action(self, f"scrolled {direction}")
+        return {"ok": True, "direction": direction, "tab_id": self.tab_id}
+
+    def element_shot(self, selector: str,
+                     path: str | os.PathLike[str] | None = None
+                     ) -> dict[str, Any]:
+        """Screenshot one element (a chart, a captcha widget, a price
+        card) instead of the whole page."""
+        page = self._require_loaded()
+        selector = (selector or "").strip()
+        if not selector:
+            raise BrowserError("rendered element_shot needs a selector")
+        locator_fn = getattr(page, "locator", None)
+        if not callable(locator_fn):
+            raise BrowserError("this page driver cannot screenshot elements")
+        dest_dir = (Path(self._storage_state_path).parent.parent
+                    / "screenshots" / self.session_name)
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        out = (Path(path) if path
+               else dest_dir / f"element-{int(time.time() * 1000)}.png")
+        try:
+            locator_fn(selector).screenshot(path=str(out))
+        except Exception as exc:  # noqa: BLE001 - capture errors are opaque
+            raise self._action_error(
+                "element_shot", exc, detail=f"selector {selector!r}") from exc
+        if not out.is_file() or out.stat().st_size == 0:
+            raise BrowserError(
+                f"rendered element_shot of {selector!r} produced no image")
+        return {"path": str(out), "selector": selector,
+                "tab_id": self.tab_id}
+
+    def pdf(self, path: str | os.PathLike[str] | None = None
+            ) -> dict[str, Any]:
+        """Save the current page as a PDF (receipts, articles, invoices —
+        the Playwright-MCP ``pdf`` evidence)."""
+        page = self._require_loaded()
+        dest_dir = (Path(self._storage_state_path).parent.parent
+                    / "pdfs" / self.session_name)
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        out = (Path(path) if path
+               else dest_dir / f"rendered-{int(time.time() * 1000)}.pdf")
+        pdf_fn = getattr(page, "pdf", None)
+        if not callable(pdf_fn):
+            raise BrowserError("this page driver cannot save PDFs")
+        try:
+            pdf_fn(path=str(out))
+        except Exception as exc:  # noqa: BLE001 - capture errors are opaque
+            raise BrowserError(
+                f"rendered pdf of {self.url} failed: {exc}") from exc
+        if not out.is_file() or out.stat().st_size == 0:
+            raise BrowserError(
+                f"rendered pdf of {self.url} produced no document")
+        return {"path": str(out), "url": self.url, "tab_id": self.tab_id}
+
+    # -- history navigation ------------------------------------------------------
+    def _after_navigation(self, page: Any, before: str,
+                          action: str) -> dict[str, Any]:
+        """Refresh url/title/history after a navigation action and
+        notify the live view. Shared by reload/forward/back."""
+        try:
+            after = page.url
+        except Exception:  # noqa: BLE001 - url read is cosmetic
+            after = before
+        if after != before:
+            self.url = after
+            try:
+                self.title = page.title()
+            except Exception:  # noqa: BLE001 - title is cosmetic
+                pass
+            self.history.append(
+                {"url": self.url, "title": self.title, "ts": time.time()})
+        _notify_action(self, action)
+        return {"ok": True, "url": self.url, "title": self.title,
+                "navigated": after != before, "tab_id": self.tab_id}
+
+    def reload(self, *, wait_until: str = "domcontentloaded",
+               timeout: int = 60_000) -> dict[str, Any]:
+        """Reload the current page (retries a flaky load, refreshes
+        session-gated content)."""
+        page = self._require_loaded()
+        wait_until = (wait_until or "domcontentloaded").strip().lower()
+        if wait_until not in _GOTO_WAIT_UNTIL:
+            raise BrowserError(
+                f"unknown wait_until {wait_until!r} "
+                f"(want {'|'.join(sorted(_GOTO_WAIT_UNTIL))})")
+        self._pace("reload")
+        before = self.url
+        try:
+            page.reload(wait_until=wait_until, timeout=int(timeout))
+        except Exception as exc:  # noqa: BLE001 - reload errors are opaque
+            raise self._action_error("reload", exc) from exc
+        return self._after_navigation(page, before, "reloaded the page")
+
+    def forward(self) -> dict[str, Any]:
+        """Go forward in the tab's history."""
+        page = self._require_loaded()
+        go_forward = getattr(page, "go_forward", None)
+        if not callable(go_forward):
+            raise BrowserError("this page driver cannot go forward")
+        self._pace("forward")
+        before = self.url
+        try:
+            go_forward()
+        except Exception as exc:  # noqa: BLE001 - opaque
+            raise self._action_error("forward", exc) from exc
+        return self._after_navigation(page, before, "went forward")
+
+    def back(self) -> dict[str, Any]:
+        """Go back in the tab's history (the rendered counterpart of
+        :meth:`Tab.back`)."""
+        page = self._require_loaded()
+        go_back = getattr(page, "go_back", None)
+        if not callable(go_back):
+            raise BrowserError("this page driver cannot go back")
+        self._pace("back")
+        before = self.url
+        try:
+            go_back()
+        except Exception as exc:  # noqa: BLE001 - opaque
+            raise self._action_error("back", exc) from exc
+        return self._after_navigation(page, before,
+                                      f"went back to {self.url}")
+
+    # -- form intelligence ---------------------------------------------------------
+    def candidates(self, name: str, limit: int = 5) -> dict[str, Any]:
+        """Ranked candidate controls for ``name`` — the diagnosis half of
+        form filling. When a fill fails, this shows what the page
+        actually has (with shadow-DOM / iframe flags) so the caller can
+        pick the right one instead of guessing."""
+        page = self._require_loaded()
+        name = (name or "").strip()
+        if not name:
+            raise BrowserError("rendered candidates needs a field name")
+        found = forms.resolve_candidates(page, name, limit=limit)
+        return {"field": name, "candidates": found,
+                "tab_id": self.tab_id}
+
+    def form_groups(self) -> dict[str, Any]:
+        """The page's forms: fields grouped by owning ``<form>`` with each
+        form's submit control. Pick the right form before a multi-field
+        fill; find the submit target without guessing."""
+        page = self._require_loaded()
+        return {"forms": forms.describe_forms(page), "tab_id": self.tab_id}
 
     def extract(self, target: str = "", kind: str = "") -> dict[str, Any]:
         """Structured extraction from the rendered DOM: ``kind`` selects
@@ -2040,13 +2818,15 @@ class BrowserService:
     def set_pacing(self, pacing: Pacing | None = None, *,
                    enabled: bool | None = None,
                    delay_ms: int | None = None,
-                   jitter_ms: int | None = None) -> dict[str, Any]:
+                   jitter_ms: int | None = None,
+                   per_action: dict[str, Any] | None = None) -> dict[str, Any]:
         """Configure pacing between browser actions.
 
         Pass a :class:`Pacing` outright, or keyword tweaks applied over
-        the current one. Because tabs hold a reference to this same
-        object, live tabs pick the change up immediately. Returns the
-        active configuration.
+        the current one (``per_action`` maps action names to
+        ``[delay_ms, jitter_ms]`` pairs overriding the global cadence).
+        Because tabs hold a reference to this same object, live tabs pick
+        the change up immediately. Returns the active configuration.
         """
         # Mutate in place: tabs hold a reference to this same object, so
         # live tabs pick the change up immediately.
@@ -2057,6 +2837,7 @@ class BrowserService:
             self._pacing.enabled = pacing.enabled
             self._pacing.delay_ms = pacing.delay_ms
             self._pacing.jitter_ms = pacing.jitter_ms
+            self._pacing.per_action = dict(pacing.per_action)
         else:
             if enabled is not None:
                 self._pacing.enabled = bool(enabled)
@@ -2064,7 +2845,23 @@ class BrowserService:
                 self._pacing.delay_ms = max(0, int(delay_ms))
             if jitter_ms is not None:
                 self._pacing.jitter_ms = max(0, int(jitter_ms))
-            if ((self._pacing.delay_ms or self._pacing.jitter_ms)
+            if per_action is not None:
+                if not isinstance(per_action, dict):
+                    raise BrowserError(
+                        "set_pacing per_action must be a "
+                        "{action: [delay_ms, jitter_ms]} mapping")
+                cleaned: dict[str, tuple[int, int]] = {}
+                for act, pair in per_action.items():
+                    try:
+                        cleaned[str(act).strip().lower()] = (
+                            max(0, int(pair[0])), max(0, int(pair[1])))
+                    except (TypeError, ValueError, IndexError) as exc:
+                        raise BrowserError(
+                            f"set_pacing per_action[{act!r}] must be "
+                            f"[delay_ms, jitter_ms]: {exc}") from exc
+                self._pacing.per_action = cleaned
+            if ((self._pacing.delay_ms or self._pacing.jitter_ms
+                 or self._pacing.per_action)
                     and not self._pacing.enabled):
                 raise BrowserError(
                     "pacing has delay/jitter configured but enabled=False — "
@@ -2740,6 +3537,47 @@ class BrowserService:
             )
             artifact_uri = art.uri
         return ScreenshotResult(path=str(path), artifact_uri=artifact_uri)
+
+    def pdf_rendered(self, tab_id: str,
+                     path: str | os.PathLike[str] | None = None
+                     ) -> dict[str, Any]:
+        """Save a rendered tab's LIVE page as a PDF — receipts, articles,
+        invoices. Logged-in state and JS mutations included."""
+        tab = self._rendered_tabs.get(tab_id)
+        if tab is None:
+            raise BrowserError(f"unknown rendered tab {tab_id!r}")
+        result = tab.pdf(path=path)
+        artifact_uri: str | None = None
+        if self._artifact_store is not None:
+            pdf_path = Path(result["path"])
+            art = self._artifact_store.put(
+                pdf_path.read_bytes(),
+                type="document",
+                mime="application/pdf",
+                creator="browser-service",
+                mission_id=self._mission_id,
+                provenance=Provenance(source_type="browser",
+                                      source_id=tab.url),
+            )
+            artifact_uri = art.uri
+        result["artifact_uri"] = artifact_uri
+        return result
+
+    def stats(self) -> dict[str, Any]:
+        """Honest service snapshot: sessions, tabs, downloads, pacing —
+        the daemon's ``stats`` op and CLI status surface."""
+        sessions = self.list_sessions()
+        plain_tabs = sum(len(self.get_session(n)._tabs) for n in sessions)
+        return {
+            "sessions": sessions,
+            "plain_tabs": plain_tabs,
+            "rendered_tabs": len(self._rendered_tabs),
+            "rendered_tab_ids": sorted(self._rendered_tabs),
+            "downloads": len(self._downloads),
+            "pacing": self._pacing.describe(),
+            "proxy_pool_attached": self.proxy_pool_attached(),
+            "data_dir": str(self.data_dir),
+        }
 
     # -- screenshots -------------------------------------------------------------
     def screenshot(self, tab: Tab | str, *, full_page: bool = False) -> ScreenshotResult:

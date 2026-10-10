@@ -42,6 +42,47 @@ _LIVE_VIEW_INTERVAL_S = {
     "workstation": 8.0,
 }
 
+#: Verb → icon for narrated action captions. The caption reads like a
+#: human narrating the task, not a log line.
+_ACTION_ICONS = (
+    (("open", "navigat", "goto", "visit"), "\U0001F310"),
+    (("click", "tap", "press"), "\U0001F446"),
+    (("fill", "type", "input", "enter"), "\u2328\uFE0F"),
+    (("select", "check", "uncheck", "choose"), "\u2611\uFE0F"),
+    (("submit", "send"), "\U0001F4E8"),
+    (("screenshot", "shot", "capture"), "\U0001F4F7"),
+    (("download", "save"), "\U0001F4E5"),
+    (("upload",), "\U0001F4E4"),
+    (("scroll",), "\U0001F4DC"),
+    (("wait", "paus"), "\u23F3"),
+    (("back", "forward", "reload", "refresh"), "\U0001F504"),
+    (("extract", "read", "scrap"), "\U0001F4CB"),
+    (("clos", "quit", "exit"), "\U0001F6AA"),
+)
+
+_DEFAULT_ICON = "\U0001F50D"
+
+
+def action_icon(action: str) -> str:
+    """Pick a narration icon for an action description."""
+    low = (action or "").lower()
+    for verbs, icon in _ACTION_ICONS:
+        if any(v in low for v in verbs):
+            return icon
+    return _DEFAULT_ICON
+
+
+def format_elapsed(seconds: float) -> str:
+    """Compact elapsed time: 45s, 3m12s, 1h02m."""
+    seconds = max(0, int(seconds))
+    if seconds < 60:
+        return f"{seconds}s"
+    minutes, sec = divmod(seconds, 60)
+    if minutes < 60:
+        return f"{minutes}m{sec:02d}s"
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours}h{minutes:02d}m"
+
 
 def _interval_for(profile: str | None) -> float:
     kind = (profile or get_profile_kind()).strip().lower()
@@ -64,6 +105,7 @@ class LiveView:
         max_shots: int = LIVE_VIEW_MAX_SHOTS,
         min_interval_s: float | None = None,
         clock: Callable[[], float] | None = None,
+        caption_style: str = "rich",
     ) -> None:
         self._shot = shot
         self._profile = profile
@@ -71,13 +113,19 @@ class LiveView:
         self._interval = (min_interval_s if min_interval_s is not None
                           else _interval_for(profile))
         self._clock = clock or time.monotonic
+        #: caption style: "rich" (icons, elapsed, progress) or "compact"
+        #: (one line, label + latest action).
+        self._caption_style = ("compact" if str(caption_style).lower()
+                               == "compact" else "rich")
         self._chat: ChatRef | None = None
         self._adapter: ChatAdapter | None = None
         self._label = ""
         self._message_id = ""
         self._shots = 0
         self._last_sent = 0.0
+        self._started_at = 0.0
         self._pending_action = ""
+        self._actions = 0
         self._tab: Any = None
         self._active = False
 
@@ -90,8 +138,9 @@ class LiveView:
             self._adapter = adapter
             self._label = (task_label or "browsing").strip() or "browsing"
             self._active = True
+            self._started_at = self._clock()
             path = self._take_shot()
-            caption = f"\U0001F50D {self._label}\u2026"
+            caption = self._opening_caption()
             if path is not None:
                 res = adapter.send_media(
                     chat, MediaRef(path=str(path), kind="image"),
@@ -113,6 +162,7 @@ class LiveView:
             action = (action or "").strip()
             if action:
                 self._pending_action = action
+                self._actions += 1
             if self._shots >= self._max_shots:
                 return  # capped: keep the latest action for the finish frame
             now = self._clock()
@@ -132,7 +182,7 @@ class LiveView:
             if not self._active:
                 return
             path = self._take_shot()
-            caption = f"\u2705 {self._label}\n{(summary or '').strip()}"
+            caption = self._finish_caption(summary)
             if path is not None:
                 self._send_frame(path, caption, force=True)
             elif self._adapter is not None and self._chat is not None:
@@ -148,7 +198,7 @@ class LiveView:
             if not self._active:
                 return
             err = (error or "unknown error").strip()
-            caption = f"\u274C {self._label}\nfailed: {err}"
+            caption = self._fail_caption(err)
             path = self._take_shot()
             if path is not None:
                 self._send_frame(path, caption, force=True)
@@ -175,11 +225,44 @@ class LiveView:
             _log.debug("liveview.detach failed", exc_info=True)
 
     # -- internals ---------------------------------------------------------
+    def _elapsed(self) -> str:
+        return format_elapsed(self._clock() - self._started_at)
+
+    def _progress(self) -> str:
+        return f"{min(self._shots, self._max_shots)}/{self._max_shots}"
+
+    def _opening_caption(self) -> str:
+        if self._caption_style == "compact":
+            return f"\U0001F50D {self._label}\u2026"
+        return (f"\U0001F50D {self._label}\u2026\n"
+                f"live view attached — updates as I work")
+
     def _caption(self) -> str:
-        base = f"\U0001F50D {self._label}"
+        if self._caption_style == "compact":
+            base = f"{action_icon(self._pending_action)} {self._label}"
+            if self._pending_action:
+                return f"{base}: {self._pending_action}"
+            return base
+        head = (f"{action_icon(self._pending_action)} {self._label} "
+                f"· {self._elapsed()} · {self._progress()}")
         if self._pending_action:
-            return f"{base}\n{self._pending_action}"
-        return base + "\u2026"
+            return f"{head}\n{self._pending_action}"
+        return head + "\u2026"
+
+    def _finish_caption(self, summary: str) -> str:
+        body = (summary or "").strip()
+        if self._caption_style == "compact":
+            caption = f"\u2705 {self._label}"
+            return f"{caption}\n{body}" if body else caption
+        caption = (f"\u2705 {self._label} — done in {self._elapsed()} "
+                   f"({self._actions} actions, {self._shots} frames)")
+        return f"{caption}\n{body}" if body else caption
+
+    def _fail_caption(self, error: str) -> str:
+        if self._caption_style == "compact":
+            return f"\u274C {self._label}\nfailed: {error}"
+        return (f"\u274C {self._label} — failed after {self._elapsed()} "
+                f"({self._actions} actions)\nfailed: {error}")
 
     def _take_shot(self) -> Path | None:
         try:

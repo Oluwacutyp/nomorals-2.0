@@ -74,6 +74,8 @@ _MUTATING_OPS = frozenset({
     "open", "close", "click", "submit",
     "r_fill", "r_click", "r_submit", "r_evaluate", "r_fill_form",
     "r_set_date", "r_check", "r_select", "r_upload", "r_switch",
+    "r_type", "r_dblclick", "r_press", "r_drag",
+    "r_reload", "r_forward", "r_back",
 })
 #: Cap on bus events buffered between client drains.
 _MAX_BUFFERED_EVENTS = 10_000
@@ -488,9 +490,11 @@ def _handle_pacing_op(svc: BrowserService,
     """The ``pacing`` op: get the active pacing, or configure it.
 
     ``{"action": "get"}`` returns the config. ``{"action": "set", ...}``
-    accepts ``enabled``/``delay_ms``/``jitter_ms``, or a ``preset``:
-    ``human`` (human-ish cadence), ``profile`` (suggested for this
-    machine's resource profile), ``off`` (no pacing).
+    accepts ``enabled``/``delay_ms``/``jitter_ms``, an optional
+    ``per_action`` object mapping action names to ``[delay_ms, jitter_ms]``
+    pairs, or a ``preset``: ``human`` (human-ish cadence), ``careful``
+    (slower, state-changing actions slower still), ``profile``
+    (suggested for this machine's resource profile), ``off`` (no pacing).
     """
     from .pacing import Pacing
 
@@ -503,12 +507,14 @@ def _handle_pacing_op(svc: BrowserService,
     if preset:
         if preset == "human":
             return svc.set_pacing(Pacing.human())
+        if preset == "careful":
+            return svc.set_pacing(Pacing.careful())
         if preset == "off":
             return svc.set_pacing(Pacing.disabled())
         if preset == "profile":
             return svc.set_pacing(Pacing.from_profile())
         raise DaemonError(
-            f"unknown pacing preset {preset!r} (want human|off|profile)")
+            f"unknown pacing preset {preset!r} (want human|careful|off|profile)")
     kwargs: dict[str, Any] = {}
     if "enabled" in params:
         kwargs["enabled"] = bool(params["enabled"])
@@ -516,9 +522,25 @@ def _handle_pacing_op(svc: BrowserService,
         kwargs["delay_ms"] = int(params["delay_ms"])
     if "jitter_ms" in params:
         kwargs["jitter_ms"] = int(params["jitter_ms"])
+    per_action = params.get("per_action")
+    if per_action is not None:
+        if not isinstance(per_action, dict):
+            raise DaemonError(
+                "pacing per_action must be a {action: [delay_ms, jitter_ms]} "
+                "object")
+        cleaned: dict[str, tuple[int, int]] = {}
+        for act, pair in per_action.items():
+            try:
+                cleaned[str(act).strip().lower()] = (int(pair[0]), int(pair[1]))
+            except (TypeError, ValueError, IndexError) as exc:
+                raise DaemonError(
+                    f"pacing per_action[{act!r}] must be "
+                    f"[delay_ms, jitter_ms]: {exc}") from exc
+        kwargs["per_action"] = cleaned
     if not kwargs:
         raise DaemonError(
-            "pacing set needs enabled/delay_ms/jitter_ms or a preset")
+            "pacing set needs enabled/delay_ms/jitter_ms/per_action or "
+            "a preset")
     return svc.set_pacing(**kwargs)
 
 
@@ -777,6 +799,87 @@ def _handle_op(svc: BrowserService, op: str, params: dict[str, Any]) -> Any:
     if op == "r_download":
         return {"result": svc.rendered_tab_download(
             params.get("tab_id") or "", params.get("target") or "")}
+    if op == "r_snapshot":
+        tab = _rendered_tab_or_raise(svc, params.get("tab_id") or "")
+        return {"result": tab.snapshot(
+            max_chars=int(params.get("max_chars") or 60_000))}
+    if op == "r_ref":
+        tab = _rendered_tab_or_raise(svc, params.get("tab_id") or "")
+        return {"result": {"selector": tab.resolve_ref(
+            params.get("ref") or "")}}
+    if op == "r_pdf":
+        return {"result": svc.pdf_rendered(
+            params.get("tab_id") or "", params.get("path") or None)}
+    if op == "r_console":
+        tab = _rendered_tab_or_raise(svc, params.get("tab_id") or "")
+        return {"result": tab.console_messages(
+            limit=int(params.get("limit") or 100),
+            level=params.get("level") or "")}
+    if op == "r_requests":
+        tab = _rendered_tab_or_raise(svc, params.get("tab_id") or "")
+        return {"result": tab.network_requests(
+            limit=int(params.get("limit") or 100),
+            failed_only=bool(params.get("failed_only")))}
+    if op == "r_dialogs":
+        tab = _rendered_tab_or_raise(svc, params.get("tab_id") or "")
+        return {"result": tab.dialogs(
+            limit=int(params.get("limit") or 20),
+            clear=bool(params.get("clear")))}
+    if op == "r_dialog_policy":
+        tab = _rendered_tab_or_raise(svc, params.get("tab_id") or "")
+        return {"result": tab.set_dialog_policy(
+            params.get("policy") or "accept")}
+    if op == "r_hover":
+        tab = _rendered_tab_or_raise(svc, params.get("tab_id") or "")
+        return {"result": tab.hover(params.get("target") or "")}
+    if op == "r_dblclick":
+        tab = _rendered_tab_or_raise(svc, params.get("tab_id") or "")
+        return {"result": tab.dblclick(params.get("target") or "")}
+    if op == "r_press":
+        tab = _rendered_tab_or_raise(svc, params.get("tab_id") or "")
+        return {"result": tab.press(params.get("key") or "",
+                                    params.get("target") or "")}
+    if op == "r_drag":
+        tab = _rendered_tab_or_raise(svc, params.get("tab_id") or "")
+        return {"result": tab.drag(params.get("source") or "",
+                                   params.get("target") or "")}
+    if op == "r_type":
+        tab = _rendered_tab_or_raise(svc, params.get("tab_id") or "")
+        return {"result": tab.type_text(
+            params.get("target") or "",
+            params.get("text") or "",
+            delay_ms=int(params.get("delay_ms") or 40))}
+    if op == "r_scroll":
+        tab = _rendered_tab_or_raise(svc, params.get("tab_id") or "")
+        return {"result": tab.scroll(
+            direction=params.get("direction") or "down",
+            pixels=int(params.get("pixels") or 600))}
+    if op == "r_element_shot":
+        tab = _rendered_tab_or_raise(svc, params.get("tab_id") or "")
+        return {"result": tab.element_shot(
+            params.get("selector") or "",
+            path=params.get("path") or None)}
+    if op == "r_reload":
+        tab = _rendered_tab_or_raise(svc, params.get("tab_id") or "")
+        return {"result": tab.reload(
+            wait_until=params.get("wait_until") or "domcontentloaded",
+            timeout=int(params.get("timeout") or 60_000))}
+    if op == "r_forward":
+        tab = _rendered_tab_or_raise(svc, params.get("tab_id") or "")
+        return {"result": tab.forward()}
+    if op == "r_back":
+        tab = _rendered_tab_or_raise(svc, params.get("tab_id") or "")
+        return {"result": tab.back()}
+    if op == "r_candidates":
+        tab = _rendered_tab_or_raise(svc, params.get("tab_id") or "")
+        return {"result": tab.candidates(
+            params.get("name") or "",
+            limit=int(params.get("limit") or 5))}
+    if op == "r_forms":
+        tab = _rendered_tab_or_raise(svc, params.get("tab_id") or "")
+        return {"result": tab.form_groups()}
+    if op == "stats":
+        return {"result": svc.stats()}
     raise DaemonError(f"unknown daemon op {op!r}")
 
 
