@@ -13,6 +13,8 @@ Every error carries:
 
 from __future__ import annotations
 
+import inspect
+import json
 import re
 from typing import Any
 
@@ -76,11 +78,51 @@ def is_server_error(exc: BaseException) -> bool:
     return status in (408, 425) or 500 <= status <= 599
 
 
+def retry_after_of(exc: BaseException) -> float | None:
+    """Best-effort ``Retry-After`` seconds for an error, or ``None``.
+
+    Single shared helper so the retry loop, the rate limiter, and the error
+    intelligence all honor the same signal instead of each inventing their
+    own extraction. Prefers an explicit ``retry_after`` attribute, then a
+    ``Retry-After`` response header, then ``details["retry_after"]``.
+    """
+    direct = getattr(exc, "retry_after", None)
+    if isinstance(direct, (int, float)) and direct >= 0:
+        return float(direct)
+    response = getattr(exc, "response", None)
+    headers = getattr(response, "headers", None)
+    if headers:
+        try:
+            raw = headers.get("Retry-After") or headers.get("retry-after")
+        except Exception:  # noqa: BLE001 - exotic header mappings
+            raw = None
+        if raw is not None:
+            try:
+                return max(0.0, float(raw))
+            except (TypeError, ValueError):
+                pass
+    details = getattr(exc, "details", None)
+    if isinstance(details, dict):
+        raw = details.get("retry_after")
+        if isinstance(raw, (int, float)) and raw >= 0:
+            return float(raw)
+    return None
+
+
 class NoMoralsError(Exception):
     """Base class for all framework errors."""
 
     code: str = "error"
     retryable: bool = False
+
+    #: code → error class, populated automatically by __init_subclass__.
+    _registry: dict[str, type["NoMoralsError"]] = {}
+
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        super().__init_subclass__(**kwargs)
+        code = getattr(cls, "code", "")
+        if code and code != "error":
+            NoMoralsError._registry[code] = cls
 
     def __init__(
         self,
@@ -107,8 +149,71 @@ class NoMoralsError(Exception):
             "retryable": self.retryable,
         }
 
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "NoMoralsError":
+        """Rebuild an error from :meth:`to_dict` output. Never raises.
+
+        Resolves the concrete class by ``code`` (then by ``type`` name);
+        falls back to a plain :class:`NoMoralsError` when the class has a
+        custom constructor that the generic path cannot satisfy.
+        """
+        try:
+            code = data.get("code", "") or ""
+            type_name = data.get("type", "") or ""
+            klass: type[NoMoralsError] = NoMoralsError._registry.get(code) or NoMoralsError
+            if klass is NoMoralsError and type_name:
+                candidate = globals().get(type_name)
+                if isinstance(candidate, type) and issubclass(candidate, NoMoralsError):
+                    klass = candidate
+            message = data.get("message", "") or klass.__name__
+            details = data.get("details") or {}
+            retryable = data.get("retryable")
+            # Forward structured extras (retry_after, field, role, ...) that the
+            # concrete __init__ actually accepts — otherwise reconstruction
+            # silently drops them (e.g. RateLimited.retry_after).
+            fwd: dict[str, Any] = {}
+            try:
+                params = set(inspect.signature(klass.__init__).parameters)
+            except (TypeError, ValueError):
+                params = set()
+            for attr in ("field", "capability", "actor", "role", "tool",
+                         "reason", "kind", "retry_after", "dependency"):
+                if attr in details and attr in params:
+                    fwd[attr] = details[attr]
+            try:
+                err = klass(message, code=code or None,
+                            details=dict(details),
+                            retryable=bool(retryable) if retryable is not None else None,
+                            **fwd)
+            except TypeError:
+                # custom __init__ (e.g. AmbiguousRef) — generic reconstruction
+                err = NoMoralsError(message, code=code or "error",
+                                    details=dict(details),
+                                    retryable=bool(retryable) if retryable is not None else None)
+            # restore structured extras that subclasses setdefault into details
+            for attr in ("field", "capability", "actor", "role", "tool",
+                         "reason", "kind", "retry_after", "breaker"):
+                if attr in details and not hasattr(err, attr):
+                    try:
+                        setattr(err, attr, details[attr])
+                    except Exception:  # noqa: BLE001 - best effort
+                        pass
+            return err
+        except Exception:  # noqa: BLE001 - from_dict never raises
+            return NoMoralsError(str(data)[:200], code="error.deser")
+
     def __repr__(self) -> str:  # pragma: no cover - trivial
         return f"{type(self).__name__}(code={self.code!r}, message={self.message!r})"
+
+
+def resolve_error(code: str) -> type[NoMoralsError] | None:
+    """Look up the error class registered for ``code`` (or ``None``)."""
+    return NoMoralsError._registry.get(code)
+
+
+def error_codes() -> dict[str, str]:
+    """All registered codes → class names. Useful for docs and dashboards."""
+    return {code: klass.__name__ for code, klass in sorted(NoMoralsError._registry.items())}
 
 
 # ── Configuration ──────────────────────────────────────────────────────────────
@@ -225,6 +330,60 @@ class DownloadError(ModelError):
     retryable = True
 
 
+# ── Network / auth / quotas ────────────────────────────────────────────────────
+class NetworkError(NoMoralsError):
+    """Generic transport failure not tied to a model provider.
+
+    DNS failures, refused connections, TLS errors on non-model traffic.
+    Distinct from :class:`ProviderUnavailable`, which is model-provider scoped.
+    """
+
+    code = "network.error"
+    retryable = True
+
+
+class AuthError(NoMoralsError):
+    """Credentials are bad, expired, or missing.
+
+    Terminal for these credentials: retrying the same secret can never
+    succeed — refresh it first, then retry.
+    """
+
+    code = "auth.failed"
+    retryable = False
+
+
+class QuotaExceeded(NoMoralsError):
+    """A quota (not a rate window) is exhausted — monthly tokens, seats, storage.
+
+    Unlike :class:`RateLimited`, waiting a few seconds will not help.
+    ``retry_after`` names the reset time when it is known.
+    """
+
+    code = "quota.exceeded"
+    retryable = True
+
+    def __init__(self, message: str = "quota exceeded", *, retry_after: float | None = None,
+                 **kw: Any) -> None:
+        super().__init__(message, **kw)
+        self.retry_after = retry_after
+        if retry_after is not None:
+            self.details.setdefault("retry_after", retry_after)
+
+
+class DependencyError(NoMoralsError):
+    """A downstream service this operation depends on failed."""
+
+    code = "dependency.failed"
+    retryable = True
+
+    def __init__(self, message: str = "", *, dependency: str | None = None, **kw: Any) -> None:
+        super().__init__(message, **kw)
+        self.dependency = dependency
+        if dependency:
+            self.details.setdefault("dependency", dependency)
+
+
 # ── Tools / capabilities ───────────────────────────────────────────────────────
 class ToolError(NoMoralsError):
     code = "tool.error"
@@ -328,6 +487,14 @@ class DeadlineExceeded(TaskCancelled):
     retryable = False
 
 
+class StateError(NoMoralsError):
+    """Invalid internal state — a state machine received an event it cannot
+    handle in its current state, or an invariant was violated."""
+
+    code = "state.invalid"
+    retryable = False
+
+
 # ── Media / parsing ────────────────────────────────────────────────────────────
 class ParseError(NoMoralsError):
     code = "parse.error"
@@ -361,6 +528,8 @@ def classify(exc: BaseException) -> NoMoralsError:
         return CapabilityDenied(text)
     if isinstance(exc, (FileNotFoundError,)):
         return NotFound(text)
+    if isinstance(exc, json.JSONDecodeError):
+        return ParseError(text)
     if isinstance(exc, (ValueError, TypeError)):
         return ValidationError(text)
     if "rate limit" in lowered or "429" in lowered:
