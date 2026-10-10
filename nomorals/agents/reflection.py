@@ -38,6 +38,8 @@ from typing import Any, Optional
 from ..core.ids import new_short_id
 from ..core.logging_setup import get_logger
 from ..llm.base import Message, SamplingParams
+from ..llm.brain import brain_for
+from ..storage.kv import KVStore
 
 _log = get_logger(__name__)
 
@@ -94,11 +96,7 @@ class GoalReflector:
     def existing(self, goal_id: str) -> Optional[dict[str, Any]]:
         """The stored reflection record, or None."""
         try:
-            row = self.db.query_one(
-                "SELECT value FROM kv_store WHERE key=?", (self._key(goal_id),))
-            if not row:
-                return None
-            data = json.loads(row.get("value") or "null")
+            data = KVStore(self.db).get(self._key(goal_id))
             return data if isinstance(data, dict) else None
         except Exception:  # noqa: BLE001
             return None
@@ -106,23 +104,17 @@ class GoalReflector:
     def list(self, *, limit: int = 20) -> list[dict[str, Any]]:
         """All stored reflections, newest first (goal_id recovered from key)."""
         try:
-            rows = self.db.query(
-                "SELECT key, value, updated_at FROM kv_store "
-                "WHERE key LIKE 'goal.reflection.%' "
-                "ORDER BY updated_at DESC LIMIT ?", (limit,))
+            pairs = KVStore(self.db).scan("goal.reflection.", limit=limit)
         except Exception:  # noqa: BLE001
             return []
         out = []
-        for r in rows:
-            key = str(r.get("key", ""))
-            try:
-                data = json.loads(r.get("value") or "{}")
-            except (ValueError, TypeError):
-                data = {}
+        for key, data in pairs:
             if isinstance(data, dict):
                 out.append({"goal_id": key.split(".", 2)[-1],
-                            "ts": float(r.get("updated_at", 0) or 0), **data})
-        return out
+                            "ts": float(data.get("ts", 0) or 0), **data})
+        # Sort by ts DESC to match the original ORDER BY updated_at DESC
+        out.sort(key=lambda r: r["ts"], reverse=True)
+        return out[:limit]
 
     # ── the reflection pass ────────────────────────────────────────────────
     def reflect(self, goal_id: str, *, force: bool = False) -> dict[str, Any]:
@@ -195,11 +187,11 @@ class GoalReflector:
             '{"name": "<short-kebab-name>", '
             '"kind": "strategy|prevention|solution|code|prompt", '
             '"body": "<the reusable approach or avoidance rule>"}}')
-        response = router.chat(
+        response = brain_for(self.context).chat(
             [Message.system("You are a rigorous post-mortem reviewer. "
                             "No preamble, no apologies."),
              Message.user(prompt)],
-            SamplingParams(temperature=0.2, max_tokens=700))
+            SamplingParams(temperature=0.2, max_tokens=700), task_kind="judge")
         if not response.ok:
             return None
         from .reasoning import _extract_json
@@ -297,19 +289,15 @@ class GoalReflector:
         if skill:
             meta["skill_name"] = skill["name"]
         try:
-            self.db.execute(
-                "INSERT INTO kv_store (key, value, kind, updated_at) "
-                "VALUES (?,?, 'json', ?) ON CONFLICT(key) DO UPDATE SET "
-                "value = excluded.value, updated_at = excluded.updated_at",
-                (self._key(goal.id), json.dumps({
-                    "source": source,
-                    "what_worked": reflection.get("what_worked", []),
-                    "what_didnt_work": reflection.get("what_didnt_work", []),
-                    "lessons": reflection.get("lessons", []),
-                    "skill_name": meta["skill_name"],
-                    "skill_id": "",  # filled below
-                    "ts": now,
-                }), now))
+            KVStore(self.db).set(self._key(goal.id), {
+                "source": source,
+                "what_worked": reflection.get("what_worked", []),
+                "what_didnt_work": reflection.get("what_didnt_work", []),
+                "lessons": reflection.get("lessons", []),
+                "skill_name": meta["skill_name"],
+                "skill_id": "",  # filled below
+                "ts": now,
+            })
         except Exception as exc:  # noqa: BLE001
             _log.debug("reflection record write failed: %s", exc)
 
@@ -350,12 +338,7 @@ class GoalReflector:
             stored = self.existing(goal.id) or {}
             if meta.get("skill_id"):
                 stored["skill_id"] = meta["skill_id"]
-                self.db.execute(
-                    "INSERT INTO kv_store (key, value, kind, updated_at) "
-                    "VALUES (?,?, 'json', ?) ON CONFLICT(key) DO UPDATE "
-                    "SET value = excluded.value, updated_at = "
-                    "excluded.updated_at",
-                    (self._key(goal.id), json.dumps(stored), time.time()))
+                KVStore(self.db).set(self._key(goal.id), stored)
         except Exception:  # noqa: BLE001
             pass
         return meta

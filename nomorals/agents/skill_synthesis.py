@@ -25,8 +25,10 @@ import time
 from dataclasses import dataclass
 from typing import Any, Callable
 
+from ..llm.brain import brain_for
 from ..core.ids import new_short_id
 from ..core.logging_setup import get_logger
+from ..storage.kv import KVStore
 from .skills import SkillLibrary
 
 _log = get_logger(__name__)
@@ -203,8 +205,8 @@ class SkillSynthesizer:
             "tool names, one per line), ## Steps, ## Notes sections>\", "
             "\"tags\": [\"synthesized\", ...]}")
         try:
-            resp = router.chat([Message.user(prompt)],
-                               SamplingParams(temperature=0.3, max_tokens=1500))
+            resp = brain_for(self.context).chat([Message.user(prompt)],
+                               SamplingParams(temperature=0.3, max_tokens=1500), task_kind="judge")
             if not getattr(resp, "ok", False):
                 return _template_draft(pattern)
             data = json.loads(_first_json(resp.text or ""))
@@ -259,14 +261,11 @@ class SkillSynthesizer:
             return {"ok": False, "error": f"smoke test failed: {detail}"}
         # provenance
         try:
-            self.db.execute(
-                "INSERT OR REPLACE INTO kv_store (key, value, kind, "
-                "updated_at) VALUES (?,?, 'json', ?)",
-                (f"skill.provenance.{skill.id}",
-                 json.dumps({"synthesized_from": pattern.trace_ids,
-                             "synthesized_at": time.time(),
-                             "pattern": pattern.to_dict()}),
-                 time.time()))
+            KVStore(self.db).set(f"skill.provenance.{skill.id}", {
+                "synthesized_from": pattern.trace_ids,
+                "synthesized_at": time.time(),
+                "pattern": pattern.to_dict(),
+            })
         except Exception:  # noqa: BLE001
             pass
         if mode == "approval":
@@ -276,13 +275,10 @@ class SkillSynthesizer:
         # autonomous: register with a 14-day probation flag
         self._set_probation_tag(skill.id, "probation")
         try:
-            self.db.execute(
-                "INSERT OR REPLACE INTO kv_store (key, value, kind, "
-                "updated_at) VALUES (?,?, 'json', ?)",
-                (f"skill.probation.{skill.id}",
-                 json.dumps({"until": time.time() + PROBATION_DAYS * 86400,
-                             "pattern": pattern.to_dict()}),
-                 time.time()))
+            KVStore(self.db).set(f"skill.probation.{skill.id}", {
+                "until": time.time() + PROBATION_DAYS * 86400,
+                "pattern": pattern.to_dict(),
+            })
         except Exception:  # noqa: BLE001
             pass
         _log.info("synthesized skill %s (%s) on probation",
@@ -321,16 +317,12 @@ class SkillSynthesizer:
         ones nobody touched."""
         out: list[dict[str, Any]] = []
         try:
-            rows = self.db.query(
-                "SELECT key, value FROM kv_store WHERE key LIKE "
-                "'skill.probation.%'")
+            pairs = KVStore(self.db).scan("skill.probation.")
         except Exception:  # noqa: BLE001
             return []
-        for r in rows:
-            skill_id = r["key"].split("skill.probation.", 1)[1]
-            try:
-                data = json.loads(r["value"] or "{}")
-            except Exception:  # noqa: BLE001
+        for key, data in pairs:
+            skill_id = key.split("skill.probation.", 1)[1]
+            if not isinstance(data, dict):
                 continue
             if time.time() < data.get("until", 0):
                 continue
@@ -360,7 +352,7 @@ class SkillSynthesizer:
                     pass
                 out.append({"skill_id": skill_id, "kept": False, "uses": uses})
             try:
-                self.db.execute("DELETE FROM kv_store WHERE key=?", (r["key"],))
+                KVStore(self.db).delete(key)
             except Exception:  # noqa: BLE001
                 pass
         return out
