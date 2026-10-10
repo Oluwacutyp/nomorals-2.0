@@ -26,6 +26,8 @@ from __future__ import annotations
 import time
 from typing import Any
 
+from ..storage.kv import KVStore
+
 #: how long a finding must stay quiet before it may page again
 COOLDOWN_SECONDS = 6 * 3600.0
 #: pivots older than this are history, not an alert
@@ -34,20 +36,15 @@ PIVOT_WINDOW_SECONDS = 24 * 3600.0
 
 def _kv_get(db: Any, key: str) -> float:
     try:
-        row = db.query_one("SELECT value FROM kv_store WHERE key=?", (key,))
-        return float(row["value"]) if row else 0.0
+        raw = KVStore(db).get_raw(key)
+        return float(raw) if raw else 0.0
     except Exception:  # noqa: BLE001 - cooldown is best-effort
         return 0.0
 
 
 def _kv_set(db: Any, key: str, value: float) -> None:
     try:
-        db.execute(
-            "INSERT INTO kv_store (key, value, kind, updated_at) "
-            "VALUES (?,?,?,?) "
-            "ON CONFLICT(key) DO UPDATE SET "
-            "value=excluded.value, updated_at=excluded.updated_at",
-            (key, str(value), "json", time.time()))
+        KVStore(db).set_raw(key, str(value), "json")
     except Exception:  # noqa: BLE001
         pass
 

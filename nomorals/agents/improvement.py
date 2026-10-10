@@ -33,6 +33,7 @@ from typing import Any, Optional
 
 from ..core.ids import new_short_id
 from ..core.logging_setup import get_logger
+from ..storage.kv import KVStore
 from .benchmark import measurable, run_benchmark
 
 _log = get_logger(__name__)
@@ -306,11 +307,9 @@ class ImprovementLoop:
              rec.rationale, rec.edit_summary, status, rec.created_at))
         # stash full details in kv so history can show them
         try:
-            self.db.execute(
-                "INSERT OR REPLACE INTO kv_store (key, value, kind, "
-                "updated_at) VALUES (?,?, 'json', ?)",
-                (f"improvement.details.{cycle_id}",
-                 json.dumps(details, default=str), time.time()))
+            KVStore(self.db).set_raw(
+                f"improvement.details.{cycle_id}",
+                json.dumps(details, default=str), "json")
         except Exception:  # noqa: BLE001
             pass
         _log.info("improvement cycle [%s] dim=%s %s -> %s", action, dimension,
@@ -383,11 +382,8 @@ class ImprovementLoop:
         for r in rows:
             rec = CycleRecord.from_row(r)
             try:
-                drow = self.db.query_one(
-                    "SELECT value FROM kv_store WHERE key=?",
-                    (f"improvement.details.{rec.id}",))
-                if drow:
-                    rec.details = json.loads(drow["value"] or "{}")
+                rec.details = KVStore(self.db).get(
+                    f"improvement.details.{rec.id}", default={})
             except Exception:  # noqa: BLE001
                 pass
             out.append(rec)

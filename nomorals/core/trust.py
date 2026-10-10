@@ -29,6 +29,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from .logging_setup import get_logger
+from ..storage.kv import KVStore
 
 __all__ = ["SourceTrust", "domain_tier"]
 
@@ -132,14 +133,9 @@ class SourceTrust:
         if db is None:
             return {}
         try:
-            row = db.query_one("SELECT value FROM kv_store WHERE key = ?",
-                               (self._KV,))
-            if row:
-                import json
-
-                data = json.loads(row["value"] or "{}")
-                if isinstance(data, dict):
-                    return data
+            data = KVStore(db).get(self._KV)
+            if isinstance(data, dict):
+                return data
         except Exception:  # noqa: BLE001
             pass
         return {}
@@ -151,14 +147,8 @@ class SourceTrust:
         try:
             import json
 
-            with db.transaction():
-                db.execute(
-                    "INSERT INTO kv_store (key, value, kind, updated_at) "
-                    "VALUES (?, ?, 'json', ?) "
-                    "ON CONFLICT(key) DO UPDATE SET value = excluded.value, "
-                    "updated_at = excluded.updated_at",
-                    (self._KV, json.dumps(data, ensure_ascii=False), time.time()),
-                )
+            KVStore(db).set_raw(self._KV,
+                                json.dumps(data, ensure_ascii=False), "json")
         except Exception:  # noqa: BLE001
             _log.debug("source-trust persist failed", exc_info=True)
 

@@ -79,6 +79,7 @@ from typing import Any
 from ..core.errors import NoMoralsError, ToolError
 from ..core.logging_setup import get_logger
 from ..core.policy import Capability
+from ..storage.kv import KVStore
 from .library import MusicLibrary, read_metadata
 
 _log = get_logger(__name__)
@@ -326,22 +327,14 @@ class PlaybackEngine:
     # ── persistent state ──────────────────────────────────────────────────
     def _load_state(self) -> dict[str, Any]:
         try:
-            row = self.db.query_one("SELECT value FROM kv_store WHERE key=?",
-                                    (_STATE_KEY,))
-            if row:
-                return json.loads(row["value"])
+            return KVStore(self.db).get(_STATE_KEY, default={})
         except Exception:  # noqa: BLE001
             pass
         return {}
 
     def _save_state(self) -> None:
         try:
-            self.db.execute(
-                "INSERT INTO kv_store (key, value, kind, updated_at) "
-                "VALUES (?,?, 'json', ?) "
-                "ON CONFLICT(key) DO UPDATE SET value=excluded.value, "
-                "updated_at=excluded.updated_at",
-                (_STATE_KEY, json.dumps(self._state), time.time()))
+            KVStore(self.db).set(_STATE_KEY, self._state)
         except Exception as exc:  # noqa: BLE001
             _log.debug("player state save failed: %s", exc)
 

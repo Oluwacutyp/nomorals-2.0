@@ -27,6 +27,7 @@ from .degradation import DegradationLadder, LadderManager, Rung
 from .incidents import IncidentJournal
 from .logging_setup import get_logger
 from .selfheal import SelfHealingExecutor, SubsystemSupervisor
+from ..storage.kv import KVStore
 
 _log = get_logger(__name__)
 
@@ -237,13 +238,8 @@ def register_default_ladders(es: ErrorSystem, context: Any = None) -> None:
         if db is None:
             raise RuntimeError("no database to queue the message")
         try:
-            db.execute(
-                "INSERT INTO kv_store (key, value, kind, updated_at) "
-                "VALUES (?, ?, 'json', ?) ",
-                (f"tg_retry:{time.time()}:{chat}",
-                 json.dumps({"chat": chat, "text": text}),
-                 time.time()),
-            )
+            KVStore(db).set(f"tg_retry:{time.time()}:{chat}",
+                            {"chat": chat, "text": text})
         except Exception as exc:  # noqa: BLE001
             raise RuntimeError(f"could not queue telegram message: {exc}")
         return {"ok": False, "queued": True, "chat": chat}

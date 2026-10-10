@@ -47,6 +47,7 @@ from typing import Any
 
 from ..core.ids import new_id
 from ..core.logging_setup import get_logger
+from ..storage.kv import KVStore
 from .features import feature_enabled
 from .notifier import Notifier, _in_quiet_hours_now
 
@@ -202,10 +203,7 @@ def _kv_get(context: Any, key: str) -> Any:
     if db is None:
         return None
     try:
-        row = db.query_one("SELECT value FROM kv_store WHERE key=?", (key,))
-        if not row:
-            return None
-        return json.loads(row.get("value") or "null")
+        return KVStore(db).get(key)
     except Exception:  # noqa: BLE001 - kv is best-effort
         return None
 
@@ -215,12 +213,7 @@ def _kv_put(context: Any, key: str, value: Any) -> bool:
     if db is None:
         return False
     try:
-        db.execute(
-            "INSERT INTO kv_store (key, value, kind, updated_at) "
-            "VALUES (?, ?, 'json', ?) ON CONFLICT(key) DO UPDATE SET "
-            "value = excluded.value, updated_at = excluded.updated_at",
-            (key, json.dumps(value), time.time()),
-        )
+        KVStore(db).set(key, value)
         return True
     except Exception as exc:  # noqa: BLE001
         _log.warning("kv put failed (%s): %s", key, exc)

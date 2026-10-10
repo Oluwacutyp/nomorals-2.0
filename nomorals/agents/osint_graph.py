@@ -42,6 +42,7 @@ from typing import Any, Callable
 from ..core.errors import ToolError
 from ..core.logging_setup import get_logger
 from ..core.policy import Capability
+from ..storage.kv import KVStore
 
 _log = get_logger(__name__)
 
@@ -250,10 +251,8 @@ class IdentityGraph:
         if db is None:
             return {"nodes": {}, "edges": [], "events": []}
         try:
-            row = db.query_one("SELECT value FROM kv_store WHERE key = ?",
-                               (_GRAPH_KEY,))
-            if row:
-                data = json.loads(row["value"])
+            data = KVStore(db).get(_GRAPH_KEY)
+            if data:
                 data.setdefault("nodes", {})
                 data.setdefault("edges", [])
                 data.setdefault("events", [])
@@ -267,14 +266,8 @@ class IdentityGraph:
         if db is None:
             return
         try:
-            with db.transaction():
-                db.execute(
-                    "INSERT INTO kv_store (key, value, kind, updated_at) "
-                    "VALUES (?, ?, 'json', ?) "
-                    "ON CONFLICT(key) DO UPDATE SET value = excluded.value, "
-                    "updated_at = excluded.updated_at",
-                    (_GRAPH_KEY,
-                     json.dumps(self.data, default=str), time.time()))
+            KVStore(db).set_raw(_GRAPH_KEY,
+                                json.dumps(self.data, default=str), "json")
         except Exception as exc:  # noqa: BLE001
             _log.warning("could not persist identity graph: %s", exc)
 

@@ -10,8 +10,9 @@ Defaults: everything the bot does today stays ON, EXCEPT the arena loop
 
 from __future__ import annotations
 
-import time
 from typing import Any
+
+from ..storage.kv import KVStore
 
 __all__ = ["FEATURES", "FeatureRegistry", "feature_enabled"]
 
@@ -46,9 +47,9 @@ class FeatureRegistry:
             return False
         default_on, _ = FEATURES[name]
         try:
-            row = self.db.query_one("SELECT value FROM kv_store WHERE key = ?", (self._key(name),))
-            if row is not None:
-                return str(row.get("value", "")).lower() == "on"
+            raw = KVStore(self.db).get_raw(self._key(name))
+            if raw is not None:
+                return raw.lower() == "on"
         except Exception:  # noqa: BLE001 - flag read must never break the bot
             pass
         return default_on
@@ -57,13 +58,7 @@ class FeatureRegistry:
         if name not in FEATURES:
             return False
         try:
-            with self.db.transaction():
-                self.db.execute(
-                    """INSERT INTO kv_store (key, value, updated_at) VALUES (?, ?, ?)
-                       ON CONFLICT(key) DO UPDATE SET value = excluded.value,
-                                                     updated_at = excluded.updated_at""",
-                    (self._key(name), "on" if on else "off", time.time()),
-                )
+            KVStore(self.db).set_raw(self._key(name), "on" if on else "off")
         except Exception:  # noqa: BLE001
             return False
         return True

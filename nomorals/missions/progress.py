@@ -47,6 +47,7 @@ from ..agents.notifier import (
 )
 from ..core.errors import ValidationError
 from ..core.logging_setup import get_logger
+from ..storage.kv import KVStore
 
 __all__ = [
     "StallCode",
@@ -300,17 +301,10 @@ class MissionWatchers:
         if self.db is None:
             return []
         try:
-            row = self.db.query_one(
-                "SELECT value FROM kv_store WHERE key = ?",
-                (self._key(mission_id),),
-            )
+            data = KVStore(self.db).get(self._key(mission_id))
         except Exception:  # noqa: BLE001 - subscriptions are best-effort
             return []
-        if not row:
-            return []
-        try:
-            data = json.loads(row["value"])
-        except (ValueError, KeyError, TypeError):
+        if not data:
             return []
         return [str(c) for c in data if c] if isinstance(data, list) else []
 
@@ -318,13 +312,7 @@ class MissionWatchers:
         if self.db is None:
             return
         try:
-            self.db.execute(
-                "INSERT INTO kv_store (key, value, kind, updated_at) "
-                "VALUES (?, ?, 'json', ?) "
-                "ON CONFLICT(key) DO UPDATE SET value = excluded.value, "
-                "updated_at = excluded.updated_at",
-                (self._key(mission_id), json.dumps(chats), time.time()),
-            )
+            KVStore(self.db).set(self._key(mission_id), chats)
         except Exception:  # noqa: BLE001 - subscriptions are best-effort
             pass
 

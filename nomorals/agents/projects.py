@@ -34,6 +34,8 @@ from typing import Any, Callable
 from ..core.ids import new_short_id
 from ..core.logging_setup import get_logger
 from ..llm.base import Message
+from ..storage.kv import KVStore
+from ..llm.brain import brain_for
 
 __all__ = ["Project", "ProjectStep", "ProjectManager", "register"]
 
@@ -230,14 +232,10 @@ class ProjectManager:
         if not row:
             return None
         steps: list[ProjectStep] = []
-        kv = self.db.query_one(
-            "SELECT value FROM kv_store WHERE key=?",
-            (_KV_PREFIX + project_id,),
-        )
-        if kv and kv.get("value"):
+        kv = KVStore(self.db).get(_KV_PREFIX + project_id)
+        if kv:
             try:
-                steps = [ProjectStep.from_dict(d)
-                         for d in json.loads(kv["value"])]
+                steps = [ProjectStep.from_dict(d) for d in kv]
             except (ValueError, TypeError):
                 steps = []
         return Project(
@@ -350,13 +348,13 @@ class ProjectManager:
                      f"the previous plan failed or was superseded):"
                      f"\n{context_note}")
         try:
-            resp = self.context.router.chat(
+            resp = brain_for(self.context).chat(
                 [Message.system(
                      "You break a project objective into 3-7 concrete, ordered, "
                      "self-contained action steps. Reply with a JSON array of "
                      "strings. No commentary."),
                  Message.user(user)],
-            )
+            task_kind="plan")
             if resp.ok:
                 arr = _extract_json_array(resp.text or "")
                 if arr:
@@ -697,11 +695,11 @@ class ProjectManager:
         if known:
             user += f"\n\n{known}\nRewrite the step so it avoids these known failure patterns."
         try:
-            resp = self.context.router.chat(
+            resp = brain_for(self.context).chat(
                 [Message.system("A project step failed. Rewrite it as a different, "
                                 "more robust approach in ONE short sentence."),
                  Message.user(user)],
-            )
+            task_kind="plan")
             if resp.ok and (resp.text or "").strip():
                 return resp.text.strip()[:300]
         except Exception:  # noqa: BLE001
@@ -789,11 +787,11 @@ class ProjectManager:
                 user = f"{self._skill_context_block(recalled)}\n\n{user}"
             if upstream:
                 user = f"{upstream}\n\nYour step now: {user}"
-            resp = self.context.router.chat(
+            resp = brain_for(self.context).chat(
                 [Message.system("You are executing one step of a project. Do it and "
                                 "report the concrete result in 1-3 sentences."),
                  Message.user(user)],
-            )
+            task_kind="plan")
             if not resp.ok:
                 self._record_skill_use(recalled, success=False, task=description)
                 raise RuntimeError(resp.error or "execution failed")

@@ -45,6 +45,7 @@ from typing import Any
 from ..core.ids import ulid_now
 from ..core.logging_setup import get_logger
 from ..core.owner import seal_configured, verify_owner
+from ..storage.kv import KVStore
 
 
 # Shim classes for settings that were removed from core.config
@@ -237,12 +238,8 @@ class PowerMode:
         if db is None:
             return
         try:
-            db.execute(
-                "INSERT INTO kv_store (key, value, kind, updated_at) VALUES (?, ?, 'json', ?) "
-                "ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
-                (ACTIVE_KEY, json.dumps({"active": bool(active), "locked": bool(locked),
-                                         "by": actor, "ts": time.time()}), time.time()),
-            )
+            KVStore(db).set(ACTIVE_KEY, {"active": bool(active), "locked": bool(locked),
+                                         "by": actor, "ts": time.time()})
         except Exception as exc:  # noqa: BLE001
             _log.warning("power-mode persist failed: %s", exc)
 
@@ -251,10 +248,7 @@ class PowerMode:
         if db is None:
             return None
         try:
-            row = db.query_one("SELECT value FROM kv_store WHERE key = ?", (ACTIVE_KEY,))
-            if row is None:
-                return None
-            data = json.loads(row["value"] or "{}")
+            data = KVStore(db).get(ACTIVE_KEY)
             if not isinstance(data, dict):
                 return None
             return data
