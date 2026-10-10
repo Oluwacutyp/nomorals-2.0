@@ -49,6 +49,10 @@ __all__ = [
     "NIGERIAN_FIRST_NAMES",
     "INTERNATIONAL_FIRST_NAMES",
     "DISPOSABLE_SURNAMES",
+    "LOCALE_FIRST_NAMES",
+    "YORUBA_FIRST_NAMES",
+    "HAUSA_FIRST_NAMES",
+    "IGBO_FIRST_NAMES",
     "render_persona_card",
 ]
 
@@ -76,6 +80,95 @@ DISPOSABLE_SURNAMES = (
     "Trial", "Demo", "Test", "Temp", "Guest",
 )
 
+#: Locale name pools — the user's language scope puts Ekiti/Ilawe
+#: Ekiti Yoruba first, then Hausa, Igbo, then international.
+YORUBA_FIRST_NAMES = (
+    "Adeyinka", "Oluwadamilola", "Ayomide", "Temilade", "Oluwatosin",
+    "Ifeoluwa", "Oluwaseyi", "Adedayo", "Oluwabukola", "Kayode",
+    "Folashade", "Omolola", "Adebisi", "Olanrewaju", "Titilayo",
+    "Oluwafemi", "Adeola", "Oluwaseun", "Morenikeji", "Ayodele",
+    "Tunde", "Yetunde", "Funke", "Segun", "Olumide", "Damilola",
+)
+HAUSA_FIRST_NAMES = (
+    "Ibrahim", "Fatima", "Aisha", "Musa", "Halima",
+    "Zainab", "Abubakar", "Hadiza", "Usman", "Aminu",
+    "Maryam", "Sani", "Bilkisu", "Nasir", "Hauwa",
+)
+IGBO_FIRST_NAMES = (
+    "Chinedu", "Ngozi", "Adaeze", "Emeka", "Chiamaka",
+    "Nnamdi", "Kelechi", "Ifeanyi", "Amara", "Obinna",
+    "Nkechi", "Obioma", "Uchenna", "Chioma", "Ebuka",
+)
+
+#: locale -> first-name pool
+LOCALE_FIRST_NAMES: dict[str, tuple[str, ...]] = {
+    "ng_yoruba": YORUBA_FIRST_NAMES,
+    "ng_hausa": HAUSA_FIRST_NAMES,
+    "ng_igbo": IGBO_FIRST_NAMES,
+    "ng": NIGERIAN_FIRST_NAMES,
+    "intl": INTERNATIONAL_FIRST_NAMES,
+}
+
+#: Lagos-shaped address components for generated personas
+_NG_STREETS = (
+    "Allen Avenue", "Awolowo Road", "Admiralty Way", "Opebi Road",
+    "Herbert Macaulay Way", "Adeola Odeku Street", "Cameron Road",
+    "Toyin Street", "Mobolaji Bank Anthony Way", "Adeniran Ogunsanya Street",
+    "Bode Thomas Street", "Acme Road", "Ogunnusi Road", "Ikotun Road",
+)
+_NG_AREAS = (
+    "Ikeja", "Lekki Phase 1", "Ikoyi", "Yaba", "Victoria Island",
+    "Surulere", "Ogba", "Maryland", "Gbagada", "Ajah",
+)
+
+#: Nigerian mobile prefixes (NCC allocations)
+_NG_MOBILE_PREFIXES = (
+    "803", "805", "807", "809", "810", "813", "816", "817", "818",
+    "819", "703", "706", "708", "802", "808", "812", "701", "902",
+    "903", "915",
+)
+
+#: neutral interest lines — personas need a bio on many signup forms
+_BIO_LINES = (
+    "football & afrobeats 🎶", "tech enthusiast 💻", "foodie 🍲",
+    "gaming 🎮", "movies & series 🎬", "fitness 🏋️",
+    "photography 📸", "music lover 🎧", "reading & travel ✈️",
+    "fashion 👗", "crypto curious 🪙", "content creator 📱",
+)
+
+
+def _ng_address(rng: random.Random) -> str:
+    """A Lagos-shaped street address (synthetic, disposable)."""
+    num = rng.randint(1, 120)
+    street = rng.choice(_NG_STREETS)
+    area = rng.choice(_NG_AREAS)
+    return f"{num} {street}, {area}, Lagos"
+
+
+def _ng_phone(rng: random.Random) -> str:
+    """A +234 mobile-shaped number (synthetic, disposable)."""
+    prefix = rng.choice(_NG_MOBILE_PREFIXES)
+    rest = rng.randint(1_000_000, 9_999_999)
+    return f"+234 {prefix} {rest // 10000:04d} {rest % 10000:04d}"
+
+
+def _persona_bio(rng: random.Random) -> str:
+    return rng.choice(_BIO_LINES)
+
+
+def _handle_variants(first: str, last: str,
+                     rng: random.Random) -> list[str]:
+    """Social-handle candidates (no dots — handles, not emails)."""
+    import re
+    f = re.sub(r"[^a-z]", "", first.lower()) or "user"
+    l = re.sub(r"[^a-z]", "", last.lower()) or "trial"
+    suffix = f"{rng.randint(10, 99)}"
+    cands = [f"{f}_{l}", f"{f}{l}{suffix}", f"the{f}{suffix}",
+             f"{f}.{l}{suffix}"]
+    seen: set[str] = set()
+    return [c for c in cands if not (c in seen or seen.add(c))]
+
+
 #: vault service under which personas are stored.
 VAULT_SERVICE = "identity_bank"
 
@@ -97,7 +190,12 @@ class Persona:
     first_name: str
     last_name: str
     username_variants: list[str] = field(default_factory=list)
+    handle_variants: list[str] = field(default_factory=list)
     dob: str = ""  # ISO date, always an adult (21–45y)
+    address: str = ""  # generated Nigerian address shape
+    phone: str = ""  # generated +234 mobile shape (disposable)
+    bio: str = ""  # short neutral interests line
+    locale: str = "ng_yoruba"  # name-pool locale
     email: str = ""  # filled at drive time from a disposable address
     email_provider: str = ""
     password: str = ""
@@ -116,7 +214,12 @@ class Persona:
             "first_name": self.first_name,
             "last_name": self.last_name,
             "username_variants": list(self.username_variants),
+            "handle_variants": list(self.handle_variants),
             "dob": self.dob,
+            "address": self.address,
+            "phone": self.phone,
+            "bio": self.bio,
+            "locale": self.locale,
             "email": self.email,
             "email_provider": self.email_provider,
             "password": self.password,
@@ -133,7 +236,12 @@ class Persona:
             first_name=str(data.get("first_name", "")),
             last_name=str(data.get("last_name", "")),
             username_variants=list(data.get("username_variants") or []),
+            handle_variants=list(data.get("handle_variants") or []),
             dob=str(data.get("dob", "")),
+            address=str(data.get("address", "")),
+            phone=str(data.get("phone", "")),
+            bio=str(data.get("bio", "")),
+            locale=str(data.get("locale", "ng_yoruba")),
             email=str(data.get("email", "")),
             email_provider=str(data.get("email_provider", "")),
             password=str(data.get("password", "")),
@@ -265,15 +373,24 @@ class IdentityBank:
     # ── minting ───────────────────────────────────────────────────
 
     def mint(self, service: str, *,
-             rng: random.Random | None = None) -> Persona:
+             rng: random.Random | None = None,
+             locale: str = "ng_yoruba") -> Persona:
         """Mint a fresh disposable persona for ``service`` and store it.
 
         The persona is a *draft* — it must pass the confirmation gate
         before any signup uses it.
+
+        Args:
+            service: Service the persona is minted for
+            rng: Seeded RNG for reproducible personas (default: fresh)
+            locale: Name-pool locale — ``ng_yoruba`` (Ekiti/Ilawe Ekiti
+                Yoruba first), ``ng_hausa``, ``ng_igbo``, ``ng``,
+                ``intl``. Unknown locales fall back to ``ng_yoruba``.
         """
         rng = rng or random.Random()
         service = service.strip().lower()
-        first_pool = NIGERIAN_FIRST_NAMES + INTERNATIONAL_FIRST_NAMES
+        locale = (locale or "ng_yoruba").strip().lower()
+        first_pool = LOCALE_FIRST_NAMES.get(locale) or YORUBA_FIRST_NAMES
         first = rng.choice(first_pool)
         last = rng.choice(DISPOSABLE_SURNAMES)
         persona = Persona(
@@ -282,19 +399,24 @@ class IdentityBank:
             first_name=first,
             last_name=last,
             username_variants=_username_variants(first, last, rng),
+            handle_variants=_handle_variants(first, last, rng),
             dob=_adult_dob(rng),
+            address=_ng_address(rng),
+            phone=_ng_phone(rng),
+            bio=_persona_bio(rng),
+            locale=locale,
             password=generate_password(20),
             disposable=True,
             created_at=time.time(),
-            metadata={"pool": "nigerian" if first in NIGERIAN_FIRST_NAMES
-                      else "international"},
+            metadata={"pool": locale, "disposable": True},
         )
         self._save(persona)
         _log.info("minted disposable persona %s for %s", persona.id, service)
         return persona
 
     def get_or_mint(self, service: str, *,
-                    rng: random.Random | None = None) -> Persona:
+                    rng: random.Random | None = None,
+                    locale: str = "ng_yoruba") -> Persona:
         """Reuse the service's current persona, or mint one.
 
         The same persona is reused across a signup's retries (same name
@@ -307,7 +429,7 @@ class IdentityBank:
         for persona in reversed(self._load_all(service)):
             if now - persona.created_at < REUSE_WINDOW_SECONDS:
                 return persona
-        return self.mint(service, rng=rng)
+        return self.mint(service, rng=rng, locale=locale)
 
     def get(self, persona_id: str) -> Persona | None:
         """Fetch a persona by id (vault or table backend)."""
@@ -361,17 +483,32 @@ class IdentityBank:
 
 
 def render_persona_card(persona: Persona, service: str) -> str:
-    """The draft-identity warning card shown before confirmation."""
+    """The draft-identity warning card shown before confirmation.
+
+    Styled as a full identity dossier — everything a signup form asks
+    for, in one glance — with the disposable warning up front.
+    """
+    top_user = (persona.username_variants[0]
+                if persona.username_variants else "?")
+    top_handle = (persona.handle_variants[0]
+                  if persona.handle_variants else "?")
     lines = [
         "⚠️  SIGNUP IDENTITY DRAFT — confirm before I use it",
+        "┈" * 46,
+        f"👤  name:      {persona.name}",
+        f"🌍  locale:    {persona.locale}",
+        f"🎂  dob:       {persona.dob} (adult)",
+        f"🏠  address:   {persona.address or '—'}",
+        f"📱  phone:     {persona.phone or '—'}  (disposable, temp SMS)",
+        f"✉️   email:     disposable temp address (minted at signup time,",
+        "               never your real email)",
+        f"👾  username:  {top_user}",
+        f"📣  handle:    @{top_handle}",
+        f"📝  bio:       {persona.bio or '—'}",
         "",
-        f"service:  {service}",
-        f"name:     {persona.name}",
-        f"username: {persona.username_variants[0] if persona.username_variants else '?'}",
-        f"dob:      {persona.dob} (adult)",
-        f"email:    disposable temp address (minted at signup time, "
-        "never your real email)",
-        "",
+        "username options: " + (", ".join(persona.username_variants[:5])
+                               or "—"),
+        "┈" * 46,
         "This is a DISPOSABLE draft identity for a trial signup — not your",
         "real details. I will not proceed without your explicit confirmation.",
         "One account per service. Credentials are stored in your vault.",

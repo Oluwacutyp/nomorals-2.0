@@ -35,13 +35,26 @@ from ..core.errors import NoMoralsError, NotFound
 from ..core.logging_setup import get_logger
 from .vault import Credential, CredentialVault
 
-__all__ = ["SessionManager", "Session", "OAuthToken", "SessionInvalid"]
+__all__ = ["SessionManager", "Session", "OAuthToken", "SessionInvalid",
+           "TokenRefreshError"]
 
 _log = get_logger(__name__)
 
 
 class SessionInvalid(NoMoralsError):
     """Raised when a session is missing, expired, or otherwise unusable."""
+
+
+class TokenRefreshError(SessionInvalid):
+    """An OAuth refresh failed and the token cannot be used.
+
+    Carries ``recoverable`` — True for transient transport/5xx failures
+    (retry later), False for 4xx/invalid_grant (re-authenticate).
+    """
+
+    def __init__(self, message: str, *, recoverable: bool = False) -> None:
+        super().__init__(message)
+        self.recoverable = recoverable
 
 
 @dataclass
@@ -59,6 +72,22 @@ class OAuthToken:
         if self.expires_at is None:
             return False
         return time.time() > self.expires_at
+
+    def needs_refresh(self, *, skew_s: float = 60.0) -> bool:
+        """True when the token is expired *or will be* within ``skew_s``.
+
+        The proactive buffer (60s default) is the field-tested rule: don't
+        wait for a 401 — refresh *before* the token dies mid-request.
+        """
+        if self.expires_at is None:
+            return False
+        return time.time() > self.expires_at - skew_s
+
+    def seconds_until_expiry(self) -> float | None:
+        """Seconds left on the token, or None when it has no expiry."""
+        if self.expires_at is None:
+            return None
+        return self.expires_at - time.time()
     
     def to_dict(self) -> dict[str, Any]:
         """Serialize to dict."""
@@ -110,6 +139,63 @@ class Session:
             return False
         return True
 
+    # ── Playwright storage_state interop ─────────────────────────────
+    #
+    # The field-tested doctrine (invisible_playwright): the best login is
+    # the one you never run. Log in once in a trusted browser, save
+    # ``context.storage_state(path=...)``, then import the JSON here —
+    # cookies AND localStorage ride along, no re-login, no CAPTCHA risk.
+
+    @classmethod
+    def from_storage_state(cls, state: dict[str, Any], *,
+                           service: str, username: str) -> "Session":
+        """Build a Session from a Playwright ``storage_state`` dict.
+
+        Cookies land in ``cookies``; per-origin localStorage lands in
+        ``metadata["local_storage"]`` so callers can re-hydrate a fresh
+        browser context byte-for-byte.
+        """
+        cookies: dict[str, str] = {}
+        for c in state.get("cookies") or []:
+            name = c.get("name")
+            if name:
+                cookies[str(name)] = str(c.get("value", ""))
+        local_storage: dict[str, list[dict[str, str]]] = {}
+        for origin in state.get("origins") or []:
+            items = origin.get("localStorage") or []
+            if origin.get("origin") and items:
+                local_storage[str(origin["origin"])] = [
+                    {"name": str(i.get("name", "")),
+                     "value": str(i.get("value", ""))}
+                    for i in items
+                ]
+        session = cls(service=service, username=username, cookies=cookies)
+        if local_storage:
+            session.metadata["local_storage"] = local_storage
+        session.metadata["imported_from"] = "playwright_storage_state"
+        return session
+
+    def to_storage_state(self) -> dict[str, Any]:
+        """Export to the Playwright ``storage_state`` JSON shape.
+
+        Round-trips through :meth:`from_storage_state`: feed the result
+        back to ``browser.new_context(storage_state=...)`` to resume the
+        exact same session.
+        """
+        cookies = [
+            {"name": name, "value": value, "domain": "",
+             "path": "/", "expires": -1, "httpOnly": False,
+             "secure": False, "sameSite": "Lax"}
+            for name, value in self.cookies.items()
+        ]
+        origins = [
+            {"origin": origin,
+             "localStorage": items}
+            for origin, items in
+            (self.metadata.get("local_storage") or {}).items()
+        ]
+        return {"cookies": cookies, "origins": origins}
+
     def health_report(self) -> dict[str, Any]:
         """Machine-readable session health.
 
@@ -117,6 +203,7 @@ class Session:
         where status is one of:
 
         * ``ok`` — usable right now
+        * ``expiring_soon`` — OAuth token dies within 10 minutes
         * ``expired`` — OAuth token expired
         * ``stale`` — 24h of inactivity
         * ``empty`` — valid timewise but holds no cookies or OAuth token,
@@ -126,6 +213,9 @@ class Session:
         now = time.time()
         if self.oauth_token is not None and self.oauth_token.is_expired():
             reasons.append("oauth_token_expired")
+        elif (self.oauth_token is not None
+              and self.oauth_token.needs_refresh(skew_s=600)):
+            reasons.append("oauth_token_expiring_soon")
         if now - self.last_used > 24 * 3600:
             reasons.append("idle_over_24h")
         if not self.cookies and (
@@ -133,8 +223,10 @@ class Session:
         ):
             reasons.append("no_cookies_or_token")
         if reasons:
-            status = "expired" if "oauth_token_expired" in reasons else (
-                "stale" if "idle_over_24h" in reasons else "empty")
+            status = ("expired" if "oauth_token_expired" in reasons else
+                      "stale" if "idle_over_24h" in reasons else
+                      "expiring_soon" if "oauth_token_expiring_soon" in reasons
+                      else "empty")
         else:
             status = "ok"
         return {
@@ -604,57 +696,103 @@ class SessionManager:
         client_id: str,
         client_secret: str,
         token_url: str,
+        *,
+        skew_s: float = 60.0,
+        retry: int = 1,
     ) -> OAuthToken:
-        """Refresh an expired OAuth token.
-        
+        """Refresh an expired OAuth token (rotation-safe).
+
+        Follows the field-tested rules:
+
+        * **preserve the complete refresh result** — ``expires_in``,
+          scope, and every returned field are kept;
+        * **rotation-safe** — when the response omits a new refresh token
+          (single-use rotation policies), the *old* refresh token is kept
+          so the next refresh still works;
+        * **proactive buffer** — the stored ``expires_at`` is shaved by
+          ``skew_s`` seconds so the next caller refreshes *before* expiry;
+        * **one retry** on transient transport errors (never on 4xx).
+
         Args:
             service: Service name
             username: Username or identifier
-            refresh_token: Refresh token
+            refresh_token: Current refresh token
             client_id: OAuth client ID
-            client_secret: OAuth client secret
+            client_secret: OAuth client secret ("" for public clients)
             token_url: Token endpoint URL
-            
+            skew_s: Expiry safety buffer in seconds
+            retry: Extra attempts on transient transport failures
+
         Returns:
             New OAuthToken object
+
+        Raises:
+            TokenRefreshError: HTTP-level refresh failure;
+                ``recoverable`` tells the caller whether retrying later
+                makes sense. Transport failures re-raise the original
+                ``OSError`` after retries are exhausted.
         """
-        # Prepare refresh request
         data = urllib.parse.urlencode({
             "grant_type": "refresh_token",
             "refresh_token": refresh_token,
             "client_id": client_id,
             "client_secret": client_secret,
         }).encode()
-        
-        req = urllib.request.Request(
-            token_url,
-            data=data,
-            headers={"Content-Type": "application/x-www-form-urlencoded"},
+
+        for attempt in range(retry + 1):
+            req = urllib.request.Request(
+                token_url,
+                data=data,
+                headers={
+                    "Content-Type": "application/x-www-form-urlencoded"},
+            )
+            try:
+                with urllib.request.urlopen(req, timeout=10) as response:
+                    result = json.loads(response.read().decode())
+                break
+            except urllib.error.HTTPError as exc:
+                body = ""
+                try:
+                    body = exc.read(2000).decode("utf-8", "replace")
+                except Exception:  # noqa: BLE001 — body is best-effort
+                    pass
+                recoverable = exc.code in (429,) or 500 <= exc.code < 600
+                raise TokenRefreshError(
+                    f"OAuth refresh for {service}/{username} rejected "
+                    f"(HTTP {exc.code}): {body[:200]}",
+                    recoverable=recoverable,
+                ) from exc
+            except (urllib.error.URLError, TimeoutError, OSError) as exc:
+                if attempt < retry:
+                    time.sleep(1.0 * (attempt + 1))
+                    continue
+                # Transport failures keep the old contract: the original
+                # OSError propagates (callers already handle it).
+                raise
+            except Exception as exc:  # noqa: BLE001 — unexpected shape
+                raise TokenRefreshError(
+                    f"OAuth refresh for {service}/{username} failed: {exc}",
+                    recoverable=False,
+                ) from exc
+
+        # Parse the complete token response (Authlib rule: never drop
+        # fields — expires_in, rotated refresh token, scope all survive).
+        expires_in = result.get("expires_in", 3600)
+        new_token = OAuthToken(
+            access_token=result.get("access_token", ""),
+            token_type=result.get("token_type", "Bearer"),
+            expires_at=time.time() + expires_in - skew_s,
+            refresh_token=result.get("refresh_token") or refresh_token,
+            scope=result.get("scope", ""),
         )
-        
-        try:
-            with urllib.request.urlopen(req, timeout=10) as response:
-                result = json.loads(response.read().decode())
-                
-                # Parse token response
-                expires_in = result.get("expires_in", 3600)
-                new_token = OAuthToken(
-                    access_token=result["access_token"],
-                    token_type=result.get("token_type", "Bearer"),
-                    expires_at=time.time() + expires_in,
-                    refresh_token=result.get("refresh_token", refresh_token),
-                    scope=result.get("scope", ""),
-                )
-                
-                # Update session
-                self.set_oauth_token(service, username, new_token)
-                _log.info(f"Refreshed OAuth token for {service}/{username}")
-                
-                return new_token
-        except Exception as e:
-            _log.error(f"Failed to refresh OAuth token: {e}")
-            raise
-    
+
+        # Update session
+        self.set_oauth_token(service, username, new_token)
+        _log.info("Refreshed OAuth token for %s/%s", service, username)
+
+        return new_token
+
+
     def clear_session(self, service: str, username: str) -> None:
         """Clear a session (logout).
         
@@ -683,6 +821,32 @@ class SessionManager:
 
         _log.info(f"Cleared session: {service}/{username}")
     
+    def import_storage_state(self, state: dict[str, Any], *,
+                             service: str, username: str) -> Session:
+        """Import a Playwright ``storage_state`` JSON blob as a session.
+
+        Log in once in a trusted browser, ``context.storage_state()``,
+        hand the dict here — the session store now holds the exact same
+        cookies + localStorage and the login form never runs again.
+
+        Args:
+            state: The storage_state dict (cookies + origins)
+            service: Service name
+            username: Username or identifier
+
+        Returns:
+            The imported Session (persisted)
+        """
+        session = Session.from_storage_state(state, service=service,
+                                             username=username)
+        session.touch()
+        key = self._session_key(service, username)
+        self._sessions[key] = session
+        self._save_session(session)
+        _log.info("imported storage_state for %s/%s (%d cookies)",
+                  service, username, len(session.cookies))
+        return session
+
     def list_sessions(self, *, valid_only: bool = False) -> list[Session]:
         """List stored sessions.
 

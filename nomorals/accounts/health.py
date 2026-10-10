@@ -39,10 +39,60 @@ __all__ = [
     "AccountHealth",
     "check_account_health",
     "check_all_health",
+    "render_health_board",
     "LOCKED_MARKERS",
     "VERIFICATION_MARKERS",
     "LOGGED_OUT_MARKERS",
 ]
+
+#: status -> display dot
+STATUS_DOTS = {
+    "healthy": "🟢",
+    "degraded": "🟡",
+    "expired": "🔴",
+    "locked": "🔒",
+    "needs_verification": "🟠",
+    "logged_out": "⚪",
+    "disabled": "⛔",
+    "missing": "❓",
+    "unknown": "❔",
+}
+
+
+def render_health_board(reports: list[AccountHealth] | list[dict]) -> str:
+    """A styled health board for a list of AccountHealth reports.
+
+    ``reports`` may be AccountHealth objects or their ``to_dict()``
+    shapes (as returned by ``check_all_health()["accounts"]``).
+    """
+    def _get(r: Any, key: str, default: Any = None) -> Any:
+        if isinstance(r, dict):
+            return r.get(key, default)
+        return getattr(r, key, default)
+
+    rows = []
+    counts: dict[str, int] = {}
+    for r in reports:
+        status = str(_get(r, "status", "unknown"))
+        counts[status] = counts.get(status, 0) + 1
+        dot = STATUS_DOTS.get(status, "❔")
+        issues = _get(r, "issues", []) or []
+        first_issue = issues[0] if issues else "all clear"
+        extra = f" (+{len(issues) - 1} more)" if len(issues) > 1 else ""
+        rows.append(
+            f"  {dot}  {_get(r, 'service', '?')}/{_get(r, 'username', '?')} "
+            f"· {status.replace('_', ' ')} · {first_issue}{extra}")
+
+    total = len(reports)
+    healthy = counts.get("healthy", 0)
+    header = (f"🏥 ACCOUNT HEALTH — {healthy}/{total} healthy"
+              if total else "🏥 ACCOUNT HEALTH — no accounts")
+    lines = [header, "┈" * 46, *rows]
+    if counts:
+        summary = "  ".join(
+            f"{STATUS_DOTS.get(st, '❔')} {n}" for st, n in sorted(counts.items()))
+        lines += ["┈" * 46, f"  {summary}"]
+    return "\n".join(lines)
 
 _log = get_logger(__name__)
 

@@ -68,6 +68,7 @@ __all__ = [
     "KNOWN_SIGNUP_URLS",
     "ALLOWED_TRANSITIONS",
     "render_attempt_summary",
+    "render_attempt_progress",
 ]
 
 _log = get_logger(__name__)
@@ -1268,4 +1269,74 @@ def render_attempt_summary(attempt: SignupAttempt) -> str:
         lines.append(f"  vault:   credential {attempt.credential_ref}")
     if attempt.note:
         lines.append(f"  note:    {attempt.note[:200]}")
+    return "\n".join(lines)
+
+
+#: stage ladder in flow order (terminal stages branch off)
+_STAGE_LADDER = (
+    SignupStage.STARTED,
+    SignupStage.FORM_FILLED,
+    SignupStage.EMAIL_SENT,
+    SignupStage.VERIFIED,
+    SignupStage.COMPLETE,
+)
+
+_STAGE_LABEL = {
+    SignupStage.STARTED: "🚀 started",
+    SignupStage.FORM_FILLED: "📝 form filled",
+    SignupStage.EMAIL_SENT: "📧 email sent — awaiting verification",
+    SignupStage.VERIFIED: "✅ verified",
+    SignupStage.COMPLETE: "🎉 complete — credentials in vault",
+    SignupStage.STOPPED_AT_WALL: "🧱 stopped at wall",
+    SignupStage.FAILED: "💥 failed",
+}
+
+_WALL_LABEL = {
+    WallKind.NONE: "—",
+    WallKind.CAPTCHA: "🧩 CAPTCHA",
+    WallKind.SMS_PHONE: "📱 SMS/phone gate",
+    WallKind.RATE_LIMIT: "⏳ rate limit",
+    WallKind.MANUAL_REVIEW: "👁 manual review",
+    WallKind.REAL_ID: "🪪 real-ID demand",
+    WallKind.AGE_GATE: "🔞 age gate",
+    WallKind.UNKNOWN: "❓ unknown wall",
+}
+
+
+def render_attempt_progress(attempt: SignupAttempt) -> str:
+    """A styled stage-ladder view of one signup attempt.
+
+    Shows every stage of the flow with done/current/pending marks, so
+    the owner sees exactly how far the signup got and what stopped it:
+
+        🧭 SIGNUP — github (attempt abc123)
+        ✅ 🚀 started
+        ✅ 📝 form filled
+        👉 📧 email sent — awaiting verification
+        ⬜ ✅ verified
+        ⬜ 🎉 complete — credentials in vault
+    """
+    lines = [f"🧭 SIGNUP — {attempt.service} (attempt {attempt.id[:8]})"]
+    stage = attempt.stage
+    if stage in (SignupStage.STOPPED_AT_WALL, SignupStage.FAILED):
+        # full ladder for context, then the terminal mark with the wall
+        for st in _STAGE_LADDER:
+            lines.append(f"  ⬜ {_STAGE_LABEL[st]}")
+        wall = _WALL_LABEL.get(attempt.wall_kind,
+                               attempt.wall_kind.value)
+        mark = "🧱" if stage is SignupStage.STOPPED_AT_WALL else "💥"
+        lines.append(f"  {mark} {_STAGE_LABEL[stage]} — {wall}")
+        if attempt.wall_detail:
+            lines.append(f"      {attempt.wall_detail[:160]}")
+    else:
+        current_idx = (_STAGE_LADDER.index(stage)
+                       if stage in _STAGE_LADDER else 0)
+        for i, st in enumerate(_STAGE_LADDER):
+            mark = "✅" if i < current_idx else ("👉" if i == current_idx
+                                                else "⬜")
+            lines.append(f"  {mark} {_STAGE_LABEL[st]}")
+    if attempt.credential_ref:
+        lines.append(f"  🔐 vault: credential {attempt.credential_ref}")
+    if attempt.note:
+        lines.append(f"  📝 {attempt.note[:200]}")
     return "\n".join(lines)

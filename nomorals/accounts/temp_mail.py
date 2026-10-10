@@ -19,8 +19,10 @@ from __future__ import annotations
 import json
 import random
 import re
+import secrets
 import string
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
@@ -36,11 +38,13 @@ __all__ = [
     "TempMailProvider",
     "OneSecMailProvider",
     "GuerrillaMailProvider",
+    "MailTmProvider",
     "get_provider",
     "grab_address",
     "grab_address_cascade",
     "wait_message",
     "wait_code",
+    "delete_message",
     "PROVIDERS",
     "CASCADE_PROVIDERS",
 ]
@@ -144,6 +148,16 @@ class TempMailProvider:
             time.sleep(poll_s)
         return None
 
+    def delete_message(self, addr: TempAddress,
+                       msg: MailMessage) -> bool:
+        """Delete one message. Default: unsupported (returns False)."""
+        return False
+
+    def probe(self) -> bool:
+        """True when the provider looks reachable. Default: try a cheap
+        call. Never raises — a failed probe means "skip me"."""
+        return True
+
 
 class OneSecMailProvider(TempMailProvider):
     """1secmail.com — real REST API, keyless, pure GET+JSON."""
@@ -246,13 +260,149 @@ class GuerrillaMailProvider(TempMailProvider):
         return msg
 
 
+class MailTmProvider(TempMailProvider):
+    """mail.tm (and mail.gw — identical API) — the modern keyless temp-mail
+    REST API and the primary of the cascade.
+
+    Flow: GET /domains → POST /accounts {address, password} (201) →
+    POST /token {address, password} → JWT → GET /messages (Bearer).
+    Accounts are random-password JWT accounts; the JWT rides on
+    ``TempAddress.token`` so ``wait_message`` works unchanged.
+    """
+
+    name = "mailtm"
+    BASE = "https://api.mail.tm"
+    _GW_BASE = "https://api.mail.gw"
+
+    def __init__(self, base: str | None = None) -> None:
+        self._base = base or self.BASE
+
+    def _post_json(self, path: str, payload: dict[str, Any],
+                   token: str = "") -> tuple[int, Any]:
+        import urllib.request
+        data = json.dumps(payload).encode("utf-8")
+        headers = {"Content-Type": "application/json",
+                   "User-Agent": "Mozilla/5.0 (Linux; Android 10)"}
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        req = urllib.request.Request(self._base + path, data=data,
+                                     headers=headers, method="POST")
+        try:
+            with urllib.request.urlopen(req, timeout=20) as resp:
+                body = resp.read().decode("utf-8", "replace")
+                return resp.status, (json.loads(body) if body else {})
+        except urllib.error.HTTPError as exc:
+            body = exc.read().decode("utf-8", "replace")
+            try:
+                return exc.code, (json.loads(body) if body else {})
+            except ValueError:
+                return exc.code, {}
+
+    def _get_auth(self, path: str, token: str) -> Any:
+        return _fetch_json(
+            self._base + path, timeout=20,
+            headers={"Authorization": f"Bearer {token}",
+                     "User-Agent": "Mozilla/5.0 (Linux; Android 10)"},
+        )
+
+    def probe(self) -> bool:
+        """True when the domain listing parses. Never raises."""
+        try:
+            domains = self.list_domains()
+            return bool(domains)
+        except Exception:  # noqa: BLE001
+            _log.debug("mail.tm probe failed")
+            return False
+
+    def list_domains(self) -> list[str]:
+        raw = _fetch_json(self._base + "/domains", timeout=20)
+        members = raw.get("hydra:member") or []
+        return [str(m.get("domain", "")) for m in members
+                if m.get("domain")]
+
+    def grab_address(self) -> TempAddress:
+        domains = self.list_domains()
+        domain = domains[0] if domains else "mail.tm"
+        login = "".join(random.choices(string.ascii_lowercase +
+                                       string.digits, k=12))
+        address = f"{login}@{domain}"
+        password = "".join(secrets.choice(
+            string.ascii_letters + string.digits) for _ in range(20))
+        status, _ = self._post_json("/accounts",
+                                    {"address": address, "password": password})
+        if status not in (200, 201):
+            raise RuntimeError(
+                f"mail.tm account creation failed (HTTP {status})")
+        status, tok = self._post_json(
+            "/token", {"address": address, "password": password})
+        jwt = str(tok.get("token", "")) if status == 200 else ""
+        if not jwt:
+            raise RuntimeError("mail.tm token fetch failed")
+        return TempAddress(address=address, login=login, domain=domain,
+                           provider=self.name, token=jwt)
+
+    def _sender(self, m: dict[str, Any]) -> str:
+        frm = m.get("from") or {}
+        addr = frm.get("address", "") if isinstance(frm, dict) else str(frm)
+        name = frm.get("name", "") if isinstance(frm, dict) else ""
+        return f"{name} <{addr}>".strip() if name else str(addr)
+
+    def get_messages(self, addr: TempAddress) -> list[MailMessage]:
+        if not addr.token:
+            return []
+        raw = self._get_auth("/messages", addr.token)
+        out = []
+        for m in raw.get("hydra:member") or []:
+            out.append(MailMessage(
+                id=str(m.get("id", "")),
+                sender=self._sender(m),
+                subject=str(m.get("subject", "")),
+                date=str(m.get("createdAt", "")),
+                body_text=str(m.get("intro", "")),
+            ))
+        return out
+
+    def read_message(self, addr: TempAddress,
+                     msg: MailMessage) -> MailMessage:
+        if not addr.token:
+            return msg
+        raw = self._get_auth(f"/messages/{msg.id}", addr.token)
+        msg.body_text = str(raw.get("text", "") or msg.body_text)
+        msg.body_html = str(raw.get("html", "") or "")
+        msg.sender = self._sender(raw) or msg.sender
+        msg.subject = str(raw.get("subject", "") or msg.subject)
+        msg.code = ""
+        msg.__post_init__()
+        return msg
+
+    def delete_message(self, addr: TempAddress,
+                       msg: MailMessage) -> bool:
+        """DELETE /messages/{id} — 204 on success."""
+        if not addr.token:
+            return False
+        import urllib.request
+        req = urllib.request.Request(
+            f"{self._base}/messages/{msg.id}",
+            headers={"Authorization": f"Bearer {addr.token}",
+                     "User-Agent": "Mozilla/5.0 (Linux; Android 10)"},
+            method="DELETE")
+        try:
+            with urllib.request.urlopen(req, timeout=20) as resp:
+                return resp.status in (200, 204)
+        except Exception as exc:  # noqa: BLE001
+            _log.debug("mail.tm delete failed: %s", exc)
+            return False
+
+
 PROVIDERS: dict[str, type[TempMailProvider]] = {
+    "mailtm": MailTmProvider,
     "1secmail": OneSecMailProvider,
     "guerrillamail": GuerrillaMailProvider,
 }
 
-#: cascade order — 1secmail first (simplest API), guerrilla as fallback
-CASCADE_PROVIDERS = ["1secmail", "guerrillamail"]
+#: cascade order — mail.tm first (cleanest keyless REST API), then
+#: 1secmail, then guerrilla. Providers whose probe() fails are skipped.
+CASCADE_PROVIDERS = ["mailtm", "1secmail", "guerrillamail"]
 
 
 def get_provider(name: str = "1secmail") -> TempMailProvider:
@@ -268,11 +418,25 @@ def grab_address(provider: str = "1secmail") -> TempAddress:
 
 
 def grab_address_cascade(providers: list[str] | None = None) -> TempAddress:
-    """Try providers in order until one yields a usable address."""
+    """Try providers in order until one yields a usable address.
+
+    Providers whose ``probe()`` fails are skipped silently — a down
+    provider is "skip me", never an exception to the caller.
+    """
     last: Exception | None = None
     for name in providers or CASCADE_PROVIDERS:
         try:
-            addr = grab_address(name)
+            prov = get_provider(name)
+        except Exception as exc:  # noqa: BLE001
+            _log.debug("temp-mail provider %s unavailable: %s", name, exc)
+            last = exc
+            continue
+        try:
+            if not prov.probe():
+                _log.debug("temp-mail provider %s probe failed — skipping",
+                           name)
+                continue
+            addr = prov.grab_address()
             if addr.address:
                 _log.info("temp-mail: got %s via %s", addr.address, name)
                 return addr
@@ -280,6 +444,14 @@ def grab_address_cascade(providers: list[str] | None = None) -> TempAddress:
             _log.debug("temp-mail provider %s failed: %s", name, exc)
             last = exc
     raise RuntimeError(f"all temp-mail providers failed (last: {last})")
+
+
+def delete_message(addr: TempAddress, msg: MailMessage,
+                   provider: str | None = None) -> bool:
+    """Delete one message via its provider. Returns False when the
+    provider doesn't support deletion."""
+    prov = get_provider(provider or addr.provider or CASCADE_PROVIDERS[0])
+    return prov.delete_message(addr, msg)
 
 
 def wait_message(addr: TempAddress, *, timeout_s: float = 180,

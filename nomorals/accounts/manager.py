@@ -20,6 +20,8 @@ Usage:
 
 from __future__ import annotations
 
+import hashlib
+import math
 import time
 from dataclasses import dataclass
 from typing import Any, Optional
@@ -28,7 +30,51 @@ from ..core.errors import NotFound
 from ..core.logging_setup import get_logger
 from .vault import AccountProfile, Credential, CredentialVault
 
-__all__ = ["AccountManager", "AccountInfo"]
+__all__ = ["AccountManager", "AccountInfo", "estimate_secret_strength"]
+
+
+def estimate_secret_strength(secret: str) -> dict[str, Any]:
+    """Estimate a secret's strength (Bitwarden-report style).
+
+    Shannon entropy per character × length gives an effective bit
+    count; charset variety and length feed a human label. No network,
+    no wordlists — a fast offline heuristic.
+
+    Returns ``{"bits", "label", "length", "charset_size"}`` where label
+    is one of ``weak`` / ``fair`` / ``strong`` / ``very_strong``.
+    """
+    if not secret:
+        return {"bits": 0.0, "label": "weak", "length": 0,
+                "charset_size": 0}
+    charset = 0
+    if any(c.islower() for c in secret):
+        charset += 26
+    if any(c.isupper() for c in secret):
+        charset += 26
+    if any(c.isdigit() for c in secret):
+        charset += 10
+    if any(not c.isalnum() for c in secret):
+        charset += 32
+    if charset == 0:
+        charset = 1
+    # Shannon entropy of the actual string (catches "aaaaaaa..." and
+    # other low-entropy shapes a charset×length estimate would miss).
+    from collections import Counter
+    counts = Counter(secret)
+    length = len(secret)
+    shannon = -sum((c / length) * math.log2(c / length)
+                   for c in counts.values())
+    bits = min(shannon * length, math.log2(charset) * length)
+    if bits < 40:
+        label = "weak"
+    elif bits < 60:
+        label = "fair"
+    elif bits < 80:
+        label = "strong"
+    else:
+        label = "very_strong"
+    return {"bits": round(bits, 1), "label": label, "length": length,
+            "charset_size": charset}
 
 _log = get_logger(__name__)
 
@@ -379,9 +425,135 @@ class AccountManager:
                     "message": f"Expires in {(cred.expires_at - now) / 86400:.1f} days",
                     "severity": "medium",
                 })
-        
+
+        # Secret-quality issues (Bitwarden-report style): weak and
+        # reused secrets. Decryption happens here, in memory only —
+        # issue records never carry the secret itself.
+        for cred in all_creds:
+            try:
+                full = self.vault.get(cred.service, cred.username,
+                                      mark_used=False)
+            except Exception:  # noqa: BLE001 — undecryptable: skip
+                continue
+            secret = full.password or ""
+            strength = estimate_secret_strength(secret)
+            if strength["label"] == "weak" and secret:
+                issues.append({
+                    "type": "weak_secret",
+                    "service": cred.service,
+                    "username": cred.username,
+                    "message": (f"Weak secret (~{strength['bits']:.0f} bits, "
+                                f"{strength['length']} chars)"),
+                    "severity": "medium",
+                })
+        for group in self.reused_secrets():
+            accts = ", ".join(
+                f"{a['service']}/{a['username']}" for a in group["accounts"])
+            for acct in group["accounts"]:
+                issues.append({
+                    "type": "reused_secret",
+                    "service": acct["service"],
+                    "username": acct["username"],
+                    "message": (f"Secret reused across {group['count']} "
+                                f"accounts ({accts})"),
+                    "severity": "high",
+                })
+
         return issues
 
+
+    def reused_secrets(self) -> list[dict[str, Any]]:
+        """Find secrets shared by more than one active credential.
+
+        Returns groups of ``{"secret_sha256" (truncated), "count",
+        "accounts": [{"service", "username"}]}`` — the secret itself
+        never leaves this method.
+        """
+        buckets: dict[str, list[dict[str, str]]] = {}
+        for summary in self.vault.list_all(active_only=True):
+            try:
+                full = self.vault.get(summary.service, summary.username,
+                                      mark_used=False)
+            except Exception:  # noqa: BLE001 — skip undecryptable
+                continue
+            secret = full.password or ""
+            if not secret:
+                continue
+            digest = hashlib.sha256(secret.encode("utf-8")).hexdigest()
+            buckets.setdefault(digest, []).append({
+                "service": summary.service,
+                "username": summary.username,
+            })
+        return [
+            {"secret_sha256": digest[:16], "count": len(accts),
+             "accounts": accts}
+            for digest, accts in buckets.items()
+            if len(accts) > 1
+        ]
+
+    # ── presentation ─────────────────────────────────────────────────
+    #
+    # Machine-readable dicts stay the automation surface; these
+    # renderers are the human surface — styled for chat.
+
+    def render_account_board(
+        self,
+        *,
+        service: str | None = None,
+        tag: str | None = None,
+    ) -> str:
+        """A styled vault dashboard — accounts grouped by service with
+        status dots, usage, and expiry countdowns.
+
+        Example::
+
+            🔐 VAULT — 4 accounts across 3 services
+            ┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈
+            📦 github (2)
+              🟢  devon-bot · used 12× · 3d ago · password
+              🟡  old-ci · api_key
+            📦 gmail (1)
+              🔴  bot@example.com · EXPIRED
+        """
+        accounts = self.list_accounts(service=service, tag=tag,
+                                      active_only=False)
+        now = time.time()
+        by_service: dict[str, list[AccountInfo]] = {}
+        for a in accounts:
+            by_service.setdefault(a.service, []).append(a)
+
+        def _status(a: AccountInfo) -> tuple[str, str]:
+            if not a.is_active:
+                return "⛔", "disabled"
+            if a.is_expired:
+                return "🔴", "EXPIRED"
+            return "🟢", "ok"
+
+        lines = [f"🔐 VAULT — {len(accounts)} account(s) across "
+                 f"{len(by_service)} service(s)",
+                 "┈" * 46]
+        for svc in sorted(by_service):
+            group = sorted(by_service[svc],
+                           key=lambda a: (not a.is_active, a.username))
+            lines.append(f"📦 {svc} ({len(group)})")
+            for a in group:
+                dot, label = _status(a)
+                if a.is_active and not a.is_expired:
+                    bits = []
+                    if a.use_count:
+                        bits.append(f"used {a.use_count}×")
+                    if a.last_used:
+                        ago = (now - a.last_used) / 86400
+                        bits.append(f"{ago:.0f}d ago" if ago >= 1
+                                    else "today")
+                    bits.append(a.credential_type)
+                    detail = " · ".join(bits)
+                else:
+                    detail = label
+                lines.append(f"  {dot}  {a.username} · {detail}")
+        if not accounts:
+            lines.append("(empty — no accounts stored)")
+        return "\n".join(lines)
 
     # ── connector-vault integration ──────────────────────────────
     # Connectors store their credentials in this same vault under the

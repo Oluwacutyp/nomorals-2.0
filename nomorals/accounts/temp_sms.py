@@ -52,6 +52,20 @@ class SmsMessage:
 
     #: 4-8 digit runs are the usual OTP shape
     _CODE_RE = re.compile(r"(?<!\d)(\d{4,8})(?!\d)")
+    _AGE_RE = re.compile(
+        r"(\d+)\s*(second|minute|hour|day)s?\s*ago|just\s*now",
+        re.I)
+
+    def age_seconds(self) -> float | None:
+        """Parse the human age string into seconds (None if unknown)."""
+        m = self._AGE_RE.search(self.received or "")
+        if not m:
+            return None
+        if m.group(0).lower().startswith("just"):
+            return 0.0
+        qty, unit = int(m.group(1)), m.group(2).lower()
+        return qty * {"second": 1, "minute": 60,
+                      "hour": 3600, "day": 86400}[unit]
 
     def __post_init__(self) -> None:
         if not self.code and self.body:
@@ -73,6 +87,9 @@ class TempNumber:
     provider: str = ""      # provider name
     inbox_id: str = ""      # provider-internal id for the inbox page
     online: bool = True
+    freshness: float = 0.0  # 0..1 activity hint — fresher numbers burn
+                            # less wait time; providers set it when the
+                            # listing shows recent activity
 
 
 class TempSmsProvider:
@@ -90,13 +107,36 @@ class TempSmsProvider:
         """Poll the inbox for a number obtained from list_numbers."""
         raise NotImplementedError
 
+    def probe(self) -> bool:
+        """True when the provider looks reachable. Never raises —
+        a failed probe means "skip me" in the cascade."""
+        return True
+
+    def rank_numbers(self, numbers: list[TempNumber]) -> list[TempNumber]:
+        """Freshest, most-usable numbers first.
+
+        Online numbers beat offline ones; fully-resolved numbers beat
+        masked-only ones; provider freshness hints break ties. Stale
+        numbers burn signup time — ranking is the cheapest speedup.
+        """
+        def key(n: TempNumber) -> tuple:
+            return (not n.online, not bool(n.number), -n.freshness)
+        return sorted(numbers, key=key)
+
     def wait_for_code(self, number: TempNumber, *,
                       sender_hint: str = "",
                       timeout: float = 120,
-                      poll_every: float = 10) -> str:
-        """Poll until a verification code arrives. Returns the code or ""."""
+                      poll_every: float = 10,
+                      seen_store: dict | None = None) -> str:
+        """Poll until a verification code arrives. Returns the code or "".
+
+        ``seen_store`` is an optional persistent dict (e.g. the signup
+        driver's KV) holding already-seen message keys — a restarted
+        wait resumes instead of re-reading old messages as new.
+        """
         deadline = time.time() + timeout
-        seen: set[str] = set()
+        store_key = f"sms_seen:{self.name}:{number.inbox_id or number.number}"
+        seen: set[str] = set((seen_store or {}).get(store_key, ()))
         while time.time() < deadline:
             try:
                 msgs = self.get_messages(number)
@@ -108,6 +148,8 @@ class TempSmsProvider:
                 if key in seen:
                     continue
                 seen.add(key)
+                if seen_store is not None:
+                    seen_store[store_key] = sorted(seen)
                 if m.code and (not sender_hint or
                                sender_hint.lower() in m.sender.lower()
                                or sender_hint.lower() in m.body.lower()):
@@ -348,7 +390,7 @@ def grab_number(country: str = "us",
     if not numbers:
         return {"status": "failed",
                 "notes": f"no {provider} numbers for {country}"}
-    n = numbers[0]
+    n = prov.rank_numbers(numbers)[0]
     return {
         "status": "ok",
         "number": n.number,
@@ -362,11 +404,13 @@ def grab_number(country: str = "us",
 
 def wait_code(number_info: dict[str, Any], *,
               sender_hint: str = "",
-              timeout: float = 180) -> str:
+              timeout: float = 180,
+              seen_store: dict | None = None) -> str:
     """Wait for an SMS verification code on a grabbed number.
 
     ``number_info`` is the dict returned by :func:`grab_number` (or
     :func:`grab_number_cascade`).  Returns the code or "" on timeout.
+    ``seen_store`` persists seen-message keys across restarts.
     """
     prov = get_provider(str(number_info.get("provider", "simcodes")))
     num = TempNumber(
@@ -378,7 +422,7 @@ def wait_code(number_info: dict[str, Any], *,
         inbox_id=str(number_info.get("inbox_id", "")),
     )
     return prov.wait_for_code(num, sender_hint=sender_hint,
-                             timeout=timeout)
+                             timeout=timeout, seen_store=seen_store)
 
 
 #: cascade order — verified providers first; probe-gated ones after.
@@ -427,7 +471,7 @@ def grab_number_cascade(
             if not numbers:
                 notes.append(f"{prov_name}/{ctry}: no numbers listed")
                 continue
-            n = numbers[0]
+            n = prov.rank_numbers(numbers)[0]
             _log.info("temp-sms cascade: using %s number %s",
                       prov_name, n.masked or n.number)
             return {

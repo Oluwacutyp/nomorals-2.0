@@ -51,6 +51,7 @@ __all__ = [
     "LoginCaptchaRequired",
     "login_with_vault",
     "ensure_login",
+    "type_like_human",
     "PasswordChangeConfig",
     "change_password_on_site",
     "USERNAME_FIELD_CANDIDATES",
@@ -134,6 +135,8 @@ class LoginConfig:
     submit_target: str = ""   # default: the page's first form
     success_text: str = ""    # text that must appear after login
     post_login_wait_ms: int = 5000
+    human_typing: bool = False  # type with human-like per-key delays
+                                # (behavioral anti-detection; slower)
 
 
 def _config_from_metadata(meta: dict[str, Any],
@@ -141,27 +144,64 @@ def _config_from_metadata(meta: dict[str, Any],
     cfg = LoginConfig()
     for f in ("login_url", "username_field", "password_field",
               "username_value", "submit_target", "success_text",
-              "post_login_wait_ms"):
+              "post_login_wait_ms", "human_typing"):
         if f in meta:
             setattr(cfg, f, meta[f])
     if override is not None:
         for f in ("login_url", "username_field", "password_field",
                   "username_value", "submit_target", "success_text",
-                  "post_login_wait_ms"):
+                  "post_login_wait_ms", "human_typing"):
             val = getattr(override, f)
-            if val or f == "post_login_wait_ms":
+            if val or f in ("post_login_wait_ms", "human_typing"):
                 setattr(cfg, f, val)
     return cfg
 
 
+def type_like_human(tab: Any, field: str, value: str, *,
+                    rng: "random.Random | None" = None) -> None:
+    """Type ``value`` into ``field`` with human-like timing.
+
+    Behavioral bot detection keys on perfect timing — instant fills,
+    metronomic keystrokes, no focus-before-type. This helper focuses
+    the field first, then types with randomized per-keystroke delays
+    (30–140ms) plus occasional 200–500ms pauses, mimicking a real
+    typist. Slower than ``tab.fill`` — use for login/signup forms on
+    hardened sites, not for bulk form work.
+    """
+    import random as _random
+    import time as _time
+    rng = rng or _random.Random()
+    try:
+        tab.focus(field)
+    except Exception:  # noqa: BLE001 — focus is best-effort
+        pass
+    _time.sleep(rng.uniform(0.15, 0.45))  # pre-type hesitation
+    type_char = getattr(tab, "type", None)
+    if callable(type_char):
+        for ch in value:
+            try:
+                type_char(field, ch)
+            except Exception:  # noqa: BLE001 — fall back to fill
+                tab.fill(field, value)
+                return
+            _time.sleep(rng.uniform(0.03, 0.14))
+            if rng.random() < 0.06:  # thinking pause
+                _time.sleep(rng.uniform(0.2, 0.5))
+    else:
+        tab.fill(field, value)
+
+
 def _fill_first(tab: Any, candidates: list[str], value: str,
-                what: str) -> str:
+                what: str, *, human_typing: bool = False) -> str:
     """Fill the first candidate field the page accepts. Returns the field
     name used; raises LoginFailed when none of them exists."""
     last_exc: Exception | None = None
     for name in candidates:
         try:
-            tab.fill(name, value)
+            if human_typing:
+                type_like_human(tab, name, value)
+            else:
+                tab.fill(name, value)
             return name
         except Exception as exc:  # noqa: BLE001 — try the next candidate
             last_exc = exc
@@ -328,8 +368,10 @@ def login_with_vault(
         pass_candidates = ([cfg.password_field] if cfg.password_field
                            else []) + list(PASSWORD_FIELD_CANDIDATES)
         user_field = _fill_first(tab, user_candidates, login_name,
-                                 "username/email")
-        _fill_first(tab, pass_candidates, secret, "password")
+                                 "username/email",
+                                 human_typing=cfg.human_typing)
+        _fill_first(tab, pass_candidates, secret, "password",
+                    human_typing=cfg.human_typing)
         _log.info("login %s/%s: filled %r + password field",
                   service, cred.username, user_field)
 

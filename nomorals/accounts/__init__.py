@@ -17,13 +17,14 @@ checkpoint instead of being bypassed.
 """
 
 from .vault import CredentialVault, Credential, AccountProfile
-from .manager import AccountManager
+from .manager import AccountManager, estimate_secret_strength
 from .browser_login import (
     LoginConfig,
     LoginFailed,
     LoginCaptchaRequired,
     login_with_vault,
     ensure_login,
+    type_like_human,
     PasswordChangeConfig,
     change_password_on_site,
     USERNAME_FIELD_CANDIDATES,
@@ -45,14 +46,31 @@ from .sessions import (
     Session,
     OAuthToken,
     SessionInvalid,
+    TokenRefreshError,
 )
 from .health import (
     AccountHealth,
     check_account_health,
     check_all_health,
+    render_health_board,
     LOCKED_MARKERS,
     VERIFICATION_MARKERS,
     LOGGED_OUT_MARKERS,
+)
+from .temp_mail import (
+    TempMailProvider,
+    OneSecMailProvider,
+    GuerrillaMailProvider,
+    MailTmProvider,
+    TempAddress,
+    MailMessage,
+    get_provider as get_mail_provider,
+    grab_address as grab_temp_address,
+    grab_address_cascade as grab_temp_address_cascade,
+    wait_code as wait_temp_mail_code,
+    delete_message as delete_temp_mail_message,
+    PROVIDERS as MAIL_PROVIDERS,
+    CASCADE_PROVIDERS as MAIL_CASCADE_PROVIDERS,
 )
 from .temp_sms import (
     TempSmsProvider,
@@ -76,6 +94,10 @@ from .identity_bank import (
     INTERNATIONAL_FIRST_NAMES,
     DISPOSABLE_SURNAMES,
     render_persona_card,
+    LOCALE_FIRST_NAMES,
+    YORUBA_FIRST_NAMES,
+    HAUSA_FIRST_NAMES,
+    IGBO_FIRST_NAMES,
 )
 from .signup_driver import (
     SignupStage,
@@ -88,6 +110,7 @@ from .signup_driver import (
     KNOWN_SIGNUP_URLS,
     ALLOWED_TRANSITIONS,
     render_attempt_summary,
+    render_attempt_progress,
 )
 
 __all__ = [
@@ -95,11 +118,13 @@ __all__ = [
     "Credential",
     "AccountProfile",
     "AccountManager",
+    "estimate_secret_strength",
     "LoginConfig",
     "LoginFailed",
     "LoginCaptchaRequired",
     "login_with_vault",
     "ensure_login",
+    "type_like_human",
     "PasswordChangeConfig",
     "change_password_on_site",
     "USERNAME_FIELD_CANDIDATES",
@@ -117,12 +142,27 @@ __all__ = [
     "Session",
     "OAuthToken",
     "SessionInvalid",
+    "TokenRefreshError",
     "AccountHealth",
     "check_account_health",
     "check_all_health",
+    "render_health_board",
     "LOCKED_MARKERS",
     "VERIFICATION_MARKERS",
     "LOGGED_OUT_MARKERS",
+    "TempMailProvider",
+    "OneSecMailProvider",
+    "GuerrillaMailProvider",
+    "MailTmProvider",
+    "TempAddress",
+    "MailMessage",
+    "get_mail_provider",
+    "grab_temp_address",
+    "grab_temp_address_cascade",
+    "wait_temp_mail_code",
+    "delete_temp_mail_message",
+    "MAIL_PROVIDERS",
+    "MAIL_CASCADE_PROVIDERS",
     "TempSmsProvider",
     "SimcodesProvider",
     "SevenSimProvider",
@@ -142,6 +182,10 @@ __all__ = [
     "INTERNATIONAL_FIRST_NAMES",
     "DISPOSABLE_SURNAMES",
     "render_persona_card",
+    "LOCALE_FIRST_NAMES",
+    "YORUBA_FIRST_NAMES",
+    "HAUSA_FIRST_NAMES",
+    "IGBO_FIRST_NAMES",
     "SignupStage",
     "WallKind",
     "SignupAttempt",
@@ -152,4 +196,5 @@ __all__ = [
     "KNOWN_SIGNUP_URLS",
     "ALLOWED_TRANSITIONS",
     "render_attempt_summary",
+    "render_attempt_progress",
 ]

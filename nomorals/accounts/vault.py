@@ -667,6 +667,207 @@ class CredentialVault:
                     f"{profile_name!r}"
                 )
 
+    # ── master-passphrase rotation & encrypted backup ──────────────────
+    #
+    # Bitwarden-grade vaults rotate the master secret by re-encrypting
+    # every item. A compromised passphrase without rotation means the
+    # vault is dead — so this vault can change its own.
+
+    def change_passphrase(self, new_passphrase: str) -> None:
+        """Rotate the vault's master passphrase.
+
+        Every credential is decrypted with the old key and re-encrypted
+        under the new one; session blobs (the ``sessions`` table, when
+        present) are re-keyed the same way. Atomic: either the whole
+        vault moves to the new passphrase or nothing changes.
+
+        Args:
+            new_passphrase: The new master passphrase (must be non-empty)
+
+        Raises:
+            ValueError: Empty passphrase
+            CipherError: A stored row fails authentication mid-rotation
+                (the transaction rolls back — nothing is half-rotated)
+        """
+        if not new_passphrase:
+            raise ValueError("new_passphrase must be non-empty")
+        old_master = self._master_key
+        new_master = derive_key(
+            new_passphrase, salt=b"nomorals-vault-master",
+            iterations=_KDF_ITERATIONS).hex()
+
+        def _old_cred_key(cred_id: int) -> str:
+            return derive_key(old_master,
+                              salt=f"credential-{cred_id}".encode(),
+                              iterations=_KDF_ITERATIONS).hex()
+
+        def _new_cred_key(cred_id: int) -> str:
+            return derive_key(new_master,
+                              salt=f"credential-{cred_id}".encode(),
+                              iterations=_KDF_ITERATIONS).hex()
+
+        from ..core.cipher import CipherError as _CipherError
+        with self.db.transaction():
+            rows = self.db.query(
+                "SELECT id, password_encrypted FROM credentials")
+            rotated = []
+            for row in rows:
+                old_key = bytes.fromhex(_old_cred_key(row["id"]))
+                try:
+                    from ..core.cipher import aes_decrypt as _dec
+                    plain = _dec(row["password_encrypted"],
+                                 key=old_key).decode("utf-8")
+                except _CipherError as exc:
+                    raise _CipherError(
+                        f"credential {row['id']} failed authentication "
+                        f"during rotation: {exc}") from exc
+                new_key = bytes.fromhex(_new_cred_key(row["id"]))
+                from ..core.cipher import aes_encrypt as _enc
+                rotated.append((_enc(plain.encode("utf-8"), key=new_key),
+                                row["id"]))
+            for blob, cred_id in rotated:
+                self.db.execute(
+                    "UPDATE credentials SET password_encrypted = ?, "
+                    "updated_at = ? WHERE id = ?",
+                    (blob, time.time(), cred_id))
+            # Re-key session blobs (purpose "sessions") the same way.
+            self._rekey_blobs(old_master, new_master,
+                              table="sessions", column="session_data",
+                              key_column=("service", "username"),
+                              purpose="sessions")
+        self._master_key = new_master
+        _log.info("vault master passphrase rotated (%d credential(s))",
+                  len(rotated))
+
+    def _rekey_blobs(self, old_master: str, new_master: str, *,
+                     table: str, column: str,
+                     key_column: tuple[str, ...], purpose: str) -> int:
+        """Re-encrypt every blob in ``table.column`` (purpose-scoped)."""
+        from ..core.cipher import (CipherError as _CipherError,
+                                   aes_decrypt as _dec, aes_encrypt as _enc)
+        try:
+            cols = ", ".join(key_column)
+            rows = self.db.query(f"SELECT {cols}, {column} FROM {table}")
+        except Exception:  # noqa: BLE001 — table may not exist
+            return 0
+        count = 0
+        for row in rows:
+            blob = row[column]
+            old_key = derive_key(
+                old_master,
+                salt=f"nomorals-vault-blob:{purpose}".encode(),
+                iterations=_KDF_ITERATIONS)
+            new_key = derive_key(
+                new_master,
+                salt=f"nomorals-vault-blob:{purpose}".encode(),
+                iterations=_KDF_ITERATIONS)
+            try:
+                plain = _dec(blob, key=old_key)
+            except _CipherError:
+                continue  # legacy plaintext row — leave as-is
+            new_blob = _enc(plain, key=new_key)
+            where = " AND ".join(f"{c} = ?" for c in key_column)
+            self.db.execute(
+                f"UPDATE {table} SET {column} = ? WHERE {where}",
+                (new_blob, *[row[c] for c in key_column]))
+            count += 1
+        return count
+
+    def export_encrypted(self, path: str, backup_passphrase: str) -> str:
+        """Export an encrypted JSON backup of the whole vault.
+
+        All credentials are decrypted in memory and re-encrypted as one
+        JSON document under ``backup_passphrase`` (purpose "backup").
+        The file is useless without the backup passphrase.
+
+        Args:
+            path: Destination file path
+            backup_passphrase: Passphrase protecting the backup
+
+        Returns:
+            The path written
+        """
+        if not backup_passphrase:
+            raise ValueError("backup_passphrase must be non-empty")
+        creds = []
+        for summary in self.list_all(active_only=False):
+            full = self.get(summary.service, summary.username,
+                            mark_used=False)
+            d = full.to_dict()
+            d["password"] = full.password
+            creds.append(d)
+        doc = json.dumps({
+            "format": "nomorals-vault-backup",
+            "version": 1,
+            "exported_at": time.time(),
+            "credentials": creds,
+            "profiles": [p.name for p in self.list_profiles()],
+        })
+        key = derive_key(
+            backup_passphrase,
+            salt=b"nomorals-vault-backup",
+            iterations=_KDF_ITERATIONS)
+        from ..core.cipher import aes_encrypt as _enc
+        blob = _enc(doc.encode("utf-8"), key=key)
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(blob)
+        _log.info("vault backup exported to %s (%d credential(s))",
+                  path, len(creds))
+        return path
+
+    def import_encrypted(self, path: str, backup_passphrase: str,
+                         *, overwrite: bool = False) -> int:
+        """Restore credentials from an :meth:`export_encrypted` backup.
+
+        Args:
+            path: Backup file path
+            backup_passphrase: Passphrase the backup was exported with
+            overwrite: Replace existing credentials with backup copies
+
+        Returns:
+            Number of credentials imported
+
+        Raises:
+            CipherError: Wrong passphrase or tampered backup
+            ValueError: Not a vault backup file
+        """
+        from ..core.cipher import (CipherError as _CipherError,
+                                   aes_decrypt as _dec)
+        with open(path, encoding="utf-8") as fh:
+            blob = fh.read()
+        key = derive_key(
+            backup_passphrase,
+            salt=b"nomorals-vault-backup",
+            iterations=_KDF_ITERATIONS)
+        try:
+            doc = json.loads(_dec(blob, key=key).decode("utf-8"))
+        except _CipherError as exc:
+            raise _CipherError(
+                f"backup decryption failed (wrong passphrase?): {exc}"
+            ) from exc
+        if doc.get("format") != "nomorals-vault-backup":
+            raise ValueError("not a nomorals vault backup file")
+        imported = 0
+        for c in doc.get("credentials", []):
+            exists = self.db.query_one(
+                "SELECT id FROM credentials WHERE service = ? AND username = ?",
+                (c.get("service", ""), c.get("username", "")))
+            if exists and not overwrite:
+                continue
+            self.store(
+                service=c.get("service", ""),
+                username=c.get("username", ""),
+                password=c.get("password", ""),
+                credential_type=c.get("credential_type", "password"),
+                tags=list(c.get("tags") or []),
+                metadata=dict(c.get("metadata") or {}),
+                expires_at=c.get("expires_at"),
+            )
+            imported += 1
+        _log.info("vault backup imported from %s (%d credential(s))",
+                  path, imported)
+        return imported
+
     def profiles_of(self, service: str, username: str) -> list[str]:
         """Names of all profiles containing this credential."""
         cred = self.db.query_one(
