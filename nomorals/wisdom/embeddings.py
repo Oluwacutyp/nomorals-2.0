@@ -19,11 +19,23 @@ Multiple providers per capability, best-FREE primary:
 and raises ``EmbeddingError`` only when nothing works (HashEmbedBackend
 never fails, so this is defensive).
 
+Retrieval asymmetry (2026 SOTA practice): serious embedding providers
+expose different entry points for queries and documents — E5 models
+expect ``query: `` / ``passage: `` prefixes, Qwen3 expects an instruction
+on the query side only. Measured: e5-small bare 59.4% hit@1 → 74.8% with
+correct prefixes. So the base class carries :meth:`embed_query` and
+:meth:`embed_documents`; models that need prefixes declare them via the
+``query_prefix`` / ``document_prefix`` hooks, and the embedding cache key
+always includes the *role* (query vs passage) — caching the two together
+would silently return a query vector where a passage vector was
+requested, with no dimension change to notice.
+
 All third-party imports are lazy: importing this module is always cheap
 and never requires fastembed/torch/sentence-transformers to be installed.
 """
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import math
@@ -45,6 +57,11 @@ class EmbeddingBackend(ABC):
     #: registry key used by ``auto_backend`` / config
     key: str = "base"
 
+    #: Task prefixes applied by embed_query / embed_documents. Models
+    #: trained with instruction prefixes (E5 family) override these.
+    query_prefix: str = ""
+    document_prefix: str = ""
+
     def __init__(self, model: str = "") -> None:
         self.model = model or self.default_model()
 
@@ -65,6 +82,37 @@ class EmbeddingBackend(ABC):
     def embed_one(self, text: str) -> list[float]:
         return self.embed([text])[0]
 
+    # ── retrieval asymmetry ─────────────────────────────────────────
+    def embed_query(self, text: str) -> list[float]:
+        """Embed a *query* — applies the model's query-side prefix."""
+        return self.embed([self.query_prefix + text])[0]
+
+    def embed_documents(self, texts: list[str]) -> list[list[float]]:
+        """Embed *documents* — applies the model's document-side prefix."""
+        if self.document_prefix:
+            texts = [self.document_prefix + t for t in texts]
+        return self.embed(texts)
+
+    def cache_key(self, text: str, role: str = "passage") -> str:
+        """Stable cache key for one embedding. Includes model AND role
+        (``"query"`` vs ``"passage"``) — the two live in different
+        vector spaces for prefix-trained models and must never share a
+        cache entry."""
+        role = "query" if role == "query" else "passage"
+        blob = f"{self.key}|{self.model}|{role}|{text}".encode("utf-8")
+        return hashlib.sha256(blob).hexdigest()
+
+    # ── async variants (real: sync work in a thread pool) ─────────────
+    async def aembed(self, texts: list[str]) -> list[list[float]]:
+        return await asyncio.to_thread(self.embed, list(texts))
+
+    async def aembed_query(self, text: str) -> list[float]:
+        return await asyncio.to_thread(self.embed_query, text)
+
+    async def aembed_documents(
+            self, texts: list[str]) -> list[list[float]]:
+        return await asyncio.to_thread(self.embed_documents, list(texts))
+
     @property
     def dim(self) -> int | None:
         """Vector dimensionality, or None if unknown until first embed."""
@@ -79,7 +127,13 @@ class EmbeddingBackend(ABC):
 class FastEmbedBackend(EmbeddingBackend):
     """Best free primary: ONNX Runtime only, no torch. Maintained by
     Qdrant; bge-small-en-v1.5 (384d) is the default — a strong
-    quality-per-size pick on public MTEB-style benchmarks."""
+    quality-per-size pick on public MTEB-style benchmarks.
+
+    For non-English corpora (Sanskrit, Greek, Coptic, Arabic, Chinese —
+    i.e. this corpus), ``BAAI/bge-m3`` (1024d, multilingual, no prefixes
+    needed per BAAI) is the better model choice: pass it as the model
+    name. It downloads ~2.2GB on first use, so it is opt-in, not default.
+    """
 
     key = "fastembed"
 
@@ -134,8 +188,10 @@ class FastEmbedBackend(EmbeddingBackend):
         return {"BAAI/bge-small-en-v1.5": 384,
                 "BAAI/bge-base-en-v1.5": 768,
                 "BAAI/bge-large-en-v1.5": 1024,
+                "BAAI/bge-m3": 1024,
                 "sentence-transformers/all-MiniLM-L6-v2": 384,
-                "intfloat/multilingual-e5-large": 1024}.get(self.model)
+                "intfloat/multilingual-e5-large": 1024,
+                "intfloat/multilingual-e5-small": 384}.get(self.model)
 
     def close(self) -> None:
         self._model = None
@@ -145,7 +201,13 @@ class FastEmbedBackend(EmbeddingBackend):
 
 class SentenceTransformersBackend(EmbeddingBackend):
     """Quality fallback: usually the best-scoring open embedding stack,
-    at the cost of a torch dependency and more RAM."""
+    at the cost of a torch dependency and more RAM.
+
+    E5-family models are trained with ``query: `` / ``passage: ``
+    prefixes — measured +15 points of hit@1 on a 384d model. When the
+    model name marks it as prefix-expecting (contains "e5"), this
+    backend sets the prefixes automatically so ``embed_query`` and
+    ``embed_documents`` do the right thing without caller changes."""
 
     key = "sentence-transformers"
 
@@ -168,6 +230,11 @@ class SentenceTransformersBackend(EmbeddingBackend):
                 "'sentence-transformers' package is not installed; "
                 "pip install sentence-transformers")
         super().__init__(model)
+        # E5 models are prefix-trained: query side gets "query: ",
+        # document side gets "passage: ". Measured, not decorative.
+        if "e5" in self.model.lower():
+            self.query_prefix = "query: "
+            self.document_prefix = "passage: "
         self._model = None
 
     def _ensure(self) -> Any:
@@ -199,7 +266,12 @@ class SentenceTransformersBackend(EmbeddingBackend):
                 return int(m.get_sentence_embedding_dimension())
             except Exception:
                 return None
-        return {"sentence-transformers/all-MiniLM-L6-v2": 384}.get(self.model)
+        return {"sentence-transformers/all-MiniLM-L6-v2": 384,
+                "intfloat/multilingual-e5-small": 384,
+                "intfloat/multilingual-e5-large": 1024,
+                "intfloat/e5-small-v2": 384,
+                "intfloat/e5-large-v2": 1024,
+                "BAAI/bge-m3": 1024}.get(self.model)
 
     def close(self) -> None:
         self._model = None
@@ -267,8 +339,14 @@ class OllamaBackend(EmbeddingBackend):
     @property
     def dim(self) -> int | None:
         return {"nomic-embed-text": 768,
+                "nomic-embed-text-v1.5": 768,
                 "mxbai-embed-large": 1024,
-                "snowflake-arctic-embed": 1024}.get(self.model)
+                "snowflake-arctic-embed": 1024,
+                "snowflake-arctic-embed2": 1024,
+                "qwen3-embedding": 1024,
+                "qwen3-embedding:0.6b": 1024,
+                "qwen3-embedding:4b": 2560,
+                "embeddinggemma": 768}.get(self.model)
 
 
 # ── Hashing fallback (stdlib, always available) ───────────────────────
@@ -371,9 +449,47 @@ def auto_backend(name: str = "") -> EmbeddingBackend:
 
 
 def embed_texts(backend: EmbeddingBackend,
-                texts: Iterable[str]) -> list[list[float]]:
-    """Embed a batch through ``backend``; every vector L2-normalized."""
-    return [_normalize(v) for v in backend.embed(list(texts))]
+                texts: Iterable[str],
+                dimensions: int | None = None,
+                role: str = "") -> list[list[float]]:
+    """Embed a batch through ``backend``; every vector L2-normalized.
+
+    ``role`` selects the retrieval-asymmetric path: ``"query"`` routes
+    through :meth:`embed_query`, ``"passage"``/``"document"`` through
+    :meth:`embed_documents` (prefix-trained models like E5 need their
+    ``query: `` / ``passage: `` prefixes — bare is the measured-wrong
+    default). ``""`` keeps the legacy symmetric :meth:`embed` path.
+
+    ``dimensions`` applies Matryoshka (MRL) truncation: keep the first
+    N dims of each vector, then re-normalize. Only meaningful for
+    MRL-trained models (OpenAI-3, nomic-embed-text-v1.5, Qwen3-Embedding,
+    Gemini) — 512d retains 94–98% of full quality at 4–8× storage cut.
+    Truncating a non-MRL model still works (it is just a projection),
+    but quality loss is unmeasured, so it is opt-in only.
+    """
+    texts = list(texts)
+    if role == "query":
+        vectors = [backend.embed_query(t) for t in texts]
+    elif role in ("passage", "document"):
+        vectors = backend.embed_documents(texts)
+    else:
+        vectors = backend.embed(texts)
+    vectors = [_normalize(v) for v in vectors]
+    if dimensions is not None:
+        if not isinstance(dimensions, int) or dimensions < 1:
+            raise EmbeddingError(
+                f"dimensions must be a positive int, got {dimensions!r}")
+        vectors = [_normalize(v[:dimensions]) for v in vectors]
+    return vectors
+
+
+def truncate_dim(vectors: list[list[float]],
+                 dimensions: int) -> list[list[float]]:
+    """Matryoshka truncation of already-embedded vectors (re-normalized)."""
+    if not isinstance(dimensions, int) or dimensions < 1:
+        raise EmbeddingError(
+            f"dimensions must be a positive int, got {dimensions!r}")
+    return [_normalize(v[:dimensions]) for v in vectors]
 
 
 def _normalize(vec: list[float]) -> list[float]:

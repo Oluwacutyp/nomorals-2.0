@@ -24,6 +24,24 @@ _NONEMPTY_STR_FIELDS = ("tradition", "region", "title", "summary")
 
 _TOKEN_RE = re.compile(r"[a-z0-9]+")
 
+#: Era buckets for the timeline, mirroring how the great esotericism
+#: timelines are organized (Ancient / Medieval / Early Modern /
+#: Modern & Contemporary). (start, end) inclusive, BCE years negative.
+ERAS: tuple[tuple[str, int, int], ...] = (
+    ("Ancient", -3000, 500),
+    ("Medieval", 501, 1500),
+    ("Early Modern", 1501, 1800),
+    ("Modern & Contemporary", 1801, 2100),
+)
+
+
+def era_of(year: int) -> str:
+    """The era bucket a year falls in ("" when outside the timeline)."""
+    for name, start, end in ERAS:
+        if start <= year <= end:
+            return name
+    return ""
+
 
 def _data_path() -> Path:
     return Path(__file__).resolve().parent / "data" / "timeline.json"
@@ -164,6 +182,159 @@ class HistoryEngine:
             "passages": passages,
             "timeline_context": self._topic_events(topic),
         }
+
+
+    # -- era / parallel / density / gaps ------------------------------
+    def events_by_era(self, era: str = "") -> dict[str, list[dict]]:
+        """Events grouped by era bucket. ``era`` selects one bucket
+        (fail fast on unknown names); empty returns all buckets."""
+        known = [name for name, _, _ in ERAS]
+        if era and era not in known:
+            raise HistoryError(
+                f"unknown era {era!r}; known: {', '.join(known)}")
+        grouped: dict[str, list[dict]] = {name: [] for name in known}
+        for e in self._events:
+            name = era_of(e["start"])
+            if name:
+                grouped[name].append(dict(e))
+        for events in grouped.values():
+            events.sort(key=lambda e: (e["start"], e["end"]))
+        if era:
+            return {era: grouped[era]}
+        return grouped
+
+    def parallel_at(self, year: int, window: int = 50) -> dict[str, Any]:
+        """The "everything at once" view: events overlapping
+        [year - window, year + window], grouped by tradition.
+
+        What was happening across all traditions at the same moment
+        in history.
+        """
+        if type(year) is not int or type(window) is not int:
+            raise HistoryError("year/window must be ints")
+        if window < 0:
+            raise HistoryError("window must be >= 0")
+        lo, hi = year - window, year + window
+        by_tradition: dict[str, list[dict]] = {}
+        for e in self._events:
+            if e["start"] <= hi and e["end"] >= lo:
+                by_tradition.setdefault(e["tradition"], []).append(dict(e))
+        for events in by_tradition.values():
+            events.sort(key=lambda e: (e["start"], e["end"]))
+        return {
+            "year": year, "window": window,
+            "span": [lo, hi],
+            "traditions": sorted(by_tradition),
+            "by_tradition": by_tradition,
+            "total": sum(len(v) for v in by_tradition.values()),
+        }
+
+    def century_density(self) -> dict[str, dict[str, int]]:
+        """{century_start: {tradition: count}} - where the timeline is
+        thick and where it is thin. Century starts are BCE-negative
+        (e.g. -200 = the 200s BCE)."""
+        density: dict[str, dict[str, int]] = {}
+        for e in self._events:
+            first = (e["start"] // 100) * 100
+            last = (e["end"] // 100) * 100
+            c = first
+            while c <= last:
+                bucket = density.setdefault(str(c), {})
+                bucket[e["tradition"]] = bucket.get(e["tradition"], 0) + 1
+                c += 100
+        return density
+
+    def gaps(self, min_events_per_tradition: int = 3
+             ) -> dict[str, Any]:
+        """Where the timeline is thin - feeds the autonomous ingest
+        hunter. Returns thin traditions and empty century spans."""
+        by_tradition: dict[str, int] = {}
+        for e in self._events:
+            by_tradition[e["tradition"]] = \
+                by_tradition.get(e["tradition"], 0) + 1
+        thin = sorted(t for t, n in by_tradition.items()
+                      if n < min_events_per_tradition)
+        density = self.century_density()
+        centuries = sorted(int(c) for c in density)
+        empty_spans: list[list[int]] = []
+        if centuries:
+            run: list[int] = []
+            for c in range(centuries[0], centuries[-1] + 100, 100):
+                if str(c) not in density:
+                    run.append(c)
+                else:
+                    if len(run) >= 2:
+                        empty_spans.append([run[0], run[-1]])
+                    run = []
+            if len(run) >= 2:
+                empty_spans.append([run[0], run[-1]])
+        return {
+            "thin_traditions": thin,
+            "tradition_counts": dict(sorted(by_tradition.items())),
+            "empty_century_spans": empty_spans,
+            "total_events": len(self._events),
+        }
+
+    def render_ascii(self, events: "list[dict] | None" = None,
+                     width: int = 72) -> str:
+        """Render events as a terminal timeline.
+
+        A century ruler on top, one bar per event spanning its
+        [start, end], grouped under era headers with tradition tags -
+        presentation, not a JSON dump.
+        """
+        evs = ([dict(e) for e in events] if events is not None
+               else self.events())
+        if not evs:
+            return "(no events)"
+        lo = min(e["start"] for e in evs)
+        hi = max(e["end"] for e in evs)
+        span = max(1, hi - lo)
+        width = max(40, min(width, 120))
+
+        def pos(year: int) -> int:
+            return int((year - lo) / span * (width - 1))
+
+        ruler = [" "] * width
+        # Label every N centuries so labels never collide: each label
+        # needs ~8 columns.
+        n_centuries = max(1, (hi - lo) // 100)
+        step = max(1, -(-n_centuries // max(1, width // 8)))
+        for c in range((lo // 100) * 100, hi + 1, 100 * step):
+            x = pos(c)
+            label = f"{abs(c)}" + ("BCE" if c < 0 else "")
+            for i, ch in enumerate(label):
+                if x + i < width:
+                    ruler[x + i] = ch
+        lines = ["".join(ruler).rstrip(), "\u2500" * width]
+
+        def fmt_year(y: int) -> str:
+            return f"{abs(y)} BCE" if y < 0 else f"{y} CE"
+
+        current_era = ""
+        for e in sorted(evs, key=lambda e: (e["start"], e["end"])):
+            era = era_of(e["start"]) or era_of(e["end"])
+            if era and era != current_era:
+                current_era = era
+                lines.append(f"\n\u25c8 {era.upper()}")
+            x0 = pos(e["start"])
+            x1 = pos(max(e["end"], e["start"]))
+            bar = ["\u00b7"] * width
+            for x in range(x0, min(x1 + 1, width)):
+                bar[x] = "\u2501"
+            if 0 <= x0 < width:
+                bar[x0] = "\u25cf"
+            title = e["title"]
+            room = max(12, width - x1 - 3 - len(e["tradition"]))
+            if len(title) > room:
+                title = title[:room - 1] + "\u2026"
+            bar_line = (f"{''.join(bar[:x1 + 1])} {title} "
+                        f"[{e['tradition']}]")
+            lines.append(bar_line[:width])
+            detail = (f"  {fmt_year(e['start'])} \u2013 "
+                      f"{fmt_year(e['end'])} \u00b7 {e['region']}")
+            lines.append(detail[:width])
+        return "\n".join(lines).rstrip()
 
     # ── helpers ───────────────────────────────────────────────────────
     @staticmethod

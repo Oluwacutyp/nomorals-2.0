@@ -51,7 +51,8 @@ SLEEP_CHUNK_SECONDS = 5.0
 
 JOURNAL_PROMPT_TEMPLATE = (
     "\U0001f9d8 {name} {done}. How was that? What did you experience?\n"
-    "(Reply here \u2014 I'll save it to your practice log.)"
+    "(Reply here \u2014 I'll save it to your practice log.\n"
+    "Add a 1\u20135 rating too if you like, e.g. \"4 calm and steady\".)"
 )
 
 
@@ -75,12 +76,17 @@ class ChatPracticeSession:
     def __init__(self, guide: Any, session_id: str, *,
                  notifier: Any,
                  platform: str = "",
-                 clock: Any = None) -> None:
+                 clock: Any = None,
+                 midpoint_chime: bool = False) -> None:
         self.guide = guide
         self.session_id = session_id
         self._notifier = notifier
         self._platform = (platform or "").strip().lower()
         self._clock = clock if clock is not None else RealClock()
+        # Midpoint chime ("halfway - settle deeper") at 50% of the plan.
+        # Opt-in: the default phase stream is exactly the session script,
+        # one message per phase, which existing consumers assert on.
+        self._midpoint_chime = bool(midpoint_chime)
         self.run_id = new_id()
         self.state = "idle"
         self.on_finish: Callable[["ChatPracticeSession"], None] | None = None
@@ -91,6 +97,8 @@ class ChatPracticeSession:
         self._paused = threading.Event()
         self._hold = threading.Event()  # set while the thread parks on pause
         self._lock = threading.Lock()
+        self._phases_done = 0
+        self._midpoint_sent = False
 
     # ── introspection ─────────────────────────────────────────────
     @property
@@ -108,6 +116,13 @@ class ChatPracticeSession:
     def estimated_seconds(self) -> float:
         """Total paced seconds for this session (0 when not started)."""
         return sum(secs for _, secs in self._plan)
+
+    def progress(self) -> dict[str, int]:
+        """Live progress: phases done / total."""
+        total = len(self._plan)
+        with self._lock:
+            done = self._phases_done
+        return {"phases_done": done, "total": total}
 
     # ── control ───────────────────────────────────────────────────
     def start(self) -> None:
@@ -175,14 +190,25 @@ class ChatPracticeSession:
             # session must complete even inside quiet hours (like an alarm).
             self._send(self.guide.safety_text(), critical=True)
             total = len(self._plan)
+            midpoint = total // 2
             for msg, secs in self._plan:
                 if self._stop.is_set():
                     break
                 self._wait_resumed()
                 if self._stop.is_set():
                     break
+                # midpoint chime (the guided-session "settle deeper"
+                # chapter mark): once, at 50% of the plan.
+                if (self._midpoint_chime and total >= 4
+                        and not self._midpoint_sent
+                        and phases_done >= midpoint):
+                    self._midpoint_sent = True
+                    self._send("\u23f3 halfway \u2014 settle deeper.",
+                               critical=True)
                 self._send(msg, critical=True)
                 phases_done += 1
+                with self._lock:
+                    self._phases_done = phases_done
                 self._paced_sleep(secs)
             completed = not self._stop.is_set() and phases_done == total
         except Exception:  # noqa: BLE001 - a dead pacer must still journal-prompt
@@ -265,10 +291,12 @@ class WisdomChatManager:
     """
 
     def __init__(self, context: Any, *, clock: Any = None,
-                 notifier: Any = None) -> None:
+                 notifier: Any = None,
+                 midpoint_chime: bool = False) -> None:
         self.context = context
         self._clock = clock
         self._notifier = notifier
+        self._midpoint_chime = bool(midpoint_chime)
         self._guide: Any = None
         self._sessions: dict[str, ChatPracticeSession] = {}
         self._journal_await: dict[str, str] = {}  # chat_key -> session_id
@@ -292,7 +320,8 @@ class WisdomChatManager:
 
     # ── sessions ──────────────────────────────────────────────────
     def start_session(self, chat_key: str, session_id: str,
-                      *, platform: str = "") -> str:
+                      *, platform: str = "",
+                      midpoint_chime: bool | None = None) -> str:
         """Start a guided session in this chat. Returns the ack text for
         the chat reply. Raises PracticeError on an unknown session id
         (message lists available sessions); returns an error string when
@@ -306,6 +335,9 @@ class WisdomChatManager:
                 self._practice_guide, session_id,
                 notifier=self._live_notifier,
                 platform=platform, clock=self._clock,
+                midpoint_chime=(self._midpoint_chime
+                                if midpoint_chime is None
+                                else midpoint_chime),
             )
             session.on_finish = (
                 lambda s, ck=chat_key: self._on_session_finish(ck, s))
@@ -336,12 +368,15 @@ class WisdomChatManager:
     def status(self, chat_key: str) -> dict[str, Any]:
         """JSON-able status for a chat: active run or journal-await."""
         session = self._sessions.get(chat_key)
+        active = None
+        if session is not None and session.is_active:
+            active = {"session_id": session.session_id,
+                      "name": session.display_name,
+                      "state": session.state,
+                      "progress": session.progress()}
         return {
             "chat_key": chat_key,
-            "active": ({"session_id": session.session_id,
-                        "name": session.display_name,
-                        "state": session.state}
-                       if session is not None and session.is_active else None),
+            "active": active,
             "journal_await": self._journal_await.get(chat_key),
         }
 
@@ -391,15 +426,32 @@ class WisdomChatManager:
 
     def _take_journal(self, chat_key: str, session_id: str,
                       notes: str) -> str:
+        # A leading 1-5 ("4 calm and steady") is a post-session rating.
+        rating: int | None = None
+        rest = notes.strip()
+        if rest[:1].isdigit():
+            maybe = int(rest[:1])
+            if 1 <= maybe <= 5 and (
+                    len(rest) == 1 or not rest[1].isdigit()):
+                rating = maybe
+                rest = rest[1:].strip(" ,.:;\u2014-")
+        journal_text = rest or notes.strip()
         try:
-            self._practice_guide.journal(session_id, notes)
+            self._practice_guide.journal(session_id, journal_text)
+            if rating is not None:
+                try:
+                    self._practice_guide.rate(session_id, rating)
+                except Exception:  # noqa: BLE001 - rating is bonus
+                    _log.debug("wisdom rating store failed", exc_info=True)
+                    rating = None
         except Exception as exc:  # noqa: BLE001 - fail fast, stay awaited
             _log.warning("wisdom journal store failed: %s", exc)
             return f"\u26a0\ufe0f couldn't save that ({exc}) \u2014 try again?"
         with self._lock:
             self._journal_await.pop(chat_key, None)
             self._persist()
-        return "\U0001f4dd saved to your practice log. Nice work."
+        suffix = f" (rated {rating}\u2b50)" if rating else ""
+        return f"\U0001f4dd saved to your practice log{suffix}. Nice work."
 
     # ── persistence ───────────────────────────────────────────────
     def _state_path(self):

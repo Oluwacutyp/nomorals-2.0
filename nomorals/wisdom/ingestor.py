@@ -50,6 +50,22 @@ _DDG_LITE = "https://lite.duckduckgo.com/lite/"
 #: User-Agent identifying the WisdomKeeper crawler.
 _USER_AGENT = "DevonWisdom/1.0 (WisdomKeeper archive ingestor)"
 
+#: Gutendex - free, no-key JSON API over the Project Gutenberg catalog.
+#: Structured search with authors/subjects/formats metadata (the clean
+#: discovery path: archive.org search is token-soup by comparison).
+_GUTENDEX = "https://gutendex.com/books/"
+
+#: Wikisource MediaWiki API - structured full-text search over the
+#: proofread public-domain library (curates individual works, links
+#: translations to originals).
+_WIKISOURCE_API = "https://en.wikisource.org/w/api.php"
+
+#: Canonical plain-text URL for a Gutenberg ebook id.
+_GUTENBERG_TEXT = "https://www.gutenberg.org/cache/epub/{id}/pg{id}.txt"
+
+#: Minimum seconds between fetches to the same host (politeness).
+_POLITE_DELAY = 1.0
+
 #: Fetch retry policy: attempts and the backoff slept before attempts 2..n.
 _FETCH_ATTEMPTS = 3
 _FETCH_BACKOFF = (0.5, 1.5)
@@ -80,6 +96,8 @@ class ArchiveIngestor:
         self._blobs.mkdir(parents=True, exist_ok=True)
         self._index_path = self._blobs / _BLOB_INDEX
         self._index: dict[str, dict[str, Any]] | None = None
+        # host -> last fetch epoch (per-domain politeness delay)
+        self._last_fetch: dict[str, float] = {}
 
     # ── paths ─────────────────────────────────────────────────────────
     def _wisdom_root(self) -> Path:
@@ -166,6 +184,17 @@ class ArchiveIngestor:
                 url, f"blob too large ({len(response.body)} bytes)")
         return response.body
 
+    def _polite_wait(self, url: str) -> None:
+        """Sleep just enough to keep >= _POLITE_DELAY between fetches
+        to the same host. Never sleeps on cache hits."""
+        host = (urllib.parse.urlparse(url).hostname or "").lower()
+        if not host:
+            return
+        wait = _POLITE_DELAY - (time.time() - self._last_fetch.get(host, 0))
+        if wait > 0:
+            time.sleep(wait)
+        self._last_fetch[host] = time.time()
+
     def fetch_bytes(self, url: str) -> bytes:
         """GET a URL with retries and blob caching.
 
@@ -177,6 +206,7 @@ class ArchiveIngestor:
         if cached is not None:
             return cached
         self._check_robots(url)
+        self._polite_wait(url)
         data = self._get_with_retry(url)
         if not data:
             # Defensive: _get_with_retry should already have raised, but a
@@ -217,6 +247,35 @@ class ArchiveIngestor:
             return fallback
         return name
 
+    # Project Gutenberg boilerplate markers. Ingesting raw PG text
+    # without stripping these pollutes the corpus with license headers
+    # (the long-noted Gutenberg quality criticism).
+    _PG_START = "*** START OF"
+    _PG_END = "*** END OF"
+
+    @classmethod
+    def strip_gutenberg_boilerplate(cls, text: str) -> str:
+        """Remove Project Gutenberg header/footer boilerplate.
+
+        Cuts everything up to and including the "*** START OF ..."
+        line, and everything from the "*** END OF ..." line on.
+        Returns the text unchanged when the markers are absent.
+        """
+        if cls._PG_START not in text and cls._PG_END not in text:
+            return text
+        lines = text.splitlines(keepends=True)
+        start = 0
+        for i, line in enumerate(lines):
+            if cls._PG_START in line and "PROJECT GUTENBERG" in line:
+                start = i + 1
+                break
+        end = len(lines)
+        for i in range(len(lines) - 1, -1, -1):
+            if cls._PG_END in lines[i] and "PROJECT GUTENBERG" in lines[i]:
+                end = i
+                break
+        return "".join(lines[start:end]).strip() + "\n"
+
     def parse(self, data: bytes, filename: str) -> str:
         """Parse raw bytes into full text via the document engine.
 
@@ -235,15 +294,27 @@ class ArchiveIngestor:
         text = full_text(document)
         if not text.strip():
             raise IngestError(filename, "document parsed to empty text")
+        # Plain-text sources (Gutenberg et al.) carry license
+        # boilerplate — strip it before the text reaches the corpus.
+        text = self.strip_gutenberg_boilerplate(text)
+        if not text.strip():
+            raise IngestError(
+                filename, "document parsed to empty text after "
+                "boilerplate stripping")
         return text
 
     # ── ingest ────────────────────────────────────────────────────────
-    def ingest_entry(self, entry: ManifestEntry) -> ManifestEntry:
+    def ingest_entry(self, entry: ManifestEntry, *,
+                     edition: str = "") -> ManifestEntry:
         """Fetch, verify, parse, and ingest one manifest entry.
 
         Idempotent: if the manifest sha matches the fetched bytes and the
         entry is already ingested, the entry is returned unchanged.
         Registers the entry in the manifest first when it is new.
+
+        ``edition`` records source-edition provenance (which edition /
+        printing the text came from — the Gutenberg scholarly-rigor
+        criticism) into the manifest notes when the entry has none.
         """
         entry.validate()
         data = self.fetch_bytes(entry.source_url)
@@ -252,6 +323,8 @@ class ArchiveIngestor:
             return entry  # already ingested, unchanged bytes
         filename = self._filename_for(entry.source_url, f"{entry.slug}.bin")
         text = self.parse(data, filename)
+        if edition and not entry.notes:
+            entry.notes = f"source edition: {edition[:300]}"
         try:
             self.corpus.get(entry.slug)
         except CorpusError:
@@ -264,33 +337,148 @@ class ArchiveIngestor:
         return self.corpus.ingest_text(slug, text, translator=translator)
 
     # ── search ────────────────────────────────────────────────────────
+    #: Search backends tried in order (each can be disabled via the
+    #: ``sources`` parameter of :meth:`search`).
+    SEARCH_SOURCES = ("gutendex", "wikisource", "archive", "web")
+
     def search(self, query: str, tradition: str = "",
-               max_results: int = 10) -> list[dict[str, Any]]:
+               max_results: int = 10,
+               sources: "tuple[str, ...] | list[str] | None" = None
+               ) -> list[dict[str, Any]]:
         """Find candidate texts in public archives. No auto-ingest.
 
-        Queries archive.org's advanced search first; falls back to a plain
-        web search if archive.org is unreachable. Every candidate carries
-        identifier/title/url/description; ingestion is a separate step.
-        Raises :class:`IngestError` only when both backends fail.
+        Tries each backend in order — Gutendex (structured Gutenberg
+        catalog), Wikisource (proofread library), archive.org advanced
+        search, then a plain web search — merging candidates and
+        deduplicating by URL. Every candidate carries
+        identifier/title/url/description (+ authors/subjects/edition
+        when the backend provides them); ingestion is a separate step.
+        Raises :class:`IngestError` only when every enabled backend fails.
         """
         query = (query or "").strip()
         if not query:
             raise IngestError("<search>", "search needs a non-empty query")
         if max_results < 1:
             raise IngestError("<search>", "max_results must be >= 1")
-        try:
-            return self._search_archive(query, tradition, max_results)
-        except IngestError as archive_exc:
-            # archive.org unreachable — fall through to the plain web
-            # fallback below; the failure is recorded on the exception chain.
-            _log.debug("archive.org search failed, trying web fallback: %s",
-                       archive_exc)
-        try:
-            return self._search_web(query, tradition, max_results)
-        except IngestError as web_exc:
+        wanted = tuple(sources) if sources else self.SEARCH_SOURCES
+        for s in wanted:
+            if s not in self.SEARCH_SOURCES:
+                raise IngestError(
+                    "<search>", f"unknown search source {s!r} "
+                    f"(known: {', '.join(self.SEARCH_SOURCES)})")
+        _backends = {
+            "gutendex": self._search_gutendex,
+            "wikisource": self._search_wikisource,
+            "archive": self._search_archive,
+            "web": self._search_web,
+        }
+        merged: list[dict[str, Any]] = []
+        seen_urls: set[str] = set()
+        failures: list[str] = []
+        for name in wanted:
+            try:
+                for cand in _backends[name](query, tradition, max_results):
+                    url = str(cand.get("url") or "")
+                    if url and url not in seen_urls:
+                        seen_urls.add(url)
+                        cand.setdefault("source", name)
+                        merged.append(cand)
+                    if len(merged) >= max_results:
+                        break
+            except IngestError as exc:
+                # One backend down must not kill the hunt; the failure
+                # is recorded and the next backend is tried.
+                failures.append(f"{name}: {exc}")
+                _log.debug("wisdom search backend %s failed: %s", name, exc)
+            if len(merged) >= max_results:
+                break
+        if not merged:
             raise IngestError(
-                query, f"archive.org and web search both failed: {web_exc}"
-            ) from web_exc
+                query, "every search backend failed: "
+                + "; ".join(failures))
+        return merged[:max_results]
+
+    def _search_gutendex(self, query: str, tradition: str,
+                         max_results: int) -> list[dict[str, Any]]:
+        """Project Gutenberg catalog via the Gutendex JSON API (no key).
+
+        Returns candidates with authors, subjects, and a direct
+        plain-text URL — the highest-signal source for public-domain
+        books.
+        """
+        params = {"search": f"{query} {tradition}".strip()}
+        url = f"{_GUTENDEX}?{urllib.parse.urlencode(params)}"
+        try:
+            response = self._http.get(url)
+            payload = json.loads(response.text)
+        except NoMoralsError as exc:
+            raise IngestError(url, f"gutendex search failed: {exc}") from exc
+        except (ValueError, OSError) as exc:
+            raise IngestError(url, f"gutendex search failed: {exc}") from exc
+        results: list[dict[str, Any]] = []
+        for book in (payload.get("results") or [])[:max_results]:
+            gid = book.get("id")
+            title = str(book.get("title") or "").strip()
+            if not gid or not title:
+                continue
+            authors = ", ".join(
+                a.get("name", "") for a in (book.get("authors") or [])
+                if a.get("name"))[:200]
+            subjects = "; ".join(
+                str(s) for s in (book.get("subjects") or [])[:6])
+            results.append({
+                "identifier": f"gutenberg-{gid}",
+                "title": title,
+                "url": _GUTENBERG_TEXT.format(id=gid),
+                "description": subjects,
+                "authors": authors,
+                "subjects": subjects,
+                "edition": f"Project Gutenberg ebook #{gid}",
+            })
+        return results
+
+    def _search_wikisource(self, query: str, tradition: str,
+                           max_results: int) -> list[dict[str, Any]]:
+        """English Wikisource via the MediaWiki API.
+
+        Proofread, curated-at-work-level texts — the best source for
+        individual poems/treatises rather than whole volumes.
+        """
+        params = {
+            "action": "query",
+            "list": "search",
+            "srsearch": f"{query} {tradition}".strip(),
+            "srlimit": str(max_results),
+            "srnamespace": "0",
+            "format": "json",
+        }
+        url = f"{_WIKISOURCE_API}?{urllib.parse.urlencode(params)}"
+        try:
+            response = self._http.get(url)
+            payload = json.loads(response.text)
+        except NoMoralsError as exc:
+            raise IngestError(
+                url, f"wikisource search failed: {exc}") from exc
+        except (ValueError, OSError) as exc:
+            raise IngestError(
+                url, f"wikisource search failed: {exc}") from exc
+        results: list[dict[str, Any]] = []
+        query_block = payload.get("query") or {}
+        for hit in (query_block.get("search") or [])[:max_results]:
+            title = str(hit.get("title") or "").strip()
+            if not title:
+                continue
+            page = urllib.parse.quote(title.replace(" ", "_"))
+            snippet = re.sub(r"(?s)<[^>]*>", " ",
+                             str(hit.get("snippet") or "")).strip()
+            results.append({
+                "identifier": f"wikisource:{title}",
+                "title": title,
+                "url": f"https://en.wikisource.org/wiki/{page}",
+                "description": snippet[:300],
+                "edition": "English Wikisource (proofread)",
+            })
+        return results
 
     def _search_archive(self, query: str, tradition: str,
                         max_results: int) -> list[dict[str, Any]]:

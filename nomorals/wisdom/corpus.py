@@ -126,13 +126,141 @@ class Answer:
     query: str
     passages: list[ProvenanceHit] = field(default_factory=list)
     synthesis: str = ""
+    confidence: str = "none"
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "query": self.query,
             "synthesis": self.synthesis,
+            "confidence": self.confidence,
             "passages": [p.to_dict() for p in self.passages],
         }
+
+    def render(self, style: str = "chat") -> str:
+        """God-tier presentation of an answer.
+
+        ``style``: ``"chat"`` (compact, emoji badges, Telegram-ready),
+        ``"terminal"`` (boxed sections, no emoji), or ``"markdown"``
+        (headings + links, for artifacts/docs).
+        """
+        style = (style or "chat").lower()
+        if style not in ("chat", "terminal", "markdown"):
+            raise CorpusError(
+                f"unknown render style {style!r} "
+                "(expected 'chat', 'terminal', or 'markdown')")
+        if not self.passages:
+            empty = {
+                "chat": f"🔍 No passages in the corpus speak to "
+                        f"“{self.query}” yet.\nIngest more texts or try "
+                        f"different terms.",
+                "terminal": f"No passages in the corpus speak to "
+                            f"'{self.query}' yet.\nIngest more texts or "
+                            f"try different terms.",
+                "markdown": f"> No passages in the corpus speak to "
+                            f"**{self.query}** yet.\n>\n> Ingest more "
+                            f"texts or try different terms.",
+            }
+            return empty[style]
+        lines: list[str] = []
+        if style == "chat":
+            lines.append(f"📜 *{self.query}* — "
+                         f"{len(self.passages)} passage(s), "
+                         f"confidence: {self.confidence}")
+            lines.append("")
+            for i, p in enumerate(self.passages, 1):
+                badge = _canon_badge(p.canon_status)
+                lines.append(f"{badge} *{p.work}* — {p.section}")
+                lines.append(f"_{p.snippet.strip()[:400]}_")
+                if p.url:
+                    lines.append(f"🔗 {p.url}")
+                if i < len(self.passages):
+                    lines.append("─" * 24)
+        elif style == "terminal":
+            bar = "═" * 60
+            lines.append(bar)
+            lines.append(f"QUERY: {self.query}")
+            lines.append(f"HITS: {len(self.passages)}   "
+                         f"CONFIDENCE: {self.confidence.upper()}")
+            lines.append(bar)
+            for i, p in enumerate(self.passages, 1):
+                canon = f" [{p.canon_status}]" if p.canon_status else ""
+                lines.append(f"[{i}] {p.work}{canon} — {p.section}")
+                lines.append(f"    {p.snippet.strip()[:420]}")
+                if p.url:
+                    lines.append(f"    src: {p.url}")
+                lines.append("─" * 60)
+        else:  # markdown
+            lines.append(f"## {self.query}")
+            lines.append("")
+            lines.append(f"*{len(self.passages)} passage(s) · "
+                         f"confidence: {self.confidence}*")
+            lines.append("")
+            for p in self.passages:
+                canon = f" `{p.canon_status}`" if p.canon_status else ""
+                lines.append(f"### {p.work}{canon} — {p.section}")
+                lines.append("")
+                lines.append(f"> {p.snippet.strip()[:500]}")
+                lines.append("")
+                if p.url:
+                    lines.append(f"[source]({p.url})")
+                    lines.append("")
+        lines.append(self.synthesis)
+        return "\n".join(lines).strip()
+
+
+def _canon_badge(canon_status: str) -> str:
+    return {
+        "canon": "⛪",
+        "apocrypha": "📕",
+        "pseudepigrapha": "📜",
+        "gnostic": "🕯️",
+        "dss": "🏺",
+        "eastern": "☸️",
+        "esoteric": "🔮",
+        "secondary": "📚",
+    }.get((canon_status or "").lower(), "📖")
+
+
+def _trigrams(text: str) -> set[str]:
+    t = f"  {(text or '').lower()}  "
+    return {t[i:i + 3] for i in range(len(t) - 2)}
+
+
+def _jaccard(a: set[str], b: set[str]) -> float:
+    if not a or not b:
+        return 0.0
+    return len(a & b) / len(a | b)
+
+
+def _mmr_select(passages: list["ProvenanceHit"], *, top: int,
+                lambda_: float = 0.6) -> list["ProvenanceHit"]:
+    """Maximal marginal relevance over passages.
+
+    Iteratively picks the passage maximizing
+    ``lambda * relevance - (1 - lambda) * max_similarity_to_selected``.
+    Relevance is the raw retrieval score (higher = better — the
+    literature form); similarity is trigram Jaccard on snippets, a
+    real diversity signal with no embeddings needed. Keeps
+    near-duplicates from crowding out coverage.
+    """
+    if len(passages) <= top or top <= 0:
+        return passages[:max(top, 0)]
+    rel = [p.score for p in passages]
+    tris = [_trigrams(p.snippet) for p in passages]
+    selected: list[int] = []
+    remaining = set(range(len(passages)))
+    while remaining and len(selected) < top:
+        best, best_val = -1, float("-inf")
+        for i in remaining:
+            redundancy = 0.0
+            for j in selected:
+                redundancy = max(redundancy, _jaccard(tris[i], tris[j]))
+            val = lambda_ * rel[i] - (1.0 - lambda_) * redundancy
+            if val > best_val:
+                best, best_val = i, val
+        selected.append(best)
+        remaining.discard(best)
+    return [passages[i] for i in selected]
 
 
 class CanonCorpus:
@@ -287,7 +415,10 @@ class CanonCorpus:
 
     # ── ask ───────────────────────────────────────────────────────────
     def ask(self, query: str, *, top: int = 5,
-            tradition: str = "", mode: str = "keyword") -> Answer:
+            tradition: str = "", mode: str = "keyword",
+            expand: bool = False, min_score: float = 0.0,
+            diversify: bool = False, mmr_lambda: float = 0.6,
+            weights: tuple[float, float] = (1.0, 1.0)) -> Answer:
         """Search the corpus; every hit carries provenance.
 
         ``mode`` selects the retrieval path:
@@ -296,6 +427,21 @@ class CanonCorpus:
         - ``"semantic"`` — dense-vector cosine search over passage
           embeddings (requires :meth:`build_semantic_index` first).
         - ``"hybrid"`` — reciprocal-rank fusion of keyword + semantic.
+
+        Retrieval upgrades (all opt-in, all default-off):
+
+        - ``expand`` — pseudo-relevance feedback: run the keyword query,
+          harvest salient terms from the top hits, and re-run expanded.
+          Helps when the user remembers the idea but not the wording.
+        - ``min_score`` — evidence gate on the semantic side: cosine
+          similarities below this are dropped before fusion so the
+          vector half never returns "top K of anything".
+        - ``diversify`` — maximal-marginal-relevance selection over the
+          fused ranking (``mmr_lambda`` trades relevance vs novelty)
+          so near-duplicate passages don't crowd out coverage.
+        - ``weights`` — (keyword_weight, semantic_weight) for the
+          fusion; raise the keyword weight for precise-terminology
+          queries.
         """
         query = (query or "").strip()
         if not query:
@@ -304,16 +450,72 @@ class CanonCorpus:
             raise CorpusError(
                 f"unknown ask() mode {mode!r} "
                 "(expected 'keyword', 'semantic', or 'hybrid')")
+        if not 0.0 <= mmr_lambda <= 1.0:
+            raise CorpusError(
+                f"mmr_lambda must be in [0, 1], got {mmr_lambda!r}")
+        if expand:
+            query = self._expand_query(query, tradition=tradition)
         passages: list[ProvenanceHit] = []
         if mode == "keyword":
-            hits = self.library.search(query, top=top)
+            hits = self.library.search(
+                query, top=top * 2 if diversify else top)
             passages = self._to_provenance(hits, tradition)
         else:
             passages = self._ask_semantic(query, top=top,
                                           tradition=tradition,
-                                          hybrid=mode == "hybrid")
+                                          hybrid=mode == "hybrid",
+                                          min_score=min_score,
+                                          weights=weights)
+        if diversify and len(passages) > top:
+            passages = _mmr_select(passages, top=top,
+                                   lambda_=mmr_lambda)
+        else:
+            passages = passages[:top]
         synthesis = self._synthesize(query, passages)
-        return Answer(query=query, passages=passages, synthesis=synthesis)
+        confidence = self._confidence(passages)
+        return Answer(query=query, passages=passages, synthesis=synthesis,
+                      confidence=confidence)
+
+    @staticmethod
+    def _confidence(passages: list[ProvenanceHit]) -> str:
+        """Honest confidence note: coverage-based, never invented."""
+        if not passages:
+            return "none"
+        works = {p.work for p in passages}
+        if len(passages) >= 3 and len(works) >= 2:
+            return "high"
+        if len(passages) >= 2:
+            return "medium"
+        return "low"
+
+    def _expand_query(self, query: str, tradition: str = "") -> str:
+        """Pseudo-relevance feedback (vault-rag pattern): run the query,
+        take the most salient terms from the top hits, and append the
+        ones not already in the query. Returns the original query when
+        nothing useful comes back."""
+        from collections import Counter
+        import re as _re
+        stop = {
+            "the", "a", "an", "and", "or", "of", "to", "in", "is", "are",
+            "was", "were", "be", "been", "on", "at", "for", "with", "by",
+            "from", "as", "it", "its", "this", "that", "these", "those",
+            "he", "she", "they", "we", "you", "his", "her", "their",
+            "not", "but", "if", "then", "than", "so", "into", "all",
+        }
+        try:
+            hits = self.library.search(query, top=5)
+        except Exception:
+            return query
+        have = set(_re.findall(r"[a-z]{3,}", query.lower()))
+        counts: Counter[str] = Counter()
+        for h in hits:
+            for w in _re.findall(r"[a-z]{4,}", (h.passage or "").lower()):
+                if w not in stop and w not in have:
+                    counts[w] += 1
+        extra = [w for w, _ in counts.most_common(4)]
+        if not extra:
+            return query
+        return f"{query} {' '.join(extra)}"
 
     def _to_provenance(self, hits: Any,
                        tradition: str) -> list[ProvenanceHit]:
@@ -402,8 +604,16 @@ class CanonCorpus:
         finally:
             con.close()
 
-    def _semantic_search(self, query: str, *, top: int) -> list[Any]:
-        """Vector KNN → SearchHit-shaped rows ordered by cosine."""
+    def _semantic_search(self, query: str, *, top: int,
+                         tradition: str = "",
+                         min_score: float = 0.0) -> list[Any]:
+        """Vector KNN → SearchHit-shaped rows ordered by cosine.
+
+        The query goes through ``embed_query`` (query-side prefixes for
+        prefix-trained models — not the document path). ``tradition``
+        pre-filters inside the index; ``min_score`` is the evidence
+        gate: similarities below it never leave the index.
+        """
         backend = self._embed_backend()
         try:
             index = self._vector_index(backend)
@@ -416,8 +626,9 @@ class CanonCorpus:
                 raise CorpusError(
                     "semantic index is empty; run build_semantic_index() "
                     "after ingesting texts")
-            qvec = backend.embed_one(query)
-            hits = index.search(qvec, top=top)
+            qvec = backend.embed_query(query)
+            hits = index.search(qvec, top=top, tradition=tradition,
+                                min_score=min_score)
         finally:
             index.close()
         rows = self._passage_rows([k for k, _ in hits])
@@ -431,8 +642,13 @@ class CanonCorpus:
         return ordered
 
     def _ask_semantic(self, query: str, *, top: int,
-                      tradition: str, hybrid: bool) -> list[ProvenanceHit]:
-        sem_hits = self._semantic_search(query, top=top * 2 if hybrid else top)
+                      tradition: str, hybrid: bool,
+                      min_score: float = 0.0,
+                      weights: tuple[float, float] = (1.0, 1.0)
+                      ) -> list[ProvenanceHit]:
+        sem_hits = self._semantic_search(
+            query, top=top * 2 if hybrid else top,
+            tradition=tradition, min_score=min_score)
         if not hybrid:
             return self._to_provenance(sem_hits, tradition)
         from .hybrid import fuse_hits
@@ -441,8 +657,50 @@ class CanonCorpus:
             kw_hits, sem_hits,
             key_fn=lambda h: (
                 h.title or h.book, h.chapter_number, h.passage[:64]),
-            top=top * 2)
+            top=top * 2, weights=weights, semantic_floor=min_score)
         return self._to_provenance(fused[:top], tradition)
+
+    def _index_metadata(self) -> dict[str, dict[str, str]]:
+        """Map vector-index passage keys → tradition/work metadata.
+
+        The library's book slugs are its own; the corpus slug rides in
+        the book title as a ``[slug]`` prefix, so resolve via the books
+        table and the manifest.
+        """
+        import sqlite3
+        meta: dict[str, dict[str, str]] = {}
+        try:
+            con = sqlite3.connect(self.library.db_path())
+            try:
+                books = con.execute(
+                    "SELECT slug, title FROM books").fetchall()
+            finally:
+                con.close()
+        except Exception:
+            return meta
+        for book_slug, title in books:
+            corpus_slug = ""
+            t = title or ""
+            if t.startswith("["):
+                end = t.find("]")
+                if end > 1:
+                    corpus_slug = t[1:end]
+            entry = self._manifest.get(corpus_slug)
+            if entry is None:
+                continue
+            # All passage keys for this book share the metadata; the
+            # build loop matches on the "<book_slug>#" key prefix.
+            meta[f"{book_slug}#"] = {
+                "tradition": entry.tradition or "",
+                "work": entry.title or "",
+            }
+        return meta
+
+    def _metadata_for_key(self, key: str,
+                          index: dict[str, dict[str, str]]
+                          ) -> dict[str, str]:
+        prefix, _, _ = key.rpartition("#")
+        return index.get(prefix + "#", {})
 
     def build_semantic_index(self, backend_name: str = "", *,
                              rebuild: bool = False,
@@ -450,6 +708,9 @@ class CanonCorpus:
         """Embed every library passage and (re)build the vector index.
 
         ``backend_name`` forces one provider (``""`` = best available).
+        Incremental: unchanged passages keep their cached vectors, so
+        rebuilding after adding texts only embeds the new ones — the
+        report tells you how many were embedded vs carried over.
         Idempotent-ish: skipped only when an identical index already
         exists *and* ``rebuild`` is False. Returns a status dict.
         """
@@ -474,11 +735,17 @@ class CanonCorpus:
                 return self.semantic_index_status()
             keys = [k for k, _ in pairs]
             texts = [t for _, t in pairs]
-            n = index.build(keys, texts, backend, progress=progress)
+            meta_index = self._index_metadata()
+            metadata = {k: self._metadata_for_key(k, meta_index)
+                        for k in keys}
+            # Documents embed through the document-side path (prefixes
+            # for prefix-trained models).
+            result = index.build(keys, texts, backend, progress=progress,
+                                 metadata=metadata)
         finally:
             index.close()
         status = self.semantic_index_status()
-        status["vectors"] = n
+        status.update(result)
         return status
 
     def semantic_index_status(self) -> dict[str, Any]:

@@ -94,6 +94,104 @@ def _terms(text: str, top: int = 40) -> list[str]:
     return [w for w, _ in counts.most_common(top)]
 
 
+_SENT_SPLIT = re.compile(r"(?<=[.!?\u2026])\s+(?=[A-Z\u201c\u2018\(0-9])")
+
+
+def _sentences(text: str) -> list[str]:
+    """Split a passage into sentences (stdlib, no NLTK)."""
+    text = re.sub(r"\s+", " ", (text or "").strip())
+    if not text:
+        return []
+    parts = _SENT_SPLIT.split(text)
+    return [s.strip() for s in parts if len(s.strip()) > 24]
+
+
+def _sent_overlap(a: set[str], b: set[str]) -> float:
+    """TextRank sentence similarity: shared words normalized by
+    log-lengths (Mihalcea & Tarau)."""
+    if not a or not b:
+        return 0.0
+    shared = len(a & b)
+    if not shared:
+        return 0.0
+    import math
+    return shared / (math.log(len(a) + 1) + math.log(len(b) + 1))
+
+
+def textrank(sentences: list[str], top_n: int = 8,
+             damping: float = 0.85, iters: int = 40) -> list[int]:
+    """TextRank sentence ranking (Mihalcea & Tarau 2004).
+
+    Builds the sentence-similarity graph and runs PageRank: sentences
+    central to the graph (similar to many others) win — the classic
+    extractive-summarization upgrade over raw term-frequency scoring.
+    Returns the indices of the top_n sentences, in rank order.
+    """
+    n = len(sentences)
+    if n == 0 or top_n <= 0:
+        return []
+    if n == 1:
+        return [0]
+    wordsets = [set(re.findall(r"[a-z]{3,}", s.lower())) - _STOP
+                for s in sentences]
+    # adjacency: similarity above a small floor (keeps the graph sparse)
+    adj: list[list[tuple[int, float]]] = [[] for _ in range(n)]
+    for i in range(n):
+        for j in range(i + 1, n):
+            sim = _sent_overlap(wordsets[i], wordsets[j])
+            if sim > 0.02:
+                adj[i].append((j, sim))
+                adj[j].append((i, sim))
+    out_w = [sum(w for _, w in nbrs) or 1.0 for nbrs in adj]
+    scores = [1.0 / n] * n
+    for _ in range(iters):
+        new = [(1.0 - damping) / n] * n
+        for i in range(n):
+            for j, w in adj[i]:
+                new[j] += damping * scores[i] * w / out_w[i]
+        # dangling nodes (no edges) spread their mass uniformly
+        dangling = damping * sum(scores[i] for i in range(n)
+                                 if not adj[i]) / n
+        scores = [v + dangling for v in new]
+    ranked = sorted(range(n), key=lambda i: -scores[i])
+    return ranked[: min(top_n * 3, n)]
+
+
+def _trigram_set(text: str) -> set[str]:
+    t = f"  {(text or '').lower()}  "
+    return {t[i:i + 3] for i in range(len(t) - 2)}
+
+
+def mmr_order(candidates: list[int], key_text: list[str],
+              relevance: list[float], top_n: int,
+              lambda_: float = 0.7) -> list[int]:
+    """Maximal marginal relevance over candidate indices.
+
+    Picks ``lambda * relevance - (1 - lambda) * max_similarity`` with
+    trigram-Jaccard similarity — kills near-duplicate sentences so the
+    digest covers the work instead of repeating its refrain.
+    """
+    selected: list[int] = []
+    remaining = list(candidates)
+    tri = {i: _trigram_set(key_text[i]) for i in candidates}
+    while remaining and len(selected) < top_n:
+        best, best_val = remaining[0], float("-inf")
+        for i in remaining:
+            sim = 0.0
+            ti = tri[i]
+            for j in selected:
+                tj = tri[j]
+                union = ti | tj
+                if union:
+                    sim = max(sim, len(ti & tj) / len(union))
+            val = lambda_ * relevance[i] - (1.0 - lambda_) * sim
+            if val > best_val:
+                best, best_val = i, val
+        selected.append(best)
+        remaining.remove(best)
+    return selected
+
+
 class WisdomOrgan:
     """One ``tick()`` = ingest → digest → cross-link, inside a budget."""
 
@@ -237,26 +335,30 @@ class WisdomOrgan:
     def _digest_new(self, report: dict[str, Any], deadline: float) -> None:
         keeper = self._keeper()
         manifest = getattr(keeper.corpus, "_manifest", {}) or {}
-        rows = self.db.query("SELECT slug FROM wisdom_digests")
-        done = {r["slug"] for r in (rows or [])}
         for slug, entry in manifest.items():
             if time.time() >= deadline:
                 break
-            if slug in done or not entry.ingested_at:
+            if not entry.ingested_at:
                 continue
             try:
+                if not self.digest_stale(slug):
+                    continue  # digest is current
                 digest = self.digest_work(slug)
                 if digest:
                     report["digested"].append(slug)
             except Exception as exc:  # noqa: BLE001
                 _log.warning("wisdom digest failed for %s: %s", slug, exc)
 
-    def digest_work(self, slug: str, top_passages: int = 8) -> dict[str, Any]:
+    def digest_work(self, slug: str, top_passages: int = 8
+                  ) -> dict[str, Any]:
         """Extractive digest: the work's most salient passages.
 
-        Scores passages by overlap with the work's own top terms —
-        representative content, chosen structurally, never by keyword
-        dictionaries about what "wisdom" should sound like.
+        Two-stage, per the summarization literature: (1) TextRank
+        sentence centrality over the sampled passages — sentences
+        similar to many others win, which surfaces the work's load-
+        bearing ideas, not just its most frequent words; (2) MMR
+        diversity selection, so near-duplicate sentences don't crowd
+        out coverage. Key terms still come from term salience.
         """
         keeper = self._keeper()
         manifest = getattr(keeper.corpus, "_manifest", {}) or {}
@@ -285,39 +387,88 @@ class WisdomOrgan:
                 passages = []
         if not passages:
             raise ValueError(f"no passages found for {slug!r}")
-        corpus_terms = _terms(" ".join(
-            (p.snippet or "") for p in passages[:50]), top=60)
+        # Stage 1: sentence-level TextRank over the sampled passages.
+        sentences: list[str] = []
+        sent_meta: list[tuple[str, str, str]] = []  # (section, url, work)
+        for p in passages[:40]:
+            for s in _sentences(p.snippet or ""):
+                sentences.append(s)
+                sent_meta.append(
+                    (p.section or "", p.url or "", p.work or ""))
+        if not sentences:
+            raise ValueError(f"no digestible sentences for {slug!r}")
+        corpus_terms = _terms(" ".join(sentences), top=60)
         term_set = set(corpus_terms)
-        scored = []
-        for p in passages:
-            snippet = p.snippet or ""
-            words = set(re.findall(r"[a-z]{3,}", snippet.lower())) - _STOP
+        # relevance: term salience with a substantive-length preference
+        relevance: list[float] = []
+        for s in sentences:
+            words = set(re.findall(r"[a-z]{3,}", s.lower())) - _STOP
             overlap = len(words & term_set)
-            # Prefer substantive passages; penalize stubs.
-            length_bonus = min(1.0, len(snippet) / 600.0)
-            scored.append((overlap * (0.5 + 0.5 * length_bonus), p))
-        scored.sort(key=lambda t: -t[0])
-        top = [p for _, p in scored[:top_passages]]
+            length_bonus = min(1.0, len(s) / 400.0)
+            relevance.append(overlap * (0.5 + 0.5 * length_bonus))
+        ranked = textrank(sentences, top_n=top_passages * 3)
+        # Stage 2: MMR — relevance vs novelty.
+        picked = mmr_order(ranked, sentences, relevance,
+                           top_n=top_passages, lambda_=0.7)
+        top = []
+        for i in picked:
+            section, url, _ = sent_meta[i]
+            top.append({
+                "section": section,
+                "snippet": sentences[i][:800],
+                "url": url,
+            })
         digest = {
             "slug": slug, "title": entry.title,
             "tradition": entry.tradition,
             "key_terms": corpus_terms[:20],
-            "passages": [{
-                "section": p.section, "snippet": (p.snippet or "").strip()[:800],
-                "url": p.url or "",
-            } for p in top],
+            "passages": top,
         }
+        self._ensure_digest_schema()
         self.db.execute(
             "INSERT INTO wisdom_digests"
-            " (slug, title, tradition, key_terms, passages, digested_at)"
-            " VALUES (?, ?, ?, ?, ?, ?)"
+            " (slug, title, tradition, key_terms, passages, digested_at,"
+            " source_sha)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?)"
             " ON CONFLICT(slug) DO UPDATE SET"
             " key_terms=excluded.key_terms, passages=excluded.passages,"
-            " digested_at=excluded.digested_at",
+            " digested_at=excluded.digested_at,"
+            " source_sha=excluded.source_sha",
             (slug, entry.title, entry.tradition,
              json.dumps(digest["key_terms"]), json.dumps(digest["passages"]),
-             time.time()))
+             time.time(), entry.sha256 or ""))
         return digest
+
+    def _ensure_digest_schema(self) -> None:
+        """Add source_sha to wisdom_digests on older databases (digest
+        staleness tracking)."""
+        try:
+            cols = {r[1] for r in self.db.execute(
+                "PRAGMA table_info(wisdom_digests)").fetchall()}
+        except Exception:  # noqa: BLE001
+            return
+        if "source_sha" not in cols:
+            try:
+                self.db.execute(
+                    "ALTER TABLE wisdom_digests "
+                    "ADD COLUMN source_sha TEXT DEFAULT ''")
+            except Exception:  # noqa: BLE001
+                pass
+
+    def digest_stale(self, slug: str) -> bool:
+        """True when the work was re-ingested after its digest was made
+        (source sha differs) — the digest needs a refresh."""
+        self._ensure_digest_schema()
+        row = self.db.query_one(
+            "SELECT source_sha FROM wisdom_digests WHERE slug = ?", (slug,))
+        if not row:
+            return True
+        keeper = self._keeper()
+        manifest = getattr(keeper.corpus, "_manifest", {}) or {}
+        entry = manifest.get(slug)
+        if entry is None:
+            return False
+        return (row["source_sha"] or "") != (entry.sha256 or "")
 
     def get_digest(self, slug: str) -> dict[str, Any] | None:
         row = self.db.query_one(
@@ -395,6 +546,94 @@ class WisdomOrgan:
                 "strength": r["strength"],
             })
         return out
+
+    # -- consolidation (near-duplicate proposals) ------------------
+    def consolidate(self, threshold: float = 0.85) -> list[dict[str, Any]]:
+        """Find near-duplicate digests by key-term Jaccard similarity.
+
+        Returns merge *proposals* — pairs above ``threshold`` with the
+        evidence. Nothing is deleted or merged automatically: the memory-
+        hygiene rule is propose, never destroy on its own.
+        """
+        if not 0.0 < threshold <= 1.0:
+            raise ValueError(
+                f"threshold must be in (0, 1], got {threshold!r}")
+        rows = self.db.query(
+            "SELECT slug, title, tradition, key_terms FROM wisdom_digests")
+        digests = []
+        for r in rows or []:
+            digests.append({
+                "slug": r["slug"], "title": r["title"],
+                "tradition": r["tradition"] or "",
+                "terms": set(json.loads(r["key_terms"] or "[]")),
+            })
+        proposals = []
+        for i, a in enumerate(digests):
+            for b in digests[i + 1:]:
+                union = a["terms"] | b["terms"]
+                if not union:
+                    continue
+                sim = len(a["terms"] & b["terms"]) / len(union)
+                if sim >= threshold:
+                    proposals.append({
+                        "slug_a": a["slug"], "title_a": a["title"],
+                        "slug_b": b["slug"], "title_b": b["title"],
+                        "similarity": round(sim, 3),
+                        "shared_terms": sorted(a["terms"] & b["terms"])[:12],
+                        "proposal": "merge",
+                    })
+        proposals.sort(key=lambda d: -d["similarity"])
+        return proposals
+
+    # -- gap analysis (autonomous research proposals) ----------------
+    def gap_analysis(self, min_works_per_tradition: int = 3
+                     ) -> dict[str, Any]:
+        """Where the corpus is thin, and what to hunt next.
+
+        Combines manifest coverage (traditions with few ingested works),
+        timeline gaps (HistoryEngine.gaps), and live archive.org
+        candidates for the thinnest traditions — the autonomous
+        "research proposals" the ingestor's tick can act on.
+        """
+        keeper = self._keeper()
+        manifest = getattr(keeper.corpus, "_manifest", {}) or {}
+        ingested_by_tradition: dict[str, int] = {}
+        for entry in manifest.values():
+            if entry.ingested_at:
+                t = entry.tradition or "unknown"
+                ingested_by_tradition[t] = \
+                    ingested_by_tradition.get(t, 0) + 1
+        thin = sorted(t for t, n in ingested_by_tradition.items()
+                      if n < min_works_per_tradition)
+        # traditions in the timeline but absent from the corpus entirely
+        try:
+            from .history import HistoryEngine
+            timeline_gaps = HistoryEngine(
+                self.context).gaps()["thin_traditions"]
+        except Exception:  # noqa: BLE001
+            timeline_gaps = []
+        candidates: list[dict[str, Any]] = []
+        if thin:
+            from .ingestor import ArchiveIngestor
+            ingestor = ArchiveIngestor(self.context)
+            for tradition in thin[:4]:
+                try:
+                    found = ingestor.search(
+                        tradition, tradition=tradition, max_results=3,
+                        sources=("gutendex", "archive"))
+                except Exception:  # noqa: BLE001
+                    continue
+                for c in found:
+                    c["for_tradition"] = tradition
+                    candidates.append(c)
+        return {
+            "thin_traditions": thin,
+            "ingested_by_tradition": dict(
+                sorted(ingested_by_tradition.items())),
+            "timeline_thin_traditions": timeline_gaps,
+            "candidates": candidates,
+            "generated_at": time.time(),
+        }
 
     # ── synthesis (cross-tradition, for the brain) ───────────────────
 

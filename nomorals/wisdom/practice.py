@@ -211,6 +211,14 @@ class PracticeGuide:
         return self._wisdom_root() / "practice_log.jsonl"
 
     # ── loading ───────────────────────────────────────────────────────
+    def _custom_dir(self) -> Path:
+        """Workspace dir for user-created sessions. Package sessions are
+        read-only data; custom programs live here so upgrades never
+        clobber them."""
+        d = self._wisdom_root() / "custom_sessions"
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
     def _load_sessions(self) -> dict[str, SessionScript]:
         if not self._sessions_dir.is_dir():
             raise PracticeError(
@@ -228,10 +236,75 @@ class PracticeGuide:
                 raise PracticeError(
                     f"duplicate session id {script.id!r} in {path.name}")
             sessions[script.id] = script
+        # User-created programs overlay the packaged set. A custom id
+        # that collides with a packaged session is rejected at creation
+        # time (create_custom), so this merge is collision-free.
+        custom_dir = self._wisdom_root() / "custom_sessions"
+        if custom_dir.is_dir():
+            for path in sorted(custom_dir.glob("*.json")):
+                try:
+                    raw = json.loads(path.read_text(encoding="utf-8"))
+                except (OSError, ValueError):
+                    continue  # a torn custom file must not break boot
+                try:
+                    script = SessionScript.from_dict(
+                        raw, source=f"custom/{path.name}")
+                except PracticeError:
+                    continue
+                sessions[script.id] = script
         if not sessions:
             raise PracticeError(
                 f"no session scripts found in {self._sessions_dir}")
         return sessions
+
+    def create_custom(self, session_id: str, name: str, description: str,
+                      phases: list[dict[str, Any]], *,
+                      beginner: bool = True,
+                      safety_note_id: str = "breathwork-general"
+                      ) -> SessionScript:
+        """Create and save a custom breathing program (the Awesome
+        Breathing / Paced Breathing "custom program" feature).
+
+        ``phases`` is a list of {"label", "seconds", "instruction",
+        "repeat"?} dicts — the same schema as the packaged JSON.
+        Validated exactly like packaged sessions; the id must be new
+        (never shadows a packaged session). Persisted to the workspace
+        custom_sessions dir and live immediately.
+        """
+        payload = {
+            "id": session_id,
+            "name": name,
+            "description": description,
+            "safety_note_id": safety_note_id,
+            "beginner": beginner,
+            "phases": phases,
+        }
+        script = SessionScript.from_dict(payload, source="custom-request")
+        if script.id in self._sessions:
+            raise PracticeError(
+                f"session id {script.id!r} already exists; pick another")
+        path = self._custom_dir() / f"{script.id}.json"
+        path.write_text(json.dumps(payload, indent=2, ensure_ascii=False),
+                        encoding="utf-8")
+        self._sessions[script.id] = script
+        _emit("wisdom.practice.custom_created", {
+            "session_id": script.id, "name": script.name,
+            "total_seconds": script.total_seconds(),
+        })
+        return script
+
+    def delete_custom(self, session_id: str) -> bool:
+        """Delete a user-created program. Packaged sessions are
+        read-only and cannot be deleted. True when one was removed."""
+        session = self._get(session_id)
+        path = self._custom_dir() / f"{session.id}.json"
+        if not path.is_file():
+            raise PracticeError(
+                f"session {session_id!r} is a packaged session and "
+                f"cannot be deleted")
+        path.unlink()
+        del self._sessions[session.id]
+        return True
 
     def _get(self, session_id: str) -> SessionScript:
         try:
@@ -284,11 +357,20 @@ class PracticeGuide:
     def run(self, session_id: str, *, clock: Any = None,
             out: Callable[[str], None] | None = None,
             rounds: int | None = None,
-            show_safety: bool = False) -> dict[str, Any]:
+            show_safety: bool = False,
+            settle_seconds: float = 0.0,
+            ramp: float = 1.0) -> dict[str, Any]:
         """Pace a session. Prints each phase label + instruction, counts
         down, then moves on. ``clock`` must provide ``.sleep(seconds)``
         and ``.now() -> float``. ``rounds`` repeats the whole phase
-        sequence that many times. ``show_safety`` prints safety notes first."""
+        sequence that many times. ``show_safety`` prints safety notes first.
+
+        ``settle_seconds`` is the pre-session settle-in countdown (the
+        "few moments to settle in" the best breathing apps offer).
+        ``ramp`` gradually scales breath times across rounds: 1.0 is
+        flat, 1.5 ends rounds 50% longer than they start (Paced
+        Breathing's ramp mode). A midpoint chime goes out at 50%.
+        """
         session = self._get(session_id)
         if rounds is None:
             rounds = 1
@@ -296,34 +378,54 @@ class PracticeGuide:
                 or rounds < 1:
             raise PracticeError(
                 f"rounds must be a positive int, got {rounds!r}")
+        if isinstance(settle_seconds, bool) or not isinstance(
+                settle_seconds, (int, float)) or settle_seconds < 0:
+            raise PracticeError(
+                f"settle_seconds must be >= 0, got {settle_seconds!r}")
+        if isinstance(ramp, bool) or not isinstance(
+                ramp, (int, float)) or not 0.25 <= ramp <= 3.0:
+            raise PracticeError(
+                f"ramp must be a number in [0.25, 3.0], got {ramp!r}")
         clock = clock if clock is not None else RealClock()
         out = out if out is not None else print
 
         started_at = datetime.fromtimestamp(
             clock.now(), tz=timezone.utc).isoformat()
 
+        # The paced plan: (phase, effective_seconds) per execution, with
+        # the ramp factor interpolated linearly across rounds.
+        plan: list[tuple[Phase, float]] = []
+        for r in range(rounds):
+            factor = 1.0 + (ramp - 1.0) * (r / max(1, rounds - 1))
+            for phase in session.phases:
+                for _ in range(phase.repeat):
+                    plan.append((phase, phase.seconds * factor))
+        total = len(plan)
+        paced_seconds = sum(secs for _, secs in plan)
+
         _emit("wisdom.practice.started", {
             "session_id": session.id,
             "name": session.name,
             "rounds": rounds,
-            "total_seconds": session.total_seconds() * rounds,
+            "ramp": ramp,
+            "total_seconds": paced_seconds,
         })
 
         out(f"=== {session.name} ===")
         if show_safety:
             out(self.safety_text())
             out("")
+        if settle_seconds > 0:
+            out(f"Settle in… ({settle_seconds:g}s)")
+            self._countdown(float(settle_seconds), out, clock)
 
-        plan: list[Phase] = []
-        for _ in range(rounds):
-            for phase in session.phases:
-                plan.extend([phase] * phase.repeat)
-        total = len(plan)
-
+        midpoint = total // 2 + 1
         phases_done = 0
-        for i, phase in enumerate(plan, 1):
+        for i, (phase, secs) in enumerate(plan, 1):
+            if total >= 4 and i == midpoint:
+                out("— halfway — settle deeper —")
             out(f"[{i}/{total}] {phase.label}: {phase.instruction}")
-            self._countdown(phase.seconds, out, clock)
+            self._countdown(secs, out, clock)
             phases_done += 1
 
         out(f"Done — {session.name} complete.")
@@ -335,6 +437,9 @@ class PracticeGuide:
             "completed": True,
             "phases_done": phases_done,
             "notes": "",
+            "rounds": rounds,
+            "ramp": ramp,
+            "total_seconds": paced_seconds,
         }
         self._append_log(entry)
         _emit("wisdom.practice.completed", {
@@ -343,12 +448,14 @@ class PracticeGuide:
             "started_at": started_at,
             "completed": True,
             "phases_done": phases_done,
+            "total_seconds": paced_seconds,
         })
         return {
             "session_id": session.id,
             "started_at": started_at,
             "completed": True,
             "phases_done": phases_done,
+            "total_seconds": paced_seconds,
         }
 
     def _countdown(self, seconds: float, out: Callable[[str], None],
@@ -417,6 +524,128 @@ class PracticeGuide:
         return entries[-limit:][::-1]
 
     # ── log plumbing ──────────────────────────────────────────────────
+    # -- ratings --------------------------------------------------
+    def rate(self, session_id: str, stars: int) -> dict[str, Any]:
+        """Record a 1-5 post-session rating. Fail fast on unknown
+        sessions and out-of-range stars."""
+        session = self._get(session_id)
+        if isinstance(stars, bool) or not isinstance(stars, int) \
+                or not 1 <= stars <= 5:
+            raise PracticeError(
+                f"rating must be an int 1-5, got {stars!r}")
+        entry = {
+            "type": "rating",
+            "session_id": session.id,
+            "rated_at": datetime.now(timezone.utc).isoformat(),
+            "stars": stars,
+        }
+        self._append_log(entry)
+        _emit("wisdom.practice.rated", {
+            "session_id": session.id, "stars": stars})
+        return entry
+
+    # -- stats ------------------------------------------------------
+    def stats(self) -> dict[str, Any]:
+        """Practice stats: sessions, minutes, streaks, ratings.
+
+        The streak feature the best breathing apps ship (Paced
+        Breathing PB+): consecutive UTC days with at least one
+        completed session, counting back from today.
+        """
+        entries = self.history(limit=100000)
+        sessions = [e for e in entries
+                    if e.get("type") == "session"]
+        completed = [e for e in sessions if e.get("completed")]
+        total_seconds = sum(float(e.get("total_seconds") or 0)
+                            for e in completed)
+        by_session: dict[str, int] = {}
+        for e in completed:
+            sid = str(e.get("session_id", "?"))
+            by_session[sid] = by_session.get(sid, 0) + 1
+        # streak: consecutive UTC days with >= 1 completed session
+        days: set[str] = set()
+        for e in completed:
+            try:
+                day = datetime.fromisoformat(
+                    str(e["started_at"])).date().isoformat()
+            except (KeyError, ValueError):
+                continue
+            days.add(day)
+        streak = 0
+        cursor = datetime.now(timezone.utc).date()
+        if cursor.isoformat() not in days:
+            # allow the streak to survive "today not yet practiced"
+            cursor = cursor.fromordinal(cursor.toordinal() - 1)
+        while cursor.isoformat() in days:
+            streak += 1
+            cursor = cursor.fromordinal(cursor.toordinal() - 1)
+        ratings: dict[str, list[int]] = {}
+        for e in entries:
+            if e.get("type") == "rating":
+                try:
+                    stars = int(e["stars"])
+                except (KeyError, TypeError, ValueError):
+                    continue
+                ratings.setdefault(
+                    str(e.get("session_id", "?")), []).append(stars)
+        avg_rating = {sid: round(sum(v) / len(v), 2)
+                      for sid, v in ratings.items()}
+        last = completed[0] if completed else None
+        return {
+            "sessions_total": len(sessions),
+            "sessions_completed": len(completed),
+            "minutes_practiced": round(total_seconds / 60.0, 1),
+            "streak_days": streak,
+            "by_session": dict(sorted(by_session.items())),
+            "avg_rating": avg_rating,
+            "last_session": ({
+                "session_id": last.get("session_id"),
+                "started_at": last.get("started_at"),
+            } if last else None),
+        }
+
+    # -- catalog presentation ---------------------------------------
+    @staticmethod
+    def _rhythm_glyph(label: str) -> str:
+        low = (label or "").lower()
+        if low.startswith("inhale"):
+            return "\u25b2"  # ▲
+        if low.startswith("exhale"):
+            return "\u25bc"  # ▼
+        if low.startswith("hold"):
+            return "\u25a0"  # ■
+        return "\u25cf"  # ●
+
+    def rhythm_signature(self, session_id: str) -> str:
+        """Compact pattern signature, e.g. "4-4-4-4" for box breathing:
+        the seconds of one phase cycle, joined."""
+        session = self._get(session_id)
+        parts = []
+        for phase in session.phases:
+            secs = phase.seconds
+            parts.append(str(int(secs)) if float(secs).is_integer()
+                         else str(secs))
+        return "-".join(parts)
+
+    def catalog_text(self) -> str:
+        """God-tier session catalog: rhythm glyphs + pattern signature
+        + duration, not a bare id list."""
+        lines = ["\U0001f9d8 Practice sessions", ""]
+        for info in self.list_sessions():
+            session = self._get(info["id"])
+            glyphs = " ".join(
+                self._rhythm_glyph(ph.label) for ph in session.phases)
+            sig = self.rhythm_signature(info["id"])
+            mins = info["total_seconds"] / 60.0
+            beginner = "beginner-friendly" if info["beginner"] else "advanced"
+            lines.append(f"{glyphs}  {info['name']} [{beginner}]")
+            lines.append(f"    {info['description']}")
+            lines.append(
+                f"    pattern {sig} \u00b7 \u2248{mins:.0f} min "
+                f"\u00b7 id: {info['id']}")
+            lines.append("")
+        return "\n".join(lines).rstrip()
+
     def _append_log(self, entry: dict[str, Any]) -> None:
         path = self._log_path()
         with path.open("a", encoding="utf-8") as fh:
