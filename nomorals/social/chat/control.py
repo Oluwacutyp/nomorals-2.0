@@ -791,6 +791,24 @@ def _whatsapp_find_section(sections: list, page: str) -> int | None:
     return None
 
 
+def _whatsapp_greeting() -> str:
+    """Time-aware menu header. Never raises."""
+    try:
+        from datetime import datetime
+        hour = datetime.now().hour
+        if 5 <= hour < 12:
+            daypart = "good morning"
+        elif 12 <= hour < 17:
+            daypart = "good afternoon"
+        elif 17 <= hour < 22:
+            daypart = "good evening"
+        else:
+            daypart = "up late"
+        return f"✨ *Devon — {daypart}* · here's what I can do"
+    except Exception:  # noqa: BLE001
+        return "✨ *Devon — command menu*"
+
+
 def whatsapp_menu(page: str = "") -> str:
     """WhatsApp-native command menu — text-first, no buttons, no HTML.
 
@@ -829,7 +847,7 @@ def whatsapp_menu(page: str = "") -> str:
         if idx is not None:
             return _section_page(idx)
 
-        lines = [menu_section("✨", "Devon — command menu", "whatsapp"), ""]
+        lines = [_whatsapp_greeting(), ""]
         lines.append("_text-first — no buttons, no tapping needed_")
         lines.append("")
         for i, (emoji, title, items) in enumerate(sections, 1):
