@@ -6,14 +6,22 @@ text descriptions, has no agency, no tool access, no loop.
 
 Primary path: Groq's vision API (Llama 3.2 Vision) via the LLM router.
 Fallback: local GGUF vision model via the lifecycle/provisioner.
+
+Native path (no model, no network): :mod:`nomorals.vision.native` —
+metadata, EXIF forensics, colors, quality, perceptual hashes, pixel diff,
+template matching (NCC), Haar face detection, QR decode, document layout,
+tesseract OCR transcription, and Set-of-Mark screen parsing for reliable
+visual grounding.
 """
 
 from . import native
-from .screenshot import capture_screenshot, screenshot_from_file
-from .seer import Seer, see, UNTRUSTED_VISION_PREFIX
+from .screenshot import (capture_screen, capture_screenshot,
+                         screenshot_from_file)
+from .seer import Seer, see, see_bytes, UNTRUSTED_VISION_PREFIX
 
-__all__ = ["Seer", "see", "UNTRUSTED_VISION_PREFIX", "capture_screenshot",
-           "screenshot_from_file", "native", "register"]
+__all__ = ["Seer", "see", "see_bytes", "UNTRUSTED_VISION_PREFIX",
+           "capture_screen", "capture_screenshot", "screenshot_from_file",
+           "native", "register"]
 
 
 def register(registry) -> None:
