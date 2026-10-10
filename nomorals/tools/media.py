@@ -271,7 +271,7 @@ def register(registry: Any) -> None:
                         "id": new_id(), "url": url, "extractor": result.get("extractor", ""),
                         "kind": "audio" if audio_only else "video", "title": result.get("title", ""),
                         "path": result["path"], "size_bytes": result["bytes"],
-                        "status": "done", "created_at": time.time(), "metadata": {},
+                        "status": "done", "created_at": time.time(), "metadata": "{}",
                     },
                 )
             except Exception as exc:  # noqa: BLE001 - bookkeeping must not fail the download
