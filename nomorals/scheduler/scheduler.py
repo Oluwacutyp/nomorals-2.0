@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import random
 import re
 import threading
 import time
@@ -37,7 +38,11 @@ from ..storage.db import Database
 from .recurrence import (
     CronSpec,
     RRule,
+    describe_cron as _describe_cron,
+    describe_rrule as _describe_rrule,
     next_cron as _rec_next_cron,
+    parse_natural_datetime as _parse_natural_datetime,
+    parse_natural_schedule as _parse_natural_schedule,
     parse_rrule as _rec_parse_rrule,
 )
 
@@ -246,8 +251,33 @@ def evaluate_conditions(conditions: dict[str, Any],
     Keys support dotted paths (``{"user.tier": "pro"}``).  A missing key
     never matches an operator predicate (only ``ne``/``nin`` against a
     present-but-unequal value can pass — absent stays absent).
+
+    Boolean combinators (MongoDB query-language style) compose groups::
+
+        {"$or": [{"kind": "email"}, {"price": {"lt": 100}}]}
+        {"$and": [{"kind": "email"}, {"$not": {"spam": True}}]}
+        {"$not": {"user.tier": "free"}}
     """
     for key, expected in conditions.items():
+        if key == "$or":
+            if (not isinstance(expected, list) or not any(
+                    isinstance(sub, dict)
+                    and evaluate_conditions(sub, event_data)
+                    for sub in expected)):
+                return False
+            continue
+        if key == "$and":
+            if (not isinstance(expected, list) or not all(
+                    isinstance(sub, dict)
+                    and evaluate_conditions(sub, event_data)
+                    for sub in expected)):
+                return False
+            continue
+        if key == "$not":
+            if (not isinstance(expected, dict)
+                    or evaluate_conditions(expected, event_data)):
+                return False
+            continue
         actual: Any = event_data
         for part in str(key).split("."):
             if isinstance(actual, dict) and part in actual:
@@ -290,6 +320,138 @@ def _validate_policy(value: str, allowed: frozenset, name: str) -> str:
         raise ValueError(
             f"{name} must be one of {sorted(allowed)}, got {value!r}")
     return value
+
+
+def _parse_quiet_hours(value: Any) -> tuple[str, str] | None:
+    """Validate ``quiet_hours`` → (start, end) "HH:MM" strings.  Raises ValueError."""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        parts = [p.strip() for p in value.split("-")]
+        if len(parts) != 2:
+            raise ValueError(
+                f"quiet_hours must be 'HH:MM-HH:MM' or a (start, end) pair, "
+                f"got {value!r}")
+        start, end = parts
+    else:
+        try:
+            start, end = value
+        except (TypeError, ValueError):
+            raise ValueError(
+                f"quiet_hours must be 'HH:MM-HH:MM' or a (start, end) pair, "
+                f"got {value!r}")
+        start, end = str(start).strip(), str(end).strip()
+    for label, hhmm in (("start", start), ("end", end)):
+        if not re.fullmatch(r"\d{1,2}:\d{2}", hhmm):
+            raise ValueError(
+                f"quiet_hours {label} must be HH:MM, got {hhmm!r}")
+        h, m = int(hhmm.split(":")[0]), int(hhmm.split(":")[1])
+        if not (0 <= h <= 23 and 0 <= m <= 59):
+            raise ValueError(
+                f"quiet_hours {label} out of range: {hhmm!r}")
+    return start, end
+
+
+def _quiet_shift(now_ts: float, quiet: tuple[str, str] | None,
+                 tz: str | None) -> float | None:
+    """End-of-window timestamp when ``now_ts`` falls inside quiet hours.
+
+    Returns None when not quiet right now.  Overnight windows
+    (``23:00``–``07:00``) are handled.  Times are wall-clock in ``tz``
+    (IANA) or server-local when None.
+    """
+    if not quiet:
+        return None
+    start_s, end_s = quiet
+    sh, sm = int(start_s.split(":")[0]), int(start_s.split(":")[1])
+    eh, em = int(end_s.split(":")[0]), int(end_s.split(":")[1])
+    zone = None
+    if tz:
+        try:
+            from zoneinfo import ZoneInfo
+            zone = ZoneInfo(tz)
+        except Exception:
+            zone = None
+    now_dt = datetime.fromtimestamp(now_ts, tz=zone)
+    start_dt = now_dt.replace(hour=sh, minute=sm, second=0, microsecond=0)
+    end_dt = now_dt.replace(hour=eh, minute=em, second=0, microsecond=0)
+    if end_dt <= start_dt:
+        # overnight window: which side of midnight is "now" on?
+        if now_dt >= start_dt:
+            end_dt += timedelta(days=1)    # today 23:00 → tomorrow 07:00
+        else:
+            start_dt -= timedelta(days=1)  # yesterday 23:00 → today 07:00
+    if start_dt <= now_dt < end_dt:
+        return end_dt.timestamp()
+    return None
+
+
+def _ts_date(ts: float, tz: str | None) -> Any:
+    """Calendar date of a unix timestamp in ``tz`` (or server-local)."""
+    zone = None
+    if tz:
+        try:
+            from zoneinfo import ZoneInfo
+            zone = ZoneInfo(tz)
+        except Exception:
+            zone = None
+    return datetime.fromtimestamp(ts, tz=zone).date()
+
+
+def _normalize_skip_dates(dates: Any) -> list[str]:
+    """Skip-dates input → sorted ISO 'YYYY-MM-DD' strings.  Raises ValueError."""
+    if not dates:
+        return []
+    if isinstance(dates, (str, datetime)):
+        dates = [dates]
+    out: set[str] = set()
+    from datetime import date as _date
+    for d in dates:
+        if isinstance(d, datetime):
+            out.add(d.date().isoformat())
+        elif isinstance(d, _date):
+            out.add(d.isoformat())
+        elif isinstance(d, str):
+            try:
+                out.add(datetime.strptime(d.strip(), "%Y-%m-%d").date()
+                        .isoformat())
+            except ValueError:
+                raise ValueError(
+                    f"skip_dates entries must be YYYY-MM-DD, got {d!r}")
+        else:
+            raise ValueError(
+                f"skip_dates entries must be dates or YYYY-MM-DD, got {d!r}")
+    return sorted(out)
+
+
+def _fmt_clock(dt: datetime) -> str:
+    """'9:05 AM' — no platform-dependent strftime codes."""
+    return f"{dt.hour % 12 or 12}:{dt.minute:02d} " \
+        f"{'AM' if dt.hour < 12 else 'PM'}"
+
+
+def _fmt_next(ts: float, tz: str | None = None) -> str:
+    """Human firing label: 'today 9:00 AM', 'tomorrow 6:30 PM', …"""
+    zone = None
+    if tz:
+        try:
+            from zoneinfo import ZoneInfo
+            zone = ZoneInfo(tz)
+        except Exception:
+            zone = None
+    dt = datetime.fromtimestamp(ts, tz=zone)
+    today = datetime.now(tz=zone).date()
+    if dt.date() == today:
+        day = "today"
+    elif dt.date() == today + timedelta(days=1):
+        day = "tomorrow"
+    elif dt.date() == today - timedelta(days=1):
+        day = "yesterday"
+    elif dt.date() < today + timedelta(days=7):
+        day = dt.strftime("%A")  # "Monday"
+    else:
+        day = dt.strftime("%b %d")  # "Oct 21"
+    return f"{day} {_fmt_clock(dt)}"
 
 
 def _dtstart(now_ts: float, tz: str | None) -> datetime:
@@ -558,13 +720,19 @@ class Scheduler:
         timeout_s: float = 0.0,
         max_attempts: int = 1,
         retry_base_s: float = 60.0,
+        jitter_s: float = 0.0,
+        pause_on_failure: bool = False,
+        skip_dates: Any = None,
     ) -> CronJob:
         """Schedule a recurring cron job.
 
         Args:
             task_id: Unique task ID (generated if None)
             cron_expr: Cron expression (e.g., "0 9 * * MON-FRI"; extended:
-                "0 9 L * *", "0 9 * * 5#3")
+                "0 9 L * *", "0 9 * * 5#3") — or natural language like
+                "every weekday at 9am" (anything :func:`parse_natural_schedule`
+                maps to cron; rrule-shaped phrases raise and point at
+                :meth:`schedule_rrule`)
             action: Action to execute
             parameters: Action parameters
             max_runs: Maximum executions (None = unlimited)
@@ -579,17 +747,33 @@ class Scheduler:
             timeout_s: per-execution wall-clock cap (0 = no cap)
             max_attempts: tries before dead-lettering (>= 1)
             retry_base_s: base delay for exponential retry backoff
+            jitter_s: uniform random delay in [0, jitter_s] added to every
+                firing (systemd ``RandomizedDelaySec`` / Temporal ``--jitter``
+                — spreads the thundering herd when many jobs share a slot)
+            pause_on_failure: pause the schedule on first failure (Temporal
+                ``--pause-on-failure``) instead of retry-spamming; resume with
+                :meth:`resume`
+            skip_dates: dates the job never fires on ("2026-12-25",
+                ``datetime``/``date`` objects, or lists thereof — holidays,
+                maintenance windows)
 
         Returns:
             CronJob object
+
+        Raises:
+            ValueError: bad expression/timezone/policy, or ``task_id``
+                already exists (idempotent callers: reuse the id).
         """
         task_id = task_id or new_id("cron")
+        self._raise_if_exists(task_id)
         parameters = parameters or {}
         tz = _validate_tz(tz)
         missed_fire_policy = _validate_policy(
             missed_fire_policy, MISSED_FIRE_POLICIES, "missed_fire_policy")
         overlap_policy = _validate_policy(
             overlap_policy, OVERLAP_POLICIES, "overlap_policy")
+        skips = _normalize_skip_dates(skip_dates)
+        cron_expr = self._resolve_cron_expr(cron_expr)
         metadata = {
             "heavy": heavy, "weight": weight, "tz": tz or "",
             "missed_fire_policy": missed_fire_policy,
@@ -598,12 +782,18 @@ class Scheduler:
             "timeout_s": max(0.0, float(timeout_s or 0.0)),
             "max_attempts": max(1, int(max_attempts or 1)),
             "retry_base_s": max(5.0, float(retry_base_s or 60.0)),
+            "jitter_s": max(0.0, float(jitter_s or 0.0)),
+            "pause_on_failure": bool(pause_on_failure),
+            "skip_dates": skips,
             "fail_count": 0,
             "recurrence": "cron",
         }
 
         # Validate cron expression (raises on garbage); tz-aware.
-        next_run = CronParser.next_run(cron_expr, tz=tz)
+        next_run = self._next_valid(
+            {"cron_expr": cron_expr, "task_id": task_id,
+             "created_at": time.time()},
+            metadata, time.time())
 
         # Create task
         with self.db.transaction():
@@ -650,6 +840,9 @@ class Scheduler:
         timeout_s: float = 0.0,
         max_attempts: int = 1,
         retry_base_s: float = 60.0,
+        jitter_s: float = 0.0,
+        pause_on_failure: bool = False,
+        skip_dates: Any = None,
     ) -> CronJob:
         """Schedule a recurring task from an RFC 5545 RRULE.
 
@@ -657,9 +850,12 @@ class Scheduler:
         ``FREQ=MONTHLY;BYDAY=2TU`` (2nd Tuesday) or
         ``FREQ=MONTHLY;BYDAY=FR;BYSETPOS=-1`` (last Friday).  Stored in
         the cron_jobs table (RRULE text in ``cron_expr``, marker in
-        metadata).  Same policy knobs as :meth:`schedule_cron`.
+        metadata).  Same policy knobs as :meth:`schedule_cron`, plus
+        natural-language schedules (``"every 2nd tuesday"``) via
+        :func:`parse_natural_schedule`.
         """
         task_id = task_id or new_id("rrule")
+        self._raise_if_exists(task_id)
         parameters = parameters or {}
         tz = _validate_tz(tz)
         missed_fire_policy = _validate_policy(
@@ -669,13 +865,22 @@ class Scheduler:
         rule_text = (rrule or "").strip()
         if rule_text.upper().startswith("RRULE:"):
             rule_text = rule_text[6:].strip()
+        if not rule_text or "FREQ=" not in rule_text.upper():
+            # maybe natural language ("every 2nd tuesday", "last friday …")
+            try:
+                kind, expr = _parse_natural_schedule(rule_text)
+            except ValueError:
+                kind, expr = None, rule_text
+            if kind == "rrule":
+                rule_text = expr
+            elif kind == "cron":
+                raise ValueError(
+                    f"{rrule!r} is a plain cron schedule — "
+                    "use schedule_cron()")
         now_ts = time.time()
         dtstart = _dtstart(now_ts, tz)
         _rec_parse_rrule(rule_text, dtstart)  # raises on garbage
-        nxt = _next_rrule(rule_text, now_ts, now_ts, tz)
-        if nxt is None:
-            raise ValueError(
-                f"RRULE yields no future occurrences: {rrule!r}")
+        skips = _normalize_skip_dates(skip_dates)
         metadata = {
             "heavy": heavy, "weight": weight, "tz": tz or "",
             "missed_fire_policy": missed_fire_policy,
@@ -684,9 +889,19 @@ class Scheduler:
             "timeout_s": max(0.0, float(timeout_s or 0.0)),
             "max_attempts": max(1, int(max_attempts or 1)),
             "retry_base_s": max(5.0, float(retry_base_s or 60.0)),
+            "jitter_s": max(0.0, float(jitter_s or 0.0)),
+            "pause_on_failure": bool(pause_on_failure),
+            "skip_dates": skips,
             "fail_count": 0,
             "recurrence": "rrule",
         }
+        nxt = self._next_valid(
+            {"cron_expr": rule_text, "task_id": task_id,
+             "created_at": now_ts},
+            metadata, now_ts)
+        if nxt is None:
+            raise ValueError(
+                f"RRULE yields no future occurrences: {rrule!r}")
         with self.db.transaction():
             self.db.execute("""
                 INSERT INTO scheduled_tasks (task_id, task_type, action, parameters, status, created_at, updated_at, metadata)
@@ -787,16 +1002,22 @@ class Scheduler:
         tz = meta.get("tz") or None
         now_ts = time.time()
         if cron_expr is not None:
-            CronParser.parse(cron_expr)  # validates
-            new_expr, recurrence = cron_expr.strip(), "cron"
-            nxt = CronParser.next_run(new_expr, tz=tz)
+            new_expr = self._resolve_cron_expr(cron_expr)
+            recurrence = "cron"
+            nxt = self._next_valid(
+                {"cron_expr": new_expr, "task_id": task_id,
+                 "created_at": now_ts},
+                {**meta, "recurrence": "cron"}, now_ts)
         else:
             rule_text = (rrule or "").strip()
             if rule_text.upper().startswith("RRULE:"):
                 rule_text = rule_text[6:].strip()
             _rec_parse_rrule(rule_text, _dtstart(now_ts, tz))
             new_expr, recurrence = rule_text, "rrule"
-            nxt = _next_rrule(rule_text, now_ts, now_ts, tz)
+            nxt = self._next_valid(
+                {"cron_expr": rule_text, "task_id": task_id,
+                 "created_at": now_ts},
+                {**meta, "recurrence": "rrule"}, now_ts)
             if nxt is None:
                 raise ValueError(
                     f"RRULE yields no future occurrences: {rrule!r}")
@@ -825,6 +1046,63 @@ class Scheduler:
                 created = float(task["created_at"])
             return _next_rrule(expr, created, after_ts, tz)
         return CronParser.next_run(expr, after_ts, tz=tz)
+
+    def _raise_if_exists(self, task_id: str) -> None:
+        """Idempotent-add guard: a clear error beats sqlite IntegrityError."""
+        row = self.db.query_one(
+            "SELECT task_id FROM scheduled_tasks WHERE task_id = ?",
+            (task_id,))
+        if row:
+            raise ValueError(f"task_id {task_id!r} already exists")
+
+    @staticmethod
+    def _resolve_cron_expr(cron_expr: str) -> str:
+        """Accept a cron expression or natural language ('every weekday at
+        9am').  Natural-language phrases that map to RRULE raise a
+        ValueError pointing at :meth:`schedule_rrule`."""
+        text = (cron_expr or "").strip()
+        if not text:
+            raise ValueError("empty cron expression")
+        try:
+            CronParser.parse(text)  # validates eagerly
+            return text
+        except ValueError:
+            pass
+        kind, expr = _parse_natural_schedule(text)  # raises when unknown
+        if kind != "cron":
+            raise ValueError(
+                f"{text!r} needs an RRULE schedule — use schedule_rrule()")
+        return expr
+
+    @staticmethod
+    def _apply_jitter(ts: float, meta: dict[str, Any]) -> float:
+        """Uniform [0, jitter_s] delay per firing (Temporal --jitter /
+        systemd RandomizedDelaySec gold).  0 (default) = exact."""
+        jitter = max(0.0, float(meta.get("jitter_s") or 0.0))
+        return ts + random.uniform(0, jitter) if jitter > 0 else ts
+
+    def _next_valid(self, cron_row: dict[str, Any], meta: dict[str, Any],
+                    after_ts: float, *, apply_jitter: bool = True,
+                    ) -> float | None:
+        """Next firing strictly after ``after_ts`` with skip-dates + jitter.
+
+        Firings landing on a ``skip_dates`` calendar day (in the job's tz)
+        are skipped forward (cap: 400 skips, then the series is treated as
+        exhausted).  Jitter is applied last; ``preview()`` passes
+        ``apply_jitter=False`` for nominal times.
+        """
+        tz = meta.get("tz") or None
+        skips = set(meta.get("skip_dates") or [])
+        nxt = self._next_recurrence(cron_row, meta, after_ts)
+        guard = 0
+        while nxt is not None and skips and guard < 400:
+            if _ts_date(nxt, tz).isoformat() not in skips:
+                break
+            nxt = self._next_recurrence(cron_row, meta, nxt)
+            guard += 1
+        if nxt is None:
+            return None
+        return self._apply_jitter(nxt, meta) if apply_jitter else nxt
 
     async def list_cron_jobs(self, *, active_only: bool = True) -> list[CronJob]:
         """List all cron jobs."""
@@ -860,7 +1138,7 @@ class Scheduler:
     async def create_reminder(
         self,
         text: str,
-        due_at: datetime | float,
+        due_at: datetime | float | str,
         user_id: str,
         *,
         action: str = "send_reminder",
@@ -874,13 +1152,18 @@ class Scheduler:
         timeout_s: float = 0.0,
         max_attempts: int = 1,
         retry_base_s: float = 60.0,
+        nag_every_s: float = 0.0,
+        max_nags: int = 0,
+        quiet_hours: Any = None,
     ) -> Reminder:
         """Create a reminder.
 
         Args:
             text: Reminder text
-            due_at: When reminder is due (naive datetimes are interpreted
-                in ``tz`` when given, else server-local)
+            due_at: When reminder is due — a datetime, unix timestamp, or
+                natural language ("in 20 minutes", "tomorrow at 8am",
+                "next monday at 9").  Naive datetimes are interpreted in
+                ``tz`` when given, else server-local.
             user_id: User to remind
             action: Action to execute (default: send_reminder)
             parameters: Additional parameters
@@ -894,6 +1177,14 @@ class Scheduler:
             timeout_s: per-execution wall-clock cap (0 = no cap)
             max_attempts: tries before dead-lettering (>= 1)
             retry_base_s: base delay for exponential retry backoff
+            nag_every_s: re-fire every N seconds until acknowledged
+                (Due-app "auto snooze"); 0 = fire once.  Each nag is a real
+                firing (recorded + listener event) until ``max_nags`` or
+                :meth:`complete_reminder`.
+            max_nags: cap on nag re-fires (0 with nag_every_s set = 1 nag)
+            quiet_hours: "23:00-07:00" or ("23:00", "07:00") — a firing
+                inside the window is shifted to the window end (Do Not
+                Disturb), recorded, and a ``deferred`` event fires.
 
         Returns:
             Reminder object
@@ -907,6 +1198,11 @@ class Scheduler:
             missed_fire_policy, MISSED_FIRE_POLICIES, "missed_fire_policy")
         overlap_policy = _validate_policy(
             overlap_policy, OVERLAP_POLICIES, "overlap_policy")
+        quiet = _parse_quiet_hours(quiet_hours)
+        nag_every_s = max(0.0, float(nag_every_s or 0.0))
+        max_nags = max(0, int(max_nags or 0))
+        if nag_every_s > 0 and max_nags == 0:
+            max_nags = 1
         metadata = {
             "heavy": heavy, "weight": weight, "tz": tz or "",
             "missed_fire_policy": missed_fire_policy,
@@ -916,9 +1212,15 @@ class Scheduler:
             "max_attempts": max(1, int(max_attempts or 1)),
             "retry_base_s": max(5.0, float(retry_base_s or 60.0)),
             "fail_count": 0,
+            "nag_every_s": nag_every_s,
+            "max_nags": max_nags,
+            "nag_count": 0,
+            "quiet_hours": list(quiet) if quiet else [],
         }
 
-        if isinstance(due_at, datetime):
+        if isinstance(due_at, str):
+            due_at = _parse_natural_datetime(due_at, tz=tz).timestamp()
+        elif isinstance(due_at, datetime):
             due_at = _interpret_naive(due_at, tz).timestamp()
         
         with self.db.transaction():
@@ -1031,6 +1333,7 @@ class Scheduler:
         timeout_s: float = 0.0,
         max_attempts: int = 1,
         overlap_policy: str = "skip",
+        cooldown_s: float = 0.0,
     ) -> EventHook:
         """Create an event hook.
 
@@ -1052,6 +1355,9 @@ class Scheduler:
             max_attempts: failures before dead-lettering (>= 1)
             overlap_policy: "concurrent" | "skip" | "queue" when a previous
                 hook run is still in flight
+            cooldown_s: debounce — at most one firing per this many seconds;
+                excess triggers are recorded as throttled (never silently
+                dropped)
 
         Returns:
             EventHook object
@@ -1065,6 +1371,8 @@ class Scheduler:
             "timeout_s": max(0.0, float(timeout_s or 0.0)),
             "max_attempts": max(1, int(max_attempts or 1)),
             "overlap_policy": overlap_policy,
+            "cooldown_s": max(0.0, float(cooldown_s or 0.0)),
+            "last_trigger_ts": 0.0,
             "fail_count": 0,
         }
 
@@ -1115,6 +1423,7 @@ class Scheduler:
         """, (event_type,))
 
         triggered = []
+        now = time.time()
 
         for row in rows:
             row = dict(row)
@@ -1123,6 +1432,23 @@ class Scheduler:
                 continue
             task_id = row["task_id"]
             meta = self._row_metadata(row)
+            # cooldown debounce: at most one firing per window
+            cooldown = max(0.0, float(meta.get("cooldown_s") or 0.0))
+            last_ts = float(meta.get("last_trigger_ts") or 0.0)
+            if cooldown > 0 and last_ts and now - last_ts < cooldown:
+                wait = int(cooldown - (now - last_ts))
+                self._record_run(
+                    task_id, now, 0.0, True,
+                    f"throttled: cooldown {cooldown:g}s "
+                    f"({wait}s remaining)", "event")
+                self._emit("throttled", {"task_id": task_id,
+                                         "action": row["action"],
+                                         "event_type": event_type,
+                                         "cooldown_s": cooldown,
+                                         "retry_in_s": wait})
+                _log.info("hook %s throttled (cooldown %ds)",
+                          task_id, wait)
+                continue
             if self._overlap_decision(task_id, meta) != "run":
                 _log.info("hook %s skipped (overlap)", task_id)
                 continue
@@ -1159,8 +1485,10 @@ class Scheduler:
                 continue
             seconds = time.time() - started
             self._mark_flight(task_id, False)
+            meta_patch: dict[str, Any] = {"last_trigger_ts": time.time()}
             if int(meta.get("fail_count") or 0):
-                self._write_meta(task_id, {"fail_count": 0})
+                meta_patch["fail_count"] = 0
+            self._write_meta(task_id, meta_patch)
             self._record_run(task_id, started, seconds, True,
                              f"event {event_type}", "event")
 
@@ -1189,7 +1517,7 @@ class Scheduler:
     async def schedule_once(
         self,
         task_id: str | None,
-        run_at: datetime | float,
+        run_at: datetime | float | str,
         action: str,
         parameters: dict[str, Any] | None = None,
         *,
@@ -1202,12 +1530,15 @@ class Scheduler:
         timeout_s: float = 0.0,
         max_attempts: int = 1,
         retry_base_s: float = 60.0,
+        quiet_hours: Any = None,
     ) -> ScheduledTask:
         """Schedule a one-time task.
 
         Args:
             task_id: Unique task ID
-            run_at: When to run (naive datetimes are interpreted in ``tz``)
+            run_at: When to run — a datetime, unix timestamp, or natural
+                language ("in 20 minutes", "tomorrow at 8am").  Naive
+                datetimes are interpreted in ``tz``.
             action: Action to execute
             parameters: Action parameters
             heavy: Mark as heavy work (deferred while resources are pressured)
@@ -1220,19 +1551,28 @@ class Scheduler:
             timeout_s: per-execution wall-clock cap (0 = no cap)
             max_attempts: tries before dead-lettering (>= 1)
             retry_base_s: base delay for exponential retry backoff
+            quiet_hours: "23:00-07:00" or ("23:00", "07:00") — a firing
+                inside the window is shifted to the window end.
 
         Returns:
             ScheduledTask object
+
+        Raises:
+            ValueError: bad time/policy, or ``task_id`` already exists.
         """
         task_id = task_id or new_id("task")
+        self._raise_if_exists(task_id)
         parameters = parameters or {}
         tz = _validate_tz(tz)
         missed_fire_policy = _validate_policy(
             missed_fire_policy, MISSED_FIRE_POLICIES, "missed_fire_policy")
         overlap_policy = _validate_policy(
             overlap_policy, OVERLAP_POLICIES, "overlap_policy")
+        quiet = _parse_quiet_hours(quiet_hours)
 
-        if isinstance(run_at, datetime):
+        if isinstance(run_at, str):
+            run_at = _parse_natural_datetime(run_at, tz=tz).timestamp()
+        elif isinstance(run_at, datetime):
             run_at = _interpret_naive(run_at, tz).timestamp()
 
         metadata = {
@@ -1244,6 +1584,7 @@ class Scheduler:
             "max_attempts": max(1, int(max_attempts or 1)),
             "retry_base_s": max(5.0, float(retry_base_s or 60.0)),
             "fail_count": 0,
+            "quiet_hours": list(quiet) if quiet else [],
         }
         with self.db.transaction():
             self.db.execute("""
@@ -1263,6 +1604,323 @@ class Scheduler:
         _log.info(f"Scheduled one-time task: {task_id} at {datetime.fromtimestamp(run_at)}")
         return task
     
+    # ── Task management (unified across types) ───────────────────────────────
+
+    def _hydrate(self, row: dict[str, Any]) -> ScheduledTask:
+        """scheduled_tasks row → CronJob / Reminder / EventHook / ScheduledTask."""
+        meta = self._row_metadata(row)
+        try:
+            params = json.loads(row.get("parameters") or "{}")
+        except (ValueError, TypeError):
+            params = {}
+        if not isinstance(params, dict):
+            params = {}
+        base: dict[str, Any] = {
+            "task_id": row["task_id"],
+            "action": row.get("action") or "",
+            "parameters": params,
+            "status": TaskStatus(row.get("status") or "pending"),
+            "metadata": meta,
+            "created_at": float(row.get("created_at") or 0.0),
+            "updated_at": float(row.get("updated_at") or 0.0),
+        }
+        ttype = row.get("task_type")
+        if ttype == "cron":
+            c = self.db.query_one(
+                "SELECT * FROM cron_jobs WHERE task_id = ?",
+                (row["task_id"],)) or {}
+            return CronJob(
+                **base, cron_expr=c.get("cron_expr") or "",
+                next_run=float(c.get("next_run") or 0.0),
+                last_run=c.get("last_run"),
+                run_count=int(c.get("run_count") or 0),
+                max_runs=c.get("max_runs"), goal_id=c.get("goal_id"))
+        if ttype == "reminder":
+            r = self.db.query_one(
+                "SELECT * FROM reminders WHERE task_id = ?",
+                (row["task_id"],)) or {}
+            return Reminder(
+                **base, text=r.get("text") or "",
+                due_at=float(r.get("due_at") or 0.0),
+                user_id=r.get("user_id") or "",
+                snooze_count=int(r.get("snooze_count") or 0),
+                completed_at=r.get("completed_at"))
+        if ttype == "event_hook":
+            h = self.db.query_one(
+                "SELECT * FROM event_hooks WHERE task_id = ?",
+                (row["task_id"],)) or {}
+            try:
+                conds = json.loads(h.get("conditions") or "{}")
+            except (ValueError, TypeError):
+                conds = {}
+            return EventHook(
+                **base, event_type=h.get("event_type") or "",
+                conditions=conds if isinstance(conds, dict) else {},
+                trigger_count=int(h.get("trigger_count") or 0),
+                max_triggers=h.get("max_triggers"))
+        base["task_type"] = ttype or "one_time"
+        return ScheduledTask(**base)
+
+    async def get_task(self, task_id: str) -> ScheduledTask | None:
+        """Fetch any task by id — cron, reminder, event hook, or one-time."""
+        row = self.db.query_one(
+            "SELECT * FROM scheduled_tasks WHERE task_id = ?", (task_id,))
+        return self._hydrate(dict(row)) if row else None
+
+    async def list_tasks(self, *, active_only: bool = True,
+                         task_type: str | None = None,
+                         ) -> list[ScheduledTask]:
+        """List tasks across all types, newest first.
+
+        ``active_only`` keeps pending/paused/snoozed; ``task_type`` filters
+        to one of "cron" | "reminder" | "event_hook" | "one_time".
+        """
+        rows = self.db.query(
+            "SELECT * FROM scheduled_tasks ORDER BY created_at DESC")
+        out: list[ScheduledTask] = []
+        for r in rows:
+            r = dict(r)
+            if task_type and r.get("task_type") != task_type:
+                continue
+            if active_only and r.get("status") not in (
+                    "pending", "paused", "snoozed"):
+                continue
+            out.append(self._hydrate(r))
+        return out
+
+    def _delete_task_sync(self, task_id: str) -> bool:
+        row = self.db.query_one(
+            "SELECT task_type FROM scheduled_tasks WHERE task_id = ?",
+            (task_id,))
+        if not row:
+            return False
+        table = {"cron": "cron_jobs", "reminder": "reminders",
+                 "event_hook": "event_hooks"}.get(row["task_type"])
+        with self.db.transaction():
+            if table:
+                self.db.execute(
+                    f"DELETE FROM {table} WHERE task_id = ?", (task_id,))
+            self.db.execute(
+                "DELETE FROM task_runs WHERE task_id = ?", (task_id,))
+            self.db.execute(
+                "DELETE FROM scheduled_tasks WHERE task_id = ?", (task_id,))
+        _log.info("Deleted task: %s", task_id)
+        return True
+
+    async def delete_task(self, task_id: str) -> bool:
+        """Delete a task and its run history.  Returns False when unknown."""
+        return self._delete_task_sync(task_id)
+
+    async def update_task(self, task_id: str, *,
+                          action: str | None = None,
+                          parameters: dict[str, Any] | None = None) -> bool:
+        """Change a task's action and/or parameters.  Schedule untouched."""
+        row = self.db.query_one(
+            "SELECT task_id, action, parameters FROM scheduled_tasks "
+            "WHERE task_id = ?", (task_id,))
+        if not row:
+            return False
+        new_action = action if action is not None else row["action"]
+        new_params = (parameters if parameters is not None
+                      else json.loads(row["parameters"] or "{}"))
+        with self.db.transaction():
+            self.db.execute(
+                "UPDATE scheduled_tasks SET action = ?, parameters = ?, "
+                "updated_at = ? WHERE task_id = ?",
+                (new_action, json.dumps(new_params), time.time(), task_id))
+        return True
+
+    def prune_terminal(self, older_than_s: float = 30 * 86400) -> int:
+        """Delete terminal tasks (completed/cancelled/missed/dead) older
+        than ``older_than_s`` — the K8s ``ttlSecondsAfterFinished`` /
+        history-limit gold.  Run history goes with them.  Returns the
+        number of tasks removed.  Never raises."""
+        try:
+            cutoff = time.time() - max(0.0, float(older_than_s))
+            rows = self.db.query(
+                "SELECT task_id FROM scheduled_tasks "
+                "WHERE status IN ('completed', 'cancelled', 'missed', 'dead') "
+                "AND updated_at < ?",
+                (cutoff,))
+            n = 0
+            for r in rows:
+                if self._delete_task_sync(r["task_id"]):
+                    n += 1
+            if n:
+                _log.info("pruned %d terminal task(s)", n)
+            return n
+        except Exception:  # noqa: BLE001 - pruning is housekeeping
+            _log.debug("prune_terminal failed", exc_info=True)
+            return 0
+
+    def preview(self, task_id: str, n: int = 5) -> list[float]:
+        """Next ``n`` firing timestamps (unix) for a task.
+
+        Cron/RRULE jobs expand their recurrence (skip-dates applied;
+        jitter NOT applied — preview shows nominal times).  Reminders and
+        one-time tasks return their single due time while still pending.
+        Event hooks are event-driven → ``[]``.  ``[]`` when unknown.
+        """
+        n = max(1, min(int(n or 5), 100))
+        row = self.db.query_one(
+            "SELECT * FROM scheduled_tasks WHERE task_id = ?", (task_id,))
+        if not row:
+            return []
+        row = dict(row)
+        meta = self._row_metadata(row)
+        ttype = row.get("task_type")
+        if ttype == "cron":
+            c = self.db.query_one(
+                "SELECT * FROM cron_jobs WHERE task_id = ?", (task_id,)) or {}
+            expr = c.get("cron_expr") or ""
+            if not expr:
+                return []
+            cron_row = {"cron_expr": expr, "task_id": task_id,
+                        "created_at": row.get("created_at")}
+            out: list[float] = []
+            cursor = time.time()
+            for _ in range(n):
+                nxt = self._next_valid(cron_row, meta, cursor,
+                                       apply_jitter=False)
+                if nxt is None:
+                    break
+                out.append(nxt)
+                cursor = nxt
+            return out
+        if ttype == "reminder":
+            r = self.db.query_one(
+                "SELECT due_at FROM reminders WHERE task_id = ?",
+                (task_id,)) or {}
+            if row.get("status") in ("pending", "snoozed") and r.get("due_at"):
+                return [float(r["due_at"])]
+            return []
+        if ttype == "one_time":
+            run_at = float(meta.get("run_at") or 0.0)
+            if row.get("status") == "pending" and run_at:
+                return [run_at]
+            return []
+        return []
+
+    async def describe(self, task_id: str) -> str | None:
+        """Chat-ready one-line summary of a task.
+
+        e.g. ``"⏰ Every weekday at 9:00 AM · Africa/Lagos · next: today
+        9:00 AM"``.  Returns None when the task doesn't exist.
+        """
+        task = await self.get_task(task_id)
+        if task is None:
+            return None
+        meta = task.metadata or {}
+        tz = meta.get("tz") or None
+        status = (f" [{task.status.value}]"
+                  if task.status != TaskStatus.PENDING else "")
+        if isinstance(task, CronJob):
+            try:
+                if meta.get("recurrence") == "rrule":
+                    sched = _describe_rrule(task.cron_expr)
+                else:
+                    sched = _describe_cron(task.cron_expr)
+            except ValueError:
+                sched = task.cron_expr
+            nxt = (f" · next: {_fmt_next(task.next_run, tz)}"
+                   if task.next_run else "")
+            tzs = f" · {tz}" if tz else ""
+            return f"⏰ {sched}{tzs}{nxt}{status}"
+        if isinstance(task, Reminder):
+            return (f"🔔 Reminder: {task.text} · "
+                    f"due {_fmt_next(task.due_at, tz)}{status}")
+        if isinstance(task, EventHook):
+            return f"⚡ Hook: {task.event_type} → {task.action}{status}"
+        run_at = float(meta.get("run_at") or 0.0)
+        when = f" · at {_fmt_next(run_at, tz)}" if run_at else ""
+        return f"📋 One-time: {task.action}{when}{status}"
+
+    async def run_now(self, task_id: str) -> bool:
+        """Manually fire a task's action right now (Quartz ``triggerJob``).
+
+        The schedule is untouched — a cron job's ``next_run`` is NOT
+        advanced and a reminder is NOT completed.  Goes through the
+        guarded path (timeout + registered-handler check), records a
+        ``manual`` run, emits ``fired``.  Returns False when unknown.
+        """
+        row = self.db.query_one(
+            "SELECT * FROM scheduled_tasks WHERE task_id = ?", (task_id,))
+        if not row:
+            return False
+        row = dict(row)
+        meta = self._row_metadata(row)
+        action = row["action"]
+        try:
+            parameters = json.loads(row.get("parameters") or "{}")
+        except (ValueError, TypeError):
+            parameters = {}
+        timeout_s = float(meta.get("timeout_s") or 0.0)
+        started = time.time()
+        try:
+            await self._run_guarded(
+                action, parameters if isinstance(parameters, dict) else {},
+                timeout_s)
+        except Exception as exc:  # noqa: BLE001
+            seconds = time.time() - started
+            self._record_run(task_id, started, seconds, False,
+                             f"manual run failed: {str(exc)[:300]}",
+                             "manual")
+            self._emit("failed", {"task_id": task_id, "action": action,
+                                  "manual": True, "error": str(exc)[:300]})
+            return False
+        seconds = time.time() - started
+        self._record_run(task_id, started, seconds, True, "manual run",
+                         "manual")
+        self._emit("fired", {"task_id": task_id, "action": action,
+                             "seconds": round(seconds, 2), "manual": True})
+        _log.info("manual run: %s", task_id)
+        return True
+
+    async def add_skip_dates(self, task_id: str, dates: Any) -> CronJob | None:
+        """Add dates a cron/rrule job never fires on; recomputes next_run."""
+        job = await self.get_cron(task_id)
+        if job is None:
+            return None
+        skips = sorted(set(job.metadata.get("skip_dates") or [])
+                       | set(_normalize_skip_dates(dates)))
+        meta = {**job.metadata, "skip_dates": skips}
+        self._write_meta(task_id, {"skip_dates": skips})
+        nxt = self._next_valid(
+            {"cron_expr": job.cron_expr, "task_id": task_id,
+             "created_at": job.created_at},
+            meta, time.time())
+        with self.db.transaction():
+            if nxt is None:
+                self.db.execute(
+                    "UPDATE scheduled_tasks SET status = 'completed', "
+                    "updated_at = ? WHERE task_id = ?",
+                    (time.time(), task_id))
+            else:
+                self.db.execute(
+                    "UPDATE cron_jobs SET next_run = ? WHERE task_id = ?",
+                    (nxt, task_id))
+        return await self.get_cron(task_id)
+
+    async def remove_skip_dates(self, task_id: str, dates: Any) -> CronJob | None:
+        """Remove dates from a job's skip list; recomputes next_run."""
+        job = await self.get_cron(task_id)
+        if job is None:
+            return None
+        skips = sorted(set(job.metadata.get("skip_dates") or [])
+                       - set(_normalize_skip_dates(dates)))
+        meta = {**job.metadata, "skip_dates": skips}
+        self._write_meta(task_id, {"skip_dates": skips})
+        nxt = self._next_valid(
+            {"cron_expr": job.cron_expr, "task_id": task_id,
+             "created_at": job.created_at},
+            meta, time.time())
+        with self.db.transaction():
+            if nxt is not None:
+                self.db.execute(
+                    "UPDATE cron_jobs SET next_run = ? WHERE task_id = ?",
+                    (nxt, task_id))
+        return await self.get_cron(task_id)
+
     # ── Worker ───────────────────────────────────────────────────────────────
     
     def start(self, *, catch_up: bool = True) -> None:
@@ -1381,6 +2039,8 @@ class Scheduler:
             "deferred": {},
             "dead": [],
             "recent_runs": [],
+            "upcoming": [],
+            "stale": [],
         }
         try:
             out["worker_alive"] = (self._worker_thread is not None
@@ -1417,6 +2077,60 @@ class Scheduler:
             with self._flight_lock:
                 out["in_flight"] = sorted(self._in_flight)
             out["deferred"] = dict(self._deferrals)
+            # upcoming: next 5 firings across cron / reminder / one-time
+            try:
+                upcoming: list[dict[str, Any]] = []
+                for r in self.db.query(
+                        "SELECT t.task_id, t.task_type, c.next_run AS at_ts "
+                        "FROM scheduled_tasks t JOIN cron_jobs c "
+                        "ON c.task_id = t.task_id "
+                        "WHERE t.status = 'pending' ORDER BY c.next_run ASC "
+                        "LIMIT 5"):
+                    upcoming.append({"task_id": r["task_id"], "kind": "cron",
+                                     "at": float(r["at_ts"]),
+                                     "in_s": max(0, int(float(r["at_ts"])
+                                                        - now))})
+                for r in self.db.query(
+                        "SELECT t.task_id, r.due_at AS at_ts FROM "
+                        "scheduled_tasks t JOIN reminders r "
+                        "ON r.task_id = t.task_id "
+                        "WHERE t.status IN ('pending', 'snoozed') "
+                        "ORDER BY r.due_at ASC LIMIT 5"):
+                    upcoming.append({"task_id": r["task_id"],
+                                     "kind": "reminder",
+                                     "at": float(r["at_ts"]),
+                                     "in_s": max(0, int(float(r["at_ts"])
+                                                        - now))})
+                upcoming.sort(key=lambda e: e["at"])
+                out["upcoming"] = upcoming[:5]
+            except Exception:  # noqa: BLE001
+                pass
+            # stale: elapsed-silence heuristic.  A job can show a healthy
+            # *future* next_run while nothing actually executes (the trigger
+            # keeps advancing); the signal that catches it is silence vs
+            # the job's own cadence: no firing for 2x the last interval.
+            try:
+                stale = []
+                for r in self.db.query(
+                        "SELECT t.task_id, c.next_run, c.last_run FROM "
+                        "scheduled_tasks t JOIN cron_jobs c "
+                        "ON c.task_id = t.task_id "
+                        "WHERE t.status = 'pending' AND c.last_run IS NOT "
+                        "NULL LIMIT 50"):
+                    cadence = float(r["next_run"]) - float(r["last_run"])
+                    silence = now - float(r["last_run"])
+                    if cadence > 0 and silence > 2 * cadence:
+                        stale.append({
+                            "task_id": r["task_id"],
+                            "silence_s": int(silence),
+                            "cadence_s": int(cadence),
+                        })
+                out["stale"] = stale[:10]
+                if stale:
+                    out["reasons"].append(
+                        f"{len(stale)} cron job(s) silent beyond 2x cadence")
+            except Exception:  # noqa: BLE001
+                pass
             try:
                 dead = self.db.query(
                     "SELECT task_id, action, updated_at FROM scheduled_tasks "
@@ -1555,8 +2269,7 @@ class Scheduler:
         """Exponential backoff with a touch of jitter: base * 2^(n-1)."""
         delay = max(5.0, float(base_s or 60.0)) * (2.0 ** max(0, fail_count - 1))
         delay = min(delay, 24 * 3600.0)
-        import random as _random
-        return delay * (0.75 + _random.random() * 0.5)
+        return delay * (0.75 + random.random() * 0.5)
 
     async def _run_guarded(self, action: str, parameters: dict[str, Any],
                            timeout_s: float) -> Any:
@@ -1657,9 +2370,13 @@ class Scheduler:
 
     def _advance_cron(self, row: dict[str, Any], meta: dict[str, Any],
                       now: float) -> float | None:
-        """Move a cron/rrule job to its next firing.  Returns next_run."""
+        """Move a cron/rrule job to its next firing.  Returns next_run.
+
+        Goes through :meth:`_next_valid`, so skip-dates are honored and
+        ``jitter_s`` is applied to every firing.
+        """
         task_id = row["task_id"]
-        nxt = self._next_recurrence(row, meta, now)
+        nxt = self._next_valid(row, meta, now)
         with self.db.transaction():
             if nxt is None:
                 # exhausted RRULE (COUNT/UNTIL) — retire like a one-shot
@@ -1692,6 +2409,22 @@ class Scheduler:
         self._record_run(task_id, now - seconds, seconds, False,
                          f"failed (attempt {fail_count}): {error[:300]}",
                          "tick")
+        if meta.get("pause_on_failure") and fail_count < max_attempts:
+            # Temporal --pause-on-failure gold: stop the schedule on the
+            # first failure so a human can inspect; resume() restarts it.
+            with self.db.transaction():
+                self.db.execute(
+                    "UPDATE scheduled_tasks SET status = 'paused', "
+                    "updated_at = ? WHERE task_id = ?",
+                    (time.time(), task_id))
+            self._write_meta(task_id, {"fail_count": fail_count})
+            self._emit("failed", {"task_id": task_id, "action": row["action"],
+                                  "fail_count": fail_count,
+                                  "paused": True,
+                                  "error": error[:300]})
+            _log.warning("cron %s paused after failure (pause_on_failure): %s",
+                         task_id, error[:200])
+            return
         if fail_count >= max_attempts:
             with self.db.transaction():
                 self.db.execute(
@@ -1738,6 +2471,31 @@ class Scheduler:
         if decision == "queue":
             return False
 
+        # quiet hours: shift the firing to the window end (DND), don't drop it
+        quiet = meta.get("quiet_hours") or []
+        shifted = _quiet_shift(
+            now, tuple(quiet) if len(quiet) == 2 else None,
+            meta.get("tz") or None)
+        if shifted is not None:
+            with self.db.transaction():
+                self.db.execute(
+                    "UPDATE reminders SET due_at = ? WHERE task_id = ?",
+                    (shifted, task_id))
+                self.db.execute(
+                    "UPDATE scheduled_tasks SET status = 'pending', "
+                    "updated_at = ? WHERE task_id = ?",
+                    (time.time(), task_id))
+            self._record_run(
+                task_id, now, 0.0, True,
+                f"suppressed: quiet hours → shifted to "
+                f"{_fmt_next(shifted, meta.get('tz') or None)}", "tick")
+            self._emit("deferred", {"task_id": task_id, "action": action,
+                                    "reason": "quiet_hours",
+                                    "shifted_to": shifted})
+            _log.info("reminder %s in quiet hours — shifted to %s",
+                      task_id, _fmt_next(shifted, meta.get("tz") or None))
+            return False
+
         due_at = float(row.get("due_at") or now)
         lateness = now - due_at
         stale_after = float(meta.get("stale_after_s") or 6 * 3600)
@@ -1770,6 +2528,31 @@ class Scheduler:
         self._mark_flight(task_id, False)
         if int(meta.get("fail_count") or 0):
             self._write_meta(task_id, {"fail_count": 0})
+        # nag mode (Due-app "auto snooze"): re-fire until acknowledged
+        nag_every = float(meta.get("nag_every_s") or 0.0)
+        max_nags = int(meta.get("max_nags") or 0)
+        nag_count = int(meta.get("nag_count") or 0)
+        if nag_every > 0 and nag_count < max_nags:
+            nag_count += 1
+            next_due = time.time() + nag_every
+            with self.db.transaction():
+                self.db.execute(
+                    "UPDATE reminders SET due_at = ? WHERE task_id = ?",
+                    (next_due, task_id))
+                self.db.execute(
+                    "UPDATE scheduled_tasks SET status = 'pending', "
+                    "updated_at = ? WHERE task_id = ?",
+                    (time.time(), task_id))
+            self._write_meta(task_id, {"nag_count": nag_count})
+            self._record_run(task_id, started, seconds, True,
+                             f"fired (nag {nag_count}/{max_nags})", "tick")
+            self._emit("fired", {"task_id": task_id, "action": action,
+                                 "seconds": round(seconds, 2),
+                                 "lateness_s": int(lateness),
+                                 "nag": nag_count, "max_nags": max_nags})
+            _log.info("reminder %s fired (nag %d/%d)", task_id,
+                      nag_count, max_nags)
+            return True
         await self.complete_reminder(task_id)
         note = (f"fired {int(lateness)}s late"
                 if lateness > 1 else "fired on time")
@@ -1836,6 +2619,24 @@ class Scheduler:
                 self._record_run(task_id, now, 0.0, True,
                                  "skipped: previous run still in flight "
                                  "(overlap_policy=skip)", "tick")
+            return False
+
+        # quiet hours: shift the firing to the window end (DND), don't drop it
+        quiet = meta.get("quiet_hours") or []
+        shifted = _quiet_shift(
+            now, tuple(quiet) if len(quiet) == 2 else None,
+            meta.get("tz") or None)
+        if shifted is not None:
+            self._write_meta(task_id, {"run_at": shifted})
+            self._record_run(
+                task_id, now, 0.0, True,
+                f"suppressed: quiet hours → shifted to "
+                f"{_fmt_next(shifted, meta.get('tz') or None)}", "tick")
+            self._emit("deferred", {"task_id": task_id, "action": action,
+                                    "reason": "quiet_hours",
+                                    "shifted_to": shifted})
+            _log.info("one-time task %s in quiet hours — shifted to %s",
+                      task_id, _fmt_next(shifted, meta.get("tz") or None))
             return False
 
         lateness = now - run_at

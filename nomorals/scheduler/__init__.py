@@ -43,6 +43,18 @@ Usage:
 """
 
 from .scheduler import Scheduler, CronJob, Reminder, EventHook, ScheduledTask
+from .recurrence import (
+    CronSpec,
+    RRule,
+    describe_cron,
+    describe_rrule,
+    parse_cron,
+    parse_natural_datetime,
+    parse_natural_schedule,
+    parse_rrule,
+    parse_rrule_set,
+    prev_cron,
+)
 
 __all__ = [
     "Scheduler",
@@ -50,4 +62,14 @@ __all__ = [
     "Reminder",
     "EventHook",
     "ScheduledTask",
+    "CronSpec",
+    "RRule",
+    "describe_cron",
+    "describe_rrule",
+    "parse_cron",
+    "parse_natural_datetime",
+    "parse_natural_schedule",
+    "parse_rrule",
+    "parse_rrule_set",
+    "prev_cron",
 ]
