@@ -36,17 +36,15 @@ def _pipeline():
 # ── inpaint / outpaint ───────────────────────────────────────────────
 def inpaint(image: Image.Image, mask: Image.Image, prompt: str = "",
             *, pipeline=None) -> tuple[Image.Image, str]:
-    """Fill the masked region. Neural when a pipeline exists, else telea."""
+    """Fill the masked region. Neural when a pipeline exists, else CPU.
+
+    Routes through :func:`imggen.edit.inpaint_auto` (blended diffusion
+    → cv2 Telea/NS → numpy Voronoi-diffuse) with an honest tier label.
+    """
     pipe = pipeline or _pipeline()
-    if pipe is not None:
-        try:
-            from ..imggen.edit import inpaint as _neural
-            return _neural(pipe, image, mask, prompt or "seamless fill")[0], \
-                "neural-inpaint"
-        except Exception:
-            pass
-    from ..cv_ops import inpaint_diffuse
-    return inpaint_diffuse(image, mask), "diffusion-fill"
+    from ..imggen.edit import inpaint_auto
+    return inpaint_auto(image, mask, prompt or "seamless fill",
+                        pipeline=pipe)
 
 
 def outpaint(image: Image.Image, target_w: int, target_h: int,

@@ -210,7 +210,7 @@ def test_filler_frames_and_extend(tmp_path):
     mids = fill_frames(a, b, 3)
     assert len(mids) == 3 and all(m.size == (48, 48) for m in mids)
     ext, backend = extend_background(a, 96, 72)
-    assert ext.size == (96, 72) and backend == "mirror-pad"
+    assert ext.size == (96, 72) and "non-neural" in backend
 
 
 def test_interpolation_backend_is_honest():
@@ -286,7 +286,7 @@ def test_ai_edit_cpu_ops():
     mask = Image.new("L", (64, 64), 0)
     ImageDraw.Draw(mask).ellipse([16, 16, 48, 48], fill=255)
     out, b = ae.object_removal(img, mask)
-    assert b == "diffusion-fill" and out.size == (64, 64)
+    assert "non-neural" in b and out.size == (64, 64)
     out, b = ae.relight_photo(img, "rembrandt", warmth=0.4)
     assert b == "photo-relight(rembrandt)"
     out, b = ae.background_replace(img, Image.new("RGB", (64, 64), (10, 40, 90)), mask)

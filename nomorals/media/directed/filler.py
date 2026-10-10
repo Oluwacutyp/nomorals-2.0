@@ -282,22 +282,14 @@ def extend_background(image: Image.Image, target_w: int, target_h: int,
             return out, "neural-outpaint"
         except Exception:
             pass
-    # CPU: mirror pad then blur the seam
+    # CPU: edge-extrude + seam-band inpaint + pyramid blend
+    # (imggen.edit.outpaint_cpu) — content-aware extension, no torch.
     ox, oy = (target_w - w) // 2, (target_h - h) // 2
-    import numpy as np
-    arr = np.array(image)
-    pad_x = (ox, target_w - w - ox)
-    pad_y = (oy, target_h - h - oy)
-    big = (np.pad(arr, ((pad_y[0], pad_y[1]), (pad_x[0], pad_x[1]), (0, 0)),
-                  mode="reflect")
-           if (any(pad_x) or any(pad_y)) else arr)
-    canvas = Image.fromarray(big)
-    soft = canvas.filter(ImageFilter.GaussianBlur(3))
-    mask = Image.new("L", (target_w, target_h), 0)
-    from PIL import ImageDraw
-    ImageDraw.Draw(mask).rectangle([ox, oy, ox + w, oy + h], fill=255)
-    mask = mask.filter(ImageFilter.GaussianBlur(12))
-    return Image.composite(canvas, soft, mask), "mirror-pad"
+    from ..imggen.edit import outpaint_cpu
+    out, label = outpaint_cpu(
+        image, prompt, left=ox, top=oy,
+        right=target_w - w - ox, bottom=target_h - h - oy)
+    return out, label
 
 
 def _find_pipeline():
