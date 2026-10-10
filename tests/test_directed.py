@@ -314,3 +314,67 @@ def test_spine_tools_registered():
               "direct_to_timeline", "animate_photo",
               "camera_look", "list_actions"):
         assert n in names, n
+
+
+# -- prompt engine: new backend renderers (golden outputs) ---------------------
+
+def _chef_sp(**kw):
+    from nomorals.media.directed.prompt_engine import structure
+    return structure(
+        "a chef raises a flaming pan, dolly in, rule of thirds, "
+        "golden hour, cinematic", **kw)
+
+
+def test_prompt_hunyuanvideo_golden():
+    r = _chef_sp(backend="hunyuanvideo").render("hunyuanvideo")
+    assert r["backend"] == "hunyuanvideo"
+    assert "dolly" in r["prompt"].lower()
+    assert "rule-of-thirds" in r["prompt"]  # composition woven in
+    assert "at 0.0s" in r["prompt"]  # timed beats
+    assert "The camera:" in r["prompt"]  # camera section
+    assert len(r["prompt"].split()) <= 250
+    assert "jerky motion" in r["negative_prompt"]  # motion-artifact set
+    # alias
+    assert _chef_sp().render("hunyuan")["backend"] == "hunyuanvideo"
+
+
+def test_prompt_mochi_golden():
+    r = _chef_sp().render("mochi")
+    assert r["prompt"].startswith("Cinematic.")  # named style brief
+    assert "rule-of-thirds" in r["prompt"]
+    assert "morphing face" in r["negative_prompt"]  # temporal artifacts
+
+
+def test_prompt_cogvideox_golden():
+    r = _chef_sp().render("cogvideox")
+    assert "Camera work:" in r["prompt"]  # camera last, prose paragraph
+    assert "raises a flaming pan" in r["prompt"].lower()
+    assert "inconsistent motion" in r["negative_prompt"]  # official set
+    assert _chef_sp().render("cogvideo")["backend"] == "cogvideox"
+
+
+def test_prompt_svd_is_motion_directive():
+    r = _chef_sp().render("svd")
+    assert "Camera: slow dolly push-in." in r["prompt"]
+    assert r["negative_prompt"] == ""  # no text encoder — honest empty
+
+
+def test_negative_prompt_builder():
+    from nomorals.media.directed.prompt_engine import negative_prompt
+    base = negative_prompt("hunyuanvideo")
+    assert "watermark" in base
+    extended = negative_prompt("hunyuanvideo", extra="cartoon, painting")
+    assert extended.startswith(base) and extended.endswith("painting")
+    assert negative_prompt("motion") == ""
+    # unknown backend falls back to the generic video negative
+    assert "blurry" in negative_prompt("mystery-backend")
+
+
+def test_composition_vocabulary_extracted():
+    from nomorals.media.directed.prompt_engine import (
+        structure, COMPOSITION)
+    assert "leading lines" in COMPOSITION and "headroom" in COMPOSITION
+    sp = structure("portrait with leading lines and deep headroom")
+    assert len(sp.composition) >= 2
+    r = sp.render("mochi")
+    assert "Composition:" in r["prompt"]

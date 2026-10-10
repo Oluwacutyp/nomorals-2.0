@@ -70,6 +70,10 @@ _SC_HOST_RE = re.compile(
 
 _YT_ID_RE = re.compile(r"[A-Za-z0-9_\-]{11}\Z")
 
+#: SoundCloud api-v2 ``policy`` values that are NOT full streams.
+#: "ALLOW" (or empty — yt-dlp probes carry no policy) means full audio.
+_PREVIEW_POLICIES = {"PREVIEW", "SNIP", "BLOCK", "DENY"}
+
 _SPOTIFY_URI_KINDS = (
     "track", "album", "playlist", "episode", "show", "artist",
 )
@@ -82,6 +86,26 @@ class ResolutionError(Exception):
         super().__init__(message)
         self.strategy = strategy
         self.message = message
+
+
+def _info_is_preview_only(info: dict) -> bool:
+    """Does a yt-dlp probe describe a preview-only SoundCloud track?
+
+    The signal is the same one the SoundCloud adapter's ``stream_url``
+    uses on final stream URLs: SoundCloud's ``/preview/`` path in any
+    format/stream URL. yt-dlp probes carry no ``policy`` field, so this
+    is the only pre-download signal available.
+    """
+    urls: list[str] = []
+    if info.get("url"):
+        urls.append(str(info["url"]))
+    for fmt in info.get("formats") or []:
+        if not isinstance(fmt, dict):
+            continue
+        for key in ("url", "format_note"):
+            if fmt.get(key):
+                urls.append(str(fmt[key]))
+    return any("/preview/" in u for u in urls)
 
 
 @dataclass
@@ -415,6 +439,20 @@ class SourceResolver:
                               f"unsupported SoundCloud kind {kind!r}")
 
     @classmethod
+    def _preview_reason(cls, tr: Any) -> str:
+        """Why this SoundCloud track dict is preview-only, or "" when
+        it's a full stream. Checks the api-v2 ``policy`` AND explicit
+        preview flags (yt-dlp probes carry no policy, so the flag is
+        the only signal there)."""
+        tr = tr or {}
+        policy = str(tr.get("policy") or "").upper()
+        if policy and policy != "ALLOW":
+            return f"policy={policy}"
+        if tr.get("preview") or tr.get("preview_url"):
+            return "preview flag set"
+        return ""
+
+    @classmethod
     def _track_result(cls, tr: Any, source_name: str) -> ResolvedAudio:
         tr = tr or {}
         permalink = str(tr.get("permalink_url") or "")
@@ -424,12 +462,12 @@ class SourceResolver:
         # Preview-only tracks (~30s clips) are useless — fall through to
         # full-track sources (YouTube, Audiomack, etc.) instead of
         # silently downloading a preview.
-        policy = str(tr.get("policy") or "").upper()
-        if policy and policy != "ALLOW":
+        reason = cls._preview_reason(tr)
+        if reason:
             raise ResolutionError(
                 "soundcloud-api",
-                f"track {tr.get('title', '')!r} is {policy} "
-                f"(preview-only); trying full-track sources")
+                f"track {tr.get('title', '')!r} is preview-only "
+                f"({reason}); trying full-track sources")
         return ResolvedAudio(
             ok=True, path_or_url=permalink,
             title=str(tr.get("title") or permalink),
@@ -444,9 +482,20 @@ class SourceResolver:
         if not tracks:
             raise ResolutionError("soundcloud-api",
                                   f"no playable tracks at {url!r}")
-        first = self._track_result(tracks[0], source_name)
+        playable = [t for t in tracks
+                    if not self._preview_reason(t or {})]
+        skipped = len(tracks) - len(playable)
+        if not playable:
+            raise ResolutionError(
+                "soundcloud-api",
+                f"all {len(tracks)} tracks at {url!r} are preview-only; "
+                f"trying full-track sources")
+        if skipped:
+            _log.info("resolver: skipped %d preview-only tracks at %s",
+                      skipped, url)
+        first = self._track_result(playable[0], source_name)
         first.extra_tracks = [self._track_result(t, source_name)
-                              for t in tracks[1:]]
+                              for t in playable[1:]]
         return first
 
     def _s_soundcloud_search(self, query: str) -> ResolvedAudio:
@@ -494,6 +543,11 @@ class SourceResolver:
             # yt-dlp routed a SoundCloud URL dynamically — keep the
             # soundcloud kind so the player still prefers the API for
             # fresh stream URLs, with yt-dlp as the download fallback.
+            if _info_is_preview_only(info):
+                # SoundCloud only serves a ~30s preview for this track —
+                # don't claim it; fall through to full-track sources.
+                return self._soundcloud_preview_fallback(
+                    title, str(info.get("uploader") or ""), url)
             out = self._track_result(
                 {"permalink_url": webpage, "title": title,
                  "artist": str(info.get("uploader") or ""),
@@ -503,6 +557,36 @@ class SourceResolver:
         return ResolvedAudio(ok=True, path_or_url=url, title=title,
                              duration=duration, kind="url",
                              source_name=f"yt-dlp ({extractor})")
+
+    def _soundcloud_preview_fallback(self, title: str, artist: str,
+                                     url: str) -> ResolvedAudio:
+        """A SoundCloud URL that only yields a preview: try YouTube for
+        the full track before giving up. Raises ResolutionError when
+        even that finds nothing — the chain then reports honestly."""
+        from .playback import PlaybackEngine  # lazy: same layer
+
+        query = f"{artist} {title}".strip() or title
+        _log.info("resolver: %s is preview-only on SoundCloud — "
+                  "falling back to YouTube search for %r", url, query[:60])
+        try:
+            video_id = PlaybackEngine._youtube_search_id(query)
+        except Exception as exc:  # noqa: BLE001
+            raise ResolutionError(
+                "yt-dlp",
+                f"SoundCloud only serves a preview (~30s) for {title!r}; "
+                f"YouTube fallback failed: {exc}") from exc
+        if not _YT_ID_RE.match(str(video_id or "")):
+            raise ResolutionError(
+                "yt-dlp",
+                f"SoundCloud only serves a preview (~30s) for {title!r}; "
+                f"no YouTube full-track match either")
+        return ResolvedAudio(
+            ok=True,
+            path_or_url=PlaybackEngine._youtube_watch_url(video_id),
+            title=title, artist=artist, kind="youtube",
+            source_name="YouTube search (SoundCloud preview fallback)",
+            hint=f"SoundCloud only serves a ~30s preview of {title!r} — "
+                 f"playing the full track from YouTube instead")
 
     def _s_youtube_search(self, query: str) -> ResolvedAudio:
         from .playback import PlaybackEngine  # lazy: same layer

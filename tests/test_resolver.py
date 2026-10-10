@@ -370,3 +370,116 @@ def test_resolve_result_shape():
                  "errors", "hint", "kind", "source_name",
                  "downloadable", "extra_tracks"):
         assert hasattr(out, attr), f"missing {attr}"
+
+
+# ── preview-only detection + fall-through ───────────────────────────────
+
+
+def test_track_result_rejects_preview_policies():
+    for policy in ("PREVIEW", "SNIP", "BLOCK"):
+        tr = _track(title="T", permalink="https://soundcloud.com/a/t")
+        tr["policy"] = policy
+        with pytest.raises(ResolutionError) as ei:
+            SourceResolver._track_result(tr, "SoundCloud API")
+        assert "preview" in str(ei.value).lower()
+    # ALLOW and empty policy still pass
+    for policy in ("ALLOW", ""):
+        tr = _track(title="T", permalink="https://soundcloud.com/a/t")
+        tr["policy"] = policy
+        out = SourceResolver._track_result(tr, "SoundCloud API")
+        assert out.ok and out.kind == "soundcloud"
+
+
+def test_track_result_rejects_preview_flag():
+    tr = _track(title="T", permalink="https://soundcloud.com/a/t")
+    tr["preview"] = True
+    with pytest.raises(ResolutionError):
+        SourceResolver._track_result(tr, "SoundCloud API")
+
+
+def test_track_list_skips_preview_only_first_track():
+    sc_tracks = [
+        {"permalink_url": "https://soundcloud.com/a/preview",
+         "title": "Preview", "policy": "PREVIEW", "duration_ms": 30000},
+        {"permalink_url": "https://soundcloud.com/a/full",
+         "title": "Full", "policy": "ALLOW", "duration_ms": 180000},
+    ]
+    r = SourceResolver(None)
+    out = r._track_list_result(
+        sc_tracks, "https://soundcloud.com/a/playlist", "SoundCloud API")
+    assert out.ok and out.title == "Full"
+    assert out.extra_tracks == []
+
+
+def test_track_list_all_preview_fails_honestly():
+    sc_tracks = [
+        {"permalink_url": "https://soundcloud.com/a/p1",
+         "title": "P1", "policy": "PREVIEW"},
+    ]
+    r = SourceResolver(None)
+    with pytest.raises(ResolutionError) as ei:
+        r._track_list_result(sc_tracks, "https://soundcloud.com/a/pl",
+                             "SoundCloud API")
+    assert "preview-only" in str(ei.value)
+
+
+def test_info_is_preview_only_signal():
+    from nomorals.media.resolver import _info_is_preview_only
+    assert not _info_is_preview_only(
+        {"formats": [{"url": "https://cf-hls-media.sndcdn.com/abc.m3u8"}]})
+    assert _info_is_preview_only(
+        {"formats": [{"url": "https://preview.sndcdn.com/preview/abcd.mp3"}]})
+    assert _info_is_preview_only(
+        {"url": "https://api-v2.soundcloud.com/preview/xyz"})
+    assert not _info_is_preview_only({})
+
+
+def test_ytdlp_soundcloud_preview_falls_back_to_youtube(monkeypatch):
+    from nomorals.media import playback as playback_mod
+    sc = FakeSoundCloud(fail_resolve=True)
+
+    def fake_probe(url):
+        return {"id": "12345", "title": "Cool Track",
+                "uploader": "DJ X", "duration": 30.0,
+                "extractor": "soundcloud", "webpage_url": url,
+                "formats": [
+                    {"url": "https://preview.sndcdn.com/preview/x.mp3"}]}
+
+    def fake_yt_search(cls, query):
+        assert "Cool Track" in query
+        return "dQw4w9WgXcQ"
+
+    monkeypatch.setattr(resolver, "probe", fake_probe)
+    monkeypatch.setattr(playback_mod.PlaybackEngine, "_youtube_search_id",
+                        classmethod(fake_yt_search))
+    out = SourceResolver(None, soundcloud=sc).resolve(
+        "https://soundcloud.com/artist/cool-track")
+    assert out.ok, f"errors: {out.errors}"
+    assert out.kind == "youtube"
+    assert "preview" in out.source_name.lower()
+    assert "youtube.com/watch?v=dQw4w9WgXcQ" in out.path_or_url
+    assert "preview" in out.hint.lower()
+
+
+def test_ytdlp_soundcloud_preview_no_youtube_match_fails_honestly(
+        monkeypatch):
+    from nomorals.media import playback as playback_mod
+    sc = FakeSoundCloud(fail_resolve=True)
+
+    def fake_probe(url):
+        return {"id": "12345", "title": "Obscure Track",
+                "uploader": "Nobody", "duration": 30.0,
+                "extractor": "soundcloud", "webpage_url": url,
+                "formats": [
+                    {"url": "https://preview.sndcdn.com/preview/x.mp3"}]}
+
+    def fake_yt_search(cls, query):
+        return ""  # no match
+
+    monkeypatch.setattr(resolver, "probe", fake_probe)
+    monkeypatch.setattr(playback_mod.PlaybackEngine, "_youtube_search_id",
+                        classmethod(fake_yt_search))
+    out = SourceResolver(None, soundcloud=sc).resolve(
+        "https://soundcloud.com/artist/obscure-track")
+    assert not out.ok
+    assert any("preview" in e.lower() for e in out.errors), out.errors
