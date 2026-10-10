@@ -289,9 +289,17 @@ class SelfHealingExecutor:
         similar = self.journal.find_similar(exc, self.subsystem)
         chronic = self.journal.is_chronic(exc, self.subsystem)
 
-        # Strategy 0: memory — a verified fix for this exact shape wins.
+        # Strategy 0: memory — a verified fix for this exact shape goes first.
         known = self.journal.known_fix(exc, self.subsystem)
         strategies: list[RecoveryStrategy] = list(self.strategies)
+        if known:
+            # Move the strategy that produced the verified fix to the front.
+            match = [s for s in strategies if s.name == known["strategy"]]
+            rest = [s for s in strategies if s.name != known["strategy"]]
+            if match:
+                _log.info("selfheal: known verified fix %r for %s — trying first",
+                          known["strategy"], incident.signature)
+                strategies = match + rest
         if fallbacks:
             strategies.append(FallbackChainStrategy(fallbacks))
         if on_credential_refresh:

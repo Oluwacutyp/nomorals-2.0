@@ -196,18 +196,42 @@ def test_executor_escalates_when_nothing_works():
 def test_executor_uses_known_fix_first():
     j = IncidentJournal()
     from nomorals.core.incidents import RecoveryRecord
+
+    order = []
+
+    class NamedRetry(RetryStrategy):
+        name = "retry"
+
+        def attempt(self, fn, analysis, ctx):
+            order.append("retry")
+            return super().attempt(fn, analysis, ctx)
+
+    class NamedFallback(FallbackChainStrategy):
+        name = "fallback_chain"
+
+        def attempt(self, fn, analysis, ctx):
+            order.append("fallback_chain")
+            return super().attempt(fn, analysis, ctx)
+
     def known_shape():
         raise ValueError("known shape")
     e = _capture(known_shape)
     inc = j.record_incident(e, subsystem="test")
-    j.record_recovery(RecoveryRecord(inc.id, inc.signature, "retry",
+    j.record_recovery(RecoveryRecord(inc.id, inc.signature, "fallback_chain",
                                      detail="works", verified=True,
                                      verify_note="ok"))
-    ex = SelfHealingExecutor("test", journal=j,
-                             strategies=[RetryStrategy(
-                                 BackoffPolicy(base=0.0, max_attempts=2))])
-    out = ex.execute(lambda: "fine")
-    assert out.status == RecoveryStatus.OK  # primary worked; memory unused
+    ex = SelfHealingExecutor(
+        "test", journal=j,
+        strategies=[NamedRetry(BackoffPolicy(base=0.0, max_attempts=1)),
+                    NamedFallback([("fb", lambda: "fb-ok")])])
+
+    def always_fails():
+        raise ValueError("known shape")
+
+    out = ex.execute(always_fails, verify=lambda r: True)
+    # fallback_chain produced the verified fix before, so it runs first.
+    assert order[0] == "fallback_chain"
+    assert out.ok
 
 
 def test_circuit_breaker_fast_path():

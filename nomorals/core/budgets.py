@@ -184,23 +184,35 @@ class ErrorBudget:
                     except Exception:  # noqa: BLE001 - alert hook must not break checks
                         _log.exception("budget on_alert hook failed")
 
-        # Budget policy levels (independent of burn rate).
+        # Budget policy levels (independent of burn rate). Cooldown applies
+        # here too — a dead budget pages once per cooldown, not per check.
+        def _policy_alert(rule: str, severity: str, message: str,
+                          burn: float) -> BudgetAlert | None:
+            last = self._fired.get(rule, 0.0)
+            if now - last < self._cooldown_s:
+                return None
+            with self._lock:
+                self._fired[rule] = now
+            return BudgetAlert(
+                subsystem=self.subsystem, rule=rule, severity=severity,
+                burn_rate=burn, observed_ratio=0.0,
+                budget_remaining=remaining, message=message, ts=now)
+
         if remaining <= 0.0:
-            alerts.append(BudgetAlert(
-                subsystem=self.subsystem, rule="budget_exhausted",
-                severity="page", burn_rate=float("inf"),
-                observed_ratio=0.0, budget_remaining=0.0,
-                message=(f"{self.subsystem}: error budget EXHAUSTED —"
-                         " freeze risky changes, reliability work only."),
-                ts=now))
+            alert = _policy_alert(
+                "budget_exhausted", "page",
+                f"{self.subsystem}: error budget EXHAUSTED —"
+                " freeze risky changes, reliability work only.",
+                float("inf"))
+            if alert:
+                alerts.append(alert)
         elif remaining < 0.2:
-            alerts.append(BudgetAlert(
-                subsystem=self.subsystem, rule="budget_low",
-                severity="warning", burn_rate=0.0,
-                observed_ratio=0.0, budget_remaining=remaining,
-                message=(f"{self.subsystem}: error budget at"
-                         f" {remaining:.0%} — reliability work takes priority."),
-                ts=now))
+            alert = _policy_alert(
+                "budget_low", "warning",
+                f"{self.subsystem}: error budget at {remaining:.0%}"
+                " — reliability work takes priority.", 0.0)
+            if alert:
+                alerts.append(alert)
         return alerts
 
     def status(self, now: float | None = None) -> dict[str, Any]:
