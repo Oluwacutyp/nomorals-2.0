@@ -69,6 +69,9 @@ class Estimate:
     deadline: float = 0.0   # user-facing: the conservative quote (Meituan: max)
     source: str = "heuristic"  # learned | heuristic
     miss_count: int = 0
+    #: standard deviation of the band (PERT-style; half the band span / 2
+    #: by default).  Used by project-level aggregation (variances add).
+    std_minutes: float = 0.0
 
     def format(self, start_epoch: float | None = None) -> str:
         """'ETA 4:30pm (range 4:15–4:50)' — wall-clock when a start is known."""
@@ -184,14 +187,15 @@ class EstimateStore:
             conf = self._confidence(stats)
             # Meituan: user-facing deadline = most conservative estimator.
             deadline = total_hi
+            std = max(0.0, (total_hi - total_lo) / 4.0)
             return Estimate(task_type, total_p, total_lo, total_hi, conf,
                             seg_out, deadline,
                             "learned" if learned_any else "heuristic",
-                            misses)
+                            misses, std_minutes=round(std, 2))
         except Exception:  # noqa: BLE001
             _log.warning("estimates: estimate failed", exc_info=True)
             return Estimate("generic", 30.0, 15.0, 60.0, 0.3, [], 60.0,
-                            "heuristic", 0)
+                            "heuristic", 0, std_minutes=11.25)
 
     def _norm_segments(self, segments: Any) -> list[tuple[str, float]]:
         out: list[tuple[str, float]] = []
@@ -373,6 +377,91 @@ class EstimateStore:
             return msg
         except Exception:  # noqa: BLE001
             return None
+
+
+# ── PERT three-point estimation (U.S. Navy Polaris, 1958) ──────────────
+
+def pert(optimistic: float, most_likely: float, pessimistic: float
+         ) -> tuple[float, float]:
+    """Three-point estimate -> ``(expected_minutes, std_minutes)``.
+
+    TE = (O + 4M + P) / 6 (the beta-distribution mean), sigma = (P - O) / 6.
+    The classical input format for work with no history: a person quotes
+    best-case / normal / worst-case and the math absorbs the uncertainty.
+    Never raises; bad input -> (0.0, 0.0).
+    """
+    try:
+        o = max(0.0, float(optimistic))
+        m = max(0.0, float(most_likely))
+        p = max(0.0, float(pessimistic))
+        if p < o:
+            o, p = p, o
+        m = min(max(m, o), p)
+        te = (o + 4.0 * m + p) / 6.0
+        sigma = (p - o) / 6.0
+        return round(te, 2), round(sigma, 2)
+    except (TypeError, ValueError):
+        return 0.0, 0.0
+
+
+def pert_estimate(task_type: str, optimistic: float, most_likely: float,
+                  pessimistic: float, *, db_path: str = "") -> Estimate:
+    """A banded Estimate built from a PERT three-point quote.
+
+    The band is TE ± 2σ (roughly a 95% interval), and it still flows
+    through the learned store so recorded actuals keep correcting it.
+    Never raises.
+    """
+    try:
+        te, sigma = pert(optimistic, most_likely, pessimistic)
+        low = max(0.0, te - 2.0 * sigma)
+        high = te + 2.0 * sigma
+        store = get_store(db_path)
+        stats = store._stats((task_type or "generic").strip().lower())
+        if stats["n"] >= 3 and stats["ema_ratio"] > 0:
+            ratio = min(3.0, max(0.33, stats["ema_ratio"]))
+            te, low, high = te * ratio, low * ratio, high * ratio
+        return Estimate((task_type or "generic").strip().lower() or "generic",
+                        round(te, 2), round(low, 2), round(high, 2),
+                        confidence=0.5, segments=[], deadline=round(high, 2),
+                        source="pert", miss_count=stats["misses"],
+                        std_minutes=round(sigma, 2))
+    except Exception:  # noqa: BLE001
+        return Estimate("generic", 30.0, 15.0, 60.0, 0.3, [], 60.0,
+                        "heuristic", 0, std_minutes=11.25)
+
+
+def aggregate(task_type: str, parts: list[Estimate]) -> Estimate:
+    """Project-level band from per-step estimates.
+
+    Expected time = sum of step expectations; variances add in
+    quadrature (independent steps): sigma_total = sqrt(sum(sigma^2)).
+    Band = TE ± 2σ, deadline = the conservative end (Meituan).  Never
+    raises; empty input -> a generic honest band.
+    """
+    try:
+        parts = [p for p in (parts or []) if p is not None]
+        if not parts:
+            return Estimate((task_type or "project").strip().lower()
+                            or "project", 30.0, 15.0, 60.0, 0.3, [], 60.0,
+                            "heuristic", 0, std_minutes=11.25)
+        te = sum(p.point for p in parts)
+        var = sum((p.std_minutes or 0.0) ** 2 for p in parts)
+        sigma = math.sqrt(var)
+        low = max(0.0, te - 2.0 * sigma)
+        high = te + 2.0 * sigma
+        learned = any(p.source == "learned" for p in parts)
+        pert_any = any(p.source == "pert" for p in parts)
+        source = "learned" if learned else ("pert" if pert_any else "heuristic")
+        conf = min(p.confidence for p in parts)
+        misses = sum(p.miss_count for p in parts)
+        return Estimate((task_type or "project").strip().lower() or "project",
+                        round(te, 2), round(low, 2), round(high, 2),
+                        round(conf, 2), [], round(high, 2), source, misses,
+                        std_minutes=round(sigma, 2))
+    except Exception:  # noqa: BLE001
+        return Estimate("generic", 30.0, 15.0, 60.0, 0.3, [], 60.0,
+                        "heuristic", 0, std_minutes=11.25)
 
 
 # ── module-level convenience (lazy singleton) ────────────────────

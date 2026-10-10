@@ -60,7 +60,11 @@ def _prefs(context: Any) -> dict[str, Any]:
     if bs is not None and hasattr(bs, "__dict__"):
         for k in out:
             v = getattr(bs, k, None)
-            if v:
+            if k == "enabled":
+                # a falsy switch is a real setting, not a missing one
+                if v is not None:
+                    out[k] = bool(v)
+            elif v:
                 out[k] = v
         return out
     try:
@@ -85,6 +89,97 @@ def pulse_timezone(context: Any) -> str:
 
 def pulse_enabled(context: Any) -> bool:
     return bool(_prefs(context).get("enabled", True))
+
+
+# ── last-run marker (catch-up + "did it deliver?" observability) ──
+
+def _marker_path(context: Any) -> Path | None:
+    """Sidecar JSON: the last pulse run's outcome.  Never raises."""
+    try:
+        ws = getattr(getattr(context, "settings", None), "workspace_dir", "")
+        if not ws:
+            return None
+        return Path(ws) / "pulse_last_run.json"
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _read_marker(context: Any) -> dict[str, Any]:
+    try:
+        p = _marker_path(context)
+        if p is not None and p.is_file():
+            data = json.loads(p.read_text(encoding="utf-8"))
+            return data if isinstance(data, dict) else {}
+    except Exception:  # noqa: BLE001
+        pass
+    return {}
+
+
+def _write_marker(context: Any, result: dict[str, Any]) -> None:
+    try:
+        p = _marker_path(context)
+        if p is None:
+            return
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps({
+            "ts": time.time(),
+            "stages": result.get("stages", []),
+            "delivered_text": bool(result.get("delivered_text")),
+            "delivered_audio": bool(result.get("delivered_audio")),
+            "elapsed_s": result.get("elapsed_s", 0),
+        }), encoding="utf-8")
+    except Exception:  # noqa: BLE001
+        _log.debug("morning-pulse: marker write failed", exc_info=True)
+
+
+def last_pulse_run(context: Any) -> dict[str, Any]:
+    """When the pulse last ran and whether it reached the owner."""
+    return _read_marker(context)
+
+
+def _pulse_due_today(context: Any) -> float:
+    """Epoch of today's pulse time in the pulse timezone (0 if the
+    timezone math is unavailable).  Never raises."""
+    try:
+        from datetime import datetime
+        from ..core.tz import safe_zoneinfo
+        tz = safe_zoneinfo(pulse_timezone(context))
+        hh, mm = (pulse_time(context).split(":") + ["0"])[:2]
+        return datetime.now(tz).replace(hour=int(hh), minute=int(mm),
+                                        second=0, microsecond=0).timestamp()
+    except Exception:  # noqa: BLE001
+        return 0.0
+
+
+def check_pulse_catchup(context: Any) -> dict[str, Any]:
+    """Boot-time catch-up for the pulse (mirrors briefing.check_catchup).
+
+    If the pulse is enabled, today's pulse time has passed, and no pulse
+    has *delivered* since then, run it once now — never a backlog, never
+    a duplicate.  This covers the case the scheduler's ``fire_now``
+    policy misses: a pulse that fired but failed to deliver.  Safe to
+    call on every boot.  Never raises.
+    """
+    try:
+        if not pulse_enabled(context):
+            return {"catchup": False, "reason": "pulse disabled"}
+        due = _pulse_due_today(context)
+        now = time.time()
+        if not due or now < due:
+            return {"catchup": False, "reason": "pulse time not reached"}
+        marker = _read_marker(context)
+        last_ts = float(marker.get("ts") or 0)
+        if last_ts >= due and (marker.get("delivered_text")
+                               or marker.get("delivered_audio")):
+            return {"catchup": False, "reason": "already delivered"}
+        _log.info("morning-pulse: catch-up firing (last delivered run "
+                  "before today's %s)", pulse_time(context))
+        result = run_pulse(context)
+        result["catchup"] = True
+        return result
+    except Exception as exc:  # noqa: BLE001
+        _log.warning("morning-pulse catch-up failed: %s", exc)
+        return {"catchup": False, "reason": f"{type(exc).__name__}: {exc}"}
 
 
 # ── scheduler registration ───────────────────────────────────────────────
@@ -313,9 +408,11 @@ def run_pulse(context: Any) -> dict[str, Any]:
         "elapsed_s": elapsed,
         "ok": delivered,
     })
-    return {"ok": True, "stages": stages, "text": briefing_text,
-            "audio_path": audio_path, "delivered_text": text_ok,
-            "delivered_audio": audio_ok, "elapsed_s": elapsed}
+    result = {"ok": True, "stages": stages, "text": briefing_text,
+                "audio_path": audio_path, "delivered_text": text_ok,
+                "delivered_audio": audio_ok, "elapsed_s": elapsed}
+    _write_marker(context, result)
+    return result
 
 
 def _write_script(context: Any, briefing_text: str,
@@ -349,10 +446,17 @@ def _write_script(context: Any, briefing_text: str,
             )
             response = brain_for(context).chat([Message(role="user", content=prompt)], task_kind="creative")
             text = (getattr(response, "text", "") or "").strip()
-            if text and HOST_1_NAME in text:
+            # accept the LLM script when it actually looks like dialogue
+            # (Speaker: line turns) — a missing host name alone shouldn't
+            # discard a good script.
+            dialogue_lines = [ln for ln in text.splitlines()
+                              if ":" in ln and ln.partition(":")[2].strip()]
+            if len(dialogue_lines) >= 2 or HOST_1_NAME in text:
                 _log.info("morning-pulse: LLM wrote %d-char script",
                           len(text))
                 return text
+            _log.info("morning-pulse: LLM reply wasn't dialogue-shaped; "
+                      "using template fallback")
     except Exception as exc:  # noqa: BLE001
         _log.warning("morning-pulse: LLM script failed: %s", exc)
 
@@ -551,7 +655,8 @@ def register(registry: Any) -> None:
         description=(
             "Morning pulse: the autonomous daily briefing with voice. "
             "action=run (news → briefing → voice → deliver now) | "
-            "status (job schedule + last run) | config (show time/timezone)."
+            "status (job schedule + last run) | config (show time/timezone) | "
+            "catchup (run now only if today's pulse never delivered)."
         ),
         capability=Capability.DB_READ,
         parameters={
@@ -570,7 +675,10 @@ def register(registry: Any) -> None:
             return {"job": jobs[0] if jobs else None,
                     "time": pulse_time(context),
                     "timezone": pulse_timezone(context),
-                    "enabled": pulse_enabled(context)}
+                    "enabled": pulse_enabled(context),
+                    "last_run": last_pulse_run(context)}
+        if act == "catchup":
+            return check_pulse_catchup(context)
         if act == "config":
             return {"time": pulse_time(context),
                     "timezone": pulse_timezone(context),

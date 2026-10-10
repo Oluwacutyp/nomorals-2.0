@@ -233,6 +233,8 @@ class AgentPlanner:
         account: str,
         on_progress: Optional[Callable[[str, float], None]] = None,
         on_step_complete: Optional[Callable[[str, Any], None]] = None,
+        step_timeout: float = 300.0,
+        max_retries: int = 2,
     ) -> PlanResult:
         """Execute a goal by decomposing and running a plan.
         
@@ -265,61 +267,111 @@ class AgentPlanner:
             plan.status = PlanStatus.EXECUTING
             plan.started_at = time.time()
             
+            # validate before touching anything (no mid-flight surprises)
+            problems = self.validate_plan(plan)
+            if problems:
+                plan.status = PlanStatus.FAILED
+                plan.completed_at = time.time()
+                plan.error = "; ".join(problems[:5])
+                _log.error(f"Plan invalid, not executed: {plan.error}")
+                return PlanResult(
+                    plan_id=plan.plan_id,
+                    success=False,
+                    steps_completed=0,
+                    steps_total=len(plan.steps),
+                    results={},
+                    errors=[f"invalid plan: {p}" for p in problems],
+                    duration_seconds=time.time() - start_time,
+                    summary="plan failed validation and was not executed: "
+                            + "; ".join(problems[:3]),
+                    plan_error=plan.plan_error,
+                )
+
             results = {}
             errors = []
             completed = 0
-            
-            for step in plan.steps:
+            total = len(plan.steps)
+
+            async def _run_one(step: PlanStep) -> tuple[PlanStep, bool]:
+                """Run one step with retry + timeout. Returns (step, ok)."""
+                nonlocal completed
                 if execution.cancelled:
-                    break
-                
+                    step.status = "skipped"
+                    step.error = "cancelled"
+                    return step, False
+                if not self._check_dependencies(step, results):
+                    step.status = "skipped"
+                    step.error = "dependency failed"
+                    return step, False
                 plan.current_step = step.name
                 step.status = "running"
                 step.started_at = time.time()
-                
-                try:
-                    # Check dependencies
-                    if not self._check_dependencies(step, results):
-                        step.status = "skipped"
-                        step.error = "Dependency failed"
-                        continue
-                    
-                    # Execute step
-                    result = await self._execute_step(step, account)
-                    step.result = result
-                    step.status = "completed"
-                    step.completed_at = time.time()
-                    results[step.step_id] = result
-                    completed += 1
-                    
-                    # Callback
-                    if on_step_complete:
-                        on_step_complete(step.name, result)
-                    
-                    _log.info(f"Step completed: {step.name}")
-                    
-                except Exception as e:
-                    # Analyze error
-                    analysis = self.error_intel.analyze(
-                        e,
-                        context={"step": step.name, "action": step.action}
-                    )
-                    
-                    step.status = "failed"
-                    step.error = analysis.explanation
-                    step.completed_at = time.time()
-                    errors.append(f"{step.name}: {analysis.explanation}")
-                    
-                    _log.error(f"Step failed: {step.name} - {analysis.explanation}")
-                    
-                    # Check if we should continue
-                    if not analysis.retryable:
-                        break
-                
-                # Update progress
-                plan.progress = (completed / len(plan.steps)) * 100
-                if on_progress:
-                    on_progress(step.name, plan.progress)
+                last_exc: Exception | None = None
+                for attempt in range(max(1, max_retries) + 1):
+                    try:
+                        if step_timeout and step_timeout > 0:
+                            result = await asyncio.wait_for(
+                                self._execute_step(step, account),
+                                timeout=step_timeout)
+                        else:
+                            result = await self._execute_step(step, account)
+                        step.result = result
+                        step.status = "completed"
+                        step.completed_at = time.time()
+                        results[step.step_id] = result
+                        completed += 1
+                        if on_step_complete:
+                            on_step_complete(step.name, result)
+                        plan.progress = (completed / total) * 100 if total else 100.0
+                        if on_progress:
+                            on_progress(step.name, plan.progress)
+                        _log.info(f"Step completed: {step.name}")
+                        return step, True
+                    except Exception as e:  # noqa: BLE001 - a step failing is data
+                        last_exc = e
+                        analysis = self.error_intel.analyze(
+                            e, context={"step": step.name,
+                                        "action": step.action})
+                        retryable = bool(getattr(analysis, "retryable", False))
+                        if retryable and attempt < max(1, max_retries):
+                            delay = min(30.0, 2.0 ** attempt)
+                            _log.warning(
+                                f"Step {step.name} failed (retryable), "
+                                f"retry {attempt + 1} in {delay:.0f}s: "
+                                f"{getattr(analysis, 'explanation', e)}")
+                            await asyncio.sleep(delay)
+                            continue
+                        step.status = "failed"
+                        step.error = getattr(analysis, "explanation", str(e))
+                        step.completed_at = time.time()
+                        errors.append(f"{step.name}: {step.error}")
+                        # non-retryable failures halt later batches (below)
+                        step.non_retryable_fail = not retryable
+                        _log.error(f"Step failed: {step.name} - {step.error}")
+                        return step, False
+                step.status = "failed"
+                step.error = str(last_exc) if last_exc else "unknown"
+                step.completed_at = time.time()
+                errors.append(f"{step.name}: {step.error}")
+                return step, False
+
+            for batch in self.execution_batches(plan):
+                if execution.cancelled:
+                    break
+                # independent steps in one batch run in parallel
+                await asyncio.gather(*(_run_one(s) for s in batch))
+                # a failed non-retryable step halts later batches that
+                # depend on it; unrelated later work still runs (skip-on-
+                # failed-deps is checked per step inside _run_one)
+                if any(getattr(s, "non_retryable_fail", False)
+                       for s in batch):
+                    # non-retryable failure: stop launching new batches
+                    for s in plan.steps:
+                        if s.status == "pending":
+                            s.status = "skipped"
+                            s.error = ("halted after non-retryable "
+                                       "step failure")
+                    break
             
             # Finalize
             plan.status = PlanStatus.COMPLETED if not errors else PlanStatus.FAILED
@@ -516,6 +568,96 @@ Generate the plan:"""
                 ]
             }
     
+    def validate_plan(self, plan: Plan) -> list[str]:
+        """Validate a plan BEFORE execution (never mid-flight surprises).
+
+        Checks: every ``depends_on`` id exists, no dependency cycles,
+        every action has a handler, no duplicate step ids.  Returns a
+        list of problem strings (empty = valid).  Never raises.
+        """
+        problems: list[str] = []
+        try:
+            ids = [s.step_id for s in plan.steps]
+            seen: set[str] = set()
+            for sid in ids:
+                if sid in seen:
+                    problems.append(f"duplicate step id: {sid}")
+                seen.add(sid)
+            idset = set(ids)
+            for step in plan.steps:
+                for dep in step.depends_on:
+                    if dep not in idset:
+                        problems.append(
+                            f"step '{step.name}' depends on unknown "
+                            f"step id '{dep}'")
+                    if dep == step.step_id:
+                        problems.append(
+                            f"step '{step.name}' depends on itself")
+                if step.action not in self._action_handlers:
+                    problems.append(
+                        f"step '{step.name}' uses unknown action "
+                        f"'{step.action}'")
+            # cycle detection (DFS on the dependency graph)
+            graph = {s.step_id: [d for d in s.depends_on if d in idset]
+                     for s in plan.steps}
+            color: dict[str, int] = {}
+
+            def _dfs(nid: str, stack: list[str]) -> bool:
+                color[nid] = 1
+                stack.append(nid)
+                for dep in graph.get(nid, []):
+                    if color.get(dep) == 1:
+                        problems.append(
+                            "dependency cycle: "
+                            + " -> ".join(stack + [dep]))
+                        return True
+                    if color.get(dep) is None and _dfs(dep, stack):
+                        return True
+                stack.pop()
+                color[nid] = 2
+                return False
+
+            for nid in graph:
+                if color.get(nid) is None:
+                    _dfs(nid, [])
+        except Exception as exc:  # noqa: BLE001 - never raises
+            problems.append(f"validation broke: {exc}")
+        return problems
+
+    def execution_batches(self, plan: Plan) -> list[list[PlanStep]]:
+        """Topological batches: steps in one batch are independent and
+        run in parallel; batches run in order.  Never raises (a cycle
+        degrades to one step per batch in original order).
+        """
+        try:
+            idset = {s.step_id for s in plan.steps}
+            indeg = {s.step_id: 0 for s in plan.steps}
+            followers: dict[str, list[str]] = {s.step_id: [] for s in plan.steps}
+            for s in plan.steps:
+                for dep in s.depends_on:
+                    if dep in idset and dep != s.step_id:
+                        indeg[s.step_id] += 1
+                        followers[dep].append(s.step_id)
+            by_id = {s.step_id: s for s in plan.steps}
+            order_index = {s.step_id: i for i, s in enumerate(plan.steps)}
+            remaining = set(idset)
+            batches: list[list[PlanStep]] = []
+            while remaining:
+                ready = sorted((nid for nid in remaining if indeg[nid] == 0),
+                               key=lambda nid: order_index[nid])
+                if not ready:  # cycle: break it by original order
+                    nid = min(remaining, key=lambda x: order_index[x])
+                    ready = [nid]
+                batches.append([by_id[nid] for nid in ready])
+                for nid in ready:
+                    remaining.discard(nid)
+                    for f in followers[nid]:
+                        indeg[f] -= 1
+            return batches
+        except Exception:  # noqa: BLE001 - never raises
+            _log.debug("execution_batches failed", exc_info=True)
+            return [[s] for s in plan.steps]
+
     def _check_dependencies(self, step: PlanStep, results: dict[str, Any]) -> bool:
         """Check if all dependencies are satisfied."""
         for dep_id in step.depends_on:

@@ -880,6 +880,91 @@ class FromYourPastProvider(_Provider):
         return out
 
 
+class GoalsProvider(_Provider):
+    """Goal triage: overdue + due-soon goals, then the mission-control
+    pick with its next action.  The "what needs attention today" content
+    a briefing exists to carry.  Never raises."""
+    name = "goals"
+    title = "🎯 Goals"
+    priority = 22
+
+    def collect(self, ctx: Any, since: float) -> BriefingSection | None:
+        try:
+            return self._collect(ctx)
+        except Exception as exc:  # noqa: BLE001 — goals never sink a briefing
+            _log.debug("goals provider skipped: %s", exc)
+            return None
+
+    def _collect(self, ctx: Any) -> BriefingSection | None:
+        from .goals import GoalSystem
+        system = GoalSystem(ctx)
+        lines, items = [], []
+        for g in system.overdue(limit=3):
+            label = system.deadline_text(g)
+            lines.append(f"• 🔴 {g.title} — {label}")
+            items.append({"id": f"goal-{g.id}", "title": g.title,
+                          "body": f"{label}. next: {g.next_action[:200]}"})
+        for g in system.due_soon(within_hours=48, limit=3):
+            if any(i["id"] == f"goal-{g.id}" for i in items):
+                continue
+            label = system.deadline_text(g)
+            lines.append(f"• 🟡 {g.title} — {label}")
+            items.append({"id": f"goal-{g.id}", "title": g.title,
+                          "body": f"{label}. next: {g.next_action[:200]}"})
+        nxt = system.next_goal()
+        if nxt is not None and not any(i["id"] == f"goal-{nxt.id}"
+                                       for i in items):
+            pct = int(round(nxt.progress * 100))
+            nxt_line = (f"• ▶️ {nxt.title} — {pct}%"
+                        + (f" (next: {nxt.next_action[:90]})"
+                           if nxt.next_action else ""))
+            lines.append(nxt_line)
+            items.append({"id": f"goal-{nxt.id}", "title": nxt.title,
+                          "body": (f"{pct}% done. "
+                                   f"next: {nxt.next_action[:200]}")})
+        if not lines:
+            return None
+        return BriefingSection(
+            name=self.name, title=self.title, priority=self.priority,
+            source="goals", items=items, lines=lines)
+
+
+class DisruptionProvider(_Provider):
+    """World-graph disruptions: nodes marked disrupted (flight delayed,
+    blocker appeared) and what they cascade into.  The briefing's early-
+    warning line — "your 2pm depends on a Lagos flight that just
+    delayed".  Never raises."""
+    name = "disruptions"
+    title = "⚠️ Disruptions"
+    priority = 15
+
+    def collect(self, ctx: Any, since: float) -> BriefingSection | None:
+        try:
+            from ..planning.graph import WorldGraph
+            graph = WorldGraph()
+            dis = graph.disrupted()
+        except Exception as exc:  # noqa: BLE001
+            _log.debug("disruption provider skipped: %s", exc)
+            return None
+        if not dis:
+            return None
+        lines, items = [], []
+        for n in dis[:5]:
+            note = n.attrs.get("disruption_note", "")
+            line = f"• {n.label}"
+            if note:
+                line += f" — {note[:100]}"
+            affected = [d.label for d in graph.dependents(n.node_id)[:3]]
+            if affected:
+                line += f" (affects: {', '.join(affected)})"
+            lines.append(line)
+            items.append({"id": f"dis-{n.node_id}", "title": n.label,
+                          "body": (note or "disrupted")[:300]})
+        return BriefingSection(
+            name=self.name, title=self.title, priority=self.priority,
+            source="world-graph", items=items, lines=lines)
+
+
 # ── composer ───────────────────────────────────────────────────────────────
 
 class BriefingComposer:
@@ -889,6 +974,8 @@ class BriefingComposer:
     def __init__(self) -> None:
         self.providers: list[_Provider] = [
             OvernightAlertsProvider(),
+            DisruptionProvider(),
+            GoalsProvider(),
             CalendarProvider(),
             PeopleProvider(),
             MarketsProvider(),

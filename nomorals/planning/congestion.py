@@ -22,6 +22,7 @@ crash and never a fabricated jam.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import math
 import os
@@ -29,7 +30,7 @@ import sqlite3
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Iterator
 
 _log = logging.getLogger("nomorals.planning.congestion")
 
@@ -423,6 +424,77 @@ class ContentionMonitor:
             _log.debug("advise failed", exc_info=True)
             return {"action": "proceed", "detail": "monitor unavailable — proceeding.",
                     "probability": 0.0, "eta_s": None}
+
+
+@contextlib.contextmanager
+def hold(monitor: ContentionMonitor | None, name: str,
+         agent: str) -> Iterator[Hold | None]:
+    """Acquire a resource for the duration of a ``with`` block.
+
+    Fan-out code no longer hand-rolls try/finally::
+
+        with hold(mon, "groq-key-1", "agent-7"):
+            ...  # the hold is always released
+
+    A None monitor or a failed acquire yields None (fail-open "proceed").
+    Never raises.
+    """
+    h: Hold | None = None
+    try:
+        if monitor is not None:
+            h = monitor.acquire(name, agent)
+    except Exception:  # noqa: BLE001
+        h = None
+    try:
+        yield h
+    finally:
+        try:
+            if monitor is not None and h is not None:
+                monitor.release(name, agent)
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def route_around(monitor: ContentionMonitor | None,
+                 names: list[str],
+                 agents_waiting: int = 0) -> dict[str, dict[str, Any]]:
+    """Route work around congestion: per-resource routed assignment.
+
+    For each resource in ``names`` this returns
+    ``{"target": <name or alternate>, "action": <advise action>,
+    "reason": <detail>, "probability": float}`` — the fan-out target is
+    the uncongested alternate when advise() says "switch", else the
+    resource itself.  This is the planning-layer "route around
+    congestion" answer: congested provider -> failover provider,
+    warming provider -> staggered waves.  Never raises.
+    """
+    out: dict[str, dict[str, Any]] = {}
+    try:
+        if monitor is None:
+            return out
+        for name in names or []:
+            try:
+                advice = monitor.advise(name, agents_waiting=agents_waiting)
+            except Exception:  # noqa: BLE001
+                advice = {"action": "proceed", "detail": "unavailable",
+                          "probability": 0.0}
+            target = name
+            if advice.get("action") == "switch" and advice.get("alternate"):
+                target = str(advice["alternate"])
+            out[name] = {
+                "target": target,
+                "action": str(advice.get("action", "proceed")),
+                "reason": str(advice.get("detail", "")),
+                "probability": float(advice.get("probability", 0.0) or 0.0),
+            }
+            eta = advice.get("eta_s")
+            if eta is not None:
+                out[name]["eta_s"] = eta
+            if advice.get("wave_size"):
+                out[name]["wave_size"] = advice["wave_size"]
+    except Exception:  # noqa: BLE001
+        pass
+    return out
 
 
 def pre_fanout_check(monitor: ContentionMonitor | None,

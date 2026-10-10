@@ -413,6 +413,188 @@ class WorldGraph:
 
     # ── projection (read-only from memory/scheduler) ──────────────────
 
+    def schedule_order(self) -> list[GraphNode]:
+        """Topological order honoring ``depends_on`` edges, with due-date
+        urgency breaking ties: among the ready nodes, the one due soonest
+        goes first.  "What should I do first?"
+
+        Cycle-safe (Kahn's algorithm on a DAG projection; nodes caught in
+        a cycle are appended last, due-date order).  Never raises.
+        """
+        try:
+            nodes = self.list_nodes()
+            by_id = {n.node_id: n for n in nodes}
+            # edge a depends_on b  =>  b must come before a
+            indeg: dict[str, int] = {n.node_id: 0 for n in nodes}
+            before: dict[str, list[str]] = {n.node_id: [] for n in nodes}
+            for e in self.edges():
+                if (e.type == "depends_on" and e.from_id in by_id
+                        and e.to_id in by_id and e.from_id != e.to_id):
+                    before[e.to_id].append(e.from_id)
+                    indeg[e.from_id] += 1
+
+            def due_key(n: GraphNode) -> float:
+                due = n.attrs.get("due_ts") or n.attrs.get("due")
+                try:
+                    return float(due) if due else float("inf")
+                except (TypeError, ValueError):
+                    return float("inf")
+
+            ready = sorted((nid for nid, d in indeg.items() if d == 0),
+                           key=lambda nid: due_key(by_id[nid]))
+            out: list[GraphNode] = []
+            while ready:
+                nid = ready.pop(0)
+                out.append(by_id[nid])
+                for nxt in before[nid]:
+                    indeg[nxt] -= 1
+                    if indeg[nxt] == 0:
+                        ready.append(nxt)
+                ready.sort(key=lambda x: due_key(by_id[x]))
+            # cycle leftovers: due-date order, appended (honest, not dropped)
+            if len(out) < len(nodes):
+                seen = {n.node_id for n in out}
+                leftover = sorted((n for n in nodes if n.node_id not in seen),
+                                  key=due_key)
+                out.extend(leftover)
+            return out
+        except Exception:  # noqa: BLE001
+            _log.debug("schedule_order failed", exc_info=True)
+            return []
+
+    def critical_path_pert(self) -> dict[str, Any]:
+        """Duration-aware critical path (PERT).
+
+        Nodes may carry PERT three-point estimates in attrs:
+        ``optimistic`` / ``most_likely`` / ``pessimistic`` (minutes).
+        Expected time TE = (O + 4M + P) / 6, sigma = (P - O) / 6.  Nodes
+        without estimates default to 0 expected time (honest: unknown
+        work isn't counted as free, it's counted as *unestimated*).
+
+        Returns {"ok", "path", "expected_minutes", "std_minutes",
+        "unestimated"}.  Never raises.
+        """
+        try:
+            import math as _math
+            from .estimates import pert
+
+            nodes = [n for n in self.list_nodes()
+                     if n.type in ("deadline", "schedule", "commitment")]
+            ids = {n.node_id for n in nodes}
+            by_id = {n.node_id: n for n in nodes}
+
+            def te_sigma(n: GraphNode) -> tuple[float, float]:
+                a = n.attrs
+                if all(k in a for k in ("optimistic", "most_likely",
+                                       "pessimistic")):
+                    try:
+                        te, sigma = pert(a["optimistic"], a["most_likely"],
+                                         a["pessimistic"])
+                        return max(0.0, te), max(0.0, sigma)
+                    except Exception:  # noqa: BLE001
+                        pass
+                return 0.0, 0.0
+
+            deps: dict[str, list[str]] = {}
+            for n in nodes:
+                deps[n.node_id] = [e.to_id for e in self.edges(n.node_id)
+                                   if e.from_id == n.node_id
+                                   and e.type == "depends_on"
+                                   and e.to_id in ids]
+
+            memo: dict[str, tuple[list[str], float, float]] = {}
+
+            def longest(nid: str, seen: frozenset
+                        ) -> tuple[list[str], float, float]:
+                # -> (path, sum of TE, sum of sigma^2)
+                if nid in memo:
+                    return memo[nid]
+                own_te, own_sigma = te_sigma(by_id[nid])
+                best: tuple[list[str], float, float] = (
+                    [nid], own_te, own_sigma ** 2)
+                for d in deps.get(nid, []):
+                    if d in seen:
+                        continue
+                    sub_path, sub_te, sub_var = longest(d, seen | {nid})
+                    cand = ([nid] + sub_path, own_te + sub_te,
+                            own_sigma ** 2 + sub_var)
+                    if cand[1] > best[1]:
+                        best = cand
+                memo[nid] = best
+                return best
+
+            best_path: list[str] = []
+            best_te = best_var = 0.0
+            for n in nodes:
+                p, te, var = longest(n.node_id, frozenset())
+                if te > best_te:
+                    best_path, best_te, best_var = p, te, var
+
+            unestimated = sum(1 for nid in best_path
+                              if te_sigma(by_id[nid])[0] <= 0)
+            return {
+                "ok": True,
+                "path": [by_id[i].label for i in best_path if i in by_id],
+                "node_ids": best_path,
+                "expected_minutes": round(best_te, 1),
+                "std_minutes": round(_math.sqrt(best_var), 1),
+                "unestimated": unestimated,
+            }
+        except Exception:  # noqa: BLE001
+            _log.debug("critical_path_pert failed", exc_info=True)
+            return {"ok": False, "reason": "query failed"}
+
+    def project_goal(self, goal: Any) -> int:
+        """Project a GoalSystem goal + its steps into the graph.
+
+        The goal becomes a ``project`` node; each step becomes a
+        ``commitment`` node with ``depends_on`` edges chaining consecutive
+        steps (step N+1 depends_on step N), plus ``owned_by`` edges to the
+        goal.  Step nodes carry ``due_ts`` when the goal has a deadline.
+        Idempotent via ``external_ref`` ("goal:<id>" / "goalstep:<id>").
+        Disruption alerts now cover goals: "your deploy goal depends on a
+        flight that just delayed".  Never raises; returns nodes upserted.
+        """
+        try:
+            goal_id = str(getattr(goal, "id", "") or "")
+            title = str(getattr(goal, "title", "") or "").strip()
+            if not goal_id or not title:
+                return 0
+            deadline = float(getattr(goal, "deadline", 0) or 0)
+            count = 0
+            goal_node = self.add_node(
+                "project", title,
+                {"source": "goals", "status": getattr(goal, "status", ""),
+                 "progress": getattr(goal, "progress", 0.0),
+                 **({"due_ts": deadline} if deadline else {})},
+                external_ref=f"goal:{goal_id}")
+            if goal_node is None:
+                return 0
+            count += 1
+            prev_step_id = ""
+            for s in list(getattr(goal, "steps", []) or []):
+                desc = str(getattr(s, "description", "") or "").strip()[:140]
+                if not desc:
+                    continue
+                step_id = str(getattr(s, "id", "") or "")
+                node = self.add_node(
+                    "commitment", desc,
+                    {"source": "goals", "goal_id": goal_id,
+                     "step_status": getattr(s, "status", ""),
+                     **({"due_ts": deadline} if deadline else {})},
+                    external_ref=f"goalstep:{step_id}" if step_id else "")
+                if node is None:
+                    continue
+                count += 1
+                self.add_edge(node.node_id, goal_node.node_id, "owned_by")
+                if prev_step_id:
+                    self.add_edge(node.node_id, prev_step_id, "depends_on")
+                prev_step_id = node.node_id
+            return count
+        except Exception:  # noqa: BLE001
+            _log.debug("project_goal failed", exc_info=True)
+            return 0
+
     def sync_from_memory(self, memory: Any = None) -> int:
         """Project memory facts → graph nodes. Reads only; never writes to
         memory. Idempotent via ``external_ref = "memory:<record_id>"``.

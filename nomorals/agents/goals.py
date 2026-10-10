@@ -45,13 +45,17 @@ class GoalStep:
     status: str = "pending"
     result: str = ""
     attempts: int = 0
+    #: PERT-style three-point minutes for this step (0 = unknown).  Used by
+    #: estimate_goal(); honest wide bands when unknown.
+    est_minutes: float = 0.0
     created_at: float = 0.0
     updated_at: float = 0.0
 
     def to_dict(self) -> dict[str, Any]:
         return {"id": self.id, "position": self.position,
                 "description": self.description, "status": self.status,
-                "result": self.result, "attempts": self.attempts}
+                "result": self.result, "attempts": self.attempts,
+                "est_minutes": self.est_minutes}
 
     @classmethod
     def from_row(cls, row: dict[str, Any]) -> "GoalStep":
@@ -61,6 +65,7 @@ class GoalStep:
                    status=row.get("status", "pending"),
                    result=row.get("result", ""),
                    attempts=int(row.get("attempts", 0)),
+                   est_minutes=float(row.get("est_minutes", 0) or 0.0),
                    created_at=float(row.get("created_at", 0)),
                    updated_at=float(row.get("updated_at", 0)))
 
@@ -81,6 +86,8 @@ class Goal:
     depends_on: list[str] = field(default_factory=list)
     #: how many times the cognitive loop has self-healed this goal
     heals: int = 0
+    #: epoch seconds the goal is due (0 = no deadline)
+    deadline: float = 0.0
     created_at: float = 0.0
     updated_at: float = 0.0
     finished_at: float = 0.0
@@ -102,6 +109,7 @@ class Goal:
             "next_action": self.next_action, "strategy": self.strategy,
             "project_id": self.project_id, "priority": self.priority,
             "depends_on": list(self.depends_on), "heals": self.heals,
+            "deadline": self.deadline,
             "done": self.done_steps, "total": self.total_steps,
             "steps": [s.to_dict() for s in self.steps],
         }
@@ -130,15 +138,85 @@ class Goal:
                    priority=int(row.get("priority", 0) or 0),
                    depends_on=deps,
                    heals=int(row.get("heals", 0) or 0),
+                   deadline=float(row.get("deadline", 0) or 0.0),
                    created_at=float(row.get("created_at", 0)),
                    updated_at=float(row.get("updated_at", 0)),
                    finished_at=float(row.get("finished_at", 0) or 0.0))
+
+
+def _parse_deadline(raw: float | str) -> float:
+    """Parse a deadline: epoch, ISO date, or "in Nd/Nh/Nm".  0 on failure."""
+    try:
+        if isinstance(raw, (int, float)) and float(raw) > 0:
+            return float(raw)
+        text = str(raw or "").strip().lower()
+        if not text:
+            return 0.0
+        try:  # plain epoch
+            return float(text) if float(text) > 0 else 0.0
+        except ValueError:
+            pass
+        import re as _re
+        from datetime import datetime as _dt, timedelta as _td
+        m = _re.fullmatch(r"in\s+(\d+(?:\.\d+)?)\s*([dhm])", text)
+        if m:
+            qty, unit = float(m.group(1)), m.group(2)
+            mult = {"d": 86400.0, "h": 3600.0, "m": 60.0}[unit]
+            return time.time() + qty * mult
+        for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%d"):
+            try:
+                return _dt.strptime(text, fmt).timestamp()
+            except ValueError:
+                continue
+        return 0.0
+    except Exception:  # noqa: BLE001
+        return 0.0
+
+
+def _fmt_span(seconds: float) -> str:
+    """'3h 20m' / '2d' / '45m' for a positive duration."""
+    try:
+        s = max(0.0, float(seconds))
+    except (TypeError, ValueError):
+        return "?"
+    if s < 3600:
+        return f"{s / 60:.0f}m"
+    if s < 86400:
+        h, rem = divmod(s, 3600)
+        return f"{h:.0f}h {rem / 60:.0f}m" if rem >= 60 else f"{h:.0f}h"
+    return f"{s / 86400:.1f}d"
 
 
 class GoalSystem:
     def __init__(self, context: Any) -> None:
         self.context = context
         self.db = context.db
+        self._ensure_schema()
+
+    def _ensure_schema(self) -> None:
+        """Defensive column adds (SQLite ALTER TABLE is safe + idempotent).
+
+        ``deadline`` on agent_goals and ``est_minutes`` on agent_goal_steps
+        are Phase-9 additions; old databases get them on first use.
+        """
+        try:
+            cols = {r.get("name") for r in
+                    self.db.query("PRAGMA table_info(agent_goals)")}
+            if "deadline" not in cols:
+                self.db.execute(
+                    "ALTER TABLE agent_goals ADD COLUMN deadline "
+                    "REAL NOT NULL DEFAULT 0")
+        except Exception:  # noqa: BLE001 - table may not exist yet
+            pass
+        try:
+            cols = {r.get("name") for r in
+                    self.db.query("PRAGMA table_info(agent_goal_steps)")}
+            if "est_minutes" not in cols:
+                self.db.execute(
+                    "ALTER TABLE agent_goal_steps ADD COLUMN est_minutes "
+                    "REAL NOT NULL DEFAULT 0")
+        except Exception:  # noqa: BLE001 - table may not exist yet
+            pass
 
     # ── create ──────────────────────────────────────────────────────────────
     def create(self, title: str, description: str = "", *,
@@ -451,6 +529,168 @@ class GoalSystem:
             break
         return best
 
+    # ── deadlines (phase 9) ─────────────────────────────────────────────
+    def set_deadline(self, goal_id: str,
+                     deadline: float | str) -> Goal | None:
+        """Set a goal's deadline.  Accepts an epoch, an ISO date
+        ("2026-10-20"), or a relative spec ("in 3d", "in 12h").
+        Returns None when the goal does not exist."""
+        goal = self.get(goal_id)
+        if goal is None:
+            return None
+        ts = _parse_deadline(deadline)
+        if ts <= 0:
+            raise ValueError(f"could not parse deadline {deadline!r}")
+        self.db.execute(
+            "UPDATE agent_goals SET deadline=?, updated_at=? WHERE id=?",
+            (ts, time.time(), goal_id))
+        return self.get(goal_id)
+
+    def clear_deadline(self, goal_id: str) -> Goal | None:
+        goal = self.get(goal_id)
+        if goal is None:
+            return None
+        self.db.execute(
+            "UPDATE agent_goals SET deadline=0, updated_at=? WHERE id=?",
+            (time.time(), goal_id))
+        return self.get(goal_id)
+
+    def due_soon(self, *, within_hours: float = 24.0,
+                 limit: int = 20) -> list[Goal]:
+        """Active goals whose deadline falls inside the window, soonest
+        first.  The morning briefing and the pulse read this."""
+        now = time.time()
+        horizon = now + max(1.0, float(within_hours)) * 3600.0
+        out: list[Goal] = []
+        for g in self.list(status="active", limit=200):
+            if now < g.deadline <= horizon:  # overdue goals live in overdue()
+                out.append(g)
+        out.sort(key=lambda g: g.deadline)
+        return out[:limit]
+
+    def overdue(self, *, limit: int = 20) -> list[Goal]:
+        """Active goals past their deadline, most overdue first."""
+        now = time.time()
+        out = [g for g in self.list(status="active", limit=200)
+               if 0 < g.deadline < now]
+        out.sort(key=lambda g: g.deadline)
+        return out[:limit]
+
+    def deadline_text(self, goal: Goal) -> str:
+        """Human deadline label: 'in 3h', 'overdue by 2d', 'no deadline'."""
+        if not goal.deadline:
+            return "no deadline"
+        try:
+            from datetime import datetime as _dt
+            delta = goal.deadline - time.time()
+            when = _dt.fromtimestamp(goal.deadline).strftime("%b %d %H:%M")
+            if delta < 0:
+                return f"overdue by {_fmt_span(-delta)} (was {when})"
+            return f"due in {_fmt_span(delta)} ({when})"
+        except Exception:  # noqa: BLE001
+            return "deadline set"
+
+    # ── estimates (phase 9: planning.estimates) ─────────────────────────
+    def set_step_estimate(self, goal_id: str, step_id: str,
+                          minutes: float) -> GoalStep | None:
+        """Set a step's PERT-style duration guess (minutes).  Feed this
+        from plan text ("~2h") or from the owner's corrections; the
+        estimates store learns the real durations from
+        ``record_step_outcome``."""
+        try:
+            minutes = max(0.0, float(minutes))
+        except (TypeError, ValueError):
+            return None
+        self.db.execute(
+            "UPDATE agent_goal_steps SET est_minutes=?, updated_at=? "
+            "WHERE id=? AND goal_id=?",
+            (minutes, time.time(), step_id, goal_id))
+        for s in self._steps(goal_id):
+            if s.id == step_id:
+                return s
+        return None
+
+    def estimate_goal(self, goal_id: str, *,
+                      db_path: str = "") -> dict[str, Any]:
+        """Banded time estimate for finishing a goal.
+
+        Each unfinished step gets a banded estimate from the learned
+        ``goal_step`` category (the owner's per-step guesses seed it);
+        the project band aggregates them — expected times sum, variances
+        add in quadrature.  Returns the Estimate as a dict; ``"ok":
+        False`` when the goal is unknown or has no work left.
+        """
+        goal = self.get(goal_id)
+        if goal is None:
+            return {"ok": False, "error": f"no goal {goal_id!r}"}
+        try:
+            from ..planning.estimates import EstimateStore, aggregate, get_store
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "error": f"estimates unavailable: {exc}"}
+        # Persistent by default (the module singleton) so recorded actuals
+        # keep correcting future bands; a db_path (":memory:" in tests)
+        # isolates the store instead.
+        store = EstimateStore(db_path) if db_path else get_store()
+        open_steps = [s for s in goal.steps
+                      if s.status in {"pending", "in_progress", "blocked"}]
+        if not open_steps:
+            return {"ok": False, "error": "no unfinished steps"}
+        parts = []
+        for s in open_steps:
+            minutes = s.est_minutes if s.est_minutes > 0 else 15.0
+            est = store.estimate("goal_step", {s.description[:80]: minutes})
+            parts.append(est)
+        total = aggregate(f"goal:{goal.id}", parts)
+        return {"ok": True, "goal_id": goal.id, "title": goal.title,
+                "steps": len(open_steps),
+                "point_minutes": total.point,
+                "low_minutes": total.low, "high_minutes": total.high,
+                "deadline_minutes": total.deadline,
+                "confidence": total.confidence, "source": total.source,
+                "text": total.format()}
+
+    def record_step_outcome(self, goal_id: str, step_id: str,
+                            actual_minutes: float, *,
+                            db_path: str = "") -> bool:
+        """Feed a real step duration into the learned ``goal_step``
+        category so future ``estimate_goal`` bands get honest.  Call
+        this when a step finishes (predicted = the banded point we
+        quoted)."""
+        try:
+            actual = max(0.0, float(actual_minutes))
+        except (TypeError, ValueError):
+            return False
+        step = next((s for s in self._steps(goal_id) if s.id == step_id),
+                    None)
+        if step is None:
+            return False
+        try:
+            from ..planning.estimates import EstimateStore, get_store
+            store = (EstimateStore(db_path) if db_path else get_store())
+            predicted = step.est_minutes if step.est_minutes > 0 else 15.0
+            return store.record_actual("goal_step", predicted, actual,
+                                       {step.description[:80]: actual})
+        except Exception:  # noqa: BLE001
+            return False
+
+    # ── world-graph projection (phase 9) ────────────────────────────────
+    def project_to_graph(self, goal_id: str,
+                         graph: Any = None) -> dict[str, Any]:
+        """Project this goal + steps into the world graph so disruption
+        alerts cover goals ("your deploy goal depends on the flight that
+        just delayed").  ``graph`` may be a WorldGraph; one is created
+        when omitted.  Idempotent (external_ref)."""
+        goal = self.get(goal_id)
+        if goal is None:
+            return {"ok": False, "error": f"no goal {goal_id!r}"}
+        try:
+            from ..planning.graph import WorldGraph
+            g = graph if graph is not None else WorldGraph()
+            n = g.project_goal(goal)
+            return {"ok": True, "nodes": n, "goal_id": goal.id}
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+
     # ── progress ────────────────────────────────────────────────────────────
     # ── cross-goal intelligence (wave 63) ─────────────────────────────────
     def _record_completion_knowledge(self, goal_id: str) -> None:
@@ -737,8 +977,9 @@ class GoalSystem:
 
     def update(self, goal_id: str, *, title: str | None = None,
                description: str | None = None,
-               priority: int | None = None) -> Goal | None:
-        """Edit a goal's title / description / priority in place.
+               priority: int | None = None,
+               deadline: float | str | None = None) -> Goal | None:
+        """Edit a goal's title / description / priority / deadline in place.
 
         Returns None when the goal does not exist.
         """
@@ -755,6 +996,11 @@ class GoalSystem:
             updates["description"] = description[:2000]
         if priority is not None:
             updates["priority"] = int(priority)
+        if deadline is not None:
+            ts = _parse_deadline(deadline)
+            if ts <= 0:
+                raise ValueError(f"could not parse deadline {deadline!r}")
+            updates["deadline"] = ts
         if updates:
             updates["updated_at"] = time.time()
             set_clause = ", ".join(f"{k}=?" for k in updates)
@@ -881,11 +1127,14 @@ def register(registry: Any) -> None:
             "objectives that survive sessions. action=create | advance | "
             "adapt | status | list | get | pause | resume | abandon | "
             "complete | tick | spawn_project | priority | depends | next | "
+            "deadline (set/clear a due date) | due (due-soon + overdue) | "
+            "estimate (banded time to finish) | graph (project into the "
+            "world graph for disruption alerts) | "
             "reflect (distill a finished goal's lessons into KG + skills)."
         ),
         capability="memory.write",
         parameters={
-            "action": "str — create|advance|adapt|status|list|get|pause|resume|abandon|complete|tick|spawn_project|priority|depends|next|reflect",
+            "action": "str — create|advance|adapt|status|list|get|pause|resume|abandon|complete|tick|spawn_project|priority|depends|next|deadline|due|estimate|graph|reflect",
             "title": "str — goal title (create)",
             "description": "str — goal detail (create)",
             "goal_id": "str — for most actions",
@@ -895,12 +1144,19 @@ def register(registry: Any) -> None:
             "priority": "int — new priority (priority action)",
             "depends_on": "str — goal id this goal waits for (depends)",
             "remove": "str — '1' to remove a dependency (depends)",
+            "deadline": "str — epoch | ISO date | 'in 3d' (deadline action)",
+            "clear": "str — '1' to clear the deadline (deadline action)",
+            "within_hours": "str — window for due (default 24)",
+            "minutes": "str — step duration guess (estimate action)",
+            "step_id": "str — goal step id (estimate action)",
         },
     )
     def goal(
         action: str, *, title: str = "", description: str = "", goal_id: str = "",
         reason: str = "", status: str = "", limit: str = "20",
         priority: str = "", depends_on: str = "", remove: str = "",
+        deadline: str = "", clear: str = "", within_hours: str = "24",
+        minutes: str = "", step_id: str = "",
     ) -> dict[str, Any]:
         system = GoalSystem(context)
         action = (action or "list").strip().lower()
@@ -974,6 +1230,38 @@ def register(registry: Any) -> None:
             from .reflection import GoalReflector
 
             return GoalReflector(context).reflect(goal_id, force=True)
+        if action == "deadline":
+            if not goal_id:
+                return {"ok": False, "error": "goal_id required"}
+            try:
+                g = (system.clear_deadline(goal_id)
+                     if clear in {"1", "true", "yes"}
+                     else system.set_deadline(goal_id, deadline))
+            except ValueError as exc:
+                return {"ok": False, "error": str(exc)}
+            return {"ok": g is not None,
+                    "goal": g.to_dict() if g else None}
+        if action == "due":
+            try:
+                hours = float(within_hours or 24)
+            except ValueError:
+                hours = 24.0
+            soon = system.due_soon(within_hours=hours, limit=n)
+            over = system.overdue(limit=n)
+            return {"due_soon": [g.to_dict() for g in soon],
+                    "overdue": [g.to_dict() for g in over],
+                    "deadline_labels": {
+                        g.id: system.deadline_text(g) for g in soon + over}}
+        if action == "estimate":
+            if not goal_id:
+                return {"ok": False, "error": "goal_id required"}
+            if step_id and minutes:
+                system.set_step_estimate(goal_id, step_id, minutes)
+            return system.estimate_goal(goal_id)
+        if action == "graph":
+            if not goal_id:
+                return {"ok": False, "error": "goal_id required"}
+            return system.project_to_graph(goal_id)
         return system.status()
 
 

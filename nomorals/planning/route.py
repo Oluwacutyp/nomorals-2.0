@@ -212,6 +212,9 @@ class RouteResult:
     backend: str
     arrivals: list[float] = field(default_factory=list)  # epoch per stop
     learned_legs: int = 0
+    #: human-readable infeasibility notes, e.g. "bank: arrives 17:40 after
+    #: window closes 17:00".  Empty when every window is respected.
+    window_violations: list[str] = field(default_factory=list)
 
 
 # ── stage 1: predict — the learned cost model ────────────────────────────
@@ -522,8 +525,39 @@ class RouteSolver:
             total_cost += cost_kobo
             t += (b.dwell_minutes or 0) * 60.0  # time spent at the stop
             total_min += b.dwell_minutes or 0
+        violations = self._window_violations(order, arrivals)
         return RouteResult(order, legs, total_min, total_cost, self.backend,
-                           arrivals, learned)
+                           arrivals, learned, violations)
+
+    @staticmethod
+    def _window_violations(order: list[Stop],
+                           arrivals: list[float]) -> list[str]:
+        """Which stops arrive after their window closes.
+
+        Arriving *before* the window opens is fine (you wait); arriving
+        after it closes is a miss.  ``Stop.window`` was previously ignored
+        by the solver — this at least makes infeasibility visible instead
+        of confidently promising the impossible.
+        """
+        out: list[str] = []
+        try:
+            for stop, arr in zip(order, arrivals):
+                w = stop.window
+                if not w:
+                    continue
+                try:
+                    start, end = float(w[0]), float(w[1])
+                except (TypeError, ValueError, IndexError):
+                    continue
+                if end > 0 and arr > end:
+                    late_min = (arr - end) / 60.0
+                    out.append(
+                        f"{stop.label}: arrives {_fmt_eta(arr)} — "
+                        f"{late_min:.0f}m after window closes "
+                        f"({_fmt_eta(end)})")
+        except Exception:  # noqa: BLE001 - never raises
+            pass
+        return out
 
 
 # ── RoutePlanner: the pipeline in one object ─────────────────────────────
@@ -654,6 +688,9 @@ def format_route(result: RouteResult) -> str:
     total_h = result.total_minutes / 60.0
     lines.append(f"⏱️ {total_h:.1f}h total (incl. dwell) · "
                  f"💰 {_fmt_naira(result.total_cost_kobo)} est. travel")
+    if result.window_violations:
+        lines.append("⚠️ window misses:")
+        lines += [f"   • {v}" for v in result.window_violations]
     lines.append(ROUTE_DISCLAIMER)
     return "\n".join(lines)
 
