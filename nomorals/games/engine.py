@@ -140,6 +140,83 @@ class GameEngine:
             self._relay_obj = relay
         return relay
 
+    @property
+    def matchmaker(self) -> Any:
+        """The matchmaking queue, created on first use. The ticker
+        sweeps it (see _sweep_timeouts) so queued players get paired
+        without anyone tripping a command."""
+        mm = self._matchmaker_obj
+        if mm is None:
+            from .matchmaking import Matchmaker
+            mm = Matchmaker(self)
+            self._matchmaker_obj = mm
+        return mm
+
+    @property
+    def dm(self) -> Any:
+        """The table's dungeon master — narrates notable game events in
+        each game's DM mood (``/dm mood``). Games push bare events with
+        :func:`nomorals.games.gamemaster.feed`; the engine drains the
+        feed after moves and at finish. Created on first use."""
+        gm = self._dm_obj
+        if gm is None:
+            from .gamemaster import GameMaster
+            from .npc import NPCStore
+            gm = GameMaster(NPCStore(), suggest=self._suggest)
+            self._dm_obj = gm
+        return gm
+
+    def _drain_dm_feed(self, room: Room, game: MultiGame, out: list[str],
+                       *, force: bool = False) -> None:
+        """Narrate the game's DM feed (see
+        :func:`nomorals.games.gamemaster.feed`).
+
+        Cooldown-guarded (25s) so a chatty game never spams the table;
+        the finish drain passes ``force=True`` so the last moments
+        still get their scene. Never raises — a silent DM beats a
+        broken game.
+        """
+        feed = room.state.pop("_dm_feed", None)
+        if not feed:
+            return
+        now = time.time()
+        if not force:
+            last = float(room.state.get("_dm_last_narrate") or 0)
+            if now - last < 25:
+                return
+        room.state["_dm_last_narrate"] = now
+        try:
+            gm = self.dm
+            cast = None
+            if room.kind == "group":
+                try:
+                    cast = gm.ensure_cast(game.name)
+                except Exception:  # noqa: BLE001
+                    cast = None
+            line = gm.announce(game.name, feed, cast=cast)
+            if line:
+                out.append(line)
+        except Exception:  # noqa: BLE001
+            _log.debug("dm narration failed", exc_info=True)
+
+    def _drain_dm_feed_safe(self, room: Room, game: MultiGame,
+                            out: list[str], *, force: bool = False) -> None:
+        """Version-skew-safe DM drain.
+
+        The DM narration is a nice-to-have layer — it must never break
+        the core game flow. This guards against both narration bugs and
+        the method itself missing (stale code during a rolling update):
+        either way the game completes and the player gets their result.
+        """
+        drain = getattr(self, "_drain_dm_feed", None)
+        if drain is None:
+            _log.debug("dm drain unavailable (version skew) — skipping")
+            return
+        try:
+            drain(room, game, out, force=force)
+        except Exception:  # noqa: BLE001
+            _log.debug("dm drain failed", exc_info=True)
+
     # ── game registry ──────────────────────────────────────────────────────
     def _register_builtins(self) -> None:
         from .games.easy import EASY_GAMES
@@ -224,6 +301,13 @@ class GameEngine:
                 relay.maybe_cleanup()
         except Exception:  # noqa: BLE001
             _log.debug("relay cleanup failed", exc_info=True)
+        # pair queued players into duels (throttled inside)
+        try:
+            mm = self._matchmaker_obj
+            if mm is not None:
+                mm.maybe_sweep()
+        except Exception:  # noqa: BLE001
+            _log.debug("match sweep failed", exc_info=True)
         self._maybe_prune_history(now)
 
     def _maybe_prune_history(self, now: float) -> None:
@@ -399,6 +483,17 @@ class GameEngine:
                     mastery=mastery_idx, history=history))
             # stash difficulty on the room so start/status messages can show it
             room.state["_difficulty"] = difficulty
+            # provably-fair tables: open the commit-reveal table BEFORE
+            # setup() draws anything, so the commitment covers the whole
+            # game (deck order, spins, dice, reels).
+            if getattr(game, "fair", False):
+                try:
+                    from .fairness import get_client_seed, init_table
+                    client = (get_client_seed(self.db, host.key)
+                              if self.db is not None else "house")
+                    room.state["fair"] = init_table(client)
+                except Exception:  # noqa: BLE001
+                    _log.debug("fair table init failed", exc_info=True)
             self._mirror_inventory(room)
             self._rooms[chat_key] = room
             self._by_id[room.id] = room
@@ -407,6 +502,22 @@ class GameEngine:
             intro = game.setup(room, self._mind)
             if intro:
                 msgs.append(intro)
+            # the fairness commitment is published before any draw —
+            # the player sees it before play starts.
+            if room.state.get("fair") is not None:
+                try:
+                    from .fairness import commit_line
+                    msgs.append(commit_line(room.state["fair"]))
+                except Exception:  # noqa: BLE001
+                    _log.debug("fair commit line failed", exc_info=True)
+            # the season touches this table — say so up front.
+            try:
+                from .seasons import event_blurb
+                blurb = event_blurb(self.db, game.name)
+                if blurb:
+                    msgs.append(blurb)
+            except Exception:  # noqa: BLE001
+                _log.debug("season blurb failed", exc_info=True)
             # Group starts get a brief how-to-play blurb (join + core
             # loop) so nobody stares at the table wondering what to do.
             # Solo/DM games don't need it — the intro is enough there.
@@ -795,6 +906,9 @@ class GameEngine:
             out.append(
                 f"⚠️ {game.name} errored on that move "
                 f"({detail or 'unknown error'}) — the table is still open.")
+        # the DM narrates what just happened (cooldown-guarded).
+        # Safe wrapper: narration must never break the move itself.
+        self._drain_dm_feed_safe(room, game, out)
         if self.is_over(room):
             out.extend(self._finish(room))
         else:
@@ -856,15 +970,26 @@ class GameEngine:
             cur = room.current
             if cur is None or not cur.is_ai:
                 return
+            # agent seats (characters, brain) play via their registered
+            # decider; house seats use the game's built-in ai_turn.
+            decider = None
+            for prefix, fn in self.seat_deciders.items():
+                if cur.key.startswith(prefix):
+                    decider = fn
+                    break
             try:
-                out.extend(game.ai_turn(room, self._mind))
+                if decider is not None:
+                    msgs = decider(room, cur, game, self._mind)
+                    if msgs is None:
+                        msgs = game.ai_turn(room, self._mind)
+                else:
+                    msgs = game.ai_turn(room, self._mind)
+                out.extend(msgs or [])
             except Exception as exc:  # noqa: BLE001
                 _log.exception("ai turn failed: %s", room.game)
                 out.append(
                     f"⚠️ the house ({game.name} AI) errored "
                     f"({type(exc).__name__}) — seat skipped.")
-            if self.is_over(room):
-                return
             # did the game make progress? (removed the AI seat, changed
             # state, or advanced). If nothing moved at all, bail out.
             before = (room.turn, room.status)
@@ -979,7 +1104,8 @@ class GameEngine:
                     _log.debug("fair reveal failed", exc_info=True)
             # the DM gets the last word: drain any remaining feed, then
             # narrate the finale for games that opted into one.
-            self._drain_dm_feed(room, game, msgs, force=True)
+            # Safe wrapper: narration must never break the quit path.
+            self._drain_dm_feed_safe(room, game, msgs, force=True)
             if getattr(game, "dm_finale", False):
                 try:
                     evt = game.dm_finale_event(room)
@@ -1000,6 +1126,15 @@ class GameEngine:
                 _log.debug("victory loot failed", exc_info=True)
             try:
                 winner = game.winner(room)
+                # ranked 1v1: move the ELO board (queue matches and
+                # hand-arranged duels alike)
+                try:
+                    from .matchmaking import maybe_record_ranked
+                    for line in maybe_record_ranked(
+                            self.db, room, game, winner):
+                        msgs.append(line)
+                except Exception:  # noqa: BLE001
+                    _log.debug("ranked record failed", exc_info=True)
                 for p in list(room.players):
                     if p.is_ai:
                         continue
@@ -1018,6 +1153,14 @@ class GameEngine:
                     coins, coin_why = self._settle_coins(
                         game, room, p, won, score, difficulty,
                         streak_after)
+                    # seasonal event: the week's multiplier on coins
+                    try:
+                        from .seasons import apply_event
+                        coins, _season_note = apply_event(
+                            self.db, room.game, "coins", coins)
+                        coin_why += _season_note
+                    except Exception:  # noqa: BLE001
+                        _log.debug("season coin mult failed", exc_info=True)
                     # boosters: coin charm is consumed on use
                     try:
                         prof_items = self.store.get_for(p).items
@@ -1094,6 +1237,15 @@ class GameEngine:
                         from .progression import (
                             award_xp, describe_level_up, xp_bar)
                         amount = game.xp_reward(won, room, p)
+                        # seasonal event: the week's multiplier on XP
+                        season_xp_note = ""
+                        try:
+                            from .seasons import apply_event
+                            amount, season_xp_note = apply_event(
+                                self.db, room.game, "xp", amount)
+                        except Exception:  # noqa: BLE001
+                            _log.debug("season xp mult failed",
+                                       exc_info=True)
                         # daily hunt: the first arena win of the day
                         # pays double XP
                         if room.game == "arena" and won is True:
@@ -1122,7 +1274,8 @@ class GameEngine:
                         if amount > 0:
                             prof = self.store.get_for(p)
                             msgs.append(
-                                f"+{amount} XP {xp_bar(prof.xp)}")
+                                f"+{amount} XP {xp_bar(prof.xp)}"
+                                f"{season_xp_note}")
                         for lvl in gained:
                             msgs.append(describe_level_up(lvl))
                             # RPG attributes: each level grants points

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import time
 from typing import Any, Callable
+from ...llm.brain import brain_for
 from ...core.logging_setup import get_logger
 from ...social.chat.base import ChatKind, ChatMessage, ChatRef
 _log = get_logger(__name__)
@@ -82,6 +83,11 @@ class RuntimeGamesMixin:
             lines.append("  /gift confirm · /gift cancel · /gift history")
             lines.append("  /game stats [name] · /game balance · /game shop · "
                          "/game leaderboard")
+            lines.append("  /game fair — provable-fairness status · "
+                         "/game seed <word> — your entropy for fair tables")
+            lines.append("  /game events — this week's season & bonuses")
+            lines.append("  /game queue <game> — matchmaking: get paired for a duel")
+            lines.append("  /game ratings [game] — the ELO boards")
             lines.append("  /game delete — delete your profile (48h to undo)")
             return "\n".join(lines)
         if verb == "quit":
@@ -154,6 +160,74 @@ class RuntimeGamesMixin:
                 ok, msg = engine.economy.purchase(player, rest[4:].strip())
                 return msg
             return engine.economy.catalog_text("", player)
+        if verb == "fair":
+            # provable-fairness status for the live table in this chat
+            from ...games.fairness import FAIR_GAMES, verify
+            if live is None or live.game not in FAIR_GAMES:
+                return ("🔒 provably-fair tables: "
+                        + ", ".join(FAIR_GAMES) + "\n"
+                        "start one and the house publishes a sha256 "
+                        "commitment before the first draw — the seed is "
+                        "revealed at the end so you can verify every draw.\n"
+                        "/game seed <word> — set your own entropy.")
+            fair = (live.state or {}).get("fair") or {}
+            commit = str(fair.get("commit") or "")
+            draws = int(fair.get("draws") or 0)
+            revealed = bool(fair.get("revealed"))
+            lines = [f"🔒 {live.game} — provably fair",
+                     f"   commitment: {commit}",
+                     f"   your seed: {fair.get('client', 'house')}",
+                     f"   draws so far: {draws}"]
+            if revealed:
+                seed = str(fair.get("seed") or "")
+                ok = verify(commit, seed)
+                lines.append(f"   revealed: {seed}")
+                lines.append("   sha256(seed) == commitment: "
+                             + ("✓ checks out" if ok else "✗ MISMATCH"))
+            else:
+                lines.append("   seed revealed when the game ends.")
+            return "\n".join(lines)
+        if verb == "seed":
+            if player is None:
+                return "seed needs a chat sender — run it where you play."
+            from ...games.fairness import FAIR_GAMES, set_client_seed
+            word = " ".join(parts[1:]).strip()
+            if not word:
+                return "usage: /game seed <word> — your entropy for fair tables."
+            if live is not None and live.game in FAIR_GAMES \
+                    and (live.state or {}).get("fair"):
+                return ("finish this table first — the commitment already "
+                        "binds your current seed.")
+            try:
+                seed = set_client_seed(engine.db, player.key, word)
+            except ValueError as exc:
+                return str(exc)
+            return (f"🎲 your fair seed is now {seed!r} — every future "
+                    f"fair table mixes it into the draws.")
+        if verb == "events":
+            from ...games.seasons import describe_seasons
+            return describe_seasons(engine.db)
+        if verb == "queue":
+            if player is None:
+                return "queue needs a chat sender — run it where you play."
+            from ...games.matchmaking import QUEUE_GAMES, match_status
+            rest = " ".join(parts[1:]).strip().lower()
+            if not rest:
+                status = match_status(engine.db, player.key)
+                return (status or
+                        "not queued. /game queue <game> — get matched.\n"
+                        "queueable: " + ", ".join(QUEUE_GAMES))
+            return engine.matchmaker.enqueue(player, chat_key, rest)
+        if verb in ("dequeue", "unqueue", "leavequeue"):
+            if player is None:
+                return "dequeue needs a chat sender."
+            return engine.matchmaker.dequeue(player.key)
+        if verb == "ratings":
+            if player is None:
+                return "ratings needs a chat sender — run it where you play."
+            from ...games.matchmaking import render_ratings
+            game = parts[1].lower() if len(parts) > 1 else ""
+            return render_ratings(engine.db, game)
         if verb == "join":
             if player is None:
                 return "join needs a chat sender — say it where the game is live."
@@ -1114,7 +1188,20 @@ class RuntimeGamesMixin:
                 if (room.kind == "group" and room.player(player.key) is None
                         and not is_engine_command):
                     msgs.extend(engine.join(chat_key, player))
-                msgs.extend(engine.move(chat_key, text, player, kind=kind))
+                # A live room OWNS this message. If the engine crashes on
+                # it, the player gets an honest error — the message must
+                # NEVER silently fall through to the general brain, or a
+                # game move ("fury") gets answered as a chat question.
+                try:
+                    msgs.extend(engine.move(chat_key, text, player, kind=kind))
+                except Exception as exc:  # noqa: BLE001
+                    _log.exception("game move crashed for live room %s",
+                                   chat_key)
+                    detail = f"{type(exc).__name__}: {exc}".strip()
+                    return (f"that move broke something on my end "
+                            f"({detail or 'unknown error'}) — the table is "
+                            f"still open, try again or /game quit to walk "
+                            f"away.")
                 return "\n".join(msgs) or None
             return None
         except Exception:  # noqa: BLE001 - a game bug must never eat the chat
@@ -1301,16 +1388,44 @@ class RuntimeGamesMixin:
             return err
         from ...games.gamemaster import DM_MOODS
         gm = self._npc_gamemaster()
-        mood = (tail or "").strip().lower()
-        if not mood:
+        parts = (tail or "").split(None, 1)
+        verb = parts[0].lower() if parts else ""
+        rest = parts[1] if len(parts) > 1 else ""
+        if verb in ("", "mood") and not rest:
             cur = gm.get_dm_mood(game_id)
             return (f"🎲 DM mood for {game_id}: {cur}\n"
-                    f"   /dm mood <{'|'.join(DM_MOODS)}> — set it")
+                    f"   /dm mood <{'|'.join(DM_MOODS)}> — set the voice\n"
+                    f"   /dm say <text> — the DM speaks it in its voice\n"
+                    f"   /dm intro — the DM sets the scene for this table")
+        if verb == "say":
+            if not rest.strip():
+                return "usage: /dm say <text> — the DM speaks it in its voice."
+            line = gm.narrate(game_id, rest.strip())
+            return f"🎲 {line}" if line else "the DM has no words for that."
+        if verb == "intro":
+            engine = self._game_engine()
+            live = engine.live(chat_key)
+            if live is None:
+                return "no live game here — start one first."
+            names = ", ".join(p.name for p in live.players) or "no one yet"
+            scene = (f"the table is set for {live.game}: {names} "
+                     f"take their seats")
+            line = gm.narrate(game_id, scene)
+            return f"🎲 {line}" if line else scene
+        if verb == "mood":
+            try:
+                mood = gm.set_dm_mood(game_id, rest)
+            except ValueError as exc:
+                return str(exc)
+            # show off the new voice immediately
+            sample = gm.narrate(game_id, "the mood in the room shifts")
+            return f"🎲 DM mood for {game_id}: {mood}\n{sample}"
+        # back-compat: "/dm grim" still sets the mood directly
         try:
-            gm.set_dm_mood(game_id, mood)
-        except ValueError as exc:
-            return str(exc)
-        # show off the new voice immediately
+            mood = gm.set_dm_mood(game_id, verb)
+        except ValueError:
+            return (f"unknown /dm command {verb!r} — try /dm mood "
+                    f"<{'|'.join(DM_MOODS)}> · /dm say <text> · /dm intro")
         sample = gm.narrate(game_id, "the mood in the room shifts")
         return f"🎲 DM mood for {game_id}: {mood}\n{sample}"
 
@@ -1392,7 +1507,7 @@ class RuntimeGamesMixin:
         def _call(prompt: str) -> str:
             from ...llm.base import Message
 
-            response = router.chat([Message(role="user", content=prompt)])
+            response = brain_for(self.context).chat([Message(role="user", content=prompt)], task_kind="chat")
             return getattr(response, "text", "") or ""
 
         return _call
