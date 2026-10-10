@@ -13,36 +13,51 @@ from typing import Any
 def register(registry: Any) -> None:
     from ..core.policy import Capability
 
+    context = registry.context
+
+    def _suggest(prompt: str) -> str:
+        """Brain as SuggestFn for motion direction."""
+        from ..llm.base import Message, SamplingParams
+        from ..llm.brain import brain_for
+        try:
+            resp = brain_for(context).chat(
+                [Message.user(prompt)],
+                SamplingParams(temperature=0.7, max_tokens=2500),
+                task_kind="creative")
+            return (resp.text or "").strip()
+        except Exception:
+            return ""
+
     @registry.register(
         "animate_photo",
         description=(
             "Animate a still photo with a DIRECTED action. ('make the person "
-            "in this photo raise two fingers', 'animate her waving, phone "
-            "selfie style'). The action is directed — the person performs "
-            "that specific motion, not random movement. Optional camera "
-            "look: phone_selfie, phone, handheld, cctv, dashcam, cinema. "
-            "Returns the video path."
+            "in this photo raise two fingers', 'animate her shadow boxing', "
+            "'make him do a backflip', 'collapse crying'). ANY describable "
+            "human action works — the brain directs the motion, not a fixed "
+            "list. Optional camera look: phone_selfie, phone, handheld, "
+            "cctv, dashcam, cinema. Returns the video path."
         ),
         capability=Capability.MEDIA,
     )
     def animate_photo(image: str, action: str, *, camera: str = "",
                       duration_s: float = 4.0,
                       workdir: str | None = None) -> dict[str, Any]:
-        from ..media.directed.pose_rig import (
-            build_track, resolve_action, list_actions)
+        from ..media.directed.motion_score import generate_track
         from ..media.directed.animator import direct_animate, ModelUnavailable
-        key = resolve_action(action)
-        if key is None:
-            return {"ok": False,
-                    "error": f"don't know how to direct {action!r}",
-                    "known_actions": list_actions()}
         n_frames = max(8, int(duration_s * 10))
-        track = build_track(key, n_frames=n_frames, fps=10.0)
+        try:
+            track, meta = generate_track(
+                action, suggest=_suggest, n_frames=n_frames, fps=10.0)
+        except (ValueError, RuntimeError) as exc:
+            return {"ok": False, "error": str(exc)}
         try:
             res = direct_animate(image, track, workdir=workdir)
         except ModelUnavailable as exc:
             return {"ok": False, "error": str(exc)}
         path, backend, note = res.path, res.backend, res.note
+        if meta.get("notes"):
+            note += " | direction notes: " + "; ".join(meta["notes"][:3])
         if camera:
             from ..media.directed.camera import camera_look_video, LOOKS
             if camera not in LOOKS:
@@ -54,7 +69,8 @@ def register(registry: Any) -> None:
             path = camera_look_video(path, camera, styled, fps=10)
             note += f" + {camera} look"
         return {"ok": True, "path": path, "backend": backend,
-                "action": key, "note": note}
+                "action": meta.get("action", action),
+                "source": meta.get("source", "?"), "note": note}
 
     @registry.register(
         "camera_look",
@@ -83,13 +99,16 @@ def register(registry: Any) -> None:
 
     @registry.register(
         "list_actions",
-        description=("List the directed animation action vocabulary "
-                     "('what can you make the person do')."),
+        description=("List example directed-animation actions ('what can you "
+                     "make the person do'). Any describable human action "
+                     "works — these are fast offline presets, not the limit."),
         capability=Capability.MEDIA,
     )
     def list_actions() -> dict[str, Any]:
         from ..media.directed.pose_rig import list_actions as _la
-        return {"ok": True, "actions": _la()}
+        return {"ok": True, "preset_examples": _la(),
+                "note": "presets are instant and offline; describe ANY "
+                        "action and the brain directs it"}
 
     @registry.register(
         "structure_prompt",
@@ -275,6 +294,28 @@ def register(registry: Any) -> None:
             return {"ok": False, "error": str(exc)}
         return {"ok": True, "path": res.path, "backend": res.backend,
                 "note": res.note}
+
+    @registry.register(
+        "direct_action",
+        description=(
+            "Direct ANY action into a motion score without rendering "
+            "('show me how you'd direct a backflip'). Returns the phase "
+            "breakdown the brain choreographed, plus any plausibility "
+            "notes. Inspect before animating."
+        ),
+        capability=Capability.MEDIA,
+    )
+    def direct_action(action: str) -> dict[str, Any]:
+        from ..media.directed.motion_score import generate_motion_score
+        from ..media.directed.pose_rig import resolve_action
+        if resolve_action(action) is not None:
+            return {"ok": True, "source": "preset",
+                    "note": "preset action — parametric, instant, offline"}
+        try:
+            score = generate_motion_score(action, _suggest)
+        except (ValueError, RuntimeError) as exc:
+            return {"ok": False, "error": str(exc)}
+        return {"ok": True, "source": "generated", "score": score}
 
     @registry.register(
         "talk_photo",

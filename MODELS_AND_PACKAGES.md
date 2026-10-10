@@ -160,6 +160,7 @@ Source: `nomorals/media/directed/`.
 | Model | For | Size 💰 | Platform | Install |
 |-------|-----|---------|----------|---------|
 | **MimicMotion_1-1.pth** + DWPose onnx | Pose-guided video (photo + pose → directed motion) | ~5 GB + ~200 MB 💰 | 🖥️ (16GB VRAM) | `git clone https://github.com/Tencent/MimicMotion ~/.devon-models/mimicmotion/repo` + download weights into `~/.devon-models/mimicmotion/` |
+| **Kimodo-SOMA-RP-v1** (NVIDIA) | Text-to-motion: any description → 3D joint sequence (heavy path for open action generation) | ~4-6 GB 💰 | 🖥️ (~17GB VRAM) | `pip install kimodo` + weights auto-download from HuggingFace on first use. Repo: `https://github.com/nv-tlabs/kimodo` |
 | **Wav2Lip** (wav2lip.pth + s3fd.pth) | Video lip sync | ~960 MB 💰 | 💻🖥️ (8GB VRAM) | `git clone https://github.com/zdh6090/Wav2Lip ~/.devon-models/wav2lip/repo` + weights. ⚠️ Research/non-commercial license |
 | **LatentSync 1.5** (latentsync_unet.pt + whisper tiny.pt) | Higher-quality lip sync | ~2-3 GB 💰 | 💻🖥️ (8GB VRAM; v1.6 needs 18GB) | `git clone https://github.com/bytedance/LatentSync ~/.devon-models/latentsync/repo` + `source setup_env.sh`. Apache 2.0 |
 | **SadTalker** | Photo → talking head | ~2 GB + checkpoints 💰 | 💻🖥️ | `git clone https://github.com/OpenTalker/SadTalker ~/.devon-models/sadtaker/repo` + checkpoint script |

@@ -10,6 +10,12 @@ No model needed here: the ACTION is authored parametrically, the neural
 model (when present) only renders it photoreal. Deterministic, editable,
 offline.
 
+The ACTIONS below are SEED EXAMPLES + instant offline presets — never the
+ceiling. Any describable human action goes through
+motion_score.generate_track(): preset fast path when matched, otherwise
+the brain choreographs a motion score (JSON phases) compiled onto this
+rig. The only limit is physical plausibility, enforced by the compiler.
+
 Rest-pose assumption (honest): without a pose detector the rig places a
 frontal rest pose scaled to the frame, person centered. When DWPose is
 available the rest pose is extracted from the image and actions retarget
