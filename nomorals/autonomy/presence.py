@@ -180,11 +180,11 @@ def ensure_heartbeat_job(scheduler: Any) -> None:
         have = [j for j in scheduler.list_jobs()
                 if j.get("name") == "presence-heartbeat"]
         if not have:
-            scheduler.add_cron_job(
+            scheduler.add(
                 name="presence-heartbeat",
                 spec="*/30 * * * *",
-                action="__presence_heartbeat__",
-                parameters={},
+                payload_kind="tool",
+                payload={"tool": "__presence_heartbeat__", "args": {}},
                 metadata={"organ": "autonomy.presence"},
             )
             _log.info("presence heartbeat job registered")

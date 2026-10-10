@@ -314,7 +314,8 @@ def _parse_daily_spec(text: str) -> str:
     try:
         ZoneInfo(tz)
     except ZoneInfoNotFoundError:
-        raise ValueError(f"unknown timezone: {tz!r}")
+        _log.warning("scheduler: unknown timezone %r (tzdata missing?), using local", tz)
+        return hhmm
     return f"{hhmm} {tz}"
 
 

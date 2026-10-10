@@ -1338,7 +1338,7 @@ class PartnerRuntime(
                                  if j.get("name") == "mining session"]
                     if not have_mine:
                         self._scheduler.add(
-                            "mining session", "daily", "tool",
+                            "mining session", "daily 03:00", "tool",
                             {"tool": "train_mine", "args": {}},
                         )
                 except Exception as exc:  # noqa: BLE001 - optional

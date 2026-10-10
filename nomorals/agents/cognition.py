@@ -463,6 +463,21 @@ class CognitiveLoop:
                              "tokens_this_tick": total["tokens"],
                              **budget.report()}
         self._log_tick(summary)
+        self._ledger_tick(summary)
+        # cross-system: let bus-source triggers react to the heartbeat
+        try:
+            from ..core.events import Event, global_bus
+
+            global_bus.publish(Event(
+                topic="cognition.tick.finished",
+                data={"seconds": summary.get("seconds", 0.0),
+                      "stages": {k: ("error" if isinstance(v, dict) and v.get("error")
+                                     else "ok")
+                                 for k, v in (summary.get("stages") or {}).items()},
+                      "next_interval_hours": summary.get("next_interval_hours")},
+                source="nomorals.agents.cognition"))
+        except Exception:  # noqa: BLE001 - telemetry is fail-open
+            _log.debug("cognitive bus publish failed", exc_info=True)
         self._update_adaptive_cadence(summary)
         _log.info("cognitive loop tick: %s",
                   {k: v for k, v in summary["stages"].items()})
@@ -639,6 +654,38 @@ class CognitiveLoop:
             _log.debug("adaptive cadence failed: %s", exc)
 
     # ── telemetry (wave 62) ────────────────────────────────────────────────
+    def _ledger_tick(self, summary: dict[str, Any]) -> None:
+        """Journal one heartbeat into the unified autonomy ledger
+        (best-effort).  This is the cross-system answer to "what has the
+        autonomy been doing" — alongside the existing cognition_log row."""
+        try:
+            from .autonomy_ledger import record_ledger
+
+            stages = summary.get("stages", {}) or {}
+            bits = []
+            for name, st in stages.items():
+                if not isinstance(st, dict):
+                    continue
+                if st.get("error"):
+                    bits.append(f"{name}:error")
+                elif st.get("skipped"):
+                    bits.append(f"{name}:skipped")
+                elif st.get("ran") or st.get("advanced") or st.get("healed"):
+                    bits.append(f"{name}:active")
+            budget = summary.get("budget") or {}
+            record_ledger(
+                self.context, "cognition", "tick", "",
+                "cognitive tick: " + (", ".join(bits) or "idle"),
+                cost_seconds=float(summary.get("seconds") or 0.0),
+                cost_tokens=int(budget.get("tokens_this_tick") or 0),
+                ok=not any(isinstance(st, dict) and st.get("error")
+                           for st in stages.values()),
+                metadata={"next_interval_hours":
+                          summary.get("next_interval_hours")},
+            )
+        except Exception:  # noqa: BLE001 - ledger never breaks a tick
+            _log.debug("cognitive ledger tick failed", exc_info=True)
+
     def _log_tick(self, summary: dict[str, Any]) -> None:
         """Journal one heartbeat into cognition_log (best-effort)."""
         try:
@@ -784,7 +831,7 @@ class CognitiveLoop:
         resumed: list[str] = []
         try:
             rows = self.context.db.query(
-                "SELECT id, project_id FROM goals "
+                "SELECT goal_id, project_id FROM goals "
                 "WHERE status = 'paused' AND project_id != '' "
                 "ORDER BY priority DESC, created_at ASC LIMIT 10")
             if not rows:
@@ -794,7 +841,7 @@ class CognitiveLoop:
 
             gs = GoalSystem(self.context)
             for r in rows:
-                goal_id = str(r.get("id") or "")
+                goal_id = str(r.get("goal_id") or "")
                 project_id = str(r.get("project_id") or "")
                 try:
                     project = mgr._load(project_id)
