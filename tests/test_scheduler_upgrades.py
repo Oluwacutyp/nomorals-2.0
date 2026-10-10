@@ -293,9 +293,14 @@ class SchedulerUpgradeTests(unittest.TestCase):
                              "message", {"text": "c"},
                              depends_on=parent["id"], max_retries=3)
         formatted = self.sched._format_job(self.sched._find(job["id"]))
-        self.assertEqual(formatted["depends_on"], parent["id"])
+        self.assertEqual(formatted["depends_on"], [parent["id"]])
         self.assertEqual(formatted["max_retries"], 3)
         self.assertEqual(formatted["timezone"], "America/New_York")
+        # deep-upgrade defaults ride along on every formatted job
+        self.assertEqual(formatted["missed_fire_policy"], "fire_now")
+        self.assertEqual(formatted["overlap_policy"], "concurrent")
+        self.assertEqual(formatted["backoff"], "exponential")
+        self.assertEqual(formatted["depends_policy"], "all_ok")
 
 
 if __name__ == "__main__":

@@ -29,6 +29,7 @@ from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Any, Optional
 
+from ..llm.brain import brain_for
 from ..core.logging_setup import get_logger
 from .opportunities import Opportunity
 
@@ -198,7 +199,7 @@ class GigApplier:
             router = getattr(settings, "router", None)
         if router is None:
             raise RuntimeError("no LLM available for drafting — pass llm_fn")
-        resp = router.complete(prompt)
+        resp = brain_for(context).complete(prompt, task_kind="chat")
         return resp.text if hasattr(resp, "text") else str(resp)
 
     def draft(self, opp: Opportunity, profile: Any = None,

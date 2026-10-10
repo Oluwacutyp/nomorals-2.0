@@ -38,6 +38,7 @@ __all__ = [
     "QUEST_REQUIRED",
     "ITEM_REQUIRED",
     "ITEM_RARITIES",
+    "feed",
     "validate_quest",
     "validate_item",
 ]
@@ -169,6 +170,31 @@ _ITEM_FLAVOR = (
 
 def _safe_game_id(game_id: str) -> str:
     return re.sub(r"[^a-zA-Z0-9_-]", "_", game_id or "default")
+
+
+def feed(room: Any, event_text: str, *, big: bool = False) -> None:
+    """Push a bare game event onto the room's DM feed.
+
+    Games call this at notable moments — ``feed(room, "Ada lands a
+    killing crit on the Hollow Warden", big=True)``. The engine drains
+    the feed after the move and the GameMaster narrates it in the
+    table's DM mood (see :meth:`GameMaster.announce`). ``big`` marks
+    moments the NPC cast reacts to. Pure state append — never raises,
+    never blocks; the engine decides what gets narrated.
+    """
+    text = (event_text or "").strip()
+    if not text or room is None:
+        return
+    state = getattr(room, "state", None)
+    if not isinstance(state, dict):
+        return
+    try:
+        items = state.setdefault("_dm_feed", [])
+        if len(items) >= 6:
+            items.pop(0)
+        items.append({"text": text[:220], "big": bool(big)})
+    except Exception:  # noqa: BLE001 - the feed must never break a game
+        _log.debug("dm feed push failed", exc_info=True)
 
 
 class GameMaster:
@@ -407,6 +433,43 @@ class GameMaster:
         }
 
     # ── cast management ───────────────────────────────────────────────────
+    def announce(self, game_id: str,
+                 events: list[Any] | None,
+                 *, cast: list[NPCProfile] | None = None) -> str | None:
+        """Narrate drained feed events in the DM's current mood.
+
+        Narrates the most salient event (the last ``big`` one, else the
+        last one); when a cast is present and the moment is big, one of
+        them reacts in their own voice. Returns the chat line(s), or
+        None when there's nothing worth saying. The engine calls this —
+        games only ever push to :func:`feed`.
+        """
+        norm: list[tuple[str, bool]] = []
+        for e in events or []:
+            if isinstance(e, dict):
+                text = str(e.get("text") or "").strip()
+                if text:
+                    norm.append((text, bool(e.get("big"))))
+            elif str(e or "").strip():
+                norm.append((str(e).strip(), False))
+        if not norm:
+            return None
+        big_ones = [t for t, b in norm if b]
+        headliner = big_ones[-1] if big_ones else norm[-1][0]
+        line = self.narrate(game_id, headliner)
+        if not line:
+            return None
+        out = [f"🎲 {line}"]
+        if cast and any(b for _, b in norm):
+            npc = self.rng.choice(cast)
+            try:
+                reaction = self.npc_speak(npc, headliner)
+                if reaction:
+                    out.append(f"_{reaction}_")
+            except Exception:  # noqa: BLE001
+                _log.debug("npc reaction failed", exc_info=True)
+        return "\n".join(out)
+
     def ensure_cast(self, game_id: str) -> list[NPCProfile]:
         """Seed a starter cast if this game has no NPCs yet.
 

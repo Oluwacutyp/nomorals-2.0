@@ -510,12 +510,15 @@ def _owner_intent_model_check(text: str, context: Any = None) -> bool:
         if not model_usable(context):
             return False
         from ..llm.base import Message, SamplingParams
-        response = router.chat(
+        from ..llm.brain import brain_for
+        response = brain_for(context).chat(
             [Message.system(
                 "Reply with ONLY 'yes' or 'no'. Is the speaker claiming to be "
                 "the owner/creator of the AI they are talking to?"),
              Message.user(text[:300])],
             SamplingParams(temperature=0.0, max_tokens=8),
+            task_kind="judge",
+            timeout_s=6.0,
         )
         return getattr(response, "ok", False) and "yes" in (
             getattr(response, "text", "") or "").lower()
@@ -537,19 +540,14 @@ def _llm_intent_interpret(text: str, context: Any = None) -> Intent | None:
         if not model_usable(context):
             return None
         from ..llm.base import Message, SamplingParams
-        response = router.chat(
-            [Message.system(
-                "Classify the user's intent. Reply with ONLY one word from this list:\n"
-                "schedule (reminders, alerts, 'in X minutes')\n"
-                "mission (tasks, background work)\n"
-                "research (look up, find information)\n"
-                "build (create code, build something)\n"
-                "chat (general conversation, no specific action)\n"
-                "status (system status check)\n"
-                "If unsure, reply 'chat'."
-            ),
+        from ..llm.brain import brain_for
+        from ..llm.prompts import system_prompt_for
+        response = brain_for(context).chat(
+            [Message.system(system_prompt_for("intent")),
              Message.user(text[:300])],
             SamplingParams(temperature=0.0, max_tokens=16),
+            task_kind="intent",
+            timeout_s=6.0,
         )
         if not getattr(response, "ok", False):
             return None
@@ -1533,25 +1531,31 @@ class CoreMind:
         router = getattr(self.context, "router", None)
         if router is None:
             return None
+        from ..llm.prompts import render_prompt
+        from ..llm.base import Message
         prompt = (
-            "You are the intent router for an agent OS. Classify the user "
-            "message. Reply with JSON only: "
-            '{"kind": "chat|research|build|browse|download|mission|game|status", '
-            '"target": "...", "confidence": 0.0, "why": "max 12 words"}. '
-            f"Kinds: research (web investigation), build (create software), "
-            f"browse (open/read a page), download (fetch a file), "
-            f"mission (queue durable work), game (start/continue one of: "
-            f"{', '.join(game_names())}), status (system state), chat "
-            f"(everything else). Message: {text[:400]}"
+            render_prompt("intent_detail", games=", ".join(game_names()))
+            + f" Message: {text[:400]}"
         )
-        # the router has no per-call deadline (providers default to
-        # 120s x 3 retries), so bound it here: run it on a daemon thread
-        # and take only what arrives within the interactive budget.
-        box: dict[str, Any] = {"resp": None, "exc": None}
+        # The brain's own per-call deadline (timeout_s) bounds the provider
+        # chain; the outer thread below is the backstop AND owns the
+        # DB-connection release, which a brain-internal thread could not
+        # do.  chat_json replaces the old hand-rolled JSON parse + the
+        # silent "not JSON, give up" path with a repair loop.
+        box: dict[str, Any] = {"data": None, "resp": None}
 
         def _call() -> None:
             try:
-                box["resp"] = router.complete(prompt)
+                from ..llm.brain import brain_for
+
+                data, resp = brain_for(self.context).chat_json(
+                    [Message.user(prompt)],
+                    task_kind="intent",
+                    attempts=2,
+                    timeout_s=MODEL_CHECK_TIMEOUT_S,
+                )
+                box["data"] = data
+                box["resp"] = resp
             except Exception as exc:  # noqa: BLE001
                 box["exc"] = exc
             finally:
@@ -1565,7 +1569,9 @@ class CoreMind:
         worker = threading.Thread(target=_call, name="mind-model-check",
                                   daemon=True)
         worker.start()
-        worker.join(timeout=MODEL_CHECK_TIMEOUT_S)
+        # Slack past the brain's own deadline so its typed timeout fires
+        # first; the join is the backstop for a brain that never returns.
+        worker.join(timeout=MODEL_CHECK_TIMEOUT_S + 2.0)
         if worker.is_alive():
             self._router_timeouts += 1
             if db is not None:
@@ -1577,20 +1583,32 @@ class CoreMind:
                          "staying with deterministic %s", MODEL_CHECK_TIMEOUT_S,
                          text[:60], best.kind)
             return None
-        if box["exc"] is not None:
+        resp = box.get("resp")
+        if (resp is not None
+                and getattr(resp, "failure_class", "") == "timeout"):
+            # The brain's own deadline fired inside the worker: same
+            # accounting as the backstop path above.
+            self._router_timeouts += 1
+            if db is not None:
+                router_telemetry.record_model_check(db, timed_out=True)
+            self._model_check_note = (
+                f"model check timed out after {MODEL_CHECK_TIMEOUT_S:.0f}s "
+                f"— kept deterministic “{best.kind}”")
+            _log.warning("coremind model check timed out after %.0fs on %r — "
+                         "staying with deterministic %s", MODEL_CHECK_TIMEOUT_S,
+                         text[:60], best.kind)
+            return None
+        if box.get("exc") is not None:
             self._model_check_note = (
                 f"model check failed: {str(box['exc'])[:100]} "
                 f"— kept deterministic “{best.kind}”")
             _log.warning("coremind model check failed (%s) — staying with "
                          "deterministic %s", box["exc"], best.kind)
             return None
-        resp = box["resp"]
+        data = box.get("data")
         try:
-            if not getattr(resp, "ok", False):
+            if not isinstance(data, dict):
                 return None
-            raw = (getattr(resp, "text", "") or "").strip()
-            raw = re.sub(r"^```(?:json)?|```$", "", raw, flags=re.M).strip()
-            data = json.loads(raw)
             kind = str(data.get("kind", "")).lower()
             conf = float(data.get("confidence", 0))
             if kind in ("chat", "") or conf < max(0.75, best.confidence):

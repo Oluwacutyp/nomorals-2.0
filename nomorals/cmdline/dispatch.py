@@ -18,6 +18,7 @@ from .commands.book import _cmd_book
 from .commands.account import _cmd_account
 from .commands.books import _cmd_books
 from .commands.briefing import _cmd_briefing
+from .commands.audio import _cmd_audio
 from .commands.builders import _cmd_build
 from .commands.captcha import _cmd_captcha
 from .commands.cards import _cmd_cards
@@ -27,6 +28,7 @@ from .commands.doc import _cmd_doc
 from .commands.data import _cmd_data
 from .commands.datasci import _cmd_datasci
 from .commands.doctor import _cmd_doctor, _cmd_models, _cmd_setup
+from .commands.brain import _cmd_brain
 from .commands.exec import _cmd_apps, _cmd_exec
 from .commands.finance import _cmd_finance
 from .commands.games import _cmd_arena, _cmd_simulate, _cmd_skill, _cmd_trial
@@ -36,6 +38,7 @@ from .commands.golden import _cmd_golden
 from .commands.hub import _cmd_hub
 from .commands.imggen import cmd_imggen
 from .commands.shorts import cmd_shorts
+from .commands.video import cmd_video
 from .commands.improve import _cmd_improve
 from .commands.inbox import _cmd_inbox
 from .commands.media import _cmd_media, _cmd_studio
@@ -52,6 +55,7 @@ from .commands.owner import _cmd_owner
 from .commands.partner import _cmd_reason, _cmd_workspace
 from .commands.power import _cmd_power
 from .commands.project import _cmd_project
+from .commands.pulse import _cmd_pulse
 from .commands.plugin import _cmd_plugin
 from .commands.queue import _cmd_queue
 from .commands.recover import _cmd_recover
@@ -73,6 +77,7 @@ from .commands.snapshot import _cmd_snapshot
 from .commands.stream import _cmd_stream
 from .commands.status import _cmd_status
 from .commands.session import _cmd_session
+from .commands.chat import _cmd_chat
 from .commands.swarm import _cmd_swarm
 from .commands.timeline import _cmd_timeline
 from .commands.tools import _cmd_tools
@@ -234,6 +239,8 @@ def _dispatch(args: argparse.Namespace) -> int:
             return _cmd_models(args, context)
         if args.command == "data":
             return _cmd_data(args, context)
+        if args.command == "brain":
+            return _cmd_brain(args, context)
         if args.command == "datasci":
             return _cmd_datasci(args, context)
         if args.command == "tools":
@@ -244,6 +251,8 @@ def _dispatch(args: argparse.Namespace) -> int:
             return _cmd_owner(args, context)
         if args.command == "power":
             return _cmd_power(args, context)
+        if args.command == "pulse":
+            return _cmd_pulse(args, context)
         if args.command == "run":
             return _cmd_run(args, context)
         if args.command == "ask":
@@ -274,6 +283,8 @@ def _dispatch(args: argparse.Namespace) -> int:
             return _cmd_status(args, context)
         if args.command == "session":
             return _cmd_session(args, context)
+        if args.command == "chat":
+            return _cmd_chat(args, context)
         if args.command == "mind":
             return _cmd_mind(args, context)
 
@@ -403,8 +414,12 @@ def _dispatch(args: argparse.Namespace) -> int:
             return cmd_imggen(args, context)
         if args.command == "shorts":
             return cmd_shorts(args, context)
+        if args.command == "video":
+            return cmd_video(args, context)
         if args.command == "inbox":
             return _cmd_inbox(args, context)
+        if args.command == "audio":
+            return _cmd_audio(args, context)
         if args.command == "room":
             return _cmd_room(args, context)
         if args.command == "briefing":

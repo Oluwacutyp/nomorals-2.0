@@ -170,9 +170,12 @@ class DirectivesAgent:
         if self.router is None:
             raise RuntimeError("no model available to execute this directive")
         from ..llm.base import Message
+        from ..llm.brain import Brain
 
-        response = self.router.chat(
-            [Message(role="user", content=instruction)]
+        brain = self.router if isinstance(self.router, Brain) else Brain(router=self.router)
+        response = brain.chat(
+            [Message(role="user", content=instruction)],
+            task_kind="chat",
         )
         text = (getattr(response, "text", "") or "").strip()
         if getattr(response, "error", None) and not text:

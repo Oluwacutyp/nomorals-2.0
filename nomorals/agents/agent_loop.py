@@ -17,6 +17,7 @@ chat gateway's ``send``. The loop is wired together in
 
 from __future__ import annotations
 
+import abc
 import logging
 import re
 from dataclasses import dataclass, field
@@ -76,21 +77,148 @@ class LoopContext:
 
 # ── dynamic context sizing ──────────────────────────────────────────────
 # The owner's principle: dynamic where it matters. Dialogue depth adapts
-# to input complexity instead of a fixed 4-turn window.
+# to the message via a STRATEGY CHAIN — each strategy sees the signals
+# and the running (turns, chars) depth and returns an adjusted depth.
+# The default chain reproduces the old length bands and then layers
+# ambiguity/media/command/profile adjustments on top; custom chains can
+# be injected for per-deployment tuning.
 
-def _dialogue_depth(text_len: int, ambiguous: bool = False) -> tuple[int, int]:
-    """Return (turn_count, chars_per_turn) adapted to input complexity.
+#: (turns, chars-per-turn)
+Depth = tuple[int, int]
 
-    Short greetings need almost no history; long or ambiguous messages
-    benefit from a wider window.
-    """
-    if text_len < 30:
-        return (2, 120)
-    if text_len < 120:
-        return (4, 160)
-    if ambiguous or text_len >= 300:
-        return (8, 200)
-    return (6, 180)
+
+@dataclass
+class DepthSignals:
+    """Everything the depth chain may consider.  Cheap, local, no model."""
+
+    text_len: int = 0
+    ambiguous: bool = False
+    has_media: bool = False
+    is_command: bool = False
+    resource_profile: str = "workstation"  # workstation | laptop | termux
+
+
+class DepthStrategy(abc.ABC):
+    """One adjustable link in the dialogue-depth chain."""
+
+    name: str = "base"
+
+    @abc.abstractmethod
+    def adjust(self, depth: Depth, signals: DepthSignals) -> Depth:
+        """Return the depth after this strategy's consideration."""
+
+
+class LengthBandDepth(DepthStrategy):
+    """Base depth from text-length bands.  Bands are data, not branches."""
+
+    name = "length_band"
+
+    def __init__(
+        self,
+        bands: tuple[tuple[float, Depth], ...] = (
+            (30, (2, 120)),
+            (120, (4, 160)),
+            (300, (6, 180)),
+            (float("inf"), (8, 200)),
+        ),
+    ) -> None:
+        self.bands = bands
+
+    def adjust(self, depth: Depth, signals: DepthSignals) -> Depth:
+        for limit, band_depth in self.bands:
+            if signals.text_len < limit:
+                return band_depth
+        return self.bands[-1][1]
+
+
+class AmbiguityBoost(DepthStrategy):
+    """Questions / alternatives / hedges deserve a wider window."""
+
+    name = "ambiguity_boost"
+
+    def __init__(self, extra_turns: int = 2, extra_chars: int = 20) -> None:
+        self.extra_turns = extra_turns
+        self.extra_chars = extra_chars
+
+    def adjust(self, depth: Depth, signals: DepthSignals) -> Depth:
+        if signals.ambiguous:
+            return (depth[0] + self.extra_turns, depth[1] + self.extra_chars)
+        return depth
+
+
+class MediaBoost(DepthStrategy):
+    """Media messages usually refer back to earlier context."""
+
+    name = "media_boost"
+
+    def __init__(self, extra_turns: int = 2) -> None:
+        self.extra_turns = extra_turns
+
+    def adjust(self, depth: Depth, signals: DepthSignals) -> Depth:
+        if signals.has_media:
+            return (depth[0] + self.extra_turns, depth[1])
+        return depth
+
+
+class CommandNarrow(DepthStrategy):
+    """Commands are self-contained — don't drag history along."""
+
+    name = "command_narrow"
+
+    def __init__(self, max_turns: int = 2, max_chars: int = 120) -> None:
+        self.max_turns = max_turns
+        self.max_chars = max_chars
+
+    def adjust(self, depth: Depth, signals: DepthSignals) -> Depth:
+        if signals.is_command:
+            return (min(depth[0], self.max_turns), min(depth[1], self.max_chars))
+        return depth
+
+
+class ProfileCap(DepthStrategy):
+    """Small machines get a smaller window — a cap, not a redesign."""
+
+    name = "profile_cap"
+
+    def __init__(self, caps: dict[str, Depth] | None = None) -> None:
+        self.caps = caps or {"termux": (4, 160)}
+
+    def adjust(self, depth: Depth, signals: DepthSignals) -> Depth:
+        cap = self.caps.get(signals.resource_profile)
+        if cap is not None:
+            return (min(depth[0], cap[0]), min(depth[1], cap[1]))
+        return depth
+
+
+def default_depth_strategies() -> list[DepthStrategy]:
+    """The stock chain: band → ambiguity → media → command → profile cap."""
+    return [
+        LengthBandDepth(),
+        AmbiguityBoost(),
+        MediaBoost(),
+        CommandNarrow(),
+        ProfileCap(),
+    ]
+
+
+def dialogue_depth(
+    signals: DepthSignals,
+    strategies: list[DepthStrategy] | None = None,
+) -> Depth:
+    """Run the depth chain over ``signals``.  Never raises."""
+    depth: Depth = (4, 160)
+    try:
+        for strategy in strategies if strategies is not None else default_depth_strategies():
+            depth = strategy.adjust(depth, signals)
+    except Exception:  # noqa: BLE001 — depth must never break the loop
+        _log.debug("depth chain degraded", exc_info=True)
+    return depth
+
+
+def _dialogue_depth(text_len: int, ambiguous: bool = False) -> Depth:
+    """Backward-compatible entry: the old two-argument call delegates to
+    the chain with only length/ambiguity signals."""
+    return dialogue_depth(DepthSignals(text_len=text_len, ambiguous=ambiguous))
 
 
 def _looks_ambiguous(text: str) -> bool:
@@ -196,9 +324,16 @@ def build_loop_context(
             try:
                 brain = getattr(runtime, "brain", None)
                 if brain is not None and hasattr(brain, "_history"):
-                    # dynamic depth: adapt to input complexity
-                    n_turns, chars = _dialogue_depth(
-                        ctx.text_len, _looks_ambiguous(ctx.text))
+                    # dynamic depth: the strategy chain adapts the window
+                    # to the message (length, ambiguity, media, command,
+                    # machine profile) instead of a hardcoded branch.
+                    n_turns, chars = dialogue_depth(DepthSignals(
+                        text_len=ctx.text_len,
+                        ambiguous=_looks_ambiguous(ctx.text),
+                        has_media=ctx.has_media,
+                        is_command=ctx.is_command,
+                        resource_profile=ctx.resource_profile,
+                    ))
                     hist = brain._history(ctx.chat_key, limit=n_turns)
                     for m in hist[-n_turns:]:
                         t = getattr(m, "text", "")

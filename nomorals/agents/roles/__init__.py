@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from ...llm.brain import brain_for
 from ..base import Agent
 from ...core.tasks import Task
 from ...core.policy import Capability
@@ -117,13 +118,13 @@ class ResearchAgent(RoleAgent):
         from ...llm.base import Message, SamplingParams
 
         corpus = "\n\n".join(f"[{p['url']}]\n{p['text'][:2500]}" for p in pages)
-        response = router.chat(
+        response = brain_for(self.context).chat(
             [
                 Message.system("You synthesize research. Cite the source URL inline."),
                 Message.user(f"Question: {goal}\n\nSources:\n{corpus}"),
             ],
             SamplingParams(temperature=0.3, max_tokens=1500),
-        )
+        task_kind="chat")
         if not response.ok:
             return "\n".join(f"- {p['url']}" for p in pages)
         self.budget.charge_tokens(response.usage.total_tokens)
@@ -163,13 +164,13 @@ class CodingAgent(RoleAgent):
             return f"# No model available to generate code for: {goal}\n"
         from ...llm.base import Message, SamplingParams
 
-        response = router.chat(
+        response = brain_for(self.context).chat(
             [
                 Message.system(f"Write complete, runnable {language}. No placeholders. No commentary outside the code."),
                 Message.user(goal),
             ],
             SamplingParams(temperature=0.2, max_tokens=4096),
-        )
+        task_kind="chat")
         self.budget.charge_tokens(response.usage.total_tokens)
         return _strip_code_fence(response.text) if response.ok else ""
 
@@ -300,7 +301,7 @@ class CriticAgent(RoleAgent):
             return {"score": 0.5, "verdict": "no model available to critique", "issues": []}
         from ...llm.base import Message, SamplingParams
 
-        response = router.chat(
+        response = brain_for(self.context).chat(
             [
                 Message.system(
                     "You are a strict reviewer. List concrete defects. "
@@ -309,7 +310,7 @@ class CriticAgent(RoleAgent):
                 Message.user(f"Goal: {goal}\n\nDeliverable:\n{str(output)[:6000]}"),
             ],
             SamplingParams(temperature=0.1, max_tokens=1024, json_mode=True),
-        )
+        task_kind="chat")
         self.budget.charge_tokens(response.usage.total_tokens)
         if not response.ok:
             return {"score": 0.5, "verdict": "critique unavailable", "issues": []}

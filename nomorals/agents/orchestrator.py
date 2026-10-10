@@ -18,6 +18,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, Callable, Sequence
 
+from ..llm.brain import brain_for
 from ..core.errors import NoMoralsError, classify
 from ..core.jsonutil import extract_json as _extract_json
 from ..core.logging_setup import get_logger
@@ -257,10 +258,10 @@ class MasterOrchestrator:
         else:
             from ..llm.base import Message, SamplingParams
 
-            response = router.chat(
+            response = brain_for(self.context).chat(
                 [Message.user(prompt)],
                 SamplingParams(temperature=0.2, max_tokens=2048, json_mode=True),
-            )
+            task_kind="plan")
             if response.ok:
                 plan = self._parse_plan(goal, response.text) or plan
                 plan.model = response.model
@@ -296,6 +297,15 @@ class MasterOrchestrator:
             except ValueError:
                 kind = TaskKind.IO
             deps = entry.get("depends_on") or []
+            # Step execution policies ride in the payload for the mission
+            # runner: "optional" (a failed step degrades instead of failing
+            # the mission) and "on_failure" ("fail_fast" | "continue").
+            payload: dict[str, Any] = {}
+            if isinstance(entry.get("optional"), bool):
+                payload["optional"] = entry["optional"]
+            on_failure = str(entry.get("on_failure") or "").strip().lower()
+            if on_failure in {"fail_fast", "continue"}:
+                payload["on_failure"] = on_failure
             steps.append(
                 PlanStep(
                     name=name,
@@ -303,6 +313,7 @@ class MasterOrchestrator:
                     role=str(entry.get("role") or "execution"),
                     kind=kind,
                     depends_on=[str(d) for d in deps] if isinstance(deps, list) else [],
+                    payload=payload,
                 )
             )
         if not steps:
@@ -736,13 +747,13 @@ class MasterOrchestrator:
         from ..llm.base import Message, SamplingParams
 
         digest = "\n\n".join(f"[{name}]\n{value[:2000]}" for name, value in results.items())
-        response = router.chat(
+        response = brain_for(self.context).chat(
             [
                 Message.system("Combine the step outputs into one coherent answer. Be concise."),
                 Message.user(f"Goal: {goal}\n\nStep outputs:\n{digest}"),
             ],
             SamplingParams(temperature=0.3, max_tokens=2048),
-        )
+        task_kind="plan")
         return response.text if response.ok else "\n\n".join(f"## {k}\n{v}" for k, v in results.items())
 
     def reflect(
@@ -765,7 +776,7 @@ class MasterOrchestrator:
             from ..llm.base import Message, SamplingParams
 
             failures = "; ".join(f"{k}: {v[:120]}" for k, v in report.failures.items()) or "none"
-            response = router.chat(
+            response = brain_for(self.context).chat(
                 [
                     Message.user(
                         f"Goal: {goal}\nCompleted: {report.done}/{total}\nFailures: {failures}\n"
@@ -773,7 +784,7 @@ class MasterOrchestrator:
                     )
                 ],
                 SamplingParams(temperature=0.2, max_tokens=512),
-            )
+            task_kind="plan")
             if response.ok and response.text.strip():
                 lessons = [
                     line.strip("-• ").strip()

@@ -210,6 +210,11 @@ class LLMResponse:
     #: Human-readable degradation line, e.g.
     #: ``"hf_serverless failed (ModelError: 503); served by groq"``.
     fallback_note: str = ""
+    #: Typed failure class for a failed response
+    #: (``nomorals.llm.failures.FailureClass`` value, e.g. "rate_limited").
+    #: Empty on success.  Lets callers recover the RIGHT way — shrink the
+    #: context on "context_overflow" instead of blindly retrying.
+    failure_class: str = ""
 
     @property
     def ok(self) -> bool:
@@ -227,6 +232,7 @@ class LLMResponse:
             "degraded": self.degraded,
             "failed_providers": list(self.failed_providers),
             "fallback_note": self.fallback_note,
+            "failure_class": self.failure_class,
         }
 
 

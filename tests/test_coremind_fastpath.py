@@ -59,6 +59,10 @@ class SlowRouter:
     def __init__(self, hang=30.0):
         self.hang = hang
 
+    def chat(self, messages, params=None, **kw):
+        time.sleep(self.hang)
+        return types.SimpleNamespace(ok=True, text='{"kind": "chat"}')
+
     def complete(self, prompt, params=None, **kw):
         time.sleep(self.hang)
         return types.SimpleNamespace(ok=True, text='{"kind": "chat"}')
@@ -70,6 +74,13 @@ class ChattyRouter:
     def __init__(self):
         self.calls = 0
 
+    def chat(self, messages, params=None, **kw):
+        self.calls += 1
+        return types.SimpleNamespace(
+            ok=True,
+            text='{"kind": "research", "target": "fusion reactors", '
+                 '"confidence": 0.95, "why": "user asked to research"}')
+
     def complete(self, prompt, params=None, **kw):
         self.calls += 1
         return types.SimpleNamespace(
@@ -79,6 +90,9 @@ class ChattyRouter:
 
 
 class FailingRouter:
+    def chat(self, messages, params=None, **kw):
+        raise RuntimeError("provider down")
+
     def complete(self, prompt, params=None, **kw):
         raise RuntimeError("provider down")
 
@@ -145,7 +159,10 @@ class ModelCheckBoundTest(unittest.TestCase):
         self.assertEqual(intent.kind, "build",
                          "timeout must keep the deterministic intent")
         self.assertAlmostEqual(intent.confidence, 0.6)
-        self.assertLess(dt, MODEL_CHECK_TIMEOUT_S + 3.0,
+        # Two bounded model calls run in this path (intent interpret ≤6s,
+        # model check ≤8s+2s backstop); a fully stalled chain must still
+        # resolve inside their combined budget, never hang.
+        self.assertLess(dt, 2 * MODEL_CHECK_TIMEOUT_S + 3.0,
                         f"chat thread stalled {dt:.1f}s")
         self.assertEqual(mind._router_timeouts, 1)
         self.assertTrue(mind._model_check_note,

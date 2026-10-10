@@ -32,6 +32,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+from ..llm.brain import brain_for
 from ..core.logging_setup import get_logger
 
 _log = get_logger(__name__)
@@ -618,7 +619,7 @@ def _draft_capability(name: str, description: str, llm_fn: Any,
             if router is None:
                 _log.warning("capability draft skipped: no LLM available")
                 return None
-            resp = router.complete(prompt)
+            resp = brain_for(context).complete(prompt, task_kind="judge")
             text = resp.text if hasattr(resp, "text") else str(resp)
         draft = _parse_draft(text)
         if draft is None:

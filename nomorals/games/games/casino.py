@@ -12,6 +12,8 @@ import random
 from typing import Any
 
 from ..ai import GameMind
+from ..fairness import draw_int, draw_weighted, shuffle as fair_shuffle
+from ..gamemaster import feed
 from ..players import Player
 from .base import MultiGame, Room
 
@@ -27,18 +29,23 @@ class BlackjackGame(MultiGame):
     max_players = 1
     ai_seats = 1
     move_timeout = 0
+    #: provably fair: the deck order is committed before the deal
+    fair = True
     rules = ("Get as close to 21 as you can without going over. "
              "Face cards = 10, Aces = 1 or 11. Hit (take a card), "
              "Stand (keep your hand), Double (double bet, one more card), "
              "Split (two hands if you have a pair). Dealer hits on 16, "
-             "stands on 17. Blackjack pays 3:2, wins pay 1:1.")
+             "stands on 17. Blackjack pays 3:2, wins pay 1:1. "
+             "🔒 the deck is provably fair — commitment shown at deal.")
 
     def new_state(self, rng: random.Random) -> dict[str, Any]:
-        deck = self._shuffle(rng)
-        player_hand = [deck.pop(), deck.pop()]
-        dealer_hand = [deck.pop(), deck.pop()]
-        return {"deck": deck, "player": player_hand, "dealer": dealer_hand,
-                "bet": 10, "done": False, "result": "", "split": None}
+        # the deck is ordered here; the engine opens the fair table right
+        # after new_state, and setup() fair-shuffles + deals from the
+        # committed sequence — nothing is drawn before the commitment.
+        deck = [v for v in range(2, 15) for _ in range(4)]
+        return {"deck": deck, "player": [], "dealer": [],
+                "bet": 10, "done": False, "result": "", "split": None,
+                "dealt": False}
 
     def _shuffle(self, rng: random.Random) -> list[int]:
         """52-card deck: 2–10, J=11, Q=12, K=13, A=14."""
@@ -72,6 +79,22 @@ class BlackjackGame(MultiGame):
 
     def setup(self, room, mind):
         s = room.state
+        # fair deal: shuffle + deal from the committed sequence. setup
+        # runs after the engine opens the fair table (see GameEngine.start).
+        fair = s.get("fair")
+        if not s["dealt"]:
+            if fair is not None:
+                fair_shuffle(fair, "deck", s["deck"])
+            else:  # pragma: no cover - engine always opens the table
+                room.rng().shuffle(s["deck"])
+            s["player"] = [s["deck"].pop(), s["deck"].pop()]
+            s["dealer"] = [s["deck"].pop(), s["deck"].pop()]
+            s["dealt"] = True
+            if self._hand_value(s["player"]) == 21:
+                human = next((p for p in room.players if not p.is_ai), None)
+                who = human.name if human is not None else "the player"
+                feed(room, f"{who} is dealt a natural BLACKJACK",
+                     big=True)
         return (f"dealer: {self._render_hand(s['dealer'], hide_second=True)}\n"
                 f"you:    {self._render_hand(s['player'])} "
                 f"({self._hand_value(s['player'])})\n"
@@ -182,10 +205,12 @@ class RouletteGame(MultiGame):
     max_players = 1
     ai_seats = 0
     move_timeout = 0
+    #: provably fair: the spin is drawn from the committed sequence
+    fair = True
     rules = ("Bet on a number (0–36), color (red/black), or dozen "
              "(1st/2nd/3rd). The wheel spins, the ball lands, payouts: "
              "number 35:1, color 1:1, dozen 2:1. 0 is green, neither "
-             "red nor black.")
+             "red nor black. 🔒 every spin is provably fair.")
 
     RED = {1, 3, 5, 7, 9, 12, 14, 16, 18, 19, 21, 23, 25, 27, 30, 32, 34, 36}
 
@@ -195,6 +220,12 @@ class RouletteGame(MultiGame):
 
     def _spin(self, rng: random.Random) -> int:
         return rng.randint(0, 36)
+
+    def _fair_spin(self, room: Room) -> int:
+        fair = (room.state or {}).get("fair")
+        if fair is not None:
+            return draw_int(fair, "spin", 0, 36)
+        return room.rng().randint(0, 36)
 
     def _color(self, num: int) -> str:
         if num == 0:
@@ -236,7 +267,7 @@ class RouletteGame(MultiGame):
         if t == "spin":
             if not s["bet_type"]:
                 return ["place a bet first"]
-            num = self._spin(room.rng())
+            num = self._fair_spin(room)
             color = self._color(num)
             s["result"] = num
             s["done"] = True
@@ -246,6 +277,10 @@ class RouletteGame(MultiGame):
             if s["bet_type"] == "number" and s["bet_value"] == num:
                 won = True
                 payout = s["amount"] * 35
+                feed(room,
+                     f"{player.name} calls the number {num} — "
+                     f"it lands, {payout} coins!",
+                     big=True)
             elif s["bet_type"] == "color" and s["bet_value"] == color:
                 won = True
                 payout = s["amount"] * 2
@@ -288,9 +323,12 @@ class SlotsGame(MultiGame):
     max_players = 1
     ai_seats = 0
     move_timeout = 0
+    #: provably fair: the reels are drawn from the committed sequence
+    fair = True
     rules = ("Spin the reels. Three matching symbols pays: cherries 2x, "
              "bars 5x, sevens 10x. Three diamonds = JACKPOT 100x. "
-             "Two matching symbols pays 1x (break even).")
+             "Two matching symbols pays 1x (break even). "
+             "🔒 every spin is provably fair.")
 
     SYMBOLS = ("🍒", "🍋", "🍊", "🔔", "⭐", "7️⃣", "💎")
     WEIGHTS = (30, 20, 20, 15, 10, 4, 1)  # diamonds rare, cherries common
@@ -300,6 +338,12 @@ class SlotsGame(MultiGame):
 
     def _spin_reel(self, rng: random.Random) -> str:
         return rng.choices(self.SYMBOLS, weights=self.WEIGHTS, k=1)[0]
+
+    def _fair_reel(self, room: Room, i: int) -> str:
+        fair = (room.state or {}).get("fair")
+        if fair is not None:
+            return self.SYMBOLS[draw_weighted(fair, f"reel:{i}", self.WEIGHTS)]
+        return room.rng().choices(self.SYMBOLS, weights=self.WEIGHTS, k=1)[0]
 
     def setup(self, room, mind):
         return ("slots — bet and spin:\n"
@@ -321,7 +365,7 @@ class SlotsGame(MultiGame):
                     return [f"bet set to {amt} coins"]
             return ["bet <amount>"]
         if t == "spin":
-            reels = [self._spin_reel(room.rng()) for _ in range(3)]
+            reels = [self._fair_reel(room, i) for i in range(3)]
             s["reels"] = reels
             s["done"] = True
             out = [f"[ {reels[0]} ] [ {reels[1]} ] [ {reels[2]} ]"]
@@ -330,6 +374,10 @@ class SlotsGame(MultiGame):
                 if sym == "💎":
                     mult = 100
                     out.append("💎💎💎 JACKPOT! 💎💎💎")
+                    feed(room,
+                         f"{player.name} hits the diamond JACKPOT — "
+                         f"{s['bet'] * mult} coins!",
+                         big=True)
                 elif sym == "7️⃣":
                     mult = 10
                 elif sym == "🔔":

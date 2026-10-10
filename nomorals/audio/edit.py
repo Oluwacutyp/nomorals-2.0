@@ -185,34 +185,82 @@ def _audio_duration(path: str | os.PathLike[str]) -> float:
 
 
 def enhance_audio(audio: str | os.PathLike[str], *,
-                  out_dir: str | os.PathLike[str] | None = None) -> dict[str, Any]:
+                  out_dir: str | os.PathLike[str] | None = None,
+                  engine: str = "auto",
+                  profile: str = "voice") -> dict[str, Any]:
     """Denoise ``audio`` (Adobe Enhance pattern) before transcription.
 
-    Tries ffmpeg ``afftdn`` (FFT denoiser), then a highpass/lowpass safety
-    net. No ffmpeg or no working filter → the original path is returned
-    with an honest note; never a fake "enhancement".
+    Strategy chain (native-first):
+
+    1. ``ffmpeg`` — the ``afftdn`` FFT denoiser, then a highpass/lowpass
+       safety net (``engine="ffmpeg"`` forces this).
+    2. ``devon`` — Devon's OWN DSP chain (:mod:`nomorals.audio.dsp`:
+       de-hum → spectral-gate denoise → trim → normalize → compress →
+       limit → fade). No ffmpeg needed, pure Python (+numpy when
+       present). ``engine="devon"`` forces this.
+    3. Honest passthrough — the original path with a note; never a fake
+       "enhancement".
+
+    ``engine="auto"`` (default) tries 1 then 2. ``profile`` selects the
+    native chain tuning: "voice" (voice notes/speech) or "music".
     """
     p = Path(audio)
     if not p.exists():
         return {"ok": False, "reason": f"no such audio file: {audio}"}
-    ff = _ffmpeg()
-    if ff is None:
-        return {"ok": True, "output": str(p), "filter": "none",
-                "note": "ffmpeg not installed — using the original audio"}
+    eng = (engine or "auto").lower()
     out = (Path(out_dir) if out_dir else p.parent) / f"{p.stem}-enhanced.wav"
-    from ..media_edit.videos import run_ffmpeg
-    for label, af in (("afftdn", "afftdn"),
-                      ("highpass+lowpass", "highpass=f=60,lowpass=f=15000")):
+    ff = _ffmpeg()
+    if eng in ("auto", "ffmpeg") and ff is not None:
+        from ..media_edit.videos import run_ffmpeg
+        for label, af in (("afftdn", "afftdn"),
+                          ("highpass+lowpass", "highpass=f=60,lowpass=f=15000")):
+            try:
+                run_ffmpeg(["-i", str(p), "-af", af, "-ar", "16000", "-ac", "1",
+                            str(out)], timeout=300.0)
+                if out.exists() and out.stat().st_size > 0:
+                    return {"ok": True, "output": str(out), "filter": label,
+                            "engine": "ffmpeg"}
+            except Exception as exc:  # noqa: BLE001
+                _log.debug("enhance filter %s failed: %s", label, exc)
+                continue
+    if eng in ("auto", "devon"):
+        res = _enhance_native(p, out, profile=profile)
+        if res.get("ok"):
+            return res
+        if eng == "devon":
+            return res  # forced engine: report the honest failure
+    note = ("ffmpeg not installed and native DSP could not decode — "
+            "using the original audio" if ff is None else
+            "denoise filters unavailable — using the original audio")
+    return {"ok": True, "output": str(p), "filter": "none", "engine": "none",
+            "note": note}
+
+
+def _enhance_native(p: Path, out: Path, profile: str = "voice") -> dict[str, Any]:
+    """Devon's own enhancement: decode → DSP chain → write. Never raises."""
+    try:
+        from .dsp import enhance, write_mono_wav
+        from .fingerprint import read_mono, AudioReadError
         try:
-            run_ffmpeg(["-i", str(p), "-af", af, "-ar", "16000", "-ac", "1",
-                        str(out)], timeout=300.0)
-            if out.exists() and out.stat().st_size > 0:
-                return {"ok": True, "output": str(out), "filter": label}
-        except Exception as exc:  # noqa: BLE001
-            _log.debug("enhance filter %s failed: %s", label, exc)
-            continue
-    return {"ok": True, "output": str(p), "filter": "none",
-            "note": "denoise filters unavailable — using the original audio"}
+            samples, sr = read_mono(p, target_sr=22050, max_seconds=1800.0)
+        except AudioReadError as exc:
+            return {"ok": False, "reason": str(exc), "engine": "devon"}
+        res = enhance(samples, sr, profile=profile)
+        if not res.get("ok"):
+            return {"ok": False,
+                    "reason": str(res.get("reason", "native DSP failed")),
+                    "engine": "devon"}
+        written = write_mono_wav(out, res["samples"], sr)
+        if not written:
+            return {"ok": False, "reason": "could not write enhanced wav",
+                    "engine": "devon"}
+        return {"ok": True, "output": written, "filter": "devon-dsp",
+                "engine": "devon", "chain": res.get("chain", ""),
+                "profile": profile,
+                "note": "enhanced by Devon's own DSP (no ffmpeg)"}
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "reason": f"native enhance failed: {exc}",
+                "engine": "devon"}
 
 
 def _splice(audio: str | os.PathLike[str],
@@ -577,6 +625,76 @@ def apply_edits(transcript: EditableTranscript | dict[str, Any],
 
 
 # ---------------------------------------------------------------------------
+# fx — Devon-owned effect chains
+# ---------------------------------------------------------------------------
+
+def apply_fx(audio: str | os.PathLike[str], chain_spec: str, *,
+             out_dir: str | os.PathLike[str] | None = None,
+             suffix: str = "fx") -> dict[str, Any]:
+    """Run one of Devon's own effect chains over ``audio``.
+
+    ``chain_spec``: ``"reverb wet=0.3, eq low=3 high=-2, normalize"`` —
+    parsed by :meth:`nomorals.audio.dsp.EffectChain.parse_lenient`.
+    Known effects: denoise, dehum, normalize, compress, limit, trim,
+    fade, reverb, echo, eq, pitch.
+
+    Returns ``{"ok", "output", "chain", "skipped"}`` — or ``{"ok":
+    False, "reason"}``. Never raises, never fake audio.
+    """
+    try:
+        from .dsp import EffectChain, write_mono_wav
+        from .fingerprint import read_mono, AudioReadError
+        p = Path(audio)
+        if not p.exists():
+            return {"ok": False, "reason": f"no such audio file: {audio}"}
+        chain, unknown = EffectChain.parse_lenient(chain_spec or "")
+        if not chain.steps:
+            known = ", ".join(sorted(EFFECTS_NAMES))
+            return {"ok": False,
+                    "reason": "no known effects in that chain — known: "
+                              f"{known}" + (f" (unknown: {', '.join(unknown)})"
+                                             if unknown else "")}
+        try:
+            samples, sr = read_mono(p, target_sr=22050, max_seconds=1800.0)
+        except AudioReadError as exc:
+            return {"ok": False, "reason": str(exc)}
+        out_samples = chain.run(samples, sr)
+        dest = ((Path(out_dir) if out_dir else p.parent)
+                / f"{p.stem}-{suffix}.wav")
+        written = write_mono_wav(dest, out_samples, sr)
+        if not written:
+            return {"ok": False, "reason": "could not write fx output"}
+        note = f"chain: {chain.describe()}"
+        if unknown:
+            note += f" (unknown effects skipped: {', '.join(unknown)})"
+        if chain.skipped:
+            note += f" (failed mid-chain: {', '.join(chain.skipped)})"
+        return {"ok": True, "output": written, "chain": chain.describe(),
+                "skipped": chain.skipped, "unknown": unknown, "note": note}
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "reason": f"fx failed: {exc}"}
+
+
+EFFECTS_NAMES = (
+    "denoise", "dehum", "normalize", "compress", "limit", "trim",
+    "fade", "reverb", "echo", "eq", "pitch",
+)
+
+
+def list_fx() -> str:
+    """Human-readable effect catalogue. Never raises."""
+    try:
+        from .dsp import EFFECTS
+        lines = ["Devon-owned effects (all native, no plugins):"]
+        for name in EFFECTS_NAMES:
+            _, desc = EFFECTS[name]
+            lines.append(f"  {name} — {desc}")
+        return "\n".join(lines)
+    except Exception:  # noqa: BLE001
+        return "effects unavailable"
+
+
+# ---------------------------------------------------------------------------
 # natural-language intent ("remove all the filler words from this voice note")
 # ---------------------------------------------------------------------------
 
@@ -619,7 +737,13 @@ _USAGE = (
     "🎙️ /audio — transcript-as-timeline audio editing (owner only)\n"
     "  /audio edit <file> [lang] — transcribe with word timings\n"
     "  /audio fillers <file> [lang] — cut filler words (um, uh, you know, ẹẹm…)\n"
-    "  /audio enhance <file> — denoise before transcribing\n"
+    "  /audio enhance <file> [voice|music|light] — denoise (ffmpeg → Devon's own DSP)\n"
+    "  /audio fx <file> <effects…> — Devon-owned effect chain, e.g.\n"
+    "      /audio fx note.wav reverb wet=0.3, eq low=3 high=-2, normalize\n"
+    "  /audio fx-list — the native effect catalogue\n"
+    "  /audio analyze <file> — what Devon hears (tempo, key, loudness…)\n"
+    "  /audio fingerprint <file> [title] — index into local recognition memory\n"
+    "  /audio match <file> — recognize against Devon's local library\n"
     "Natural: \"remove all the filler words from this voice note\""
 )
 
@@ -661,11 +785,43 @@ def control_audio(tail: str, *, context: Any = None,
             return (f"🧹 {res.get('note', 'done')}\n"
                     f"📁 {res.get('output')}")
         if verb == "enhance" and len(parts) >= 2:
-            res = enhance_audio(parts[1])
+            prof = parts[2].lower() if len(parts) > 2 else "voice"
+            res = enhance_audio(parts[1], profile=prof)
             if not res.get("ok"):
                 return f"🎙️ {res.get('reason', 'failed')}"
             note = res.get("note", f"filter: {res.get('filter')}")
-            return f"✨ enhanced via {res.get('filter')}\n📁 {res.get('output')}\n{note}"
+            eng = res.get("engine", "?")
+            return (f"✨ enhanced [{eng}] via {res.get('filter')}\n"
+                    f"📁 {res.get('output')}\n{note}")
+        if verb == "fx-list":
+            return "🎛️ " + list_fx().replace("\n", "\n")
+        if verb == "fx" and len(parts) >= 3:
+            spec = " ".join(parts[2:])
+            res = apply_fx(parts[1], spec)
+            if not res.get("ok"):
+                return f"🎛️ {res.get('reason', 'failed')}"
+            return f"🎛️ {res.get('note')}\n📁 {res.get('output')}"
+        if verb == "analyze" and len(parts) >= 2:
+            from .fingerprint import describe_audio
+            return f"👂 {describe_audio(parts[1])}"
+        if verb == "fingerprint" and len(parts) >= 2:
+            from .fingerprint import default_fingerprint_db
+            title = " ".join(parts[2:]) if len(parts) > 2 else ""
+            res = default_fingerprint_db().add_track(
+                parts[1], title=title or Path(parts[1]).stem,
+                artist="local", source="library")
+            if not res.get("ok"):
+                return f"🎛️ {res.get('reason', 'failed')}"
+            return (f"🎛️ fingerprinted '{res.get('title')}' — "
+                    f"{res.get('hashes')} hashes in local memory")
+        if verb == "match" and len(parts) >= 2:
+            from .fingerprint import match_local_db
+            res = match_local_db(parts[1])
+            if not res.get("ok"):
+                return f"🎛️ {res.get('reason')}"
+            return (f"🎵 I know this one — {res.get('artist')} — "
+                    f"{res.get('title')} (local match, "
+                    f"confidence {res.get('score')})")
         return _USAGE
     except Exception as exc:  # noqa: BLE001
         return f"🎙️ audio edit failed: {exc}"

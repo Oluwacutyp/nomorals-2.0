@@ -21,6 +21,7 @@ import time
 import xml.etree.ElementTree as ET
 from typing import Any
 
+from ..llm.brain import brain_for
 from ..core.ids import new_id
 from ..core.http import HttpClient
 from .search.engine import SearchEngine
@@ -205,7 +206,7 @@ class NewsAgent:
             "numbered 1..N in the same order.\n" + "\n".join(lines)
         )
         try:
-            response = router.chat([Message(role="user", content=prompt)])
+            response = brain_for(self.context).chat([Message(role="user", content=prompt)], task_kind="summarize")
             text = (getattr(response, "text", "") or "").strip()
         except Exception:  # noqa: BLE001
             return {}

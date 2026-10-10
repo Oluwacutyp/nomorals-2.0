@@ -8,6 +8,14 @@ facts of her life (background pack), decides whether to:
 * post to one of the configured group chats, on a topic that fits her
   interests — never about the partner, never personal.
 
+The decision is a strategy chain, not a hardcoded if-ladder: each
+``Strategy`` (silence check-in, ambient share, group post) scores its
+outreach from the live context; safety vetoes (quiet hours, daily caps,
+per-chat intervals, feature flags) apply after selection; the best
+eligible proposal above an adaptive threshold gets drafted and emitted.
+Successes make her slightly bolder, failures and denials make her more
+cautious — the threshold adapts, the safety rules never do.
+
 Modes (``partner.autonomy_mode``):
 
 * ``off``     — the agent does not start.
@@ -41,6 +49,7 @@ from typing import Any
 from ..core.ids import ulid_now
 from ..core.logging_setup import get_logger
 from ..llm.base import Message, SamplingParams
+from ..llm.brain import brain_for
 from ..partner.mood import MoodEngine
 from ..partner.persona import Persona
 from ..partner.relationship import Relationship
@@ -65,6 +74,149 @@ class _DayState:
     last_chat_ts: dict[str, float] = field(default_factory=dict)
 
 
+# ── decision strategies ──────────────────────────────────────────────────
+# The autonomy decision is a strategy chain, not a hardcoded if-ladder.
+# Each strategy scores one kind of outreach from the live context; the
+# agent picks the best eligible proposal above an adaptive threshold.
+# Safety rules (quiet hours, caps, intervals, feature flags) are vetoes
+# applied AFTER selection — they are never negotiable, but they are not
+# the decision logic either.
+
+
+@dataclass
+class Proposal:
+    """One scored outreach candidate from a strategy."""
+
+    kind: str              # "dm" | "group"
+    chat: ChatRef
+    reason: str
+    score: float           # 0..1 — higher means more worth sending now
+    strategy: str
+    draft_instruction: str
+
+
+@dataclass
+class DecisionContext:
+    """Everything strategies may read.  Fresh per tick."""
+
+    now: float
+    mood_label: str
+    mood_values: dict[str, float]
+    dm_sent: int
+    group_sent: int
+    last_dm_ts: float
+    last_chat_ts: dict[str, float]
+
+
+class Strategy:
+    """One outreach strategy.  Returns scored proposals (possibly none)."""
+
+    name: str = "strategy"
+
+    def evaluate(self, agent: "AutonomyAgent",
+                 ctx: DecisionContext) -> list[Proposal]:
+        raise NotImplementedError
+
+
+class SilenceCheckinStrategy(Strategy):
+    """A DM when the silence has run long — scored by how overdue it is
+    and how much the current mood pulls toward contact."""
+
+    name = "silence_checkin"
+
+    def evaluate(self, agent: "AutonomyAgent",
+                 ctx: DecisionContext) -> list[Proposal]:
+        chat = agent._owner_dm_chat()
+        if chat is None:
+            return []
+        row = agent.context.db.query_one(
+            "SELECT last_active FROM chats WHERE id = ?", (chat.key,))
+        last = float(row.get("last_active") or 0.0) if row else 0.0
+        hours_idle = (ctx.now - last) / 3600.0 if last else 0.0
+        if hours_idle < agent.silence_hours:
+            return []
+        reason = agent._dm_reason(chat, ctx.now)
+        if reason is None:
+            return []
+        overdue = min(1.0, (hours_idle - agent.silence_hours + 2.0) / 12.0)
+        mood_pull = max(ctx.mood_values.get("distance", 0.0),
+                        ctx.mood_values.get("insecurity", 0.0),
+                        ctx.mood_values.get("affection", 0.0)) / 100.0
+        score = 0.40 + 0.40 * overdue + 0.20 * mood_pull
+        return [Proposal(
+            kind="dm", chat=chat, reason=reason,
+            score=min(1.0, score), strategy=self.name,
+            draft_instruction=(
+                f"Send the partner a spontaneous DM. Reason: {reason}"),
+        )]
+
+
+class AmbientShareStrategy(Strategy):
+    """Once a day, share one small real thing from her day — only when
+    her energy is up and she hasn't already DM'd today."""
+
+    name = "ambient_share"
+
+    def evaluate(self, agent: "AutonomyAgent",
+                 ctx: DecisionContext) -> list[Proposal]:
+        chat = agent._owner_dm_chat()
+        if chat is None or ctx.last_dm_ts != 0.0:
+            return []
+        hour = time.localtime(ctx.now).tm_hour
+        if not 10 <= hour < 20:
+            return []
+        energy = ctx.mood_values.get("energy", 50.0)
+        if energy <= 55:
+            return []
+        ambient = agent.background.ambient_lines(
+            user_in_us=True, romantic=agent.relationship.is_romantic())
+        if not ambient:
+            return []
+        score = 0.45 + 0.30 * ((energy - 55.0) / 45.0)
+        return [Proposal(
+            kind="dm", chat=chat, reason="ambient share",
+            score=min(1.0, score), strategy=self.name,
+            draft_instruction=(
+                "Share one small, specific thing from your day with the "
+                f"partner. Use this detail: {ambient[0]} "
+                "Keep it under two sentences."),
+        )]
+
+
+class GroupPostStrategy(Strategy):
+    """A public group post on her own interests when the mood is social.
+    One proposal per configured group chat — the per-chat interval veto
+    picks which one is actually eligible."""
+
+    name = "group_post"
+
+    def evaluate(self, agent: "AutonomyAgent",
+                 ctx: DecisionContext) -> list[Proposal]:
+        if not agent.group_chats:
+            return []
+        if ctx.mood_label not in agent.group_moods:
+            return []
+        boost = 0.10 if ctx.mood_label in {"playful", "excited"} else 0.0
+        proposals = []
+        for key in sorted(agent.group_chats):
+            chat = agent._parse_chat(key)
+            if chat is None:
+                continue
+            topic = agent._interest_for(ctx.now)
+            proposals.append(Proposal(
+                kind="group", chat=chat,
+                reason=f"group post ({topic})",
+                score=min(1.0, 0.50 + boost), strategy=self.name,
+                draft_instruction=(
+                    f"Write a short public group post about: {topic}. "
+                    f"Rules: first person as {agent.persona.name}; at most two "
+                    "sentences; casual, dry, a little opinionated; NO mention "
+                    "of the partner, the relationship, or being an AI; end "
+                    "with a hook people can reply to."),
+            ))
+        return proposals
+
+
 class AutonomyAgent:
     """Heartbeat-driven proactive messaging, with an approval flow."""
 
@@ -83,6 +235,7 @@ class AutonomyAgent:
         max_group_per_day: int = 2,
         heartbeat_seconds: float = 900.0,
         silence_hours_for_checkin: float = 6.0,
+        group_moods: set[str] | None = None,
     ) -> None:
         if mode not in {"off", "suggest", "auto"}:
             raise ValueError(f"autonomy mode must be off|suggest|auto, got {mode!r}")
@@ -99,6 +252,19 @@ class AutonomyAgent:
         self.max_group_per_day = max(0, int(max_group_per_day))
         self.heartbeat_seconds = max(60.0, float(heartbeat_seconds))
         self.silence_hours = max(1.0, float(silence_hours_for_checkin))
+        #: moods in which a group post is socially appropriate — data, not
+        #: a hardcoded set buried in the decision logic.
+        self.group_moods = set(group_moods or
+                               {"playful", "happy", "excited", "proud", "calm"})
+        #: the strategy chain, evaluated in order every tick
+        self._strategies: list[Strategy] = [
+            SilenceCheckinStrategy(),
+            AmbientShareStrategy(),
+            GroupPostStrategy(),
+        ]
+        #: adaptive send threshold: successes make her slightly bolder,
+        #: failures and denials make her more cautious.  Bounded.
+        self._threshold = 0.5
 
         self.mood: MoodEngine = brain.mood
         self.persona: Persona = brain.persona
@@ -172,6 +338,8 @@ class AutonomyAgent:
 
     # ── one decision cycle ───────────────────────────────────────────────────
     def tick(self, *, now: float | None = None) -> dict[str, Any]:
+        """One heartbeat: strategies propose, safety vetoes, best eligible
+        proposal above the adaptive threshold gets drafted and emitted."""
         from .features import feature_enabled
 
         now = now if now is not None else time.time()
@@ -181,71 +349,82 @@ class AutonomyAgent:
                 self.stats["skipped"] += 1
                 return {"decision": "quiet hours"}
             self._roll_day(now)
-            dm_on = feature_enabled(self.context, "proactive_dm")
-            groups_on = feature_enabled(self.context, "group_posts")
+            ctx = DecisionContext(
+                now=now,
+                mood_label=self.mood.current().label,
+                mood_values=dict(self.mood.current().values),
+                dm_sent=self._day.dm_sent,
+                group_sent=self._day.group_sent,
+                last_dm_ts=self._day.last_dm_ts,
+                last_chat_ts=dict(self._day.last_chat_ts),
+            )
+            proposals: list[Proposal] = []
+            for strategy in self._strategies:
+                try:
+                    proposals.extend(strategy.evaluate(self, ctx) or [])
+                except Exception:  # noqa: BLE001 - one bad strategy never kills the tick
+                    _log.exception("autonomy strategy %s failed", strategy.name)
+            eligible = [p for p in proposals
+                        if self._policy_allows(p, ctx, now, feature_enabled)]
+            if not eligible:
+                self.stats["skipped"] += 1
+                return {"decision": "nothing to send",
+                        "proposals": len(proposals),
+                        "strategies": sorted({p.strategy for p in proposals})}
+            best = max(eligible, key=lambda p: p.score)
+            if best.score < self._threshold:
+                self.stats["skipped"] += 1
+                return {"decision": "below threshold",
+                        "best": round(best.score, 3),
+                        "threshold": round(self._threshold, 3),
+                        "strategy": best.strategy}
+            content = self._draft(best.draft_instruction)
+            if not content:
+                self.stats["skipped"] += 1
+                return {"decision": "draft failed",
+                        "strategy": best.strategy}
+            result = self._emit(best.kind, best.chat, content, best.reason, now)
+            if result.get("ok"):
+                if best.kind == "dm":
+                    self._day.dm_sent += 1
+                    self._day.last_dm_ts = now
+                else:
+                    self._day.group_sent += 1
+                self._day.last_chat_ts[best.chat.key] = now
+                self._adapt_threshold(success=True)
+            else:
+                # held for approval (suggest mode) is not a failure — only
+                # a genuinely failed send tightens the threshold
+                if result.get("status") == "failed":
+                    self._adapt_threshold(success=False)
+            result["strategy"] = best.strategy
+            result["score"] = round(best.score, 3)
+            return result
 
-            # 1) Spontaneous DM to the partner.
-            dm_chat = self._owner_dm_chat()
-            if dm_chat is not None and dm_on \
-                    and not self._cap_reached(self._day.dm_sent, self.max_dm_per_day) \
-                    and self._chat_allowed(dm_chat.key, now):
-                reason = self._dm_reason(dm_chat, now)
-                if reason is not None:
-                    content = self._draft(f"Send the partner a spontaneous DM. Reason: {reason}")
-                    if content:
-                        result = self._emit("dm", dm_chat, content, reason, now)
-                        if result.get("ok"):
-                            self._day.dm_sent += 1
-                            self._day.last_dm_ts = now
-                            self._day.last_chat_ts[dm_chat.key] = now
-                        return result
+    def _policy_allows(self, proposal: Proposal, ctx: DecisionContext,
+                       now: float, feature_enabled: Any) -> bool:
+        """Safety vetoes.  Never negotiable, evaluated after the
+        strategies score — caps, intervals, feature flags, chat kind."""
+        if proposal.kind == "dm":
+            if not feature_enabled(self.context, "proactive_dm"):
+                return False
+            if self._cap_reached(ctx.dm_sent, self.max_dm_per_day):
+                return False
+        else:
+            if not feature_enabled(self.context, "group_posts"):
+                return False
+            if self._cap_reached(ctx.group_sent, self.max_group_per_day):
+                return False
+        return self._chat_allowed(proposal.chat.key, now)
 
-            # 2) Ambient share: once a day, if she's in a good state.
-            if dm_chat is not None and dm_on \
-                    and not self._cap_reached(self._day.dm_sent, self.max_dm_per_day) \
-                    and self._chat_allowed(dm_chat.key, now):
-                hour = time.localtime(now).tm_hour
-                if self._day.last_dm_ts == 0.0 and 10 <= hour < 20:
-                    ambient = self.background.ambient_lines(
-                        user_in_us=True, romantic=self.relationship.is_romantic()
-                    )
-                    if ambient and self.mood.current().values.get("energy", 50) > 55:
-                        content = self._draft(
-                            f"Share one small, specific thing from your day with the partner. "
-                            f"Use this detail: {ambient[0]} Keep it under two sentences."
-                        )
-                        if content:
-                            result = self._emit("dm", dm_chat, content, "ambient share", now)
-                            if result.get("ok"):
-                                self._day.dm_sent += 1
-                                self._day.last_dm_ts = now
-                                self._day.last_chat_ts[dm_chat.key] = now
-                            return result
-
-            # 3) A group post, on her own interests.
-            if groups_on and self.group_chats \
-                    and not self._cap_reached(self._day.group_sent, self.max_group_per_day):
-                label = self.mood.current().label
-                if label in {"playful", "happy", "excited", "proud", "calm"}:
-                    for key in sorted(self.group_chats):
-                        chat = self._parse_chat(key)
-                        if chat is None or not self._chat_allowed(chat.key, now):
-                            continue
-                        topic = self._interest_for(now)
-                        content = self._draft(
-                            f"Write a short public group post about: {topic}. "
-                            f"Rules: first person as {self.persona.name}; at most two sentences; "
-                            "casual, dry, a little opinionated; NO mention of the partner, "
-                            "the relationship, or being an AI; end with a hook people can reply to."
-                        )
-                        if content:
-                            result = self._emit("group", chat, content, f"group post ({topic})", now)
-                            if result.get("ok"):
-                                self._day.group_sent += 1
-                                self._day.last_chat_ts[chat.key] = now
-                            return result
-            self.stats["skipped"] += 1
-            return {"decision": "nothing to send"}
+    def _adapt_threshold(self, *, success: bool) -> None:
+        """Adaptive eagerness: successes make her slightly bolder,
+        failures and denials make her more cautious.  Bounded
+        [0.3, 0.9] — the threshold adapts, the safety rules don't."""
+        if success:
+            self._threshold = max(0.3, self._threshold * 0.98)
+        else:
+            self._threshold = min(0.9, self._threshold + 0.05)
 
     def _dm_reason(self, chat: ChatRef, now: float) -> str | None:
         row = self.context.db.query_one("SELECT last_active FROM chats WHERE id = ?", (chat.key,))
@@ -304,10 +483,10 @@ class AutonomyAgent:
             "No quotes, no labels, no emojis unless one truly fits. Output only the message."
         )
         try:
-            response = self.context.router.chat(
+            response = brain_for(self.context).chat(
                 [Message.system(system), Message.user(instruction)],
                 SamplingParams(temperature=0.9, max_tokens=160),
-            )
+            task_kind="plan")
         except Exception as exc:  # noqa: BLE001 - proactive failure = silence
             _log.warning("autonomy draft failed: %s", exc)
             return ""
@@ -323,6 +502,9 @@ class AutonomyAgent:
         proposal_id = ulid_now()
         self.stats["proposals"] += 1
         self._record(proposal_id, kind, chat, content, reason, "pending", now)
+        self._ledger("proposal", proposal_id,
+                     f"[{kind}] {reason}: {content[:120]}",
+                     metadata={"chat": chat.key, "reason": reason})
         if self.mode != "auto":
             _log.info("proposal %s [%s] %s: %s", proposal_id, kind, chat.key, content[:80])
             return {"ok": False, "proposal": proposal_id, "status": "pending",
@@ -330,10 +512,37 @@ class AutonomyAgent:
         result = self.gateway.send(chat.platform, chat, content)
         status = "sent" if result.ok else "failed"
         self._record(proposal_id, kind, chat, content, reason, status, now)
+        self._ledger("send" if result.ok else "send_failed", proposal_id,
+                     f"[{kind}] {reason}: {content[:120]}",
+                     ok=result.ok,
+                     learned="" if result.ok else str(result.error or "")[:200],
+                     metadata={"chat": chat.key})
+        try:
+            from ..core.events import Event, global_bus
+
+            global_bus.publish(Event(
+                topic=f"autonomy.{status}",
+                data={"proposal_id": proposal_id, "kind": kind,
+                      "chat": chat.key, "reason": reason},
+                source="nomorals.agents.autonomy"))
+        except Exception:  # noqa: BLE001 - telemetry is fail-open
+            _log.debug("autonomy bus publish failed", exc_info=True)
         if result.ok:
             self.stats["sent"] += 1
         return {"ok": result.ok, "proposal": proposal_id, "status": status,
                 "error": result.error}
+
+    def _ledger(self, kind: str, ref_id: str, summary: str, *,
+                ok: bool = True, learned: str = "",
+                metadata: dict[str, Any] | None = None) -> None:
+        """Journal to the unified autonomy ledger.  Never raises."""
+        try:
+            from .autonomy_ledger import record_ledger
+
+            record_ledger(self.context, "autonomy", kind, ref_id, summary,
+                          ok=ok, learned=learned, metadata=metadata)
+        except Exception:  # noqa: BLE001
+            _log.debug("autonomy ledger write failed", exc_info=True)
 
     def _record(self, proposal_id: str, kind: str, chat: ChatRef, content: str,
                 reason: str, status: str, now: float) -> None:
@@ -383,6 +592,8 @@ class AutonomyAgent:
             "UPDATE proactive_log SET status = 'denied', acted_at = ? WHERE id = ?",
             (time.time(), proposal_id),
         )
+        # a denial is feedback: she gets more cautious about proposing
+        self._threshold = min(0.9, self._threshold + 0.05)
         return {"ok": True, "status": "denied"}
 
     def status(self) -> dict[str, Any]:
@@ -395,4 +606,7 @@ class AutonomyAgent:
             "pending_proposals": int(pending),
             "today": {"dm": self._day.dm_sent, "group": self._day.group_sent},
             "stats": dict(self.stats),
+            "threshold": round(self._threshold, 3),
+            "strategies": [s.name for s in self._strategies],
+            "group_moods": sorted(self.group_moods),
         }

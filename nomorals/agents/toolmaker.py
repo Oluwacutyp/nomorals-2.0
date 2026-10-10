@@ -31,6 +31,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
 
+from ..llm.brain import brain_for
 from ..core.ids import new_short_id
 from ..core.logging_setup import get_logger
 from .reasoning import _extract_json
@@ -179,8 +180,8 @@ class ToolMaker:
             "\"example\": \"<one example call>\"}\n\n"
             f"TASK: {task}")
         try:
-            resp = router.chat([Message.user(prompt)],
-                               SamplingParams(temperature=0.2, max_tokens=600))
+            resp = brain_for(self.context).chat([Message.user(prompt)],
+                               SamplingParams(temperature=0.2, max_tokens=600), task_kind="code")
             if not getattr(resp, "ok", False):
                 return None
             data = _extract_json(resp.text or "")
@@ -227,8 +228,8 @@ class ToolMaker:
             "STARTING POINT (improve it; keep the register() contract):\n"
             + template)
         try:
-            resp = router.chat([Message.user(prompt)],
-                               SamplingParams(temperature=0.2, max_tokens=2000))
+            resp = brain_for(self.context).chat([Message.user(prompt)],
+                               SamplingParams(temperature=0.2, max_tokens=2000), task_kind="code")
             if not getattr(resp, "ok", False):
                 return ""
             from .coding import extract_code_block

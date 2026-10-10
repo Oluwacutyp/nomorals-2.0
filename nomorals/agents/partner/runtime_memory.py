@@ -11,13 +11,14 @@ class RuntimeMemoryMixin:
 
     # ── long-term memory: /remember /recall /forget ──────────────────────────
     def _control_remember(self, tail: str, *, chat_key: str = "") -> str:
-        """Explicitly store something: /remember <text> [kind] [tags:a,b]."""
+        """Explicitly store something: /remember <text> [kind] [tags:a,b] [scope:name]."""
         from ...memory.base import ALL_KINDS
 
         raw = (tail or "").strip()
         if not raw:
-            return ("usage: /remember <what to remember> [kind] [tags:a,b]\n"
-                    "kinds: fact preference decision relationship episode skill lesson")
+            return ("usage: /remember <what to remember> [kind] [tags:a,b] [scope:name]\n"
+                    "kinds: fact preference decision relationship episode skill lesson\n"
+                    "scope puts it in a memory space, e.g. scope:project:devon-arena")
         tokens = raw.split()
         kind = "episode"
         for i, tok in enumerate(tokens):
@@ -27,25 +28,42 @@ class RuntimeMemoryMixin:
                 break
         content = " ".join(tokens)
         tags = ""
-        if " " in content and content.rsplit(" ", 1)[-1].startswith("tags:"):
-            content, tagpart = content.rsplit(" ", 1)
-            tags = tagpart[len("tags:"):]
+        scope = ""
+        # trailing key:value options, parsed right-to-left so "scope:a b"
+        # style values with spaces still work when quoted by position
+        while " " in content:
+            last = content.rsplit(" ", 1)[-1]
+            if last.startswith("tags:"):
+                content, _ = content.rsplit(" ", 1)
+                tags = last[len("tags:"):]
+            elif last.startswith("scope:"):
+                content, _ = content.rsplit(" ", 1)
+                scope = last[len("scope:"):]
+            else:
+                break
         content = content.strip()
         if not content:
-            return "usage: /remember <what to remember> [kind] [tags:a,b]"
+            return "usage: /remember <what to remember> [kind] [tags:a,b] [scope:name]"
         record_id = self.context.memory.remember(
             content, kind=kind, importance=0.9,
             source="user:command", origin=f"chat:{chat_key or 'command'}",
-            tags=tags,
+            tags=tags, scope=scope,
         )
-        return f"remembered it. [{kind}] {content[:120]} (id {record_id[:8]})"
+        scope_note = f" [scope {scope}]" if scope else ""
+        return f"remembered it. [{kind}]{scope_note} {content[:120]} (id {record_id[:8]})"
 
     def _control_recall(self, tail: str) -> str:
-        """Show the top memories matching the query (or the freshest, if none)."""
+        """Show the top memories matching the query (or the freshest, if none).
+        /recall <query> [scope:name] — scope restricts to one memory space."""
         query = (tail or "").strip()
+        scope = ""
+        if " " in query and query.rsplit(" ", 1)[-1].startswith("scope:"):
+            query, scopepart = query.rsplit(" ", 1)
+            scope = scopepart[len("scope:"):]
+            query = query.strip()
         if self.context.memory is None:
             return "memory is off in this session."
-        result = self.context.memory.recall(query, limit=5)
+        result = self.context.memory.recall(query, limit=5, scope=scope)
         if not result.records:
             return "nothing in memory matches that yet — try /remember."
         lines = ["from memory:"]

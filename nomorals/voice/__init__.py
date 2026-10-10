@@ -51,6 +51,8 @@ from .tts import (
     available_backends,
     mood_to_tagged_text,
     probe_reference_audio,
+    voice_print,
+    voice_print_distance,
 )
 
 __all__ = [
@@ -71,6 +73,8 @@ __all__ = [
     "make_session_stt",
     "mood_to_tagged_text",
     "probe_reference_audio",
+    "voice_print",
+    "voice_print_distance",
     "render_bark",
     "render_chatterbox",
     "render_cosyvoice",

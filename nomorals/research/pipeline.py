@@ -17,6 +17,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
+from ..llm.brain import brain_for
 from ..core.logging_setup import get_logger
 
 _log = get_logger(__name__)
@@ -29,11 +30,11 @@ _log = get_logger(__name__)
 # These numbers exist so a run can be *bounded*, not so it can be invoiced.
 
 #: approximate USD per operation. Planning estimates, not metered billing.
-COST_TABLE: dict[str, float] = {
-    "web_search": 0.001,   # one web_search call
-    "web_fetch": 0.002,    # one web_fetch call (full page read)
-    "llm_call": 0.0008,    # one decompose / synthesize / clarify LLM call
-}
+# Cost constants live in .costs so that nomorals.llm.router (which needs
+# the flat per-call USD cost) can import them without pulling in this
+# module's brain dependency — the old direct import created a
+# research.pipeline <-> llm.router cycle (research first => ImportError).
+from .costs import COST_TABLE
 
 
 class ResearchBudget:
@@ -1055,7 +1056,7 @@ def _router_llm_fn(router: Any) -> Any:
         return None
 
     def llm_fn(prompt: str) -> str:
-        resp = router.complete(prompt)
+        resp = brain_for(self.context).complete(prompt, task_kind="research")
         llm_fn.last_response = resp
         return resp.text if hasattr(resp, "text") else str(resp)
 

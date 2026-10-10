@@ -1012,11 +1012,205 @@ class RelationshipCadence:
         return path
 
 
+def _control_memory_subcommand(sub: str, tail: str, mem: Any) -> str:
+    """Deep memory surface for `/memory <subcommand>`. Never raises."""
+    if mem is None:
+        return "memory is off in this session."
+    try:
+        if sub == "health":
+            from ..memory.cadence import status as _cadence_status
+            h = mem.health()
+            lines = [f"memory health: {'OK' if h.get('ok') else 'PROBLEMS'}",
+                     f"records: {h.get('records')}  "
+                     f"vectors: {h.get('vectors')} "
+                     f"({h.get('vector_backend')})  "
+                     f"fts: {h.get('fts_documents')}"]
+            if h.get("dimension_drift"):
+                lines.append(f"⚠ dimension drift: stored {h.get('stored_dims')} "
+                             f"vs embedder {h.get('embedder_dims')} — "
+                             f"run /memory repair")
+            for problem in (h.get("problems") or [])[:5]:
+                lines.append(f"• {problem}")
+            cad = _cadence_status(mem)
+            if cad.get("enabled"):
+                due = cad.get("next_due_in_s")
+                lines.append(
+                    f"consolidation: every {cad.get('interval_s', 0):.0f}s, "
+                    f"next due in {due:.0f}s, "
+                    f"{cad.get('undistilled_episodes')} undistilled episodes")
+            else:
+                lines.append("consolidation schedule: disabled")
+            lines.append(f"degraded recalls: {h.get('degraded_recalls', 0)}")
+            return "\n".join(lines)
+
+        if sub == "explain":
+            rid = tail.split()[0] if tail else ""
+            if not rid:
+                return "usage: /memory explain <record id>"
+            record = mem.get(rid)
+            if record is None:
+                # try a prefix match on the id
+                found = [r for r in
+                         mem.recall("", limit=200).records
+                         if r.id.startswith(rid)]
+                record = found[0] if found else None
+            if record is None:
+                return f"no memory with id '{rid}'"
+            from ..memory.manager import _explain_score
+            score, contrib = _explain_score(
+                record, weights=mem.weights,
+                half_life_seconds=mem.half_life)
+            lines = [f"[{record.kind}] {record.content[:160]}",
+                     f"trust: {record.trust}  importance: {record.importance:.2f}  "
+                     f"accesses: {record.access_count}",
+                     f"base score now: {score:.3f}  (" +
+                     ", ".join(f"{k} {v:.3f}"
+                               for k, v in sorted(contrib.items())) + ")"]
+            md = record.metadata or {}
+            if md.get("superseded_by"):
+                lines.append(f"superseded by {md['superseded_by'][:8]}…")
+            if md.get("distilled_into"):
+                lines.append("distilled into a durable fact (original kept)")
+            return "\n".join(lines)
+
+        if sub == "repair":
+            dry = tail.strip() == "--dry-run"
+            report = mem.repair_embeddings(dry_run=dry)
+            if dry:
+                return (f"repair dry-run: {report.get('targets', 0)} targets "
+                        f"({report.get('missing', 0)} missing, "
+                        f"{report.get('drifted', 0)} drifted)")
+            return (f"repaired {report.get('repaired', 0)} vectors "
+                    f"({report.get('failed', 0)} failed)")
+
+        if sub == "contradictions":
+            from ..memory.contradictions import detect_for
+            if tail:
+                found = detect_for(mem, tail.split()[0])
+                targets = [(tail.split()[0], found)]
+            else:
+                result = mem.recall("", limit=30, kind="fact")
+                result.records += mem.recall(
+                    "", limit=30, kind="preference").records
+                targets = []
+                seen: set[str] = set()
+                for record in result.records:
+                    if record.id in seen:
+                        continue
+                    seen.add(record.id)
+                    hits = detect_for(mem, record.id)
+                    if hits:
+                        targets.append((record.id, hits))
+                    if len(targets) >= 5:
+                        break
+            if not targets or not any(h for _, h in targets):
+                return "no contradictions detected in recent facts."
+            lines = []
+            for rid, hits in targets:
+                for hit in hits[:3]:
+                    lines.append(f"• [{hit.strategy} {hit.confidence:.2f}] "
+                                 f"{hit.note}")
+            return "\n".join(lines)
+
+        if sub == "timeline":
+            if not tail:
+                return "usage: /memory timeline <topic>"
+            from ..memory.deep_recall import timeline as _timeline
+            items = _timeline(mem, tail, limit=15)
+            if not items:
+                return f"nothing on '{tail}' yet."
+            import datetime as _dt
+            lines = [f"how '{tail}' evolved:"]
+            for record in items:
+                when = _dt.datetime.fromtimestamp(
+                    record.created_at).strftime("%Y-%m-%d")
+                flag = " (superseded)" if (record.metadata or {}).get(
+                    "superseded_by") else ""
+                lines.append(f"  {when} [{record.kind}]{flag} "
+                             f"{record.content[:110]}")
+            return "\n".join(lines)
+
+        if sub == "consolidate":
+            from ..memory.cadence import consolidate_now
+            report = consolidate_now(mem)
+            if not report.get("ok"):
+                return f"consolidation failed: {report.get('error')}"
+            return (f"consolidated (additive — nothing deleted): "
+                    f"{report.get('summaries', 0)} new facts from "
+                    f"{report.get('episodes', 0)} episodes "
+                    f"in {report.get('seconds', 0)}s")
+
+        if sub == "scopes":
+            from ..memory.scopes import scopes_summary
+            counts = scopes_summary(mem)
+            if not counts:
+                return "no memory spaces yet — everything is global."
+            lines = ["memory spaces:"]
+            for name, count in counts.items():
+                lines.append(f"  {name}: {count} records")
+            return "\n".join(lines)
+
+        if sub == "schedule":
+            from ..memory.cadence import status as _cadence_status
+            cad = _cadence_status(mem)
+            if not cad.get("enabled"):
+                return "consolidation schedule: disabled (interval <= 0)"
+            lines = [f"consolidation cadence: every {cad['interval_s']:.0f}s "
+                     f"(additive, never deletes)"]
+            if cad.get("last_run_at"):
+                import datetime as _dt
+                when = _dt.datetime.fromtimestamp(
+                    cad["last_run_at"]).strftime("%Y-%m-%d %H:%M")
+                lines.append(f"last run: {when} "
+                             f"(run #{cad.get('runs', 0)})")
+                rep = cad.get("last_report") or {}
+                lines.append(f"last report: {rep.get('summaries', 0)} facts "
+                             f"from {rep.get('episodes', 0)} episodes")
+            else:
+                lines.append("last run: never")
+            lines.append(f"next due in: {cad.get('next_due_in_s', 0):.0f}s")
+            lines.append(f"undistilled episodes: "
+                         f"{cad.get('undistilled_episodes')}")
+            return "\n".join(lines)
+
+        if sub == "backup":
+            from ..memory.backup import backup_to
+            import tempfile as _tf
+            dest = tail or _tf.mkdtemp(prefix="nm-mem-backup-")
+            report = backup_to(mem, dest, label="chat")
+            if not report.get("ok"):
+                return f"backup failed: {report.get('error')}"
+            return (f"backed up {len(report.get('files', []))} stores to "
+                    f"{report.get('backup_dir')}")
+    except Exception as exc:  # noqa: BLE001 — the surface never breaks chat
+        return f"/memory {sub} failed: {exc}"
+    return f"unknown /memory subcommand: {sub}"
+
+
 def control_memory(arg: str, context: Any) -> str:
     """`/memory` — trust view: what Devon remembers. Summaries only,
     never raw memory dumps. Slash commands are already owner-only
-    (runtime gates control commands to owner chats)."""
+    (runtime gates control commands to owner chats).
+
+    Subcommands (deep memory surface):
+      /memory health          diagnostics: counts, parity, drift, cadence
+      /memory explain <id>    why a record ranks where it does
+      /memory repair          re-embed missing/drifted vectors
+      /memory contradictions  scan recent facts for disagreements
+      /memory timeline <topic>  how the belief about a topic evolved
+      /memory consolidate     run the additive consolidation tick now
+      /memory scopes          memory spaces and their sizes
+      /memory schedule        consolidation cadence status
+      /memory backup          snapshot the whole store now
+      /memory <name>          one person's summary (people view, default)
+    """
     arg = (arg or "").strip()
+    mem = getattr(context, "memory", None)
+    head, _, tail = arg.partition(" ")
+    sub = head.lower()
+    if sub in {"health", "explain", "repair", "contradictions", "timeline",
+               "consolidate", "scopes", "schedule", "backup"}:
+        return _control_memory_subcommand(sub, tail.strip(), mem)
     people_dir = getattr(getattr(context, "settings", None), "people_dir", None)
     cadence = RelationshipCadence(people_dir=people_dir)
     people = cadence.people()

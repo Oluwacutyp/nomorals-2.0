@@ -36,5 +36,34 @@ class ParsePytestCountsTests(unittest.TestCase):
         self.assertNotIn("12", counts)
 
 
+
+class QuietModeFallbackTests(unittest.TestCase):
+    """pytest 9.x `-q` omits the summary line when stdout is not a TTY.
+
+    Regression: run_tests reported ``passed: 0, ok: True`` for a fully
+    green suite because _parse_pytest_counts only understood the summary
+    line. The fallback counts progress characters on progress lines.
+    """
+
+    def test_quiet_no_summary_counts_dots(self) -> None:
+        out = "............................................ [100%]\n"
+        counts = _parse_pytest_counts(out)
+        self.assertEqual(counts.get("passed"), 44)
+
+    def test_quiet_no_summary_counts_failures(self) -> None:
+        out = "....................F...s [100%]\n"
+        counts = _parse_pytest_counts(out)
+        self.assertEqual(counts.get("passed"), 23)
+        self.assertEqual(counts.get("failed"), 1)
+
+    def test_summary_line_still_preferred(self) -> None:
+        out = ".. [100%]\n44 passed in 6.14s\n"
+        counts = _parse_pytest_counts(out)
+        self.assertEqual(counts.get("passed"), 44)
+
+    def test_no_progress_chars_stays_empty(self) -> None:
+        self.assertEqual(_parse_pytest_counts("no tests ran\n"), {})
+
+
 if __name__ == "__main__":
     unittest.main()

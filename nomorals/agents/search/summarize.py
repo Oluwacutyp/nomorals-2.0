@@ -65,8 +65,15 @@ def extractive_summarize(query: str, pages: Sequence[dict[str, Any]], max_senten
 def model_summarize(router: Any, query: str, pages: Sequence[dict[str, Any]],
                     max_chars: int = 24000) -> str:
     """Ask the active model for a sourced synthesis. Raises on failure so
-    the caller can fall back to the extractive pass."""
+    the caller can fall back to the extractive pass.
+
+    ``router`` may be a raw provider router or a
+    :class:`~nomorals.llm.brain.Brain` — a Brain is used as-is.
+    """
     from ...llm.base import Message, SamplingParams
+    from ...llm.brain import Brain
+
+    brain = router if isinstance(router, Brain) else Brain(router=router)
 
     chunks: list[str] = []
     budget = max_chars
@@ -84,10 +91,11 @@ def model_summarize(router: Any, query: str, pages: Sequence[dict[str, Any]],
         "say so plainly — do not invent.\n\n"
         f"query: {query}\n\n" + "\n\n".join(chunks)
     )
-    response = router.chat(
+    response = brain.chat(
         [Message.system("You synthesize research from provided pages; you never browse."),
          Message.user(prompt)],
         SamplingParams(temperature=0.2),
+        task_kind="summarize",
     )
     if not response.ok or not (response.text or "").strip():
         raise RuntimeError(f"model summarization failed: {response.error}")

@@ -39,9 +39,11 @@ only *upward* imports are violations.
 
 from __future__ import annotations
 
+import atexit
 import queue
 import threading
 import time
+import weakref
 from pathlib import Path
 from typing import Any
 
@@ -53,6 +55,40 @@ from .benchmarks import BenchmarkDB
 __all__ = ["LearningAttachment", "attach_learning", "default_learning_db_path"]
 
 _log = get_logger(__name__)
+
+#: Every live LearningAttachment, for the interpreter-shutdown hook below.
+#: WeakSet so attachments die normally; the hook only sees the living.
+_live_attachments: "weakref.WeakSet[LearningAttachment]" = weakref.WeakSet()
+
+
+def _stop_all_learning_workers() -> None:
+    """atexit: stop every learning writer while modules are still intact.
+
+    atexit handlers run *before* module teardown begins, so sqlite3 and
+    friends are fully functional here.  Without this, daemon workers
+    mid-DB-write during finalization segfault the process (flaky SIGSEGV
+    at pytest teardown).  Bounded: never hangs shutdown.
+    """
+    try:
+        workers = list(_live_attachments)
+    except Exception:  # noqa: BLE001
+        return
+    for attachment in workers:
+        try:
+            attachment._stop.set()
+        except Exception:  # noqa: BLE001
+            pass
+    for attachment in workers:
+        try:
+            worker = attachment._worker
+            if (worker is not None and worker.is_alive()
+                    and worker is not threading.current_thread()):
+                worker.join(timeout=2.0)
+        except Exception:  # noqa: BLE001
+            pass
+
+
+atexit.register(_stop_all_learning_workers)
 
 #: Router operation → capability value recorded on trajectory/benchmark
 #: rows.  Mirrors ``ModelBroker.capability_for_operation`` so the rows land
@@ -112,6 +148,7 @@ class LearningAttachment:
             target=self._run, name="llm-learning", daemon=True
         )
         self._worker.start()
+        _live_attachments.add(self)
 
     # ── hot-path entry (called by LLMRouter._dispatch) ────────────────────
     def note(
@@ -162,9 +199,20 @@ class LearningAttachment:
         except Exception:  # noqa: BLE001
             _log.debug("learning marker cleanup failed", exc_info=True)
         self._stop.set()
-        # No join(): the worker may be mid-insert on a wedged disk and we
-        # must never hang teardown; it is a daemon, so process exit is
-        # unaffected.
+        # Bounded join: the worker wakes from its queue wait within 0.25s
+        # of the stop flag, so this is near-instant in the normal case.
+        # Unbounded waiting is still forbidden (a wedged disk must never
+        # hang teardown), but "no join at all" is wrong too: a daemon
+        # thread mid-sqlite-write during interpreter finalization
+        # segfaults the process — observed as a flaky SIGSEGV at pytest
+        # teardown.  2s keeps teardown fast and makes it deterministic.
+        try:
+            worker = self._worker
+            if worker is not None and worker.is_alive() \
+                    and worker is not threading.current_thread():
+                worker.join(timeout=2.0)
+        except Exception:  # noqa: BLE001 — teardown must never raise
+            _log.debug("learning worker join failed", exc_info=True)
 
     # ── background writer ────────────────────────────────────────────────
     def _run(self) -> None:
@@ -185,6 +233,18 @@ class LearningAttachment:
         capability = _OPERATION_CAPABILITY.get(operation, operation)
         if self.trajectories is not None:
             try:
+                # The typed failure class lets failure_clusters group by
+                # *kind* of breakage (rate_limited vs auth vs overflow)
+                # instead of by raw message text.
+                failure_class = ""
+                if not success and error:
+                    try:
+                        from .failures import classify_failure
+
+                        failure_class = classify_failure(
+                            error).failure_class.value
+                    except Exception:  # noqa: BLE001 — the class is a bonus
+                        failure_class = ""
                 self.trajectories.record(
                     task_kind=operation,
                     capability=capability,
@@ -192,6 +252,7 @@ class LearningAttachment:
                     success=success,
                     latency_s=latency_s,
                     error=error,
+                    failure_class=failure_class,
                 )
             except Exception:  # noqa: BLE001
                 _log.warning(

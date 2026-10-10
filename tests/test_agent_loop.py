@@ -273,3 +273,63 @@ class DynamicBehaviorTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DepthChainTests(unittest.TestCase):
+    """Dialogue depth is a strategy chain, not hardcoded branches."""
+
+    def test_chain_reproduces_length_bands(self):
+        from nomorals.agents.agent_loop import dialogue_depth, DepthSignals
+        self.assertEqual(dialogue_depth(DepthSignals(text_len=10)), (2, 120))
+        self.assertEqual(dialogue_depth(DepthSignals(text_len=400)), (8, 200))
+
+    def test_ambiguity_boost_widens(self):
+        from nomorals.agents.agent_loop import dialogue_depth, DepthSignals
+        plain = dialogue_depth(DepthSignals(text_len=150))
+        boosted = dialogue_depth(DepthSignals(text_len=150, ambiguous=True))
+        self.assertGreater(boosted[0], plain[0])
+        self.assertGreaterEqual(boosted[1], plain[1])
+
+    def test_media_boost_adds_turns(self):
+        from nomorals.agents.agent_loop import dialogue_depth, DepthSignals
+        plain = dialogue_depth(DepthSignals(text_len=50))
+        media = dialogue_depth(DepthSignals(text_len=50, has_media=True))
+        self.assertGreater(media[0], plain[0])
+
+    def test_command_narrows(self):
+        from nomorals.agents.agent_loop import dialogue_depth, DepthSignals
+        wide = dialogue_depth(DepthSignals(text_len=400))
+        narrow = dialogue_depth(DepthSignals(text_len=400, is_command=True))
+        self.assertLessEqual(narrow[0], 2)
+        self.assertLess(narrow[0], wide[0])
+
+    def test_termux_caps(self):
+        from nomorals.agents.agent_loop import dialogue_depth, DepthSignals
+        ws = dialogue_depth(DepthSignals(text_len=400, resource_profile="workstation"))
+        tx = dialogue_depth(DepthSignals(text_len=400, resource_profile="termux"))
+        self.assertLessEqual(tx[0], 4)
+        self.assertGreater(ws[0], tx[0])
+
+    def test_custom_chain_injection(self):
+        from nomorals.agents.agent_loop import (
+            dialogue_depth, DepthSignals, DepthStrategy,
+        )
+
+        class Fixed(DepthStrategy):
+            name = "fixed"
+            def adjust(self, depth, signals):
+                return (7, 77)
+
+        self.assertEqual(dialogue_depth(DepthSignals(text_len=10),
+                                        strategies=[Fixed()]), (7, 77))
+
+    def test_chain_never_raises(self):
+        from nomorals.agents.agent_loop import dialogue_depth, DepthSignals, DepthStrategy
+
+        class Boom(DepthStrategy):
+            name = "boom"
+            def adjust(self, depth, signals):
+                raise RuntimeError("nope")
+
+        depth = dialogue_depth(DepthSignals(text_len=10), strategies=[Boom()])
+        self.assertEqual(depth, (4, 160))  # the safe default survives

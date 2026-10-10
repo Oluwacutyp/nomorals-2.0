@@ -209,3 +209,31 @@ def test_normalize_error_multiline_takes_first_stable_line(tmp_path):
 def test_cluster_key_for_is_stable(tmp_path):
     assert cluster_key_for("chat", "boom") == "chat::boom"
     assert cluster_key_for("chat", "boom") == cluster_key_for("chat", "boom")
+
+
+def test_failure_clusters_group_by_class(tmp_path):
+    from nomorals.cognition.trajectories import TrajectoryStore
+
+    store = TrajectoryStore()
+    store.record(task_kind="chat", capability="chat", model_id="m",
+                 success=False, error="429 Too Many Requests")
+    store.record(task_kind="chat", capability="chat", model_id="m",
+                 success=False, error="401 Unauthorized: invalid api key")
+    store.record(task_kind="chat", capability="chat", model_id="m",
+                 success=False, error="429 Too Many Requests")
+    clusters = store.failure_clusters("chat")
+    by_class = {c["failure_class"]: c["count"] for c in clusters}
+    assert by_class.get("rate_limited") == 2
+    assert by_class.get("auth") == 1
+    assert all("failure_class" in c for c in clusters)
+
+
+def test_record_derives_failure_class_from_error(tmp_path):
+    from nomorals.cognition.trajectories import TrajectoryStore
+
+    store = TrajectoryStore()
+    store.record(task_kind="chat", capability="chat", model_id="m",
+                 success=False,
+                 error="400 maximum context length exceeded")
+    clusters = store.failure_clusters("chat")
+    assert clusters and clusters[0]["failure_class"] == "context_overflow"

@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import sys
 from typing import Any
+from ...llm.brain import brain_for
 
 
 
@@ -75,9 +76,9 @@ def _dispatch_tui_command(context: Any, state: Any, text: str) -> None:
 
     from ...llm.base import Message, SamplingParams
 
-    response = context.router.chat(
+    response = brain_for(context).chat(
         [Message.user(text)], SamplingParams(temperature=0.7, max_tokens=1024)
-    )
+    , task_kind="chat")
     if response.ok:
         state.say(response.text, kind="assistant")
     else:

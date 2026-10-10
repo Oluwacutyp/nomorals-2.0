@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+from ...llm.brain import brain_for
 from ..emit import _emit
 
 from ...core.logging_setup import get_logger
@@ -54,11 +55,11 @@ def _cmd_partner_ask(args, context) -> int:
     reply, model = "", ""
     router = getattr(context, "router", None)
     if router is not None:
-        response = router.chat([
+        response = brain_for(context).chat([
             Message.system(f"You are {name} ({pronouns}), answering your "
                            "person directly. Warm, brief, honest."),
             Message.user(ask),
-        ])
+        ], task_kind="chat")
         if not response.ok:
             print(f"partner: {response.error}", file=sys.stderr)
             return 1

@@ -68,7 +68,9 @@ class FakeAdapter(ChatAdapter):
     def push(self, chat: ChatRef, text: str) -> None:
         self._deliver(self._handler, ChatMessage(chat=chat, incoming=True, text=text, sender="you"))
 
-    def send(self, chat: ChatRef, text: str, *, reply_to: str = "") -> SendResult:
+    def send(self, chat: ChatRef, text: str, *, reply_to: str = "",
+             buttons: list[list[tuple[str, str]]] | None = None,
+             parse_mode: str = "") -> SendResult:
         self.sent.append(text)
         return SendResult(ok=True, platform=self.name, message_id=f"m{len(self.sent)}")
 

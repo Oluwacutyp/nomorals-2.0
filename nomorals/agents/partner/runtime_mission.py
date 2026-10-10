@@ -22,6 +22,7 @@ class RuntimeMissionMixin:
         /mission clear <id>       — drop the stall record (progress resumed)
         /mission pause <id>       — freeze it (status → paused)
         /mission resume <id>      — continue it in the background
+        /mission replan <id>      — paused/failed: force replan policy on and resume
         /mission cancel <id> [reason] — stop it for good (terminal)
         /mission retry <id>       — fresh attempt: cancel + requeue the goal
         /mission watch <id>       — this chat gets milestone updates
@@ -202,6 +203,48 @@ class RuntimeMissionMixin:
                              name=f"mission-resume-{mission.id[:8]}",
                              daemon=True).start()
             return (f"▶ {mission.name}: resumed in the background — "
+                    f"/mission status {mission.id} for progress.")
+
+        if verb == "replan":
+            mission, _amb = _resolve(rest)
+            if _amb:
+                return _amb
+            if mission is None:
+                return (f"no mission matching {rest!r} — "
+                        "/mission list to see the active ones.")
+            if mission.status not in (MissionStatus.PAUSED,
+                                      MissionStatus.FAILED):
+                return (f"{mission.name} is {mission.status} — replan is "
+                        "for paused/failed missions; live ones replan "
+                        "themselves on failure.")
+            # force the replan policy on and reset the replan budget, then
+            # resume: completed steps are skipped, the failed step is
+            # re-driven, and the next failure replans instead of dying.
+            meta = dict(mission.metadata or {})
+            meta["replan_policy"] = "always"
+            mission.metadata = meta
+            state = dict(mission.state or {})
+            state["replans"] = 0
+            mission.state = state
+            if mission.terminal:
+                mission.status = MissionStatus.PENDING
+                mission.finished_at = None
+            store.save(mission)
+            runner = wired_runner(self.context, store=store)
+
+            def _replan_job() -> None:
+                try:
+                    runner.resume(mission.id)
+                except Exception:  # noqa: BLE001 - chat must stay alive
+                    _log.exception("mission replan %s failed", mission.id)
+                finally:
+                    self._release_db_thread()
+
+            threading.Thread(target=_replan_job,
+                             name=f"mission-replan-{mission.id[:8]}",
+                             daemon=True).start()
+            return (f"🔄 {mission.name}: replanning enabled (policy=always) "
+                    f"and resumed in the background — "
                     f"/mission status {mission.id} for progress.")
 
         if verb == "cancel":

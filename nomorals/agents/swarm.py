@@ -31,6 +31,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Any
 
+from ..llm.brain import brain_for
 from ..core.ids import new_short_id
 from ..core.logging_setup import get_logger
 from .devon import DevonAgent, DevonResult
@@ -129,7 +130,7 @@ class SwarmAgent:
             try:
                 from ..llm.base import Message, SamplingParams
 
-                response = self.context.router.chat(
+                response = brain_for(self.context).chat(
                     [
                         Message.system(
                             f"Split this goal into at most {workers} parallel subtasks that "
@@ -140,7 +141,7 @@ class SwarmAgent:
                         Message.user(goal),
                     ],
                     SamplingParams(temperature=0.2, max_tokens=300),
-                )
+                task_kind="chat")
                 text = (response.text or "").strip()
                 start, end = text.find("["), text.rfind("]")
                 if start != -1 and end > start:
@@ -211,7 +212,7 @@ class SwarmAgent:
                     for i, leg in enumerate(legs)
                     if leg.get("ok")
                 )
-                response = self.context.router.chat(
+                response = brain_for(self.context).chat(
                     [
                         Message.system(
                             "You are fusing the results of a parallel multi-agent swarm "
@@ -221,7 +222,7 @@ class SwarmAgent:
                         Message.user(f"Goal: {goal}\n\nWorker results:\n{leg_text[:12000]}"),
                     ],
                     SamplingParams(temperature=0.3, max_tokens=900),
-                )
+                task_kind="chat")
                 text = (response.text or "").strip()
                 if text:
                     return text, True

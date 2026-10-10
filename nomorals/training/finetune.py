@@ -34,6 +34,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Iterator
 
+from ..llm.brain import brain_for
 from .dataset import (Example, Turn, decode_example, read_jsonl,
                       to_alpaca, to_sharegpt, write_jsonl)
 from ..core.logging_setup import get_logger
@@ -1705,10 +1706,10 @@ def generate_persona_samples(
             f"with exactly {len(topics)} pairs."
         )
         try:
-            response = router.chat(
+            response = brain_for(self.context).chat(
                 [Message.system("You produce strict JSON training data."),
                  Message.user(prompt)],
-                SamplingParams(temperature=0.9, max_tokens=1600))
+                SamplingParams(temperature=0.9, max_tokens=1600), task_kind="judge")
         except Exception as exc:  # noqa: BLE001 — generation is best-effort
             _log.debug("persona sample call failed: %s", exc)
             break

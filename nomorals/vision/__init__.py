@@ -8,11 +8,12 @@ Primary path: Groq's vision API (Llama 3.2 Vision) via the LLM router.
 Fallback: local GGUF vision model via the lifecycle/provisioner.
 """
 
+from . import native
 from .screenshot import capture_screenshot, screenshot_from_file
 from .seer import Seer, see, UNTRUSTED_VISION_PREFIX
 
 __all__ = ["Seer", "see", "UNTRUSTED_VISION_PREFIX", "capture_screenshot",
-           "screenshot_from_file", "register"]
+           "screenshot_from_file", "native", "register"]
 
 
 def register(registry) -> None:

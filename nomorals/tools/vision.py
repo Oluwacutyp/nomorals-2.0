@@ -33,20 +33,24 @@ import time
 from pathlib import Path
 from typing import Any
 
+from ..llm.brain import brain_for
 from ..core.errors import ModelError, ToolError
 from ..core.logging_setup import get_logger
 from ..core.policy import Capability
 
 __all__ = [
+    "analyze",
     "compare",
     "describe",
     "extract",
     "format_chat_summary",
     "image_metadata",
+    "layout",
     "locate",
     "read_text",
     "register",
     "resolve_image",
+    "vision_capabilities",
 ]
 
 _log = get_logger(__name__)
@@ -97,45 +101,14 @@ _NOTICE_EMITTED = False
 
 
 def image_metadata(data: bytes) -> dict[str, Any]:
-    """Format, dimensions, and size — parsed from headers, no PIL needed."""
-    meta: dict[str, Any] = {"bytes": len(data), "sha256": hashlib.sha256(data).hexdigest()}
-    if data.startswith(b"\x89PNG\r\n\x1a\n"):
-        meta["format"] = "png"
-        if len(data) >= 24:
-            meta["width"] = int.from_bytes(data[16:20], "big")
-            meta["height"] = int.from_bytes(data[20:24], "big")
-            meta["bit_depth"] = data[24] if len(data) > 24 else 0
-    elif data.startswith(b"\xff\xd8\xff"):
-        meta["format"] = "jpeg"
-        width = height = 0
-        index = 2
-        while index + 9 <= len(data):  # need 9 bytes from index; '<' dropped the last frame
-            if data[index] != 0xFF:
-                index += 1
-                continue
-            marker = data[index + 1]
-            if marker in {0xC0, 0xC1, 0xC2, 0xC3}:
-                height = int.from_bytes(data[index + 5 : index + 7], "big")
-                width = int.from_bytes(data[index + 7 : index + 9], "big")
-                break
-            length = int.from_bytes(data[index + 2 : index + 4], "big")
-            index += 2 + max(2, length)
-        meta["width"], meta["height"] = width, height
-    elif data.startswith(b"GIF8"):
-        meta["format"] = "gif"
-        if len(data) >= 10:
-            meta["width"] = int.from_bytes(data[6:8], "little")
-            meta["height"] = int.from_bytes(data[8:10], "little")
-    elif data.startswith(b"RIFF") and data[8:12] == b"WEBP":
-        meta["format"] = "webp"
-    elif data.startswith(b"BM"):
-        meta["format"] = "bmp"
-        if len(data) >= 26:
-            meta["width"] = int.from_bytes(data[18:22], "little")
-            meta["height"] = abs(int.from_bytes(data[22:26], "little", signed=True))
-    else:
-        meta["format"] = "unknown"
-    return meta
+    """Format, dimensions, and size — parsed from headers, no PIL needed.
+
+    Canonical implementation lives in :mod:`nomorals.vision.native`
+    (``header_metadata``); this delegates so the two can never drift.
+    """
+    from ..vision.native import header_metadata
+
+    return header_metadata(data)
 
 
 # ── settings / logging ───────────────────────────────────────────────────────
@@ -491,7 +464,7 @@ def _vision_call(
     description, provider, model, usage, error = "", "", "", {}, ""
     if router is not None:
         try:
-            response = router.describe_image(payload, instruction)
+            response = brain_for(self.context).describe_image(payload, instruction)
             description, provider, model = response.text, response.provider, response.model
             usage_raw = response.usage.as_dict
             usage = dict(usage_raw() if callable(usage_raw) else usage_raw)
@@ -547,6 +520,27 @@ def describe(
     return result
 
 
+def _native_ocr_text(data: bytes, context: Any) -> str:
+    """Transcribe with the tesseract binary directly — no router needed.
+
+    This is Devon's own OCR floor: deterministic, offline, verbatim. Raises
+    :class:`NativeUnavailable` (via the shared resolver) when the binary is
+    missing, so callers can chain to the next strategy honestly.
+    """
+    from ..llm.providers.ocr import ocr_binary, ocr_bytes
+    from ..vision.native import NativeUnavailable
+
+    vision = _vision_settings(context)
+    explicit = str(_knob(vision, "ocr_binary", "") or "")
+    language = str(_knob(vision, "ocr_language", "eng") or "eng")
+    if not ocr_binary(explicit):
+        raise NativeUnavailable(
+            "native OCR needs the tesseract binary (Termux: "
+            "pkg install tesseract; or set NM_OCR_BINARY)"
+        )
+    return ocr_bytes(data, language=language, binary=explicit)
+
+
 def read_text(
     context: Any,
     data: bytes,
@@ -554,13 +548,57 @@ def read_text(
     cache: dict[str, dict[str, Any]] | None = None,
     strict: bool = False,
     source: str = "bytes",
+    strategy: str = "auto",
 ) -> dict[str, Any]:
-    """OCR-style transcription via the vision model.
+    """Transcribe text from an image — strategy chain, native first.
 
-    Never silently "fixes" garbled text — the prompt demands verbatim output
-    with [illegible] markers, and low-confidence regions are flagged, not
-    invented.
+    Strategies:
+    - ``"auto"`` (default): native tesseract OCR when the binary is present
+      (deterministic, offline, verbatim) → vision model otherwise.
+    - ``"native"``: tesseract only — raises a clear error when unavailable.
+    - ``"model"``: vision model only — the previous behavior.
+
+    The result always names its ``method`` (``"native-ocr"`` or
+    ``"vlm"``/``"vlm-ocr-floor"``). Never silently "fixes" garbled text —
+    the model prompt demands verbatim output with [illegible] markers, and
+    low-confidence regions are flagged, not invented.
     """
+    from ..vision.native import NativeUnavailable
+
+    strategy = (strategy or "auto").lower()
+    if strategy not in ("auto", "native", "model"):
+        raise ToolError(
+            f"unknown read_text strategy {strategy!r} "
+            "(want auto | native | model)"
+        )
+    _check_size(data, context)
+
+    if strategy in ("auto", "native"):
+        try:
+            text = _native_ocr_text(data, context)
+        except NativeUnavailable:
+            if strategy == "native":
+                raise
+            _log.info("native OCR unavailable; chaining to vision model")
+        else:
+            from ..vision.seer import UNTRUSTED_VISION_PREFIX
+
+            _audit("read_text", source, len(data), len(data),
+                   "native", "tesseract", {}, context)
+            return {
+                "text": UNTRUSTED_VISION_PREFIX + text,
+                "confidence_note": (
+                    "native tesseract transcription of the raw pixels — "
+                    "deterministic and offline; verify proper nouns and "
+                    "numbers against the image"
+                ),
+                "method": "native-ocr",
+                "provider": "native",
+                "model": "tesseract",
+                "source": source,
+                **image_metadata(data),
+            }
+
     result = _vision_call(
         context, data, _READ_TEXT_PROMPT, action="read_text", source=source,
         cache=cache, strict=strict,
@@ -568,11 +606,13 @@ def read_text(
     text = result.pop("description")
     provider = result.get("provider", "")
     if provider == "ocr":
+        method = "vlm-ocr-floor"
         confidence_note = (
-            "tesseract transcription of the raw pixels — verify proper nouns "
-            "and numbers against the image"
+            "tesseract transcription of the raw pixels via the router's OCR "
+            "floor — verify proper nouns and numbers against the image"
         )
     else:
+        method = "vlm"
         confidence_note = (
             "model transcription — regions marked [illegible] are uncertain; "
             "the model was instructed not to guess"
@@ -580,6 +620,7 @@ def read_text(
     return {
         "text": text,
         "confidence_note": confidence_note,
+        "method": method,
         **result,
     }
 
@@ -591,14 +632,30 @@ def locate(
     *,
     strict: bool = False,
     source: str = "bytes",
+    template: bytes | None = None,
 ) -> dict[str, Any]:
     """Find ``target`` ("the submit button") → 0-1000 bbox + confidence.
 
-    Coordinates are approximate — the result says so, and any future click
-    automation must re-verify on screen.
+    Strategy chain:
+    - ``template`` given (bytes of the exact icon/button to find): Devon's
+      own normalized cross-correlation match — deterministic, no model,
+      honest ``found: False`` below threshold instead of a guessed box.
+    - otherwise: the vision model guesses a region from the word
+      description — coordinates are approximate and the result says so.
+
+    Any future click automation must re-verify on screen.
     """
     if not (target or "").strip():
         raise ToolError("vision locate needs a target description")
+    if template is not None:
+        from ..vision.native import template_locate
+
+        _check_size(data, context)
+        _check_size(template, context)
+        found = template_locate(data, template)
+        _audit("locate", source, len(data), len(data),
+               "native", "template-match-ncc", {}, context)
+        return {"target": target, **found}
     raw = _vision_call(
         context, data, _LOCATE_PROMPT.format(target=target), action="locate",
         source=source, cache=None, strict=strict,
@@ -609,11 +666,13 @@ def locate(
     if box is None:
         return {
             **base, "target": target, "found": False,
+            "method": "vlm-guess",
             "disclaimer": _LOCATE_DISCLAIMER,
             "note": "model did not return a parseable region",
         }
     if not box.get("found", True):
         return {**base, "target": target, "found": False,
+                "method": "vlm-guess",
                 "disclaimer": _LOCATE_DISCLAIMER}
     for key in ("x", "y", "w", "h"):
         box[key] = max(0, min(1000, int(box.get(key, 0))))
@@ -622,6 +681,7 @@ def locate(
         **base, "target": target, "found": True,
         "x": box["x"], "y": box["y"], "w": box["w"], "h": box["h"],
         "confidence": box["confidence"],
+        "method": "vlm-guess",
         "approximate": True,
         "disclaimer": _LOCATE_DISCLAIMER,
     }
@@ -639,6 +699,18 @@ def _parse_box(text: str) -> dict[str, Any] | None:
         return None
 
 
+def _native_diff_summary(native: dict[str, Any]) -> str:
+    """Honest one-line summary of a native pixel diff (no model)."""
+    if native.get("identical"):
+        return "native diff: the two images are pixel-identical"
+    frac = native.get("changed_fraction") or 0.0
+    bbox = native.get("changed_bbox_1000") or {}
+    where = (f" around x={bbox.get('x')},y={bbox.get('y')} "
+             f"(w={bbox.get('w')},h={bbox.get('h')}, 0-1000)") if bbox else ""
+    return (f"native diff: {frac * 100:.1f}% of pixels changed"
+            f" (mean abs diff {native.get('mean_abs_diff')}/255){where}")
+
+
 def compare(
     context: Any,
     data_a: bytes,
@@ -647,12 +719,50 @@ def compare(
     *,
     strict: bool = False,
     source: str = "bytes",
+    semantic: bool = True,
 ) -> dict[str, Any]:
-    """Spot the difference between two images (before/after, deploy check)."""
+    """Spot the difference between two images (before/after, deploy check).
+
+    Strategy chain: Devon's own pixel diff ALWAYS runs when Pillow is
+    present (deterministic, offline — changed fraction + changed region),
+    and the vision model adds the *semantic* reading ("what changed
+    meaningfully") when a router is configured and ``semantic`` is true.
+    With no router the native diff is the whole answer — an honest
+    measurement, never an error string dressed as a description.
+    """
     _check_size(data_a, context)
     _check_size(data_b, context)
     vision = _vision_settings(context)
     max_dim = _knob(vision, "max_dimension", DEFAULT_MAX_DIMENSION)
+
+    # native diff first — works fully offline
+    native: dict[str, Any] | None = None
+    try:
+        from ..vision.native import compare_native
+
+        native = compare_native(data_a, data_b)
+        _audit("compare", source, len(data_a) + len(data_b),
+               len(data_a) + len(data_b), "native", "pixel-diff", {}, context)
+    except Exception as exc:  # noqa: BLE001 - native is best-effort here
+        _log.debug("native compare unavailable: %s", exc)
+
+    router = getattr(context, "router", None) if context is not None else None
+    if router is None or not semantic:
+        if native is None:
+            raise ToolError(
+                "compare needs Pillow for the native diff or a vision-capable "
+                "model for the semantic reading — neither is available"
+            )
+        return {
+            "description": _native_diff_summary(native),
+            "native": native,
+            "method": "native",
+            "semantic": False,
+            "note": ("no vision model configured — this is Devon's own "
+                     "pixel-level diff; semantic interpretation needs a model"),
+            "source": source,
+        }
+
     instruction = _COMPARE_PROMPT.format(extra=prompt or "Spot the differences.")
     downscaled_a, _note_a = _downscale(data_a, max_dim)
     downscaled_b, _note_b = _downscale(data_b, max_dim)
@@ -668,19 +778,25 @@ def compare(
             context, downscaled_b, "Describe this image thoroughly.",
             action="compare", source=source, cache=None, strict=strict,
         )["description"]
-        return {
+        result = {
             "description": "Image A:\n" + desc_a + "\n\nImage B:\n" + desc_b,
             "note": ("PIL unavailable — described separately instead of a "
                      "single side-by-side view"),
             "method": "separate-descriptions",
             "source": source,
         }
+        if native is not None:
+            result["native"] = native
+        return result
 
     result = _vision_call(
         context, composite, instruction, action="compare", source=source,
         cache=None, strict=strict,
     )
     result["method"] = "side-by-side"
+    result["semantic"] = True
+    if native is not None:
+        result["native"] = native
     return result
 
 
@@ -711,6 +827,84 @@ def _side_by_side(data_a: bytes, data_b: bytes) -> bytes | None:
     buf = io.BytesIO()
     canvas.save(buf, format="PNG")
     return buf.getvalue()
+
+
+# ── native analysis (no model, no network) ───────────────────────────────────
+
+
+def analyze(
+    context: Any,
+    data: bytes,
+    *,
+    source: str = "bytes",
+) -> dict[str, Any]:
+    """Deep native image analysis — Devon's own eyes, no model involved.
+
+    One call returns EXIF forensics, dominant colors, brightness/contrast/
+    saturation, sharpness, entropy, perceptual hashes, plus best-effort
+    face detection and QR decode (each reported with its method or a clear
+    reason it is unavailable on this machine). Images never leave the
+    machine here, so there is no provider/model in the result.
+    """
+    from ..vision.native import analyze as _analyze
+
+    _check_size(data, context)
+    started = time.perf_counter()
+    report = _analyze(data)
+    _audit("analyze", source, len(data), 0, "native", "analyze", {}, context)
+    return {
+        **report,
+        "source": source,
+        "seconds": round(time.perf_counter() - started, 3),
+    }
+
+
+def layout(
+    context: Any,
+    data: bytes,
+    *,
+    source: str = "bytes",
+) -> dict[str, Any]:
+    """Document layout analysis — tesseract TSV, no model.
+
+    Returns blocks/lines/words with 0-1000 normalized coordinates and word
+    confidence. Raises :class:`NativeUnavailable` with an install hint when
+    the tesseract binary is missing.
+    """
+    from ..vision.native import document_layout as _document_layout
+
+    _check_size(data, context)
+    vision = _vision_settings(context)
+    language = str(_knob(vision, "ocr_language", "eng") or "eng")
+    started = time.perf_counter()
+    result = _document_layout(data, language=language)
+    _audit("layout", source, len(data), 0, "native", "tesseract-tsv", {}, context)
+    return {**result, "source": source,
+            "seconds": round(time.perf_counter() - started, 3)}
+
+
+def vision_capabilities(context: Any = None) -> dict[str, Any]:
+    """Honest capability report: what Devon can do with images HERE.
+
+    ``native`` lists every model-free analysis with per-machine
+    availability; ``needs_model`` names what genuinely still requires a
+    vision-capable model and why. ``router_vision`` says whether a model
+    path is currently configured.
+    """
+    from ..vision.native import capabilities as _capabilities
+
+    report = _capabilities()
+    router = getattr(context, "router", None) if context is not None else None
+    router_vision = False
+    if router is not None:
+        try:
+            chain = router.providers() if hasattr(router, "providers") else []
+            router_vision = any("vision" in getattr(p, "capabilities", set())
+                                for p in chain)
+        except Exception:  # noqa: BLE001 - capability probe is best-effort
+            router_vision = False
+    report["router_vision"] = router_vision
+    return report
 
 
 # ── screenshots (privileged) ────────────────────────────────────────────────
@@ -766,44 +960,104 @@ def register(registry: Any) -> None:
     @registry.register(
         "vision_read_text",
         description=(
-            "Transcribe text from an image (OCR-style). Verbatim output; "
-            "illegible regions are flagged, never invented. Same sources as "
-            "vision_describe."
+            "Transcribe text from an image (OCR-style). Native-first: uses "
+            "Devon's own tesseract OCR when available (deterministic, "
+            "offline), vision model otherwise. strategy= auto|native|model. "
+            "Verbatim output; illegible regions are flagged, never invented. "
+            "Same sources as vision_describe."
         ),
         capability=Capability.MODEL_CALL,
     )
     def vision_read_text(path: str = "", url: str = "",
-                         reference: str = "") -> dict[str, Any]:
+                         reference: str = "",
+                         strategy: str = "auto") -> dict[str, Any]:
         data, source = _load(path, url, reference=reference)
-        return read_text(context, data, cache=cache, source=source)
+        return read_text(context, data, cache=cache, source=source,
+                         strategy=strategy)
 
     @registry.register(
         "vision_locate",
         description=(
             "Locate a UI element or object ('the submit button') in an image. "
-            "Returns approximate 0-1000 normalized coordinates — re-verify on "
-            "screen before any click automation. Same sources as vision_describe."
+            "Give template_path= with the EXACT icon/button image for "
+            "Devon's own deterministic template match (no model, honest "
+            "not-found); otherwise the vision model guesses the region. "
+            "Returns 0-1000 normalized coordinates — re-verify on screen "
+            "before any click automation. Same sources as vision_describe."
         ),
         capability=Capability.MODEL_CALL,
     )
     def vision_locate(path: str = "", url: str = "", target: str = "",
-                      reference: str = "") -> dict[str, Any]:
+                      reference: str = "",
+                      template_path: str = "") -> dict[str, Any]:
         data, source = _load(path, url, reference=reference)
-        return locate(context, data, target, source=source)
+        template = None
+        if template_path:
+            template, _ = _load(template_path, "")
+        return locate(context, data, target, source=source, template=template)
 
     @registry.register(
         "vision_compare",
         description=(
             "Spot the difference between two images (before/after, 'did the "
-            "deploy change the UI'). Give path_a=/url_a= and path_b=/url_b=."
+            "deploy change the UI'). Devon's own pixel diff always runs "
+            "(changed fraction + region, works offline); the vision model "
+            "adds the semantic reading when configured. Give path_a=/url_a= "
+            "and path_b=/url_b=."
         ),
         capability=Capability.MODEL_CALL,
     )
     def vision_compare(path_a: str = "", path_b: str = "", url_a: str = "",
-                       url_b: str = "", prompt: str = "") -> dict[str, Any]:
-        data_a, _ = _load(path_a, url_a)
-        data_b, _ = _load(path_b, url_b)
+                       url_b: str = "", prompt: str = "",
+                       reference_a: str = "", reference_b: str = ""
+                       ) -> dict[str, Any]:
+        data_a, _ = _load(path_a, url_a, reference=reference_a)
+        data_b, _ = _load(path_b, url_b, reference=reference_b)
         return compare(context, data_a, data_b, prompt, source="compare")
+
+    @registry.register(
+        "vision_analyze",
+        description=(
+            "Deep NATIVE image analysis — no model, no network, no key: EXIF "
+            "forensics, dominant colors, brightness/contrast/saturation, "
+            "sharpness, entropy, perceptual hashes, face detection and QR "
+            "decode (each labeled with its method or why it's unavailable "
+            "here). Same sources as vision_describe."
+        ),
+        capability=Capability.FS_READ,
+    )
+    def vision_analyze(path: str = "", url: str = "",
+                       reference: str = "") -> dict[str, Any]:
+        data, source = _load(path, url, reference=reference)
+        return analyze(context, data, source=source)
+
+    @registry.register(
+        "vision_capabilities",
+        description=(
+            "Honest report of what Devon can do with images on THIS machine: "
+            "every native (offline, model-free) analysis with per-machine "
+            "availability, plus what genuinely still needs a vision model "
+            "and why."
+        ),
+        capability=Capability.FS_READ,
+    )
+    def vision_capabilities_tool() -> dict[str, Any]:
+        return vision_capabilities(context)
+
+    @registry.register(
+        "vision_layout",
+        description=(
+            "Document layout analysis via tesseract (no model): text blocks, "
+            "lines and words with 0-1000 normalized coordinates and word "
+            "confidence. Needs the tesseract binary. Same sources as "
+            "vision_describe."
+        ),
+        capability=Capability.FS_READ,
+    )
+    def vision_layout(path: str = "", url: str = "",
+                      reference: str = "") -> dict[str, Any]:
+        data, source = _load(path, url, reference=reference)
+        return layout(context, data, source=source)
 
     @registry.register(
         "vision_extract",

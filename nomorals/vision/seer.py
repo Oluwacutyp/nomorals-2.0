@@ -23,6 +23,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from ..llm.brain import brain_for
 from ..core.errors import ToolError
 from ..core.logging_setup import get_logger
 
@@ -146,7 +147,7 @@ class Seer:
     def _see_via_router(self, image_bytes: bytes, prompt: str) -> str:
         router = self._get_router()
         try:
-            response = router.describe_image(image_bytes, prompt)
+            response = brain_for(self.context).describe_image(image_bytes, prompt)
         except Exception as exc:  # noqa: BLE001
             # Distinguish "no provider supports vision" (fail fast) from
             # transient errors (fall through to local).

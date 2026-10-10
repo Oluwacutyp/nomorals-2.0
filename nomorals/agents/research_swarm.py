@@ -42,6 +42,7 @@ from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 from dataclasses import dataclass, field
 from typing import Any
 
+from ..llm.brain import brain_for
 from ..core.logging_setup import get_logger
 from ..core.trust import SourceTrust
 from .search.engine import SearchEngine
@@ -391,8 +392,8 @@ class ResearchSwarm:
             "broad, one practical, one critical, one recent. Respond with a "
             "JSON array of strings only.\n\nGoal: " + query[:400]
         )
-        response = self.context.router.chat(
-            [Message.user(prompt)], SamplingParams(temperature=0.4, max_tokens=200))
+        response = brain_for(self.context).chat(
+            [Message.user(prompt)], SamplingParams(temperature=0.4, max_tokens=200), task_kind="research")
         if not getattr(response, "ok", False) or not response.text:
             return []
         text = response.text.strip()
@@ -638,8 +639,8 @@ class ResearchSwarm:
             "are not in the findings. Cite URLs inline where they matter.\n\n"
             f"Goal: {query}\n\nFindings:\n{payload}"
         )
-        response = self.context.router.chat(
-            [Message.user(prompt)], SamplingParams(temperature=0.3, max_tokens=500))
+        response = brain_for(self.context).chat(
+            [Message.user(prompt)], SamplingParams(temperature=0.3, max_tokens=500), task_kind="research")
         text = (getattr(response, "text", "") or "").strip()
         if text and len(text) > 40:
             return text

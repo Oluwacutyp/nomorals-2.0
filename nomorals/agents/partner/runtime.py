@@ -1804,7 +1804,7 @@ class PartnerRuntime(
         Returns a reply string when a money-send intent fired, else None.
         Never raises — failures return honest error strings.
         """
-        from ..finance.send import parse_send_request, send_money
+        from ...finance.send import parse_send_request, send_money
         req = parse_send_request(message.text)
         if req is None:
             return None

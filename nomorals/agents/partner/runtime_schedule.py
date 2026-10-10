@@ -17,6 +17,24 @@ class RuntimeScheduleMixin:
         verb = parts[0].lower() if parts else "status"
         if verb == "health":
             return self._schedule_health(scheduler)
+        if verb == "runs":
+            ref = " ".join(parts[1:])
+            if not ref:
+                return "usage: /schedule runs <name or id>"
+            try:
+                runs = scheduler.recent_runs(ref, limit=10)
+            except AmbiguousRef as exc:
+                return str(exc)
+            if not runs:
+                return f"no runs recorded for {ref!r}"
+            lines = [f"recent runs for {ref}:"]
+            for r in runs:
+                mark = "✅" if r["ok"] else "❌"
+                ts = time.strftime("%m-%d %H:%M",
+                                   time.localtime(r["started_at"]))
+                lines.append(f"  {mark} {ts} {r['seconds']}s "
+                             f"[{r['trigger_source']}] {r['result'][:90]}")
+            return "\n".join(lines)
         if verb in {"status", "list"}:
             jobs = scheduler.list_jobs()
             if not jobs:
@@ -27,12 +45,22 @@ class RuntimeScheduleMixin:
                 nxt = job.get("next_run_iso") or ("past" if job["kind"] == "at" else "—")
                 lines.append(f"  [{state}] {job['name']} — {job['kind']} {job['spec']} (next: {nxt})")
                 extras = []
-                if job.get("depends_on"):
-                    extras.append(f"after:{job['depends_on'][:8]}")
+                deps = job.get("depends_on") or []
+                if deps:
+                    deps = deps if isinstance(deps, list) else [deps]
+                    extras.append("after:" + ",".join(d[:8] for d in deps))
+                    if str(job.get("depends_policy") or "all_ok") != "all_ok":
+                        extras.append(f"gate:{job['depends_policy']}")
                 if job.get("max_retries"):
                     extras.append(f"retry×{job['max_retries']}")
                 if job.get("retry_count"):
                     extras.append(f"retrying({job['retry_count']})")
+                if job.get("heavy"):
+                    extras.append("heavy")
+                if str(job.get("missed_fire_policy") or "fire_now") != "fire_now":
+                    extras.append(f"missed:{job['missed_fire_policy']}")
+                if str(job.get("overlap_policy") or "concurrent") != "concurrent":
+                    extras.append(f"overlap:{job['overlap_policy']}")
                 if extras:
                     lines[-1] += " [" + ", ".join(extras) + "]"
                 if job.get("last_result"):
@@ -68,7 +96,7 @@ class RuntimeScheduleMixin:
                 return str(exc)
             return f"ran {outcome['name']}: {outcome['result'][:400]}"
         return ("usage: /schedule add <name> <when> <message|tool|command> <...> [options] | list | "
-                "health | rm <name> | enable|disable <name> | run <name>\n"
+                "health | runs <name> | rm <name> | enable|disable <name> | run <name>\n"
                 "  when: 'at 2026-12-25 09:00' | 'every 30m' | '22:00' | 'daily 22:00 America/New_York'\n"
                 "        | 'cron 0 22 * * *' (minute hour day month weekday)\n"
                 "  action: message goodnight | tool web_research {\"query\":\"ai news\"} | command python3 -V\n"
@@ -147,12 +175,27 @@ class RuntimeScheduleMixin:
             return "add needs an action: message <text> | tool <name> <json> | command <cmd>"
         spec = " ".join(rest[:split_at])
         payload_parts = rest[split_at + 1:]
-        # ── trailing options: tz <IANA> | after <job> | retry <n> | delay <s>
+        # ── trailing options: tz <IANA> | after <job> | depends <id1,id2> |
+        #   dependspolicy <all|any|latest> | retry <n> | delay <s> |
+        #   backoff <constant|linear|exponential> | missed <fire|skip|next> |
+        #   overlap <skip|queue|concurrent> | timeout <s> | heavy
         # stripped from the end of the payload so free-form message text
         # isn't polluted.
         timezone, depends_on = "", ""
+        depends_policy = "all_ok"
         max_retries, retry_delay = 0, 60.0
-        while len(payload_parts) >= 2:
+        backoff = "exponential"
+        missed_fire_policy = "fire_now"
+        overlap_policy = "concurrent"
+        run_timeout_s = 0.0
+        heavy = False
+        while payload_parts:
+            if payload_parts[-1].lower() == "heavy":
+                heavy = True
+                payload_parts = payload_parts[:-1]
+                continue
+            if len(payload_parts) < 2:
+                break
             key = payload_parts[-2].lower()
             val = payload_parts[-1]
             if key == "tz":
@@ -160,6 +203,15 @@ class RuntimeScheduleMixin:
                 payload_parts = payload_parts[:-2]
             elif key == "after":
                 depends_on = val
+                payload_parts = payload_parts[:-2]
+            elif key == "depends":
+                depends_on = [d.strip() for d in val.split(",") if d.strip()]
+                payload_parts = payload_parts[:-2]
+            elif key == "dependspolicy":
+                if val.lower() not in {"all", "any", "latest"}:
+                    break
+                depends_policy = {"all": "all_ok", "any": "any_ok",
+                                  "latest": "latest_ok"}[val.lower()]
                 payload_parts = payload_parts[:-2]
             elif key == "retry":
                 try:
@@ -170,6 +222,29 @@ class RuntimeScheduleMixin:
             elif key == "delay":
                 try:
                     retry_delay = max(10.0, float(val))
+                except ValueError:
+                    break
+                payload_parts = payload_parts[:-2]
+            elif key == "backoff":
+                if val.lower() not in {"constant", "linear", "exponential"}:
+                    break
+                backoff = val.lower()
+                payload_parts = payload_parts[:-2]
+            elif key == "missed":
+                mapping = {"fire": "fire_now", "skip": "skip",
+                           "next": "next_only"}
+                if val.lower() not in mapping:
+                    break
+                missed_fire_policy = mapping[val.lower()]
+                payload_parts = payload_parts[:-2]
+            elif key == "overlap":
+                if val.lower() not in {"skip", "queue", "concurrent"}:
+                    break
+                overlap_policy = val.lower()
+                payload_parts = payload_parts[:-2]
+            elif key == "timeout":
+                try:
+                    run_timeout_s = max(0.0, float(val))
                 except ValueError:
                     break
                 payload_parts = payload_parts[:-2]
@@ -198,7 +273,12 @@ class RuntimeScheduleMixin:
         try:
             job = scheduler.add(name, spec, payload_kind, payload,
                                 timezone=timezone, depends_on=depends_on,
-                                max_retries=max_retries, retry_delay=retry_delay)
+                                depends_policy=depends_policy,
+                                max_retries=max_retries, retry_delay=retry_delay,
+                                backoff=backoff,
+                                missed_fire_policy=missed_fire_policy,
+                                overlap_policy=overlap_policy,
+                                run_timeout_s=run_timeout_s, heavy=heavy)
         except (ValueError, RuntimeError) as exc:
             return f"scheduling failed: {exc}"
         when = time.strftime("%m-%d %H:%M", time.localtime(job["next_run"]))
@@ -206,9 +286,18 @@ class RuntimeScheduleMixin:
         if timezone:
             extras.append(f"tz={timezone}")
         if depends_on:
-            extras.append(f"after={depends_on}")
+            deps = depends_on if isinstance(depends_on, list) else [depends_on]
+            extras.append("after=" + ",".join(deps))
         if max_retries:
-            extras.append(f"retry×{max_retries}")
+            extras.append(f"retry×{max_retries} ({backoff})")
+        if missed_fire_policy != "fire_now":
+            extras.append(f"missed={missed_fire_policy}")
+        if overlap_policy != "concurrent":
+            extras.append(f"overlap={overlap_policy}")
+        if run_timeout_s:
+            extras.append(f"timeout={run_timeout_s:g}s")
+        if heavy:
+            extras.append("heavy")
         extra_s = (" [" + ", ".join(extras) + "]") if extras else ""
         return f"⏰ scheduled {job['name']} — {job['kind']} ({spec}) — next {when}{extra_s}"
 

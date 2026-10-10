@@ -25,6 +25,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
+from ..llm.brain import brain_for
 from ..core.logging_setup import get_logger
 from ..documents.index import DocumentIndex
 from ..documents.parsers import parse_bytes, parse_path
@@ -368,7 +369,7 @@ class GroundedSession:
         router = getattr(context, "router", None) if context else None
         if router is None:
             raise GroundedError("no LLM available (pass llm_fn or context)")
-        resp = router.complete(prompt)
+        resp = brain_for(self.context).complete(prompt, task_kind="research")
         return resp.text if hasattr(resp, "text") else str(resp)
 
     def _number_citations(self, raw: str, sources: list[Source],

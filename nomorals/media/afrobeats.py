@@ -36,6 +36,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from ..llm.brain import brain_for
 from ..core.logging_setup import get_logger
 
 _log = get_logger(__name__)
@@ -685,8 +686,8 @@ def yoruba_lyrics(topic: str, context: Any, *,
         f"Write exactly {lines} lines of {lang} song lyrics about: "
         f"{topic!r}. {tone_req} One clear image per line, singable, "
         f"no titles, no markdown — just the lines.")
-    resp = router.chat([Message.user(prompt)],
-                       SamplingParams(temperature=0.9))
+    resp = brain_for(context).chat([Message.user(prompt)],
+                       SamplingParams(temperature=0.9), task_kind="creative")
     text = (getattr(resp, "text", "") or "").strip()
     if not text:
         raise LoRAUnavailable("the language model returned no lyrics")

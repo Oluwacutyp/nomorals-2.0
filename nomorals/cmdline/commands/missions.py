@@ -86,6 +86,39 @@ def _cmd_missions(args: argparse.Namespace, context: Any) -> int:
               f"({p.get('percent', 0):.0f}%)")
         return 0
 
+    if args.replan:
+        # Force the replan policy on, reset the replan budget, and resume:
+        # completed steps are skipped, the failed step is re-driven, and
+        # the next failure replans instead of dying.
+        from ...missions.mission import MissionStatus as _MS
+
+        try:
+            mission = store.get(args.replan)
+        except (KeyError, ValueError, NoMoralsError) as exc:
+            print(f"missions: {exc}", file=sys.stderr)
+            return 2
+        if mission.status not in (_MS.PAUSED, _MS.FAILED):
+            print(f"missions: {mission.name} is {mission.status} — replan "
+                  "is for paused/failed missions", file=sys.stderr)
+            return 2
+        meta = dict(mission.metadata or {})
+        meta["replan_policy"] = "always"
+        mission.metadata = meta
+        state = dict(mission.state or {})
+        state["replans"] = 0
+        mission.state = state
+        if mission.terminal:
+            mission.status = _MS.PENDING
+            mission.finished_at = None
+        store.save(mission)
+        result = runner.resume(
+            mission.id, max_iterations=args.max_iterations, reflect=reflect
+        )
+        _emit(args, result.to_dict(),
+              f"replanned {mission.id} — {mission.name}: {result.status}\n"
+              + _render_result(result))
+        return 0 if result.ok else 1
+
     if args.show:
         # reconcile on read: a dead runner must not report "running"
         store.reconcile(args.show)

@@ -13,6 +13,7 @@ from __future__ import annotations
 import re
 from typing import Any, Callable
 
+from ..llm.brain import brain_for
 from .model import STATUS_WRITTEN, Book, Chapter, count_words
 
 __all__ = ["write_chapter", "model_chapter", "template_chapter",
@@ -93,7 +94,7 @@ def model_chapter(book: Book, chapter: Chapter, prev_tail: str = "",
     from ..llm.base import Message, SamplingParams
 
     target = max(300, int(book.target_words))
-    response = router.chat(
+    response = brain_for(context).chat(
         [
             Message.system(
                 "You are an expert non-fiction author. Your chapters are "
@@ -105,7 +106,7 @@ def model_chapter(book: Book, chapter: Chapter, prev_tail: str = "",
             Message.user(_writing_prompt(book, chapter, prev_tail)),
         ],
         SamplingParams(temperature=0.65, max_tokens=min(12000, int(target * 1.7) + 400)),
-    )
+    task_kind="creative")
     text = (getattr(response, "text", "") or "").strip()
     if not response.ok or count_words(text) < max(120, int(target * 0.35)):
         raise RuntimeError(f"model chapter too short or failed: {getattr(response, 'error', '')}")

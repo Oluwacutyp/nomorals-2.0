@@ -6,6 +6,7 @@ the chat command writes to): at / every / daily, with
 
     nm schedule list [--json]
     nm schedule health [--json]
+    nm schedule runs <name-or-id> [--json]
     nm schedule add <name> <when> message <text...>
     nm schedule add <name> <when> tool <tool-name> [<json-args>]
     nm schedule add <name> <when> command <shell-command...>
@@ -37,10 +38,14 @@ def _scheduler(context: Any):
 def _usage() -> int:
     print("usage: nm schedule list [--json]\n"
           "       nm schedule health [--json]\n"
+          "       nm schedule runs <name-or-id> [--json]\n"
           "       nm schedule add <name> <when> message <text...> |\n"
           "                              tool <tool-name> [<json-args>] |\n"
           "                              command <shell-command...>\n"
-          "                              [tz <IANA>] [after <job>] [retry <n>] [delay <s>]\n"
+          "                              [tz <IANA>] [after <job>] [depends <id1,id2>]\n"
+          "                              [dependspolicy <all|any|latest>] [retry <n>] [delay <s>]\n"
+          "                              [backoff <constant|linear|exponential>] [missed <fire|skip|next>]\n"
+          "                              [overlap <skip|queue|concurrent>] [timeout <s>] [heavy]\n"
           "       nm schedule rm <name-or-id>\n"
           "       nm schedule enable|disable <name-or-id>\n"
           "       nm schedule run <name-or-id>\n"
@@ -61,6 +66,8 @@ def _cmd_schedule(args: Any, context: Any) -> int:
             return _schedule_list(args, context)
         if verb == "health":
             return _schedule_health(args, context)
+        if verb == "runs":
+            return _schedule_runs(args, context, words[1:])
         if verb == "add":
             return _schedule_add(context, words[1:])
         if verb in ("rm", "remove"):
@@ -167,10 +174,28 @@ def _schedule_add(context: Any, parts: list[str]) -> int:
         return 2
     spec = " ".join(rest[:split_at])
     payload_parts = rest[split_at + 1:]
-    # trailing options: tz <IANA> | after <job> | retry <n> | delay <s>
+    # trailing options: tz <IANA> | after <job> | depends <id1,id2> |
+    #   dependspolicy <all|any|latest> | retry <n> | delay <s> |
+    #   backoff <constant|linear|exponential> | missed <fire|skip|next> |
+    #   overlap <skip|queue|concurrent> | timeout <s> | heavy
     timezone, depends_on = "", ""
+    depends_policy = "all_ok"
     max_retries, retry_delay = 0, 60.0
-    while len(payload_parts) >= 2:
+    backoff = "exponential"
+    missed_fire_policy = "fire_now"
+    overlap_policy = "concurrent"
+    run_timeout_s = 0.0
+    heavy = False
+    while payload_parts:
+        # single-word flag
+        if payload_parts[-1].lower() == "heavy" and len(payload_parts) >= 1:
+            # 'heavy' takes no value; only valid as the last token or
+            # followed by another option key
+            heavy = True
+            payload_parts = payload_parts[:-1]
+            continue
+        if len(payload_parts) < 2:
+            break
         key = payload_parts[-2].lower()
         val = payload_parts[-1]
         if key == "tz":
@@ -178,6 +203,15 @@ def _schedule_add(context: Any, parts: list[str]) -> int:
             payload_parts = payload_parts[:-2]
         elif key == "after":
             depends_on = val
+            payload_parts = payload_parts[:-2]
+        elif key == "depends":
+            depends_on = [d.strip() for d in val.split(",") if d.strip()]
+            payload_parts = payload_parts[:-2]
+        elif key == "dependspolicy":
+            if val.lower() not in {"all", "any", "latest"}:
+                break
+            depends_policy = {"all": "all_ok", "any": "any_ok",
+                              "latest": "latest_ok"}[val.lower()]
             payload_parts = payload_parts[:-2]
         elif key == "retry":
             try:
@@ -188,6 +222,28 @@ def _schedule_add(context: Any, parts: list[str]) -> int:
         elif key == "delay":
             try:
                 retry_delay = max(10.0, float(val))
+            except ValueError:
+                break
+            payload_parts = payload_parts[:-2]
+        elif key == "backoff":
+            if val.lower() not in {"constant", "linear", "exponential"}:
+                break
+            backoff = val.lower()
+            payload_parts = payload_parts[:-2]
+        elif key == "missed":
+            mapping = {"fire": "fire_now", "skip": "skip", "next": "next_only"}
+            if val.lower() not in mapping:
+                break
+            missed_fire_policy = mapping[val.lower()]
+            payload_parts = payload_parts[:-2]
+        elif key == "overlap":
+            if val.lower() not in {"skip", "queue", "concurrent"}:
+                break
+            overlap_policy = val.lower()
+            payload_parts = payload_parts[:-2]
+        elif key == "timeout":
+            try:
+                run_timeout_s = max(0.0, float(val))
             except ValueError:
                 break
             payload_parts = payload_parts[:-2]
@@ -222,12 +278,46 @@ def _schedule_add(context: Any, parts: list[str]) -> int:
     try:
         job = sched.add(name, spec, payload_kind, payload,
                         timezone=timezone, depends_on=depends_on,
-                        max_retries=max_retries, retry_delay=retry_delay)
+                        depends_policy=depends_policy,
+                        max_retries=max_retries, retry_delay=retry_delay,
+                        backoff=backoff,
+                        missed_fire_policy=missed_fire_policy,
+                        overlap_policy=overlap_policy,
+                        run_timeout_s=run_timeout_s, heavy=heavy)
     except (ValueError, RuntimeError) as exc:
         print(f"scheduling failed: {exc}", file=sys.stderr)
         return 1
     when = time.strftime("%m-%d %H:%M", time.localtime(job["next_run"]))
     print(f"scheduled {job['name']} — {job['kind']} ({spec}) — next {when}")
+    return 0
+
+
+def _schedule_runs(args: Any, context: Any, rest: list[str]) -> int:
+    """``nm schedule runs <name-or-id>`` — per-execution history."""
+    if not rest:
+        print("usage: nm schedule runs <name-or-id>", file=sys.stderr)
+        return 2
+    from ...core.errors import AmbiguousRef
+
+    ref = " ".join(rest)
+    sched = _scheduler(context)
+    try:
+        runs = sched.recent_runs(ref, limit=15)
+    except AmbiguousRef as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    if not runs:
+        print(f"no runs recorded for {ref!r}")
+        return 0
+    if _as_json(args):
+        print(json.dumps(runs, indent=2, default=str))
+        return 0
+    print(f"recent runs for {ref}:")
+    for r in runs:
+        ts = time.strftime("%m-%d %H:%M", time.localtime(r["started_at"]))
+        mark = "✅" if r["ok"] else "❌"
+        print(f"  {mark} {ts} {r['seconds']}s [{r['trigger_source']}] "
+              f"{r['result'][:90]}")
     return 0
 
 

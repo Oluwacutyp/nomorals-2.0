@@ -39,6 +39,7 @@ from typing import Any, Callable, Optional, Protocol, runtime_checkable
 from ..core.logging_setup import get_logger
 from ..core.policy import Capability
 from ..llm.base import Message, SamplingParams
+from ..llm.brain import brain_for
 from .reasoning import _extract_json, reasoning_eval
 
 _log = get_logger(__name__)
@@ -114,10 +115,10 @@ def measurable(context: Any) -> bool:
 
 def _llm(context: Any, system: str, user: str,
          *, temperature: float = 0.1) -> Optional[str]:
-    response = context.router.chat(
+    response = brain_for(context).chat(
         [Message.system(system), Message.user(user)],
         SamplingParams(temperature=temperature, max_tokens=1200),
-    )
+    task_kind="judge")
     if not getattr(response, "ok", False):
         return None
     text = (getattr(response, "text", "") or "").strip()

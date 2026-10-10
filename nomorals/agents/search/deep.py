@@ -43,6 +43,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Sequence
 
+from ...llm.brain import brain_for
 from ...core.ids import new_short_id
 from ...core.logging_setup import get_logger
 from . import curate
@@ -573,13 +574,13 @@ class DeepResearcher:
             "disagree, say so. If the passages do not answer the question, say what is missing. "
             "No preamble, no 'based on the sources'."
         )
-        response = self.context.router.chat(
+        response = brain_for(self.context).chat(
             [
                 Message.system("You are a meticulous research assistant."),
                 Message.user(prompt),
             ],
             SamplingParams(temperature=0.3, max_tokens=1200),
-        )
+        task_kind="research")
         text = (response.text or "").strip()
         if not text:
             return ""

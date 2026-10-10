@@ -31,7 +31,24 @@ from typing import Any
 
 from ..core.logging_setup import get_logger
 
-__all__ = ["ModelProfile", "TaskRouter", "TASK_TYPES", "OBJECTIVES", "register"]
+__all__ = [
+    "CapabilityGate",
+    "ChatBaseline",
+    "ComplexityBias",
+    "CostObjective",
+    "ModelProfile",
+    "QualityObjective",
+    "ReliabilityPenalty",
+    "RequiredCapabilityBonus",
+    "ScoreStrategy",
+    "SpeedObjective",
+    "TaskAffinity",
+    "TaskRouter",
+    "TASK_TYPES",
+    "OBJECTIVES",
+    "default_strategies",
+    "register",
+]
 
 _log = get_logger(__name__)
 
@@ -64,6 +81,10 @@ class ModelProfile:
     calls: int = 0
     errors: int = 0
     avg_latency_ms: float = 0.0
+    #: USD per 1k tokens (broker card, 0.0 = free/local).
+    cost_per_1k: float = 0.0
+    #: Benchmark evidence score 0..1 (0.5 = unknown), from the broker.
+    quality: float = 0.5
 
     @property
     def error_rate(self) -> float:
@@ -79,6 +100,8 @@ class ModelProfile:
             "calls": self.calls,
             "avg_latency_ms": self.avg_latency_ms,
             "error_rate": round(self.error_rate, 3),
+            "cost_per_1k": self.cost_per_1k,
+            "quality": round(self.quality, 3),
         }
 
 
@@ -89,14 +112,210 @@ def _required_capability(task_type: str) -> str | None:
         return "embed"
     return None
 
+# ── scoring strategies ───────────────────────────────────────────────────
+# The old score() was a pile of hardcoded constants (s += 2.0, local -= 1.0).
+# Scoring is now a chain of named strategies, each with a weight and
+# parameters — inspectable, testable, and reweightable without editing
+# code.  Default weights reproduce the historical ranking exactly.
+
+
+class ScoreStrategy:
+    """One named scoring rule in the chain."""
+
+    name: str = "base"
+    weight: float = 1.0
+
+    def applies(self, profile: "ModelProfile", task_type: str,
+                objective: str, complexity: str | None) -> bool:
+        return True
+
+    def disqualifies(self, profile: "ModelProfile", task_type: str,
+                     objective: str, complexity: str | None) -> bool:
+        """True → the profile is out entirely (score -inf)."""
+        return False
+
+    def score(self, profile: "ModelProfile", task_type: str,
+              objective: str, complexity: str | None) -> float:
+        return 0.0
+
+
+class CapabilityGate(ScoreStrategy):
+    """Hard gate: a vision task never routes to a text-only provider."""
+
+    name = "capability_gate"
+
+    def disqualifies(self, profile, task_type, objective, complexity) -> bool:
+        required = _required_capability(task_type)
+        return bool(required and required not in profile.capabilities)
+
+
+class ChatBaseline(ScoreStrategy):
+    name = "chat_baseline"
+
+    def score(self, profile, task_type, objective, complexity) -> float:
+        return 1.0 if "chat" in profile.capabilities else 0.0
+
+
+class RequiredCapabilityBonus(ScoreStrategy):
+    name = "required_capability"
+
+    def score(self, profile, task_type, objective, complexity) -> float:
+        required = _required_capability(task_type)
+        return 2.0 if required and required in profile.capabilities else 0.0
+
+
+class TaskAffinity(ScoreStrategy):
+    """Coding/reasoning/planning prefer code-strong providers.
+
+    The affinity set is a strategy *parameter*, not a hardcoded constant —
+    reweight or replace it without touching the scorer.
+    """
+
+    name = "task_affinity"
+
+    def __init__(self, code_strong: frozenset[str] | None = None,
+                 bonus: float = 1.0) -> None:
+        self.code_strong = code_strong if code_strong is not None else frozenset(
+            {"hf_serverless", "openai_compat"})
+        self.bonus = bonus
+
+    def score(self, profile, task_type, objective, complexity) -> float:
+        if task_type in {"coding", "reasoning", "planning"}:
+            if profile.name in self.code_strong or "code" in profile.capabilities:
+                return self.bonus
+        return 0.0
+
+
+class SpeedObjective(ScoreStrategy):
+    """Speed objective: local first, then measured-fast."""
+
+    name = "speed_objective"
+
+    def __init__(self, local_bonus: float = 2.0, fast_bonus: float = 1.0,
+                 fast_ms: float = 500.0) -> None:
+        self.local_bonus = local_bonus
+        self.fast_bonus = fast_bonus
+        self.fast_ms = fast_ms
+
+    def applies(self, profile, task_type, objective, complexity) -> bool:
+        return objective == "speed"
+
+    def score(self, profile, task_type, objective, complexity) -> float:
+        s = 0.0
+        if profile.local:
+            s += self.local_bonus
+        if profile.avg_latency_ms and profile.avg_latency_ms < self.fast_ms:
+            s += self.fast_bonus
+        return s
+
+
+class CostObjective(ScoreStrategy):
+    """Cost objective: free tiers win; zero-cost cards next."""
+
+    name = "cost_objective"
+
+    def __init__(self, free_bonus: float = 3.0, zero_cost_bonus: float = 1.0) -> None:
+        self.free_bonus = free_bonus
+        self.zero_cost_bonus = zero_cost_bonus
+
+    def applies(self, profile, task_type, objective, complexity) -> bool:
+        return objective == "cost"
+
+    def score(self, profile, task_type, objective, complexity) -> float:
+        if profile.free:
+            return self.free_bonus
+        if profile.cost_per_1k <= 0:
+            return self.zero_cost_bonus
+        return 0.0
+
+
+class QualityObjective(ScoreStrategy):
+    """Quality objective: measured benchmark evidence first, strong (non-
+    local) models next.  Evidence beats the old hardcoded local penalty."""
+
+    name = "quality_objective"
+
+    def __init__(self, evidence_weight: float = 2.0,
+                 strong_bonus: float = 1.0) -> None:
+        self.evidence_weight = evidence_weight
+        self.strong_bonus = strong_bonus
+
+    def applies(self, profile, task_type, objective, complexity) -> bool:
+        return objective == "quality"
+
+    def score(self, profile, task_type, objective, complexity) -> float:
+        s = (profile.quality - 0.5) * self.evidence_weight
+        if not profile.local:
+            s += self.strong_bonus
+        return s
+
+
+class ComplexityBias(ScoreStrategy):
+    """Easy work belongs on cheap/fast models; hard work on the strongest
+    available.  "Strong" is evidence-based (quality score), not a name."""
+
+    name = "complexity_bias"
+
+    def __init__(self, bonus: float = 2.0) -> None:
+        self.bonus = bonus
+
+    def score(self, profile, task_type, objective, complexity) -> float:
+        cx = (complexity or "").strip().lower()
+        if cx == "easy":
+            if profile.local or profile.free:
+                return self.bonus
+        elif cx == "hard":
+            if not profile.local and profile.quality >= 0.5:
+                return self.bonus
+        return 0.0
+
+
+class ReliabilityPenalty(ScoreStrategy):
+    """Flaky providers lose points.  The error-rate ceiling is a parameter."""
+
+    name = "reliability"
+
+    def __init__(self, max_error_rate: float = 0.3,
+                 penalty: float = 1.5) -> None:
+        self.max_error_rate = max_error_rate
+        self.penalty = penalty
+
+    def score(self, profile, task_type, objective, complexity) -> float:
+        return -self.penalty if profile.error_rate > self.max_error_rate else 0.0
+
+
+def default_strategies() -> list[ScoreStrategy]:
+    """The standard chain.  Weights default to 1.0 (historical ranking)."""
+    return [
+        CapabilityGate(),
+        ChatBaseline(),
+        RequiredCapabilityBonus(),
+        TaskAffinity(),
+        SpeedObjective(),
+        CostObjective(),
+        QualityObjective(),
+        ComplexityBias(),
+        ReliabilityPenalty(),
+    ]
+
+
 
 class TaskRouter:
     """Pick the best provider for a task type + objective."""
 
-    def __init__(self, context: Any) -> None:
+    def __init__(self, context: Any,
+                 strategies: list[ScoreStrategy] | None = None,
+                 weights: dict[str, float] | None = None) -> None:
         self.context = context
         self.settings = context.settings
         self._profiles: dict[str, ModelProfile] = {}
+        #: The scoring chain.  Pass custom strategies to extend/replace the
+        #: defaults; ``weights`` reweights by strategy name.
+        self.strategies = strategies if strategies is not None else default_strategies()
+        weights = weights or {}
+        for strategy in self.strategies:
+            if strategy.name in weights:
+                strategy.weight = float(weights[strategy.name])
 
     # ── profiles ─────────────────────────────────────────────────────────────
     def _router(self):
@@ -117,12 +336,35 @@ class TaskRouter:
             names = list(router.providers())
         except Exception:  # noqa: BLE001
             names = list(getattr(router, "_by_name", {}) or {})
+        # Broker evidence (cost + benchmark quality) when a broker is
+        # attached; the strategies use it, and fall back to the flags
+        # below when it is absent.
+        cards: dict[str, Any] = {}
+        benchmarks: Any = None
+        try:
+            broker = getattr(router, "broker", None)
+            if broker is not None:
+                for card in broker.cards():
+                    cards.setdefault(card.provider, card)
+                benchmarks = getattr(broker, "benchmarks", None)
+        except Exception:  # noqa: BLE001 — evidence is a bonus
+            cards, benchmarks = {}, None
         for name in names:
             provider = getattr(router, "get", lambda n: None)(name)
             if provider is None:
                 continue
             caps = frozenset(getattr(provider, "capabilities", {"chat"}) or {"chat"})
             stats = getattr(provider, "stats_snapshot", lambda: {})()
+            card = cards.get(name)
+            cost_per_1k = float(getattr(card, "cost_per_1k", 0.0) or 0.0)
+            quality = 0.5
+            if benchmarks is not None and card is not None:
+                try:
+                    from ..llm.capabilities import Capability
+
+                    quality = float(benchmarks.score(card.id, Capability.CHAT))
+                except Exception:  # noqa: BLE001
+                    quality = 0.5
             profiles[name] = ModelProfile(
                 name=name,
                 model=str(getattr(provider, "model_id", name) or name),
@@ -132,6 +374,8 @@ class TaskRouter:
                 calls=int(stats.get("calls", 0) or 0),
                 errors=int(stats.get("errors", 0) or 0),
                 avg_latency_ms=float(stats.get("avg_latency_ms", 0.0) or 0.0),
+                cost_per_1k=cost_per_1k,
+                quality=max(0.0, min(1.0, quality)),
             )
         self._profiles = profiles
 
@@ -140,49 +384,48 @@ class TaskRouter:
               objective: str, complexity: str | None = None) -> float:
         """Higher = better for this task+objective.
 
-        ``complexity`` (``"easy"``/``"medium"``/``"hard"``, build-map #18)
-        biases the pick: easy work belongs on cheap/fast models, hard work
-        on the strongest available one.  ``None`` keeps the pre-complexity
+        Runs the strategy chain: gates disqualify first (score -inf),
+        then each applicable strategy contributes ``weight * score``.
+        ``complexity`` (``"easy"``/``"medium"``/``"hard"``) biases the
+        pick: easy work belongs on cheap/fast models, hard work on the
+        strongest available one.  ``None`` keeps the pre-complexity
         scoring exactly as it was.
         """
-        s = 0.0
-        required = _required_capability(task_type)
-        if required and required not in profile.capabilities:
-            return -1.0  # hard disqualify
-        if "chat" in profile.capabilities:
-            s += 1.0
-        if required and required in profile.capabilities:
-            s += 2.0  # it can actually do this kind of task
-        # task affinity
-        if task_type in {"coding", "reasoning", "planning"}:
-            if profile.name in {"hf_serverless", "openai_compat"}:
-                s += 1.0
-        # objective weighting
-        if objective == "speed":
-            if profile.local:
-                s += 2.0
-            if profile.avg_latency_ms and profile.avg_latency_ms < 500:
-                s += 1.0
-        elif objective == "cost":
-            if profile.free:
-                s += 3.0
-        elif objective == "quality":
-            if profile.local:
-                s -= 1.0  # cloud/8B+ usually beat a tiny local for quality
-        # complexity bias (build-map #18): orthogonal to the objective.
-        # "Strong" here means non-local — consistent with the quality
-        # objective above, which already penalizes local models.
-        cx = (complexity or "").strip().lower()
-        if cx == "easy":
-            if profile.local or profile.free:
-                s += 2.0
-        elif cx == "hard":
-            if not profile.local:
-                s += 2.0
-        # reliability
-        if profile.error_rate > 0.3:
-            s -= 1.5
-        return s
+        task_type = (task_type or "chat").strip().lower()
+        objective = (objective or "balanced").strip().lower()
+        total = 0.0
+        for strategy in self.strategies:
+            try:
+                if not strategy.applies(profile, task_type, objective, complexity):
+                    continue
+                if strategy.disqualifies(profile, task_type, objective, complexity):
+                    return float("-inf")
+                total += strategy.weight * strategy.score(
+                    profile, task_type, objective, complexity)
+            except Exception:  # noqa: BLE001 — one bad strategy never kills scoring
+                _log.debug("strategy %s failed; skipping", strategy.name,
+                           exc_info=True)
+        return total
+
+    def score_breakdown(self, profile: ModelProfile, task_type: str,
+                        objective: str,
+                        complexity: str | None = None) -> dict[str, float]:
+        """Per-strategy contributions (introspection/UI).  Never raises."""
+        task_type = (task_type or "chat").strip().lower()
+        objective = (objective or "balanced").strip().lower()
+        out: dict[str, float] = {}
+        for strategy in self.strategies:
+            try:
+                if not strategy.applies(profile, task_type, objective, complexity):
+                    continue
+                if strategy.disqualifies(profile, task_type, objective, complexity):
+                    return {"disqualified_by": strategy.name}  # type: ignore[dict-item]
+                out[strategy.name] = round(
+                    strategy.weight * strategy.score(
+                        profile, task_type, objective, complexity), 3)
+            except Exception:  # noqa: BLE001
+                out[strategy.name] = 0.0
+        return out
 
     def select(self, task_type: str = "chat",
                objective: str = "balanced",

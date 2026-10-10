@@ -640,7 +640,25 @@ class CodingAgent:
 
     def chat(self, prompt: str) -> Any:
         """Simple chat interface for tools like EditLoop and CodeExecutor."""
-        return self.router.chat([{"role": "user", "content": prompt}])
+        from ..llm.base import Message
+
+        # (Fixed 2026-10-09: this used to pass raw dicts, but providers
+        # read ``message.role`` / ``message.content`` as attributes — every
+        # call fell into the router's error path.  Real Messages now.)
+        return self._brain().chat([Message.user(prompt)], task_kind="chat")
+
+    def _brain(self) -> Any:
+        """Lazy Brain over this agent's router.  Never raises."""
+        brain = getattr(self, "_coding_brain", None)
+        try:
+            from ..llm.brain import Brain
+
+            if brain is None or getattr(brain, "_external_router", None) is not self.router:
+                brain = Brain(router=self.router)
+                self._coding_brain = brain
+            return brain
+        except Exception:  # noqa: BLE001
+            return self.router
 
     # ── complexity-routed model selection (build-map #18) ────────────────────
     def _select_model(self, phase: str) -> Any:
@@ -684,7 +702,9 @@ class CodingAgent:
         """
         target = self._select_model(phase)
         if target is self.router:
-            return self.router.chat(messages, params, **kw)
+            # Unrouted: the brain owns the chain — task-kind threading,
+            # timeouts, the failure taxonomy, context fitting.
+            return self._brain().chat(messages, params, task_kind="coding", **kw)
         tier = "hard" if phase == "plan" else "medium"
         try:
             resp = target.chat(messages, params, **kw)
@@ -706,7 +726,7 @@ class CodingAgent:
             _log.warning("coding %s phase: provider %s raised (%s); "
                          "chain fallback",
                          phase, getattr(target, "name", "?"), exc)
-        return self.router.chat(messages, params, **kw)
+        return self._brain().chat(messages, params, task_kind="coding", **kw)
 
     # ── public ──────────────────────────────────────────────────────────────
     def run(

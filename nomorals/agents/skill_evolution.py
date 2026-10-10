@@ -48,6 +48,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+from ..llm.brain import brain_for
 from ..core.diff import (
     _FilePatch,
     _apply_parsed_diff,
@@ -392,8 +393,8 @@ class SkillEvolutionLoop:
             f"against the current text, at most {self.max_diff_lines} changed "
             "lines. No explanation, no code fences.")
         try:
-            resp = router.chat([Message.user(prompt)],
-                               SamplingParams(temperature=0.2, max_tokens=2000))
+            resp = brain_for(self.context).chat([Message.user(prompt)],
+                               SamplingParams(temperature=0.2, max_tokens=2000), task_kind="judge")
             if not getattr(resp, "ok", False):
                 raise SkillEvolutionError("model proposal failed")
             return resp.text or ""

@@ -6,6 +6,7 @@ The scheduler in scheduler.py ticks the jobs. The core rule is conservative:
 better to miss something than to spam the owner.
 """
 
+from .costs import COST_TABLE
 from .pipeline import (
     Assessment,
     DeepReport,
@@ -27,6 +28,7 @@ from .scheduler import ResearchScheduler, default_jobs
 
 __all__ = [
     "Assessment",
+    "COST_TABLE",
     "DeepReport",
     "ResearchBudget",
     "ResearchContext",

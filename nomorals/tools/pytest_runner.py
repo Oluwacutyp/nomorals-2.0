@@ -44,6 +44,21 @@ def _parse_pytest_counts(out: str) -> dict[str, int]:
     counts: dict[str, int] = {}
     for num, word in _SUMMARY_COUNT.findall(out):
         counts[word] = counts.get(word, 0) + int(num)
+    if not counts:
+        # pytest 9.x in quiet mode (`-q`) omits the summary line when
+        # stdout is not a TTY — the run still succeeded, so fall back to
+        # the progress characters (one per test: . pass, s skip, x/X
+        # xfail/xpass, F fail, E error) on progress lines ("[100%]").
+        for line in out.splitlines():
+            if "%]" not in line:
+                continue
+            for ch in line:
+                if ch == ".":
+                    counts["passed"] = counts.get("passed", 0) + 1
+                elif ch == "F":
+                    counts["failed"] = counts.get("failed", 0) + 1
+                elif ch == "E":
+                    counts["error"] = counts.get("error", 0) + 1
     return counts
 _UNITTEST_FAIL = re.compile(r"^(FAIL|ERROR):\s+(\S+)", re.MULTILINE)
 _UNITTEST_COUNTS = re.compile(r"FAILED\s*\(([^)]*)\)")

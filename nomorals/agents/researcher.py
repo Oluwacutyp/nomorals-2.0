@@ -25,6 +25,7 @@ import time
 import threading
 from typing import Any, Sequence
 
+from ..llm.brain import brain_for
 from ..core.ids import min_unique_prefix_len, new_id, resolve_id_prefix
 from .features import feature_enabled
 from .search.engine import SearchEngine
@@ -383,7 +384,7 @@ class ResearchAgent:
         from ..llm.base import Message
 
         try:
-            response = router.chat([Message(role="user", content=prompt)])
+            response = brain_for(self.context).chat([Message(role="user", content=prompt)], task_kind="research")
             text = (getattr(response, "text", "") or "").strip()
             if getattr(response, "error", None):
                 return ""

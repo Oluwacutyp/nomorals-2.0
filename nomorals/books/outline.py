@@ -13,6 +13,7 @@ import json
 import re
 from typing import Any
 
+from ..llm.brain import brain_for
 from .model import Book, Chapter
 
 __all__ = ["make_outline", "template_outline", "key_terms",
@@ -255,7 +256,7 @@ def _model_outline(book: Book, *, n_chapters: int) -> list[Chapter] | None:
             "Titles must be specific to the topic (no 'Introduction'/'Conclusion' "
             "as the only structure). No prose, no markdown fences."
         )
-        response = router.chat(
+        response = brain_for(context).chat(
             [
                 Message.system(
                     "You are a sharp non-fiction editor. You outline books that "
@@ -264,7 +265,7 @@ def _model_outline(book: Book, *, n_chapters: int) -> list[Chapter] | None:
                 Message.user(prompt),
             ],
             SamplingParams(temperature=0.4, max_tokens=2500),
-        )
+        task_kind="creative")
         text = (getattr(response, "text", "") or "").strip()
         start, end = text.find("["), text.rfind("]")
         if start == -1 or end <= start:
@@ -337,13 +338,13 @@ def _model_seed(book: Book) -> list[Chapter] | None:
             "No 'Introduction'/'Conclusion' filler titles. No prose, no "
             "markdown fences."
         )
-        response = router.chat(
+        response = brain_for(context).chat(
             [Message.system(
                 "You are a sharp non-fiction editor. You open books with "
                 "momentum — every chapter earns the next one."),
              Message.user(prompt)],
             SamplingParams(temperature=0.4, max_tokens=1500),
-        )
+        task_kind="creative")
         return _parse_chapters_json(
             getattr(response, "text", "") or "", want=3,
             ok=getattr(response, "ok", False))
@@ -452,13 +453,13 @@ def _model_continuation(book: Book) -> dict[str, Any] | None:
             '"beats": ["<4-6 beats>"]}]} — at most 2 chapters, each with '
             "4-6 beats. Empty \"next\" when complete. No prose, no fences."
         )
-        response = router.chat(
+        response = brain_for(context).chat(
             [Message.system(
                 "You are the author, not an outliner. You feel when a book "
                 "is done. You never pad and never truncate."),
              Message.user(prompt)],
             SamplingParams(temperature=0.4, max_tokens=1500),
-        )
+        task_kind="creative")
         text = (getattr(response, "text", "") or "").strip()
         start, end = text.find("{"), text.rfind("}")
         if start == -1 or end <= start or not getattr(response, "ok", False):

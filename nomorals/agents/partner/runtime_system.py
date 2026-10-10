@@ -1207,6 +1207,203 @@ class RuntimeSystemMixin:
         raise _ConnectorsChatError(
             f"no list {ref!r} — /trello lists <board> shows ids")
 
+    # ── exness: /exness ────────────────────────────────────────────────
+    def _control_exness(self, tail: str) -> str:
+        """/exness balance | positions | price <symbol> [timeframe] |
+        buy <symbol> <lots> [sl] [tp] | sell <symbol> <lots> [sl] [tp] |
+        close <position-id> | closeall
+
+        Trading reads + order placement through the Exness connector.
+        Orders are the owner's explicit command (confirmed=True); reads
+        need no approval. Never raises — failures become chat text.
+        """
+        def _usage() -> str:
+            return (
+                "/exness balance — account balance / equity / margin\n"
+                "/exness positions — open positions + pending orders\n"
+                "/exness price <symbol> [timeframe] — latest candles\n"
+                "/exness buy <symbol> <lots> [sl] [tp] — market buy\n"
+                "/exness sell <symbol> <lots> [sl] [tp] — market sell\n"
+                "/exness close <position-id> — close one position\n"
+                "/exness closeall — close EVERYTHING (asks first)")
+
+        parts = (tail or "").strip().split(None, 1)
+        verb = parts[0].lower() if parts else ""
+        rest = parts[1] if len(parts) > 1 else ""
+        if verb not in ("balance", "positions", "price", "buy", "sell",
+                        "close", "closeall"):
+            return _usage()
+        try:
+            conn = self._chat_connector("exness")
+        except _ConnectorsChatError as exc:
+            return f"exness: {exc}"
+        try:
+            if verb == "balance":
+                snap = conn.get_snapshot()
+                state = snap.get("account_state") or {}
+                return (
+                    "exness balance:\n"
+                    f"  balance: {state.get('balance', '?')}\n"
+                    f"  equity: {state.get('equity', '?')}\n"
+                    f"  used margin: {state.get('used_margin', '?')}")
+            if verb == "positions":
+                snap = conn.get_snapshot()
+                lines = ["exness positions:"]
+                positions = snap.get("positions") or []
+                orders = snap.get("orders") or []
+                if not positions and not orders:
+                    return "no open positions or pending orders"
+                for p in positions:
+                    lines.append(
+                        f"  #{p.get('position_id')} "
+                        f"{p.get('direction', '?').upper()} "
+                        f"{p.get('volume', '?')} {p.get('instrument', '?')} "
+                        f"@ {p.get('open_price', '?')}")
+                for o in orders[:10]:
+                    lines.append(
+                        f"  ⏳ {o.get('order_id')} {o.get('order_type', '?')} "
+                        f"{o.get('direction', '?')} "
+                        f"{o.get('instrument', '?')} @ {o.get('price', '?')}")
+                return "\n".join(lines)
+            if verb == "price":
+                toks = rest.split()
+                if not toks:
+                    return "usage: /exness price <symbol> [timeframe]"
+                symbol = toks[0].upper()
+                tf = (toks[1] if len(toks) > 1 else "H1").upper()
+                candles = conn.get_candles(symbol, tf, count=3)
+                if not candles:
+                    return f"no candles for {symbol} {tf}"
+                last = candles[-1]
+                return (
+                    f"{symbol} {tf}: {last.get('close')} "
+                    f"(o {last.get('open')} h {last.get('high')} "
+                    f"l {last.get('low')}) @ {last.get('time', '?')}")
+            if verb in ("buy", "sell"):
+                toks = rest.split()
+                if len(toks) < 2:
+                    return f"usage: /exness {verb} <symbol> <lots> [sl] [tp]"
+                symbol = toks[0].upper()
+                try:
+                    lots = float(toks[1])
+                except ValueError:
+                    return f"lots must be a number, got {toks[1]!r}"
+                sl = float(toks[2]) if len(toks) > 2 else None
+                tp = float(toks[3]) if len(toks) > 3 else None
+                # the owner typed the exact order — explicit approval
+                out = conn.open_position(symbol, verb, lots, stop_loss=sl,
+                                         take_profit=tp, confirmed=True)
+                op = out.get("operation_id", "?")
+                return (f"📈 exness {verb} {lots} {symbol} accepted "
+                        f"(operation {op}) — poll with "
+                        f"`nm connectors` or /exness positions")
+            if verb == "close":
+                pid = rest.strip()
+                if not pid:
+                    return "usage: /exness close <position-id>"
+                out = conn.close_position(pid, confirmed=True)
+                return (f"✅ exness close {pid} accepted "
+                        f"(operation {out.get('operation_id', '?')})")
+            # verb == "closeall" — destructive: require the explicit word
+            if rest.strip().lower() != "confirm":
+                return ("closing ALL positions is destructive — type "
+                        "`/exness closeall confirm` to do it for real.")
+            out = conn.close_all_positions(confirmed=True)
+            return (f"🔥 exness closed all positions "
+                    f"(operation {out.get('operation_id', '?')})")
+        except _ConnectorsChatError as exc:
+            return f"exness: {exc}"
+        except Exception as exc:  # noqa: BLE001 - surfaced as text
+            return f"exness failed: {exc}"
+
+    # ── stripe: /stripe ────────────────────────────────────────────────
+    def _control_stripe(self, tail: str) -> str:
+        """/stripe balance | customers [email] | charges | link <amount>
+        <currency> <label>
+
+        Payments reads + checkout-link creation through the Stripe
+        connector. Link creation is the owner's explicit command
+        (confirmed where the connector requires it); reads need no
+        approval. Never raises.
+        """
+        def _usage() -> str:
+            return (
+                "/stripe balance — available + pending balances\n"
+                "/stripe customers [email] — customer list\n"
+                "/stripe charges — recent charges\n"
+                "/stripe link <amount> <currency> <label> — hosted "
+                "checkout link (amount in major units, e.g. 25.50)")
+
+        parts = (tail or "").strip().split(None, 1)
+        verb = parts[0].lower() if parts else ""
+        rest = parts[1] if len(parts) > 1 else ""
+        if verb not in ("balance", "customers", "charges", "link"):
+            return _usage()
+        try:
+            conn = self._chat_connector("stripe")
+        except _ConnectorsChatError as exc:
+            return f"stripe: {exc}"
+        try:
+            if verb == "balance":
+                bal = conn.get_balance()
+                lines = ["stripe balance:"]
+                for bucket in ("available", "pending"):
+                    for b in bal.get(bucket, []):
+                        lines.append(
+                            f"  {bucket}: {b.get('amount', 0) / 100:,.2f} "
+                            f"{b.get('currency', '').upper()}")
+                return "\n".join(lines)
+            if verb == "customers":
+                customers = conn.list_customers(
+                    limit=10, email=rest.strip())
+                if not customers:
+                    return "no customers found"
+                lines = ["stripe customers:"]
+                for c in customers:
+                    lines.append(
+                        f"  {c.get('id')}  "
+                        f"{c.get('name') or c.get('email') or '?'}")
+                return "\n".join(lines)
+            if verb == "charges":
+                charges = conn.list_charges(limit=10)
+                if not charges:
+                    return "no charges yet"
+                lines = ["stripe charges:"]
+                for ch in charges:
+                    lines.append(
+                        f"  {ch.get('id')}  "
+                        f"{ch.get('amount', 0) / 100:,.2f} "
+                        f"{ch.get('currency', '').upper()}  "
+                        f"{ch.get('status', '?')}")
+                return "\n".join(lines)
+            # verb == "link"
+            toks = rest.split(None, 2)
+            if len(toks) < 3:
+                return ("usage: /stripe link <amount> <currency> <label> "
+                        "— e.g. /stripe link 25.50 usd logo gig")
+            try:
+                major = float(toks[0])
+            except ValueError:
+                return f"amount must be a number, got {toks[0]!r}"
+            if major <= 0:
+                return "amount must be positive"
+            currency, label = toks[1].lower(), toks[2].strip()
+            minor = int(round(major * 100))
+            link = conn.create_payment_link([{
+                "price_data": {
+                    "currency": currency,
+                    "unit_amount": minor,
+                    "product_data": {"name": label},
+                },
+                "quantity": 1,
+            }])
+            return (f"🔗 stripe checkout link ({major:,.2f} "
+                    f"{currency.upper()} — {label}):\n{link.get('url', '?')}")
+        except _ConnectorsChatError as exc:
+            return f"stripe: {exc}"
+        except Exception as exc:  # noqa: BLE001 - surfaced as text
+            return f"stripe failed: {exc}"
+
     # ── wave 73: media hub / podcast / CI fix ──────────────────────────────
     def _control_hub(self, tail: str, chat_key: str = "") -> str:
         """/hub song <topic…> [style] | video <query…> [platform] |

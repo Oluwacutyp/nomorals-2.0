@@ -99,7 +99,8 @@ class LocalAdapter(ChatAdapter):
         self.stats["sent"] += 1
         return SendResult(ok=True, platform=self.name, message_id=f"local-{int(time.time() * 1000)}")
 
-    def typing(self, chat: ChatRef, seconds: float = 3.0) -> bool:
+    def typing(self, chat: ChatRef, seconds: float = 3.0,
+               action: str = "typing") -> bool:
         # The console has no typing indicator; the latency itself is the signal.
         return False
 

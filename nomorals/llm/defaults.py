@@ -95,6 +95,9 @@ CARD_HINTS: dict[str, dict[str, Any]] = {
     "groq": {"local": False, "cost_per_1k": 0.0, "context_len": 131072},
     "openrouter": {"local": False, "cost_per_1k": 0.0},
     "hf_serverless": {"local": False, "cost_per_1k": 0.0},
+    "deepseek": {"local": False, "cost_per_1k": 0.00014, "context_len": 65536},
+    "gemini": {"local": False, "cost_per_1k": 0.0003, "context_len": 1048576},
+    "anthropic": {"local": False, "cost_per_1k": 0.003, "context_len": 200000},
 }
 
 
@@ -137,7 +140,10 @@ def specs_from_env() -> list[ProviderSpec]:
        broker prefers it whenever it can serve.
     4. **OpenRouter ``:free``** — $0 models, rotating roster.
     5. **HF serverless** — generic fallback.
-    6. **Groq free tier** — last resort.  The operator has found Groq
+    6. **DeepSeek** — cheapest paid chat (``DEEPSEEK_API_KEY``).
+    7. **Gemini** — long-context paid tier (``GEMINI_API_KEY``).
+    8. **Anthropic** — Claude, native Messages API (``ANTHROPIC_API_KEY``).
+    9. **Groq free tier** — last resort.  The operator has found Groq
        unreliable, so it sits at the end of the chain: still a fallback,
        never the first thing tried.
     """
@@ -166,6 +172,21 @@ def specs_from_env() -> list[ProviderSpec]:
             # microsoft/Phi-3.5-mini-instruct is not served there.
             kwargs={"model": os.environ.get("HF_MODEL", "meta-llama/Llama-3.1-8B-Instruct")},
             env_key="HF_TOKEN",
+        ),
+        ProviderSpec(
+            "deepseek", "deepseek",
+            kwargs={"model": os.environ.get("DEEPSEEK_MODEL", "deepseek-chat")},
+            context_len=65536, env_key="DEEPSEEK_API_KEY",
+        ),
+        ProviderSpec(
+            "gemini", "gemini",
+            kwargs={"model": os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")},
+            context_len=1048576, env_key="GEMINI_API_KEY",
+        ),
+        ProviderSpec(
+            "anthropic", "anthropic",
+            kwargs={"model": os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-6")},
+            context_len=200000, env_key="ANTHROPIC_API_KEY",
         ),
         ProviderSpec(
             "groq", "groq",

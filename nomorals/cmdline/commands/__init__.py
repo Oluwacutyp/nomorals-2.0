@@ -15,6 +15,7 @@ from .builders import _cmd_build
 from .captcha import _cmd_captcha
 from .cards import _cmd_cards
 from .code import _cmd_code, _cmd_code_review, _cmd_code_run, _cmd_code_test, _critic_verdict
+from .brain import _cmd_brain
 from .data import _cmd_data
 from .doctor import _cmd_doctor, _cmd_models, _cmd_models_doctor, _cmd_setup, _env_update_home
 from .exec import _cmd_apps, _cmd_exec
@@ -133,6 +134,7 @@ __all__ = [
     "_cmd_code_review",
     "_cmd_code_test",
     "_cmd_data",
+    "_cmd_brain",
     "_cmd_doctor",
     "_env_update_home",
     "_cmd_models",

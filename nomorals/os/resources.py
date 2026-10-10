@@ -1058,7 +1058,7 @@ class ResourceBudgets:
                     f"budget {name}: cpu {b.used_cpu_pct + cpu_pct:.0f}% > "
                     f"cap {b.max_cpu_pct:.0f}%")
             headroom = self.machine_headroom_mb()
-            if headroom is not None and mem_mb > headroom:
+            if mem_mb > 0 and headroom is not None and mem_mb > headroom:
                 reasons.append(
                     f"machine headroom {headroom:.0f}MB < requested {mem_mb:.0f}MB "
                     f"(reserve {self.reserve_mb():.0f}MB)")
@@ -1506,14 +1506,15 @@ class ResourceManager:
             if len(pts) < 2:
                 return None
             n = len(pts)
-            sx = sum(p[0] for p in pts)
-            sy = sum(p[1] for p in pts)
-            sxx = sum(p[0] * p[0] for p in pts)
-            sxy = sum(p[0] * p[1] for p in pts)
-            denom = n * sxx - sx * sx
-            if not denom:
+            # centered form: raw epoch timestamps (~1.7e9) would lose all
+            # precision to catastrophic cancellation in float64
+            mx = sum(p[0] for p in pts) / n
+            my = sum(p[1] for p in pts) / n
+            num = sum((p[0] - mx) * (p[1] - my) for p in pts)
+            den = sum((p[0] - mx) ** 2 for p in pts)
+            if not den:
                 return 0.0
-            return (n * sxy - sx * sy) / denom
+            return num / den
         except Exception:  # noqa: BLE001 - never raises
             return None
 

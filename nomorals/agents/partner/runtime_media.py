@@ -971,8 +971,10 @@ class RuntimeMediaMixin:
         """ /sham — identify the song in a replied-to voice note or audio.
 
         Reply to an audio/voice message with /sham, or send audio with
-        /sham as the caption. Uses AudD music recognition; the result
-        links straight into /play.
+        /sham as the caption. Native-first: Devon's local fingerprint
+        memory first, AudD for the global catalogue, honest acoustic
+        description when neither can name it. The result links straight
+        into /play.
         """
         try:
             return self._sham_identify(message)
@@ -980,7 +982,19 @@ class RuntimeMediaMixin:
             return f"couldn't identify that audio ({exc})"
 
     def _sham_identify(self, message: Any) -> str:
-        """Core /sham logic. Returns the reply text. Never raises."""
+        """Core /sham logic. Returns the reply text. Never raises.
+
+        Native-first strategy chain:
+
+        1. **Devon's own memory** — local fingerprint match against her
+           own productions + the indexed library. Zero API, zero cost.
+        2. **AudD** — the global commercial catalogue, only when a key
+           is configured and the local memory drew a blank.
+        3. **Honest ears** — when neither can name it, Devon says what
+           she actually hears (tempo, key, loudness) instead of
+           shrugging.
+        """
+        from ...audio.fingerprint import describe_audio, match_local_db
         from ...connectors.registry import create_connector
         from ...accounts.vault import CredentialVault
 
@@ -990,6 +1004,16 @@ class RuntimeMediaMixin:
                 "nothing to identify — reply to a voice note or audio "
                 "message with /sham, or send audio with /sham as the caption."
             )
+        local = match_local_db(audio_path)
+        if local.get("ok"):
+            artist = local.get("artist") or "unknown artist"
+            title = local.get("title") or "unknown title"
+            score = local.get("score", 0)
+            return (f"🎵 I know this one — {artist} — {title}\n"
+                    f"(recognized from my own library, "
+                    f"confidence {score})\n"
+                    f"/play {artist} {title}")
+        heard = describe_audio(audio_path)
         vault = CredentialVault(
             getattr(self.context, "db", None),
             master_passphrase=__import__("os").environ.get(
@@ -997,13 +1021,22 @@ class RuntimeMediaMixin:
         try:
             audd = create_connector("audd", vault)
         except Exception:
+            audd = None
+        if audd is None:
             return (
-                "music recognition isn't wired up yet — it's one free API "
-                "key away."
-            )
+                "couldn't name that track — music recognition isn't set "
+                "up (it's one free AudD API key away), and it's not in "
+                "my local library.\n"
+                f"👂 but here's what I hear: {heard}")
         res = audd.recognize(audio_path)
         if not res.get("ok"):
-            return str(res.get("reason") or "couldn't identify that audio")
+            if res.get("needs_key"):
+                return (
+                    "couldn't name that track — no AudD key configured "
+                    "and it's not in my local library.\n"
+                    f"👂 but here's what I hear: {heard}")
+            return (f"{res.get('reason') or 'could not identify that audio'}\n"
+                    f"👂 what I hear: {heard}")
         artist = res.get("artist", "Unknown artist")
         title = res.get("title", "Unknown title")
         album = res.get("album", "")
@@ -1106,6 +1139,16 @@ class RuntimeMediaMixin:
             ref_profile = res.get("profile")
             if ref_profile is not None:
                 store.record_production(ref_profile, source=src, ref=ref)
+            # index the production into Devon's local recognition memory —
+            # from now on /sham knows this song without any API
+            try:
+                if res.get("path"):
+                    from ...audio.fingerprint import index_own
+                    index_own(res["path"], title=str(res.get("title", "")),
+                              artist="Devon")
+            except Exception:  # noqa: BLE001 - indexing is a bonus
+                _log.debug("produce fingerprint index failed",
+                           exc_info=True)
             lines = [f"🎛 produced: {res['title']} — {res['bpm']:g} BPM, "
                      f"{res['key']} {res['mode']}"]
             lines.append(res["notes"])
@@ -1124,14 +1167,35 @@ class RuntimeMediaMixin:
             return f"produce error: {exc}"
 
     def _control_video(self, tail: str) -> str:
-        """/video <query> [platform] | /video download <url> [audio] | platforms."""
+        """/video <query> [platform] | /video download <url> [audio] | platforms.
+
+        Devon Studio generation lives here too (additive — the search
+        paths below are untouched):
+        /video gen "<prompt>" [--backend auto|ltx|wan|motion] [--seconds N]
+        /video motion lyric <audio> "<lyrics>" [--preset NAME]
+        /video motion visual <audio> [--preset phonk]
+        /video motion slideshow <img1,img2> [audio]
+        /video motion trailer <clip1,clip2> [--title T]
+        /video capability | /video list
+        """
         from ...media.video import _PLATFORM_SITES, VideoFinder
 
         tail = (tail or "").strip()
         if not tail:
             return ("usage: /video <query> [platform]  |  "
-                    "/video download <url> [audio]  |  /video platforms")
+                    "/video download <url> [audio]  |  /video platforms\n"
+                    "studio: /video gen \"<prompt>\" | /video motion … | "
+                    "/video capability | /video list")
         words = tail.split()
+        first = words[0].lower()
+        # studio subcommands — "motion" only triggers on a known product
+        # kind so searches like "/video motion graphics" still search
+        _motion_kinds = ("lyric", "visual", "slideshow", "trailer")
+        if first in ("gen", "generate", "capability", "list", "chain") or (
+                first == "motion" and len(words) > 1
+                and words[1].lower() in _motion_kinds):
+            return self._control_video_studio(first,
+                                              tail[len(words[0]):].strip())
         if words[0].lower() == "platforms":
             return "platforms: " + ", ".join(sorted(_PLATFORM_SITES))
         if words[0].lower() == "download":
@@ -1170,6 +1234,121 @@ class RuntimeMediaMixin:
             lines.append(f"  {i}. {title}{dur}{extra}\n     {r['url']}")
         lines.append("download: /video download <url>")
         return "\n".join(lines)
+
+    def _control_video_studio(self, action: str, tail: str) -> str:
+        """Devon Studio generation subcommands for /video. Never raises."""
+        try:
+            if action in ("gen", "generate"):
+                return self._video_studio_gen(tail)
+            if action == "motion":
+                return self._video_studio_motion(tail)
+            if action == "capability":
+                from ...media.videogen import capability_report
+                return capability_report()
+            if action == "list":
+                from ...media.motion_studio._core import read_ledger
+                ledger = read_ledger()
+                if not ledger:
+                    return "no studio renders yet."
+                lines = ["🎬 recent studio renders:"]
+                for e in ledger[-10:]:
+                    lines.append(f"  {e.get('kind', '?'):22} {e.get('path', '?')}")
+                return "\n".join(lines)
+            if action == "chain":
+                return ("usage: /video chain needs a scenes JSON file — "
+                        "use `nm video chain scenes.json` on the CLI")
+            return f"unknown /video studio action {action!r}"
+        except Exception as exc:  # noqa: BLE001 - chat surfaces as text
+            return f"video studio error: {exc}"
+
+    def _video_studio_gen(self, tail: str) -> str:
+        import re
+        from ...media.videogen import generate
+        # /video gen "<prompt>" [--backend X] [--seconds N] [--seed N]
+        m = re.match(r'"([^"]+)"\s*(.*)$', tail) or re.match(r"'([^']+)'\s*(.*)$", tail)
+        if m:
+            prompt, flags = m.group(1), m.group(2)
+        else:
+            parts = tail.split("--", 1)
+            prompt, flags = parts[0].strip(), ("--" + parts[1] if len(parts) > 1 else "")
+        if not prompt:
+            return ('usage: /video gen "<prompt>" [--backend auto|ltx|wan|motion] '
+                    '[--seconds N] [--seed N]')
+        backend = "auto"
+        seconds = 5.0
+        seed = 0
+        bm = re.search(r"--backend\s+(\S+)", flags)
+        if bm:
+            backend = bm.group(1)
+        sm = re.search(r"--seconds\s+([\d.]+)", flags)
+        if sm:
+            seconds = float(sm.group(1))
+        nm = re.search(r"--seed\s+(\d+)", flags)
+        if nm:
+            seed = int(nm.group(1))
+        res = generate(prompt, backend=backend, duration_s=seconds, seed=seed)
+        return res.message()
+
+    def _video_studio_motion(self, tail: str) -> str:
+        import shlex
+        from ...media.motion_studio import studio
+        try:
+            parts = shlex.split(tail)
+        except ValueError:
+            parts = tail.split()
+        if not parts:
+            return ("usage: /video motion lyric|visual|slideshow|trailer …\n"
+                    "/video motion lyric <audio> \"<lyrics>\" [--preset NAME]\n"
+                    "/video motion visual <audio> [--preset phonk]\n"
+                    "/video motion slideshow <img1,img2> [audio]\n"
+                    "/video motion trailer <clip1,clip2> [--title T]")
+        kind = parts[0].lower()
+        rest = parts[1:]
+        preset = "neon_pop"
+        skip_next = False
+        positional = []
+        title = ""
+        for i, p in enumerate(rest):
+            if skip_next:
+                skip_next = False
+                continue
+            if p == "--preset" and i + 1 < len(rest):
+                preset = rest[i + 1]
+                skip_next = True
+                continue
+            if p == "--title" and i + 1 < len(rest):
+                title = rest[i + 1]
+                skip_next = True
+                continue
+            if p.startswith("--"):
+                continue
+            positional.append(p)
+        if kind == "lyric":
+            if len(positional) < 2:
+                return 'usage: /video motion lyric <audio> "<lyrics>" [--preset NAME]'
+            path = studio.make_lyric_video(positional[0], positional[1],
+                                           preset=preset)
+            return f"🎤 lyric video → {path}"
+        if kind == "visual":
+            if not positional:
+                return "usage: /video motion visual <audio> [--preset phonk]"
+            vpreset = preset if preset != "neon_pop" else "phonk"
+            path = studio.make_music_visualizer(positional[0], preset=vpreset)
+            return f"🎛️ visualizer → {path}"
+        if kind == "slideshow":
+            if not positional:
+                return "usage: /video motion slideshow <img1,img2> [audio]"
+            images = [i for i in positional[0].split(",") if i]
+            audio = positional[1] if len(positional) > 1 else None
+            path = studio.make_slideshow(images, audio=audio)
+            return f"🖼️ slideshow → {path}"
+        if kind == "trailer":
+            if not positional:
+                return "usage: /video motion trailer <clip1,clip2> [--title T]"
+            clips = [c for c in positional[0].split(",") if c]
+            path = studio.make_trailer(clips, title=title)
+            return f"🎬 trailer → {path}"
+        return f"unknown /video motion kind {kind!r}"
 
     def _control_caption(self, tail: str, chat_key: str = "",
                          message: Any = None) -> str:
@@ -1225,21 +1404,35 @@ class RuntimeMediaMixin:
                 pass
         return f"🎬 captioned ({style}): {out_path or '(render failed)'}"
 
+    _VISION_SUBCOMMANDS = (
+        "describe", "read-text", "read", "locate", "compare", "analyze",
+        "faces", "qr", "layout", "hash", "exif", "colors", "info",
+        "capabilities",
+    )
+
     def _control_vision(self, tail: str, chat_key: str = "",
                         message: Any = None) -> str:
-        """`/vision [question]` — analyze an image with the vision model.
+        """`/vision [subcommand] [args]` — Devon's eyes in chat.
 
-        Attach an image to the command message, or pass a path/URL.
-        The path/URL can come first or last: `/vision /tmp/img.png what's
-        this?` and `/vision what's this? /tmp/img.png` both work.
+        Subcommands (image from attachment, path, or URL):
+          describe <img> [question]  — vision-model description (default)
+          read-text <img>            — transcription, native OCR first
+          locate "<target>" <img>    — find a UI element / object
+          compare <imgA> <imgB>      — native pixel diff + model reading
+          analyze <img>              — native deep report (no model)
+          faces|qr|layout|hash|exif|colors <img> — one native analysis
+          info                       — what Devon can do with images here
+
+        Bare `/vision <img> [question]` still means describe.
         """
+        import shlex
+
         def _looks_like_target(s: str) -> bool:
             s = (s or "").strip()
             if not s:
                 return False
             if s.startswith(("http://", "https://", "/", "./", "~/")):
                 return True
-            # Windows paths and bare filenames with extensions.
             if len(s) > 3 and "." in s:
                 low = s.lower()
                 if any(low.endswith(ext) for ext in
@@ -1248,46 +1441,303 @@ class RuntimeMediaMixin:
                     return True
             return False
 
-        tail = (tail or "").strip()
-        target = ""
-        question = tail
-        if tail:
-            tokens = tail.split()
-            if _looks_like_target(tokens[0]):
-                target = tokens[0]
-                question = " ".join(tokens[1:]).strip()
-            elif len(tokens) > 1 and _looks_like_target(tokens[-1]):
-                target = tokens[-1]
-                question = " ".join(tokens[:-1]).strip()
+        def _send(text: str) -> str:
+            chat = self._ref_from_key(chat_key) if chat_key else None
+            if chat is not None:
+                return self._send_long_checked(chat.platform, chat,
+                                               text[:6000])
+            return text[:6000]
 
-        # Attached image takes priority over a path argument.
+        def _fail(text: str) -> str:
+            return _send(text)
+
+        tail = (tail or "").strip()
+        try:
+            tokens = shlex.split(tail)
+        except ValueError:
+            tokens = tail.split()
+
+        sub = "describe"
+        rest = tokens
+        if tokens and tokens[0].lower() in self._VISION_SUBCOMMANDS:
+            sub = tokens[0].lower()
+            rest = tokens[1:]
+        if sub == "read":
+            sub = "read-text"
+        if sub == "capabilities":
+            sub = "info"
+
+        # attached image wins over any path argument
+        attached = ""
         if message is not None:
             for media in getattr(message, "media", None) or []:
                 if getattr(media, "kind", "") == "image":
-                    target = getattr(media, "path", "")
+                    attached = getattr(media, "path", "") or ""
                     break
-        if not target:
-            return ("usage: /vision [question] — attach an image or pass "
-                    "a path/URL")
+
+        def _pick_targets(count: int) -> list[str] | None:
+            found = [t for t in rest if _looks_like_target(t)]
+            if attached:
+                found = [attached] + [t for t in found if t != attached]
+            if len(found) < count:
+                return None
+            return found[:count]
+
+        def _question_minus(targets: list[str]) -> str:
+            words = [t for t in rest if t not in targets]
+            return " ".join(words).strip()
+
+        def _call(name: str, **kw: Any) -> Any:
+            outcome = self.context.tools.call(name, **kw)
+            if not outcome.ok:
+                raise RuntimeError(
+                    getattr(outcome.error, "message", None) or str(outcome.error))
+            return outcome.value or {}
 
         try:
-            outcome = self.context.tools.call(
-                "vision_describe", path=target, prompt=question)
+            if sub == "info":
+                value = _call("vision_capabilities")
+                return _send(self._render_capabilities(value))
+
+            if sub in ("analyze", "faces", "qr", "hash", "exif",
+                       "colors"):
+                targets = _pick_targets(1)
+                if not targets:
+                    return _fail(
+                        f"usage: /vision {sub} <image> — attach an image or "
+                        "pass a path/URL")
+                value = _call("vision_analyze", path=targets[0])
+                return _send(self._render_analyze(value, sub))
+
+            if sub == "layout":
+                targets = _pick_targets(1)
+                if not targets:
+                    return _fail("usage: /vision layout <image> — attach "
+                                 "an image or pass a path/URL")
+                value = _call("vision_layout", path=targets[0])
+                return _send(self._render_layout(value))
+
+            if sub == "compare":
+                targets = _pick_targets(2)
+                if not targets:
+                    return _fail("usage: /vision compare <imageA> <imageB> — "
+                                 "attach one image and pass the other, or pass "
+                                 "two paths/URLs")
+                value = _call("vision_compare", path_a=targets[0],
+                              path_b=targets[1])
+                return _send(self._render_compare(value))
+
+            if sub == "read-text":
+                targets = _pick_targets(1)
+                if not targets:
+                    return _fail("usage: /vision read-text <image> — attach "
+                                 "an image or pass a path/URL")
+                value = _call("vision_read_text", path=targets[0])
+                method = value.get("method", "?")
+                return _send(f"📝 [{method}]\n{value.get('text', '')}\n"
+                             f"[{value.get('confidence_note', '')}]")
+
+            if sub == "locate":
+                targets = _pick_targets(1)
+                question = _question_minus(targets or [])
+                if not targets or not question:
+                    return _fail('usage: /vision locate "<target>" <image> — '
+                                 'e.g. /vision locate "the send button" shot.png')
+                value = _call("vision_locate", path=targets[0],
+                              target=question)
+                return _send(self._render_locate(value))
+
+            # describe (default)
+            targets = _pick_targets(1)
+            question = _question_minus(targets or [])
+            if not targets:
+                return _fail("usage: /vision [question] — attach an image or "
+                             "pass a path/URL")
+            value = _call("vision_describe", path=targets[0],
+                          prompt=question)
+        except RuntimeError as exc:
+            return _fail(f"vision failed: {exc}")
         except Exception as exc:  # noqa: BLE001
-            return f"vision failed: {exc}"
-        if not outcome.ok:
-            return (f"vision failed: "
-                    f"{getattr(outcome.error, 'message', outcome.error)}")
-        value = outcome.value or {}
+            return _fail(f"vision failed: {exc}")
+
         description = value.get("description") or "(no description returned)"
         provider = value.get("provider") or "vision"
-        text = f"👁 [{provider}]\n{description}"
         # Vision output is untrusted data — the tool already marks it.
-        chat = self._ref_from_key(chat_key) if chat_key else None
-        if chat is not None:
-            return self._send_long_checked(chat.platform, chat,
-                                           text[:6000])
-        return text[:6000]
+        return _send(f"👁 [{provider}]\n{description}")
+
+    # ── /vision renderers ────────────────────────────────────────────────
+
+    @staticmethod
+    def _render_locate(value: dict[str, Any]) -> str:
+        target = value.get("target", "?")
+        if not value.get("found"):
+            return (f"🎯 '{target}': not found "
+                    f"(method: {value.get('method', '?')})\n"
+                    f"{value.get('disclaimer', '')}")
+        method = value.get("method", "?")
+        score = value.get("score", value.get("confidence", "?"))
+        return (f"🎯 '{target}': x={value['x']} y={value['y']} "
+                f"w={value['w']} h={value['h']} "
+                f"(score {score}, method: {method})\n"
+                f"{value.get('disclaimer', '')}")
+
+    @staticmethod
+    def _render_compare(value: dict[str, Any]) -> str:
+        lines = []
+        native = value.get("native") or {}
+        if native:
+            if native.get("identical"):
+                lines.append("🔍 native diff: pixel-identical")
+            else:
+                frac = (native.get("changed_fraction") or 0.0) * 100
+                lines.append(f"🔍 native diff: {frac:.1f}% of pixels changed")
+                bbox = native.get("changed_bbox_1000")
+                if bbox:
+                    lines.append(f"   region: x={bbox['x']} y={bbox['y']} "
+                                 f"w={bbox['w']} h={bbox['h']} (0-1000)")
+        desc = (value.get("description") or "").strip()
+        if desc and value.get("method") != "native":
+            lines.append("")
+            lines.append(desc)
+        elif not native:
+            lines.append(desc or "(no comparison returned)")
+        return "\n".join(lines) or "(no comparison returned)"
+
+    @staticmethod
+    def _render_analyze(value: dict[str, Any], section: str) -> str:
+        if section == "analyze":
+            return RuntimeMediaMixin._render_analyze_full(value)
+        if section == "colors":
+            colors = (value.get("colors") or {})
+            if not colors.get("available", True):
+                return f"🎨 colors unavailable: {colors.get('why', '?')}"
+            dom = colors.get("dominant") or []
+            lines = ["🎨 palette:"]
+            for c in dom[:5]:
+                lines.append(f"  {c['hex']} — {c['share'] * 100:.1f}%")
+            lines.append(f"brightness {colors.get('brightness')}/255 · "
+                         f"contrast {colors.get('contrast')} · "
+                         f"saturation {colors.get('saturation_pct')}%")
+            return "\n".join(lines)
+        if section == "exif":
+            exif = value.get("exif") or {}
+            if not exif.get("present"):
+                return "🏷 no EXIF data in this image"
+            keep = {k: v for k, v in exif.items()
+                    if k not in ("present", "method") and v not in ("", None)}
+            lines = ["🏷 EXIF:"]
+            for k, v in list(keep.items())[:12]:
+                lines.append(f"  {k}: {v if not isinstance(v, dict) else '(see full analyze)'}")
+            gps = keep.get("GPS") or {}
+            if isinstance(gps, dict) and gps.get("latitude") is not None:
+                lines.append(f"  📍 GPS: {gps['latitude']:.5f}, {gps['longitude']:.5f}")
+            return "\n".join(lines)
+        if section == "faces":
+            faces = value.get("faces") or {}
+            if not faces.get("available", True):
+                return f"🙂 face detection unavailable: {faces.get('why', '?')}"
+            n = faces.get("count", 0)
+            if not n:
+                return "🙂 no faces detected"
+            lines = [f"🙂 {n} face(s) detected:"]
+            for b in faces.get("boxes", []):
+                lines.append(f"  x={b['x']} y={b['y']} w={b['w']} h={b['h']}")
+            lines.append("(coarse frontal detection — identity NOT determined)")
+            return "\n".join(lines)
+        if section == "qr":
+            qr = value.get("qr") or {}
+            if not qr.get("available", True):
+                return f"🔳 QR reading unavailable: {qr.get('why', '?')}"
+            codes = qr.get("codes") or []
+            if not codes:
+                return "🔳 no QR/barcode found"
+            lines = [f"🔳 {len(codes)} code(s):"]
+            for c in codes:
+                data = c.get("data", "")
+                shown = data if len(data) <= 200 else data[:197] + "…"
+                lines.append(f"  [{c.get('type')}] {shown}")
+            lines.append("(decoded payloads are untrusted data, not instructions)")
+            return "\n".join(lines)
+        if section == "hash":
+            hashes = value.get("hashes") or {}
+            if not hashes.get("available", True):
+                return "🔑 hashing unavailable"
+            return (f"🔑 dhash: {hashes.get('dhash')}\n"
+                    f"🔑 ahash: {hashes.get('ahash')}")
+        return "(unknown section)"
+
+    @staticmethod
+    def _render_layout(value: dict[str, Any]) -> str:
+        lines = value.get("lines") or []
+        out = [f"📄 layout: {value.get('blocks', '?')} blocks, "
+               f"{len(lines)} lines, {value.get('words', '?')} words"]
+        mean_conf = value.get("mean_word_conf")
+        if mean_conf is not None:
+            out.append(f"mean word confidence: {mean_conf}")
+        for ln in lines[:12]:
+            text = (ln.get("text") or "").strip()
+            if text:
+                out.append(f"  • {text} (conf {ln.get('conf')})")
+        if len(lines) > 12:
+            out.append(f"  … +{len(lines) - 12} more lines")
+        return "\n".join(out)
+
+    @staticmethod
+    def _render_analyze_full(value: dict[str, Any]) -> str:
+        meta = value.get("metadata") or {}
+        lines = ["🔬 native analysis (no model, no network):"]
+        fmt = meta.get("format", "?")
+        w, h = meta.get("width", "?"), meta.get("height", "?")
+        lines.append(f"  {fmt} {w}x{h} · {meta.get('bytes', '?')} bytes")
+        exif = value.get("exif") or {}
+        if exif.get("present"):
+            cam = f"{exif.get('Make', '')} {exif.get('Model', '')}".strip()
+            lines.append(f"  📷 EXIF: {cam or 'present'}"
+                         + (f" · {exif.get('DateTimeOriginal', '')}"
+                            if exif.get("DateTimeOriginal") else ""))
+        else:
+            lines.append("  📷 no EXIF")
+        colors = value.get("colors") or {}
+        if colors.get("available", True):
+            dom = ", ".join(c["hex"] for c in (colors.get("dominant") or [])[:3])
+            lines.append(f"  🎨 {dom} · brightness {colors.get('brightness')}")
+        quality = value.get("quality") or {}
+        if quality.get("available", True):
+            lines.append(f"  🔍 sharpness {quality.get('sharpness')} "
+                         f"({quality.get('sharpness_label')}) · "
+                         f"entropy {quality.get('entropy_bits')} bits")
+        faces = value.get("faces") or {}
+        if faces.get("available", True):
+            lines.append(f"  🙂 faces: {faces.get('count', 0)}")
+        qr = value.get("qr") or {}
+        if qr.get("available", True) and qr.get("count"):
+            lines.append(f"  🔳 QR/barcodes: {qr.get('count')}")
+        hashes = value.get("hashes") or {}
+        if hashes.get("available", True):
+            lines.append(f"  🔑 dhash {hashes.get('dhash')}")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _render_capabilities(value: dict[str, Any]) -> str:
+        lines = [f"👁 vision capabilities (profile: {value.get('profile', '?')}):",
+                 "", "native — offline, no key, no tokens:"]
+        for name, info in (value.get("native") or {}).items():
+            if info.get("available"):
+                lines.append(f"  ✅ {name}: {info.get('what', '')}")
+            else:
+                lines.append(f"  ❌ {name}: {info.get('why', '')}"
+                             + (f" ({info.get('install')})"
+                                if info.get("install") else ""))
+        lines.append("")
+        lines.append("needs a vision model:")
+        for name, why in (value.get("needs_model") or {}).items():
+            lines.append(f"  🧠 {name}: {why}")
+        if value.get("router_vision"):
+            lines.append("\nmodel path: available ✅")
+        else:
+            lines.append("\nmodel path: not configured ❌ "
+                         "(native analyses still work)")
+        return "\n".join(lines)
 
     def _control_image(self, tail: str) -> str:
         ref = (tail or "").strip()
@@ -1437,7 +1887,7 @@ class RuntimeMediaMixin:
     def _control_shorts(self, tail: str) -> str:
         """Devon's short-form content empire in chat.
 
-        /shorts make <niche> "<topic>" [--now]     — queue or render now
+        /shorts make <niche> "<topic>" [--now] [--style NAME] — queue or render now
         /shorts status [job_id]                    — job list / inspect
         /shorts resume <run_id>                    — resume a failed render
         /shorts niches                             — list niches
@@ -1450,7 +1900,7 @@ class RuntimeMediaMixin:
         ref = (tail or "").strip()
         if not ref:
             return ("🎬 /shorts — Devon's short-form content empire:\n"
-                    "/shorts make <niche> \"<topic>\" [--now]\n"
+                    "/shorts make <niche> \"<topic>\" [--now] [--style NAME]\n"
                     "/shorts niches — list content niches\n"
                     "/shorts status [job] · /shorts resume <run_id>\n"
                     "/shorts calendar [--due] · /shorts ledger\n"
@@ -1478,12 +1928,20 @@ class RuntimeMediaMixin:
                 return "\n".join(lines)
             if action == "make":
                 if len(rest) < 2:
-                    return "usage: /shorts make <niche> \"<topic>\" [--now]"
-                niche, topic = rest[0], " ".join(rest[1:])
-                now = topic.endswith("--now")
-                if now:
-                    topic = topic[: -len("--now")].strip().strip("\"'")
-                job = pipe.plan(niche, topic.strip().strip("\"'"))
+                    return ("usage: /shorts make <niche> \"<topic>\" "
+                            "[--now] [--style phonk|documentary|vlog|minimal]")
+                niche = rest[0]
+                toks = rest[1:]
+                now = "--now" in toks
+                style = ""
+                if "--style" in toks:
+                    si = toks.index("--style")
+                    if si + 1 < len(toks):
+                        style = toks[si + 1]
+                        del toks[si:si + 2]
+                toks = [t for t in toks if t != "--now"]
+                topic = " ".join(toks).strip("\"'").strip()
+                job = pipe.plan(niche, topic, style=style)
                 if now:
                     result = pipe.run(job)
                     if result.ok:
@@ -1492,7 +1950,8 @@ class RuntimeMediaMixin:
                                     f"{k}={v}ms" for k, v in
                                     (result.stages or {}).items()))
                     return f"🎬 render failed: {result.error}"
-                return (f"🎬 queued {job.id} ({niche} — {topic[:60]})\n"
+                style_note = f" [{style}]" if style else ""
+                return (f"🎬 queued {job.id}{style_note} ({niche} — {topic[:60]})\n"
                         f"render now: /shorts resume-later via `nm shorts` "
                         f"or re-run with --now")
             if action == "status":

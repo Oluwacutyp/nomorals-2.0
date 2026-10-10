@@ -25,7 +25,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ..core.logging_setup import get_logger
-from ..llm.base import LLMResponse, Message, SamplingParams
+from ..llm.base import Message, SamplingParams
 
 _log = get_logger(__name__)
 
@@ -159,16 +159,18 @@ class BriefAgent:
         except Exception:  # noqa: BLE001 - catalog is a bonus
             pass
         try:
-            response: LLMResponse = router.chat(
+            from ..llm.brain import brain_for
+
+            # chat_json runs the repair loop natively: malformed drafts get
+            # a repair nudge instead of silently dropping to None.
+            data, _resp = brain_for(self.context).chat_json(
                 [Message.system(system), Message.user(user)],
-                SamplingParams(temperature=0.2, max_tokens=700),
+                task_kind="plan",
+                params=SamplingParams(temperature=0.2, max_tokens=700),
             )
         except Exception as exc:  # noqa: BLE001 - structuring is best-effort
             _log.debug("brief model call failed: %s", exc)
             return None
-        if not getattr(response, "ok", False) or not getattr(response, "text", ""):
-            return None
-        data = self._extract_json(response.text)
         if not isinstance(data, dict) or not str(data.get("objective") or "").strip():
             return None
         return MissionBrief(

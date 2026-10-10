@@ -35,6 +35,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .llm.brain import brain_for
 from .core.errors import ToolError
 from .core.logging_setup import get_logger
 from .core.policy import Capability
@@ -503,14 +504,14 @@ class CodeRunner:
         try:
             from .llm.base import Message, SamplingParams
 
-            resp = router.chat(
+            resp = brain_for(self.context).chat(
                 [Message.system(
                     "You are a surgical test-suite repair engine. You "
                     "make failing test suites green by rewriting the "
                     "minimal set of files. You always emit complete "
                     "files, never diffs."),
                  Message.user(prompt)],
-                SamplingParams(temperature=0.1, max_tokens=8000))
+                SamplingParams(temperature=0.1, max_tokens=8000), task_kind="chat")
             if not resp.ok or not (resp.text or "").strip():
                 return [], f"model fix failed: {resp.error or 'empty response'}"
             out: list[tuple[Path, str]] = []
@@ -628,14 +629,14 @@ class CodeRunner:
         try:
             from .llm.base import Message, SamplingParams
 
-            resp = router.chat(
+            resp = brain_for(self.context).chat(
                 [Message.system(
                     "You are a surgical code repair engine. You rewrite "
                     "failing programs so they run cleanly and produce the "
                     "requested output. You never lecture; you only emit "
                     "the fixed code."),
                  Message.user(prompt)],
-                SamplingParams(temperature=0.1, max_tokens=8000))
+                SamplingParams(temperature=0.1, max_tokens=8000), task_kind="chat")
             if not resp.ok or not (resp.text or "").strip():
                 return None, f"model fix failed: {resp.error or 'empty response'}"
             fixed = self._extract_code_block(resp.text, lang)

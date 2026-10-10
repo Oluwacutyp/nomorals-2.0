@@ -28,6 +28,7 @@ from typing import Any
 
 from ..core.logging_setup import get_logger
 from ..llm.base import Message
+from ..llm.brain import brain_for
 from ..llm.broker import ModelBroker
 from ..llm.defaults import build_chain, specs_from_env, sync_broker_cards
 from .errors import PluginError
@@ -228,7 +229,7 @@ def _make_chatter(specs: list[Any], context: Any = None) -> Any:
             if router is not None:
                 state["router"] = router
         try:
-            resp = router.chat(msgs)
+            resp = brain_for(self.context).chat(msgs, task_kind="chat")
         except Exception as exc:  # noqa: BLE001 - contract is PluginError
             raise PluginError(f"llm.chat failed: {exc}") from exc
         if not resp.ok:

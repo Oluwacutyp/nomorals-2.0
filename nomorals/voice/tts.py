@@ -67,6 +67,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import logging
+import math
 import os
 import re
 import shutil
@@ -90,6 +91,8 @@ __all__ = [
     "select_backends",
     "BACKEND_CAPABILITIES",
     "probe_reference_audio",
+    "voice_print",
+    "voice_print_distance",
     "UniversalTTS",
     "write_wav",
 ]
@@ -125,6 +128,11 @@ class VoiceProfile:
     #: accept several samples (XTTS averages the speaker embeddings)
     #: blend them; single-sample backends use the first clip.
     extra_samples: list = field(default_factory=list)
+    #: Acoustic voice-print of the reference clip, computed at upload by
+    #: :func:`voice_print` — mean F0, spectral centroid, ZCR, energy,
+    #: plus a clone-quality verdict. Powers ``/voice match`` and the
+    #: clone-time quality gate. Empty for preset (non-cloned) voices.
+    voice_print: dict = field(default_factory=dict)
 
     def validate_for_cloning(self, backend: str = "unknown") -> None:
         """Validate voice for cloning (audit-logged, no consent gate)."""
@@ -159,6 +167,7 @@ class VoiceProfile:
             "prompt_text": self.prompt_text,
             "backend": self.backend,
             "extra_samples": list(self.extra_samples),
+            "voice_print": dict(self.voice_print or {}),
         }
 
 
@@ -223,6 +232,13 @@ class VoiceLibrary:
             description=description,
             backend=(backend or "").lower(),
         )
+        # acoustic voice-print at upload: quality verdict + matching basis
+        try:
+            vp = voice_print(dest)
+            if vp.get("ok"):
+                profile.voice_print = vp
+        except Exception:  # noqa: BLE001 - the print is a bonus
+            _log.debug("voice_print failed at upload", exc_info=True)
         self.profiles[name] = profile
         self._save_index()
         return profile
@@ -292,6 +308,40 @@ class VoiceLibrary:
     def get(self, name: str) -> Optional[VoiceProfile]:
         return self.profiles.get(name)
 
+    def match_voice(self, clip_path: str) -> dict[str, Any]:
+        """Which registered voice sounds most like ``clip_path``?
+
+        Prints the clip acoustically and returns the nearest voice by
+        voice-print distance. ``{"ok": True, "name", "distance",
+        "verdict"}`` or ``{"ok": False, "reason"}``. Never raises.
+        """
+        try:
+            vp = voice_print(clip_path)
+            if not vp.get("ok"):
+                return {"ok": False,
+                        "reason": "; ".join(vp.get("warnings", []))
+                        or "could not print that clip"}
+            best: Optional[VoiceProfile] = None
+            best_d = float("inf")
+            for p in self.profiles.values():
+                if not (p.voice_print or {}).get("ok"):
+                    continue
+                d = voice_print_distance(vp, p.voice_print)
+                if d < best_d:
+                    best_d, best = d, p
+            if best is None:
+                return {"ok": False,
+                        "reason": "no cloned voices with a voice-print yet — "
+                                  "clone one first"}
+            feats = (vp.get("features") or {})
+            return {"ok": True, "name": best.name,
+                    "distance": round(best_d, 3),
+                    "verdict": str(vp.get("verdict", "")),
+                    "mean_f0_hz": feats.get("mean_f0_hz"),
+                    "backend": best.backend or "?"}
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "reason": f"voice match failed: {exc}"}
+
     def list(self) -> list[dict[str, Any]]:
         out = []
         for p in self.profiles.values():
@@ -331,6 +381,158 @@ TAG_PATTERN = re.compile(r"\[([a-z_]+)(?::(\d+))?\]")
 #: ``to_bark_format``).
 _LEGACY_SOUND_TAGS = {"laughs", "sighs", "gasps", "clears_throat",
                       "chuckles"}
+
+
+def voice_print(path: str) -> dict[str, Any]:
+    """Acoustic voice-print of a reference clip — Devon's own measurement.
+
+    Extracts speaker-discriminative features natively (no model, no API):
+    mean/std fundamental frequency (autocorrelation), spectral centroid,
+    zero-crossing rate, RMS energy, clipping and silence ratios — plus a
+    clone-quality verdict with honest warnings.
+
+    Returns ``{"ok", "features", "verdict", "warnings", ...}``. Never
+    raises — ``ok`` is False with the reason when the clip can't be read.
+    """
+    out: dict[str, Any] = {"path": path, "ok": False, "features": {},
+                           "verdict": "unreadable", "warnings": []}
+    # true file sample rate for honest warnings (analysis downsamples)
+    true_sr = 0
+    try:
+        import wave as _wave
+
+        with _wave.open(path, "rb") as _wf:
+            true_sr = int(_wf.getframerate() or 0)
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        from ..audio.fingerprint import read_mono
+        samples, sr = read_mono(path, target_sr=11025, max_seconds=60.0)
+    except Exception as exc:  # noqa: BLE001
+        out["warnings"].append(f"unreadable: {exc}")
+        return out
+    try:
+        n = len(samples)
+        seconds = n / sr if sr else 0.0
+        if n < sr:  # need ~1s minimum for a print
+            out["warnings"].append("clip under 1s — print is unreliable")
+        # --- F0 via autocorrelation, 50–500 Hz -------------------------
+        f0s: list[float] = []
+        frame = int(0.03 * sr)
+        hop = frame // 2
+        lo_lag, hi_lag = max(2, int(sr / 500)), int(sr / 50)
+        for start in range(0, max(0, n - frame), hop):
+            seg = samples[start:start + frame]
+            e = sum(s * s for s in seg) / frame
+            if e < 1e-6:
+                continue
+            best_lag, best_v = 0, 0.0
+            for lag in range(lo_lag, min(hi_lag, frame // 2)):
+                v = sum(seg[i] * seg[i + lag]
+                        for i in range(0, frame - lag, 4))
+                if v > best_v:
+                    best_v, best_lag = v, lag
+            norm = best_v / (e * (frame - best_lag) / 4 + 1e-9)
+            if norm > 0.35 and best_lag:
+                f0s.append(sr / best_lag)
+        mean_f0 = sum(f0s) / len(f0s) if f0s else 0.0
+        if f0s:
+            var = sum((f - mean_f0) ** 2 for f in f0s) / len(f0s)
+            std_f0 = math.sqrt(var) if var > 0 else 0.0
+        else:
+            std_f0 = 0.0
+        # --- spectrum / energy -----------------------------------------
+        peak = 0.0
+        ssum = 0.0
+        clip = 0
+        quiet = 0
+        zc = 0
+        prev = samples[0] if n else 0.0
+        for s in samples:
+            a = abs(s)
+            peak = max(peak, a)
+            ssum += s * s
+            if a >= 0.99:
+                clip += 1
+            if a < 0.02:
+                quiet += 1
+            if (s >= 0) != (prev >= 0):
+                zc += 1
+            prev = s
+        rms_db = 20.0 * math.log10(max(1e-9, math.sqrt(ssum / max(1, n))))
+        # spectral centroid on a few frames (cheap, numpy-optional)
+        from ..audio.fingerprint import _frames, _bin_freqs, _WIN, _HOP
+        frames = _frames(samples, sr)
+        cnum = cden = 0.0
+        for mags in frames[::4]:
+            freqs = _bin_freqs(len(mags), sr, _WIN)
+            for i, m in enumerate(mags):
+                cnum += freqs[i] * m
+                cden += m
+        centroid = cnum / cden if cden > 0 else 0.0
+        feats = {
+            "seconds": round(seconds, 2),
+            "sample_rate": true_sr or sr,
+            "mean_f0_hz": round(mean_f0, 1),
+            "f0_std_hz": round(std_f0, 1),
+            "voiced_frames": len(f0s),
+            "centroid_hz": round(centroid, 1),
+            "zcr": round(zc / max(1, n - 1), 4),
+            "rms_db": round(rms_db, 1),
+            "peak": round(peak, 3),
+            "clipped_ratio": round(clip / max(1, n), 4),
+            "silence_ratio": round(quiet / max(1, n), 3),
+        }
+        out["features"] = feats
+        warns = out["warnings"]
+        if seconds < 3:
+            warns.append("very short (<3s) — cloning will be unstable; "
+                         "6–30s of clean speech is ideal")
+        elif seconds > 30:
+            warns.append("longer than 30s — most zero-shot backends only "
+                         "need ~10s; trim it to save memory")
+        if true_sr and true_sr < 16000:
+            warns.append(f"low sample rate ({true_sr}Hz) — telephone-grade "
+                         "audio clones poorly")
+        if feats["clipped_ratio"] > 0.001:
+            warns.append("clipping detected — distorted peaks clone badly")
+        if feats["silence_ratio"] > 0.5:
+            warns.append("mostly silence — the voice has little to learn from")
+        if not f0s:
+            warns.append("no voiced pitch found — music or noise, not speech")
+        out["verdict"] = ("good reference" if not warns else
+                          "usable with caveats" if len(warns) <= 2 else
+                          "poor reference")
+        out["ok"] = True
+        return out
+    except Exception as exc:  # noqa: BLE001
+        out["warnings"].append(f"print failed: {exc}")
+        return out
+
+
+def voice_print_distance(a: dict[str, Any],
+                         b: dict[str, Any]) -> float:
+    """Distance between two voice-prints (lower = more alike).
+
+    Normalized Euclidean over the speaker-discriminative features.
+    Never raises — missing features count as maximally distant.
+    """
+    try:
+        fa = (a or {}).get("features", a or {})
+        fb = (b or {}).get("features", b or {})
+        if not fa or not fb:
+            return float("inf")
+        va = [math.log(max(20.0, float(fa.get("mean_f0_hz", 0) or 20.0))),
+              float(fa.get("centroid_hz", 0) or 0) / 4000.0,
+              float(fa.get("zcr", 0) or 0) * 10.0,
+              float(fa.get("rms_db", -60) or -60) / 60.0]
+        vb = [math.log(max(20.0, float(fb.get("mean_f0_hz", 0) or 20.0))),
+              float(fb.get("centroid_hz", 0) or 0) / 4000.0,
+              float(fb.get("zcr", 0) or 0) * 10.0,
+              float(fb.get("rms_db", -60) or -60) / 60.0]
+        return math.sqrt(sum((x - y) ** 2 for x, y in zip(va, vb)))
+    except Exception:  # noqa: BLE001
+        return float("inf")
 
 
 def probe_reference_audio(path: str) -> dict[str, Any]:
@@ -2249,6 +2451,11 @@ class UniversalTTS:
             f"tts-{int(__import__('time').time() * 1000)}.wav")
         os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
         written = write_wav(path, audio, sample_rate)
+        try:
+            from ..core.error_system import heartbeat
+            heartbeat("voice", True)
+        except Exception:  # noqa: BLE001 - telemetry never breaks synthesis
+            pass
         return {
             "path": path,
             "bytes": written,
@@ -2406,11 +2613,6 @@ class UniversalTTS:
             f"tts-{int(__import__('time').time() * 1000)}.wav")
         os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
         written = write_wav(path, audio, sample_rate)
-        try:
-            from ..core.error_system import heartbeat
-            heartbeat("voice", True)
-        except Exception:  # noqa: BLE001 - telemetry never breaks synthesis
-            pass
         return {
             "path": path,
             "bytes": written,

@@ -36,8 +36,10 @@ _log = logging.getLogger(__name__)
 __all__ = [
     "hook_lyrics",
     "chorus_regions",
+    "section_regions",
     "song_duration_beats",
     "render_hook_vocal",
+    "render_sung_vocal",
     "render_hummed_vocal",
     "add_vocal_track",
     "mix_vocal_track",
@@ -104,6 +106,28 @@ def song_duration_beats(song: Any) -> float:
         return 0.0
 
 
+def section_regions(song: Any) -> list[tuple[str, float, float]]:
+    """Absolute (name, start_beat, end_beat) of every section.
+
+    Never raises.
+    """
+    try:
+        regions: list[tuple[str, float, float]] = []
+        bar = 0
+        sections = list(getattr(song, "sections", None) or [])
+        for s in sections:
+            bars = int(getattr(s, "bars", 0) or 0)
+            name = str(getattr(s, "name", "")).lower()
+            if bars > 0:
+                regions.append((name, bar * _BEATS_PER_BAR,
+                                (bar + bars) * _BEATS_PER_BAR))
+            bar += bars
+        return regions
+    except Exception:  # noqa: BLE001
+        _log.debug("section_regions failed", exc_info=True)
+        return []
+
+
 def chorus_regions(song: Any) -> list[tuple[float, float]]:
     """Absolute (start_beat, end_beat) of every chorus section.
 
@@ -111,15 +135,8 @@ def chorus_regions(song: Any) -> list[tuple[float, float]]:
     (every style in the composer has one, but never assume). Never raises.
     """
     try:
-        regions: list[tuple[float, float]] = []
-        bar = 0
-        sections = list(getattr(song, "sections", None) or [])
-        for s in sections:
-            bars = int(getattr(s, "bars", 0) or 0)
-            if str(getattr(s, "name", "")).lower() == "chorus" and bars > 0:
-                regions.append((bar * _BEATS_PER_BAR,
-                                (bar + bars) * _BEATS_PER_BAR))
-            bar += bars
+        regions = [(s, e) for name, s, e in section_regions(song)
+                   if name == "chorus"]
         if not regions:
             total = song_duration_beats(song)
             if total > 0:
@@ -128,6 +145,58 @@ def chorus_regions(song: Any) -> list[tuple[float, float]]:
     except Exception:  # noqa: BLE001
         _log.debug("chorus_regions failed", exc_info=True)
         return []
+
+
+def _phrases(events: Any, gap_beats: float = 1.0) -> list[list[Any]]:
+    """Group melody events into phrases — a gap > ``gap_beats`` breaks."""
+    try:
+        evs = sorted((e for e in (events or [])),
+                     key=lambda e: float(getattr(e, "start", 0)))
+        phrases: list[list[Any]] = []
+        cur: list[Any] = []
+        prev_end = 0.0
+        for e in evs:
+            try:
+                s = float(getattr(e, "start", 0))
+                d = float(getattr(e, "duration", 0.5))
+            except Exception:  # noqa: BLE001
+                continue
+            if cur and s - prev_end > gap_beats:
+                phrases.append(cur)
+                cur = []
+            cur.append(e)
+            prev_end = max(prev_end, s + d)
+        if cur:
+            phrases.append(cur)
+        return phrases
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def _phrase_median_midi(phrase: list[Any]) -> float:
+    """Median MIDI pitch of a phrase (the note the line should sit on)."""
+    try:
+        notes = sorted(int(getattr(e, "note", 0)) for e in phrase
+                       if 0 < int(getattr(e, "note", 0) or 0) < 128)
+        if not notes:
+            return 0.0
+        return float(notes[len(notes) // 2])
+    except Exception:  # noqa: BLE001
+        return 0.0
+
+
+def _tts_line_f0_midi(wav_path: str) -> float:
+    """Measure a TTS line's mean F0 → MIDI. 0.0 when unmeasurable."""
+    try:
+        from ..voice.tts import voice_print
+        vp = voice_print(wav_path)
+        f0 = float((vp.get("features") or {}).get("mean_f0_hz", 0) or 0)
+        if f0 <= 20:
+            return 0.0
+        import math
+        return 69.0 + 12.0 * math.log2(f0 / 440.0)
+    except Exception:  # noqa: BLE001
+        return 0.0
 
 
 def _default_tts(text: str, out_path: str) -> dict[str, Any]:
@@ -336,6 +405,114 @@ def render_hook_vocal(song: Any, workdir: str,
     except Exception as exc:  # noqa: BLE001
         _log.debug("render_hook_vocal failed", exc_info=True)
         return {"ok": False, "reason": f"vocal render failed: {exc}"}
+
+
+def render_sung_vocal(song: Any, workdir: str, melody_events: Any,
+                      tts_fn: Any = None,
+                      profile: str = "") -> dict[str, Any]:
+    """Sing every section's lyrics on its own melody — the full vocal.
+
+    For each section with lyrics: its melody events are grouped into
+    phrases; each lyric line is synthesized separately (``tts_fn``), its
+    measured mean F0 pitch-shifted onto the phrase's median pitch, and
+    placed at the phrase's start. The result is a vocal that follows the
+    song's melody instead of a tiled spoken hook.
+
+    Returns ``{"ok": True, "path", "backend", "lines", "note"}`` or
+    ``{"ok": False, "reason"}``. Never raises. ``tts_fn`` is injectable:
+    ``tts_fn(text, out_path) -> {"ok", "path"|"reason"}``.
+    """
+    try:
+        from ..audio.dsp import (fade_edges, normalize_peak,
+                                 pitch_shift_to, read_mono_wav,
+                                 soft_limiter, write_mono_wav)
+        regions = section_regions(song)
+        if not regions:
+            return {"ok": False, "reason": "song has no sections"}
+        tempo = float(getattr(song, "tempo", 100) or 100)
+        beat_s = 60.0 / max(20.0, tempo)
+        total_beats = song_duration_beats(song)
+        sr = _SAMPLE_RATE
+        total_n = int(total_beats * beat_s * sr) + sr
+        vocal = array("d", [0.0]) * total_n
+        fn = tts_fn or _default_tts
+        base = Path(workdir)
+        base.mkdir(parents=True, exist_ok=True)
+        sung = 0
+        shifted = 0
+        sec_i = 0
+        for name, start_b, end_b in regions:
+            sec_i += 1
+            lines = []
+            try:
+                for s in (getattr(song, "sections", None) or []):
+                    if str(getattr(s, "name", "")).lower() == name:
+                        lines = [str(l).strip()
+                                 for l in (getattr(s, "lyrics", None) or [])
+                                 if str(l).strip()]
+                        break
+            except Exception:  # noqa: BLE001
+                lines = []
+            if not lines:
+                continue
+            in_region = [e for e in (melody_events or [])
+                         if start_b <= float(getattr(e, "start", -1))
+                         < end_b]
+            phrases = _phrases(in_region)
+            if not phrases:
+                continue
+            for li, (line, phrase) in enumerate(
+                    zip(lines, phrases[:len(lines)])):
+                target = str(base / f"sung_s{sec_i}_l{li}.wav")
+                res = fn(line, target)
+                if not isinstance(res, dict) or not res.get("ok"):
+                    continue
+                lp = str(res.get("path") or "")
+                if not lp or not os.path.isfile(lp):
+                    continue
+                line_s, line_sr = read_mono_wav(lp)
+                if not line_sr or not len(line_s):
+                    continue
+                if line_sr != sr:
+                    line_s = _resample_linear(line_s, line_sr, sr)
+                # sit the line on the phrase's pitch
+                target_midi = _phrase_median_midi(phrase)
+                if target_midi > 0:
+                    line_midi = _tts_line_f0_midi(lp)
+                    if line_midi > 0:
+                        line_s = pitch_shift_to(line_s, sr, line_midi,
+                                                target_midi)
+                        shifted += 1
+                line_s = fade_edges(line_s, sr)
+                try:
+                    phrase_start_b = float(
+                        getattr(phrase[0], "start", start_b))
+                except Exception:  # noqa: BLE001
+                    phrase_start_b = start_b
+                start_n = int(phrase_start_b * beat_s * sr)
+                if start_n >= total_n:
+                    continue
+                lim = min(total_n, start_n + len(line_s))
+                for i in range(lim - start_n):
+                    vocal[start_n + i] += line_s[i]
+                sung += 1
+        if not sung:
+            return {"ok": False,
+                    "reason": "no lyric lines could be sung "
+                              "(no TTS output or no melody phrases)"}
+        # normalize the vocal bed, then soft-limit into the mix
+        vocal = normalize_peak(vocal, 0.89)
+        vocal = soft_limiter(vocal, 0.95)
+        sung_path = str(base / "sung_vocal.wav")
+        if not write_mono_wav(sung_path, vocal, sr):
+            return {"ok": False, "reason": "could not write sung vocal"}
+        note = (f"sung vocal: {sung} line(s) on their melody phrases "
+                f"({shifted} pitch-shifted to phrase pitch)")
+        return {"ok": True, "path": sung_path, "backend": "sung-tts",
+                "lines": sung, "shifted": shifted, "note": note}
+    except Exception as exc:  # noqa: BLE001
+        _log.debug("render_sung_vocal failed", exc_info=True)
+        return {"ok": False, "reason": f"sung vocal failed: {exc}"}
 
 
 def _render_hum_tone(freq: float, n: int, velocity: float,
@@ -550,50 +727,148 @@ def _add_hummed_vocal(song: Any, bed_path: str, workdir: str,
 def add_vocal_track(song: Any, bed_path: str, workdir: str,
                     tts_fn: Any = None, profile: str = "",
                     vocal_gain: float = _VOCAL_GAIN,
-                    melody_events: Any = None) -> dict[str, Any]:
-    """Add a vocal under an instrumental bed — TTS hook or hummed melody.
+                    melody_events: Any = None,
+                    vocal_mode: str = "auto") -> dict[str, Any]:
+    """Add a vocal under an instrumental bed — sung, spoken hook, or hum.
+
+    ``vocal_mode`` is a strategy, not a switch:
+
+    - ``"sung"`` — every lyric line synthesized separately and placed on
+      its melody phrase, pitch-shifted to the phrase pitch (the full
+      vocal). Needs TTS + melody events.
+    - ``"hook"`` — the spoken chorus hook tiled across chorus regions.
+    - ``"hum"`` — the chorus melody hummed with a vocal-like timbre.
+    - ``"auto"`` (default) — sung when TTS and melody are available,
+      hook when only TTS works, hum when only the melody exists,
+      honest skip otherwise.
 
     Returns {"ok": True, "path": final_wav, "note"} — or
     {"ok": False, "reason", "path": bed_path} when vocals are honestly
-    skipped (no lyrics, no bed, no TTS *and* no melody to hum).
-    The caller keeps the bed either way. Never raises.
-
-    ``melody_events``: arranged melody :class:`NoteEvent`s (absolute
-    beat positions). When the TTS backend is missing and melody events
-    are available, the chorus is hummed instead of skipped — so /music
-    always has a vocal line.
+    skipped. The caller keeps the bed either way. Never raises.
     """
     try:
         if not bed_path or not os.path.isfile(bed_path):
             return {"ok": False, "reason": "no bed audio to sing over",
                     "path": bed_path or ""}
-        vr = render_hook_vocal(song, workdir, tts_fn=tts_fn, profile=profile)
-        if not vr.get("ok"):
+        mode = (vocal_mode or "auto").lower()
+        requested = mode
+        if mode == "auto":
+            mode = ("sung" if melody_events else "hook")
+        if mode == "sung" and melody_events:
+            sr_ = render_sung_vocal(song, workdir, melody_events,
+                                    tts_fn=tts_fn, profile=profile)
+            if sr_.get("ok"):
+                regions = chorus_regions(song)
+                total_beats = song_duration_beats(song)
+                tempo = float(getattr(song, "tempo", 100) or 100)
+                out_path = str(Path(workdir) / "song_with_vocals.wav")
+                mixed = _mix_sung_track(bed_path, str(sr_["path"]),
+                                        out_path, vocal_gain=vocal_gain)
+                if mixed:
+                    note = str(sr_.get("note", "")) + " — mixed under the bed"
+                    return {"ok": True, "path": out_path, "note": note,
+                            "backend": str(sr_.get("backend", "")),
+                            "vocal_mode": "sung"}
+                # mix failed (write cap) — fall through to hook/hum
+                _log.debug("sung mix failed, falling back")
+            elif requested == "sung":
+                # explicitly requested and unavailable: honest failure,
+                # no silent downgrade
+                return {"ok": False, "reason": str(sr_.get("reason", "")),
+                        "path": bed_path}
+            mode = "hook"  # sung unavailable → next strategy
+        if mode == "hook":
+            vr = render_hook_vocal(song, workdir, tts_fn=tts_fn,
+                                   profile=profile)
+            if vr.get("ok"):
+                regions = chorus_regions(song)
+                total_beats = song_duration_beats(song)
+                tempo = float(getattr(song, "tempo", 100) or 100)
+                out_path = str(Path(workdir) / "song_with_vocals.wav")
+                mixed = mix_vocal_track(bed_path, str(vr["path"]), regions,
+                                        tempo, total_beats, out_path,
+                                        vocal_gain=vocal_gain)
+                if mixed:
+                    note = str(vr.get("note", "")) + " — mixed under the bed"
+                    return {"ok": True, "path": out_path, "note": note,
+                            "backend": str(vr.get("backend", "")),
+                            "vocal_mode": "hook"}
+                cap_mib = 0
+                try:
+                    from . import caps
+                    cap_mib = caps.MAX_AUDIO_WRITE_BYTES // (1024 * 1024)
+                except Exception:  # noqa: BLE001
+                    pass
+                return {"ok": False,
+                        "reason": "vocal mix refused: output would exceed "
+                                  f"the {cap_mib} MiB audio write cap",
+                        "path": bed_path}
             reason = str(vr.get("reason", ""))
             # HUM FALLBACK: no TTS backend is not silence. When the
             # arranged melody is available, hum the chorus instead.
             if "no TTS backend installed" in reason and melody_events:
-                return _add_hummed_vocal(song, bed_path, workdir,
-                                         melody_events,
-                                         vocal_gain=_HUM_GAIN)
-            return {"ok": False, "reason": reason,
-                    "path": bed_path}
-        regions = chorus_regions(song)
-        total_beats = song_duration_beats(song)
-        tempo = float(getattr(song, "tempo", 100) or 100)
-        out_path = str(Path(workdir) / "song_with_vocals.wav")
-        mixed = mix_vocal_track(bed_path, str(vr["path"]), regions, tempo,
-                                total_beats, out_path, vocal_gain=vocal_gain)
-        if not mixed:
-            cap_mib = caps.MAX_AUDIO_WRITE_BYTES // (1024 * 1024)
-            return {"ok": False,
-                    "reason": "vocal mix refused: output would exceed the "
-                              f"{cap_mib} MiB audio write cap (see caps.py)",
-                    "path": bed_path}
-        note = str(vr.get("note", "")) + " — mixed under the bed"
-        return {"ok": True, "path": out_path, "note": note,
-                "backend": str(vr.get("backend", ""))}
+                hr = _add_hummed_vocal(song, bed_path, workdir,
+                                       melody_events, vocal_gain=_HUM_GAIN)
+                hr["vocal_mode"] = "hum"
+                return hr
+            return {"ok": False, "reason": reason, "path": bed_path}
+        if mode == "hum" and melody_events:
+            hr = _add_hummed_vocal(song, bed_path, workdir, melody_events,
+                                   vocal_gain=_HUM_GAIN)
+            hr["vocal_mode"] = "hum"
+            return hr
+        return {"ok": False, "reason": f"vocal mode {mode!r} unavailable "
+                                       "(needs TTS and/or melody events)",
+                "path": bed_path}
     except Exception as exc:  # noqa: BLE001
         _log.debug("add_vocal_track failed", exc_info=True)
         return {"ok": False, "reason": f"vocal track failed: {exc}",
                 "path": bed_path or ""}
+
+
+def _mix_sung_track(bed_path: str, sung_path: str, out_path: str,
+                    vocal_gain: float = _VOCAL_GAIN) -> str:
+    """Mix the sung vocal (already positioned) under the bed.
+
+    Same peak-normalize + soft-clip curve as the other mixers, same
+    audio write-cap guard. Never raises. Returns the output path or "".
+    """
+    try:
+        bed, bed_sr = _read_wav_mono(bed_path)
+        sung, sung_sr = _read_wav_mono(sung_path)
+        sung = _resample_linear(sung, sung_sr, bed_sr)
+        n = max(len(bed), len(sung))
+        mix = array("d", [0.0]) * n
+        for i in range(len(bed)):
+            mix[i] += bed[i]
+        for i in range(len(sung)):
+            mix[i] += sung[i] * vocal_gain
+        peak = 0.0
+        for s in mix:
+            a = abs(s)
+            if a > peak:
+                peak = a
+        if peak > 0:
+            import math
+            norm = 0.89 / peak
+            for i, s in enumerate(mix):
+                mix[i] = math.tanh(s * norm * 1.2) * 0.95
+        from . import caps
+        pcm = array("h", (max(-32768, min(32767, int(s * 32767)))
+                          for s in mix))
+        frames = pcm.tobytes()
+        ok, reason = caps.check_write_size(
+            caps.wav_expected_bytes(len(frames)), caps.MAX_AUDIO_WRITE_BYTES)
+        if not ok:
+            caps.refuse_write(f"_mix_sung_track({out_path})", reason)
+            return ""
+        Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+        with wave.open(out_path, "wb") as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)
+            wf.setframerate(bed_sr)
+            wf.writeframes(frames)
+        return out_path
+    except Exception:  # noqa: BLE001
+        _log.debug("_mix_sung_track failed", exc_info=True)
+        return ""

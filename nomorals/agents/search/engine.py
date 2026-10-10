@@ -17,6 +17,7 @@ import time
 import urllib.parse
 from typing import Any
 
+from ...llm.brain import brain_for
 from ...core.errors import ToolError
 from ...core.http import HttpClient
 from ...core.ids import new_short_id
@@ -231,7 +232,7 @@ class SearchEngine:
         try:
             from ...llm.base import Message, SamplingParams
 
-            response = self.context.router.chat(
+            response = brain_for(self.context).chat(
                 [
                     Message.system(
                         "Decompose a research question into 2-5 complementary search "
@@ -240,7 +241,7 @@ class SearchEngine:
                     Message.user(query),
                 ],
                 SamplingParams(temperature=0.2, max_tokens=300),
-            )
+            task_kind="summarize")
             text = (response.text or "").strip()
             start, end = text.find("["), text.rfind("]")
             if start != -1 and end > start:
@@ -338,7 +339,8 @@ class SearchEngine:
         model_on = self._model_available()
         error = ""
         try:
-            summary = summarize_mod.model_summarize(self.context.router, query, read_pages) if model_on \
+            summary = summarize_mod.model_summarize(
+                brain_for(self.context), query, read_pages) if model_on \
                 else summarize_mod.extractive_summarize(query, read_pages)
         except Exception as exc:  # noqa: BLE001 - a dead model must not kill the research
             error = str(exc)

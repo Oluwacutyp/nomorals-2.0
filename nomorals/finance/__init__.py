@@ -25,6 +25,10 @@ from .budgets import (
     overspend_alerts,
     weekly_digest,
 )
+from .alerts import Alert, AlertStore, add_alert, evaluate_alerts
+from .goals import Goal, GoalStore, create_goal, goal_progress
+from .insights import Insights, compute_insights, render_insights
+from .overview import MoneyOverview, RailBalance, collect_balances
 
 __all__ = [
     "CATEGORIES",
@@ -39,4 +43,18 @@ __all__ = [
     "budget_status",
     "overspend_alerts",
     "weekly_digest",
+    "Alert",
+    "AlertStore",
+    "add_alert",
+    "evaluate_alerts",
+    "Goal",
+    "GoalStore",
+    "create_goal",
+    "goal_progress",
+    "Insights",
+    "compute_insights",
+    "render_insights",
+    "MoneyOverview",
+    "RailBalance",
+    "collect_balances",
 ]

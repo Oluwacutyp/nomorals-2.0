@@ -6,6 +6,9 @@ P2: /connectors chat command — list / status / connect; never raises,
     never echoes secrets.
 P3: /notion, /gcal, /trello chat commands — reachable from dispatch,
     honest failures, owner-explicit writes.
+P4: /exness, /stripe chat commands — trading + payments, same contract
+    (reachable from dispatch, honest failures, explicit writes, money
+    moves confirmation-gated at the connector).
 
 No network anywhere: connectors are faked, HTTP is mocked.
 """
@@ -336,10 +339,13 @@ class TestConnectorsCommand:
         assert parse_control("/notion dbs").kind == "notion"
         assert parse_control("/gcal agenda 3").kind == "gcal"
         assert parse_control("/trello boards").kind == "trello"
+        assert parse_control("/exness balance").kind == "exness"
+        assert parse_control("/stripe balance").kind == "stripe"
 
     def test_dispatch_targets_exist(self):
         for m in ("_control_connectors", "_control_notion",
-                  "_control_gcal", "_control_trello"):
+                  "_control_gcal", "_control_trello",
+                  "_control_exness", "_control_stripe"):
             assert callable(getattr(PartnerRuntime, m, None)), m
 
     def test_list_table(self, chat_env, monkeypatch):
@@ -679,9 +685,181 @@ class TestNeverRaises:
         ("_control_gcal", ["", "xyz", "agenda abc", "add | |"]),
         ("_control_trello", ["", "xyz", "boards " * 50, "add |"]),
         ("_control_connectors", ["", "xyz", "status", "connect"]),
+        ("_control_exness", ["", "xyz", "buy", "buy XAUUSD",
+                             "closeall", "closeall confirm"]),
+        ("_control_stripe", ["", "xyz", "link", "link abc usd x"]),
     ])
     def test_never_raises(self, cmd, tails, chat_env, monkeypatch):
         monkeypatch.setenv("NM_VAULT_PASSPHRASE", "test")
         for tail in tails:
             out = _mixin(cmd, FakeSelf(chat_env.db), tail)
             assert isinstance(out, str) and out.strip(), (cmd, tail)
+
+
+class _FakeExness:
+    def __init__(self):
+        self.calls = []
+
+    def get_snapshot(self):
+        self.calls.append(("get_snapshot",))
+        return {"account_state": {"balance": "1000.5", "equity": "1002.0",
+                                  "used_margin": "10.0"},
+                "positions": [{"position_id": "p1", "direction": "buy",
+                               "volume": "0.01", "instrument": "XAUUSD",
+                               "open_price": "2650.00"}],
+                "orders": []}
+
+    def get_candles(self, instrument, timeframe, **kw):
+        self.calls.append(("get_candles", instrument, timeframe, kw))
+        return [{"time": "2026-10-09T10:00:00Z", "open": 2648.0,
+                 "high": 2652.0, "low": 2647.0, "close": 2650.5,
+                 "volume": 120}]
+
+    def open_position(self, instrument, side, volume, **kw):
+        self.calls.append(("open_position", instrument, side, volume, kw))
+        return {"status": "accepted", "operation_id": "op-1"}
+
+    def close_position(self, position_id, **kw):
+        self.calls.append(("close_position", position_id, kw))
+        return {"status": "accepted", "operation_id": "op-2"}
+
+    def close_all_positions(self, **kw):
+        self.calls.append(("close_all_positions", kw))
+        return {"status": "accepted", "operation_id": "op-3"}
+
+
+class TestExnessCommand:
+    def test_balance(self):
+        fake = _FakeExness()
+        with _with_fake_connector(fake):
+            out = _mixin("_control_exness", FakeSelf(), "balance")
+        assert "1000.5" in out and "1002.0" in out
+
+    def test_positions(self):
+        fake = _FakeExness()
+        with _with_fake_connector(fake):
+            out = _mixin("_control_exness", FakeSelf(), "positions")
+        assert "p1" in out and "XAUUSD" in out
+
+    def test_price(self):
+        fake = _FakeExness()
+        with _with_fake_connector(fake):
+            out = _mixin("_control_exness", FakeSelf(), "price xauusd h1")
+        assert "2650.5" in out
+        _name, sym, tf, _kw = fake.calls[-1]
+        assert (sym, tf) == ("XAUUSD", "H1")
+
+    def test_buy_confirmed(self):
+        fake = _FakeExness()
+        with _with_fake_connector(fake):
+            out = _mixin("_control_exness", FakeSelf(),
+                         "buy XAUUSD 0.01 2640 2660")
+        assert "accepted" in out
+        _name, sym, side, vol, kw = fake.calls[-1]
+        assert (sym, side, vol) == ("XAUUSD", "buy", 0.01)
+        assert kw["confirmed"] is True  # owner typed the exact order
+        assert kw["stop_loss"] == 2640.0 and kw["take_profit"] == 2660.0
+
+    def test_buy_bad_lots(self):
+        fake = _FakeExness()
+        with _with_fake_connector(fake):
+            out = _mixin("_control_exness", FakeSelf(), "buy XAUUSD abc")
+        assert "must be a number" in out
+
+    def test_close(self):
+        fake = _FakeExness()
+        with _with_fake_connector(fake):
+            out = _mixin("_control_exness", FakeSelf(), "close p1")
+        assert "op-2" in out
+
+    def test_closeall_needs_confirm_word(self):
+        fake = _FakeExness()
+        with _with_fake_connector(fake):
+            out = _mixin("_control_exness", FakeSelf(), "closeall")
+        assert "confirm" in out
+        assert not [c for c in fake.calls if c[0] == "close_all_positions"]
+        with _with_fake_connector(fake):
+            out = _mixin("_control_exness", FakeSelf(), "closeall confirm")
+        assert "op-3" in out
+
+    def test_usage(self):
+        fake = _FakeExness()
+        with _with_fake_connector(fake):
+            out = _mixin("_control_exness", FakeSelf(), "")
+        assert "/exness balance" in out
+
+    def test_not_connected(self, chat_env, monkeypatch):
+        monkeypatch.setenv("NM_VAULT_PASSPHRASE", "test")
+        out = _mixin("_control_exness", FakeSelf(chat_env.db), "balance")
+        assert "/connectors connect exness" in out
+
+
+class _FakeStripe:
+    def __init__(self):
+        self.calls = []
+
+    def get_balance(self):
+        self.calls.append(("get_balance",))
+        return {"available": [{"amount": 25000, "currency": "usd"}],
+                "pending": [{"amount": 1000, "currency": "usd"}]}
+
+    def list_customers(self, **kw):
+        self.calls.append(("list_customers", kw))
+        return [{"id": "cus_1", "name": "Ada"}]
+
+    def list_charges(self, **kw):
+        self.calls.append(("list_charges", kw))
+        return [{"id": "ch_1", "amount": 2500, "currency": "usd",
+                 "status": "succeeded"}]
+
+    def create_payment_link(self, line_items, **kw):
+        self.calls.append(("create_payment_link", line_items, kw))
+        return {"id": "plink_1", "url": "https://pay.stripe.test/1"}
+
+
+class TestStripeCommand:
+    def test_balance(self):
+        fake = _FakeStripe()
+        with _with_fake_connector(fake):
+            out = _mixin("_control_stripe", FakeSelf(), "balance")
+        assert "250.00 USD" in out and "10.00 USD" in out
+
+    def test_customers(self):
+        fake = _FakeStripe()
+        with _with_fake_connector(fake):
+            out = _mixin("_control_stripe", FakeSelf(), "customers")
+        assert "cus_1" in out and "Ada" in out
+
+    def test_charges(self):
+        fake = _FakeStripe()
+        with _with_fake_connector(fake):
+            out = _mixin("_control_stripe", FakeSelf(), "charges")
+        assert "ch_1" in out and "25.00 USD" in out
+
+    def test_link(self):
+        fake = _FakeStripe()
+        with _with_fake_connector(fake):
+            out = _mixin("_control_stripe", FakeSelf(),
+                         "link 25.50 usd logo gig")
+        assert "https://pay.stripe.test/1" in out
+        _name, items, _kw = fake.calls[-1]
+        pd = items[0]["price_data"]
+        assert (pd["unit_amount"], pd["currency"]) == (2550, "usd")
+        assert pd["product_data"]["name"] == "logo gig"
+
+    def test_link_bad_amount(self):
+        fake = _FakeStripe()
+        with _with_fake_connector(fake):
+            out = _mixin("_control_stripe", FakeSelf(), "link abc usd x")
+        assert "must be a number" in out
+
+    def test_usage(self):
+        fake = _FakeStripe()
+        with _with_fake_connector(fake):
+            out = _mixin("_control_stripe", FakeSelf(), "")
+        assert "/stripe balance" in out
+
+    def test_not_connected(self, chat_env, monkeypatch):
+        monkeypatch.setenv("NM_VAULT_PASSPHRASE", "test")
+        out = _mixin("_control_stripe", FakeSelf(chat_env.db), "balance")
+        assert "/connectors connect stripe" in out

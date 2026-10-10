@@ -20,7 +20,13 @@ def cipher_tool(action: str = "", data: str = "", algorithm: str = "",
     elif action == "hmac":
         return _handle_hmac(key, data)
     elif action == "formats":
-        return {"algorithms": ["aes-ctr", "aes-gcm", "chacha20", "caesar", "vigenere", "atbash", "b64"]}
+        # Honest list: only what the audited core cipher actually supports.
+        # (Earlier text advertised aes-gcm/chacha20 — the core has no such
+        # modes; encrypt with mode=gcm raised CipherError.)
+        return {"algorithms": ["aes-ctr", "aes-cbc", "caesar", "vigenere",
+                               "atbash", "b64"],
+                "note": "encrypt/decrypt use passphrase KDF (PBKDF2) + "
+                        "encrypt-then-HMAC; mode ctr (default) or cbc"}
     elif action == "encrypt":
         return _handle_encrypt(data, key, algorithm, passphrase=passphrase,
                                mode=mode, iterations=iterations)
@@ -138,8 +144,18 @@ def _handle_encrypt(data: str, key: str, algorithm: str, *, passphrase: str = ""
         raise core.CipherError("encrypt needs 'data'")
     if not passphrase and not key:
         raise core.CipherError("encrypt needs a passphrase or a key")
+    raw_mode = (mode or algorithm or "ctr").strip().lower()
+    # Accept "aes-ctr"/"aes-cbc" spellings; anything else fails honestly
+    # in the core ("mode must be 'ctr' or 'cbc'") instead of silently
+    # encrypting under the default.
+    norm = {"ctr": "ctr", "aes-ctr": "ctr",
+            "cbc": "cbc", "aes-cbc": "cbc"}.get(raw_mode)
+    if norm is None:
+        raise core.CipherError(
+            f"unsupported aes mode {raw_mode!r}: want ctr or cbc "
+            "(the core has no gcm/chacha20 modes)")
     kwargs: dict = {"passphrase": passphrase or "", "key": _key_bytes(key),
-                    "mode": (mode or algorithm or "ctr")}
+                    "mode": norm}
     if iterations:
         kwargs["iterations"] = int(iterations)
     return {"blob": core.aes_encrypt(data, **kwargs), "format": "nmc1:v1"}

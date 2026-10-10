@@ -23,24 +23,75 @@ _log = get_logger(__name__)
 
 _engine: NaijaShoppingEngine | None = None
 _hunter: Any = None
+_lazy_context: Any = None
 
 
 def _get_engine() -> NaijaShoppingEngine:
-    """Get or create the shopping engine singleton."""
+    """Get or create the shopping engine singleton.
+
+    Lazily builds the engine from the registry context on first use, so
+    the tool works in chat without an explicit init call. An explicitly
+    injected engine (init_deals_tool) still wins.
+    """
     global _engine
     if _engine is None:
-        raise RuntimeError("NaijaShoppingEngine not initialized. Call init_deals_tool() first.")
+        _engine = _build_engine()
     return _engine
 
 
+def _build_engine() -> NaijaShoppingEngine:
+    """Build a NaijaShoppingEngine from the captured registry context."""
+    from ..storage.db import Database
+    from ..tools.browser import BrowserSession
+
+    db = getattr(_lazy_context, "db", None) if _lazy_context else None
+    if db is None:
+        # Standalone engine DB under the nomorals home.
+        import os
+        home = os.path.expanduser("~/.nomorals")
+        os.makedirs(home, exist_ok=True)
+        db = Database(os.path.join(home, "shopping.db"))
+    browser = BrowserSession(name="deals")
+    engine = NaijaShoppingEngine(db, browser)
+    _log.info("deals engine lazily initialized")
+    return engine
+
+
 def _get_hunter() -> Any:
-    """Get or create the NaijaDealHunter singleton (price-drop alerts)."""
+    """Get or create the NaijaDealHunter singleton (price-drop alerts).
+
+    Lazily builds from the registry context when a vault-backed
+    AccountManager is available; otherwise raises an actionable error.
+    """
     global _hunter
     if _hunter is None:
-        raise RuntimeError(
-            "NaijaDealHunter not initialized. Call init_deal_hunter() first."
-        )
+        _hunter = _build_hunter()
     return _hunter
+
+
+def _build_hunter() -> Any:
+    import os
+    from ..accounts.manager import AccountManager
+    from ..accounts.vault import CredentialVault
+    from ..integrations.naija_deals import NaijaDealHunter
+    from ..storage.db import Database
+
+    passphrase = os.environ.get("NM_VAULT_PASSPHRASE", "")
+    if not passphrase:
+        raise RuntimeError(
+            "Deal hunter needs the credential vault: set "
+            "NM_VAULT_PASSPHRASE, or call init_deal_hunter() with a "
+            "ready NaijaDealHunter.")
+    db = getattr(_lazy_context, "db", None) if _lazy_context else None
+    if db is None:
+        import os as _os
+        home = _os.path.expanduser("~/.nomorals")
+        _os.makedirs(home, exist_ok=True)
+        db = Database(_os.path.join(home, "shopping.db"))
+    vault = CredentialVault(db, master_passphrase=passphrase)
+    hunter = NaijaDealHunter(AccountManager(vault), db)
+    _log.info("deal hunter lazily initialized")
+    return hunter
 
 
 def init_deal_hunter(hunter: Any) -> None:
@@ -208,6 +259,8 @@ async def deals(action: str, **kwargs: Any) -> dict[str, Any]:
 
 def register(registry: Any) -> None:
     """Register the deals tool with the tool registry."""
+    global _lazy_context
+    _lazy_context = getattr(registry, "context", None)
     registry.register(
         name="deals",
         fn=deals,

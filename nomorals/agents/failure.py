@@ -24,6 +24,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
+from ..llm.brain import brain_for
 from ..core.ids import new_short_id
 from ..core.logging_setup import get_logger
 from .skills import SkillLibrary
@@ -296,8 +297,8 @@ class FailureAnalyzer:
             '"prevention": "<one short imperative: how to avoid this in '
             'the future>"}')
         try:
-            resp = router.chat([Message.user(prompt)],
-                               SamplingParams(temperature=0.1, max_tokens=400))
+            resp = brain_for(self.context).chat([Message.user(prompt)],
+                               SamplingParams(temperature=0.1, max_tokens=400), task_kind="judge")
             if not getattr(resp, "ok", False):
                 return None
             data = json.loads(_first_json(resp.text or ""))

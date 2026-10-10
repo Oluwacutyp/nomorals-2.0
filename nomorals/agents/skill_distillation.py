@@ -27,6 +27,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
+from ..llm.brain import brain_for
 from ..core.logging_setup import get_logger
 from ..skills.manifest import sanitize_description
 
@@ -149,7 +150,7 @@ def distill(task: str, steps: list[Any], tools_called: list[str],
             if router is None:
                 _log.warning("distillation skipped: no LLM available")
                 return None
-            resp = router.complete(prompt)
+            resp = brain_for(context).complete(prompt, task_kind="judge")
             text = resp.text if hasattr(resp, "text") else str(resp)
     except Exception as exc:  # noqa: BLE001
         _log.warning("distillation LLM call failed: %s", exc)

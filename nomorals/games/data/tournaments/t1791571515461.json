@@ -1,0 +1,26 @@
+{
+ "id": "t1791571515461",
+ "name": "Test Cup",
+ "games": [
+  "wordchain",
+  "numberguess"
+ ],
+ "players": [
+  "a",
+  "b",
+  "c"
+ ],
+ "rounds": 2,
+ "current_round": 1,
+ "points": {
+  "a": 0,
+  "b": 0,
+  "c": 0
+ },
+ "matches": [],
+ "stake": 0,
+ "pot": 0,
+ "status": "open",
+ "winner": null,
+ "created_at": 1791571515.4822538
+}

@@ -76,7 +76,6 @@ from pathlib import Path
 from typing import Any, Callable
 
 from ..core.ids import new_short_id
-from ..core.jsonutil import extract_json as _extract_json
 from ..core.logging_setup import get_logger
 from ..llm.base import Message, SamplingParams
 from ..tools.edit_loop import EditConflictError, EditLoop
@@ -157,24 +156,30 @@ class Subagent(abc.ABC):
     def _model_json(self, system: str, user: str, *,
                     max_tokens: int = 2048,
                     temperature: float = 0.2) -> tuple[Any | None, str]:
-        """One model call; returns ``(data, error)`` — error "" on success."""
+        """One model call; returns ``(data, error)`` — error "" on success.
+
+        The Brain's ``chat_json`` owns the parse + repair loop now; the
+        old hand-rolled ``_extract_json`` + one-shot parse is gone.
+        """
         if self.router is None:
             return None, "no model available"
         try:
-            response = self.router.chat(
-                [Message.system(system + "\n\nReply with a single JSON "
-                                        "object and nothing else."),
+            from ..llm.base import Message, SamplingParams
+            from ..llm.brain import Brain
+
+            brain = self.router if isinstance(self.router, Brain) else Brain(router=self.router)
+            data, response = brain.chat_json(
+                [Message.system(system),
                  Message.user(user)],
-                SamplingParams(temperature=temperature,
-                               max_tokens=max_tokens, json_mode=True),
+                task_kind="plan",
+                params=SamplingParams(temperature=temperature,
+                                      max_tokens=max_tokens, json_mode=True),
             )
         except Exception as exc:  # noqa: BLE001 - model failures are results
             return None, f"model call failed: {exc}"
-        if not response.ok:
-            return None, f"model error: {(response.error or '')[:200]}"
-        data = _extract_json(response.text)
-        if data is None:
-            return None, "model returned no parseable JSON"
+        if not isinstance(data, dict):
+            err = getattr(response, "error", "") or "no JSON in model output"
+            return None, f"model error: {err[:200]}"
         return data, ""
 
     # ── paths ────────────────────────────────────────────────────────────

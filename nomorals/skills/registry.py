@@ -111,7 +111,8 @@ class SkillRegistry:
     def pin(self, name: str, version: str) -> InstalledSkill:
         """Move the active pin for ``name`` to ``version``.  This is the
         rollback primitive: ``pin(name, older_version)`` reverts a bad
-        release without reinstalling anything."""        row = self.db.query_one(
+        release without reinstalling anything."""
+        row = self.db.query_one(
             "SELECT 1 FROM skill_packages WHERE name=? AND version=?",
             (name, version))
         if row is None:

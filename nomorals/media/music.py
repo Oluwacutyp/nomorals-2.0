@@ -43,6 +43,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
+from ..llm.brain import brain_for
 from ..core.errors import ToolError
 from ..core.logging_setup import get_logger
 from ..core.midi import (
@@ -1266,9 +1267,9 @@ class MusicCreator:
             "No titles, no labels, no markdown — just the lines, one per "
             "line. Make them rhyme and singable."
         )
-        resp = router.chat(
+        resp = brain_for(self.context).chat(
             [Message.user(prompt)],
-            SamplingParams(temperature=0.9))
+            SamplingParams(temperature=0.9), task_kind="creative")
         text = (getattr(resp, "text", "") or "").strip()
         lines = [ln.strip(" \t-•“”\"'") for ln in text.splitlines()
                  if ln.strip()]
@@ -1491,12 +1492,14 @@ class MusicCreator:
         builtin synth on phones.  The choice lands on the song so chat
         can surface a soundfont offer when one would help.
 
-        When ``with_vocals`` is true the chorus gets a vocal: the hook is
-        synthesized with the lightweight TTS vocal track
-        (:mod:`nomorals.media.vocal_lite` — works on Termux, unlike
-        DiffSinger/RVC) and mixed under the bed.  No TTS backend ->
-        the chorus melody is hummed with a vocal-like timbre instead —
-        /music always has a vocal line.  Never fake, never silent.
+        When ``with_vocals`` is true the song gets a vocal via
+        :mod:`nomorals.media.vocal_lite` (works on Termux, unlike
+        DiffSinger/RVC): the strategy is sung → hook → hum — every lyric
+        line synthesized separately and placed on its own melody phrase
+        (pitch-shifted to the phrase pitch) when TTS + melody events are
+        available; the spoken hook tiled across choruses when only TTS
+        works; the chorus melody hummed when there is no TTS. /music
+        always has a vocal line.  Never fake, never silent.
         """
         from ..tools.filesystem import safe_path
         from .synth_backend import render_wav as backend_render_wav

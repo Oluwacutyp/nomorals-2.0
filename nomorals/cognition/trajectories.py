@@ -139,10 +139,32 @@ class TrajectoryStore:
         else:
             self.db = Database(":memory:" if db is None else str(db))
         self.db.executescript(_TRAJECTORIES_DDL)
+        self._migrate_failure_class()
         self._lock = threading.RLock()
         # -inf so the first record() always runs the retention prune,
         # regardless of process uptime (monotonic clocks start near 0).
         self._last_prune = float("-inf")
+
+    def _migrate_failure_class(self) -> None:
+        """Add the failure_class column to pre-existing databases.
+
+        The typed failure class (``nomorals.llm.failures.FailureClass``)
+        lets ``failure_clusters`` group by *kind* of breakage
+        (rate_limited vs auth vs context_overflow) instead of only by raw
+        message text.  Idempotent; never raises.
+        """
+        try:
+            cols = {r["name"] for r in self.db.query(
+                "PRAGMA table_info(cog_trajectories)")}
+            if "failure_class" not in cols:
+                self.db.execute(
+                    "ALTER TABLE cog_trajectories "
+                    "ADD COLUMN failure_class TEXT NOT NULL DEFAULT ''")
+                self.db.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_cog_traj_fclass "
+                    "ON cog_trajectories(failure_class, created_at)")
+        except Exception:  # noqa: BLE001 — the column is a bonus
+            _log.debug("failure_class migration skipped", exc_info=True)
 
     # ── recording ────────────────────────────────────────────────────────
     def record(
@@ -157,8 +179,21 @@ class TrajectoryStore:
         latency_s: float = 0.0,
         cost: float = 0.0,
         error: str = "",
+        failure_class: str = "",
     ) -> None:
-        """Record one execution outcome."""
+        """Record one execution outcome.
+
+        ``failure_class`` is the typed failure kind
+        (``nomorals.llm.failures.FailureClass`` value); when omitted it is
+        derived from the error text so clusters still group by kind.
+        """
+        if not failure_class and error:
+            try:
+                from ..llm.failures import classify_failure
+
+                failure_class = classify_failure(error).failure_class.value
+            except Exception:  # noqa: BLE001 — the class is a bonus
+                failure_class = ""
         self._maybe_prune()
         self._add(
             task_kind=task_kind,
@@ -170,6 +205,7 @@ class TrajectoryStore:
             latency_s=latency_s,
             cost=cost,
             error=error,
+            failure_class=failure_class,
             created_at=time.time(),
         )
 
@@ -185,6 +221,7 @@ class TrajectoryStore:
         latency_s: float = 0.0,
         cost: float = 0.0,
         error: str = "",
+        failure_class: str = "",
         created_at: float | None = None,
     ) -> str:
         """Internal insert honoring an explicit timestamp (used by tests)."""
@@ -193,8 +230,8 @@ class TrajectoryStore:
             self.db.execute(
                 "INSERT INTO cog_trajectories (id, task_kind, capability,"
                 " model_id, skill_id, tool, success, latency_s, cost,"
-                " error, created_at)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " error, failure_class, created_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     row_id,
                     task_kind or "",
@@ -206,6 +243,7 @@ class TrajectoryStore:
                     float(latency_s),
                     float(cost),
                     error or "",
+                    failure_class or "",
                     float(created_at if created_at is not None else time.time()),
                 ),
             )
@@ -327,11 +365,14 @@ class TrajectoryStore:
     def failure_clusters(
         self, task_kind: str | None = None, limit: int = 10
     ) -> list[dict]:
-        """Group failures by normalized error signature, most-frequent first.
+        """Group failures by failure class + normalized error signature.
 
-        Each dict: ``task_kind``, ``error_signature``, ``count``,
-        ``last_seen`` (unix time), ``example_ids`` (up to 5 trajectory
-        ids).  ``task_kind=None`` aggregates across all task kinds.
+        Grouping is by (task_kind, failure_class, signature): a rate-limit
+        storm and an auth outage no longer merge into one cluster just
+        because their message texts look alike.  Each dict: ``task_kind``,
+        ``failure_class``, ``error_signature``, ``count``, ``last_seen``
+        (unix time), ``example_ids`` (up to 5 trajectory ids).
+        ``task_kind=None`` aggregates across all task kinds.
         """
         params: list = []
         where = "success = 0"
@@ -339,18 +380,21 @@ class TrajectoryStore:
             where += " AND task_kind = ?"
             params.append(task_kind)
         rows = self.db.query(
-            "SELECT id, task_kind, error, created_at FROM cog_trajectories"
+            "SELECT id, task_kind, error, failure_class, created_at"
+            " FROM cog_trajectories"
             f" WHERE {where}",
             tuple(params),
         )
-        clusters: dict[tuple[str, str], dict] = {}
+        clusters: dict[tuple[str, str, str], dict] = {}
         for row in rows:
             signature = normalize_error(row.get("error") or "")
-            key = (row["task_kind"] or "", signature)
+            fclass = row.get("failure_class") or ""
+            key = (row["task_kind"] or "", fclass, signature)
             cluster = clusters.get(key)
             if cluster is None:
                 cluster = {
                     "task_kind": row["task_kind"] or "",
+                    "failure_class": fclass,
                     "error_signature": signature,
                     "count": 0,
                     "last_seen": 0.0,

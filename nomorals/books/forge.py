@@ -18,6 +18,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from ..llm.brain import Brain, brain_for
 from ..core.logging_setup import get_logger
 from .model import (STATUS_BUILT, STATUS_SENT, STATUS_WRITTEN, Book, BookError,
                     count_words, slugify)
@@ -79,6 +80,11 @@ def clean_title(topic: str, context: Any = None) -> str:
 def _model_title(raw: str, router: Any) -> str:
     """Ask the live model for a title.  Two attempts, strict validation."""
     from ..llm.base import Message, SamplingParams
+    from ..llm.brain import Brain
+
+    # ``router`` is the caller's provider chain (not a context) — wrap it
+    # directly; Brain accepts a Brain too, so callers may pass either.
+    brain = router if isinstance(router, Brain) else Brain(router=router)
 
     prompts = [
         ("You are a bestselling book editor. Reply with ONLY the title — "
@@ -90,10 +96,10 @@ def _model_title(raw: str, router: Any) -> str:
     ]
     for system, user in prompts:
         try:
-            response = router.chat(
+            response = brain.chat(
                 [Message.system(system), Message.user(user)],
                 SamplingParams(temperature=0.6, max_tokens=40),
-            )
+                task_kind="creative")
         except Exception:  # noqa: BLE001
             continue
         title = (getattr(response, "text", "") or "").strip().strip("\"'“”")
@@ -247,13 +253,13 @@ def plan_book(topic: str, notes: str, context: Any,
             '"chapters": [{"title": "<chapter title>", '
             '"beats": ["<4-6 section beats>"]}]}'
         )
-        response = router.chat(
+        response = brain_for(context).chat(
             [Message.system(
                 "You are a bestselling book editor. Reply with ONLY the "
                 "requested JSON."),
              Message.user(prompt)],
             SamplingParams(temperature=0.5, max_tokens=3000),
-        )
+        task_kind="creative")
         text = (getattr(response, "text", "") or "").strip()
         start, end = text.find("{"), text.rfind("}")
         if not getattr(response, "ok", False) or start == -1 or end <= start:
@@ -294,7 +300,7 @@ def infer_chapter_count(topic: str, context: Any = None,
     if router is not None:
         try:
             from ..llm.base import Message, SamplingParams
-            response = router.chat(
+            response = brain_for(context).chat(
                 [Message.system(
                     "You are a book editor. Reply with ONLY an integer."),
                  Message.user(
@@ -302,7 +308,7 @@ def infer_chapter_count(topic: str, context: Any = None,
                      f"Short guide: 4-6. Standard book: 8-12. Novel/memoir: "
                      f"14-20. Reply with just the number.\nTopic: {topic[:300]}")],
                 SamplingParams(temperature=0.2, max_tokens=8),
-            )
+            task_kind="creative")
             n = int(re.search(r"\d+", getattr(response, "text", "") or "").group())
             if response.ok and 3 <= n <= 24:
                 return n

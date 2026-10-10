@@ -12,6 +12,7 @@ import time
 from typing import Any
 
 from ..ai import GameMind
+from ..gamemaster import feed
 from ..players import Player
 from .base import (DIFFICULTY_LEVELS, MultiGame, Room,
                    normalize_difficulty)
@@ -630,6 +631,8 @@ class MafiaGame(MultiGame):
     ai_seats = 2
     needs_group = True
     move_timeout = 120
+    #: the DM narrates every night kill and the town's fate
+    dm_finale = True
     rules = ("The house is the mafia. You are the town. Each night the "
              "mafia kills one of you (you'll see who). By day: talk "
              "(your turn = say anything), then vote — most votes "
@@ -679,6 +682,10 @@ class MafiaGame(MultiGame):
         s["kills"] += 1
         out = [f"morning. {victim.name if victim else 'someone'} is "
                f"found. they were {role}."]
+        feed(room,
+             f"night falls and {victim.name if victim else 'someone'} "
+             f"is found dead by morning — they were {role}",
+             big=True)
         if not any(k in s["alive"] and not k.startswith("ai:")
                    for k in s["alive"]):
             s["done"] = True
@@ -839,6 +846,15 @@ class MafiaGame(MultiGame):
         alive = [room.player(k).name for k in s["alive"]]
         return (f"night {min(s['kills'] + 1, s['nights'])}/{s['nights']} · "
                 f"phase: {s['phase']} · alive: {', '.join(alive)}")
+
+    def dm_finale_event(self, room):
+        s = room.state
+        alive = [k for k in s.get("alive", [])]
+        humans = [k for k in alive if not k.startswith("ai:")]
+        if humans:
+            return (f"five nights of knives and whispers — and the town "
+                    f"still stands, {len(humans)} souls to see the dawn")
+        return "the table is empty — the mafia owns the streets now"
 
 
 # ── 10. king of the hill ─────────────────────────────────────────────────────
@@ -1507,6 +1523,8 @@ class InvestigationGame(MultiGame):
     max_players = 6
     ai_seats = 1
     move_timeout = 180
+    #: the DM narrates the closed case (or the one that went cold)
+    dm_finale = True
     rules = ("I open a case with four suspects — 52 hand-written cases "
              "across easy/medium/hard/expert plus fresh generated ones, "
              "graded by tier (harder pays more). 'clue' reveals the next "
@@ -1667,6 +1685,10 @@ class InvestigationGame(MultiGame):
                     bonus = int(round(TIME_BONUS_MAX.get(tier, 6) * frac))
             s["time_bonus"] = bonus
             msg = (f"🏁 {accuser} closes the case — it was **{suspect}**.")
+            feed(room,
+                 f"{accuser} names the culprit — it was {suspect}. "
+                 f"case closed.",
+                 big=True)
             if bonus:
                 msg += f" ⏱ +{bonus} time bonus."
             return [msg + " the file is signed."]
@@ -1744,6 +1766,15 @@ class InvestigationGame(MultiGame):
             return ("🏁 case closed — the detective who solved it gets the "
                     "glory, the evidence, and the points.")
         return super().final_message(room, mind)
+
+    def dm_finale_event(self, room):
+        s = room.state
+        if s.get("solved"):
+            solver = room.player(s.get("solver") or "")
+            who = solver.name if solver is not None else "the detective"
+            return (f"{who} closes the case — the truth laid bare, "
+                    f"justice of a sort served")
+        return "the case goes cold — the culprit walks free"
 
     def score(self, room, player):
         s = room.state

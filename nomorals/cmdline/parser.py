@@ -12,12 +12,14 @@ from ..version import __version__
 CLI_ALIASES: dict[str, list[str]] = {
     "status": ["st"],
     "session": ["sess"],
+    "chat": ["ch"],
     "mind": ["m"],
     "doctor": ["dr"],
     "config": ["cfg"],
     "models": ["mod"],
     "memory": ["mem"],
     "power": ["pw"],
+    "pulse": [],
     "run": ["r"],
     "ask": ["a"],
     "account": ["acct"],
@@ -68,6 +70,7 @@ CLI_ALIASES: dict[str, list[str]] = {
     "reason": ["rea"],
     "research-loop": ["rl"],
     "room": ["rm"],
+    "brain": ["brai"],
     "serve": ["srv"],
     "setup": ["su"],
     "skill": ["sk"],
@@ -82,7 +85,9 @@ CLI_ALIASES: dict[str, list[str]] = {
     "vision": ["v"],
     "imggen": ["ig"],
     "shorts": ["sh"],
+    "video": ["vid"],
     "voice": ["vc"],
+    "audio": ["au"],
     "weather": ["wx"],
     "workspace": ["ws"],
     "zip": ["z"],
@@ -122,6 +127,31 @@ def _parser() -> argparse.ArgumentParser:
     sub.add_parser("config", aliases=CLI_ALIASES["config"],
                    help="print the effective configuration")
     sub.add_parser("setup", aliases=CLI_ALIASES["setup"], help="guided model setup wizard")
+
+    brain = sub.add_parser("brain", aliases=CLI_ALIASES["brain"],
+                           help="talk to the Brain facade: ask, judge, status",
+                           description=("nm brain ask \"<prompt>\" [--kind KIND] [--timeout S]\n"
+                                        "nm brain judge \"<prompt>\" [--fanout N]\n"
+                                        "nm brain status"))
+    brain_sub = brain.add_subparsers(dest="brain_action", required=True)
+    b_ask = brain_sub.add_parser("ask", help="one chat call through the Brain")
+    b_ask.add_argument("prompt", help="prompt to send")
+    b_ask.add_argument("--kind", default="chat",
+                       help="task kind (chat, summarize, intent, judge, plan, ...)")
+    b_ask.add_argument("--temperature", type=float, default=0.7)
+    b_ask.add_argument("--max-tokens", type=int, default=1024)
+    b_ask.add_argument("--timeout", type=float, default=90.0,
+                       help="per-call deadline in seconds")
+    b_judge = brain_sub.add_parser("judge", help="fan out to N providers, judge the drafts")
+    b_judge.add_argument("prompt", help="prompt to answer")
+    b_judge.add_argument("--fanout", type=int, default=3,
+                         help="providers to fan out to")
+    b_judge.add_argument("--kind", default="creative", help="task kind")
+    b_judge.add_argument("--temperature", type=float, default=0.9)
+    b_judge.add_argument("--max-tokens", type=int, default=1024)
+    b_judge.add_argument("--timeout", type=float, default=120.0,
+                         help="per-call deadline in seconds")
+    brain_sub.add_parser("status", help="Brain.diagnose(): provider health, failure classes")
 
     models = sub.add_parser("models", aliases=CLI_ALIASES["models"],
                             help="inspect the model registry and catalog")
@@ -208,6 +238,33 @@ def _parser() -> argparse.ArgumentParser:
     mem_sub.add_parser("export", help="JSON dump of the user model + records")
     mem_sub.add_parser("rebuild", help="rebuild the user model now")
     mem_sub.add_parser("curate", help="run one memory-curation pass")
+    mem_sub.add_parser("consolidate",
+                       help="run the additive consolidation tick now")
+    mem_sub.add_parser("health", help="memory diagnostics")
+    m_repair = mem_sub.add_parser("repair",
+                                  help="re-embed missing/drifted vectors")
+    m_repair.add_argument("--dry-run", action="store_true")
+    m_timeline = mem_sub.add_parser("timeline",
+                                    help="how a belief evolved over time")
+    m_timeline.add_argument("topic", nargs="?", default="")
+    m_timeline.add_argument("--limit", type=int, default=15)
+    m_deep = mem_sub.add_parser("deep", help="multi-hop associative recall")
+    m_deep.add_argument("query", nargs="?", default="")
+    m_deep.add_argument("--limit", type=int, default=8)
+    m_deep.add_argument("--scope", default="")
+    m_contra = mem_sub.add_parser("contradictions",
+                                  help="detect contradicting memories")
+    m_contra.add_argument("record_id", nargs="?", default="")
+    mem_sub.add_parser("scopes", help="list memory spaces and their sizes")
+    mem_sub.add_parser("schedule",
+                       help="consolidation cadence status")
+    m_backup = mem_sub.add_parser("backup",
+                                  help="snapshot the whole memory store")
+    m_backup.add_argument("dest", nargs="?", default="")
+    m_import = mem_sub.add_parser("import",
+                                  help="merge an export bundle into memory")
+    m_import.add_argument("path")
+    m_import.add_argument("--dry-run", action="store_true")
 
     owner = sub.add_parser("owner", aliases=CLI_ALIASES["owner"], help="owner identity seal (ingrained in code)")
     owner_sub = owner.add_subparsers(dest="owner_action")
@@ -225,6 +282,18 @@ def _parser() -> argparse.ArgumentParser:
                          help="unlock power mode via owner seal "
                               "(prompts securely)")
     power_sub.add_parser("lock", help="lock power mode")
+
+    pulse = sub.add_parser("pulse", aliases=CLI_ALIASES["pulse"],
+                           help="morning-pulse pipeline: run it now, or inspect its schedule",
+                           description="nm pulse run — run the pipeline now (news → briefing → voice → deliver)\n"
+                                       "nm pulse status — scheduler job + prefs\n"
+                                       "nm pulse config — time/timezone/hosts\n"
+                                       "nm pulse ensure — (re)register the daily scheduler job",
+                           formatter_class=argparse.RawDescriptionHelpFormatter)
+    pulse.add_argument("action", nargs="?", default="status",
+                       choices=["run", "status", "config", "ensure"],
+                       help="Action to perform")
+    pulse.add_argument("--json", action="store_true", help="Output as JSON")
     power_sub.add_parser("status", help="power mode status")
     power_sub.add_parser("battery", help="battery/thermal status (power monitor)")
 
@@ -323,6 +392,8 @@ def _parser() -> argparse.ArgumentParser:
     missions.add_argument("--start", default="", help="start a new mission with this goal")
     missions.add_argument("--resume", default="", help="resume a mission by id")
     missions.add_argument("--resume-all", action="store_true", help="resume every interrupted mission")
+    missions.add_argument("--replan", default="",
+                          help="resume a paused/failed mission with the replan policy forced on")
     missions.add_argument("--status", default="", help="filter by status")
     missions.add_argument("--show", default="", help="show one mission's detail and checkpoints")
     missions.add_argument("--max-iterations", type=int, default=8)
@@ -397,6 +468,22 @@ def _parser() -> argparse.ArgumentParser:
                            help="verb and arguments (list|show|end)")
     session_p.add_argument("--json", action="store_true", help="Output as JSON")
 
+    chat_p = sub.add_parser(
+        "chat",
+        aliases=CLI_ALIASES["chat"],
+        help="Conversation surfaces: capabilities, setup checks, outbox",
+        description=("nm chat platforms [--json]\n"
+                     "nm chat doctor [--json]\n"
+                     "nm chat outbox [clear]\n"
+                     "Read side of the chat layer: what each platform can do,\n"
+                     "whether it is set up right, and what WhatsApp sends are\n"
+                     "queued from a bridge outage. Personal gating stays\n"
+                     "enforced by the runtime; nothing here weakens it."),
+    )
+    chat_p.add_argument("task", nargs="*", default=[],
+                        help="verb and arguments (platforms|doctor|outbox)")
+    chat_p.add_argument("--json", action="store_true", help="Output as JSON")
+
     mind_p = sub.add_parser(
         "mind",
         aliases=CLI_ALIASES["mind"],
@@ -457,13 +544,21 @@ def _parser() -> argparse.ArgumentParser:
     # Agent-tool subcommands
     autonomy = sub.add_parser("autonomy", aliases=CLI_ALIASES["autonomy"], help="Manage autonomous agent operations")
     autonomy.add_argument("action", nargs="?", default="status",
-                         choices=["status", "tick", "report", "enable", "disable", "budget", "on", "off"],
+                         choices=["status", "tick", "report", "enable", "disable", "budget", "on", "off", "ledger"],
                          help="Action to perform")
     autonomy.add_argument("--json", action="store_true", help="Output as JSON")
     autonomy.add_argument("--cap", default="",
                           help="set the daily model-call cap (budget action; persisted)")
     autonomy.add_argument("--unlimited", action="store_true",
                           help="lift the daily model-call cap (budget action)")
+    autonomy.add_argument("--system", default="",
+                          help="ledger action: only this system (scheduler|mission|trigger|cognition|pulse|autonomy)")
+    autonomy.add_argument("--limit", default="20",
+                          help="ledger action: max entries (default 20)")
+    autonomy.add_argument("--summary", action="store_true",
+                          help="ledger action: per-system rollup instead of entries")
+    autonomy.add_argument("--window", default="24",
+                          help="ledger action: summary window in hours (default 24)")
 
     goal = sub.add_parser("goal", aliases=CLI_ALIASES["goal"], help="Create and manage goals")
     goal.add_argument("action", nargs="?", default="list",
@@ -1720,6 +1815,7 @@ def _parser() -> argparse.ArgumentParser:
                      "nm voice say \"text\" [--profile P] [--out PATH] [--perform] [--mood M]\n"
                      "nm voice fetch --backend cosyvoice|fish-s2-pro|fish-s1-mini|orpheus|dia|piper [--voice VOICE]\n"
                      "nm voice clone <name> <audio> [--transcript T]\n"
+                     "nm voice match <audio> | nm voice probe <audio>\n"
                      "nm voice list | nm voice use <name> | nm voice current\n"
                      "nm voice listen [--secs N] [--out PATH]\n"
                      "nm voice transcribe <file>\n"
@@ -1844,6 +1940,16 @@ def _parser() -> argparse.ArgumentParser:
     v_vtr.add_argument("name", help="catalogue voice name")
     v_vtr.add_argument("text", help="words spoken in the reference clip")
     v_vtr.add_argument("--json", action="store_true", help="Output as JSON")
+    v_match = voice_sub.add_parser(
+        "match", help="which catalogue voice sounds like this clip?")
+    v_match.add_argument("audio", help="audio file / voice note path")
+    v_match.add_argument("--json", action="store_true",
+                         help="Output as JSON")
+    v_probe = voice_sub.add_parser(
+        "probe", help="acoustic voice-print of a clip (clone quality)")
+    v_probe.add_argument("audio", help="audio file path")
+    v_probe.add_argument("--json", action="store_true",
+                         help="Output as JSON")
 
     inbox = sub.add_parser("inbox", aliases=CLI_ALIASES["inbox"],
         help="Drop-in inbox: drop a file, link, or note — Devon acts",
@@ -1883,8 +1989,14 @@ def _parser() -> argparse.ArgumentParser:
     vision = sub.add_parser("vision", aliases=CLI_ALIASES["vision"],
         help="See images: describe, read text, locate UI elements",
         description=("nm vision describe <file> [\"question\"]\n"
-                     "nm vision read-text <file>\n"
-                     "nm vision locate <file> \"<target>\"\n"
+                     "nm vision read-text <file> [--strategy auto|native|model]\n"
+                     "nm vision locate <file> \"<target>\" [--template icon.png]\n"
+                     "nm vision compare <fileA> <fileB>\n"
+                     "nm vision extract <file>\n"
+                     "nm vision analyze <file>   (native: no model, no network)\n"
+                     "nm vision layout <file>    (native document layout)\n"
+                     "nm vision metadata <file>\n"
+                     "nm vision info             (capability report)\n"
                      "nm vision screenshot [--display N]  (privileged)"),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -1897,11 +2009,48 @@ def _parser() -> argparse.ArgumentParser:
     v_desc.add_argument("--json", action="store_true", help="Output as JSON")
     v_rt = vision_sub.add_parser("read-text", help="transcribe text from an image")
     v_rt.add_argument("file", help="workspace-relative path, URL, or reference")
+    v_rt.add_argument("--strategy", default="auto",
+                      choices=("auto", "native", "model"),
+                      help="auto=native OCR first then model (default)")
     v_rt.add_argument("--json", action="store_true", help="Output as JSON")
     v_loc = vision_sub.add_parser("locate", help="locate a UI element or object")
     v_loc.add_argument("file", help="workspace-relative path, URL, or reference")
     v_loc.add_argument("target", help="what to find, e.g. 'the submit button'")
+    v_loc.add_argument("--template",
+                       help="exact template image for Devon's own deterministic "
+                            "match (no model)")
     v_loc.add_argument("--json", action="store_true", help="Output as JSON")
+    v_cmp = vision_sub.add_parser("compare", help="spot the difference between "
+                                                 "two images")
+    v_cmp.add_argument("file_a", help="first image")
+    v_cmp.add_argument("file_b", help="second image")
+    v_cmp.add_argument("--prompt", default="",
+                       help="extra instruction for the semantic reading")
+    v_cmp.add_argument("--json", action="store_true", help="Output as JSON")
+    v_ext = vision_sub.add_parser("extract",
+                                  help="structured chat-ready image extraction")
+    v_ext.add_argument("file", help="workspace-relative path, URL, or reference")
+    v_ext.add_argument("--prompt", default="",
+                       help="extra focus instruction for the extraction")
+    v_ext.add_argument("--json", action="store_true", help="Output as JSON")
+    v_an = vision_sub.add_parser("analyze",
+                                 help="native deep analysis: EXIF, colors, "
+                                      "sharpness, hashes, faces, QR (no model)")
+    v_an.add_argument("file", help="workspace-relative path, URL, or reference")
+    v_an.add_argument("--json", action="store_true", help="Output as JSON")
+    v_lay = vision_sub.add_parser("layout",
+                                  help="native document layout: blocks/lines/"
+                                       "words with coordinates (tesseract)")
+    v_lay.add_argument("file", help="workspace-relative path, URL, or reference")
+    v_lay.add_argument("--json", action="store_true", help="Output as JSON")
+    v_meta = vision_sub.add_parser("metadata",
+                                   help="format, dimensions, size (no model)")
+    v_meta.add_argument("file", help="workspace-relative path, URL, or reference")
+    v_meta.add_argument("--json", action="store_true", help="Output as JSON")
+    v_info = vision_sub.add_parser("info",
+                                   help="capability report: what Devon can do "
+                                        "with images on this machine")
+    v_info.add_argument("--json", action="store_true", help="Output as JSON")
     v_shot = vision_sub.add_parser("screenshot",
                                    help="capture the local display (privileged: "
                                         "needs allow_screenshot + confirmation)")
@@ -2031,11 +2180,16 @@ def _parser() -> argparse.ArgumentParser:
                          help="comma list: youtube,tiktok,instagram,facebook,x")
     sh_make.add_argument("--now", action="store_true",
                          help="render immediately instead of just queueing")
+    sh_make.add_argument("--style", default="",
+                         help="edit style preset: phonk|documentary|vlog|minimal "
+                              "(default: niche default)")
     sh_q = sh_sub.add_parser("queue", help="schedule a post on the calendar")
     sh_q.add_argument("niche")
     sh_q.add_argument("topic")
     sh_q.add_argument("--at", default="", help="scheduled time label")
     sh_q.add_argument("--platforms", default="")
+    sh_q.add_argument("--style", default="",
+                      help="edit style preset (default: niche default)")
     sh_st = sh_sub.add_parser("status", help="list jobs / inspect one")
     sh_st.add_argument("job_id", nargs="?", default="")
     sh_st.add_argument("--json", action="store_true")
@@ -2059,6 +2213,139 @@ def _parser() -> argparse.ArgumentParser:
     sh_est = sh_sub.add_parser("estimate", help="render time/cost estimate")
     sh_est.add_argument("niche")
     sh_est.add_argument("topic")
+
+    video = sub.add_parser("video", aliases=CLI_ALIASES["video"],
+        help="Devon Studio: neural + motion-graphics video generation",
+        description=("nm video generate \"<prompt>\" [--backend auto|ltx|wan|motion]\n"
+                     "nm video motion lyric --audio song.mp3 --lyrics \"...\" [--preset neon_pop]\n"
+                     "nm video motion visual --audio song.mp3 [--preset phonk]\n"
+                     "nm video motion slideshow --images a.png,b.png [--audio song.mp3]\n"
+                     "nm video motion trailer --clips a.mp4,b.mp4 --title \"TITLE\"\n"
+                     "nm video motion grade --file clip.mp4 --preset cinematic\n"
+                     "nm video motion export --file clip.mp4 --format 9:16\n"
+                     "nm video chain scenes.json [--style cinematic]\n"
+                     "nm video capability | nm video list"),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    v_sub = video.add_subparsers(dest="video_action", required=True)
+    v_gen = v_sub.add_parser("generate", help="generate a clip (neural or motion)")
+    v_gen.add_argument("prompt", help="text prompt for the clip")
+    v_gen.add_argument("--backend", default="auto",
+                       help="auto|ltx|wan|motion (default: auto)")
+    v_gen.add_argument("--mode", default="t2v", help="t2v|i2v")
+    v_gen.add_argument("--image", default="",
+                       help="input image for i2v mode")
+    v_gen.add_argument("--seconds", type=float, default=5.0)
+    v_gen.add_argument("--seed", type=int, default=0)
+    v_gen.add_argument("--out", default="")
+    v_mo = v_sub.add_parser("motion", help="motion-studio products (CPU-only)")
+    mo_sub = v_mo.add_subparsers(dest="motion_action", required=True)
+    mo_ly = mo_sub.add_parser("lyric", help="kinetic lyric video")
+    mo_ly.add_argument("--audio", required=True)
+    mo_ly.add_argument("--lyrics", required=True,
+                       help="lyric text or @path/to/lyrics.txt")
+    mo_ly.add_argument("--preset", default="neon_pop")
+    mo_ly.add_argument("--image", default="")
+    mo_ly.add_argument("--grade", default="")
+    mo_ly.add_argument("--format", default="9:16")
+    mo_ly.add_argument("--out", default="")
+    mo_vi = mo_sub.add_parser("visual", help="audio-reactive visualizer")
+    mo_vi.add_argument("--audio", required=True)
+    mo_vi.add_argument("--preset", default="phonk",
+                       help="lofi|phonk|shorts|ambient|club|minimal")
+    mo_vi.add_argument("--images", default="",
+                       help="comma-separated cover art images")
+    mo_vi.add_argument("--seconds", type=float, default=0.0,
+                       help="cap render length (0 = full audio)")
+    mo_vi.add_argument("--grade", default="")
+    mo_vi.add_argument("--format", default="")
+    mo_vi.add_argument("--out", default="")
+    mo_sl = mo_sub.add_parser("slideshow", help="Ken Burns slideshow")
+    mo_sl.add_argument("--images", required=True,
+                       help="comma-separated image paths")
+    mo_sl.add_argument("--audio", default="")
+    mo_sl.add_argument("--per-image", type=float, default=4.0, dest="per_image")
+    mo_sl.add_argument("--move", default="auto")
+    mo_sl.add_argument("--transition", default="crossfade")
+    mo_sl.add_argument("--grade", default="cinematic")
+    mo_sl.add_argument("--format", default="9:16")
+    mo_sl.add_argument("--out", default="")
+    mo_tr = mo_sub.add_parser("trailer", help="trailer cut")
+    mo_tr.add_argument("--clips", required=True,
+                       help="comma-separated clip paths")
+    mo_tr.add_argument("--title", default="")
+    mo_tr.add_argument("--tagline", default="")
+    mo_tr.add_argument("--audio", default="")
+    mo_tr.add_argument("--clip-len", type=float, default=2.2, dest="clip_len")
+    mo_tr.add_argument("--transition", default="cut")
+    mo_tr.add_argument("--grade", default="cinematic")
+    mo_tr.add_argument("--format", default="16:9")
+    mo_tr.add_argument("--out", default="")
+    mo_gr = mo_sub.add_parser("grade", help="apply a color grade")
+    mo_gr.add_argument("--file", required=True)
+    mo_gr.add_argument("--preset", default="cinematic")
+    mo_gr.add_argument("--out", default="")
+    mo_ex = mo_sub.add_parser("export", help="reframe to a delivery aspect")
+    mo_ex.add_argument("--file", required=True)
+    mo_ex.add_argument("--format", default="9:16",
+                       help="9:16|16:9|1:1|4:5")
+    mo_ex.add_argument("--out", default="")
+    mo_sub.add_parser("moves", help="list Ken Burns camera moves")
+    mo_sub.add_parser("presets", help="list lyric/visualizer/grade presets")
+    v_ch = v_sub.add_parser("chain", help="multi-scene film from scenes.json")
+    v_ch.add_argument("scenes_file", help="JSON array of scene dicts")
+    v_ch.add_argument("--backend", default="auto")
+    v_ch.add_argument("--style", default="cinematic")
+    v_ch.add_argument("--transition", default="crossfade")
+    v_ch.add_argument("--grade", default="cinematic")
+    v_ch.add_argument("--format", default="16:9")
+    v_ch.add_argument("--seed", type=int, default=100)
+    v_ch.add_argument("--out", default="")
+    v_cap = v_sub.add_parser("capability", help="what video can run here")
+    v_cap.add_argument("--backend", default="auto")
+    v_ls = v_sub.add_parser("list", help="recent studio renders")
+    v_ls.add_argument("--json", action="store_true")
+
+    audio = sub.add_parser("audio", aliases=CLI_ALIASES["audio"],
+        help="Devon's own audio toolkit: enhance, effects, analysis, recognition",
+        description=("nm audio enhance <file> [--profile voice|music|light] [--engine auto|ffmpeg|devon]\n"
+                     "nm audio fx <file> <effects...>  (e.g. reverb wet=0.3, eq low=3 high=-2, normalize)\n"
+                     "nm audio fx-list\n"
+                     "nm audio analyze <file>\n"
+                     "nm audio fingerprint <file> [--title T] [--artist A]\n"
+                     "nm audio match <file>"),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    a_sub = audio.add_subparsers(dest="audio_action", required=True)
+    a_en = a_sub.add_parser("enhance", help="denoise (ffmpeg → Devon's own DSP)")
+    a_en.add_argument("file", help="audio file")
+    a_en.add_argument("--profile", default="voice",
+                      help="voice|music|light (default: voice)")
+    a_en.add_argument("--engine", default="auto",
+                      help="auto|ffmpeg|devon (default: auto)")
+    a_en.add_argument("--json", action="store_true")
+    a_fx = a_sub.add_parser("fx", help="Devon-owned effect chain")
+    a_fx.add_argument("file", help="audio file")
+    a_fx.add_argument("effects", nargs="+",
+                      help="effects, e.g. reverb wet=0.3, eq low=3")
+    a_fx.add_argument("--out-dir", default="", dest="out_dir")
+    a_fx.add_argument("--json", action="store_true")
+    a_fxl = a_sub.add_parser("fx-list", help="the native effect catalogue")
+    a_fxl.add_argument("--json", action="store_true")
+    a_an = a_sub.add_parser("analyze", help="what Devon hears (tempo, key, …)")
+    a_an.add_argument("file", help="audio file")
+    a_an.add_argument("--json", action="store_true")
+    a_fp = a_sub.add_parser("fingerprint",
+                            help="index into local recognition memory")
+    a_fp.add_argument("file", help="audio file")
+    a_fp.add_argument("--title", default="")
+    a_fp.add_argument("--artist", default="")
+    a_fp.add_argument("--source", default="library")
+    a_fp.add_argument("--json", action="store_true")
+    a_m = a_sub.add_parser("match",
+                           help="recognize against the local library")
+    a_m.add_argument("file", help="audio file")
+    a_m.add_argument("--json", action="store_true")
 
     room = sub.add_parser("room", aliases=CLI_ALIASES["room"],
         help="Project rooms: persistent per-goal workspaces",
@@ -2265,6 +2552,55 @@ def _parser() -> argparse.ArgumentParser:
     t_kill.add_argument("--json", action="store_true", help="Output as JSON")
     t_doctor = trade_sub.add_parser("doctor", help="check the Sentinel integration")
     t_doctor.add_argument("--json", action="store_true", help="Output as JSON")
+    t_exness = trade_sub.add_parser("exness", help="Exness trading desk (paper-first, risk-managed)")
+    t_exness_sub = t_exness.add_subparsers(dest="exness_action", required=True)
+    t_ex = t_exness_sub.add_parser("snapshot", help="account state + open positions")
+    t_ex.add_argument("--mode", default="paper", help="paper|live")
+    t_ex.add_argument("--json", action="store_true", help="Output as JSON")
+    t_ex = t_exness_sub.add_parser("positions", help="open positions")
+    t_ex.add_argument("--mode", default="paper", help="paper|live")
+    t_ex.add_argument("--json", action="store_true", help="Output as JSON")
+    t_ex = t_exness_sub.add_parser("size", help="position size from real contract specs")
+    t_ex.add_argument("instrument", help="e.g. XAUUSD")
+    t_ex.add_argument("--entry", type=float, required=True)
+    t_ex.add_argument("--stop-loss", type=float, required=True, dest="stop_loss")
+    t_ex.add_argument("--risk-pct", type=float, default=1.0, dest="risk_pct")
+    t_ex.add_argument("--mode", default="paper", help="paper|live")
+    t_ex.add_argument("--json", action="store_true", help="Output as JSON")
+    t_ex = t_exness_sub.add_parser("open", help="open a position (paper simulates; live is confirmation-gated)")
+    t_ex.add_argument("instrument", help="e.g. XAUUSD")
+    t_ex.add_argument("--side", required=True, help="buy|sell")
+    t_ex.add_argument("--volume", type=float, required=True, help="lots")
+    t_ex.add_argument("--entry", type=float, default=None)
+    t_ex.add_argument("--stop-loss", type=float, default=None, dest="stop_loss")
+    t_ex.add_argument("--take-profit", type=float, default=None, dest="take_profit")
+    t_ex.add_argument("--comment", default="")
+    t_ex.add_argument("--mode", default="paper", help="paper|live")
+    t_ex.add_argument("--confirmed", action="store_true", help="owner approved the exact payload (live)")
+    t_ex.add_argument("--json", action="store_true", help="Output as JSON")
+    t_ex = t_exness_sub.add_parser("close", help="close a position")
+    t_ex.add_argument("position_id")
+    t_ex.add_argument("--exit-price", type=float, default=None, dest="exit_price")
+    t_ex.add_argument("--mode", default="paper", help="paper|live")
+    t_ex.add_argument("--confirmed", action="store_true", help="live only")
+    t_ex.add_argument("--json", action="store_true", help="Output as JSON")
+    t_ex = t_exness_sub.add_parser("mark", help="mark paper positions to market (SL/TP auto-close)")
+    t_ex.add_argument("instrument", help="e.g. XAUUSD")
+    t_ex.add_argument("--price", type=float, required=True)
+    t_ex.add_argument("--json", action="store_true", help="Output as JSON")
+    t_ex = t_exness_sub.add_parser("stats", help="win rate + realized P&L")
+    t_ex.add_argument("--mode", default="paper", help="paper|live")
+    t_ex.add_argument("--json", action="store_true", help="Output as JSON")
+    t_ex = t_exness_sub.add_parser("journal", help="trade journal")
+    t_ex.add_argument("--mode", default="paper", help="paper|live")
+    t_ex.add_argument("--limit", type=int, default=20)
+    t_ex.add_argument("--json", action="store_true", help="Output as JSON")
+    t_ex = t_exness_sub.add_parser("unlock", help="unlock live on a non-demo account")
+    t_ex.add_argument("--confirm", default="", help='must be "I understand the risks"')
+    t_ex.add_argument("--json", action="store_true", help="Output as JSON")
+    t_ex = t_exness_sub.add_parser("risk", help="show the risk policy + daily P&L")
+    t_ex.add_argument("--mode", default="paper", help="paper|live")
+    t_ex.add_argument("--json", action="store_true", help="Output as JSON")
 
     swarm = sub.add_parser("swarm", aliases=CLI_ALIASES["swarm"],
         help="Agent swarm: specialist roles, debate, fan-out/fan-in",
@@ -2292,15 +2628,23 @@ def _parser() -> argparse.ArgumentParser:
 
 
     # Additional subcommands
-    book = sub.add_parser("book", aliases=CLI_ALIASES["book"], help="AI-assisted book writing: create, write, build")
+    book = sub.add_parser("book", aliases=CLI_ALIASES["book"], help="AI-assisted book writing: create, write, build; story reader + fiction studio")
     book.add_argument("action", nargs="?", default="list",
-                     choices=["list", "create", "run", "status", "build"],
+                     choices=["list", "create", "run", "status", "build",
+                              "search-stories", "follow", "following", "read",
+                              "next", "prev", "sync", "progress", "bookmark",
+                              "bible", "continue", "fiction", "fiction-write",
+                              "fiction-status"],
                      help="Action to perform")
-    book.add_argument("topic", nargs="?", default="", help="Book topic")
+    book.add_argument("topic", nargs="?", default="", help="Book topic / story title / premise")
     book.add_argument("--chapters", type=int, default=5, help="Number of chapters")
     book.add_argument("--words", type=int, default=2000, help="Words per chapter")
     book.add_argument("--no-research", action="store_true", help="Skip research phase")
     book.add_argument("--slug", default="", help="Book slug")
+    book.add_argument("--genre", default="", help="fiction: mystery|thriller|horror|sci-fi|fantasy|romance")
+    book.add_argument("--mode", default="", help="fiction: novel|serial")
+    book.add_argument("--theme", default="", help="fiction: wisdom theme to weave in")
+    book.add_argument("--direction", default="", help="continue/fiction-write: story steer")
     books = sub.add_parser("books", aliases=CLI_ALIASES["books"],
                            help="Book library: ingest, search, read, bookmarks, collections")
     books.add_argument("action", nargs="?", default="list",

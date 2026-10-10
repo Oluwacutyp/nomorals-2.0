@@ -116,6 +116,8 @@ def build_adapter(settings: Any, name: str, *, on_new_member: Any = None,
                 host=chat.whatsapp_host,
                 port=chat.whatsapp_port,
                 media_dir=str(settings.resolve("data/media/whatsapp")),
+                outbox_dir=str(settings.resolve(
+                    getattr(chat, "whatsapp_outbox_dir", "data/chat/outbox"))),
             )
         except Exception as exc:  # noqa: BLE001
             raise ValueError(f"whatsapp unavailable: {exc}") from exc
@@ -161,6 +163,8 @@ def build_adapter(settings: Any, name: str, *, on_new_member: Any = None,
                 host=chat.sms_host,
                 port=chat.sms_port,
                 media_dir=str(settings.resolve("data/media/sms")),
+                auth_token=str(getattr(chat, "sms_auth_token", "") or ""),
+                public_url=str(getattr(chat, "sms_public_url", "") or ""),
             )
         except Exception as exc:  # noqa: BLE001
             raise ValueError(f"sms unavailable: {exc}") from exc

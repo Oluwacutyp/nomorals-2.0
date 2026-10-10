@@ -21,13 +21,19 @@ Behavioral rules:
 * Twilio delivers inbound SMS as a form-encoded webhook POST. This adapter
   runs a tiny local HTTP server for that; put it behind your own
   reverse proxy / tunnel and set the Twilio webhook URL to it.
-* Twilio signs webhooks (``X-Twilio-Signature``). This codebase has no
-  signature validator yet, so payloads are accepted with a warning log —
-  do NOT treat inbound SMS as authenticated until one exists.
+* Twilio signs webhooks (``X-Twilio-Signature``) and this adapter verifies
+  them with the account's auth token (:func:`verify_twilio_signature`,
+  pure stdlib HMAC-SHA1 — the same algorithm Twilio documents). With the
+  token configured, an unsigned/forged POST is rejected 403. Without it,
+  payloads are accepted with a warning log — do NOT expose the webhook
+  without the token.
 """
 
 from __future__ import annotations
 
+import base64
+import hashlib
+import hmac
 import threading
 import time
 import urllib.parse
@@ -46,6 +52,7 @@ __all__ = [
     "sms_allows",
     "sms_enabled",
     "split_sms",
+    "verify_twilio_signature",
 ]
 
 _log = get_logger(__name__)
@@ -132,6 +139,53 @@ def split_sms(text: str) -> list[str]:
     return [f"({i + 1}/{total}) {chunk}" for i, chunk in enumerate(chunks)]
 
 
+def verify_twilio_signature(
+    auth_token: str,
+    url: str,
+    params: dict[str, Any],
+    signature: str,
+) -> bool:
+    """Verify a Twilio webhook signature — Twilio's documented algorithm,
+    pure stdlib (no twilio package needed).
+
+    The signature is HMAC-SHA1 (key = auth token) over the full webhook URL
+    followed by every POST parameter sorted by name (``url + k1 + v1 +
+    k2 + v2 + ...``), base64-encoded. Comparison is constant-time. Any
+    exception (bad inputs, wrong types) verifies False — never raises.
+    """
+    try:
+        token = str(auth_token or "")
+        sig = str(signature or "")
+        if not token or not sig:
+            return False
+        body = str(url or "")
+        for key in sorted(str(k) for k in params):
+            value = params.get(key)
+            if isinstance(value, (list, tuple)):
+                value = value[0] if value else ""
+            body += str(key) + str(value if value is not None else "")
+        digest = hmac.new(token.encode("utf-8"), body.encode("utf-8"),
+                          hashlib.sha1).digest()
+        expected = base64.b64encode(digest).decode("ascii")
+        return hmac.compare_digest(expected, sig)
+    except Exception:  # noqa: BLE001 - verification fails closed
+        return False
+
+
+def _webhook_url(adapter: "SMSAdapter", path: str) -> str:
+    """Best-effort public URL for signature verification.
+
+    Twilio signs the exact URL it was configured with; behind a tunnel the
+    adapter only sees the local path. ``sms_public_url`` (when set) takes
+    precedence, else we fall back to the local host:port — which only
+    verifies when Twilio posts to that exact URL.
+    """
+    base = str(getattr(adapter, "public_url", "") or "").rstrip("/")
+    if base:
+        return base + (path or "")
+    return f"http://{adapter.host}:{adapter.port}{path or ''}"
+
+
 class _TwilioHookHandler(BaseHTTPRequestHandler):
     """Form-encoded Twilio webhook POSTs → the adapter's inbound queue."""
 
@@ -156,13 +210,24 @@ class _TwilioHookHandler(BaseHTTPRequestHandler):
         raw = self.rfile.read(max(0, length)) if length else b""
         form = urllib.parse.parse_qs(raw.decode("utf-8", "replace"))
         payload = {k: v[0] for k, v in form.items() if v}
-        # Twilio signs webhooks; we have no validator in this codebase yet.
-        if self.headers.get("X-Twilio-Signature"):
-            _log.warning(
-                "sms webhook: X-Twilio-Signature present but no validator "
-                "in this codebase — accepting payload unsigned-verified"
-            )
         adapter = type(self).adapter
+        # Twilio signs webhooks (X-Twilio-Signature). With the auth token
+        # configured we verify; without it we accept with a warning (the
+        # module docstring says don't expose the webhook that way).
+        auth_token = getattr(adapter, "auth_token", "") if adapter else ""
+        if auth_token:
+            signature = self.headers.get("X-Twilio-Signature") or ""
+            url = _webhook_url(adapter, self.path)
+            if not verify_twilio_signature(auth_token, url, payload, signature):
+                _log.warning("sms webhook: signature verification FAILED — "
+                             "rejecting forged/unsigned POST")
+                self._respond(code=403)
+                return
+        elif self.headers.get("X-Twilio-Signature"):
+            _log.warning(
+                "sms webhook: X-Twilio-Signature present but no auth token "
+                "configured — accepting payload unsigned-verified"
+            )
         if adapter is not None:
             try:
                 message = adapter.handle_webhook(payload)
@@ -191,6 +256,8 @@ class SMSAdapter(ChatAdapter):
         host: str = "127.0.0.1",
         port: int = 0,
         media_dir: str = "data/media/sms",
+        auth_token: str = "",
+        public_url: str = "",
     ) -> None:
         super().__init__(media_dir=media_dir)
         #: Duck-typed Twilio connector: needs
@@ -200,6 +267,14 @@ class SMSAdapter(ChatAdapter):
         self.from_number = (from_number or "").strip()
         self.host = host
         self.port = port
+        #: Twilio auth token — enables X-Twilio-Signature verification on
+        #: the webhook. Empty = accepted with a warning (don't expose the
+        #: webhook that way).
+        self.auth_token = (auth_token or "").strip()
+        #: The public URL Twilio is configured to POST to (behind a tunnel
+        #: the adapter only sees the local path — Twilio signs the exact
+        #: configured URL, so set this for verification to pass).
+        self.public_url = (public_url or "").strip()
         self._server: ThreadingHTTPServer | None = None
         self._handler: Any = None
 
@@ -309,4 +384,5 @@ class SMSAdapter(ChatAdapter):
         info["listening"] = f"{self.host}:{self.port}" if self._server else ""
         info["twilio_configured"] = self._twilio is not None
         info["from_number"] = self.from_number
+        info["signature_verified"] = bool(self.auth_token)
         return info

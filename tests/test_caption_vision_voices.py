@@ -242,3 +242,117 @@ def test_voices_shows_catalogue_voices():
         out = m._control_voices("", chat_key="tg:1")
         assert "devon" in out
         assert "narrator" in out
+
+
+# ── /vision subcommands ───────────────────────────────────────────────
+
+def _ok(value):
+    return SimpleNamespace(ok=True, value=value)
+
+
+def test_vision_subcommand_analyze():
+    m = _mixin()
+    m.context.tools.call.return_value = _ok({
+        "metadata": {"format": "png", "width": 64, "height": 48, "bytes": 100},
+        "exif": {"present": False},
+        "colors": {"available": True, "dominant": [{"hex": "#ff0000", "share": 1.0}],
+                   "brightness": 76.0},
+        "quality": {"available": True, "sharpness": 3.0,
+                    "sharpness_label": "blurry", "entropy_bits": 1.0},
+        "hashes": {"available": True, "dhash": "00" * 8},
+        "faces": {"available": True, "count": 0},
+        "qr": {"available": True, "count": 0},
+    })
+    out = m._control_vision("analyze /tmp/pic.png", chat_key="tg:1",
+                            message=_msg())
+    assert m.context.tools.call.call_args[0][0] == "vision_analyze"
+    assert "#ff0000" in out
+    assert "no model" in out
+
+
+def test_vision_subcommand_read_text():
+    m = _mixin()
+    m.context.tools.call.return_value = _ok({
+        "text": "HELLO", "method": "native-ocr",
+        "confidence_note": "deterministic"})
+    out = m._control_vision("read-text /tmp/pic.png", chat_key="tg:1",
+                            message=_msg())
+    assert m.context.tools.call.call_args[0][0] == "vision_read_text"
+    assert "HELLO" in out
+    assert "native-ocr" in out
+
+
+def test_vision_subcommand_locate_quoted_target():
+    m = _mixin()
+    m.context.tools.call.return_value = _ok({
+        "target": "the send button", "found": True, "x": 100, "y": 200,
+        "w": 50, "h": 30, "method": "vlm-guess", "score": 0.9,
+        "disclaimer": "approx"})
+    out = m._control_vision('locate "the send button" /tmp/pic.png',
+                            chat_key="tg:1", message=_msg())
+    call_kwargs = m.context.tools.call.call_args[1]
+    assert m.context.tools.call.call_args[0][0] == "vision_locate"
+    assert call_kwargs["target"] == "the send button"
+    assert "x=100" in out
+
+
+def test_vision_subcommand_locate_needs_target():
+    m = _mixin()
+    out = m._control_vision("locate /tmp/pic.png", chat_key="tg:1",
+                            message=_msg())
+    assert "usage" in out.lower()
+
+
+def test_vision_subcommand_compare_two_paths():
+    m = _mixin()
+    m.context.tools.call.return_value = _ok({
+        "description": "native diff: 5.0% of pixels changed",
+        "method": "native",
+        "native": {"identical": False, "changed_fraction": 0.05,
+                   "mean_abs_diff": 9.5,
+                   "changed_bbox_1000": {"x": 1, "y": 2, "w": 3, "h": 4}},
+    })
+    out = m._control_vision("compare /tmp/a.png /tmp/b.png", chat_key="tg:1",
+                            message=_msg())
+    call_kwargs = m.context.tools.call.call_args[1]
+    assert m.context.tools.call.call_args[0][0] == "vision_compare"
+    assert call_kwargs["path_a"] == "/tmp/a.png"
+    assert call_kwargs["path_b"] == "/tmp/b.png"
+    assert "5.0%" in out
+
+
+def test_vision_subcommand_info():
+    m = _mixin()
+    m.context.tools.call.return_value = _ok({
+        "profile": "laptop",
+        "native": {"ocr": {"available": False, "why": "no tesseract",
+                           "install": "pkg install tesseract"},
+                   "colors": {"available": True, "what": "palette"}},
+        "needs_model": {"describe": "open-vocabulary Q&A"},
+        "router_vision": False,
+    })
+    out = m._control_vision("info", chat_key="tg:1", message=_msg())
+    assert m.context.tools.call.call_args[0][0] == "vision_capabilities"
+    assert "native" in out.lower()
+    assert "needs a vision model" in out
+
+
+def test_vision_subcommand_layout():
+    m = _mixin()
+    m.context.tools.call.return_value = _ok({
+        "blocks": 1, "words": 2, "mean_word_conf": 95.0,
+        "lines": [{"text": "hello", "conf": 95.0, "bbox_1000": {}}]})
+    out = m._control_vision("layout /tmp/doc.png", chat_key="tg:1",
+                            message=_msg())
+    assert m.context.tools.call.call_args[0][0] == "vision_layout"
+    assert "hello" in out
+
+
+def test_vision_bare_still_describes():
+    m = _mixin()
+    m.context.tools.call.return_value = _ok(
+        {"description": "a cat", "provider": "groq"})
+    out = m._control_vision("/tmp/pic.png what's this?", chat_key="tg:1",
+                            message=_msg())
+    assert m.context.tools.call.call_args[0][0] == "vision_describe"
+    assert "a cat" in out

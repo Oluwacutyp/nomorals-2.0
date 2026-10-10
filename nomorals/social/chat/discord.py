@@ -16,7 +16,8 @@ discord --guide``), so the companion sees and texts exactly what you can:
 The one honest caveat, kept in plain sight: Discord's ToS reserves
 automation for bot accounts, so a user client is done at your own risk —
 the account running it is the one on the line. Enable with
-``chat.discord_enabled = true`` + ``NM_CHAT_DISCORD_TOKEN``.
+``chat.discord_enabled = true`` + ``NM_CHAT_DISCORD_TOKEN``; see
+``nm chat doctor`` for a per-platform setup check.
 
 The client owns its asyncio loop inside ``run()``; ``send``/``typing``/
 ``history``/``start_dm`` are called from other threads and are marshaled
@@ -71,7 +72,62 @@ class DiscordAdapter(ChatAdapter):
         self._bot: Any = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._me: Any = None
+        #: The discord module, captured inside ``run()``. ``import discord``
+        #: stays lazy (the dependency is optional), but every method that
+        #: touches the API goes through this instead of a bare ``discord``
+        #: name — a NameError used to make every ``send_media`` and every
+        #: ``send`` with ``reply_to`` fail.
+        self._discord_mod: Any = None
         self._greeted_members: set[str] = self._load_greeted()
+
+    def _dc(self) -> Any:
+        """The discord module, however we can get it. Never raises."""
+        if self._discord_mod is not None:
+            return self._discord_mod
+        try:
+            import discord as _discord  # type: ignore[import-not-found]
+
+            self._discord_mod = _discord
+            return _discord
+        except Exception:  # noqa: BLE001 - dependency genuinely missing
+            return None
+
+    def _me_id(self) -> str:
+        """This account's user id, or "" before the ready event."""
+        try:
+            return str(getattr(self._me, "id", "") or "")
+        except Exception:  # noqa: BLE001
+            return ""
+
+    def _mentions_me(self, message: Any) -> bool:
+        """True when the gateway tagged this account (or named it)."""
+        me_id = self._me_id()
+        try:
+            for user in getattr(message, "mentions", ()) or ():
+                if str(getattr(user, "id", "") or "") == me_id and me_id:
+                    return True
+        except Exception:  # noqa: BLE001 - mentions list unreadable
+            pass
+        # Fallback for user clients where the mentions array is empty:
+        # a raw @username in the text.
+        try:
+            text = str(getattr(message, "content", "") or "").lower()
+            name = str(getattr(self._me, "name", "") or "").lower()
+            if me_id and name and f"@{name}" in text:
+                return True
+        except Exception:  # noqa: BLE001
+            pass
+        return False
+
+    def _author_identity(self, message: Any) -> tuple[str, str, str]:
+        """(display_name, stable_id, username) for the message author."""
+        author = getattr(message, "author", None)
+        display = str(
+            getattr(author, "global_name", "") or getattr(author, "name", "")
+            or getattr(author, "display_name", "") or author or "")
+        stable = str(getattr(author, "id", "") or "")
+        username = str(getattr(author, "name", "") or "")
+        return display, stable, username
 
     # ── newcomer bookkeeping ────────────────────────────────────────────────
     def _greeted_path(self) -> str:
@@ -139,7 +195,7 @@ class DiscordAdapter(ChatAdapter):
             raise ValidationError(
                 "that is a BOT token (developer portal) — the Discord companion "
                 "runs YOUR account and needs your personal account token; "
-                "run `nm discord --guide` for the one-time copy",
+                "run `nm chat doctor` for the one-time copy guide",
                 field="discord_token",
             )
 
@@ -165,6 +221,9 @@ class DiscordAdapter(ChatAdapter):
             raise RuntimeError(
                 "discord.py is not installed: pip install nomorals[chat]"
             ) from None
+        # Capture the module so send/send_media (which run on other threads)
+        # can reference discord.File / discord.MessageReference.
+        self._discord_mod = discord
 
         # discord.py-self 2.x: user accounts take no intents
         bot = discord.Client()
@@ -180,6 +239,14 @@ class DiscordAdapter(ChatAdapter):
         async def on_message(message: Any) -> None:
             try:
                 if getattr(message.author, "bot", False):
+                    return
+                # Self-message loop guard: on a user account, messages we
+                # sent from another client (phone, desktop) arrive here with
+                # author == us. Processing them would make the brain reply to
+                # itself in a loop. The Telegram userbot has the same guard.
+                author_id = str(getattr(message.author, "id", "") or "")
+                me_id = self._me_id()
+                if me_id and author_id == me_id:
                     return
                 channel = message.channel
                 if isinstance(channel, discord.DMChannel):
@@ -210,22 +277,27 @@ class DiscordAdapter(ChatAdapter):
                         _log.debug("discord media save failed: %s", exc)
                 if not text and not media:
                     return
-                handler(
+                display, stable_id, username = self._author_identity(message)
+                self._deliver(
+                    handler,
                     ChatMessage(
-                    chat=ChatRef(
-                        platform=self.name,
-                        chat_id=chat_id,
-                        kind=kind,
-                        title=str(getattr(channel, "name", "") or chat_id),
-                        peer=peer,
-                    ),
+                        chat=ChatRef(
+                            platform=self.name,
+                            chat_id=chat_id,
+                            kind=kind,
+                            title=str(getattr(channel, "name", "") or chat_id),
+                            peer=display,
+                        ),
                         incoming=True,
                         text=text,
-                        sender=peer,
+                        sender=display,
+                        sender_id=stable_id,
+                        sender_username=username,
                         media=media,
                         message_id=str(message.id),
+                        mentioned=self._mentions_me(message),
                         ts=(message.created_at.timestamp() if hasattr(message, "created_at") else time.time()),
-                    )
+                    ),
                 )
             except Exception as exc:  # noqa: BLE001 - one bad message must not kill the bot
                 _log.exception("discord on_message failed: %s", exc)
@@ -257,53 +329,90 @@ class DiscordAdapter(ChatAdapter):
              buttons: list[list[tuple[str, str]]] | None = None,
              parse_mode: str = "") -> SendResult:
         started = time.perf_counter()
-        try:
-
-            async def _do() -> Any:
-                channel = await self._channel(chat)
-                kwargs: dict[str, Any] = {}
-                if reply_to:
-                    try:
-                        kwargs["reference"] = discord.MessageReference(message_id=int(reply_to),
-                                                                       channel_id=int(chat.chat_id))
-                    except (TypeError, ValueError):  # noqa: E103 - invalid reply_to id, send without reference
-                        pass
-                return await channel.send(text, **kwargs)
-
-            message = self._run_on_loop(_do())
-            self.stats["sent"] += 1
-            return SendResult(ok=True, platform=self.name, message_id=str(getattr(message, "id", "")),
+        dc = self._dc()
+        if dc is None:
+            return SendResult(ok=False, platform=self.name,
+                              error="discord.py is not installed",
                               seconds=time.perf_counter() - started)
-        except Exception as exc:  # noqa: BLE001
-            self.stats["send_errors"] += 1
-            return SendResult(ok=False, platform=self.name, error=str(exc),
-                              seconds=time.perf_counter() - started)
+        last_error = ""
+        for attempt in (1, 2):
+            try:
+
+                async def _do() -> Any:
+                    channel = await self._channel(chat)
+                    kwargs: dict[str, Any] = {}
+                    if reply_to:
+                        try:
+                            kwargs["reference"] = dc.MessageReference(
+                                message_id=int(reply_to), channel_id=int(chat.chat_id))
+                        except (TypeError, ValueError):  # noqa: E103 - invalid reply_to id, send without reference
+                            pass
+                    return await channel.send(text, **kwargs)
+
+                message = self._run_on_loop(_do())
+                self.stats["sent"] += 1
+                return SendResult(ok=True, platform=self.name,
+                                  message_id=str(getattr(message, "id", "")),
+                                  seconds=time.perf_counter() - started)
+            except Exception as exc:  # noqa: BLE001
+                last_error = str(exc)
+                # Discord 429: honor the server's own backoff once. (The
+                # library usually pre-handles rate limits; this catches the
+                # leftover case on user clients.)
+                retry_after = getattr(exc, "retry_after", 0) or 0
+                if getattr(exc, "status", 0) == 429 and attempt == 1 and retry_after > 0:
+                    wait = min(float(retry_after), 10.0) + 0.5
+                    _log.info("discord 429 — waiting %.1fs before retry", wait)
+                    time.sleep(wait)
+                    continue
+                break
+        self.stats["send_errors"] += 1
+        return SendResult(ok=False, platform=self.name, error=last_error,
+                          seconds=time.perf_counter() - started)
 
     def send_media(self, chat: ChatRef, media: MediaRef, *, caption: str = "") -> SendResult:
         started = time.perf_counter()
-        try:
-
-            async def _do() -> Any:
-                import io
-
-                channel = await self._channel(chat)
-                with open(media.path, "rb") as fh:
-                    file = discord.File(fh, filename=os.path.basename(media.path))
-                return await channel.send(caption or None, file=file)
-
-            message = self._run_on_loop(_do())
-            self.stats["sent"] += 1
-            return SendResult(ok=True, platform=self.name, message_id=str(getattr(message, "id", "")),
+        dc = self._dc()
+        if dc is None:
+            return SendResult(ok=False, platform=self.name,
+                              error="discord.py is not installed",
                               seconds=time.perf_counter() - started)
-        except Exception as exc:  # noqa: BLE001
-            self.stats["send_errors"] += 1
-            return SendResult(ok=False, platform=self.name, error=str(exc),
-                              seconds=time.perf_counter() - started)
+        last_error = ""
+        for attempt in (1, 2):
+            try:
+
+                async def _do() -> Any:
+                    channel = await self._channel(chat)
+                    with open(media.path, "rb") as fh:
+                        file = dc.File(fh, filename=os.path.basename(media.path))
+                    return await channel.send(caption or None, file=file)
+
+                message = self._run_on_loop(_do())
+                self.stats["sent"] += 1
+                return SendResult(ok=True, platform=self.name,
+                                  message_id=str(getattr(message, "id", "")),
+                                  seconds=time.perf_counter() - started)
+            except Exception as exc:  # noqa: BLE001
+                last_error = str(exc)
+                retry_after = getattr(exc, "retry_after", 0) or 0
+                if getattr(exc, "status", 0) == 429 and attempt == 1 and retry_after > 0:
+                    wait = min(float(retry_after), 10.0) + 0.5
+                    _log.info("discord 429 — waiting %.1fs before retry", wait)
+                    time.sleep(wait)
+                    continue
+                break
+        self.stats["send_errors"] += 1
+        return SendResult(ok=False, platform=self.name, error=last_error,
+                          seconds=time.perf_counter() - started)
 
     #: Discord clears a typing indicator after ~10 s; refresh cadence.
     TYPING_REFRESH = 10.0
 
-    def typing(self, chat: ChatRef, seconds: float = 3.0) -> bool:
+    def typing(self, chat: ChatRef, seconds: float = 3.0,
+               action: str = "typing") -> bool:
+        """Typing indicator. ``action`` is accepted for the shared protocol
+        (the gateway passes it) — Discord only has typing, so "recording"
+        maps to the same indicator."""
         if seconds <= 0:
             return False
         seconds = min(float(seconds), 120.0)
@@ -334,8 +443,14 @@ class DiscordAdapter(ChatAdapter):
             async def _do() -> list[ChatMessage]:
                 channel = await self._channel(chat)
                 out: list[ChatMessage] = []
+                me_id = self._me_id()
                 async for message in channel.history(limit=limit, oldest_first=True):
-                    if getattr(message.author, "bot", False) and message.author.id == getattr(self._me, "id", None):
+                    author_id = str(getattr(message.author, "id", "") or "")
+                    # Skip bots and our own messages — history feeds the
+                    # brain's context, and neither is "someone talking to us".
+                    if getattr(message.author, "bot", False):
+                        continue
+                    if me_id and author_id == me_id:
                         continue
                     out.append(
                         ChatMessage(
@@ -343,6 +458,7 @@ class DiscordAdapter(ChatAdapter):
                             incoming=True,
                             text=message.content or "",
                             sender=str(message.author),
+                            sender_id=author_id,
                             message_id=str(message.id),
                             ts=message.created_at.timestamp() if hasattr(message, "created_at") else time.time(),
                         )

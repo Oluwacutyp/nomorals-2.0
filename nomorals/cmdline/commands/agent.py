@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 from typing import Any
+from ...llm.brain import brain_for
 
 
 
@@ -53,9 +54,9 @@ def _cmd_ask(args: argparse.Namespace, context: Any) -> int:
     messages = ([Message.system(args.system)] if args.system else []) + [
         Message.user(" ".join(args.prompt))
     ]
-    response = context.router.chat(
+    response = brain_for(context).chat(
         messages, SamplingParams(temperature=args.temperature, max_tokens=args.max_tokens)
-    )
+    , task_kind="chat")
     if args.json:
         print(json.dumps(response.to_dict(), indent=2, default=str))
     else:

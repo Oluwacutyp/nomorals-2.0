@@ -215,6 +215,10 @@ class MultiGame:
     #: difficulty ladder this game actually honors (subset of
     #: DIFFICULTY_LEVELS). Empty = the game doesn't take a difficulty.
     difficulties: tuple[str, ...] = ()
+    #: the DM narrates a finale scene when this game ends (opt-in —
+    #: combat and story games want the last word, quiet puzzle tables
+    #: don't). The scene is built by dm_finale_event().
+    dm_finale: bool = False
     #: game-specific mode words the player can pass at start
     #: (``/game gomoku big``). word → one-line description shown in
     #: help. The word arrives as ``variant`` in ``new_state``; the game
@@ -335,6 +339,11 @@ class MultiGame:
         if w is not None:
             return f"🏁 {w.name} wins."
         return "game over."
+
+    def dm_finale_event(self, room: Room) -> str | None:
+        """One bare event line for the DM's finale narration (only used
+        when ``dm_finale`` is True). None = the DM stays silent."""
+        return None
 
     # ── display ─────────────────────────────────────────────────────────────
     def describe_state(self, room: Room) -> str:

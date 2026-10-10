@@ -27,6 +27,7 @@ import logging
 import time
 from typing import Any
 
+from ..llm.brain import brain_for
 from ..core.decoder import (DECODERS, analyze, identify_hash,
                             known_hash_lookup)
 from ..core.errors import ToolError
@@ -186,8 +187,8 @@ class DecoderAgent(Agent):
                     "flags. Only state what the report supports.\n"
                     + json.dumps(digest, default=str)[:6000]
                 )
-                resp = router.chat([Message(role="user", content=prompt)])
-                text = str(getattr(resp, "content", "") or "").strip()
+                resp = brain_for(self.context).chat([Message(role="user", content=prompt)], task_kind="judge")
+                text = str(getattr(resp, "text", "") or "").strip()
                 if text:
                     return text
             except Exception as exc:  # noqa: BLE001 — fall back to rules

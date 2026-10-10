@@ -80,7 +80,8 @@ class WebAdapter(ChatAdapter):
             ts = self._last_send.get(key)
             return None if ts is None else time.time() - ts
 
-    def typing(self, chat: ChatRef, seconds: float = 3.0) -> bool:
+    def typing(self, chat: ChatRef, seconds: float = 3.0,
+               action: str = "typing") -> bool:
         # The web console has no push channel for a typing event — the
         # browser renders "typing…" from the poll loop, which reads
         # typing_active(key). Record the full length-scaled window so the

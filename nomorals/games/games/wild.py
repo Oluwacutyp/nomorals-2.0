@@ -31,6 +31,8 @@ from functools import lru_cache
 from typing import Any
 
 from ..ai import GameMind
+from ..fairness import draw_int
+from ..fairness import shuffle as fair_shuffle
 from ..players import Player
 from .base import (DIFFICULTY_LEVELS, MultiGame, Room,
                    normalize_difficulty)
@@ -128,6 +130,8 @@ class PokerGame(MultiGame):
     max_players = 1  # heads-up by design: one human, one house seat
     ai_seats = 1
     move_timeout = 120
+    #: provably fair: every hand's deck is drawn from the committed sequence
+    fair = True
     rules = ("Hold'em heads-up. 200 chips each, blinds 2/4. You act "
              "first on every street: 'check' · 'bet <n>' (min-raise 4) · "
              "'call' · 'fold' · 'allin'. Then the house answers — it "
@@ -153,7 +157,13 @@ class PokerGame(MultiGame):
     def _deal(self, room: Room) -> list[str]:
         s = room.state
         s["hand"] += 1
-        s["deck"] = make_deck(room.rng())
+        fair = s.get("fair")
+        if fair is not None:
+            deck = [r + su for r in _RANKS for su in _SUITS]
+            fair_shuffle(fair, f"hand:{s['hand']}:deck", deck)
+            s["deck"] = deck
+        else:
+            s["deck"] = make_deck(room.rng())
         s["board"] = []
         s["street"] = 0
         s["pot"] = 0
@@ -805,6 +815,8 @@ class CrapsGame(MultiGame):
     max_players = 3
     ai_seats = 1
     move_timeout = 90
+    #: provably fair: every roll is drawn from the committed sequence
+    fair = True
     rules = ("You and the house each bank 100 chips, 10 per roll. "
              "Come-out roll: 7 or 11 wins, 2/3/12 loses, anything else "
              "sets the point. Then the point must land before a 7. "
@@ -828,8 +840,13 @@ class CrapsGame(MultiGame):
             return ["the table is closed."]
         if text.strip().lower() not in {"roll", "r", "go"}:
             return ["say 'roll'."]
-        rng = room.rng()
-        d1, d2 = rng.randint(1, 6), rng.randint(1, 6)
+        fair = s.get("fair")
+        if fair is not None:
+            d1 = draw_int(fair, f"roll:{s['rolls'] + 1}:d1", 1, 6)
+            d2 = draw_int(fair, f"roll:{s['rolls'] + 1}:d2", 1, 6)
+        else:
+            rng = room.rng()
+            d1, d2 = rng.randint(1, 6), rng.randint(1, 6)
         total = d1 + d2
         s["rolls"] += 1
         s["history"].append(total)

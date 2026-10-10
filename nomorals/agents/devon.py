@@ -38,6 +38,7 @@ from typing import Any, Callable
 from ..core.ids import new_short_id
 from ..core.logging_setup import get_logger
 from ..llm.base import Message, SamplingParams
+from ..llm.brain import brain_for
 
 __all__ = ["DevonAgent", "DevonResult", "StepOutcome", "TOOL_CATALOG", "summarize_test_run"]
 
@@ -432,10 +433,10 @@ class DevonAgent:
         user = (f"Available tools:\n{catalog}\n\n{mem_block}"
                 f"{type_hint}Task from the owner: {task}{retry_note}")
         try:
-            response = router.chat(
+            response = brain_for(self.context).chat(
                 [Message.system(system), Message.user(user)],
                 SamplingParams(temperature=0.0, max_tokens=600),
-            )
+            task_kind="chat")
         except Exception as exc:  # noqa: BLE001 - planner must never kill the run
             _log.warning("devon planner LLM failed: %s", exc)
             return [], "", f"model-error: {exc}"
@@ -699,10 +700,10 @@ class DevonAgent:
         )
         user = f"{mem_block}Task: {task}\n\nTool output:\n{observations[:6000]}"
         try:
-            response = router.chat(
+            response = brain_for(self.context).chat(
                 [Message.system(system), Message.user(user)],
                 SamplingParams(temperature=0.2, max_tokens=500),
-            )
+            task_kind="chat")
         except Exception as exc:  # noqa: BLE001
             _log.warning("devon digest LLM failed: %s", exc)
             return "", ""

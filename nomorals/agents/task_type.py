@@ -36,6 +36,7 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
+from ..llm.brain import brain_for
 from ..core.logging_setup import get_logger
 
 _log = get_logger(__name__)
@@ -214,11 +215,11 @@ def _model_classify(context: Any, text: str) -> TaskType | None:
     try:
         from ..llm.base import Message, SamplingParams
 
-        resp = router.chat(
+        resp = brain_for(context).chat(
             [Message.system("You are a task classifier. Reply with JSON only."),
              Message.user(prompt)],
             SamplingParams(temperature=0.0, max_tokens=120),
-        )
+        task_kind="intent")
         if not getattr(resp, "ok", False):
             return None
         from .reasoning import _extract_json

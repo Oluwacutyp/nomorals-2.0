@@ -21,6 +21,7 @@ from typing import Any
 
 from ..ai import GameMind
 from ..combat import new_fighter, strike, tick_fighter, skill_power_mult
+from ..gamemaster import feed
 from ..players import Player
 from .base import MultiGame, Room
 
@@ -209,6 +210,15 @@ class _ArenaCombat:
         tag = " (focused)" if rep["focused"] else ""
         msg = (f"{kind}{atk_name} lands {raw}{tag} — "
                f"{dfn_name} at {max(0, d['hp'])} HP.")
+        # the DM notes every killing blow (duel + raid share this path)
+        if d["hp"] <= 0:
+            if crit:
+                feed(room,
+                     f"{atk_name} lands a killing CRIT on {dfn_name}",
+                     big=True)
+            else:
+                feed(room, f"{atk_name} strikes down {dfn_name}",
+                     big=True)
         # set combo: every Nth attack strikes twice
         if d["hp"] > 0 and a.get("combo_every"):
             a["combo_count"] = int(a.get("combo_count", 0)) + 1
@@ -618,6 +628,8 @@ class DuelGame(_ArenaCombat, MultiGame):
     max_players = 2      # needs 2 humans and the game enforces it
     ai_seats = 0
     move_timeout = 120.0
+    #: the DM narrates the killing blow
+    dm_finale = True
     rules = ("A duel to the death against another human — no house AI. "
              "attack · focus · fury · defend · potion · skill <name> · "
              "combo <a> + <b> · item <gear>. Your level, equipped gear, "
@@ -806,6 +818,17 @@ class DuelGame(_ArenaCombat, MultiGame):
             return f"🏁 {w.name} wins the duel ({dmg} damage dealt)."
         return "the duel fizzles out."
 
+    def dm_finale_event(self, room: Room) -> str | None:
+        w = self.winner(room)
+        if w is None:
+            return None
+        foe = next((p for p in room.humans if p.key != w.key), None)
+        dmg = int(room.state.get("dmg", {}).get(w.key, 0))
+        if foe is not None:
+            return (f"{w.name} defeats {foe.name} in single combat "
+                    f"({dmg} damage dealt)")
+        return f"{w.name} stands victorious in the duel ring"
+
     def describe_state(self, room: Room) -> str:
         s = room.state
         bits = []
@@ -831,6 +854,8 @@ class RaidGame(_ArenaCombat, MultiGame):
     max_players = 6
     ai_seats = 0
     move_timeout = 120.0
+    #: the DM narrates the boss falling (or the party falling)
+    dm_finale = True
     rules = ("The party vs one raid boss. attack · focus · fury · "
              "defend · potion · skill <name> · combo <a> + <b> · item <gear> — everything "
              "hits the boss. It slams back after every full round, "
@@ -1072,6 +1097,22 @@ class RaidGame(_ArenaCombat, MultiGame):
             return (f"💀 {b.get('name', 'the boss')} stands over the "
                     "fallen party.")
         return "the raid disperses."
+
+    def dm_finale_event(self, room: Room) -> str | None:
+        s = room.state
+        b = s.get("fighters", {}).get("boss") or {}
+        boss = b.get("name", "the boss")
+        if s.get("won") is True:
+            shares = self._shares(room)
+            order = sorted(room.humans,
+                           key=lambda p: shares.get(p.key, 0),
+                           reverse=True)
+            mvp = order[0].name if order else "the party"
+            return (f"the {boss} falls — {mvp} leads the triumph, "
+                    f"the party splits the spoils")
+        if s.get("won") is False:
+            return f"the {boss} stands over the fallen party"
+        return None
 
     #: raid-exclusive drop odds — base chance plus a damage-share kicker.
     #: The MVP (100% share) rolls at 15%; a bystander (0%) at 5%.  Low

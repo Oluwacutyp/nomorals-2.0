@@ -33,6 +33,18 @@ def build_provider(kind: str, **kwargs: Any) -> LLMProvider:
         from .groq import GroqProvider
 
         return GroqProvider(**kwargs)
+    if kind in {"anthropic", "claude"}:
+        from .anthropic import AnthropicProvider
+
+        return AnthropicProvider(**kwargs)
+    if kind == "deepseek":
+        from .deepseek import DeepSeekProvider
+
+        return DeepSeekProvider(**kwargs)
+    if kind == "gemini":
+        from .gemini import GeminiProvider
+
+        return GeminiProvider(**kwargs)
     if kind == "openrouter":
         from .openrouter import OpenRouterProvider
 
@@ -55,8 +67,8 @@ def build_provider(kind: str, **kwargs: Any) -> LLMProvider:
         return OCRProvider(**kwargs)
     raise ValueError(
         "unknown provider "
-        f"{kind!r}; expected mock | ollama | groq | openrouter | openai_compat | "
-        "hf_serverless | llama_cpp | ocr"
+        f"{kind!r}; expected mock | ollama | groq | anthropic | deepseek | "
+        "gemini | openrouter | openai_compat | hf_serverless | llama_cpp | ocr"
     )
 
 

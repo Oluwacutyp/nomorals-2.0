@@ -7,6 +7,7 @@ import json
 import sys
 from typing import Any
 from pathlib import Path
+from ...llm.brain import brain_for
 from ...version import __version__
 from ...compat import feature_report, native_section, report_as_text
 from ..emit import _emit
@@ -407,10 +408,10 @@ def _cmd_setup(args: argparse.Namespace, context: Any) -> int:
             
             # Test with a simple prompt
             from ...llm.base import Message, SamplingParams
-            response = context.router.chat(
+            response = brain_for(context).chat(
                 [Message.user("Say 'Hello, I'm working!' in one sentence.")],
                 SamplingParams(max_tokens=50),
-            )
+            task_kind="chat")
             
             if response.ok and response.text:
                 print(f"\n✅ Model responded: {response.text}")

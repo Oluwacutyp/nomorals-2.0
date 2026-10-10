@@ -53,6 +53,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Callable
 from urllib.parse import parse_qs, urlparse
 
+from ..llm.brain import brain_for
 from ..core.errors import CapabilityDenied, NoMoralsError, classify
 from ..core.logging_setup import get_logger
 from ..core.policy import Capability, CapabilitySet
@@ -466,7 +467,7 @@ class APIServer:
                 temperature=float(body.get("temperature", 0.7)),
                 max_tokens=int(body.get("max_tokens", 1024)),
             )
-            response = context.router.chat(messages, params)
+            response = brain_for(context).chat(messages, params, task_kind="chat")
             return response.to_dict()
 
         @self.route("POST", "/memory/remember", description="Store a memory record")

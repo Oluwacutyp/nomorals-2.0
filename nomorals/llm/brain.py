@@ -27,10 +27,14 @@ The brain never raises: the worst case is an ``LLMResponse`` whose
 from __future__ import annotations
 
 import threading
+import time
 from typing import Any, Sequence
 
 from ..core.logging_setup import get_logger
 from .base import LLMResponse, Message, SamplingParams
+from .context_fit import DEFAULT_CONTEXT_TOKENS, fit_messages, fit_prompt
+from .failures import FailureClass, classify_failure
+from .prompts import render_prompt, system_prompt_for
 
 __all__ = [
     "Brain",
@@ -47,7 +51,9 @@ _log = get_logger(__name__)
 _NON_BRAIN_NAMES = frozenset({"mock", "offline", "test"})
 
 #: error-text → likely fix, for the honest-failure message.  Substring
-#: match, first hit wins.  These are hints, not diagnoses.
+#: match, first hit wins.  These are hints, not diagnoses.  The typed
+#: taxonomy (:mod:`nomorals.llm.failures`) is consulted first; this table
+#: is the fallback for classes it does not cover.
 _FIX_HINTS: tuple[tuple[str, str], ...] = (
     ("401", "the provider rejected the API key — check it is set and valid"),
     ("403", "the provider refused the request — check the key's permissions"),
@@ -61,6 +67,14 @@ _FIX_HINTS: tuple[tuple[str, str], ...] = (
 
 
 def _fix_hint(text: str) -> str:
+    # Typed first: the failure taxonomy knows the right recovery for
+    # each class (shrink context, back off, fix the key…).
+    try:
+        info = classify_failure(text)
+        if info.failure_class is not FailureClass.UNKNOWN:
+            return info.hint
+    except Exception:  # noqa: BLE001 — hinting never breaks the caller
+        pass
     low = (text or "").lower()
     for needle, hint in _FIX_HINTS:
         if needle in low:
@@ -159,8 +173,12 @@ class Brain:
         ``describe_image``.  Modern routers accept ``task_kind`` (task-aware
         selection), ``constraints`` and ``tier``; legacy ones do not — kwargs
         the signature cannot take are dropped up front instead of failing
-        the call.  Never raises: the worst case is an error response.
+        the call.  ``timeout_s`` (when given) bounds the call on a daemon
+        thread — a stalled provider chain comes back as a typed timeout
+        error, never a hung caller.  Never raises: the worst case is an
+        error response.
         """
+        timeout_s = kw.pop("timeout_s", None)
         call_kw = dict(kw)
         if task_kind and not self._accepts(fn, "task_kind"):
             _log.debug("brain: %s() has no task_kind support; calling plain",
@@ -171,39 +189,239 @@ class Brain:
             if name in call_kw and not self._accepts(fn, name):
                 del call_kw[name]
         try:
-            return fn(*args, **call_kw)
+            if timeout_s is not None and timeout_s > 0:
+                return self._coerce_response(
+                    op, self._call_bounded(op, fn, timeout_s, *args, **call_kw))
+            return self._coerce_response(op, fn(*args, **call_kw))
         except Exception as exc:  # noqa: BLE001 — honest failure, not a raise
             _log.debug("brain.%s failed: %s", op, exc, exc_info=True)
             return LLMResponse(
                 text="", error=f"brain.{op} failed before dispatch: {exc}")
 
+    @staticmethod
+    def _call_bounded(op: str, fn: Any, timeout_s: float, *args: Any,
+                      **kw: Any) -> LLMResponse:
+        """Run ``fn`` on a daemon thread; give up after ``timeout_s``.
+
+        The provider chain behind a router can stall for minutes
+        (per-provider timeout × retries × failover); interactive callers
+        must never inherit that.  On expiry the in-flight attempt is
+        abandoned and a typed ``timeout`` failure comes back — the brain
+        contract (never raises) holds.
+        """
+        box: dict[str, Any] = {}
+
+        def _run() -> None:
+            try:
+                box["resp"] = fn(*args, **kw)
+            except Exception as exc:  # noqa: BLE001
+                box["exc"] = exc
+
+        worker = threading.Thread(target=_run, name=f"brain-{op}",
+                                  daemon=True)
+        worker.start()
+        worker.join(timeout_s)
+        if worker.is_alive():
+            _log.warning("brain.%s timed out after %.1fs — abandoning",
+                         op, timeout_s)
+            return LLMResponse(
+                text="",
+                error=f"brain.{op} timed out after {timeout_s:.0f}s",
+                failure_class=FailureClass.TIMEOUT.value,
+            )
+        if "exc" in box:
+            exc = box["exc"]
+            return LLMResponse(
+                text="", error=f"brain.{op} failed before dispatch: {exc}")
+        resp = box.get("resp")
+        # The caller coerces this into an LLMResponse (duck-typed router
+        # responses included) — returned raw here.
+        return resp
+
+    def _coerce_response(self, op: str, resp: Any) -> LLMResponse:
+        """Coerce a duck-typed router response into an LLMResponse.
+
+        Legacy routers and test doubles return ``SimpleNamespace(ok=..,
+        text=..)`` instead of LLMResponse; the brain contract is
+        LLMResponse, so coerce instead of failing the call.  Never raises.
+        """
+        if isinstance(resp, LLMResponse):
+            return resp
+        if resp is None:
+            return LLMResponse(text="", error=f"brain.{op} returned no response")
+        try:
+            text = getattr(resp, "text", "") or ""
+            error = getattr(resp, "error", "") or ""
+            if not error and not getattr(resp, "ok", True):
+                error = f"brain.{op} reported failure without detail"
+            return LLMResponse(
+                text=str(text),
+                error=str(error),
+                model=str(getattr(resp, "model", "") or ""),
+                provider=str(getattr(resp, "provider", "") or ""),
+                fallback_note=str(getattr(resp, "fallback_note", "") or ""),
+            )
+        except Exception:  # noqa: BLE001 — coercion never breaks the call
+            return LLMResponse(text="", error=f"brain.{op} returned no response")
+
+    def _classify(self, resp: LLMResponse) -> LLMResponse:
+        """Attach the typed failure class to a failed response (in place).
+
+        The modern router tags it; legacy routers do not — classify from
+        the error text so every caller sees the same contract.
+        """
+        try:
+            if not resp.ok and not resp.failure_class and resp.error:
+                resp.failure_class = classify_failure(
+                    resp.error).failure_class.value
+        except Exception:  # noqa: BLE001 — tagging never breaks the call
+            pass
+        return resp
+
+    def _context_budget(self) -> int:
+        """Token budget for the active serving provider's window.
+
+        Prefers the broker card's advertised context length for the active
+        provider; falls back to a provider attribute; else the default.
+        Never raises.
+        """
+        try:
+            router = self._get_router()
+            active = getattr(router, "active", "") or ""
+            broker = getattr(router, "broker", None)
+            if broker is not None and active:
+                for card in broker.cards():
+                    if card.provider == active and card.context_len:
+                        return int(card.context_len)
+            provider = router.get(active) if hasattr(router, "get") else None
+            ctx_len = int(getattr(provider, "context_len", 0) or 0)
+            if ctx_len > 0:
+                return ctx_len
+        except Exception:  # noqa: BLE001
+            _log.debug("brain: budget lookup failed", exc_info=True)
+        return DEFAULT_CONTEXT_TOKENS
+
+    def _fit_for_send(self, messages: Sequence[Message],
+                      task_kind: str) -> list[Message]:
+        """Proactively fit messages to the serving window (cheap, local)."""
+        from .base import estimate_messages
+
+        msgs = list(messages)
+        try:
+            budget = self._context_budget()
+            if estimate_messages(msgs) > budget:
+                _log.info("brain: %d est. tokens exceed %d window — fitting "
+                          "(%s)", estimate_messages(msgs), budget, task_kind)
+                fitted = fit_messages(
+                    msgs, budget, task_kind,
+                    summarizer=self._summarize_for_fit)
+                if fitted.ok:
+                    return fitted.messages
+                _log.warning("brain: context fit overflowed; sending anyway")
+        except Exception:  # noqa: BLE001 — fitting is best-effort
+            _log.debug("brain: pre-fit failed", exc_info=True)
+        return msgs
+
+    def _summarize_for_fit(self, text: str) -> str:
+        """Summarizer backing the SummarizeMiddle strategy."""
+        try:
+            resp = self.complete(
+                f"{system_prompt_for('summarize')}\n\n{text[:12000]}",
+                task_kind="summarize",
+                params=SamplingParams(temperature=0.1, max_tokens=400),
+                timeout_s=30.0,
+            )
+            return resp.text if resp.ok else ""
+        except Exception:  # noqa: BLE001
+            return ""
+
+    def summarize(self, text: str, *, max_tokens: int = 400,
+                  timeout_s: float | None = 60.0) -> LLMResponse:
+        """Summarize text (task_kind="summarize").  Never raises."""
+        return self.complete(
+            f"{system_prompt_for('summarize')}\n\n{(text or '')[:24000]}",
+            task_kind="summarize",
+            params=SamplingParams(temperature=0.1, max_tokens=max_tokens),
+            timeout_s=timeout_s,
+        )
+
     def chat(
         self,
         messages: Sequence[Message],
+        params: SamplingParams | None = None,
         *,
         task_kind: str = "",
-        params: SamplingParams | None = None,
         constraints: Any = None,
         tier: str | None = None,
+        timeout_s: float | None = None,
     ) -> LLMResponse:
-        """Chat completion.  Never raises — failure is ``resp.error``."""
-        return self._call(
-            "chat", self._get_router().chat, messages, params,
-            task_kind=task_kind, tier=tier, constraints=constraints)
+        """Chat completion.  Never raises.
+
+        ``params`` is positional to match the router's calling convention —
+        the Brain is a drop-in for ``router.chat`` at every call site.
+        """
+        """Chat completion.  Never raises - failure is ``resp.error``.
+
+        ``timeout_s`` bounds the whole provider chain.  Messages are
+        proactively fitted to the serving window, and a
+        ``context_overflow`` failure triggers one shrink-and-retry with
+        the middle summarized - the caller never sees the raw 400.
+        """
+        msgs = self._fit_for_send(messages, task_kind or "chat")
+        resp = self._classify(self._call(
+            "chat", self._get_router().chat, msgs, params,
+            task_kind=task_kind, tier=tier, constraints=constraints,
+            timeout_s=timeout_s))
+        if (not resp.ok
+                and resp.failure_class == FailureClass.CONTEXT_OVERFLOW.value):
+            # The chain failed over and every provider choked on size: the
+            # serving window is smaller than our budget estimate (or every
+            # provider is small).  Shrink harder — summarize the middle —
+            # at half the current estimate and retry once.
+            from .base import estimate_messages as _est
+
+            retry_budget = max(64, _est(list(messages)) * 2 // 3)
+            fitted = fit_messages(
+                list(messages), retry_budget, task_kind or "chat",
+                summarizer=self._summarize_for_fit,
+                chain=("compact", "summarize_middle", "truncate_oldest"),
+                floor=64)
+            if fitted.ok and fitted.messages != list(messages):
+                _log.info("brain: context overflow - retrying with fitted "
+                          "context (%d est. tokens)", fitted.tokens)
+                resp = self._classify(self._call(
+                    "chat", self._get_router().chat, fitted.messages, params,
+                    task_kind=task_kind, tier=tier,
+                    constraints=constraints, timeout_s=timeout_s))
+        return resp
 
     def complete(
         self,
         prompt: str,
+        params: SamplingParams | None = None,
         *,
         task_kind: str = "",
-        params: SamplingParams | None = None,
         constraints: Any = None,
         tier: str | None = None,
+        timeout_s: float | None = None,
     ) -> LLMResponse:
-        """Single-prompt completion.  Never raises."""
-        return self._call(
-            "complete", self._get_router().complete, prompt, params,
-            task_kind=task_kind, tier=tier, constraints=constraints)
+        """Single-prompt completion.  Never raises.
+
+        ``params`` is positional to match the router's calling convention.
+        """
+        text = prompt or ""
+        try:
+            from .base import estimate_tokens
+
+            budget = self._context_budget()
+            if estimate_tokens(text) > budget:
+                text = fit_prompt(text, budget, task_kind or "chat")
+        except Exception:  # noqa: BLE001 — fitting is best-effort
+            _log.debug("brain: complete pre-fit failed", exc_info=True)
+        return self._classify(self._call(
+            "complete", self._get_router().complete, text, params,
+            task_kind=task_kind, tier=tier, constraints=constraints,
+            timeout_s=timeout_s))
 
     def describe_image(
         self,
@@ -213,12 +431,139 @@ class Brain:
         params: SamplingParams | None = None,
         constraints: Any = None,
         tier: str | None = None,
+        timeout_s: float | None = None,
     ) -> LLMResponse:
         """Vision.  Never raises; routes to a VL-capable model."""
-        return self._call(
+        return self._classify(self._call(
             "describe_image", self._get_router().describe_image,
             image, prompt, params,
-            task_kind="vision", tier=tier, constraints=constraints)
+            task_kind="vision", tier=tier, constraints=constraints,
+            timeout_s=timeout_s))
+
+    def embed(self, texts: Sequence[str], **kw: Any) -> tuple[list[list[float]], str]:
+        """Embeddings.  Never raises — returns ``(vectors, error)``.
+
+        ``vectors`` is empty and ``error`` names the problem on failure.
+        """
+        try:
+            vectors = self._get_router().embed(list(texts), **kw)
+            return list(vectors), ""
+        except Exception as exc:  # noqa: BLE001 — honest failure, not a raise
+            _log.debug("brain.embed failed: %s", exc, exc_info=True)
+            return [], f"brain.embed failed: {exc}"
+
+    # ── structured output (native response validation/repair) ─────────────
+    def chat_json(
+        self,
+        messages: Sequence[Message],
+        params: SamplingParams | None = None,
+        *,
+        task_kind: str = "",
+        attempts: int = 3,
+        timeout_s: float | None = None,
+    ) -> tuple[Any | None, LLMResponse]:
+        """Ask for JSON and get parsed data back — with repair retries.
+
+        The extract system prompt is prepended; when the reply is not
+        valid JSON the failed draft is shown back to the model with a
+        repair nudge, up to ``attempts`` times.  Returns
+        ``(data, last_response)`` — ``data`` is ``None`` when every
+        attempt failed to produce parseable JSON.  Never raises.
+        """
+        from ..core.jsonutil import extract_json
+
+        base_params = params or SamplingParams(temperature=0.2, max_tokens=1024)
+        extract_system = system_prompt_for("extract")
+        msgs: list[Message] = list(messages)
+        if extract_system and not any(
+                m.role == "system" and "ONLY" in m.content for m in msgs):
+            msgs = [Message.system(extract_system)] + msgs
+        last = LLMResponse(text="", error="no attempts made")
+        data: Any | None = None
+        for attempt in range(max(1, attempts)):
+            last = self.chat(msgs, task_kind=task_kind or "judge",
+                             params=base_params, timeout_s=timeout_s)
+            if not last.ok or not (last.text or "").strip():
+                continue
+            data = extract_json(last.text)
+            if data is not None:
+                return data, last
+            _log.debug("brain.chat_json: attempt %d/%d not JSON — repairing",
+                       attempt + 1, attempts)
+            msgs = msgs + [
+                Message.assistant(last.text.strip()[:4000]),
+                Message.user(
+                    "That was not valid JSON. Reply with ONLY the JSON "
+                    "object — no prose, no code fences."),
+            ]
+        return None, last
+
+    # ── multi-model adjudication ──────────────────────────────────────────
+    def best_of(
+        self,
+        prompt: str,
+        *,
+        n: int = 3,
+        task_kind: str = "",
+        params: SamplingParams | None = None,
+        timeout_s: float | None = 90.0,
+    ) -> tuple[str, Any]:
+        """Fan out to ``n`` healthy providers, judge the answers, serve the winner.
+
+        Returns ``(winning_text, Judgment)``.  When fan-out or judging
+        fails, falls back to a single brain call.  Never raises.
+        """
+        from .adjudicate import Judge, Judgment, fan_out
+
+        router = self._get_router()
+        names: list[str] = []
+        try:
+            is_cooling = getattr(router, "is_cooling_down", None)
+            for name in router.providers():
+                if callable(is_cooling) and is_cooling(name):
+                    continue
+                names.append(name)
+                if len(names) >= max(1, n):
+                    break
+        except Exception:  # noqa: BLE001
+            names = []
+        if len(names) < 2:
+            # Not enough healthy providers for a real fan-out.
+            resp = self.complete(prompt, task_kind=task_kind, params=params,
+                                 timeout_s=timeout_s)
+            return (resp.text if resp.ok else "",
+                    Judgment(winner=0, ranking=[0],
+                             rationale="single provider",
+                             ok=resp.ok, error=resp.error))
+
+        ask_params = params or SamplingParams(temperature=0.7)
+
+        def _ask_one(index: int) -> LLMResponse:
+            provider = router.get(names[index])
+            return provider.chat([Message.user(prompt)], ask_params)
+
+        candidates = fan_out(_ask_one, prompt, len(names),
+                             timeout_s=timeout_s)
+        if not candidates:
+            resp = self.complete(prompt, task_kind=task_kind, params=params,
+                                 timeout_s=timeout_s)
+            return (resp.text if resp.ok else "",
+                    Judgment(winner=0, ranking=[0],
+                             rationale="fan-out produced nothing",
+                             ok=resp.ok, error=resp.error or "fan-out empty"))
+        if len(candidates) == 1:
+            return candidates[0], Judgment(
+                winner=0, ranking=[0], rationale="only one answer")
+        # Brain.chat takes params keyword-only; the Judge's ask contract is
+        # positional (messages, params) — adapt once here.
+        ask = lambda messages, params, **kw: self.chat(  # noqa: E731
+            messages, params=params, **kw)
+        judgment = Judge(ask).adjudicate(
+            prompt, candidates, timeout_s=timeout_s)
+        winner = (candidates[judgment.winner]
+                  if 0 <= judgment.winner < len(candidates)
+                  else candidates[0])
+        return winner, judgment
 
     # ── introspection ────────────────────────────────────────────────────
     def available(self) -> bool:
@@ -258,6 +603,7 @@ class Brain:
                     "breaker": str(h.get("breaker_state", "closed")),
                     "error_rate": h.get("error_rate", 0.0),
                     "last_error": str(h.get("last_error", ""))[:160],
+                    "failure_class": str(h.get("failure_class", "") or ""),
                     "owner": self._is_owner_card(router, name),
                 })
             return {
@@ -286,9 +632,10 @@ class Brain:
                 else:
                     flag = "ok"
                 owner = " [owner]" if p["owner"] else ""
+                fclass = f" [{p['failure_class']}]" if p.get("failure_class") else ""
                 err = f" — {p['last_error']}" if p["last_error"] else ""
                 lines.append(
-                    f"  {p['name']:<16} {flag:<9} {p['model']}{owner}{err}")
+                    f"  {p['name']:<16} {flag:<9} {p['model']}{owner}{fclass}{err}")
             picks = st.get("broker_picks") or {}
             if picks:
                 lines.append("broker picks: " + ", ".join(

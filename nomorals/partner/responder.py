@@ -430,11 +430,33 @@ class PartnerResponder:
         #: persona/style preferences: it only *adds* terms to the owner's
         #: configured banks.
         self.lexicon = lexicon
-        #: Delivery scorer for memory timing/room-reading. Tracks which
-        #: memories were recently surfaced to avoid repetition, and scores
-        #: candidates on conversational appropriateness (not just relevance).
-        #: Lazily imported to avoid a hard dependency at module load.
-        self._delivery_scorer: Any = None
+        #: Lazily built Brain over ``self.router`` — one front door for the
+        #: reply path: task-kind threading, per-call timeouts, the failure
+        #: taxonomy, and context fitting, without reimplementing the
+        #: wiring.  Built on first use so a router swapped after
+        #: construction is still honored until then.
+        self._brain: Any = None
+
+    def _brain_for_reply(self) -> Any:
+        """The Brain for this responder's router.  Never raises.
+
+        Always a real Brain (which degrades gracefully for legacy
+        routers) — never the raw router, so the call below can always
+        pass ``task_kind``.
+        """
+        try:
+            from ..llm.brain import Brain
+
+            brain = self._brain
+            if brain is None or getattr(brain, "_external_router", None) is not self.router:
+                # (Re)build on first use and after a router hot-swap, so a
+                # swapped router is honored.
+                brain = Brain(router=self.router)
+                self._brain = brain
+            return brain
+        except Exception:  # noqa: BLE001 — last resort: the raw router
+            _log.debug("responder brain wrap failed", exc_info=True)
+            return self.router
 
     # ── sampling by mood ─────────────────────────────────────────────────────
     def _sampling(self) -> SamplingParams:
@@ -605,7 +627,8 @@ class PartnerResponder:
 
         for attempt in range(self.retries + 1):
             try:
-                response = self.router.chat(messages, self._sampling())
+                response = self._brain_for_reply().chat(
+                    messages, self._sampling(), task_kind="chat")
             except Exception as exc:  # noqa: BLE001 - provider boundary
                 _log.warning("llm call failed (%s): %s", exc.__class__.__name__, exc)
                 response = LLMResponse(text="", error=str(exc))

@@ -21,6 +21,7 @@ from typing import Any
 
 from ..ai import GameMind
 from ..combat import skill_power_mult
+from ..gamemaster import feed
 from ..players import Player
 from .base import MultiGame, Room
 
@@ -994,6 +995,8 @@ class BattleArenaGame(MultiGame):
     max_players = 1
     ai_seats = 1
     move_timeout = 60
+    #: the DM narrates the kill
+    dm_finale = True
     rules = ("You vs the house: 50 HP each (your level adds more). attack (deal atk − their "
              "defense, 10% crits double it), focus (next hit +50%, "
              "costs your turn), fury (two 80% attacks, 2-turn cooldown), "
@@ -1587,6 +1590,28 @@ class BattleArenaGame(MultiGame):
             out.append("repair it with /repair — or fight on bare-handed.")
         return out
 
+    def _seat_name(self, room: Room, seat: str) -> str:
+        """Display name for an arena seat ("you"/"house")."""
+        if seat == "you":
+            for p in room.players:
+                if not p.is_ai:
+                    return p.name or "you"
+            return "you"
+        return room.state.get("house_name", "the house")
+
+    def dm_finale_event(self, room: Room) -> str | None:
+        s = room.state
+        you = self._seat_name(room, "you")
+        foe = self._seat_name(room, "house")
+        if s.get("house", {}).get("hp", 1) <= 0:
+            if s.get("brutal_finish") == "you":
+                return (f"{you} stands over the ruins of {foe} — "
+                        f"a brutal finish the bards will exaggerate")
+            return f"{you} stands victorious over the fallen {foe}"
+        if s.get("you", {}).get("hp", 1) <= 0:
+            return f"{foe} stands victorious — {you} falls in the arena"
+        return None
+
     def _hit(self, room: Room, src: str, dst: str, mind: GameMind,
              mult: float = 1.0, ignore_def: float = 0.0) -> str:
         from ..combat import strike
@@ -1624,6 +1649,20 @@ class BattleArenaGame(MultiGame):
         if crit and d["hp"] <= 0:
             # a killing crit — "you" is the human seat, "house" the AI
             s["crit_kill_by"] = src
+        if d["hp"] <= 0:
+            # the DM notes the kill (drained + narrated after the move)
+            atk_name = self._seat_name(room, src)
+            def_name = self._seat_name(room, dst)
+            if s.get("brutal_finish") == src:
+                feed(room,
+                     f"{atk_name} obliterates {def_name} — a BRUTAL FINISH",
+                     big=True)
+            elif crit:
+                feed(room,
+                     f"{atk_name} lands a killing CRIT on {def_name}",
+                     big=True)
+            else:
+                feed(room, f"{atk_name} strikes down {def_name}")
         kind = "CRIT — " if crit else ""
         tag = " (focused)" if focused else ""
         msg = (f"{kind}{src} lands {raw}{tag} — "
@@ -2475,6 +2514,17 @@ class EscapeRoomGame(MultiGame):
             return "draw"  # the table escaped together — everyone scores
         return Player(key="ai:escape", platform="ai", name="The Room",
                       is_ai=True)
+
+    #: the DM narrates the breakout (or the room keeping its guests)
+    dm_finale = True
+
+    def dm_finale_event(self, room):
+        s = room.state
+        if s.get("lock", 0) >= len(s.get("puzzles", [])):
+            names = ", ".join(p.name for p in room.humans) or "the table"
+            return (f"{names} crack the last lock — the door swings open, "
+                    f"the room lets them go")
+        return "the locks hold — the room keeps its guests a while longer"
 
     def score(self, room, player):
         return room.state["lock"] * 10 - room.state["hints_used"] * 2

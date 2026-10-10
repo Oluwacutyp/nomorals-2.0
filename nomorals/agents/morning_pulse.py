@@ -32,6 +32,7 @@ import os
 import time
 from pathlib import Path
 from typing import Any
+from ..llm.brain import brain_for
 
 _log = logging.getLogger(__name__)
 
@@ -88,12 +89,34 @@ def pulse_enabled(context: Any) -> bool:
 
 # ── scheduler registration ───────────────────────────────────────────────
 
+#: Execution policies for the pulse job: it must fire even if the phone
+#: was off at 23:00 (fire_now), must never stack two pulses
+#: (overlap=skip), and gets a generous wall-clock cap for TTS.
+PULSE_POLICIES = {
+    "missed_fire_policy": "fire_now",
+    "overlap_policy": "skip",
+    "run_timeout_s": 1800.0,
+}
+
+
+def _pulse_spec_matches(job_spec: str, want: str) -> bool:
+    """True when the stored job spec is the wanted pulse time.
+
+    The stored spec may carry the timezone (``"23:00 America/Denver"``);
+    only the wall-clock part is compared.
+    """
+    return bool(job_spec) and job_spec.split()[0] == want
+
+
 def ensure_pulse_job(context: Any) -> dict[str, Any]:
     """Register the single durable ``morning-pulse`` job (idempotent).
 
     Runs ``daily HH:MM`` at the configured pulse time (default 23:00) in
-    America/Denver.  Safe to call on every boot.  If the owner changed the
-    time, the job is replaced.
+    America/Denver, with ``missed_fire_policy=fire_now`` (a phone that
+    was off at 23:00 still gets its pulse on next boot),
+    ``overlap_policy=skip`` (pulses never stack), and a 30-minute
+    run cap for TTS.  Safe to call on every boot.  If the owner changed
+    the time — or the policies drifted — the job is replaced.
     """
     from .scheduler import Scheduler
 
@@ -105,76 +128,166 @@ def ensure_pulse_job(context: Any) -> dict[str, Any]:
                 if j.get("name") == PULSE_JOB_NAME]
     except Exception:  # noqa: BLE001 — scheduler table may not exist yet
         have = []
-    if have and have[0].get("spec") == want:
-        return {"name": PULSE_JOB_NAME, "already_scheduled": True,
-                "job_id": have[0].get("id")}
-    for j in have:  # stale time → replace
+    if have:
+        job0 = have[0]
+        same_policies = all(
+            job0.get(k) == v for k, v in PULSE_POLICIES.items())
+        if _pulse_spec_matches(job0.get("spec") or "", want) and same_policies:
+            return {"name": PULSE_JOB_NAME, "already_scheduled": True,
+                    "job_id": job0.get("id")}
+    for j in have:  # stale time or policies → replace
         try:
             sched.remove(j["id"])
         except Exception:  # noqa: BLE001
             pass
     job = sched.add(PULSE_JOB_NAME, f"daily {want}", "tool",
                     {"tool": "pulse", "args": {"action": "run"}},
-                    timezone=tz)
+                    timezone=tz, **PULSE_POLICIES)
     _log.info("scheduled morning-pulse job: %s (daily %s %s)",
               PULSE_JOB_NAME, want, tz)
     return {"name": PULSE_JOB_NAME, "scheduled": True,
             "job_id": job.get("id")}
 
 
+# ── stage runner ─────────────────────────────────────────────────────────
+
+def _run_stage(name: str, fn: Any, *, attempts: int = 2,
+               base_delay_s: float = 5.0) -> tuple[bool, Any, float, int]:
+    """Run one pipeline stage with exponential-backoff retries.
+
+    Returns ``(ok, value, seconds, attempts_used)``.  Never raises — a
+    stage that exhausts its attempts reports ``ok=False`` and the
+    pipeline degrades gracefully to the next stage.
+    """
+    started = time.time()
+    last_exc: Exception | None = None
+    for attempt in range(1, max(1, attempts) + 1):
+        try:
+            value = fn()
+            return True, value, time.time() - started, attempt
+        except Exception as exc:  # noqa: BLE001 - a stage failure is a result
+            last_exc = exc
+            _log.warning("morning-pulse: stage %s attempt %d/%d failed: %s",
+                         name, attempt, attempts, exc)
+            if attempt < attempts:
+                time.sleep(min(60.0, base_delay_s * (2.0 ** (attempt - 1))))
+    _log.error("morning-pulse: stage %s failed after %d attempt(s): %s",
+               name, attempts, last_exc)
+    return False, None, time.time() - started, attempts
+
+
+def _ledger(context: Any, kind: str, summary: str, *,
+            cost_seconds: float = 0.0, ok: bool = True,
+            learned: str = "",
+            metadata: dict[str, Any] | None = None) -> None:
+    """Journal to the unified autonomy ledger.  Never raises."""
+    try:
+        from .autonomy_ledger import record_ledger
+
+        record_ledger(context, "pulse", kind, PULSE_JOB_NAME, summary,
+                      cost_seconds=cost_seconds, ok=ok, learned=learned,
+                      metadata=metadata)
+    except Exception:  # noqa: BLE001
+        _log.debug("morning-pulse ledger write failed", exc_info=True)
+
+
+def _emit_bus(data: dict[str, Any]) -> None:
+    """Publish ``pulse.finished`` for other systems.  Fail-open."""
+    try:
+        from ..core.events import Event, global_bus
+
+        global_bus.publish(Event(topic="pulse.finished", data=data,
+                                 source="nomorals.agents.morning_pulse"))
+    except Exception:  # noqa: BLE001
+        _log.debug("morning-pulse bus publish failed", exc_info=True)
+
+
 # ── the pipeline ─────────────────────────────────────────────────────────
+
+def _fetch_news(context: Any) -> list[dict[str, Any]]:
+    """News radar stage.  Returns the items (may be empty); raises only
+    on unexpected breakage — the stage runner converts that to a
+    graceful degradation."""
+    from .news import NewsAgent
+
+    agent = NewsAgent(context)
+    report = agent.run()
+    items = agent.recent(limit=12) if report.get("ok") else []
+    _log.info("morning-pulse: news radar got %d items", len(items))
+    return items
+
+
+def _compose_briefing(context: Any) -> str:
+    """Briefing compose stage.  Returns the text (possibly a fallback)."""
+    from .morning_briefing import BriefingComposer
+    from datetime import datetime
+    from ..core.tz import safe_zoneinfo
+
+    composer = BriefingComposer()
+    tz = safe_zoneinfo(pulse_timezone(context))
+    date = datetime.now(tz).strftime("%Y-%m-%d")
+    briefing = composer.compose(context, date)
+    return briefing.render_text()
+
 
 def run_pulse(context: Any) -> dict[str, Any]:
     """Run the full morning-pulse pipeline.  Never raises.
 
+    Every stage runs through the stage runner (exponential-backoff
+    retries), lands a ledger entry with its cost, and degrades
+    gracefully: news failure → pulse still goes out with the briefing;
+    voice failure → text still delivers; total failure → a short
+    fallback message, never silence.
+
     Returns {ok, text, audio_path, delivered_text, delivered_audio,
     stages} — stages names each completed step for observability.
+    ``ok`` means the pipeline ran to completion (it never raises);
+    whether anything reached the owner is in ``delivered_text`` /
+    ``delivered_audio`` (and the ledger/bus event).
     """
     stages: list[str] = []
     started = time.time()
 
     # ── 1. news radar ────────────────────────────────────────────────
-    news_items: list[dict[str, Any]] = []
-    try:
-        from .news import NewsAgent
-        agent = NewsAgent(context)
-        report = agent.run()
-        if report.get("ok"):
-            news_items = agent.recent(limit=12)
+    ok, news_items, secs, att = _run_stage(
+        "news", lambda: _fetch_news(context))
+    news_items = news_items or []
+    _ledger(context, "stage",
+            f"news radar: {'ok' if ok else 'FAILED'} "
+            f"({len(news_items)} items, {att} attempt(s))",
+            cost_seconds=secs, ok=ok,
+            metadata={"stage": "news", "items": len(news_items),
+                      "attempts": att})
+    if ok:
         stages.append("news")
-        _log.info("morning-pulse: news radar got %d items",
-                  len(news_items))
-    except Exception as exc:  # noqa: BLE001 — news must not kill the pulse
-        _log.warning("morning-pulse: news radar failed: %s", exc)
 
     # ── 2. compose ───────────────────────────────────────────────────
-    briefing_text = ""
-    try:
-        from .morning_briefing import BriefingComposer
-        composer = BriefingComposer()
-        from datetime import datetime
-        from ..core.tz import safe_zoneinfo
-        tz = safe_zoneinfo(pulse_timezone(context))
-        date = datetime.now(tz).strftime("%Y-%m-%d")
-        briefing = composer.compose(context, date)
-        briefing_text = briefing.render_text()
-        stages.append("compose")
-    except Exception as exc:  # noqa: BLE001
-        _log.warning("morning-pulse: briefing compose failed: %s", exc)
-        briefing_text = "(briefing unavailable tonight)"
+    ok, briefing_text, secs, att = _run_stage(
+        "compose", lambda: _compose_briefing(context))
+    briefing_text = briefing_text or "(briefing unavailable tonight)"
+    _ledger(context, "stage",
+            f"compose: {'ok' if ok else 'fallback'} ({att} attempt(s))",
+            cost_seconds=secs, ok=True,  # fallback text still delivers
+            metadata={"stage": "compose", "attempts": att,
+                      "fallback": not ok})
+    stages.append("compose")
 
     # ── 3. script (two-host conversational) ──────────────────────────
     script = _write_script(context, briefing_text, news_items)
     stages.append("script")
 
     # ── 4. voice ─────────────────────────────────────────────────────
-    audio_path = ""
-    try:
-        audio_path = _synthesize(context, script) or ""
-        if audio_path:
-            stages.append("voice")
-    except Exception as exc:  # noqa: BLE001 — voice must not kill delivery
-        _log.warning("morning-pulse: voice synthesis failed: %s", exc)
+    ok, audio_path, secs, att = _run_stage(
+        "voice", lambda: _synthesize(context, script))
+    audio_path = audio_path or ""
+    _ledger(context, "stage",
+            f"voice: {'ok' if ok and audio_path else 'FAILED'} "
+            f"({att} attempt(s))",
+            cost_seconds=secs, ok=bool(audio_path),
+            learned="" if audio_path else "TTS failed — text-only delivery",
+            metadata={"stage": "voice", "attempts": att})
+    if audio_path:
+        stages.append("voice")
 
     # ── 5. deliver ───────────────────────────────────────────────────
     text_ok = _deliver_text(context, briefing_text)
@@ -182,8 +295,24 @@ def run_pulse(context: Any) -> dict[str, Any]:
     stages.append("deliver")
 
     elapsed = round(time.time() - started, 1)
+    delivered = text_ok or audio_ok
     _log.info("morning-pulse done in %ss: stages=%s text=%s audio=%s",
               elapsed, stages, text_ok, audio_ok)
+    _ledger(context, "run",
+            f"morning pulse: stages={','.join(stages)} "
+            f"text={'delivered' if text_ok else 'FAILED'} "
+            f"audio={'delivered' if audio_ok else 'n/a' if not audio_path else 'FAILED'}",
+            cost_seconds=elapsed, ok=delivered,
+            learned="" if delivered else "nothing delivered — check gateway",
+            metadata={"stages": stages, "delivered_text": text_ok,
+                      "delivered_audio": audio_ok})
+    _emit_bus({
+        "stages": stages,
+        "delivered_text": text_ok,
+        "delivered_audio": audio_ok,
+        "elapsed_s": elapsed,
+        "ok": delivered,
+    })
     return {"ok": True, "stages": stages, "text": briefing_text,
             "audio_path": audio_path, "delivered_text": text_ok,
             "delivered_audio": audio_ok, "elapsed_s": elapsed}
@@ -218,7 +347,7 @@ def _write_script(context: Any, briefing_text: str,
                 f"No URLs, no markup, no stage directions. "
                 f"Keep it under 200 words total."
             )
-            response = router.chat([Message(role="user", content=prompt)])
+            response = brain_for(context).chat([Message(role="user", content=prompt)], task_kind="creative")
             text = (getattr(response, "text", "") or "").strip()
             if text and HOST_1_NAME in text:
                 _log.info("morning-pulse: LLM wrote %d-char script",

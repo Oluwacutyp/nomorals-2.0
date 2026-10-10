@@ -107,6 +107,10 @@ def _cmd_voice(args: argparse.Namespace, context: Any) -> int:
         return _cmd_voice_describe(args, context)
     if action == "transcript":
         return _cmd_voice_transcript(args, context)
+    if action == "match":
+        return _cmd_voice_match(args, context)
+    if action == "probe":
+        return _cmd_voice_probe(args, context)
     print(f"unknown voice action: {action}", file=sys.stderr)
     return 2
 
@@ -393,6 +397,50 @@ def _cmd_voice_transcript(args: argparse.Namespace,  # noqa: ARG001
                           "prompt_chars": len(args.text)}, indent=2))
     else:
         print(f"transcript set for '{args.name}' ({len(args.text)} chars)")
+    return 0
+
+
+def _cmd_voice_match(args: argparse.Namespace,  # noqa: ARG001
+                     context: Any) -> int:
+    from ...voice.catalogue import default_catalogue
+
+    cat = default_catalogue()
+    res = cat.library.match_voice(args.audio)
+    if args.json:
+        print(json.dumps(res, indent=2, default=str))
+        return 0 if res.get("ok") else 1
+    if not res.get("ok"):
+        print(f"no match: {res.get('reason')}", file=sys.stderr)
+        return 1
+    print(f"🎙️ '{args.audio}' sounds most like '{res['name']}' "
+          f"(distance {res.get('distance')}, {res.get('verdict', '')})")
+    return 0
+
+
+def _cmd_voice_probe(args: argparse.Namespace,  # noqa: ARG001
+                     context: Any) -> int:
+    from ...voice.tts import probe_reference_audio
+
+    info = probe_reference_audio(args.audio)
+    if args.json:
+        print(json.dumps(info, indent=2, default=str))
+        return 0 if info.get("ok") else 1
+    if not info.get("ok"):
+        print(f"probe failed: {'; '.join(info.get('warnings', []))}",
+              file=sys.stderr)
+        return 1
+    print(f"🔬 {args.audio}: {info.get('seconds')}s @ "
+          f"{info.get('sample_rate')} Hz, {info.get('channels')}ch")
+    vp = info.get("voice_print") or {}
+    feats = vp.get("features") or {}
+    if feats:
+        print(f"  mean F0: {feats.get('mean_f0_hz')} Hz "
+              f"(±{feats.get('f0_std_hz')})")
+        print(f"  centroid: {feats.get('centroid_hz')} Hz · "
+              f"loudness {feats.get('rms_db')} dBFS")
+    print(f"  verdict: {vp.get('verdict', info.get('verdict', ''))}")
+    for w in info.get("warnings", [])[:4]:
+        print(f"  ⚠️ {w}")
     return 0
 
 

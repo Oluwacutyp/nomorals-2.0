@@ -49,10 +49,11 @@ class EnsurePulseJobTests(unittest.TestCase):
         self.assertEqual(payload["args"], {"action": "run"})
 
     def test_idempotent_when_already_scheduled(self):
-        from nomorals.agents.morning_pulse import ensure_pulse_job
+        from nomorals.agents.morning_pulse import PULSE_POLICIES, ensure_pulse_job
         sched = MagicMock()
         sched.list_jobs.return_value = [
-            {"id": "job-1", "name": "morning-pulse", "spec": "23:00"}]
+            {"id": "job-1", "name": "morning-pulse", "spec": "23:00",
+             **PULSE_POLICIES}]
         with patch("nomorals.agents.scheduler.Scheduler",
                    return_value=sched):
             res = ensure_pulse_job(_ctx())

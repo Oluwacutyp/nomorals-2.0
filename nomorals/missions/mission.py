@@ -571,6 +571,34 @@ class MissionStore:
         """Missions that were interrupted: running or paused, never terminal."""
         return self.list(active_only=True)
 
+    def live_with_lock(self, lock_key: str) -> list[Mission]:
+        """Live (non-terminal) missions holding this lock key.
+
+        The runner uses it to refuse a second concurrent mission on the
+        same lock — two missions racing the same goal is how duplicate
+        side effects happen.  The lock key lives in ``metadata`` as a
+        JSON string (``{"lock_key": ...}``); an empty key matches nothing.
+        """
+        lock_key = (lock_key or "").strip()
+        if not lock_key:
+            return []
+        try:
+            rows = self.db.query(
+                "SELECT * FROM missions WHERE status NOT IN "
+                "('done', 'failed', 'cancelled')"
+            )
+        except Exception:  # noqa: BLE001
+            return []
+        out = []
+        for r in rows:
+            try:
+                mission = Mission.from_row(dict(r))
+            except Exception:  # noqa: BLE001 - a bad row is not our problem
+                continue
+            if str((mission.metadata or {}).get("lock_key") or "") == lock_key:
+                out.append(mission)
+        return out
+
     def stats(self) -> dict[str, Any]:
         rows = self.db.query("SELECT status, COUNT(*) AS n FROM missions GROUP BY status")
         by_status = {r["status"]: int(r["n"]) for r in rows}

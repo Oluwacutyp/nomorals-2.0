@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from types import SimpleNamespace
 from typing import Any, Callable
 
+from ..llm.brain import brain_for
 from ..core.errors import ToolDenied, ToolNotFound
 from ..core.ids import new_id
 from ..core.logging_setup import get_logger
@@ -624,11 +625,11 @@ class SwarmAgent:
         from ..llm.base import Message, SamplingParams
 
         tool_list = self.tools.prompt_listing() if self.tools else "(no tools)"
-        response = router.chat(
+        response = brain_for(self.context).chat(
             [Message.system(self.spec.system_prompt + "\n\nReply with JSON only."),
              Message.user(f"Goal: {goal}\n\nTools you may use:\n{tool_list}")],
             SamplingParams(temperature=0.3, max_tokens=2048, json_mode=True),
-        )
+        task_kind="chat")
         if not response.ok:
             return {"status": "model_error", "goal": goal,
                     "error": response.text[:500]}

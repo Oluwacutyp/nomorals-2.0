@@ -228,7 +228,8 @@ class IdentityStore:
                 return linked
 
         # New person.
-        pid = f"p{int(time.time() * 1000)}"
+        import random as _random
+        pid = f"p{int(time.time() * 1000)}{_random.randint(1000, 9999)}"
         person = Person(
             person_id=pid,
             display_name=display_name or username or platform_id,
@@ -341,7 +342,8 @@ class IdentityStore:
         self._by_platform.pop((platform, platform_id), None)
         person.links.pop(f"{platform}:{platform_id}", None)
         # The split identity becomes its own person record.
-        new_pid = f"p{int(time.time() * 1000)}"
+        import random as _random
+        new_pid = f"p{int(time.time() * 1000)}{_random.randint(1000, 9999)}"
         new_person = Person(
             person_id=new_pid, display_name=ident.display_name or platform_id
         )

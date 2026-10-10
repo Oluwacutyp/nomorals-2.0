@@ -231,7 +231,7 @@ class PromptArchitect:
         try:
             import json as _json
             from ..llm.base import Message, SamplingParams
-            from .reasoning import _extract_json
+            from ..llm.brain import brain_for
 
             prompt = (
                 "You are a task-structuring engine. Given a raw objective "
@@ -242,12 +242,10 @@ class PromptArchitect:
                 "with JSON ONLY of the same shape.\n\n"
                 f"OBJECTIVE:\n{text[:2500]}\n\nDRAFT BRIEF:\n"
                 + _json.dumps(base, default=str)[:4000])
-            resp = router.chat([Message.user(prompt)],
-                               SamplingParams(temperature=0.1,
-                                              max_tokens=900))
-            if not getattr(resp, "ok", False):
-                return None
-            data = _extract_json(resp.text or "")
+            data, _resp = brain_for(self.context).chat_json(
+                [Message.user(prompt)],
+                task_kind="plan",
+                params=SamplingParams(temperature=0.1, max_tokens=900))
             if not isinstance(data, dict):
                 return None
             merged = dict(base)

@@ -340,7 +340,11 @@ class MediaHub:
 
 def _summarize(text: str, router: Any = None,
                max_sentences: int = 8) -> str:
-    """Model summarization when a router is available; extractive otherwise."""
+    """Model summarization when a router is available; extractive otherwise.
+
+    ``router`` may be a raw provider router or a Brain — a Brain is used
+    as-is.
+    """
     sentences = [s_.strip() for s_ in re.split(r"(?<=[.!?])\s+", text)
                  if len(s_.strip()) > 20]
     if not sentences:
@@ -348,13 +352,16 @@ def _summarize(text: str, router: Any = None,
     if router is not None:
         try:
             from ..llm.base import Message, SamplingParams
+            from ..llm.brain import Brain
 
-            resp = router.chat(
+            brain = router if isinstance(router, Brain) else Brain(router=router)
+            resp = brain.chat(
                 [Message.system(
                     "Summarize this transcript in at most 8 tight sentences. "
                     "Plain text only, no preamble."),
                  Message.user(text[:24000])],
-                SamplingParams(temperature=0.2, max_tokens=700))
+                SamplingParams(temperature=0.2, max_tokens=700),
+                task_kind="summarize")
             if resp.ok and (resp.text or "").strip():
                 return resp.text.strip()
         except Exception:  # noqa: BLE001 — fall through to extractive

@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import sys
 from typing import Any
+from ...llm.brain import brain_for
 from ..emit import _emit
 
 from ...core.logging_setup import get_logger
@@ -53,7 +54,7 @@ def _cmd_swarm(args: argparse.Namespace, context: Any) -> int:
                 if feedback:
                     notes = "\n".join(
                         f"- [{i.id}] {i.detail}" for i in feedback)
-                resp = router.chat(
+                resp = brain_for(context).chat(
                     [Message.system(
                         "You are a coder. Produce the work, then revise it "
                         "against the critic's issues, quoting each issue id "
@@ -62,11 +63,11 @@ def _cmd_swarm(args: argparse.Namespace, context: Any) -> int:
                         '"addresses": ["ISSUE-1", ...]}'),
                      Message.user(f"Work: {brief}\n\nCritic issues:\n{notes or '(none)'}")],
                     SamplingParams(temperature=0.4, max_tokens=2048,
-                                   json_mode=True))
+                                   json_mode=True), task_kind="chat")
                 return _work_from_json(resp.text, brief)
 
             def critic_fn(artifact, rubric):
-                resp = router.chat(
+                resp = brain_for(context).chat(
                     [Message.system(
                         "You are an adversarial critic. Try to break the "
                         "work: counterexamples, edge cases, security holes. "
@@ -78,7 +79,7 @@ def _cmd_swarm(args: argparse.Namespace, context: Any) -> int:
                      Message.user(
                          f"Rubric: {', '.join(rubric)}\n\nWork:\n{artifact.content}")],
                     SamplingParams(temperature=0.3, max_tokens=2048,
-                                   json_mode=True))
+                                   json_mode=True), task_kind="chat")
                 return _critique_from_json(resp.text)
 
             debate = Debate(coder_fn=coder_fn, critic_fn=critic_fn,

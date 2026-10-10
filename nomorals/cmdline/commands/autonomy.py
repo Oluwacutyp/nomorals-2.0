@@ -97,8 +97,84 @@ def _cmd_autonomy(args: argparse.Namespace, context: Any) -> int:
                     + ") — lift with `nm autonomy budget --unlimited`")
         _emit(args, budget, text)
         return 0
+    if action == "ledger":
+        return _cmd_autonomy_ledger(args, context)
     print(f"autonomy: unknown action {action}", file=sys.stderr)
     return 2
+
+
+def _cmd_autonomy_ledger(args: Any, context: Any) -> int:
+    """``nm autonomy ledger`` — the unified cross-system journal.
+
+    What the autonomous subsystems did on their own: scheduler runs,
+    mission steps, trigger fires, cognitive ticks, pulse stages —
+    with cost (wall seconds + model tokens), outcome, and lessons.
+    """
+    from ...agents.autonomy_ledger import AutonomyLedger
+    import json as _json
+
+    db = getattr(context, "db", None)
+    if db is None:
+        print("autonomy ledger: no database on this context", file=sys.stderr)
+        return 1
+    ledger = AutonomyLedger(db)
+    system = str(getattr(args, "system", "") or "").strip().lower() or None
+    limit = getattr(args, "limit", 20) or 20
+    try:
+        limit = max(1, min(200, int(limit)))
+    except (TypeError, ValueError):
+        limit = 20
+    if getattr(args, "summary", False):
+        window = getattr(args, "window", 24) or 24
+        try:
+            window = max(1.0, float(window))
+        except (TypeError, ValueError):
+            window = 24.0
+        data = ledger.summary(window_hours=window)
+        if _as_json(args):
+            print(_json.dumps(data, indent=2, default=str))
+            return 0
+        totals = data.get("totals", {})
+        lines = [f"autonomy ledger — last {data.get('window_hours', window)}h: "
+                 f"{totals.get('runs', 0)} runs, "
+                 f"{totals.get('failures', 0)} failures, "
+                 f"{totals.get('cost_seconds', 0)}s, "
+                 f"{totals.get('cost_tokens', 0)} tokens"]
+        for name, s in sorted(data.get("systems", {}).items()):
+            lines.append(f"  {name}: {s['runs']} runs, "
+                         f"{s['failures']} failed, {s['cost_seconds']}s, "
+                         f"{s['cost_tokens']} tokens")
+        _emit(args, data, "\n".join(lines))
+        return 0
+    entries = ledger.recent(limit=limit, system=system)
+    if _as_json(args):
+        print(_json.dumps(entries, indent=2, default=str))
+        return 0
+    if not entries:
+        _emit(args, [], "autonomy ledger is empty"
+              + (f" for system {system!r}" if system else ""))
+        return 0
+    lines = ["autonomy ledger (newest first):"]
+    for e in entries:
+        import time as _time
+
+        ts = _time.strftime("%m-%d %H:%M", _time.localtime(e["ts"]))
+        mark = "✅" if e["ok"] else "❌"
+        cost = ""
+        if e.get("cost_seconds"):
+            cost += f" {e['cost_seconds']:.1f}s"
+        if e.get("cost_tokens"):
+            cost += f" {e['cost_tokens']}tok"
+        lines.append(f"  {mark} {ts} [{e['system']}/{e['kind']}] "
+                     f"{e['summary'][:100]}{cost}")
+        if e.get("learned"):
+            lines.append(f"      ↳ learned: {e['learned'][:120]}")
+    _emit(args, entries, "\n".join(lines))
+    return 0
+
+
+def _as_json(args: Any) -> bool:
+    return bool(getattr(args, "json", False))
 
 
 def _set_daily_call_cap(context: Any, calls: int) -> None:
