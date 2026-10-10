@@ -192,4 +192,6 @@ def test_tone_guide_real_content():
     assert "LOW" in TONE_GUIDE
     assert len(YORUBA_MINIMAL_PAIRS) >= 3
     forms = [f for f, _, _ in YORUBA_MINIMAL_PAIRS]
-    assert "igbá" in forms and "igba" in forms and "ìgba" in forms
+    # ìgbà (LL, 'time') — the old table had the wrong form ìgba here and
+    # glossed igbá as 'garden egg'; both fixed against Ward/Bamgbose.
+    assert "igbá" in forms and "igba" in forms and "ìgbà" in forms

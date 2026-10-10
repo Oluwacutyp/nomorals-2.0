@@ -71,7 +71,10 @@ def test_diagnose_partial_fallback():
     verdict, specifics = eng.diagnose(
         "photosynthesis uses sunlight", "photosynthesis uses sunlight and water")
     assert verdict == "partial"
-    assert "water" in specifics
+    # Socratic-safe: the missing keyword must NOT leak through feedback
+    # (the old code said "you're missing: water" — an answer leak).
+    assert "water" not in specifics.lower()
+    assert "missing" in specifics.lower()
 
 
 def test_diagnose_numeric():

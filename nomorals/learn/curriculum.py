@@ -40,6 +40,17 @@ __all__ = [
     "build_course",
     "course_tutor",
     "courses_dir",
+    "EXAM_FORMATS",
+    "WAEC_GRADES",
+    "Misconception",
+    "MISCONCEPTION_BANK",
+    "misconceptions_for",
+    "ExamSim",
+    "StudyPlan",
+    "study_plan",
+    "syllabus_coverage",
+    "course_to_anki_tsv",
+    "answer_scope",
 ]
 
 _log = get_logger(__name__)
@@ -793,3 +804,560 @@ def scoping_prompt(scope: CourseScope) -> str:
                  "e.g. /course set level jamb")
     lines.append("then: /course build")
     return "\n".join(lines)
+
+
+def answer_scope(chat_key: str, field_name: str, value: str) -> str:
+    """Answer one scoping question (``/course set <field> <value>``).
+
+    Validates against SCOPING_QUESTIONS; returns a status message.
+    """
+    scope = pending_scope(chat_key)
+    if scope is None:
+        return "no course being scoped — start with /course <topic>"
+    field_name = (field_name or "").strip().lower()
+    value = (value or "").strip()
+    valid = {q["field"]: q for q in SCOPING_QUESTIONS}
+    if field_name not in valid:
+        return f"unknown field '{field_name}' — pick from: " \
+               + ", ".join(valid)
+    q = valid[field_name]
+    if q["options"]:
+        vl = value.lower()
+        match = next((o for o in q["options"]
+                      if o.lower().startswith(vl) or vl in o.lower()), None)
+        if match is None:
+            return f"'{value}' isn't one of: {'/'.join(q['options'])}"
+        value = match
+    if field_name == "level":
+        scope.level = value if value in ("waec", "jamb", "both") else scope.level
+    elif field_name == "depth":
+        scope.depth = ("quick" if value.startswith("quick") else "full")
+    elif field_name == "start":
+        scope.start = value
+    set_pending_scope(chat_key, scope)
+    return (f"✓ {field_name} = {value} "
+            f"(level={scope.level}, depth={scope.depth}, start={scope.start})")
+
+
+# ── exam formats (verified) ──────────────────────────────────────────────────
+# WAEC Physics scheme: from the official WAEC Physics syllabus "Scheme of
+# Examination" (Paper 1: 50 MCQs, 1¼ hrs, 50 marks; Paper 2: Section A 7
+# short-structured answer 5/15 marks + Section B 5 essays answer 3/45 marks,
+# 1½ hrs, 60 marks; Paper 3: practical, 3 questions answer 2, 2¾ hrs,
+# 50 marks; Papers 1+2 are one composite sitting).
+# JAMB UTME: 180 questions in 2 hours (Use of English 60 + 3 subjects × 40),
+# 400 max, four-option A–D, equal marks, NO negative marking, CBT only.
+# Other WAEC subjects are NOT hardcoded — their paper schemes differ and are
+# marked unverified rather than invented.
+
+EXAM_FORMATS: dict[str, dict[str, Any]] = {
+    "WAEC Physics": {
+        "source": "WAEC Physics syllabus — Scheme of Examination (verified)",
+        "papers": [
+            {"name": "Paper 1 (Objective)", "qtype": "mcq",
+             "questions": 50, "to_answer": 50, "minutes": 75, "marks": 50},
+            {"name": "Paper 2A (Short structured)", "qtype": "short",
+             "questions": 7, "to_answer": 5, "minutes": 30, "marks": 15},
+            {"name": "Paper 2B (Essay)", "qtype": "essay",
+             "questions": 5, "to_answer": 3, "minutes": 60, "marks": 45},
+            {"name": "Paper 3 (Practical)", "qtype": "practical",
+             "questions": 3, "to_answer": 2, "minutes": 165, "marks": 50},
+        ],
+        "notes": ("Papers 1 and 2 are a single composite sitting. "
+                  "Total 160 marks."),
+    },
+    "WAEC (generic)": {
+        "source": ("per-subject schemes differ — NOT hardcoded; "
+                   "verify against the subject syllabus (unverified)"),
+        "papers": [
+            {"name": "Paper 1 (Objective)", "qtype": "mcq",
+             "questions": 50, "to_answer": 50, "minutes": 60, "marks": 50},
+            {"name": "Paper 2 (Theory)", "qtype": "essay",
+             "questions": 8, "to_answer": 5, "minutes": 90, "marks": 60},
+        ],
+        "notes": "Generic fallback. Prefer the subject's real scheme.",
+    },
+    "JAMB": {
+        "source": "JAMB UTME format (verified)",
+        "papers": [
+            {"name": "Use of English", "qtype": "mcq",
+             "questions": 60, "to_answer": 60, "minutes": 40, "marks": 100},
+            {"name": "Subject paper", "qtype": "mcq", "repeat": 3,
+             "questions": 40, "to_answer": 40, "minutes": 27, "marks": 100},
+        ],
+        "minutes": 120,
+        "marks": 400,
+        "negative_marking": False,
+        "options": ("A", "B", "C", "D"),
+        "seconds_per_question": 40,
+        "notes": ("180 questions, 2 hours → ~40s per question. "
+                  "No negative marking — never leave a question blank. "
+                  "CBT only."),
+    },
+}
+
+#: Standard WAEC SSCE grade bands (widely published).
+WAEC_GRADES: tuple[tuple[str, int, int], ...] = (
+    ("A1", 75, 100), ("B2", 70, 74), ("B3", 65, 69),
+    ("C4", 60, 64), ("C5", 55, 59), ("C6", 50, 54),
+    ("D7", 45, 49), ("E8", 40, 44), ("F9", 0, 39),
+)
+
+
+def waec_grade(pct: float) -> str:
+    for grade, lo, hi in WAEC_GRADES:
+        if lo <= pct <= hi:
+            return grade
+    return "F9"
+
+
+# ── misconception bank (WAEC Chief Examiners' Reports) ───────────────────────
+# AutoTutor's "anticipated misconceptions", grounded in what Nigerian
+# examiners actually report — NOT invented. Each entry carries its source.
+# Subclasses the tutor's Misconception (adds the syllabus ``code``) so
+# entries feed the SocraticEngine EMT cycle directly.
+
+from .tutor import Misconception as _TutorMisconception
+
+
+@dataclass
+class Misconception(_TutorMisconception):
+    """An anticipated student bug, keyed to a syllabus topic.
+
+    Field order is (code, pattern, correction, probe, source) — the bank
+    below is written in that order. Inherits ``matches()`` from the tutor's
+    Misconception so entries feed the SocraticEngine EMT cycle directly.
+    """
+    code: str = ""
+
+    def __init__(self, code: str = "", pattern: str = "",
+                 correction: str = "", probe: str = "",
+                 source: str = "") -> None:
+        super().__init__(pattern=pattern, correction=correction,
+                         probe=probe, source=source)
+        self.code = code
+
+
+MISCONCEPTION_BANK: tuple[Misconception, ...] = (
+    Misconception(
+        "WAEC Maths 6.2",
+        "spearman rank correlation square the values",
+        "Spearman's rank: rank EACH set first, then d = difference of "
+        "RANKS — ρ = 1 − 6Σd²/(n(n²−1)). Squaring the raw values is the "
+        "classic error.",
+        "You have two sets of scores — what's the very first thing you do "
+        "before any squaring?",
+        "WAEC Chief Examiner 2024 Elective Maths"),
+    Misconception(
+        "WAEC Maths 2.2",
+        "factorise quadratic expression",
+        "Split the middle term (or group): for ax²+bx+c find two numbers "
+        "multiplying to a·c and adding to b. Examiners flagged factorisation "
+        "and simplification as a top 2025 weakness.",
+        "For 2x²+7x+3: which two numbers multiply to 6 and add to 7?",
+        "WAEC Chief Examiner 2025 Core Maths"),
+    Misconception(
+        "WAEC Maths 6.1",
+        "cumulative frequency table ogive",
+        "Cumulative frequency ACCUMULATES — each entry is this class plus "
+        "all previous. Plot against UPPER class boundaries for the ogive. "
+        "Examiners flagged both poor table construction and poor "
+        "interpretation.",
+        "Your table's third row is 18 — is that just this class, or this "
+        "class plus everything before it?",
+        "WAEC Chief Examiner 2025 Core Maths"),
+    Misconception(
+        "WAEC Maths 1.1",
+        "word problem translate mathematical expression",
+        "Translate words → symbols FIRST: 'more than' = +, 'of' usually = ×, "
+        "'per' = ÷. Examiners flagged inability to turn word problems into "
+        "expressions.",
+        "Circle the operation words in the question — what does each one "
+        "become in symbols?",
+        "WAEC Chief Examiner 2025 Core Maths"),
+    Misconception(
+        "WAEC Maths 1.1",
+        "simple interest compound",
+        "Simple interest: I = PRT/100 — interest on the principal only. "
+        "Don't compound unless the question says so; examiners flagged "
+        "simple-interest applications as a weakness.",
+        "Is the interest in this question calculated on the original "
+        "amount every year, or on a growing amount?",
+        "WAEC Chief Examiner 2025 Core Maths"),
+    Misconception(
+        "WAEC Maths 4.1",
+        "pythagoras theorem hypotenuse",
+        "Pythagoras: hypotenuse² = sum of the other two squares — and the "
+        "hypotenuse is ALWAYS opposite the right angle. Examiners flagged "
+        "Pythagoras as a recurring weakness.",
+        "Point to the right angle — which side is opposite it?",
+        "WAEC Chief Examiner 2025 Core Maths"),
+    Misconception(
+        "WAEC Physics 1.2",
+        "projectile maximum height initial velocity",
+        "Resolve FIRST: max height uses the VERTICAL component u·sinθ, not "
+        "the full launch speed. Using the initial velocity whole is the "
+        "examiner-reported error.",
+        "The ball is launched at an angle — which part of the velocity "
+        "actually fights gravity?",
+        "Examiner-reported (projectile motion)"),
+    Misconception(
+        "WAEC Physics 1.4",
+        "work done force distance direction",
+        "Work = force × distance moved IN THE DIRECTION of the force. "
+        "Lifting a weight W through height q: work = Wq (gain in potential "
+        "energy), not W times the slanted path.",
+        "The force here is gravity, straight down — how far did the weight "
+        "move straight down (or up)?",
+        "Examiner-reported (work/energy)"),
+    Misconception(
+        "WAEC Physics 3.3",
+        "rectification ac dc",
+        "Rectification converts a.c. to d.c. (a diode does it). Examiners "
+        "flagged wave rectification as shallowly understood.",
+        "What kind of current comes out of a phone charger — alternating "
+        "or direct?",
+        "WAEC Chief Examiner 2019 Science"),
+    Misconception(
+        "WAEC Biology 9.3",
+        "greenhouse effect climate change",
+        "Greenhouse effect: short-wave solar radiation passes through the "
+        "atmosphere; long-wave heat radiated back is trapped by CO₂ and "
+        "other gases. Examiners flagged shallow definitions.",
+        "What happens to sunlight AFTER it warms the ground — where does "
+        "that heat try to go?",
+        "WAEC Chief Examiner 2019 Science"),
+    Misconception(
+        "WAEC English 3.1",
+        "spelling technical words",
+        "Spell technical words exactly — examiners listed wrongly spelt "
+        "words (knife, bacteria, manure, wheelbarrow, nutcracker, "
+        "volumetric) as a scored weakness.",
+        "Sound it out syllable by syllable — which syllable are you unsure "
+        "of?",
+        "WAEC Chief Examiner 2019 Science"),
+    Misconception(
+        "WAEC English 6.1",
+        "answer more questions than specified",
+        "Answer EXACTLY the number specified ('answer any 5 of 7'). Extra "
+        "answers waste time and examiners explicitly flagged it.",
+        "How many does the rubric ask for — and how many have you written?",
+        "WAEC Chief Examiner 2019 Science"),
+)
+
+
+def misconceptions_for(query: str) -> list[Misconception]:
+    """Misconceptions relevant to a topic/code query (never raises)."""
+    try:
+        qtok = _tok(query)
+        out = []
+        for m in MISCONCEPTION_BANK:
+            mtok = _tok(m.code + " " + m.pattern + " " + m.correction)
+            if qtok & mtok:
+                out.append(m)
+        return out
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def _as_tutor_misconceptions(items: list[Misconception]) -> list[Any]:
+    # Misconception already subclasses the tutor's — pass through.
+    return list(items)
+
+
+# ── exam simulation ──────────────────────────────────────────────────────────
+
+class ExamSim:
+    """Timed mock exams under real paper schemes (EXAM_FORMATS).
+
+    Questions: [{"q", "answer", "options"?, "code"?}]. MCQ grading is exact
+    (option letter or text match); theory uses keyword overlap (honest
+    heuristic, documented). No negative marking (JAMB rule). Produces a
+    report: score, pace analysis, misconception hits, predicted grade band.
+    """
+
+    def __init__(self, exam: str = "JAMB",
+                 subject: str = "Use of English",
+                 questions: list[dict[str, Any]] | None = None,
+                 minutes: float | None = None) -> None:
+        fmt = EXAM_FORMATS.get(exam, EXAM_FORMATS["JAMB"])
+        self.exam = exam
+        self.format = fmt
+        self.subject = subject
+        self.questions = list(questions or [])
+        paper_minutes = minutes
+        if paper_minutes is None:
+            for p in fmt.get("papers", []):
+                name = str(p.get("name", "")).lower()
+                if subject.lower() in name or "subject paper" in name:
+                    paper_minutes = float(p.get("minutes", 30))
+                    break
+            paper_minutes = paper_minutes or 30.0
+        self.minutes = paper_minutes
+        self._started_at = 0.0
+        self._answers: list[dict[str, Any]] = []
+        self._q_started: list[float] = []
+
+    def start(self) -> dict[str, Any]:
+        self._started_at = time.time()
+        self._answers = []
+        self._q_started = [time.time()] * len(self.questions)
+        return {"exam": self.exam, "subject": self.subject,
+                "questions": len(self.questions),
+                "minutes": self.minutes,
+                "seconds_per_question": round(self.minutes * 60
+                                              / max(1, len(self.questions)), 1),
+                "negative_marking": self.format.get("negative_marking", False)}
+
+    def answer(self, index: int, response: str) -> dict[str, Any]:
+        """Answer question ``index``. Returns verdict + elapsed pacing."""
+        if not (0 <= index < len(self.questions)):
+            raise IndexError(f"question index {index} out of range")
+        q = self.questions[index]
+        elapsed = time.time() - (self._q_started[index]
+                                 if index < len(self._q_started) else time.time())
+        verdict, detail = self._grade(q, response)
+        self._answers.append({"index": index, "response": response,
+                              "verdict": verdict, "detail": detail,
+                              "seconds": round(elapsed, 1),
+                              "code": q.get("code", "")})
+        return {"verdict": verdict, "detail": detail,
+                "seconds": round(elapsed, 1)}
+
+    @staticmethod
+    def _grade(q: dict[str, Any], response: str) -> tuple[str, str]:
+        options = q.get("options") or []
+        expected = str(q.get("answer", "")).strip()
+        resp = (response or "").strip()
+        if options:
+            # MCQ: letter match or option-text match.
+            letters = "ABCD"
+            exp_letter = ""
+            for i, opt in enumerate(options):
+                if str(opt).strip().lower() == expected.lower():
+                    exp_letter = letters[i] if i < 4 else ""
+            rl = resp.upper().strip().rstrip(".)")
+            if exp_letter and rl == exp_letter:
+                return "correct", "exact option match"
+            if resp.lower() == expected.lower():
+                return "correct", "option text match"
+            if resp and expected.lower() in resp.lower():
+                return "partial", "contains the answer text"
+            return "wrong", f"expected {exp_letter or expected}"
+        # Theory: keyword overlap (honest heuristic).
+        st, ex = _tok(resp), _tok(expected)
+        if not ex:
+            return "wrong", "no model answer to grade against"
+        ratio = len(st & ex) / len(ex)
+        if ratio >= 0.7:
+            return "correct", f"{len(st & ex)}/{len(ex)} key terms"
+        if ratio >= 0.35:
+            return "partial", f"{len(st & ex)}/{len(ex)} key terms"
+        return "wrong", f"only {len(st & ex)}/{len(ex)} key terms"
+
+    def finish(self) -> dict[str, Any]:
+        total = len(self.questions)
+        answered = len(self._answers)
+        correct = sum(1 for a in self._answers if a["verdict"] == "correct")
+        partial = sum(1 for a in self._answers if a["verdict"] == "partial")
+        score = correct + 0.5 * partial
+        pct = 100.0 * score / total if total else 0.0
+        times = [a["seconds"] for a in self._answers]
+        avg_s = sum(times) / len(times) if times else 0.0
+        budget_s = self.minutes * 60 / max(1, total)
+        # Misconception hits: wrong answers whose question code has a bank entry.
+        mis_hits: list[str] = []
+        for a in self._answers:
+            if a["verdict"] == "wrong" and a.get("code"):
+                for m in MISCONCEPTION_BANK:
+                    if m.code.lower() in str(a["code"]).lower():
+                        mis_hits.append(m.correction)
+                        break
+        elapsed_min = ((time.time() - self._started_at) / 60.0
+                       if self._started_at else 0.0)
+        grade = waec_grade(pct) if self.exam.upper().startswith("WAEC") else ""
+        scaled = ""
+        if self.exam == "JAMB":
+            scaled = f"≈ {pct / 100 * 100:.0f}/100 for this paper"
+        return {
+            "exam": self.exam, "subject": self.subject,
+            "score": round(score, 1), "total": total, "pct": round(pct, 1),
+            "answered": answered, "correct": correct, "partial": partial,
+            "avg_seconds_per_q": round(avg_s, 1),
+            "budget_seconds_per_q": round(budget_s, 1),
+            "pace": ("on pace" if avg_s <= budget_s * 1.2 else
+                     "too slow — practice under time" if avg_s > budget_s * 1.5
+                     else "slightly over budget"),
+            "time_used_min": round(elapsed_min, 1),
+            "time_allowed_min": self.minutes,
+            "grade_band": grade, "scaled": scaled,
+            "misconception_hits": mis_hits,
+        }
+
+    def report_text(self, result: dict[str, Any] | None = None) -> str:
+        r = result or self.finish()
+        lines = [
+            f"📝 {r['exam']} mock — {r['subject']}",
+            f"Score: {r['score']}/{r['total']} ({r['pct']}%)"
+            + (f" → grade band {r['grade_band']}" if r["grade_band"] else "")
+            + (f" {r['scaled']}" if r["scaled"] else ""),
+            f"Answered {r['answered']}/{r['total']}: "
+            f"{r['correct']} correct, {r['partial']} partial",
+            f"Pace: {r['avg_seconds_per_q']}s/q vs {r['budget_seconds_per_q']}s "
+            f"budget — {r['pace']}",
+            f"Time: {r['time_used_min']}m used of {r['time_allowed_min']}m",
+        ]
+        if r["misconception_hits"]:
+            lines.append("⚠️ examiner-flagged traps you hit:")
+            for hit in r["misconception_hits"][:5]:
+                lines.append(f"• {hit}")
+        return "\n".join(lines)
+
+
+# ── study plans ──────────────────────────────────────────────────────────────
+
+def plans_dir() -> Path:
+    return Path.home() / ".nomorals" / "learn" / "plans"
+
+
+@dataclass
+class StudyPlan:
+    """A spaced study timetable: lessons + review days + mock exams."""
+    course_id: str
+    course_title: str
+    exam_date: str            # YYYY-MM-DD
+    sessions: list[dict[str, Any]] = field(default_factory=list)
+    created_at: float = field(default_factory=time.time)
+
+    def to_text(self) -> str:
+        lines = [f"📅 Study plan — {self.course_title}",
+                 f"Exam: {self.exam_date} · {len(self.sessions)} sessions"]
+        for s in self.sessions:
+            lines.append(
+                f"{s['date']} · {s['kind']}: {s['topic']} "
+                f"({s['minutes']}m)")
+        return "\n".join(lines)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"course_id": self.course_id,
+                "course_title": self.course_title,
+                "exam_date": self.exam_date,
+                "sessions": self.sessions, "created_at": self.created_at}
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> "StudyPlan":
+        return cls(course_id=str(d.get("course_id", "")),
+                   course_title=str(d.get("course_title", "")),
+                   exam_date=str(d.get("exam_date", "")),
+                   sessions=list(d.get("sessions") or []),
+                   created_at=float(d.get("created_at", time.time())))
+
+    def save(self, path: str | Path | None = None) -> str:
+        p = Path(path) if path else plans_dir() / f"{self.course_id}.json"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps(self.to_dict(), indent=2), encoding="utf-8")
+        return str(p)
+
+    @classmethod
+    def load(cls, course_id: str) -> "StudyPlan | None":
+        p = plans_dir() / f"{course_id}.json"
+        if not p.is_file():
+            return None
+        try:
+            return cls.from_dict(json.loads(p.read_text(encoding="utf-8")))
+        except Exception:  # noqa: BLE001
+            _log.debug("study plan load failed", exc_info=True)
+            return None
+
+
+def study_plan(course: Course, exam_date: str, *,
+               minutes_per_day: int = 45,
+               start_date: str = "") -> StudyPlan:
+    """Build a spaced timetable for a course ending on ``exam_date``.
+
+    Lessons spread across available days; every 4th session is a review day
+    (FSRS due cards + weak topics); the last two sessions are mock exams.
+    Dates are YYYY-MM-DD strings; day-of-week math via the stdlib.
+    """
+    import datetime as _dt
+    try:
+        exam = _dt.date.fromisoformat(exam_date)
+    except ValueError as exc:
+        raise ValueError(f"exam_date must be YYYY-MM-DD, got {exam_date!r}") from exc
+    start = (_dt.date.fromisoformat(start_date) if start_date
+             else _dt.date.today())
+    days = max(1, (exam - start).days)
+    lessons = list(course.lessons)
+    sessions: list[dict[str, Any]] = []
+    day = start
+    li = 0
+    n = 0
+    # Reserve the final day (or last two) for mocks when there's room.
+    mock_days = 1 if days < 7 else 2
+    teach_days = max(1, days - mock_days)
+    per_day = max(1, -(-len(lessons) // teach_days))  # ceil
+    while day < exam and (li < len(lessons) or n < teach_days):
+        n += 1
+        if n % 4 == 0 and li:
+            # Review day: weakest topics so far + due cards.
+            topic = (f"review: {lessons[max(0, li - 3)].title} + due "
+                     f"flashcards")
+            kind = "review"
+        else:
+            chunk = lessons[li:li + per_day]
+            li += per_day
+            if not chunk:
+                day += _dt.timedelta(days=1)
+                continue
+            topic = "; ".join(f"L{ls.n} {ls.title}" for ls in chunk)
+            kind = "learn"
+        sessions.append({"date": day.isoformat(), "kind": kind,
+                         "topic": topic, "minutes": minutes_per_day})
+        day += _dt.timedelta(days=1)
+    for i in range(mock_days):
+        if day <= exam:
+            sessions.append(
+                {"date": day.isoformat(), "kind": "mock",
+                 "topic": f"timed mock exam {i + 1} + mistake review",
+                 "minutes": minutes_per_day * 2})
+            day += _dt.timedelta(days=1)
+    return StudyPlan(course_id=course.id, course_title=course.title,
+                     exam_date=exam_date, sessions=sessions)
+
+
+# ── coverage + export ────────────────────────────────────────────────────────
+
+def syllabus_coverage(course: Course) -> dict[str, Any]:
+    """How much of the syllabus the course covers (by syllabus code)."""
+    topics = subject_topics(course.scope.subject) if course.scope.subject else []
+    codes = {ls.syllabus_code for ls in course.lessons if ls.syllabus_code}
+    total = len(topics)
+    # A lesson "covers" a topic when its syllabus_code mentions the topic code.
+    covered = 0
+    for t in topics:
+        if any(t.code in c or c in t.code for c in codes):
+            covered += 1
+    pct = round(100.0 * covered / total, 1) if total else 0.0
+    return {"subject": course.scope.subject, "total_topics": total,
+            "covered": covered, "pct": pct,
+            "codes": sorted(codes)}
+
+
+def course_to_anki_tsv(course: Course,
+                       deck: str | None = None) -> str:
+    """Course quizzes as Anki's plain-text import format (see flashcards)."""
+    deck = deck or f"Devon::Courses::{course.title[:40]}"
+    lines = ["#separator:tab", "#html:true", "#notetype:Basic",
+             f"#deck:{deck}", "#tags:devon-course",
+             "#columns:Front\tBack"]
+    for ls in course.lessons:
+        for item in ls.quiz:
+            q = str(item.get("q", "")).strip()
+            a = str(item.get("answer", "")).strip()
+            if not q:
+                continue
+            front = (f"{course.title} — L{ls.n} {ls.title}<br><br>{q}"
+                     ).replace("\t", " ")
+            back = (a or "(see lesson)").replace("\t", " ").replace("\n", "<br>")
+            lines.append(f"{front}\t{back}")
+    return "\n".join(lines) + "\n"
