@@ -100,7 +100,8 @@ class WorldGraph:
     """The live graph of the owner's world. Never raises."""
 
     def __init__(self, db_path: str = "", *, profile: str = "") -> None:
-        self._in_memory = (profile == "termux") or (not profile and _is_termux())
+        self._in_memory = (db_path == ":memory:") or (profile == "termux") or (
+            not profile and _is_termux())
         path = ":memory:" if self._in_memory else (db_path or _default_db_path())
         self._db: sqlite3.Connection | None = None
         try:
@@ -390,6 +391,341 @@ class WorldGraph:
         except Exception:  # noqa: BLE001
             _log.debug("mark_disrupted failed", exc_info=True)
             return []
+
+    # ── structural analysis (mined: Neo4j GDS centrality, supply-chain
+    # articulation analysis, workflow-intelligence path queries) ───────────
+
+    def _undirected_adj(self) -> dict[str, set[str]]:
+        """Undirected adjacency over dependency edges (depends_on + blocks)."""
+        adj: dict[str, set[str]] = {}
+        try:
+            for e in self.edges():
+                if e.type not in ("depends_on", "blocks"):
+                    continue
+                adj.setdefault(e.from_id, set()).add(e.to_id)
+                adj.setdefault(e.to_id, set()).add(e.from_id)
+        except Exception:  # noqa: BLE001
+            pass
+        return adj
+
+    def _directed_adj(self) -> dict[str, set[str]]:
+        """Directed adjacency: u -> v means u must come before v
+        (i.e. v depends_on u; u blocks v ⇒ u before v)."""
+        adj: dict[str, set[str]] = {}
+        try:
+            for e in self.edges():
+                if e.type == "depends_on":
+                    adj.setdefault(e.to_id, set()).add(e.from_id)
+                elif e.type == "blocks":
+                    adj.setdefault(e.from_id, set()).add(e.to_id)
+        except Exception:  # noqa: BLE001
+            pass
+        return adj
+
+    def weak_links(self, limit: int = 8) -> list[dict[str, Any]]:
+        """Load-bearing nodes: whose failure fragments the world.
+
+        Betweenness centrality (Brandes, on the undirected dependency
+        projection) + fan-in/fan-out. "What should I protect?" — the
+        proactive complement to ``dependents()``. Never raises.
+        """
+        try:
+            adj = self._undirected_adj()
+            nodes = [n.node_id for n in self.list_nodes() if n.node_id in adj]
+            if not nodes:
+                return []
+            # Brandes' algorithm (unweighted).
+            btw: dict[str, float] = {v: 0.0 for v in nodes}
+            for s in nodes:
+                stack: list[str] = []
+                pred: dict[str, list[str]] = {v: [] for v in nodes}
+                sigma: dict[str, float] = dict.fromkeys(nodes, 0.0)
+                sigma[s] = 1.0
+                dist: dict[str, int] = dict.fromkeys(nodes, -1)
+                dist[s] = 0
+                queue = [s]
+                while queue:
+                    v = queue.pop(0)
+                    stack.append(v)
+                    for w in adj.get(v, ()):
+                        if w not in dist:
+                            continue
+                        if dist[w] < 0:
+                            queue.append(w)
+                            dist[w] = dist[v] + 1
+                        if dist[w] == dist[v] + 1:
+                            sigma[w] += sigma[v]
+                            pred[w].append(v)
+                delta: dict[str, float] = dict.fromkeys(nodes, 0.0)
+                while stack:
+                    w = stack.pop()
+                    for v in pred[w]:
+                        if sigma[w] > 0:
+                            delta[v] += (sigma[v] / sigma[w]) * (1.0 + delta[w])
+                    if w != s:
+                        btw[w] += delta[w]
+            n = len(nodes)
+            # Raw Brandes here counts ordered pairs, so the undirected
+            # normalizer is (n-1)(n-2) — scores stay in [0, 1].
+            norm = 1.0 / max(1.0, (n - 1) * (n - 2))
+            directed = self._directed_adj()
+            by_id = {nd.node_id: nd for nd in self.list_nodes()}
+            ranked = []
+            for nid in nodes:
+                nd = by_id.get(nid)
+                fan_out = len(directed.get(nid, ()))
+                fan_in = sum(1 for outs in directed.values() if nid in outs)
+                ranked.append({
+                    "id": nid,
+                    "label": nd.label if nd else nid,
+                    "type": nd.type if nd else "",
+                    "betweenness": round(btw[nid] * norm, 3),
+                    "fan_in": fan_in,
+                    "fan_out": fan_out,
+                    "dependents": len(self._propagate({nid}) - {nid}),
+                })
+            ranked.sort(key=lambda r: (r["betweenness"], r["dependents"],
+                                       r["fan_in"] + r["fan_out"]),
+                        reverse=True)
+            return ranked[:max(1, int(limit or 8))]
+        except Exception:  # noqa: BLE001
+            _log.debug("weak_links failed", exc_info=True)
+            return []
+
+    def find_cycles(self) -> list[list[str]]:
+        """Explicit dependency cycles (canonical, deduped).
+
+        ``critical_path()`` and ``schedule_order()`` silently route around
+        cycles; this reports them so they can be fixed. Never raises.
+        """
+        try:
+            adj = self._directed_adj()
+            WHITE, GRAY, BLACK = 0, 1, 2
+            color: dict[str, int] = {}
+            found: list[list[str]] = []
+            seen: set[tuple[str, ...]] = set()
+
+            def visit(start: str) -> None:
+                stack: list[tuple[str, list[str]]] = [(start, [start])]
+                color[start] = GRAY
+                while stack:
+                    v, path = stack[-1]
+                    advanced = False
+                    for w in sorted(adj.get(v, ())):
+                        c = color.get(w, WHITE)
+                        if c == WHITE:
+                            color[w] = GRAY
+                            stack.append((w, path + [w]))
+                            advanced = True
+                            break
+                        elif c == GRAY and w in path:
+                            cyc = path[path.index(w):]
+                            # canonical rotation: start at smallest id
+                            i = cyc.index(min(cyc))
+                            canon = tuple(cyc[i:] + cyc[:i])
+                            if canon not in seen:
+                                seen.add(canon)
+                                found.append(list(canon))
+                    if not advanced:
+                        color[v] = BLACK
+                        stack.pop()
+
+            for nid in sorted(adj):
+                if color.get(nid, WHITE) == WHITE:
+                    visit(nid)
+            return found
+        except Exception:  # noqa: BLE001
+            _log.debug("find_cycles failed", exc_info=True)
+            return []
+
+    def path_between(self, from_id: str, to_id: str) -> list[GraphNode]:
+        """Shortest dependency path between two nodes ("how is X connected
+        to Y"). BFS over the undirected dependency projection. Never raises.
+        """
+        try:
+            if not from_id or not to_id:
+                return []
+            adj = self._undirected_adj()
+            if from_id not in adj or to_id not in adj:
+                # endpoints may exist without dependency edges
+                if from_id == to_id and self.get(from_id):
+                    return [self.get(from_id)]  # type: ignore[list-item]
+                return []
+            prev: dict[str, str] = {from_id: ""}
+            queue = [from_id]
+            while queue:
+                v = queue.pop(0)
+                if v == to_id:
+                    break
+                for w in adj.get(v, ()):
+                    if w not in prev:
+                        prev[w] = v
+                        queue.append(w)
+            if to_id not in prev:
+                return []
+            ids: list[str] = []
+            cur = to_id
+            while cur:
+                ids.append(cur)
+                cur = prev[cur]
+            ids.reverse()
+            by_id = {n.node_id: n for n in self.list_nodes()}
+            return [by_id[i] for i in ids if i in by_id]
+        except Exception:  # noqa: BLE001
+            return []
+
+    def neighborhood(self, node_id: str, depth: int = 2) -> list[GraphNode]:
+        """k-hop subgraph around a node (dependency edges, undirected).
+        Focused views without dumping the whole graph. Never raises."""
+        try:
+            adj = self._undirected_adj()
+            depth = max(0, min(4, int(depth or 0)))
+            seen = {node_id}
+            frontier = [node_id]
+            for _ in range(depth):
+                nxt: list[str] = []
+                for v in frontier:
+                    for w in adj.get(v, ()):
+                        if w not in seen:
+                            seen.add(w)
+                            nxt.append(w)
+                frontier = nxt
+            by_id = {n.node_id: n for n in self.list_nodes()}
+            return sorted((by_id[i] for i in seen if i in by_id),
+                          key=lambda n: n.label)
+        except Exception:  # noqa: BLE001
+            return []
+
+    def schedule_waves(self) -> list[list[GraphNode]]:
+        """Topological *layers*: tasks at the same depth have no dependencies
+        between them and can run in parallel (the Neo4j maximal-distance
+        insight). Cyclic leftovers go in a final "cyclic" wave, reported
+        honestly. Never raises.
+        """
+        try:
+            nodes = self.list_nodes()
+            by_id = {n.node_id: n for n in nodes}
+            indeg: dict[str, int] = {n.node_id: 0 for n in nodes}
+            before: dict[str, list[str]] = {n.node_id: [] for n in nodes}
+            for e in self.edges():
+                if (e.type == "depends_on" and e.from_id in by_id
+                        and e.to_id in by_id and e.from_id != e.to_id):
+                    before[e.to_id].append(e.from_id)
+                    indeg[e.from_id] += 1
+
+            def due_key(n: GraphNode) -> float:
+                due = n.attrs.get("due_ts") or n.attrs.get("due")
+                try:
+                    return float(due) if due else float("inf")
+                except (TypeError, ValueError):
+                    return float("inf")
+
+            waves: list[list[GraphNode]] = []
+            ready = sorted((nid for nid, d in indeg.items() if d == 0),
+                           key=lambda nid: due_key(by_id[nid]))
+            while ready:
+                wave = [by_id[nid] for nid in ready]
+                waves.append(wave)
+                nxt_ready: list[str] = []
+                for nid in ready:
+                    for m in before[nid]:
+                        indeg[m] -= 1
+                        if indeg[m] == 0:
+                            nxt_ready.append(m)
+                ready = sorted(nxt_ready,
+                               key=lambda nid: due_key(by_id[nid]))
+            placed = {n.node_id for w in waves for n in w}
+            leftover = sorted((n for n in nodes if n.node_id not in placed),
+                              key=due_key)
+            if leftover:
+                waves.append(leftover)  # the cyclic wave
+            return waves
+        except Exception:  # noqa: BLE001
+            _log.debug("schedule_waves failed", exc_info=True)
+            return []
+
+    def simulate_disruption(self, node_id: str) -> dict[str, Any]:
+        """Dry-run disruption: layered blast-radius tree WITHOUT writing
+        state. ``what_breaks_if()`` gives a flat summary; this shows the
+        shape (depth layers) so the cascade is legible. Never raises.
+        """
+        try:
+            node = self.get(node_id)
+            if node is None:
+                return {"ok": False, "reason": "node not found"}
+            # BFS in propagation order, recording depth.
+            depth: dict[str, int] = {node_id: 0}
+            frontier = [node_id]
+            all_edges = self.edges()
+            while frontier:
+                cur = frontier.pop(0)
+                for e in all_edges:
+                    nxt = None
+                    if e.type == "depends_on" and e.to_id == cur:
+                        nxt = e.from_id
+                    elif e.type == "blocks" and e.from_id == cur:
+                        nxt = e.to_id
+                    if nxt and nxt not in depth:
+                        depth[nxt] = depth[cur] + 1
+                        frontier.append(nxt)
+            by_id = {n.node_id: n for n in self.list_nodes()}
+            layers: dict[int, list[str]] = {}
+            for nid, d in depth.items():
+                if nid == node_id:
+                    continue
+                layers.setdefault(d, []).append(
+                    by_id[nid].label if nid in by_id else nid)
+            return {
+                "ok": True,
+                "node": node.label,
+                "total_affected": len(depth) - 1,
+                "max_depth": max(depth.values()) if depth else 0,
+                "layers": {str(k): sorted(v)
+                           for k, v in sorted(layers.items())},
+            }
+        except Exception:  # noqa: BLE001
+            _log.debug("simulate_disruption failed", exc_info=True)
+            return {"ok": False, "reason": "simulation failed"}
+
+    def to_mermaid(self, node_ids: list[str] | None = None) -> str:
+        """``graph LR`` export for chat/GodConsole rendering.
+
+        Disrupted nodes get the ⚠️ marker; edge labels show the relation.
+        Never raises.
+        """
+        try:
+            nodes = self.list_nodes()
+            if node_ids:
+                want = set(node_ids)
+                nodes = [n for n in nodes if n.node_id in want]
+            keep = {n.node_id for n in nodes}
+            by_id = {n.node_id: n for n in nodes}
+
+            def esc(label: str) -> str:
+                return (label or "").replace('"', "'").replace("\n", " ")[:60]
+
+            def nid(n: GraphNode) -> str:
+                return "n_" + n.node_id.replace("-", "_")[:14]
+
+            lines = ["graph LR"]
+            for n in nodes:
+                mark = " ⚠️" if n.disrupted else ""
+                lines.append(f'    {nid(n)}["{esc(n.label)}{mark}<br/><i>{n.type}</i>"]')
+            seen_edges = 0
+            for e in self.edges():
+                if e.from_id not in keep or e.to_id not in keep:
+                    continue
+                a, b = by_id[e.from_id], by_id[e.to_id]
+                lines.append(f'    {nid(a)} -->|"{e.type}"| {nid(b)}')
+                seen_edges += 1
+                if seen_edges > 120:
+                    lines.append("    %% …edge cap reached")
+                    break
+            if len(nodes) > 60:
+                lines.append("    %% …node cap reached")
+            return "\n".join(lines)
+        except Exception:  # noqa: BLE001
+            return "graph LR\n    %% unavailable"
 
     def clear_disruption(self, node_id: str) -> bool:
         """Clear the disrupted flag on one node. Never raises."""
@@ -774,6 +1110,13 @@ def _usage() -> str:
         "  show [node-id]              — summary, or one node + dependents\n"
         "  breaks <node-id>            — what breaks if this node fails\n"
         "  path                        — critical path (longest dependency chain)\n"
+        "  weak                        — load-bearing nodes to protect\n"
+        "  cycles                      — report dependency cycles\n"
+        "  hood <node-id> [depth]      — k-hop neighborhood view\n"
+        "  between <a-id> <b-id>       — shortest dependency path A→B\n"
+        "  waves                       — parallel execution waves\n"
+        "  sim <node-id>               — dry-run disruption (no state change)\n"
+        "  map [node-id]               — mermaid diagram of the graph\n"
         "  sync                        — project memory + tasks into the graph"
     )
 
@@ -861,6 +1204,90 @@ def control_graph(tail: str, context: Any = None, chat: Any = None,
             return ("🛤️ critical path:\n" +
                     "\n".join(f"   {i+1}. [{n.type}] {n.label}"
                               for i, n in enumerate(path)))
+
+        if cmd == "weak":
+            links = g.weak_links()
+            if not links:
+                return "not enough dependency links yet to rank load-bearing nodes."
+            lines = ["🧱 load-bearing nodes (protect these first):"]
+            for i, w in enumerate(links, 1):
+                lines.append(
+                    f"   {i}. {w['label']} [{w['type']}] — centrality {w['betweenness']}, "
+                    f"{w['dependents']} downstream, fan {w['fan_in']}→{w['fan_out']}")
+            return "\n".join(lines) + "\n" + GRAPH_DISCLAIMER
+
+        if cmd == "cycles":
+            cycles = g.find_cycles()
+            if not cycles:
+                return "✅ no dependency cycles found."
+            by_id = {n.node_id: n for n in g.list_nodes()}
+            lines = [f"🔁 {len(cycles)} dependency cycle(s):"]
+            for cyc in cycles[:10]:
+                labels = [by_id[i].label if i in by_id else i for i in cyc]
+                lines.append("   • " + " → ".join(labels) + f" → {labels[0]}")
+            return "\n".join(lines) + "\n" + GRAPH_DISCLAIMER
+
+        if cmd == "hood":
+            bits = rest.split()
+            if not bits:
+                return "usage: /graph hood <node-id> [depth]"
+            depth = 2
+            if len(bits) > 1:
+                try:
+                    depth = int(bits[1])
+                except (TypeError, ValueError):
+                    depth = 2
+            hood = g.neighborhood(bits[0], depth)
+            if not hood:
+                return "node not found."
+            lines = [f"🧩 neighborhood (depth {depth}):"]
+            lines += [f"   • [{n.type}] {n.label}"
+                      + (" ⚠️" if n.disrupted else "") for n in hood[:25]]
+            return "\n".join(lines) + "\n" + GRAPH_DISCLAIMER
+
+        if cmd == "between":
+            bits = rest.split()
+            if len(bits) < 2:
+                return "usage: /graph between <a-id> <b-id>"
+            path = g.path_between(bits[0], bits[1])
+            if not path:
+                return "no dependency path connects those two."
+            return ("🔗 " + " → ".join(n.label for n in path)
+                    + f"\n{len(path) - 1} hop(s).\n" + GRAPH_DISCLAIMER)
+
+        if cmd == "waves":
+            waves = g.schedule_waves()
+            if not waves:
+                return "nothing scheduled yet."
+            lines = ["🌊 parallel waves (same wave = no dependencies between them):"]
+            for i, wave in enumerate(waves, 1):
+                tag = " ⚠️ cyclic" if i == len(waves) and g.find_cycles() else ""
+                lines.append(f"   wave {i}{tag}: " +
+                             ", ".join(n.label for n in wave[:8])
+                             + (" …" if len(wave) > 8 else ""))
+            return "\n".join(lines) + "\n" + GRAPH_DISCLAIMER
+
+        if cmd == "sim":
+            if not rest.strip():
+                return "usage: /graph sim <node-id>"
+            r = g.simulate_disruption(rest.strip())
+            if not r.get("ok"):
+                return "node not found."
+            lines = [f"🔬 dry run — if '{r['node']}' failed "
+                     f"({r['total_affected']} affected, depth {r['max_depth']}):"]
+            for depth, labels in r["layers"].items():
+                lines.append(f"   depth {depth}: " + ", ".join(labels[:8])
+                             + (" …" if len(labels) > 8 else ""))
+            return ("\n".join(lines)
+                    + "\n(no state changed — this was a simulation.)\n"
+                    + GRAPH_DISCLAIMER)
+
+        if cmd == "map":
+            node = g.get(rest.strip()) if rest.strip() else None
+            ids = ([n.node_id for n in g.neighborhood(node.node_id, 2)]
+                   if node else None)
+            return ("```mermaid\n" + g.to_mermaid(ids) + "\n```\n"
+                    + GRAPH_DISCLAIMER)
 
         if cmd == "sync":
             count = g.sync_from_memory()

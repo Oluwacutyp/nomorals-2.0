@@ -19,6 +19,7 @@ import json
 import logging
 import math
 import os
+import random
 import sqlite3
 import time
 from dataclasses import dataclass, field
@@ -119,7 +120,8 @@ class EstimateStore:
         self._db: sqlite3.Connection | None = None
         try:
             path = db_path or _default_db()
-            os.makedirs(os.path.dirname(path), exist_ok=True)
+            if path != ":memory:":
+                os.makedirs(os.path.dirname(path), exist_ok=True)
             self._db = sqlite3.connect(path)
             self._db.row_factory = sqlite3.Row
             self._db.execute(
@@ -464,6 +466,359 @@ def aggregate(task_type: str, parts: list[Estimate]) -> Estimate:
                         "heuristic", 0, std_minutes=11.25)
 
 
+# ── Monte Carlo schedule risk (Beta-PERT simulation) ─────────────
+#
+# Mined from the schedule-risk canon (everydaybudd PERT calculator,
+# timeshifted-risk-mcs, the sofka Monte Carlo skill): the deterministic
+# critical path is wrong about half the time, because a near-critical path
+# can overtake it. So per iteration we SAMPLE every step's Beta-PERT
+# distribution and take the max over ALL paths — the simulated critical
+# path — then read off P10/P50/P80/P90, per-step criticality, and a
+# sensitivity (tornado) ranking. Pure stdlib: random.betavariate, no numpy.
+
+_DEFAULT_MC_ITERATIONS = 10_000
+_MAX_MC_ITERATIONS = 50_000
+
+
+def pert_sample(optimistic: float, most_likely: float, pessimistic: float,
+                rng: random.Random | None = None) -> float:
+    """One draw from the Beta-PERT distribution for a three-point quote.
+
+    Canonical Vose parameterization: with mean mu = (O + 4M + P) / 6,
+    alpha = 1 + 4(M − O)/(P − O), beta = 1 + 4(P − M)/(P − O). Collapses to
+    the constant when O == P. Never raises.
+    """
+    try:
+        o = max(0.0, float(optimistic))
+        m = max(0.0, float(most_likely))
+        p = max(0.0, float(pessimistic))
+        if p < o:
+            o, p = p, o
+        m = min(max(m, o), p)
+        if p <= o:
+            return o
+        span = p - o
+        alpha = 1.0 + 4.0 * (m - o) / span
+        beta = 1.0 + 4.0 * (p - m) / span
+        r = rng or random
+        return o + r.betavariate(alpha, beta) * span
+    except (TypeError, ValueError):
+        return 0.0
+
+
+@dataclass
+class MonteCarloResult:
+    """Outcome of a schedule-risk simulation."""
+    task_type: str
+    iterations: int
+    seed: int
+    ok: bool = True
+    reason: str = ""
+    p10: float = 0.0
+    p50: float = 0.0
+    p80: float = 0.0
+    p90: float = 0.0
+    mean: float = 0.0
+    std: float = 0.0
+    deterministic_te: float = 0.0  # the naive sum-of-TEs critical path
+    criticality: dict[str, float] = field(default_factory=dict)
+    sensitivity: list[tuple[str, float]] = field(default_factory=list)
+    step_labels: dict[str, str] = field(default_factory=dict)
+
+    @property
+    def contingency_p80(self) -> float:
+        return max(0.0, self.p80 - self.p50)
+
+    def format(self) -> str:
+        if not self.ok:
+            return f"🎲 couldn't simulate: {self.reason}"
+        lines = [
+            f"🎲 Monte Carlo ({self.iterations:,} iterations, seed {self.seed}):",
+            f"   P50 {_fmt_band(self.p50)} · P80 {_fmt_band(self.p80)} · "
+            f"P90 {_fmt_band(self.p90)}  (P10 {_fmt_band(self.p10)})",
+            f"   mean {_fmt_band(self.mean)} ± {_fmt_band(self.std)} · "
+            f"naive plan said {_fmt_band(self.deterministic_te)}",
+            f"   💰 contingency (P80−P50): {_fmt_band(self.contingency_p80)}",
+        ]
+        if self.sensitivity:
+            lines.append("   🔥 top variance drivers:")
+            for sid, rho in self.sensitivity[:5]:
+                label = self.step_labels.get(sid, sid)
+                lines.append(f"      • {label} (sensitivity {rho:.2f})")
+        if self.criticality:
+            crit = sorted(self.criticality.items(),
+                          key=lambda kv: kv[1], reverse=True)[:5]
+            lines.append("   🛤️ criticality (share of runs on the critical path):")
+            for sid, frac in crit:
+                label = self.step_labels.get(sid, sid)
+                lines.append(f"      • {label}: {frac:.0%}")
+        lines.append("Quote the P80 to stakeholders; the P90 is your downside.")
+        return "\n".join(lines)
+
+
+def _percentile(sorted_vals: list[float], pct: float) -> float:
+    if not sorted_vals:
+        return 0.0
+    k = (len(sorted_vals) - 1) * (pct / 100.0)
+    f = math.floor(k)
+    c = math.ceil(k)
+    if f == c:
+        return sorted_vals[int(k)]
+    return sorted_vals[f] + (sorted_vals[c] - sorted_vals[f]) * (k - f)
+
+
+def _ranks(vals: list[float]) -> list[float]:
+    """Average ranks for Spearman correlation (pure Python)."""
+    order = sorted(range(len(vals)), key=lambda i: vals[i])
+    ranks = [0.0] * len(vals)
+    i = 0
+    while i < len(order):
+        j = i
+        while j + 1 < len(order) and vals[order[j + 1]] == vals[order[i]]:
+            j += 1
+        avg = (i + j) / 2.0 + 1.0
+        for k in range(i, j + 1):
+            ranks[order[k]] = avg
+        i = j + 1
+    return ranks
+
+
+def _pearson(xs: list[float], ys: list[float]) -> float:
+    n = len(xs)
+    if n < 2:
+        return 0.0
+    mx = sum(xs) / n
+    my = sum(ys) / n
+    num = sum((x - mx) * (y - my) for x, y in zip(xs, ys))
+    dx = math.sqrt(sum((x - mx) ** 2 for x in xs))
+    dy = math.sqrt(sum((y - my) ** 2 for y in ys))
+    if dx == 0 or dy == 0:
+        return 0.0
+    return max(-1.0, min(1.0, num / (dx * dy)))
+
+
+def monte_carlo(task_type: str,
+                steps: list[dict[str, Any]],
+                iterations: int = _DEFAULT_MC_ITERATIONS,
+                seed: int | None = None) -> MonteCarloResult:
+    """Simulate a project's duration distribution.
+
+    ``steps``: list of ``{"id": str, "label": str, "optimistic": m,
+    "most_likely": m, "pessimistic": m, "depends_on": [ids]}``.  Each
+    iteration samples every step's Beta-PERT distribution and computes the
+    project duration as the longest path through the dependency DAG — the
+    *simulated* critical path, which the deterministic path misses about
+    half the time.  Returns percentiles, per-step criticality index, and a
+    sensitivity ranking.  Never raises.
+    """
+    ttype = (task_type or "project").strip().lower()[:80] or "project"
+    try:
+        steps = [s for s in (steps or []) if isinstance(s, dict)]
+        if not steps:
+            return MonteCarloResult(ttype, 0, seed or 0, ok=False,
+                                    reason="no steps given")
+        if len(steps) > 200:
+            return MonteCarloResult(ttype, 0, seed or 0, ok=False,
+                                    reason="too many steps (max 200)")
+        iterations = max(100, min(_MAX_MC_ITERATIONS, int(iterations or 0)
+                                  or _DEFAULT_MC_ITERATIONS))
+        seed = int(seed) if seed is not None else random.randrange(2 ** 31)
+        rng = random.Random(seed)
+
+        # Normalize steps.
+        ids: list[str] = []
+        labels: dict[str, str] = {}
+        omp: dict[str, tuple[float, float, float]] = {}
+        deps: dict[str, list[str]] = {}
+        for i, s in enumerate(steps):
+            sid = str(s.get("id") or f"step_{i}")
+            ids.append(sid)
+            labels[sid] = str(s.get("label") or sid)[:60]
+            try:
+                o = max(0.0, float(s.get("optimistic", 0)))
+                m = max(0.0, float(s.get("most_likely", 0)))
+                p = max(0.0, float(s.get("pessimistic", 0)))
+            except (TypeError, ValueError):
+                o = m = p = 0.0
+            if p < o:
+                o, p = p, o
+            m = min(max(m, o), p)
+            omp[sid] = (o, m, p)
+            dlist = s.get("depends_on") or []
+            deps[sid] = [str(d) for d in dlist if str(d) in
+                         {str(x.get("id") or f"step_{j}")
+                          for j, x in enumerate(steps)} and str(d) != sid]
+
+        # Topological order (Kahn); cyclic leftovers appended (honest).
+        indeg = {sid: 0 for sid in ids}
+        after: dict[str, list[str]] = {sid: [] for sid in ids}
+        for sid in ids:
+            for d in deps[sid]:
+                after[d].append(sid)
+                indeg[sid] += 1
+        topo: list[str] = []
+        ready = [sid for sid in ids if indeg[sid] == 0]
+        while ready:
+            sid = ready.pop(0)
+            topo.append(sid)
+            for nxt in after[sid]:
+                indeg[nxt] -= 1
+                if indeg[nxt] == 0:
+                    ready.append(nxt)
+        topo += [sid for sid in ids if sid not in topo]
+
+        # Deterministic TE critical path (the naive plan, for comparison).
+        te = {sid: (o + 4 * m + p) / 6.0 for sid, (o, m, p) in omp.items()}
+        det_finish: dict[str, float] = {}
+        for sid in topo:
+            det_finish[sid] = te[sid] + max(
+                [det_finish[d] for d in deps[sid]] or [0.0])
+        deterministic_te = max(det_finish.values()) if det_finish else 0.0
+
+        # Simulate.
+        totals: list[float] = []
+        samples: dict[str, list[float]] = {sid: [] for sid in ids}
+        crit_hits: dict[str, int] = {sid: 0 for sid in ids}
+        for _ in range(iterations):
+            samp = {sid: pert_sample(*omp[sid], rng=rng) for sid in ids}
+            for sid in ids:
+                samples[sid].append(samp[sid])
+            finish: dict[str, float] = {}
+            for sid in topo:
+                finish[sid] = samp[sid] + max(
+                    [finish[d] for d in deps[sid]] or [0.0])
+            total = max(finish.values()) if finish else 0.0
+            totals.append(total)
+            # Criticality: backtrack from the max-finish sinks.
+            on_path = {sid for sid in ids
+                       if abs(finish[sid] - total) < 1e-9}
+            # walk backwards: a step is critical if some critical
+            # successor starts exactly when it finishes.
+            changed = True
+            while changed:
+                changed = False
+                for sid in ids:
+                    if sid in on_path:
+                        continue
+                    for nxt in after[sid]:
+                        if nxt in on_path and abs(
+                                finish[sid] + samp[nxt] - finish[nxt]) < 1e-6:
+                            on_path.add(sid)
+                            changed = True
+                            break
+            for sid in on_path:
+                crit_hits[sid] += 1
+
+        totals_sorted = sorted(totals)
+        total_ranks = _ranks(totals)
+        sens: list[tuple[str, float]] = []
+        for sid in ids:
+            rho = abs(_pearson(_ranks(samples[sid]), total_ranks))
+            sens.append((sid, round(rho, 3)))
+        sens.sort(key=lambda kv: kv[1], reverse=True)
+
+        mean = sum(totals) / len(totals)
+        var = sum((t - mean) ** 2 for t in totals) / len(totals)
+        return MonteCarloResult(
+            task_type=ttype, iterations=iterations, seed=seed,
+            p10=round(_percentile(totals_sorted, 10), 2),
+            p50=round(_percentile(totals_sorted, 50), 2),
+            p80=round(_percentile(totals_sorted, 80), 2),
+            p90=round(_percentile(totals_sorted, 90), 2),
+            mean=round(mean, 2), std=round(math.sqrt(var), 2),
+            deterministic_te=round(deterministic_te, 2),
+            criticality={sid: round(crit_hits[sid] / iterations, 3)
+                         for sid in ids},
+            sensitivity=sens,
+            step_labels=labels,
+        )
+    except Exception as e:  # noqa: BLE001 - never raises
+        _log.debug("monte_carlo failed", exc_info=True)
+        return MonteCarloResult(ttype, 0, seed or 0, ok=False,
+                                reason=str(e) or "simulation failed")
+
+
+# ── Reference-class forecasting (the outside view) ────────────────
+#
+# Mined from Kahneman/Tversky/Flyvbjerg: the inside view (this plan's story)
+# is systematically optimistic; the outside view (how tasks LIKE this
+# actually turned out) is the anchor. Our EstimateStore already keeps the
+# outside view (EMA bias ratio per task type) — this surfaces it explicitly
+# instead of applying it silently.
+
+def reference_class_check(task_type: str, inside_minutes: float,
+                          db_path: str = "") -> dict[str, Any]:
+    """Compare an inside-view quote against the reference class.
+
+    ``inside_minutes``: what the plan says. Returns the outside-view
+    anchor (learned bias ratio × quote), the empirical hit-rate, and a
+    verdict. Honest when there's no history yet. Never raises.
+    """
+    try:
+        ttype = (task_type or "generic").strip().lower()[:80] or "generic"
+        inside = max(0.0, float(inside_minutes))
+        store = get_store(db_path)
+        stats = store._stats(ttype)
+        n, misses, ratio = stats["n"], stats["misses"], stats["ema_ratio"]
+        if n < 3:
+            return {"ok": True, "task_type": ttype, "inside": inside,
+                    "reference_class_size": n,
+                    "verdict": ("no reference class yet — fewer than 3 runs "
+                                "recorded. Quote wide and start recording.")}
+
+        outside = inside * ratio
+        hit_rate = (n - misses) / n if n else 0.0
+        if ratio > 1.25:
+            verdict = (f"chronic optimism: this task type runs ×{ratio:.2f} "
+                       f"the quote. Anchor at {_fmt_band(outside)}, not "
+                       f"{_fmt_band(inside)}.")
+        elif ratio < 0.8:
+            verdict = (f"you over-quote this one (runs ×{ratio:.2f} of the "
+                       f"quote) — {_fmt_band(outside)} is the honest anchor.")
+        else:
+            verdict = (f"well-calibrated quotes here (×{ratio:.2f}); "
+                       f"{_fmt_band(inside)} stands.")
+        return {"ok": True, "task_type": ttype, "inside": inside,
+                "outside_anchor": round(outside, 2),
+                "uplift_ratio": round(ratio, 2),
+                "reference_class_size": n,
+                "empirical_hit_rate": round(hit_rate, 2),
+                "verdict": verdict}
+    except Exception:  # noqa: BLE001 - never raises
+        return {"ok": False, "reason": "check failed"}
+
+
+def calibration(db_path: str = "") -> list[dict[str, Any]]:
+    """Quoted bands vs reality, per task type (Tetlock-style calibration).
+
+    Our bands are quoted as ~80% capture bands; this compares the observed
+    in-band hit rate against that target. Never raises.
+    """
+    try:
+        store = get_store(db_path)
+        if store._db is None:
+            return []
+        rows = store._db.execute(
+            "SELECT task_type, n, misses FROM estimate_stats "
+            "WHERE n >= 3 ORDER BY n DESC").fetchall()
+        out = []
+        for r in rows:
+            n, misses = int(r["n"] or 0), int(r["misses"] or 0)
+            hit = (n - misses) / n
+            if hit < 0.60:
+                verdict = "overconfident — bands miss too often; quote wider"
+            elif hit > 0.95:
+                verdict = "underconfident — bands wider than needed"
+            else:
+                verdict = "calibrated"
+            out.append({"task_type": r["task_type"], "runs": n,
+                        "hit_rate": round(hit, 2),
+                        "target": 0.80, "verdict": verdict})
+        return out
+    except Exception:  # noqa: BLE001 - never raises
+        return []
+
+
 # ── module-level convenience (lazy singleton) ────────────────────
 
 _store: EstimateStore | None = None
@@ -496,7 +851,11 @@ def _usage() -> str:
             "       /eta record <task-type> <predicted-min> <actual-min>\n"
             "       /eta risk <task-type> <elapsed-min>\n"
             "       /eta stats [task-type]\n"
-            "example: /eta research prep=10 read=20 write=15")
+            "       /eta sim <project> <label:o/m/p> [label:o/m/p ...] — Monte Carlo\n"
+            "       /eta outside <task-type> <quoted-min> — reference-class check\n"
+            "       /eta calibrate — quoted bands vs reality\n"
+            "example: /eta research prep=10 read=20 write=15\n"
+            "example: /eta sim launch \"api:20/40/90\" \"ui:10/20/45\"")
 
 
 def control_eta(tail: str, context: Any = None, chat: Any = None,
@@ -525,6 +884,64 @@ def control_eta(tail: str, context: Any = None, chat: Any = None,
                         f"bias ×{s['ema_ratio']:.2f}. " + ESTIMATE_DISCLAIMER)
             return ("📊 per-task stats need a type: /eta stats <task-type>. "
                     + ESTIMATE_DISCLAIMER)
+        if parts[0] == "outside" and len(parts) >= 3:
+            try:
+                quoted = float(parts[2])
+            except (TypeError, ValueError):
+                return "usage: /eta outside <task-type> <quoted-min>"
+            r = reference_class_check(parts[1], quoted,
+                                      db_path if db_path else "")
+            if not r.get("ok"):
+                return "couldn't run the reference-class check."
+            lines = [f"🏛️ outside view for {r['task_type']}:"]
+            lines.append(f"   inside view (your quote): {_fmt_band(r['inside'])}")
+            if r.get("reference_class_size", 0) >= 3:
+                lines.append(f"   outside anchor: {_fmt_band(r['outside_anchor'])} "
+                             f"(uplift ×{r['uplift_ratio']}, "
+                             f"{r['reference_class_size']} past runs, "
+                             f"hit rate {r['empirical_hit_rate']:.0%})")
+            lines.append(f"   → {r['verdict']}")
+            lines.append(ESTIMATE_DISCLAIMER)
+            return "\n".join(lines)
+        if parts[0] == "calibrate":
+            rows = calibration(db_path if db_path else "")
+            if not rows:
+                return ("📏 no task types with enough history yet "
+                        "(need 3+ recorded runs). " + ESTIMATE_DISCLAIMER)
+            lines = ["📏 calibration — quoted ~80% bands vs reality:"]
+            for r in rows[:12]:
+                flag = "✅" if r["verdict"] == "calibrated" else "⚠️"
+                lines.append(f"   {flag} {r['task_type']}: hit "
+                             f"{r['hit_rate']:.0%} over {r['runs']} runs — "
+                             f"{r['verdict']}")
+            lines.append(ESTIMATE_DISCLAIMER)
+            return "\n".join(lines)
+        if parts[0] == "sim" and len(parts) >= 3:
+            project = parts[1]
+            steps: list[dict[str, Any]] = []
+            # "label:o/m/p" or "label:o/m/p>dep1,dep2"
+            for tok in parts[2:]:
+                try:
+                    if ">" in tok:
+                        spec, depstr = tok.split(">", 1)
+                        dep_ids = [d.strip() for d in depstr.split(",")
+                                   if d.strip()]
+                    else:
+                        spec, dep_ids = tok, []
+                    label, triple = spec.split(":", 1)
+                    o, m, p = [float(x) for x in triple.split("/")]
+                    steps.append({"id": label.strip() or f"step_{len(steps)}",
+                                  "label": label.strip(),
+                                  "optimistic": o, "most_likely": m,
+                                  "pessimistic": p,
+                                  "depends_on": dep_ids})
+                except (ValueError, IndexError):
+                    continue
+            if not steps:
+                return ("usage: /eta sim <project> <label:o/m/p> ...\n"
+                        "example: /eta sim launch \"api:20/40/90\" \"ui:10/20/45>api\"")
+            res = monte_carlo(project, steps)
+            return res.format() + "\n" + ESTIMATE_DISCLAIMER
         # Default: estimate. Parse seg=min pairs; bare numbers → "total".
         ttype = parts[0]
         segs: dict[str, float] = {}

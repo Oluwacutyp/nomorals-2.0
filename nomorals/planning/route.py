@@ -147,9 +147,25 @@ class GeoIndex:
                 return []
             # Cell-bucket scan first; exact distance check second.
             candidates: list[str] = []
-            for c, ids in self._cells.items():
-                if self._same_area(cell, c):
-                    candidates.extend(ids)
+            if _h3 is not None and not cell.startswith("g"):
+                # Real h3: expand the query cell with k-rings so we only
+                # touch buckets that can possibly be in range.
+                try:
+                    edge_km = {15: 0.0009, 14: 0.0018, 13: 0.0037,
+                               12: 0.0074, 11: 0.0148, 10: 0.0296,
+                               9: 0.059, 8: 0.12, 7: 0.24,
+                               6: 0.48, 5: 0.96, 4: 1.9,
+                               3: 3.8, 2: 7.7, 1: 15.0, 0: 30.0}.get(8, 0.12)
+                    rings = min(12, max(0, int(float(radius_km) / max(edge_km, 1e-6)) + 1))
+                    ring_cells = _h3.k_ring(cell, rings)
+                    for c in ring_cells:
+                        candidates.extend(self._cells.get(str(c), []))
+                except Exception:  # noqa: BLE001 - fall through to full scan
+                    candidates = []
+            if not candidates:
+                for c, ids in self._cells.items():
+                    if self._same_area(cell, c):
+                        candidates.extend(ids)
             out = []
             for sid in candidates:
                 alat, alng = self._coords.get(sid, (None, None))
@@ -245,7 +261,17 @@ class CostModel:
             self._db.execute(
                 """CREATE TABLE IF NOT EXISTS route_actuals (
                        cell_a TEXT, cell_b TEXT, minutes REAL, cost_kobo REAL,
-                       n INTEGER, PRIMARY KEY (cell_a, cell_b))""")
+                       n INTEGER, recorded_at REAL DEFAULT 0,
+                       PRIMARY KEY (cell_a, cell_b))""")
+            # Migration for DBs created before recorded_at existed.
+            try:
+                cols = [r[1] for r in self._db.execute(
+                    "PRAGMA table_info(route_actuals)").fetchall()]
+                if "recorded_at" not in cols:
+                    self._db.execute(
+                        "ALTER TABLE route_actuals ADD COLUMN recorded_at REAL DEFAULT 0")
+            except Exception:  # noqa: BLE001
+                pass
             self._db.execute(
                 """CREATE TABLE IF NOT EXISTS route_globals (
                        key TEXT PRIMARY KEY, value REAL)""")
@@ -281,21 +307,32 @@ class CostModel:
             if not ca or not cb:
                 return False
             alpha = 0.35  # EMA weight for the new observation
+            now = time.time()
             if self._db is not None:
                 row = self._db.execute(
-                    "SELECT minutes, cost_kobo, n FROM route_actuals "
+                    "SELECT minutes, cost_kobo, n, recorded_at FROM route_actuals "
                     "WHERE cell_a = ? AND cell_b = ?", (ca, cb)).fetchone()
                 if row:
-                    new_min = row["minutes"] * (1 - alpha) + minutes * alpha
-                    new_cost = row["cost_kobo"] * (1 - alpha) + float(cost_kobo) * alpha
+                    # Freshness decay: a pair untouched for 30+ days is mostly
+                    # forgotten — the new observation dominates. (Mined: every
+                    # serious cost model timestamps observations.)
+                    try:
+                        age_days = max(0.0, (now - float(row["recorded_at"] or now))
+                                       / 86400.0)
+                    except (TypeError, ValueError):
+                        age_days = 0.0
+                    w = min(0.85, alpha + age_days / 30.0 * 0.5)
+                    new_min = row["minutes"] * (1 - w) + minutes * w
+                    new_cost = row["cost_kobo"] * (1 - w) + float(cost_kobo) * w
                     self._db.execute(
-                        "UPDATE route_actuals SET minutes = ?, cost_kobo = ?, n = n + 1 "
+                        "UPDATE route_actuals SET minutes = ?, cost_kobo = ?, "
+                        "n = n + 1, recorded_at = ? "
                         "WHERE cell_a = ? AND cell_b = ?",
-                        (new_min, new_cost, ca, cb))
+                        (new_min, new_cost, now, ca, cb))
                 else:
                     self._db.execute(
-                        "INSERT INTO route_actuals VALUES (?, ?, ?, ?, 1)",
-                        (ca, cb, minutes, float(cost_kobo)))
+                        "INSERT INTO route_actuals VALUES (?, ?, ?, ?, 1, ?)",
+                        (ca, cb, minutes, float(cost_kobo), now))
                 self._db.commit()
             # Learn global speed/cost-per-km when we know the distance.
             if a.has_coords() and b.has_coords():
@@ -385,13 +422,22 @@ class CostModel:
     def stats(self) -> dict[str, Any]:
         """Learning summary: how much the model actually knows."""
         try:
-            n = 0
+            n = recent = 0
             if self._db is not None:
                 row = self._db.execute(
                     "SELECT COUNT(*) AS c, SUM(n) AS s FROM route_actuals").fetchone()
                 n = int(row["s"] or 0) if row else 0
+                try:
+                    cutoff = time.time() - 30 * 86400
+                    row2 = self._db.execute(
+                        "SELECT SUM(n) AS s FROM route_actuals "
+                        "WHERE recorded_at >= ?", (cutoff,)).fetchone()
+                    recent = int(row2["s"] or 0) if row2 else 0
+                except Exception:  # noqa: BLE001
+                    recent = n
             return {
                 "recorded_trips": n,
+                "recent_trips_30d": recent,
                 "speed_kmh": round(self._speed_kmh, 1),
                 "cost_per_km_kobo": int(round(self._cost_per_km)),
                 "source": "learned" if n else "heuristic-defaults",
@@ -440,7 +486,8 @@ class RouteSolver:
         return "ortools" if _ortools_available() else "greedy"
 
     def solve(self, stops: list[Stop], cost: CostModel,
-              *, start_time: float | None = None) -> RouteResult:
+              *, start_time: float | None = None,
+              return_to_origin: bool = False) -> RouteResult:
         """Sequence ``stops`` (first = origin).  Never raises."""
         try:
             stops = [s for s in (stops or []) if s is not None]
@@ -449,31 +496,119 @@ class RouteSolver:
             if len(stops) == 1:
                 return RouteResult(stops, [], 0.0, 0, self.backend,
                                    arrivals=[start_time or time.time()])
+            t0 = start_time if start_time is not None else time.time()
             if self.backend == "ortools":
-                order = self._solve_ortools(stops, cost)
+                order = self._solve_ortools(stops, cost, t0)
             else:
-                order = self._solve_greedy(stops, cost)
-            return self._build_result(order, cost, start_time)
+                order = self._solve_greedy(stops, cost, t0)
+                order = self._two_opt(order, cost, t0=t0)
+            return self._build_result(order, cost, start_time,
+                                      return_to_origin=return_to_origin)
         except Exception:  # noqa: BLE001 - never raises
             _log.debug("route: solve failed", exc_info=True)
             return RouteResult(stops or [], [], 0.0, 0, self.backend)
 
-    # — greedy: nearest-neighbor on learned minutes —
+    # — greedy: nearest-neighbor on learned minutes, window-aware —
 
-    def _solve_greedy(self, stops: list[Stop], cost: CostModel) -> list[Stop]:
+    def _solve_greedy(self, stops: list[Stop], cost: CostModel,
+                      t0: float) -> list[Stop]:
         origin, rest = stops[0], list(stops[1:])
         order = [origin]
         current = origin
+        clock = t0
         while rest:
-            nxt = min(rest, key=lambda s: cost.estimate(current, s)[0])
+            # Window-aware choice: travel minutes + a heavy penalty for the
+            # minutes we'd arrive after a stop's window closes. Arriving
+            # early is free (we wait) — arriving late is what breaks plans.
+            def _score(s: Stop) -> float:
+                minutes = cost.estimate(current, s)[0]
+                arr = clock + minutes * 60.0
+                late = 0.0
+                if s.window:
+                    try:
+                        end = float(s.window[1])
+                        if end > 0 and arr > end:
+                            late = (arr - end) / 60.0
+                    except (TypeError, ValueError, IndexError):
+                        pass
+                return minutes + late * 1000.0
+
+            nxt = min(rest, key=_score)
             order.append(nxt)
             rest.remove(nxt)
+            travel = cost.estimate(current, nxt)[0]
+            clock += travel * 60.0 + (nxt.dwell_minutes or 0) * 60.0
             current = nxt
         return order
 
+    # — 2-opt local search (mined: NN ~25% over optimal, NN+2-opt ~5%) —
+
+    def _two_opt(self, order: list[Stop], cost: CostModel,
+                 max_passes: int = 25, t0: float | None = None) -> list[Stop]:
+        """Uncross edge pairs until locally optimal. Pure Python, O(n²)
+        per pass — sub-50ms for the errand-scale problems this module
+        solves.
+
+        Window-aware: when ``t0`` is given and any stop has a window, a
+        swap is only accepted if it does not increase total lateness —
+        the greedy pass's window respect is never undone. Never raises.
+        """
+        try:
+            n = len(order)
+            if n < 4 or n > 400:
+                return order
+            # Precompute the travel-minute matrix once.
+            mat = [[cost.estimate(order[i], order[j])[0] for j in range(n)]
+                   for i in range(n)]
+            windows = [s.window for s in order]
+            windowed = t0 is not None and any(windows)
+
+            def tour_cost(tour: list[int]) -> float:
+                total = 0.0
+                for x, y in zip(tour, tour[1:]):
+                    total += mat[x][y]
+                if not windowed:
+                    return total
+                assert t0 is not None
+                clock = t0
+                late = 0.0
+                for idx_pos, x in enumerate(tour):
+                    if idx_pos:
+                        clock += mat[tour[idx_pos - 1]][x] * 60.0
+                    w = windows[x]
+                    if w:
+                        try:
+                            end = float(w[1])
+                            if end > 0 and clock > end:
+                                late += (clock - end) / 60.0
+                        except (TypeError, ValueError, IndexError):
+                            pass
+                    clock += (order[x].dwell_minutes or 0) * 60.0
+                return total + late * 1000.0
+
+            tour = list(range(n))
+            best = tour_cost(tour)
+            improved = True
+            passes = 0
+            while improved and passes < max_passes:
+                improved = False
+                passes += 1
+                for i in range(1, n - 1):
+                    for k in range(i + 1, n):
+                        cand = tour[:i] + tour[i:k + 1][::-1] + tour[k + 1:]
+                        c = tour_cost(cand)
+                        if best - c > 1e-6:
+                            tour, best = cand, c
+                            improved = True
+            return [order[i] for i in tour]
+        except Exception:  # noqa: BLE001 - never raises
+            _log.debug("route: 2-opt failed", exc_info=True)
+            return order
+
     # — OR-Tools: exact-ish TSP on the learned cost matrix —
 
-    def _solve_ortools(self, stops: list[Stop], cost: CostModel) -> list[Stop]:
+    def _solve_ortools(self, stops: list[Stop], cost: CostModel,
+                       t0: float) -> list[Stop]:
         try:
             from ortools.constraint_solver import routing_enums_pb2, pywrapcp
             n = len(stops)
@@ -487,32 +622,76 @@ class RouteSolver:
 
             transit = routing.RegisterTransitCallback(_cb)
             routing.SetArcCostEvaluatorOfAllVehicles(transit)
+
+            # Time dimension (mined VRPTW pattern): when any stop has a
+            # window, constrain arrivals — travel + dwell at the departing
+            # node goes in the transit, waiting is the slack.
+            has_windows = any(s.window for s in stops)
+            if has_windows:
+                try:
+                    dwell_s = [int(round((s.dwell_minutes or 0) * 60))
+                               for s in stops]
+
+                    def _time_cb(i: int, j: int) -> int:
+                        fi = manager.IndexToNode(i)
+                        return matrix[fi][manager.IndexToNode(j)] + dwell_s[fi]
+
+                    time_transit = routing.RegisterTransitCallback(_time_cb)
+                    routing.AddDimension(
+                        time_transit,
+                        4 * 3600,   # slack: allow up to 4h waiting
+                        24 * 3600,  # horizon: one day
+                        False,      # don't force cumul start at zero
+                        "Time")
+                    time_dim = routing.GetDimensionOrDie("Time")
+                    for loc, s in enumerate(stops):
+                        if not s.window:
+                            continue
+                        try:
+                            w0, w1 = float(s.window[0]), float(s.window[1])
+                        except (TypeError, ValueError, IndexError):
+                            continue
+                        if w0 <= 0 or w1 <= 0 or w1 < w0:
+                            continue
+                        idx = manager.NodeToIndex(loc)
+                        time_dim.CumulVar(idx).SetRange(
+                            max(0, int(w0 - t0)), int(w1 - t0))
+                    # Keep the depot/origin start honest: it leaves at t0.
+                    time_dim.CumulVar(routing.Start(0)).SetRange(0, 0)
+                except Exception:  # noqa: BLE001 - windows are best-effort
+                    _log.debug("route: time dimension failed", exc_info=True)
+
             params = pywrapcp.DefaultRoutingSearchParameters()
             params.first_solution_strategy = (
                 routing_enums_pb2.FirstSolutionStrategy.PATH_CHEAPEST_ARC)
             params.time_limit.seconds = 10
             solution = routing.SolveWithParameters(params)
             if solution is None:
-                return self._solve_greedy(stops, cost)
+                return self._two_opt(self._solve_greedy(stops, cost, t0), cost, t0=t0)
             order, idx = [], routing.Start(0)
             while not routing.IsEnd(idx):
                 order.append(stops[manager.IndexToNode(idx)])
                 idx = solution.Value(routing.NextVar(idx))
-            return order or self._solve_greedy(stops, cost)
+            return order or self._two_opt(self._solve_greedy(stops, cost, t0),
+                                             cost, t0=t0)
         except Exception:  # noqa: BLE001 - fall back, never raise
             _log.debug("route: ortools failed, using greedy", exc_info=True)
-            return self._solve_greedy(stops, cost)
+            return self._two_opt(self._solve_greedy(stops, cost, t0), cost, t0=t0)
 
     # — result assembly with honest per-stop arrival times —
 
     def _build_result(self, order: list[Stop], cost: CostModel,
-                      start_time: float | None) -> RouteResult:
+                      start_time: float | None,
+                      return_to_origin: bool = False) -> RouteResult:
         legs: list[Leg] = []
         arrivals: list[float] = []
         t = start_time if start_time is not None else time.time()
         arrivals.append(t)
         total_min, total_cost, learned = 0.0, 0, 0
-        for a, b in zip(order, order[1:]):
+        seq = list(order)
+        if return_to_origin and len(order) > 1:
+            seq = list(order) + [order[0]]  # the closing leg home
+        for a, b in zip(seq, seq[1:]):
             minutes, cost_kobo, source = cost.estimate_detail(a, b)
             km = haversine_km(a.lat, a.lng, b.lat, b.lng) \
                 if a.has_coords() and b.has_coords() else 0.0
@@ -525,8 +704,8 @@ class RouteSolver:
             total_cost += cost_kobo
             t += (b.dwell_minutes or 0) * 60.0  # time spent at the stop
             total_min += b.dwell_minutes or 0
-        violations = self._window_violations(order, arrivals)
-        return RouteResult(order, legs, total_min, total_cost, self.backend,
+        violations = self._window_violations(order, arrivals[:len(order)])
+        return RouteResult(seq, legs, total_min, total_cost, self.backend,
                            arrivals, learned, violations)
 
     @staticmethod
@@ -579,11 +758,30 @@ class RoutePlanner:
                 db.execute(
                     """CREATE TABLE IF NOT EXISTS route_stops (
                            stop_id TEXT PRIMARY KEY, label TEXT, lat REAL,
-                           lng REAL, dwell_minutes REAL)""")
-                db.commit()
+                           lng REAL, dwell_minutes REAL,
+                           window_start REAL DEFAULT 0,
+                           window_end REAL DEFAULT 0)""")
+                try:
+                    cols = [r[1] for r in db.execute(
+                        "PRAGMA table_info(route_stops)").fetchall()]
+                    for col in ("window_start", "window_end"):
+                        if col not in cols:
+                            db.execute(
+                                f"ALTER TABLE route_stops ADD COLUMN {col} "
+                                "REAL DEFAULT 0")
+                    db.commit()
+                except Exception:  # noqa: BLE001
+                    pass
                 for row in db.execute("SELECT * FROM route_stops"):
                     stop = Stop(row["stop_id"], row["label"], row["lat"],
                                 row["lng"], row["dwell_minutes"] or 15.0)
+                    try:
+                        ws = float(row["window_start"] or 0)
+                        we = float(row["window_end"] or 0)
+                        if ws > 0 and we > ws:
+                            stop.window = (ws, we)
+                    except (TypeError, ValueError, IndexError, KeyError):
+                        pass
                     self._stops[stop.stop_id] = stop
                     if stop.has_coords():
                         self.geo.add(stop.stop_id, stop.lat, stop.lng)
@@ -622,6 +820,33 @@ class RoutePlanner:
         except Exception:  # noqa: BLE001 - never raises
             return None
 
+    def set_window(self, label: str, start_hm: str, end_hm: str) -> bool:
+        """Set a stop's time window ("16:00"-"17:30" today). Never raises."""
+        try:
+            stop = self.find_stop(label)
+            if stop is None:
+                return False
+            import datetime as _dt
+            today = _dt.date.today()
+            w0 = _dt.datetime.combine(
+                today, _dt.datetime.strptime(start_hm.strip(), "%H:%M").time())
+            w1 = _dt.datetime.combine(
+                today, _dt.datetime.strptime(end_hm.strip(), "%H:%M").time())
+            if w1 <= w0:
+                w1 += _dt.timedelta(days=1)
+            stop.window = (w0.timestamp(), w1.timestamp())
+            if self._db_path != ":memory:":
+                db = sqlite3.connect(self._db_path)
+                db.execute(
+                    "UPDATE route_stops SET window_start = ?, window_end = ? "
+                    "WHERE stop_id = ?",
+                    (stop.window[0], stop.window[1], stop.stop_id))
+                db.commit()
+                db.close()
+            return True
+        except Exception:  # noqa: BLE001 - never raises
+            return False
+
     def find_stop(self, text: str) -> Stop | None:
         """Fuzzy name lookup.  Never raises."""
         try:
@@ -644,10 +869,12 @@ class RoutePlanner:
     # — the pipeline —
 
     def plan(self, stops: list[Stop], *,
-             start_time: float | None = None) -> RouteResult:
+             start_time: float | None = None,
+             return_to_origin: bool = False) -> RouteResult:
         """Predict → Build → Solve.  Never raises."""
         try:
-            return self.solver.solve(stops, self.cost, start_time=start_time)
+            return self.solver.solve(stops, self.cost, start_time=start_time,
+                                     return_to_origin=return_to_origin)
         except Exception:  # noqa: BLE001
             return RouteResult(stops or [], [], 0.0, 0, self.solver.backend)
 
@@ -678,13 +905,26 @@ def format_route(result: RouteResult) -> str:
     """Human-readable route with honest per-stop arrival times."""
     if not result.order:
         return "no stops to plan."
-    lines = [f"🗺️ route ({result.backend} solver, "
+    closed = len(result.order) > 1 and result.order[-1] is result.order[0]
+    solver_note = ("2-opt refined" if result.backend == "greedy"
+                   else "OR-Tools optimized")
+    lines = [f"🗺️ route ({result.backend} solver, {solver_note}, "
              f"{result.learned_legs}/{len(result.legs)} legs learned):"]
     for i, stop in enumerate(result.order):
         eta = _fmt_eta(result.arrivals[i]) if i < len(result.arrivals) else "--:--"
-        tag = "📍 start" if i == 0 else f"→ {_fmt_eta(result.arrivals[i])}"
+        if closed and i == len(result.order) - 1:
+            tag = f"🏠 back home {_fmt_eta(result.arrivals[i])}"
+        else:
+            tag = "📍 start" if i == 0 else f"→ {eta}"
+        win = ""
+        if stop.window and not (closed and i == len(result.order) - 1):
+            try:
+                win = (f" 🕐 window {_fmt_eta(float(stop.window[0]))}–"
+                       f"{_fmt_eta(float(stop.window[1]))}")
+            except (TypeError, ValueError, IndexError):
+                pass
         dwell = f" (~{stop.dwell_minutes:g}m there)" if i and stop.dwell_minutes else ""
-        lines.append(f"  {i + 1}. {stop.label} {tag}{dwell}")
+        lines.append(f"  {i + 1}. {stop.label} {tag}{win}{dwell}")
     total_h = result.total_minutes / 60.0
     lines.append(f"⏱️ {total_h:.1f}h total (incl. dwell) · "
                  f"💰 {_fmt_naira(result.total_cost_kobo)} est. travel")
@@ -698,8 +938,9 @@ def format_route(result: RouteResult) -> str:
 def _usage() -> str:
     return (
         "usage:\n"
-        "  /route plan <stop1>; <stop2>; ... — optimal order + honest times\n"
+        "  /route plan <stop1>; <stop2>; ... [roundtrip] — optimal order + honest times\n"
         "  /route add <label> [lat,lng] — save a stop\n"
+        "  /route window <label> <HH:MM>-<HH:MM> — set a stop's time window\n"
         "  /route stops — list saved stops\n"
         "  /route record <from> > <to> <minutes> [cost_kobo] — teach the model\n"
         "  /route stats — what the cost model has learned"
@@ -769,13 +1010,32 @@ def control_route(tail: str, context: Any = None, chat: Any = None,
 
         if cmd == "stats":
             s = p.cost.stats()
-            return (f"📊 cost model: {s['recorded_trips']} recorded trips · "
+            recent = (f" ({s.get('recent_trips_30d', 0)} in the last 30d)"
+                      if s.get("recorded_trips") else "")
+            return (f"📊 cost model: {s['recorded_trips']} recorded trips{recent} · "
                     f"avg speed {s['speed_kmh']} km/h · "
                     f"₦{s['cost_per_km_kobo'] // 100:,}/km "
                     f"({s['source']}, backend {p.solver.backend})")
 
+        if cmd == "window":
+            bits = rest.split()
+            if len(bits) < 2 or "-" not in bits[-1]:
+                return "usage: /route window <label> <HH:MM>-<HH:MM>"
+            span = bits[-1]
+            label = " ".join(bits[:-1])
+            try:
+                start_hm, end_hm = span.split("-", 1)
+            except ValueError:
+                return "usage: /route window <label> <HH:MM>-<HH:MM>"
+            ok = p.set_window(label, start_hm, end_hm)
+            return (f"🕐 window set: {label} {start_hm}–{end_hm}."
+                    if ok else
+                    f"couldn't set that window — `/route stops` to see names.")
+
         if cmd == "plan":
-            labels = [x.strip() for x in rest.split(";") if x.strip()]
+            roundtrip = rest.strip().lower().endswith("roundtrip")
+            body = rest[: -len("roundtrip")].rstrip() if roundtrip else rest
+            labels = [x.strip() for x in body.split(";") if x.strip()]
             if len(labels) < 2:
                 return "give me at least 2 stops: `/route plan home; market; bank`"
             stops, missing = [], []
@@ -789,7 +1049,7 @@ def control_route(tail: str, context: Any = None, chat: Any = None,
                 return ("I don't know where these are: "
                         + ", ".join(missing)
                         + ". save them first: `/route add <label> [lat,lng]`")
-            return format_route(p.plan(stops))
+            return format_route(p.plan(stops, return_to_origin=roundtrip))
 
         return _usage()
     except Exception:  # noqa: BLE001 - never raises

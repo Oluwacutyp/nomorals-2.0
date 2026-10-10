@@ -23,6 +23,7 @@ crash and never a fabricated jam.
 from __future__ import annotations
 
 import contextlib
+import json
 import logging
 import math
 import os
@@ -47,6 +48,16 @@ _JAM_THRESHOLD = 0.85
 _BACKOFF_PROB = 0.55
 #: Jam probability that triggers a "stagger" advisory.
 _STAGGER_PROB = 0.30
+#: Default hold lease (seconds). A crashed agent's hold expires instead of
+#: jamming the resource forever (mined: "a lock is a lease, not mutual
+#: exclusion" — the TTL is the safety net against the dead owner).
+_DEFAULT_HOLD_TTL_S = 600.0
+#: Circuit-breaker tuning (mined: Resilience4j count-based window).
+_CB_WINDOW = 10          # observations in the sliding window
+_CB_MIN_CALLS = 5        # don't trip before this many observations
+_CB_FAIL_THRESHOLD = 0.5  # open when >=50% of the window are jam signals
+_CB_COOLDOWN_S = 60.0    # OPEN -> HALF-OPEN after this long
+_CB_PROBES = 2           # successful probes to close from HALF-OPEN
 
 
 def _default_db() -> str:
@@ -126,11 +137,29 @@ class ContentionMonitor:
             self._db.execute(
                 """CREATE TABLE IF NOT EXISTS congestion_holds (
                        hold_id TEXT PRIMARY KEY, resource_id TEXT,
-                       agent TEXT, acquired_at REAL)""")
+                       agent TEXT, acquired_at REAL,
+                       expires_at REAL DEFAULT 0)""")
+            # Migration for DBs created before hold leases existed.
+            try:
+                cols = [r[1] for r in self._db.execute(
+                    "PRAGMA table_info(congestion_holds)").fetchall()]
+                if "expires_at" not in cols:
+                    self._db.execute(
+                        "ALTER TABLE congestion_holds "
+                        "ADD COLUMN expires_at REAL DEFAULT 0")
+            except Exception:  # noqa: BLE001
+                pass
             self._db.execute(
                 """CREATE TABLE IF NOT EXISTS congestion_events (
                        id INTEGER PRIMARY KEY AUTOINCREMENT,
                        resource_id TEXT, kind TEXT, ts REAL)""")
+            self._db.execute(
+                """CREATE TABLE IF NOT EXISTS congestion_breakers (
+                       resource_id TEXT PRIMARY KEY, state TEXT,
+                       window TEXT, consec_fail INTEGER DEFAULT 0,
+                       probes_ok INTEGER DEFAULT 0,
+                       opened_at REAL DEFAULT 0,
+                       updated_at REAL DEFAULT 0)""")
             self._db.commit()
         except Exception:  # noqa: BLE001 — a bad DB path is an empty monitor
             _log.warning("congestion: db unavailable, running empty", exc_info=True)
@@ -228,29 +257,68 @@ class ContentionMonitor:
 
     # ── holds ─────────────────────────────────────────────────────────
 
-    def acquire(self, name: str, agent: str) -> Hold | None:
-        """One agent takes the resource. Returns the hold (or None). Never raises."""
+    def acquire(self, name: str, agent: str,
+                ttl_s: float = _DEFAULT_HOLD_TTL_S) -> Hold | None:
+        """One agent takes the resource. Returns the hold (or None).
+
+        Holds are *leases*: ``ttl_s`` bounds how long the hold counts even
+        if the agent crashes without releasing (mined distributed-lock
+        pattern). ``ttl_s <= 0`` means "no expiry" — only for holds you
+        manage yourself. Never raises.
+        """
         try:
             res = self._resolve(name)
             if res is None or self._db is None:
                 return None
             agent = (agent or "unknown").strip()[:80]
+            now = time.time()
+            try:
+                ttl = float(ttl_s)
+            except (TypeError, ValueError):
+                ttl = _DEFAULT_HOLD_TTL_S
+            expires = now + ttl if ttl > 0 else 0.0
             hold = Hold(hold_id="hold_" + uuid.uuid4().hex[:8],
                         resource_id=res.resource_id, agent=agent,
-                        acquired_at=time.time())
+                        acquired_at=now)
             self._db.execute(
                 """INSERT INTO congestion_holds
-                   (hold_id, resource_id, agent, acquired_at)
-                   VALUES (?, ?, ?, ?)""",
-                (hold.hold_id, hold.resource_id, hold.agent, hold.acquired_at))
+                   (hold_id, resource_id, agent, acquired_at, expires_at)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (hold.hold_id, hold.resource_id, hold.agent, now, expires))
             self._db.execute(
                 "INSERT INTO congestion_events (resource_id, kind, ts) VALUES (?, ?, ?)",
-                (res.resource_id, "acquire", hold.acquired_at))
+                (res.resource_id, "acquire", now))
             self._db.commit()
             return hold
         except Exception:  # noqa: BLE001
             _log.debug("congestion acquire failed", exc_info=True)
             return None
+
+    def reap_stale(self) -> int:
+        """Drop expired holds (dead owners). Returns the count reaped.
+
+        Call it before fan-out, or rely on ``queue_depth()`` which ignores
+        expired holds anyway. Never raises.
+        """
+        try:
+            if self._db is None:
+                return 0
+            now = time.time()
+            rows = self._db.execute(
+                "SELECT hold_id, resource_id FROM congestion_holds "
+                "WHERE expires_at > 0 AND expires_at <= ?",
+                (now,)).fetchall()
+            for r in rows:
+                self._db.execute("DELETE FROM congestion_holds WHERE hold_id = ?",
+                                 (r["hold_id"],))
+                self._db.execute(
+                    "INSERT INTO congestion_events (resource_id, kind, ts) "
+                    "VALUES (?, ?, ?)", (r["resource_id"], "expire", now))
+            self._db.commit()
+            return len(rows)
+        except Exception:  # noqa: BLE001
+            _log.debug("reap_stale failed", exc_info=True)
+            return 0
 
     def release(self, name: str, agent: str) -> bool:
         """One agent gives the resource back. Never raises."""
@@ -274,21 +342,68 @@ class ContentionMonitor:
         except Exception:  # noqa: BLE001
             return False
 
-    def queue_depth(self, name: str) -> int:
-        """Current in-flight holds on a resource. Never raises."""
+    def queue_depth(self, name: str, *, now: float | None = None) -> int:
+        """Current *live* holds on a resource — expired leases don't count.
+        Never raises."""
         try:
             res = self._resolve(name)
             if res is None or self._db is None:
                 return 0
+            now = now if now is not None else time.time()
             row = self._db.execute(
-                "SELECT COUNT(*) AS n FROM congestion_holds WHERE resource_id = ?",
-                (res.resource_id,)).fetchone()
+                """SELECT COUNT(*) AS n FROM congestion_holds
+                   WHERE resource_id = ?
+                   AND (expires_at <= 0 OR expires_at > ?)""",
+                (res.resource_id, now)).fetchone()
             return int(row["n"] or 0)
         except Exception:  # noqa: BLE001
             return 0
 
+    def oldest_hold_age(self, name: str, *, now: float | None = None) -> float | None:
+        """Age in seconds of the oldest live hold (stale-hold visibility).
+        None when no live holds. Never raises."""
+        try:
+            res = self._resolve(name)
+            if res is None or self._db is None:
+                return None
+            now = now if now is not None else time.time()
+            row = self._db.execute(
+                """SELECT MIN(acquired_at) AS m FROM congestion_holds
+                   WHERE resource_id = ?
+                   AND (expires_at <= 0 OR expires_at > ?)""",
+                (res.resource_id, now)).fetchone()
+            if row and row["m"]:
+                return max(0.0, now - float(row["m"]))
+            return None
+        except Exception:  # noqa: BLE001
+            return None
+
+    def wait_estimate(self, name: str, *, now: float | None = None) -> float | None:
+        """Little's law: expected seconds until a slot frees.
+
+        depth / service_rate, where the service rate comes from release
+        events. None when the resource is clear or the rate is unknown.
+        Never raises.
+        """
+        try:
+            res = self._resolve(name)
+            if res is None:
+                return None
+            now = now if now is not None else time.time()
+            depth = self.queue_depth(name, now=now)
+            if depth < res.capacity:
+                return 0.0
+            _, service_per_min = self._rates(res.resource_id, now=now)
+            if service_per_min <= 0:
+                return None
+            over = depth - res.capacity + 1  # slots ahead of a newcomer
+            return round(over / (service_per_min / 60.0), 1)
+        except Exception:  # noqa: BLE001
+            return None
+
     def status(self) -> list[dict[str, Any]]:
-        """Per-resource snapshot: depth, capacity, utilization. Never raises."""
+        """Per-resource snapshot: depth, capacity, utilization, breaker,
+        oldest hold. Never raises."""
         try:
             out: list[dict[str, Any]] = []
             for res in self.list_resources():
@@ -297,10 +412,108 @@ class ContentionMonitor:
                 out.append({"name": res.name, "kind": res.kind,
                             "depth": depth, "capacity": res.capacity,
                             "utilization": round(util, 2),
-                            "congested": util >= _JAM_THRESHOLD})
+                            "congested": util >= _JAM_THRESHOLD,
+                            "breaker": self.breaker_state(res.name),
+                            "oldest_hold_s": self.oldest_hold_age(res.name)})
             return out
         except Exception:  # noqa: BLE001
             return []
+
+    # ── circuit breaker (mined: Resilience4j state machine) ──────────
+
+    def _breaker_row(self, resource_id: str) -> dict[str, Any]:
+        try:
+            if self._db is None:
+                return {}
+            row = self._db.execute(
+                "SELECT * FROM congestion_breakers WHERE resource_id = ?",
+                (resource_id,)).fetchone()
+            if row is None:
+                return {"state": "closed", "window": [],
+                        "consec_fail": 0, "probes_ok": 0, "opened_at": 0.0}
+            try:
+                window = json.loads(row["window"] or "[]")
+            except (TypeError, ValueError):
+                window = []
+            return {"state": row["state"] or "closed", "window": window,
+                    "consec_fail": int(row["consec_fail"] or 0),
+                    "probes_ok": int(row["probes_ok"] or 0),
+                    "opened_at": float(row["opened_at"] or 0.0)}
+        except Exception:  # noqa: BLE001
+            return {"state": "closed", "window": [], "consec_fail": 0,
+                    "probes_ok": 0, "opened_at": 0.0}
+
+    def _breaker_save(self, resource_id: str, row: dict[str, Any]) -> None:
+        try:
+            if self._db is None:
+                return
+            self._db.execute(
+                """INSERT INTO congestion_breakers
+                   (resource_id, state, window, consec_fail, probes_ok,
+                    opened_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(resource_id) DO UPDATE SET
+                   state=excluded.state, window=excluded.window,
+                   consec_fail=excluded.consec_fail,
+                   probes_ok=excluded.probes_ok,
+                   opened_at=excluded.opened_at,
+                   updated_at=excluded.updated_at""",
+                (resource_id, row["state"], json.dumps(row["window"][-_CB_WINDOW:]),
+                 int(row["consec_fail"]), int(row["probes_ok"]),
+                 float(row["opened_at"]), time.time()))
+            self._db.commit()
+        except Exception:  # noqa: BLE001
+            pass
+
+    def breaker_state(self, name: str, *, now: float | None = None) -> str:
+        """closed | open | half_open. Handles the OPEN→HALF-OPEN time
+        transition (no direct OPEN→CLOSED, per the pattern). Never raises."""
+        try:
+            res = self._resolve(name)
+            if res is None or self._db is None:
+                return "closed"
+            now = now if now is not None else time.time()
+            row = self._breaker_row(res.resource_id)
+            if row["state"] == "open" and now - row["opened_at"] >= _CB_COOLDOWN_S:
+                row["state"] = "half_open"
+                row["probes_ok"] = 0
+                self._breaker_save(res.resource_id, row)
+            return row["state"]
+        except Exception:  # noqa: BLE001
+            return "closed"
+
+    def _breaker_observe(self, resource_id: str, jammed: bool,
+                         *, now: float | None = None) -> str:
+        """Feed one jam/healthy observation into the breaker. Returns the
+        new state. Never raises."""
+        try:
+            now = now if now is not None else time.time()
+            row = self._breaker_row(resource_id)
+            state = row["state"]
+            if state == "half_open":
+                if jammed:
+                    row.update(state="open", opened_at=now, probes_ok=0,
+                               consec_fail=row["consec_fail"] + 1)
+                else:
+                    row["probes_ok"] += 1
+                    if row["probes_ok"] >= _CB_PROBES:
+                        row.update(state="closed", window=[],
+                                   consec_fail=0, probes_ok=0)
+                self._breaker_save(resource_id, row)
+                return row["state"]
+            if state == "open":
+                return "open"  # cooldown handles the transition
+            window = list(row["window"]) + [bool(jammed)]
+            window = window[-_CB_WINDOW:]
+            row["window"] = window
+            row["consec_fail"] = row["consec_fail"] + 1 if jammed else 0
+            if (len(window) >= _CB_MIN_CALLS
+                    and sum(window) / len(window) >= _CB_FAIL_THRESHOLD):
+                row.update(state="open", opened_at=now)
+            self._breaker_save(resource_id, row)
+            return row["state"]
+        except Exception:  # noqa: BLE001
+            return "closed"
 
     # ── prediction ────────────────────────────────────────────────────
 
@@ -387,11 +600,41 @@ class ContentionMonitor:
             if res is None:
                 return {"action": "proceed", "detail": f"unknown resource '{name}' — no contention data.",
                         "probability": 0.0, "eta_s": None}
-            depth = self.queue_depth(name)
+            now = now if now is not None else time.time()
+            # Circuit breaker first: an OPEN breaker fails fast without
+            # re-deriving anything; HALF-OPEN admits a single probe wave.
+            bstate = self.breaker_state(name, now=now)
+            if bstate == "open":
+                return {"action": "backoff",
+                        "detail": (f"'{name}' circuit is OPEN — it has been "
+                                   f"jamming repeatedly. Failing fast: hold new "
+                                   f"work ~{_CB_COOLDOWN_S:.0f}s or switch provider."),
+                        "probability": 0.95, "eta_s": None,
+                        "breaker": "open"}
+            depth = self.queue_depth(name, now=now)
             prob, eta = self.predict_jam(name, now=now)
             # Waiting agents add pressure: effective probability rises.
             pressure = agents_waiting / max(1, res.capacity)
             eff = min(0.98, prob + 0.3 * min(pressure, 1.0))
+
+            # Feed the observation into the breaker (jammed / healthy only;
+            # the middle band is neutral signal).
+            if eff >= _BACKOFF_PROB:
+                self._breaker_observe(res.resource_id, True, now=now)
+            elif eff < _STAGGER_PROB:
+                self._breaker_observe(res.resource_id, False, now=now)
+            if bstate == "half_open":
+                return {"action": "stagger",
+                        "detail": (f"'{name}' circuit is HALF-OPEN — probing "
+                                   f"recovery with 1 agent. If it jams, the "
+                                   f"circuit re-opens."),
+                        "probability": round(eff, 2), "eta_s": eta,
+                        "wave_size": 1, "wave_gap_s": 10,
+                        "breaker": "half_open"}
+
+            wait_s = self.wait_estimate(name, now=now)
+            wait_note = (f" expect ~{wait_s:.0f}s per slot (Little's law)."
+                         if wait_s else "")
 
             if eff >= _BACKOFF_PROB:
                 # Prefer switching to an uncongested alternate.
@@ -408,18 +651,23 @@ class ContentionMonitor:
                                 "alternate": alt.name}
                 return {"action": "backoff",
                         "detail": (f"'{name}' is congested ({depth}/{res.capacity} holds, "
-                                   f"jam risk {int(eff * 100)}%) — hold new work for ~60s."),
-                        "probability": round(eff, 2), "eta_s": eta}
+                                   f"jam risk {int(eff * 100)}%) — hold new work for ~60s."
+                                   f"{wait_note}"),
+                        "probability": round(eff, 2), "eta_s": eta,
+                        "breaker": self.breaker_state(name, now=now)}
             if eff >= _STAGGER_PROB:
                 stagger_n = max(2, min(8, int(math.ceil(depth / max(1, res.capacity))) + 1))
                 return {"action": "stagger",
                         "detail": (f"'{name}' is warming up ({depth}/{res.capacity} holds) — "
-                                   f"launch agents in waves of {stagger_n}, 10s apart."),
+                                   f"launch agents in waves of {stagger_n}, 10s apart."
+                                   f"{wait_note}"),
                         "probability": round(eff, 2), "eta_s": eta,
-                        "wave_size": stagger_n, "wave_gap_s": 10}
+                        "wave_size": stagger_n, "wave_gap_s": 10,
+                        "breaker": self.breaker_state(name, now=now)}
             return {"action": "proceed",
                     "detail": f"'{name}' is clear ({depth}/{res.capacity} holds).",
-                    "probability": round(eff, 2), "eta_s": eta}
+                    "probability": round(eff, 2), "eta_s": eta,
+                    "breaker": self.breaker_state(name, now=now)}
         except Exception:  # noqa: BLE001
             _log.debug("advise failed", exc_info=True)
             return {"action": "proceed", "detail": "monitor unavailable — proceeding.",
@@ -428,7 +676,7 @@ class ContentionMonitor:
 
 @contextlib.contextmanager
 def hold(monitor: ContentionMonitor | None, name: str,
-         agent: str) -> Iterator[Hold | None]:
+         agent: str, ttl_s: float = _DEFAULT_HOLD_TTL_S) -> Iterator[Hold | None]:
     """Acquire a resource for the duration of a ``with`` block.
 
     Fan-out code no longer hand-rolls try/finally::
@@ -437,12 +685,13 @@ def hold(monitor: ContentionMonitor | None, name: str,
             ...  # the hold is always released
 
     A None monitor or a failed acquire yields None (fail-open "proceed").
+    The lease TTL still applies inside the block as a dead-owner safety net.
     Never raises.
     """
     h: Hold | None = None
     try:
         if monitor is not None:
-            h = monitor.acquire(name, agent)
+            h = monitor.acquire(name, agent, ttl_s=ttl_s)
     except Exception:  # noqa: BLE001
         h = None
     try:
@@ -525,8 +774,15 @@ def format_status(monitor: ContentionMonitor) -> str:
         lines = ["🚦 contention monitor:"]
         for r in rows:
             flag = " 🔴" if r["congested"] else ""
+            cb = r.get("breaker", "closed")
+            cb_flag = {"open": " ⛔", "half_open": " 🟡"}.get(cb, "")
+            stale = ""
+            age = r.get("oldest_hold_s")
+            if age is not None and age > 300:
+                stale = f" · oldest hold {age / 60:.0f}m old"
             lines.append(f"  {r['name']} ({r['kind']}): {r['depth']}/{r['capacity']} holds"
-                         f" — {int(r['utilization'] * 100)}%{flag}")
+                         f" — {int(r['utilization'] * 100)}%{flag}"
+                         f" · circuit {cb}{cb_flag}{stale}")
         lines.append("")
         lines.append(CONGESTION_DISCLAIMER)
         return "\n".join(lines)
@@ -539,7 +795,9 @@ def _usage() -> str:
             "       /congestion register <name> [kind=endpoint|api_key|lock|rate_limit] [capacity=4]\n"
             "       /congestion advise <resource> [agents=N] — back off / switch / stagger\n"
             "       /congestion predict <resource> — jam probability + ETA\n"
-            "       /congestion alternate <resource> <alternate> — provider switching")
+            "       /congestion alternate <resource> <alternate> — provider switching\n"
+            "       /congestion breaker <resource> — circuit-breaker state\n"
+            "       /congestion reap — drop expired holds (dead owners)")
 
 
 def control_congestion(tail: str, *, monitor: ContentionMonitor | None = None,
@@ -591,6 +849,17 @@ def control_congestion(tail: str, *, monitor: ContentionMonitor | None = None,
             ok = mon.register_alternate(parts[1], parts[2])
             return ("✅ failover registered." if ok
                     else "couldn't register the alternate (both must exist).")
+
+        if cmd == "breaker" and len(parts) >= 2:
+            state = mon.breaker_state(parts[1])
+            icon = {"open": "⛔", "half_open": "🟡"}.get(state, "🟢")
+            return (f"{icon} circuit for '{parts[1]}': {state.upper()}.\n\n"
+                    f"{CONGESTION_DISCLAIMER}")
+
+        if cmd == "reap":
+            n = mon.reap_stale()
+            return (f"🧹 reaped {n} expired hold(s) (dead owners)."
+                    if n else "🧹 no expired holds — queues are clean.")
 
         return _usage()
     except Exception:  # noqa: BLE001
