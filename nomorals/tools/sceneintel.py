@@ -31,7 +31,7 @@ def register(registry: Any) -> None:
         description=("Search movie download sources (NetNaija movies, Nkiri, "
                      "FzMovies) for a film. ('find John Wick 4 to download', "
                      "'get me that Nollywood movie'). Returns candidates."),
-        capability=Capability.NET,
+        capability=Capability.NET_OUT,
     )
     def film_search(query: str, *, limit: int = 8) -> dict[str, Any]:
         from ..media.film_sources import search_films
@@ -45,7 +45,7 @@ def register(registry: Any) -> None:
         description=("Download a film from a search candidate (pass the "
                      "candidate dict from film_search). Returns the local "
                      "file path. ('download that movie')."),
-        capability=Capability.NET,
+        capability=Capability.NET_DOWNLOAD,
     )
     def film_download(candidate: dict[str, Any]) -> dict[str, Any]:
         from ..media.film_sources import (
