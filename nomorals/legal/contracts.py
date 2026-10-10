@@ -24,12 +24,22 @@ from typing import Any, Callable, Optional
 __all__ = [
     "DISCLAIMER",
     "CONTRACT_TYPES",
+    "REVIEW_STYLES",
+    "CLAUSE_CATEGORIES",
     "Finding",
     "Review",
+    "ReviewDiff",
+    "ContractMeta",
     "detect_contract_type",
     "review_contract",
     "format_review",
+    "format_diff",
     "extract_clauses",
+    "extract_metadata",
+    "extract_rights",
+    "categorize_clauses",
+    "compare_reviews",
+    "plain_english",
     "information_only_check",
     "control_contract",
 ]
@@ -70,6 +80,9 @@ MEDIUM = "medium"
 LOW = "low"
 
 _DEDUCTION = {CRITICAL: 25, HIGH: 15, MEDIUM: 8, LOW: 3}
+#: Missing-clause ("gap") findings deduct less: absence of a good clause is
+#: weaker evidence than presence of a bad one.
+_GAP_DEDUCTION = 2
 _SEV_ICON = {CRITICAL: "🔴", HIGH: "🟠", MEDIUM: "🟡", LOW: "⚪"}
 
 
@@ -100,6 +113,11 @@ class Finding:
     explanation: str  # plain-language information about the clause
     playbook_ref: str = ""
     anomaly: bool = False  # deviation from playbook norms, not a direct rule
+    suggestion: str = ""  # information-only: how similar agreements handle it
+    citation_ok: bool = True  # snippet verified verbatim against the document
+    gap: bool = False  # True when the finding is a *missing* clause (absence),
+    # not a bad present clause — scored lighter (2 pts), because absence of
+    # a good clause is weaker evidence than presence of a bad one.
 
     def headline(self) -> str:
         icon = _SEV_ICON.get(self.severity, "⚪")
@@ -115,6 +133,7 @@ class Review:
     findings: list[Finding] = field(default_factory=list)
     clauses_seen: int = 0
     disclaimer: str = DISCLAIMER
+    rights: list[str] = field(default_factory=list)  # rights the text grants (Do Not Sign pattern)
 
     @property
     def needs_attention(self) -> int:
@@ -230,10 +249,10 @@ class Rule:
 
 def _mk(rule_id: str, title: str, severity: str, clause: str,
         explanation: str, playbook_ref: str = "",
-        anomaly: bool = False) -> Finding:
+        anomaly: bool = False, gap: bool = False) -> Finding:
     return Finding(rule_id=rule_id, title=title, severity=severity,
                    clause=clause.strip()[:400], explanation=explanation,
-                   playbook_ref=playbook_ref, anomaly=anomaly)
+                   playbook_ref=playbook_ref, anomaly=anomaly, gap=gap)
 
 
 # — Lagos tenancy playbook ———————————————————————————————————————————
@@ -354,6 +373,7 @@ def _t_missing_repairs(text: str, clauses: list[Clause]) -> Optional[Finding]:
         "landlord for structural, tenant for minor). Its absence is not "
         "fatal, but it is a common source of disputes.",
         playbook_ref="Tenancy playbook — repairs allocation",
+        gap=True
     )
 
 
@@ -562,6 +582,7 @@ def _f_late_fees(text: str, clauses: list[Clause]) -> Optional[Finding]:
         "terms (e.g. a small monthly percentage) are a common nudge that "
         "keeps invoices paid on time.",
         playbook_ref="Freelance playbook — late-payment terms",
+        gap=True
     )
 
 
@@ -579,6 +600,246 @@ def _f_scope_creep(text: str, clauses: list[Clause]) -> Optional[Finding]:
     )
 
 
+# — new rules: CUAD-taxonomy coverage (governing law, confidentiality,
+# indemnification, assignment, dispute resolution, force majeure) ————
+
+def _t_late_rent_penalty(text: str, clauses: list[Clause]) -> Optional[Finding]:
+    if not _has(text, r"interest.{0,40}late.{0,20}rent|penalt.{0,40}late.{0,20}rent"
+                      r"|late.{0,20}rent.{0,40}(interest|penalt|surcharge)"):
+        return None
+    snippet = next((c.text for c in clauses
+                    if _has(c.text, r"late.{0,20}rent|interest.{0,20}penalt")), "")[:300]
+    return _mk(
+        "T-07", "Late-rent penalty / interest clause", MEDIUM, snippet,
+        "Late rent attracts a penalty or interest here. Lagos tenancy "
+        "agreements often include a modest late fee, but the rate and how "
+        "it compounds should be stated clearly — an open-ended penalty can "
+        "grow fast.",
+        playbook_ref="Tenancy playbook — late-payment terms should be explicit",
+        anomaly=False,
+    )
+
+
+def _t_no_governing_law(text: str, clauses: list[Clause]) -> Optional[Finding]:
+    if _has(text, r"governed by|governing law|jurisdiction|laws of.{0,20}(lagos|nigeria|state)"):
+        return None
+    if not _has(text, r"tenancy|rent|landlord|tenant|lease"):
+        return None
+    return _mk(
+        "T-08", "No governing-law / jurisdiction clause", MEDIUM, "",
+        "This agreement never says which law governs it or which court "
+        "settles disputes. Tenancy disputes in Lagos normally sit under "
+        "the Lagos Tenancy Law 2011, but spelling it out avoids "
+        "arguments later. Most professionally drafted agreements include "
+        "one line on this.",
+        playbook_ref="Tenancy playbook — governing law stated",
+        gap=True
+    )
+
+
+def _e_confidentiality(text: str, clauses: list[Clause]) -> Optional[Finding]:
+    if _has(text, r"confidential"):
+        return None
+    if not _has(text, r"employ"):
+        return None
+    return _mk(
+        "E-06", "No confidentiality clause found", MEDIUM, "",
+        "This employment agreement has no confidentiality clause. Many "
+        "Nigerian employers — especially in tech, finance, and roles "
+        "handling customer data — include one covering trade secrets and "
+        "client information, usually surviving termination. Its absence is "
+        "not a legal defect, but it is a gap against market practice.",
+        playbook_ref="Employment playbook — confidentiality / IP protection",
+        gap=True
+    )
+
+
+def _e_working_hours(text: str, clauses: list[Clause]) -> Optional[Finding]:
+    if _has(text, r"working hours|work hours|overtime|resumption|8am|9am"):
+        return None
+    if not _has(text, r"employ|salary"):
+        return None
+    return _mk(
+        "E-07", "No working-hours / overtime terms", LOW, "",
+        "Nothing here sets working hours, overtime, or rest days. The "
+        "Labour Act limits normal working hours and provides for rest "
+        "periods; agreements commonly spell these out so expectations "
+        "match on both sides.",
+        playbook_ref="Labour Act — hours of work and rest periods",
+        gap=True
+    )
+
+
+def _f_confidentiality(text: str, clauses: list[Clause]) -> Optional[Finding]:
+    if _has(text, r"confidential|non.?disclosure|NDA"):
+        return None
+    return _mk(
+        "F-06", "No confidentiality / NDA terms", MEDIUM, "",
+        "This service agreement has no confidentiality or non-disclosure "
+        "terms. Freelance work often exposes the freelancer to the "
+        "client's business information (and vice versa); agreements "
+        "commonly include a mutual confidentiality clause.",
+        playbook_ref="Freelance playbook — mutual confidentiality",
+        gap=True
+    )
+
+
+def _f_dispute_resolution(text: str, clauses: list[Clause]) -> Optional[Finding]:
+    if _has(text, r"arbitration|dispute.{0,30}resol|mediation"):
+        return None
+    has_govlaw = _has(text, r"jurisdiction|court of|governed by|governing law")
+    detail = ("It names a governing law but no forum or process for "
+              "resolving disputes. " if has_govlaw else
+              "Nothing here says how disputes get settled or which law governs. ")
+    return _mk(
+        "F-07", "No dispute-resolution mechanism", MEDIUM, "",
+        detail + "Service agreements commonly pick arbitration (e.g. Lagos "
+        "Court of Arbitration) or mediation, plus the governing law. "
+        "Without an agreed forum, a dispute over payment or scope has "
+        "nowhere agreed to go.",
+        playbook_ref="Freelance playbook — dispute resolution stated",
+        gap=True
+    )
+
+
+def _f_liability_cap_missing(text: str, clauses: list[Clause]) -> Optional[Finding]:
+    if _has(text, r"liab.{0,30}cap|cap.{0,30}liab|liability.{0,30}limit|limit.{0,30}liability"
+                  r"|unlimited liability|liab.{0,25}(without|no).{0,10}limit"):
+        return None  # a cap — or unlimited liability — is stated (T-98 covers the latter)
+    if not _has(text, r"liab|indemnif|warrant"):
+        return None
+    return _mk(
+        "F-08", "Liability mentioned but never capped or excluded", MEDIUM, "",
+        "Liability or indemnity is discussed but no cap is stated. Service "
+        "agreements commonly cap the freelancer's liability at the fees "
+        "paid (or a multiple). An uncapped exposure is worth a lawyer's "
+        "look before signing.",
+        playbook_ref="Freelance playbook — liability caps",
+    )
+
+
+def _f_kill_fee(text: str, clauses: list[Clause]) -> Optional[Finding]:
+    if _has(text, r"kill fee|cancellation fee|termination fee|early termination.{0,30}(fee|payment)"):
+        return None
+    if not _has(text, r"terminat"):
+        return None
+    return _mk(
+        "F-09", "No cancellation / kill fee", LOW, "",
+        "The agreement can be terminated but says nothing about payment "
+        "for work already started. Many freelance agreements include a "
+        "kill fee (e.g. a percentage of the project fee) so cancelled "
+        "work is not done for free.",
+        playbook_ref="Freelance playbook — cancellation compensation",
+        gap=True
+    )
+
+
+# — universal rules (all contract types) ——————————————————————————————
+
+def _u_auto_renew(text: str, clauses: list[Clause]) -> Optional[Finding]:
+    """Universal auto-renewal detection (T-05 is tenancy-scoped)."""
+    return _t_auto_renew(text, clauses)
+
+
+def _u_foreign_governing_law(text: str, clauses: list[Clause]) -> Optional[Finding]:
+    m = re.search(r"(?:governed by|governing law).{0,60}(england|wales|new york|delaware|"
+                  r"singapore|dubai|united kingdom|laws of england)",
+                  text or "", re.IGNORECASE)
+    if not m:
+        return None
+    snippet = next((c.text for c in clauses
+                    if _has(c.text, r"governed by|governing law")), "")[:300]
+    return _mk(
+        "U-01", "Foreign governing law in a Nigerian agreement", HIGH, snippet,
+        "This Nigerian-facing agreement is governed by foreign law "
+        "(e.g. England & Wales). That means disputes may be decided under "
+        "a different legal system — and potentially in a foreign forum — "
+        "which is costly for a Nigerian party. Cross-border governing law "
+        "is normal for international deals, but unusual for a purely "
+        "domestic one.",
+        playbook_ref="Cross-border playbook — governing law should match the deal",
+        anomaly=True,
+    )
+
+
+def _u_no_force_majeure(text: str, clauses: list[Clause]) -> Optional[Finding]:
+    if _has(text, r"force majeure|act of god|unforeseen circumstances|beyond.{0,20}control"):
+        return None
+    if not _has(text, r"terminat|obligation|perform"):
+        return None
+    return _mk(
+        "U-02", "No force-majeure clause", LOW, "",
+        "Nothing covers what happens if performance becomes impossible "
+        "(floods, strikes, government action). Most commercial agreements "
+        "include a force-majeure clause suspending obligations during such "
+        "events. Nigerian common law does not imply one automatically.",
+        playbook_ref="General playbook — force majeure",
+        gap=True
+    )
+
+
+def _u_assignment(text: str, clauses: list[Clause]) -> Optional[Finding]:
+    # Only agreement-assignment counts — IP/copyright assignment is a
+    # different concept and must not trip this rule.
+    cands = [c.text for c in clauses
+             if _has(c.text, r"\bassign")
+             and not _has(c.text, r"intellectual property|copyright|work product|\bIP\b")]
+    if not cands:
+        return None
+    if _has(" ".join(cands), r"assign.{0,60}(consent|written|not|prior)"):
+        return None
+    snippet = cands[0][:300]
+    return _mk(
+        "U-03", "Assignment allowed without clear consent terms", MEDIUM, snippet,
+        "Assignment of rights/obligations is mentioned but the consent "
+        "terms are unclear. Agreements commonly require the other party's "
+        "prior written consent before assignment, so you know who you are "
+        "dealing with throughout the term.",
+        playbook_ref="General playbook — assignment with consent",
+    )
+
+
+#: Information-only "how similar agreements handle it" lines, keyed by
+#: rule id. Applied to findings after the rule checks run. Phrasing is
+#: deliberately neutral — never "you should".#: rule id. Applied to findings after the rule checks run. Phrasing is
+#: deliberately neutral — never "you should".
+_PLAYBOOK_SUGGESTIONS: dict[str, str] = {
+    "T-01": ("Many Lagos tenancy agreements state a notice period of 3+ "
+             "months before a rent increase takes effect."),
+    "T-05": ("Auto-renewal is common, but check what notice is needed to "
+             "stop the renewal — many agreements require written notice "
+             "30–90 days before expiry."),
+    "U-04": ("Auto-renewal is common, but check what notice is needed to "
+             "stop the renewal — many agreements require written notice "
+             "30–90 days before expiry."),
+    "T-02": ("Many Lagos tenancy agreements state the service-charge amount "
+             "or the formula used to compute it."),
+    "T-03": ("The statutory minimum notice to quit for a yearly tenancy in "
+             "Lagos is 3 months (1 month for monthly, 7 days for weekly)."),
+    "T-04": ("10% of annual rent is the widely used Lagos market rate for "
+             "agency fees."),
+    "T-07": ("Many Lagos tenancy agreements state a late-rent penalty as a "
+             "fixed amount or a modest monthly percentage, in writing."),
+    "E-01": ("Nigerian employers commonly use 3–6 months of probation."),
+    "E-02": ("Labour Act minimums scale with service: roughly 1 week under "
+             "2 years, 2 weeks for 2–5 years, 1 month for 5+ years."),
+    "E-03": ("Non-competes that hold up in Nigerian courts are usually "
+             "bounded in time (often ≤12 months) and geography."),
+    "F-01": ("Freelance agreements commonly use payment terms of 7–30 days "
+             "from invoice."),
+    "F-02": ("Common practice is a written IP assignment to the client on "
+             "full payment, or freelancer ownership with a client licence."),
+    "F-06": ("Mutual confidentiality clauses commonly cover both parties' "
+             "business information during and after the engagement."),
+    "F-07": ("Service agreements commonly pick arbitration (e.g. Lagos "
+             "Court of Arbitration) or a named court, plus governing law."),
+    "F-08": ("Liability is commonly capped at the fees paid under the "
+             "agreement, or a stated multiple."),
+    "U-03": ("Common practice is assignment only with the other party's "
+             "prior written consent."),
+}
+
+
 # — playbook registry ————————————————————————————————————————————————
 
 _PLAYBOOKS: dict[str, list[Rule]] = {
@@ -589,6 +850,11 @@ _PLAYBOOKS: dict[str, list[Rule]] = {
         Rule("T-04", "Agency fee above the usual 10%", MEDIUM, ("tenancy",), _t_agency_fee),
         Rule("T-05", "Automatic renewal clause", MEDIUM, ("tenancy",), _t_auto_renew),
         Rule("T-06", "No repairs / maintenance clause found", LOW, ("tenancy",), _t_missing_repairs),
+        Rule("T-07", "Late-rent penalty / interest clause", MEDIUM, ("tenancy",), _t_late_rent_penalty),
+        Rule("T-08", "No governing-law / jurisdiction clause", MEDIUM, ("tenancy",), _t_no_governing_law),
+        Rule("U-01", "Foreign governing law in a Nigerian agreement", HIGH, ("tenancy", "employment", "freelance"), _u_foreign_governing_law),
+        Rule("U-02", "No force-majeure clause", LOW, ("tenancy", "employment", "freelance"), _u_no_force_majeure),
+        Rule("U-03", "Assignment allowed without clear consent terms", MEDIUM, ("tenancy", "employment", "freelance"), _u_assignment),
         Rule("T-98", "Unlimited liability / broad indemnity", HIGH, ("tenancy", "employment", "freelance"), _t_unlimited_liability),
         Rule("T-99", "Clause asks a party to waive statutory rights", CRITICAL, ("tenancy", "employment", "freelance"), _t_statutory_waiver),
     ],
@@ -598,6 +864,12 @@ _PLAYBOOKS: dict[str, list[Rule]] = {
         Rule("E-03", "Non-compete unusually broad", HIGH, ("employment",), _e_non_compete),
         Rule("E-04", "No pension / Contributory Pension Scheme mention", MEDIUM, ("employment",), _e_pension),
         Rule("E-05", "Broad salary-deduction clause", MEDIUM, ("employment",), _e_salary_deduction),
+        Rule("E-06", "No confidentiality clause found", MEDIUM, ("employment",), _e_confidentiality),
+        Rule("E-07", "No working-hours / overtime terms", LOW, ("employment",), _e_working_hours),
+        Rule("U-04", "Automatic renewal clause", MEDIUM, ("tenancy", "employment", "freelance"), _u_auto_renew),
+        Rule("U-01", "Foreign governing law in a Nigerian agreement", HIGH, ("tenancy", "employment", "freelance"), _u_foreign_governing_law),
+        Rule("U-02", "No force-majeure clause", LOW, ("tenancy", "employment", "freelance"), _u_no_force_majeure),
+        Rule("U-03", "Assignment allowed without clear consent terms", MEDIUM, ("tenancy", "employment", "freelance"), _u_assignment),
         Rule("T-98", "Unlimited liability / broad indemnity", HIGH, ("tenancy", "employment", "freelance"), _t_unlimited_liability),
         Rule("T-99", "Clause asks a party to waive statutory rights", CRITICAL, ("tenancy", "employment", "freelance"), _t_statutory_waiver),
     ],
@@ -607,6 +879,14 @@ _PLAYBOOKS: dict[str, list[Rule]] = {
         Rule("F-03", "One-sided termination right", MEDIUM, ("freelance",), _f_termination),
         Rule("F-04", "No late-payment provision", LOW, ("freelance",), _f_late_fees),
         Rule("F-05", "Open-ended scope / unlimited revisions", MEDIUM, ("freelance",), _f_scope_creep),
+        Rule("F-06", "No confidentiality / NDA terms", MEDIUM, ("freelance",), _f_confidentiality),
+        Rule("F-07", "No dispute-resolution mechanism", MEDIUM, ("freelance",), _f_dispute_resolution),
+        Rule("F-08", "Liability mentioned but never capped or excluded", MEDIUM, ("freelance",), _f_liability_cap_missing),
+        Rule("F-09", "No cancellation / kill fee", LOW, ("freelance",), _f_kill_fee),
+        Rule("U-04", "Automatic renewal clause", MEDIUM, ("tenancy", "employment", "freelance"), _u_auto_renew),
+        Rule("U-01", "Foreign governing law in a Nigerian agreement", HIGH, ("tenancy", "employment", "freelance"), _u_foreign_governing_law),
+        Rule("U-02", "No force-majeure clause", LOW, ("tenancy", "employment", "freelance"), _u_no_force_majeure),
+        Rule("U-03", "Assignment allowed without clear consent terms", MEDIUM, ("tenancy", "employment", "freelance"), _u_assignment),
         Rule("T-98", "Unlimited liability / broad indemnity", HIGH, ("tenancy", "employment", "freelance"), _t_unlimited_liability),
         Rule("T-99", "Clause asks a party to waive statutory rights", CRITICAL, ("tenancy", "employment", "freelance"), _t_statutory_waiver),
     ],
@@ -668,12 +948,19 @@ def review_contract(doc_text: str, contract_type: str = "auto") -> Review:
                 hit.rule_id = rule.rule_id
                 hit.title = rule.title
                 hit.severity = rule.severity
+                if not hit.suggestion:
+                    hit.suggestion = _PLAYBOOK_SUGGESTIONS.get(rule.rule_id, "")
+                hit.citation_ok = _verbatim_in(hit.clause, text)
                 findings.append(hit)
-        score = max(0, 100 - sum(_DEDUCTION.get(f.severity, 0) for f in findings))
+        score = max(0, 100 - sum(
+            _GAP_DEDUCTION if f.gap else _DEDUCTION.get(f.severity, 0)
+            for f in findings))
         order = {CRITICAL: 0, HIGH: 1, MEDIUM: 2, LOW: 3}
         findings.sort(key=lambda f: (order.get(f.severity, 4), f.rule_id))
+        rights = extract_rights(text)
         return Review(contract_type=ctype, score=score, grade=_grade(score),
-                      findings=findings, clauses_seen=len(clauses))
+                      findings=findings, clauses_seen=len(clauses),
+                      rights=rights)
     except Exception:  # noqa: BLE001 — fail-closed review, never raise
         return Review(contract_type="tenancy", score=0, grade="F",
                       findings=[], clauses_seen=0)
@@ -681,10 +968,26 @@ def review_contract(doc_text: str, contract_type: str = "auto") -> Review:
 
 # ── formatting ──────────────────────────────────────────────────────
 
+#: Output styles for contract reviews.
+#: - "full": the complete review (default)
+#: - "compact": grade + one line per finding
+#: - "triage": executive issues table (legalquants pattern — severity
+#:   sorted, deviation + note columns)
+REVIEW_STYLES = ("full", "compact", "triage")
 
-def format_review(review: Review) -> str:
-    """WhatsApp-native, plain-language review. Disclaimer always attached."""
+
+def format_review(review: Review, style: str = "full") -> str:
+    """WhatsApp-native, plain-language review. Disclaimer always attached.
+
+    ``style`` is "full" (default), "compact", or "triage" (executive
+    issues table sorted by severity).
+    """
+    style = (style or "full").lower()
+    if style not in REVIEW_STYLES:
+        style = "full"
     names = _playbook_names()
+    if style == "triage":
+        return _format_triage(review)
     lines = [
         f"📄 Contract review — {names.get(review.contract_type, review.contract_type)}",
         f"Grade: *{review.grade}* ({review.score}/100)",
@@ -693,12 +996,49 @@ def format_review(review: Review) -> str:
         lines.append(f"{review.needs_attention} clause{'s' if review.needs_attention != 1 else ''} need attention.")
     else:
         lines.append("No clauses flagged against the playbook.")
-    for f in review.findings:
+    if style == "compact":
+        for f in review.findings:
+            lines.append(f.headline())
+    else:
+        for f in review.findings:
+            lines.append("")
+            lines.append(f.headline())
+            if f.clause:
+                lines.append(f"_{f.clause[:220]}_")
+            lines.append(f.explanation)
+            if f.suggestion:
+                lines.append(f"💡 {f.suggestion}")
+    if review.rights:
         lines.append("")
-        lines.append(f.headline())
-        if f.clause:
-            lines.append(f"_{f.clause[:220]}_")
-        lines.append(f.explanation)
+        lines.append("*Rights the agreement states it gives you:*")
+        for r in review.rights[:8]:
+            lines.append(f"  ✓ {r}")
+        if len(review.rights) > 8:
+            lines.append(f"  …and {len(review.rights) - 8} more.")
+    lines.append("")
+    lines.append(review.disclaimer)
+    return "\n".join(lines)
+
+
+def _format_triage(review: Review) -> str:
+    """Executive issues table — severity-sorted triage (legalquants pattern)."""
+    names = _playbook_names()
+    lines = [
+        f"📄 Triage — {names.get(review.contract_type, review.contract_type)}",
+        f"Grade: *{review.grade}* ({review.score}/100) · "
+        f"{review.needs_attention} need attention · "
+        f"{review.clauses_seen} clauses scanned",
+        "",
+        "| # | Risk | Clause topic | Verbatim ref | Note |",
+        "|---|------|--------------|--------------|------|",
+    ]
+    for i, f in enumerate(review.findings, 1):
+        icon = _SEV_ICON.get(f.severity, "⚪")
+        ref = f.clause[:48].replace("|", "/").replace("\n", " ") if f.clause else "—"
+        note = (f.suggestion or f.explanation).split(".")[0][:80].replace("|", "/")
+        lines.append(f"| {i} | {icon} {f.severity} | {f.title} | _{ref}_ | {note} |")
+    if not review.findings:
+        lines.append("| — | — | _No issues flagged_ | — | — |")
     lines.append("")
     lines.append(review.disclaimer)
     return "\n".join(lines)
@@ -710,12 +1050,351 @@ def information_only_check(text: str) -> list[str]:
     return [p for p in _ADVICE_PHRASES if p in t]
 
 
+# ── verbatim citation check ─────────────────────────────────────────
+
+
+def _norm_ws(text: str) -> str:
+    return re.sub(r"\s+", " ", text or "").strip().lower()
+
+
+def _verbatim_in(snippet: str, doc_text: str) -> bool:
+    """Is the finding's clause snippet verbatim in the source document?
+
+    Deterministic validation (contract-risk-assessment VAL step): a rule
+    may only cite text that actually appears in the document.
+    """
+    if not snippet:
+        return True  # nothing cited → nothing to verify
+    return _norm_ws(snippet)[:200] in _norm_ws(doc_text)
+
+
+# ── contract metadata (CUAD "Basic Info" categories) ───────────────────
+
+
+@dataclass
+class ContractMeta:
+    """Structured facts about a contract (CUAD Basic Info pattern).
+
+    Purely extracted strings — no interpretation, no advice.
+    """
+    parties: list[str] = field(default_factory=list)
+    effective_date: str = ""
+    expiry_date: str = ""
+    governing_law: str = ""
+    notice_period: str = ""
+    auto_renew: bool = False
+    term_length: str = ""
+    amounts: list[str] = field(default_factory=list)
+
+
+_BETWEEN_RE = re.compile(
+    r"\bbetween\s+([A-Z][^,;\n]{2,80}?)\s+and\s+([A-Z][^,;\n]{2,80}?)(?:,|\n|$)",
+    re.IGNORECASE,
+)
+_PARTY_ROLE_RE = re.compile(
+    r'([A-Z][A-Za-z0-9 .,&\'()-]{2,70}?)\s*\(\s*["\']?(?:the\s+)?'
+    r"(landlord|tenant|employer|employee|client|contractor|freelancer|"
+    r"consultant|company|lessor|lessee)[\"']?\s*\)",
+    re.IGNORECASE,
+)
+_GOVLAW_RE = re.compile(
+    r"governed by.{0,80}?laws? of ([A-Z][A-Za-z ()-]{2,60})"
+    r"|governing law.{0,20}?([A-Z][A-Za-z ()-]{2,60})",
+    re.IGNORECASE,
+)
+_EFFDATE_RE = re.compile(
+    r"(?:effective|commencement)\s+date.{0,20}?(\d{1,2}(?:st|nd|rd|th)?\s+[A-Za-z]+,?\s+\d{4}"
+    r"|\d{4}-\d{1,2}-\d{1,2}|\d{1,2}[/-]\d{1,2}[/-]\d{2,4})",
+    re.IGNORECASE,
+)
+_TERM_RE = re.compile(
+    r"(?:term|duration|tenancy|period).{0,40}?(\d+(?:\.\d+)?\s*(?:day|week|month|year)s?)",
+    re.IGNORECASE,
+)
+_NOTICEPER_RE = re.compile(
+    r"notice.{0,40}?(\d+(?:\.\d+)?\s*(?:day|week|month|year)s?)",
+    re.IGNORECASE,
+)
+
+
+def extract_metadata(doc_text: str) -> ContractMeta:
+    """Extract structured metadata: parties, dates, governing law, terms.
+
+    CUAD "Basic Info" pattern — deterministic regex extraction over the
+    whole document. Never raises; missing values stay empty.
+    """
+    meta = ContractMeta()
+    try:
+        text = doc_text or ""
+        seen: set[str] = set()
+        m = _BETWEEN_RE.search(text)
+        if m:
+            for g in (m.group(1), m.group(2)):
+                g = re.sub(r"\s+", " ", g).strip(" ,.;")
+                g = re.sub(r"^and\s+", "", g, flags=re.IGNORECASE)
+                if g and g.lower() not in seen and len(g) < 90:
+                    seen.add(g.lower())
+                    meta.parties.append(g)
+        for pm in _PARTY_ROLE_RE.finditer(text):
+            g = re.sub(r"\s+", " ", pm.group(1)).strip(" ,.;")
+            if (g and g.lower() not in seen and len(g) < 90
+                    and "between" not in g.lower()):
+                seen.add(g.lower())
+                meta.parties.append(f"{g} ({pm.group(2).title()})")
+        gm = _GOVLAW_RE.search(text)
+        if gm:
+            meta.governing_law = re.sub(
+                r"\s+", " ", next(g for g in gm.groups() if g)).strip(" ,.;")[:80]
+        em = _EFFDATE_RE.search(text)
+        if em:
+            meta.effective_date = em.group(1).strip()
+        tm = _TERM_RE.search(text)
+        if tm:
+            meta.term_length = tm.group(1).strip()
+        nm = _NOTICEPER_RE.search(text)
+        if nm:
+            meta.notice_period = nm.group(1).strip()
+        meta.auto_renew = bool(_has(
+            text, r"automatically renew|auto.?renew|deemed to be renewed"))
+        meta.amounts = [m2.group(0).strip()[:40]
+                        for m2 in _MONEY_RE.finditer(text)][:12]
+        # crude expiry: "expir… on <date>" near an expiry keyword
+        xm = re.search(
+            r"expir.{0,60}?(\d{1,2}(?:st|nd|rd|th)?\s+[A-Za-z]+,?\s+\d{4}"
+            r"|\d{4}-\d{1,2}-\d{1,2})",
+            text, re.IGNORECASE)
+        if xm:
+            meta.expiry_date = xm.group(1).strip()
+    except Exception:  # noqa: BLE001 — metadata is best-effort
+        pass
+    return meta
+
+
+# ── clause categorization (CUAD-style taxonomy) ────────────────────────
+
+#: CUAD-style clause categories → keyword patterns. Contracts the model
+#: has never seen still get a typed map of what they contain.
+CLAUSE_CATEGORIES: dict[str, tuple[str, ...]] = {
+    "parties": (r"\bparties\b", r"between.{0,20}and", r"hereinafter"),
+    "term": (r"\bterm\b.{0,20}(year|month)", r"duration", r"commencement"),
+    "payment": (r"\bpayment\b", r"\binvoice\b", r"\bfee\b", r"₦|NGN", r"\brent\b"),
+    "termination": (r"\bterminat", r"\bcancel", r"notice to quit"),
+    "renewal": (r"\brenew", r"\bexpir", r"extend.{0,20}term"),
+    "confidentiality": (r"\bconfidential", r"non.?disclosure", r"\bNDA\b"),
+    "ip_ownership": (r"intellectual property", r"\bcopyright\b", r"\bIP\b",
+                     r"ownership", r"work product", r"deliverable"),
+    "liability": (r"\bliab", r"\bindemnif", r"\bwarrant"),
+    "non_compete": (r"non.?compete", r"restraint of trade", r"not compete",
+                    r"non.?solicit"),
+    "dispute_resolution": (r"\barbitration\b", r"\bmediation\b",
+                           r"dispute.{0,20}resol", r"\bjurisdiction\b",
+                           r"governing law", r"governed by"),
+    "governing_law": (r"governing law", r"governed by", r"laws of"),
+    "force_majeure": (r"force majeure", r"act of god", r"beyond.{0,15}control"),
+    "assignment": (r"\bassign", r"transfer.{0,20}rights"),
+    "repairs": (r"\brepair", r"\bmaintenance\b", r"dilapidation"),
+    "notice": (r"\bnotice\b", r"\bnotify\b", r"in writing"),
+    "pension": (r"\bpension\b", r"PenCom", r"\bRSA\b", r"retirement savings"),
+    "probation": (r"\bprobation\b",),
+    "scope": (r"scope of work", r"\bdeliverable", r"\brevision"),
+}
+
+
+def categorize_clauses(clauses: list[Clause]) -> dict[str, list[str]]:
+    """Map clauses to CUAD-style categories. Returns category → headings.
+
+    A clause can land in several categories. Never raises.
+    """
+    out: dict[str, list[str]] = {}
+    try:
+        for clause in clauses or []:
+            text = clause.text
+            label = clause.heading or text[:60]
+            for cat, patterns in CLAUSE_CATEGORIES.items():
+                if _has(text, *patterns):
+                    out.setdefault(cat, [])
+                    if label not in out[cat]:
+                        out[cat].append(label)
+    except Exception:  # noqa: BLE001
+        pass
+    return out
+
+
+# ── plain-English clause rewriting ─────────────────────────────────────
+
+
+#: Legalese → plain-language replacements (deterministic, offline).
+_LEGALESE: tuple[tuple[str, str], ...] = (
+    (r"\bhereinafter referred to as\b", "called"),
+    (r"\bhereinafter\b", ""),
+    (r"\bhereby\b", ""),
+    (r"\bherein\b", "in this agreement"),
+    (r"\bhereof\b", "of this agreement"),
+    (r"\bhereto\b", "to this agreement"),
+    (r"\bpursuant to\b", "under"),
+    (r"\bin witness whereof\b", "signed"),
+    (r"\bnotwithstanding anything to the contrary\b", "despite anything else in this agreement"),
+    (r"\bforce majeure\b", "events nobody can control (floods, strikes, etc.)"),
+    (r"\bindemnify and hold harmless\b", "protect against loss and cover the costs of"),
+    (r"\bindemnify\b", "cover the losses of"),
+    (r"\btime is of the essence\b", "deadlines are strict"),
+    (r"\bjointly and severally\b", "together and individually"),
+    (r"\bnull and void\b", "invalid"),
+    (r"\bcease and desist\b", "stop"),
+    (r"\bprior written consent\b", "written permission in advance"),
+    (r"\bwithout prejudice\b", "without giving up any rights"),
+    (r"\bipso facto\b", "automatically"),
+    (r"\binter alia\b", "among other things"),
+    (r"\bmutatis mutandis\b", "with the necessary changes"),
+)
+
+
+def plain_english(clause_text: str) -> str:
+    """Rewrite legalese in plain language (deterministic, offline).
+
+    This is a wording aid, not legal advice: it restates the same clause
+    more readably. Never raises.
+    """
+    try:
+        out = clause_text or ""
+        for pat, repl in _LEGALESE:
+            out = re.sub(pat, repl, out, flags=re.IGNORECASE)
+        out = re.sub(r"\s{2,}", " ", out).strip()
+        # split monster sentences on "; " for readability
+        out = re.sub(r";\s+(?=[A-Z(])", ".\n", out)
+        return out
+    except Exception:  # noqa: BLE001
+        return clause_text or ""
+
+
+# ── rights extraction (Do Not Sign pattern) ────────────────────────────
+
+_RIGHTS_RES = (
+    r"shall be entitled to",
+    r"is entitled to",
+    r"are entitled to",
+    r"shall have the right to",
+    r"has the right to",
+    r"have the right to",
+    r"may terminate",
+    r"may cancel",
+    r"quiet enjoyment",
+    r"entitled to (a )?refund",
+    r"right to (a )?refund",
+    r"may withhold",
+    r"may deduct",
+    r"shall not be liable",
+    r"right to renew",
+    r"option to renew",
+    r"first right of refusal",
+)
+
+
+def extract_rights(doc_text: str, limit: int = 12) -> list[str]:
+    """Extract rights the contract text *grants* (the Do Not Sign pattern).
+
+    Reviews flag risks; this surfaces what the agreement gives the reader:
+    refund rights, termination rights, renewal options, quiet enjoyment.
+    Phrased as reported facts ("The agreement states…"), never advice.
+    """
+    rights: list[str] = []
+    try:
+        text = re.sub(r"\s+", " ", doc_text or "")
+        sentences = re.split(r"(?<=[.!?])\s+", text)
+        for sent in sentences:
+            if len(sent) < 25 or len(sent) > 400:
+                continue
+            if any(re.search(p, sent, re.IGNORECASE) for p in _RIGHTS_RES):
+                clean = sent.strip()
+                if clean not in rights:
+                    rights.append(clean)
+                if len(rights) >= limit:
+                    break
+    except Exception:  # noqa: BLE001
+        pass
+    return rights
+
+
+# ── review comparison (amendment tracking) ──────────────────────────────
+
+
+@dataclass
+class ReviewDiff:
+    """What changed between two reviews of (probably) the same contract."""
+    old_grade: str
+    new_grade: str
+    old_score: int
+    new_score: int
+    new_findings: list[Finding] = field(default_factory=list)
+    resolved_findings: list[Finding] = field(default_factory=list)
+    carried_findings: list[Finding] = field(default_factory=list)
+
+    def summary(self) -> str:
+        delta = self.new_score - self.old_score
+        arrow = "▲" if delta > 0 else ("▼" if delta < 0 else "▬")
+        return (f"{self.old_grade} ({self.old_score}) → {self.new_grade} "
+                f"({self.new_score}) {arrow}{abs(delta)} · "
+                f"{len(self.new_findings)} new, "
+                f"{len(self.resolved_findings)} resolved, "
+                f"{len(self.carried_findings)} carried over")
+
+
+def compare_reviews(old: Review, new: Review) -> ReviewDiff:
+    """Diff two reviews by rule id — for tracking amendments/negotiations.
+
+    Shows which flagged issues the new version fixed, which appeared, and
+    which carried over. Never raises.
+    """
+    try:
+        old_map = {f.rule_id: f for f in old.findings}
+        new_map = {f.rule_id: f for f in new.findings}
+        diff = ReviewDiff(
+            old_grade=old.grade, new_grade=new.grade,
+            old_score=old.score, new_score=new.score,
+            new_findings=[f for rid, f in new_map.items() if rid not in old_map],
+            resolved_findings=[f for rid, f in old_map.items() if rid not in new_map],
+            carried_findings=[f for rid, f in new_map.items() if rid in old_map],
+        )
+        return diff
+    except Exception:  # noqa: BLE001
+        return ReviewDiff(old_grade="?", new_grade="?", old_score=0, new_score=0)
+
+
+def format_diff(diff: ReviewDiff) -> str:
+    """Render a review comparison for chat. Never raises."""
+    try:
+        lines = ["🔁 Contract comparison", diff.summary()]
+        if diff.resolved_findings:
+            lines.append("")
+            lines.append("✅ Fixed in the new version:")
+            for f in diff.resolved_findings:
+                lines.append(f"  • [{f.rule_id}] {f.title}")
+        if diff.new_findings:
+            lines.append("")
+            lines.append("⚠️ New in this version:")
+            for f in diff.new_findings:
+                lines.append(f"  • {f.headline()} [{f.rule_id}]")
+        if diff.carried_findings:
+            lines.append("")
+            lines.append("📌 Still present:")
+            for f in diff.carried_findings:
+                lines.append(f"  • {f.headline()} [{f.rule_id}]")
+        lines.append("")
+        lines.append(DISCLAIMER)
+        return "\n".join(lines)
+    except Exception:  # noqa: BLE001
+        return DISCLAIMER
+
+
 # ── chat control ────────────────────────────────────────────────────
 
 
 def _usage() -> str:
-    return ("/contract review [tenancy|employment|freelance] <paste the contract text> — "
-            "letter grade + flagged clauses in plain language.\n"
+    return ("/contract review [tenancy|employment|freelance] [style] <paste the contract text> — "
+            "letter grade + flagged clauses in plain language. style: full|compact|triage.\n"
+            "/contract meta <paste the contract text> — extracted facts: parties, dates, governing law, amounts.\n"
+            "/contract rights <paste the contract text> — rights the agreement grants you.\n"
+            "/contract rewrite <paste one clause> — plain-English rewrite of the clause.\n"
             "/contract types — supported contract types.")
 
 
@@ -732,18 +1411,57 @@ def control_contract(tail: str, context: Any = None, chat: Any = None,
             return ("Supported contract types:\n" +
                     "\n".join(f"• {k} — {v}" for k, v in names.items()) +
                     "\n\n" + DISCLAIMER)
+        if low.startswith("meta"):
+            text = rest[4:].strip()
+            if len(text) < 40:
+                return ("Paste the contract text after the command.\n" + _usage())
+            meta = extract_metadata(text)
+            lines = ["📋 Contract facts (extracted, not interpreted):"]
+            lines.append(f"Parties: {', '.join(meta.parties) or '—'}")
+            lines.append(f"Effective date: {meta.effective_date or '—'}")
+            lines.append(f"Expiry date: {meta.expiry_date or '—'}")
+            lines.append(f"Term: {meta.term_length or '—'}")
+            lines.append(f"Governing law: {meta.governing_law or '—'}")
+            lines.append(f"Notice period: {meta.notice_period or '—'}")
+            lines.append(f"Auto-renew: {'yes' if meta.auto_renew else 'not stated'}")
+            lines.append(f"Amounts: {', '.join(meta.amounts) or '—'}")
+            return "\n".join(lines) + "\n\n" + DISCLAIMER
+        if low.startswith("rights"):
+            text = rest[6:].strip()
+            if len(text) < 40:
+                return ("Paste the contract text after the command.\n" + _usage())
+            rights = extract_rights(text)
+            if not rights:
+                return ("No explicit rights-granting language found in this "
+                        "text.\n\n" + DISCLAIMER)
+            lines = ["✓ Rights this agreement states it grants:"]
+            lines += [f"  • {r}" for r in rights]
+            return "\n".join(lines) + "\n\n" + DISCLAIMER
+        if low.startswith("rewrite"):
+            text = rest[7:].strip()
+            if len(text) < 20:
+                return ("Paste one clause after the command.\n" + _usage())
+            out = plain_english(text[:2000])
+            return ("📝 Plain-English rewrite (same clause, simpler words — "
+                    "not legal advice):\n\n" + out + "\n\n" + DISCLAIMER)
         if low.startswith("review"):
             rest = rest[6:].strip()
         ctype = "auto"
+        style = "full"
         for t in CONTRACT_TYPES:
             if rest.lower().startswith(t + " ") or rest.lower().startswith(t + "\n"):
                 ctype = t
                 rest = rest[len(t):].strip()
                 break
+        for s in REVIEW_STYLES:
+            if rest.lower().startswith(s + " ") or rest.lower().startswith(s + "\n"):
+                style = s
+                rest = rest[len(s):].strip()
+                break
         if len(rest) < 80:
             return ("Paste the contract text after the command — "
                     "I need the actual clauses to review.\n" + _usage())
         review = review_contract(rest, ctype)
-        return format_review(review)
+        return format_review(review, style=style)
     except Exception as e:  # noqa: BLE001 — never raise from chat
         return f"Contract review hit an error ({e}). {DISCLAIMER}"

@@ -43,6 +43,7 @@ __all__ = [
     "control_contracts",
     "PORTFOLIO_CHECK_ACTION",
     "PORTFOLIO_CRON",
+    "RENEWAL_BUCKETS",
 ]
 
 _log = get_logger(__name__)
@@ -50,6 +51,9 @@ _log = get_logger(__name__)
 #: Scheduler action + cron for the proactive renewal/deadline check.
 PORTFOLIO_CHECK_ACTION = "portfolio_check"
 PORTFOLIO_CRON = "0 8 * * *"  # 08:00 daily
+
+#: Renewal-pipeline buckets (days) — the Ironclad 30/60/90 pattern.
+RENEWAL_BUCKETS = (30, 60, 90)
 
 _DEFAULT_DB = os.path.join(
     os.path.expanduser("~"), ".nomorals", "legal", "portfolio.db"
@@ -187,6 +191,7 @@ class Obligation:
     done: bool = False
     done_at: float = 0.0
     source: str = ""  # "extracted" | "manual" | "sla"
+    confirmed: bool = False  # extraction approved by the owner (ContractSafe pattern)
 
     def overdue(self, now: float | None = None) -> bool:
         now = now if now is not None else time.time()
@@ -207,11 +212,15 @@ class Contract:
     score: int = 0
     findings_count: int = 0
     created_at: float = 0.0
+    auto_renew: bool = False  # auto-renewal clause detected
+    annual_value: float = 0.0  # largest ₦ amount seen in the text
+    supersedes: str = ""  # id of the contract version this one replaces
 
     def headline(self) -> str:
         grade = f" ({self.grade})" if self.grade else ""
         parties = f" — {self.parties}" if self.parties else ""
-        return f"📄 {self.name}{grade}{parties}"
+        renew = " 🔁" if self.auto_renew else ""
+        return f"📄 {self.name}{grade}{parties}{renew}"
 
 
 @dataclass
@@ -284,12 +293,38 @@ class ContractPortfolio:
             self._db.execute(
                 "CREATE INDEX IF NOT EXISTS idx_obl_due ON obligations(due_at)"
             )
+            self._migrate()
             self._db.commit()
             self._ok = True
         except Exception as exc:  # noqa: BLE001 — fail-closed, never raise
             _log.warning("ContractPortfolio unavailable: %s", exc)
             self._db = None  # type: ignore[assignment]
             self._ok = False
+
+    def _migrate(self) -> None:
+        """Add sweep columns to older databases. Never raises."""
+        try:
+            cols = {r[1] for r in self._db.execute(
+                "PRAGMA table_info(contracts)").fetchall()}
+            if "doc_text" not in cols:
+                self._db.execute(
+                    "ALTER TABLE contracts ADD COLUMN doc_text TEXT DEFAULT ''")
+            if "auto_renew" not in cols:
+                self._db.execute(
+                    "ALTER TABLE contracts ADD COLUMN auto_renew INTEGER DEFAULT 0")
+            if "annual_value" not in cols:
+                self._db.execute(
+                    "ALTER TABLE contracts ADD COLUMN annual_value REAL DEFAULT 0")
+            if "supersedes" not in cols:
+                self._db.execute(
+                    "ALTER TABLE contracts ADD COLUMN supersedes TEXT DEFAULT ''")
+            ocols = {r[1] for r in self._db.execute(
+                "PRAGMA table_info(obligations)").fetchall()}
+            if "confirmed" not in ocols:
+                self._db.execute(
+                    "ALTER TABLE obligations ADD COLUMN confirmed INTEGER DEFAULT 0")
+        except Exception:  # noqa: BLE001 — migration is best-effort
+            _log.debug("portfolio migration skipped", exc_info=True)
 
     # — ingestion —
 
@@ -312,19 +347,31 @@ class ContractPortfolio:
         try:
             cid = "ctr_" + uuid.uuid4().hex[:10]
             name = (name or "").strip() or f"{review.contract_type.title()} contract"
+            auto_renew = any(f.rule_id in ("T-05", "U-04") for f in review.findings)
+            annual_value = 0.0
+            if doc_text:
+                try:
+                    from .contracts import _money
+                    amounts = _money(doc_text)
+                    annual_value = max(amounts) if amounts else 0.0
+                except Exception:  # noqa: BLE001
+                    pass
             contract = Contract(
                 id=cid, name=name[:120], contract_type=review.contract_type,
                 parties=(parties or "").strip()[:200],
                 grade=review.grade, score=review.score,
                 findings_count=len(review.findings), created_at=_now(),
+                auto_renew=auto_renew, annual_value=annual_value,
             )
             self._db.execute(
                 """INSERT INTO contracts (id, name, contract_type, parties,
-                       grade, score, findings_count, created_at)
-                   VALUES (?,?,?,?,?,?,?,?)""",
+                       grade, score, findings_count, created_at, doc_text,
+                       auto_renew, annual_value, supersedes)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (contract.id, contract.name, contract.contract_type,
                  contract.parties, contract.grade, contract.score,
-                 contract.findings_count, contract.created_at),
+                 contract.findings_count, contract.created_at,
+                 (doc_text or "")[:200000], int(auto_renew), annual_value, ""),
             )
             if doc_text:
                 self._extract_obligations(cid, doc_text, review.contract_type)
@@ -400,19 +447,34 @@ class ContractPortfolio:
 
     # — queries —
 
+    @staticmethod
+    def _row_to_contract(r: Any) -> Contract:
+        try:
+            auto_renew = bool(r["auto_renew"]) if "auto_renew" in r.keys() else False
+        except Exception:  # noqa: BLE001
+            auto_renew = False
+        try:
+            annual_value = float(r["annual_value"] or 0) if "annual_value" in r.keys() else 0.0
+        except Exception:  # noqa: BLE001
+            annual_value = 0.0
+        try:
+            supersedes = r["supersedes"] or "" if "supersedes" in r.keys() else ""
+        except Exception:  # noqa: BLE001
+            supersedes = ""
+        return Contract(
+            id=r["id"], name=r["name"], contract_type=r["contract_type"],
+            parties=r["parties"] or "", grade=r["grade"] or "",
+            score=r["score"] or 0, findings_count=r["findings_count"] or 0,
+            created_at=r["created_at"] or 0.0, auto_renew=auto_renew,
+            annual_value=annual_value, supersedes=supersedes)
+
     def list_contracts(self) -> list[Contract]:
         if not self._ok:
             return []
         try:
             rows = self._db.execute(
                 "SELECT * FROM contracts ORDER BY created_at DESC").fetchall()
-            return [Contract(id=r["id"], name=r["name"],
-                             contract_type=r["contract_type"],
-                             parties=r["parties"] or "",
-                             grade=r["grade"] or "", score=r["score"] or 0,
-                             findings_count=r["findings_count"] or 0,
-                             created_at=r["created_at"] or 0.0)
-                    for r in rows]
+            return [self._row_to_contract(r) for r in rows]
         except Exception:  # noqa: BLE001
             return []
 
@@ -424,12 +486,7 @@ class ContractPortfolio:
                 "SELECT * FROM contracts WHERE id = ?", (contract_id,)).fetchone()
             if r is None:
                 return None
-            return Contract(id=r["id"], name=r["name"],
-                            contract_type=r["contract_type"],
-                            parties=r["parties"] or "",
-                            grade=r["grade"] or "", score=r["score"] or 0,
-                            findings_count=r["findings_count"] or 0,
-                            created_at=r["created_at"] or 0.0)
+            return self._row_to_contract(r)
         except Exception:  # noqa: BLE001
             return None
 
@@ -449,11 +506,16 @@ class ContractPortfolio:
             for r in rows:
                 if r["done"] and not include_done:
                     continue
+                try:
+                    confirmed = bool(r["confirmed"]) if "confirmed" in r.keys() else False
+                except Exception:  # noqa: BLE001
+                    confirmed = False
                 out.append(Obligation(
                     id=r["id"], contract_id=r["contract_id"], kind=r["kind"],
                     description=r["description"] or "",
                     due_at=r["due_at"] or 0.0, done=bool(r["done"]),
-                    done_at=r["done_at"] or 0.0, source=r["source"] or ""))
+                    done_at=r["done_at"] or 0.0, source=r["source"] or "",
+                    confirmed=confirmed))
             return out
         except Exception:  # noqa: BLE001
             return []
@@ -537,6 +599,267 @@ class ContractPortfolio:
         except Exception:  # noqa: BLE001
             return False
 
+    # — extraction approval (ContractSafe pattern: accept / correct / skip) —
+
+    def confirm_obligation(self, obligation_id: str) -> bool:
+        """Accept an extracted obligation as correct."""
+        if not self._ok:
+            return False
+        try:
+            cur = self._db.execute(
+                "UPDATE obligations SET confirmed = 1 WHERE id = ?",
+                (obligation_id,))
+            self._db.commit()
+            return cur.rowcount > 0
+        except Exception:  # noqa: BLE001
+            return False
+
+    def correct_obligation(self, obligation_id: str,
+                           description: str = "",
+                           due_at: float = 0.0) -> bool:
+        """Correct an extracted obligation and mark it confirmed."""
+        if not self._ok:
+            return False
+        try:
+            sets, params = ["confirmed = 1"], []
+            if description:
+                sets.append("description = ?")
+                params.append(description.strip()[:400])
+            if due_at:
+                sets.append("due_at = ?")
+                params.append(float(due_at))
+            params.append(obligation_id)
+            cur = self._db.execute(
+                f"UPDATE obligations SET {', '.join(sets)} WHERE id = ?",
+                params)
+            self._db.commit()
+            return cur.rowcount > 0
+        except Exception:  # noqa: BLE001
+            return False
+
+    def remove_obligation(self, obligation_id: str) -> bool:
+        """Skip/remove an obligation (wrong extraction or no longer relevant)."""
+        if not self._ok:
+            return False
+        try:
+            cur = self._db.execute(
+                "DELETE FROM obligations WHERE id = ?", (obligation_id,))
+            self._db.commit()
+            return cur.rowcount > 0
+        except Exception:  # noqa: BLE001
+            return False
+
+    def unconfirmed_obligations(self) -> list[Obligation]:
+        """Extracted obligations awaiting owner review."""
+        if not self._ok:
+            return []
+        try:
+            rows = self._db.execute(
+                "SELECT * FROM obligations WHERE source = 'extracted' "
+                "AND (confirmed IS NULL OR confirmed = 0) AND done = 0 "
+                "ORDER BY due_at").fetchall()
+            out = []
+            for r in rows:
+                out.append(Obligation(
+                    id=r["id"], contract_id=r["contract_id"], kind=r["kind"],
+                    description=r["description"] or "",
+                    due_at=r["due_at"] or 0.0, source=r["source"] or ""))
+            return out
+        except Exception:  # noqa: BLE001
+            return []
+
+    # — full-text search (Ironclad natural-language search pattern) —
+
+    def search_contracts(self, query: str,
+                         limit: int = 10) -> list[tuple[Contract, str]]:
+        """Keyword search across stored contract texts.
+
+        Returns (contract, snippet) pairs with the match in context —
+        "show me the contracts that mention service charge". Never raises.
+        """
+        if not self._ok:
+            return []
+        try:
+            q = (query or "").strip()
+            if not q:
+                return []
+            terms = [t for t in re.findall(r"[a-zA-Z0-9₦]+", q.lower())
+                     if len(t) >= 3]
+            if not terms:
+                return []
+            rows = self._db.execute(
+                "SELECT id, name, contract_type, parties, grade, score, "
+                "findings_count, created_at, doc_text FROM contracts"
+            ).fetchall()
+            hits: list[tuple[Contract, str, int]] = []
+            for r in rows:
+                text = r["doc_text"] or ""
+                low = text.lower()
+                score = sum(low.count(t) for t in terms)
+                if score == 0:
+                    continue
+                idx = low.find(terms[0])
+                start = max(0, idx - 70)
+                end = min(len(text), idx + 130)
+                snippet = re.sub(r"\s+", " ", text[start:end]).strip()
+                hits.append((self._row_to_contract(r), snippet, score))
+            hits.sort(key=lambda h: h[2], reverse=True)
+            return [(c, s) for c, s, _ in hits[:max(1, limit)]]
+        except Exception:  # noqa: BLE001
+            return []
+
+    # — renewal pipeline (Ironclad 30/60/90 dashboard) —
+
+    def renewal_pipeline(self, buckets: tuple = RENEWAL_BUCKETS
+                         ) -> dict[str, list[tuple[Contract, Obligation]]]:
+        """Renewal/expiry obligations bucketed by days out: 30/60/90+.
+
+        Returns {"overdue": [...], "30": [...], "60": [...], "90": [...],
+        "later": [...]}.
+        """
+        out: dict[str, list[tuple[Contract, Obligation]]] = {
+            "overdue": [], "30": [], "60": [], "90": [], "later": []}
+        if not self._ok:
+            return out
+        try:
+            now = _now()
+            contracts = {c.id: c for c in self.list_contracts()}
+            for o in self.obligations():
+                if o.kind not in ("renewal", "expiry", "notice"):
+                    continue
+                c = contracts.get(o.contract_id)
+                if c is None:
+                    continue
+                days = (o.due_at - now) / 86400
+                if days < 0:
+                    out["overdue"].append((c, o))
+                elif days <= buckets[0]:
+                    out["30"].append((c, o))
+                elif days <= buckets[1]:
+                    out["60"].append((c, o))
+                elif days <= buckets[2]:
+                    out["90"].append((c, o))
+                else:
+                    out["later"].append((c, o))
+            for key in out:
+                out[key].sort(key=lambda pair: pair[1].due_at)
+            return out
+        except Exception:  # noqa: BLE001
+            return out
+
+    def pipeline_text(self) -> str:
+        """Render the renewal pipeline for chat."""
+        pipe = self.renewal_pipeline()
+        lines = ["🗓️ Renewal pipeline:"]
+        labels = [("overdue", "OVERDUE"), ("30", "next 30 days"),
+                  ("60", "31–60 days"), ("90", "61–90 days"),
+                  ("later", "beyond 90 days")]
+        empty = True
+        for key, label in labels:
+            items = pipe[key]
+            if not items:
+                continue
+            empty = False
+            lines.append(f"\n*{label}* ({len(items)}):")
+            for c, o in items[:8]:
+                renew = " 🔁" if c.auto_renew else ""
+                lines.append(f"  • {c.name}{renew}: {o.description[:70]}")
+            if len(items) > 8:
+                lines.append(f"  …and {len(items) - 8} more")
+        if empty:
+            lines.append("No renewal/expiry obligations tracked yet.")
+        lines.append("")
+        lines.append(DISCLAIMER)
+        return "\n".join(lines)
+
+    # — auto-renew roll-forward —
+
+    def roll_forward(self, contract_id: str, months: float = 12.0) -> int:
+        """Roll a contract's renewal/expiry/notice dates forward.
+
+        For auto-renewing contracts whose term rolled over without a
+        notice to quit: shifts open renewal/expiry/notice obligations by
+        ``months``. Returns the number of obligations shifted.
+        """
+        if not self._ok:
+            return 0
+        try:
+            months = max(0.5, float(months or 12.0))
+            shift = months * 30 * 86400
+            cur = self._db.execute(
+                """UPDATE obligations SET due_at = due_at + ?
+                   WHERE contract_id = ? AND done = 0
+                   AND kind IN ('renewal', 'expiry', 'notice')""",
+                (shift, contract_id))
+            self._db.commit()
+            return cur.rowcount or 0
+        except Exception:  # noqa: BLE001
+            return 0
+
+    # — portfolio value —
+
+    def portfolio_value(self) -> float:
+        """Sum of the largest ₦ amount seen in each contract's text."""
+        if not self._ok:
+            return 0.0
+        try:
+            total = self._db.execute(
+                "SELECT SUM(annual_value) FROM contracts").fetchone()[0]
+            return float(total or 0.0)
+        except Exception:  # noqa: BLE001
+            return 0.0
+
+    # — amendments (version chains) —
+
+    def amend(self, contract_id: str, new_text: str, *,
+              name: str = "") -> tuple[Contract, Review] | None:
+        """Ingest an amended version; links it to the version it replaces.
+
+        The old contract stays in history (``history()`` walks the chain).
+        Returns (contract, review) or None. Never raises.
+        """
+        try:
+            old = self.get_contract(contract_id)
+            if old is None or not (new_text or "").strip():
+                return None
+            result = self.add_raw(
+                new_text, name=name or (old.name + " (amended)"),
+                contract_type=old.contract_type, parties=old.parties)
+            if result is None:
+                return None
+            contract, review = result
+            self._db.execute(
+                "UPDATE contracts SET supersedes = ? WHERE id = ?",
+                (contract_id, contract.id))
+            self._db.commit()
+            contract.supersedes = contract_id
+            return contract, review
+        except Exception:  # noqa: BLE001
+            return None
+
+    def history(self, contract_id: str) -> list[Contract]:
+        """Version chain for a contract, oldest first. Never raises."""
+        try:
+            chain: list[Contract] = []
+            seen: set[str] = set()
+            # walk back through supersedes links
+            cur = self.get_contract(contract_id)
+            stack: list[Contract] = []
+            while cur is not None and cur.id not in seen:
+                seen.add(cur.id)
+                stack.append(cur)
+                cur = self.get_contract(cur.supersedes) if cur.supersedes else None
+            chain = list(reversed(stack))
+            # walk forward: versions that supersede anything in the chain
+            known = set(seen)
+            for c in self.list_contracts():
+                if c.supersedes in known and c.id not in known:
+                    chain.append(c)
+                    known.add(c.id)
+            return chain
+        except Exception:  # noqa: BLE001
+            return []
+
     # — SLA monitoring —
 
     def track_sla(self, contract_id: str, metric: str, target: str) -> bool:
@@ -603,6 +926,13 @@ class ContractPortfolio:
                     "Add one with: /contracts add <name> | <paste the contract text>\n\n"
                     + DISCLAIMER)
         lines = [f"📁 Contract portfolio — {len(contracts)} contract(s)"]
+        value = self.portfolio_value()
+        if value > 0:
+            lines.append(f"💰 Tracked value: ₦{value:,.0f}")
+        unconfirmed = self.unconfirmed_obligations()
+        if unconfirmed:
+            lines.append(f"🔎 {len(unconfirmed)} extracted date(s) awaiting your review "
+                         "(/contracts review-dates)")
         attention = self.needs_attention(60)
         flagged = {c.id for c, _ in attention}
         for c in contracts:
@@ -721,10 +1051,17 @@ def _usage() -> str:
     return (
         "/contracts — portfolio summary (all contracts, attention flags)\n"
         "/contracts attention [days] — what needs attention soon\n"
+        "/contracts pipeline — renewal pipeline: overdue / 30 / 60 / 90+ days\n"
+        "/contracts search <words> — full-text search across stored contracts\n"
         "/contracts add <name> | <paste the contract text> — review + ingest\n"
+        "/contracts amend <contract id> | <new text> — ingest an amended version\n"
+        "/contracts history <contract id> — version chain\n"
         "/contracts obligations <contract id> — open obligations for one contract\n"
+        "/contracts review-dates — extracted dates awaiting your confirmation\n"
+        "/contracts confirm <obligation id> — accept an extracted date\n"
         "/contracts track <contract id> | <description> | <YYYY-MM-DD> — manual obligation\n"
         "/contracts done <obligation id> — mark an obligation done\n"
+        "/contracts roll <contract id> [months] — roll auto-renew dates forward\n"
         "/contracts sla <contract id> <metric> | <target> — track an SLA term\n"
         "/contracts breach <contract id> <metric> | [note] — record an SLA breach\n"
         "/contracts timeline — all upcoming dates across contracts"
@@ -761,6 +1098,74 @@ def control_contracts(tail: str, context: Any = None, chat: Any = None,
             lines += [e.headline() for e in events[:20]]
             if len(events) > 20:
                 lines.append(f"…and {len(events) - 20} more.")
+            return "\n".join(lines) + "\n\n" + DISCLAIMER
+        if low == "pipeline":
+            return portfolio.pipeline_text()
+        if low.startswith("search "):
+            q = rest[len("search "):].strip()
+            hits = portfolio.search_contracts(q)
+            if not hits:
+                return f"No contracts mention '{q[:60]}'.\n\n{DISCLAIMER}"
+            lines = [f"🔍 Contracts mentioning '{q[:60]}' ({len(hits)}):"]
+            for c, snippet in hits[:8]:
+                lines.append(f"\n{c.headline()}\n  _…{snippet[:160]}…_")
+            return "\n".join(lines) + "\n\n" + DISCLAIMER
+        if low == "review-dates":
+            pending = portfolio.unconfirmed_obligations()
+            if not pending:
+                return ("✅ No extracted dates awaiting review.\n\n" + DISCLAIMER)
+            names = {c.id: c.name for c in portfolio.list_contracts()}
+            lines = [f"🔎 {len(pending)} extracted date(s) awaiting your review "
+                     "(/contracts confirm <id>):"]
+            for o in pending[:15]:
+                lines.append(f"  • [{o.id}] {names.get(o.contract_id, '?')}: "
+                             f"{o.description[:70]}")
+            if len(pending) > 15:
+                lines.append(f"  …and {len(pending) - 15} more")
+            return "\n".join(lines) + "\n\n" + DISCLAIMER
+        if low.startswith("confirm "):
+            oid = rest[len("confirm "):].strip()
+            if portfolio.confirm_obligation(oid):
+                return f"✅ Confirmed: {oid}"
+            return "No obligation with that ID."
+        if low.startswith("roll "):
+            parts = rest[len("roll "):].strip().split()
+            cid = parts[0] if parts else ""
+            months = 12.0
+            if len(parts) > 1:
+                try:
+                    months = max(0.5, float(parts[1]))
+                except ValueError:
+                    pass
+            n = portfolio.roll_forward(cid, months)
+            return (f"🔁 Rolled {n} date(s) forward by {months:g} months for "
+                    f"{cid}.\n\n{DISCLAIMER}" if n else
+                    f"No open renewal/expiry dates to roll for {cid}.")
+        if low.startswith("amend "):
+            body = rest[len("amend "):].strip()
+            if "|" not in body:
+                return ("Usage: /contracts amend <contract id> | <new contract text>\n"
+                        + _usage())
+            cid, text = (p.strip() for p in body.split("|", 1))
+            if len(text) < 80:
+                return ("I need the amended contract text — paste the clauses.\n"
+                        + _usage())
+            result = portfolio.amend(cid, text)
+            if result is None:
+                return "Couldn't ingest that amendment — check the contract ID."
+            contract, review = result
+            return (f"📝 Amendment ingested: {contract.headline()}\n"
+                    f"Grade: {review.grade} ({review.score}/100). "
+                    f"Replaces version {cid}.\n\n{DISCLAIMER}")
+        if low.startswith("history "):
+            cid = rest[len("history "):].strip()
+            chain = portfolio.history(cid)
+            if not chain:
+                return "No contract with that ID."
+            lines = ["📚 Version history (oldest first):"]
+            for c in chain:
+                mark = " ← current" if c.id == cid else ""
+                lines.append(f"  • {c.headline()}{mark}")
             return "\n".join(lines) + "\n\n" + DISCLAIMER
         if low.startswith("attention"):
             parts = rest.split()

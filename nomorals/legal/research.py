@@ -41,7 +41,14 @@ __all__ = [
     "LegalResearch",
     "control_research",
     "format_research",
+    "RESEARCH_STYLES",
+    "expand_query",
+    "verify_citations",
+    "groundedness",
 ]
+
+#: Output styles for research reports.
+RESEARCH_STYLES = ("full", "brief")
 
 #: The confidentiality guarantee, as documentation the tests assert exists.
 CONFIDENTIALITY = (
@@ -145,6 +152,7 @@ class Evidence:
     section: str
     snippet: str
     score: float
+    verified: bool = False  # snippet confirmed verbatim in the source section
 
 
 @dataclass
@@ -159,16 +167,32 @@ class ResearchResult:
     evidence: list[Evidence] = field(default_factory=list)
     confidential: bool = True
 
-    def render(self) -> str:
+    @property
+    def groundedness(self) -> float:
+        """Fraction of evidence snippets verified verbatim in the corpus.
+
+        The Lexis+ AI pattern: a response is grounded when every claim
+        traces to a source span that actually contains it.
+        """
+        return groundedness(self)
+
+    def render(self, style: str = "full") -> str:
         parts = [self.text]
         if self.answered and self.confidence > 0:
             parts.append(f"📊 Confidence: {self.confidence:.2f} "
                          f"({_confidence_band(self.confidence)}) — "
                          "based on corpus match strength, coverage, and "
                          "verified-source quality.")
+            g = self.groundedness
+            parts.append(f"🔗 Groundedness: {g:.0%} of cited snippets "
+                         "verified verbatim in the corpus.")
         if self.citations:
-            parts.append("Sources:\n" + "\n".join(
-                f"• {c.label()}" for c in self.citations))
+            if (style or "full").lower() == "brief":
+                parts.append("Sources: " + "; ".join(
+                    c.label() for c in self.citations[:3]))
+            else:
+                parts.append("Sources:\n" + "\n".join(
+                    f"• {c.label()}" for c in self.citations))
         parts.append(DISCLAIMER)
         return "\n\n".join(parts)
 
@@ -193,6 +217,122 @@ def _calibrate(top_score: float, n_docs: int) -> float:
     coverage = min(1.0, n_docs / 3.0)
     confidence = (0.45 * strength + 0.35 * coverage + 0.20 * _SOURCE_QUALITY)
     return round(max(0.0, min(1.0, confidence)), 2)
+
+
+# ── query expansion (Schwarcz/Vincent pattern: narrow issues win) ──────
+
+#: Legal synonym families for query expansion. Variants are searched and
+#: merged, so "sacked" also matches corpus text about "termination".
+_EXPANSIONS: dict[str, tuple[str, ...]] = {
+    "sack": ("terminate", "dismiss", "fire"),
+    "sacked": ("terminated", "dismissed", "fired"),
+    "landlord": ("lessor", "tenancy", "rent"),
+    "tenant": ("lessee", "tenancy", "rent"),
+    "evict": ("eviction", "quit notice", "possession"),
+    "locked out": ("lockout", "self-help eviction"),
+    "salary": ("wages", "pay", "remuneration"),
+    "police": ("arrest", "detention", "bail"),
+    "arrested": ("arrest", "detention", "custody"),
+    "fake": ("defective", "counterfeit", "substandard"),
+    "refund": ("redress", "replacement", "repair"),
+    "court": ("tribunal", "judiciary", "litigation"),
+    "lawyer": ("counsel", "attorney", "legal practitioner"),
+    "contract": ("agreement", "tenancy", "employment"),
+    "business": ("company", "enterprise", "CAC"),
+    "debt": ("loan", "owing", "borrower"),
+    "inherit": ("intestate", "estate", "succession"),
+}
+
+
+def _inflect(synonym: str, infl: str) -> str:
+    """Apply an English inflection to a synonym stem."""
+    if not infl:
+        return synonym
+    if infl == "ed":
+        return synonym + "d" if synonym.endswith("e") else synonym + "ed"
+    if infl == "s":
+        return synonym + "s"
+    if infl == "ing":
+        return synonym[:-1] + "ing" if synonym.endswith("e") else synonym + "ing"
+    return synonym
+
+
+#: Max query variants (original + expansions) per research call.
+_MAX_VARIANTS = 7
+
+
+def expand_query(query: str) -> list[str]:
+    """Generate search variants of a query from legal synonym families.
+
+    Every matching family contributes variants (capped at
+    ``_MAX_VARIANTS``); the original query is always first and inflections
+    are preserved ("sacked" → "terminated"). Never raises.
+    """
+    try:
+        q = (query or "").strip()
+        if not q:
+            return []
+        variants = [q]
+        low = q.lower()
+        for key, syns in sorted(_EXPANSIONS.items(),
+                               key=lambda kv: -len(kv[0])):
+            m = re.search(r"\b" + re.escape(key) + r"(ed|s|ing)?\b", low)
+            if not m:
+                continue
+            infl = m.group(1) or ""
+            for s in syns:
+                v = low[:m.start()] + _inflect(s, infl) + low[m.end():]
+                if v not in variants:
+                    variants.append(v)
+                if len(variants) >= _MAX_VARIANTS:
+                    return variants
+        return variants
+    except Exception:  # noqa: BLE001
+        return [query or ""]
+
+
+def _norm_ws(text: str) -> str:
+    return re.sub(r"\s+", " ", (text or "").replace("…", "")).strip().lower()
+
+
+def verify_citations(result: ResearchResult,
+                     sections: dict | None = None) -> ResearchResult:
+    """Verify every evidence snippet verbatim against its source section.
+
+    The Harvey LAB pattern: each claim must trace to a source span that
+    actually contains it. Sets ``Evidence.verified``. Snippets that fail
+    verification are dropped from ``result.text`` claims — the summary is
+    rebuilt from verified evidence only. Never raises.
+    """
+    try:
+        sections = sections or {}
+        verified: list[Evidence] = []
+        for ev in result.evidence:
+            body = sections.get(ev.doc_id, ("", "", ""))[2] if isinstance(
+                sections.get(ev.doc_id), tuple) else ""
+            if not body:
+                body = sections.get(ev.doc_id, "")
+            ok = bool(body) and _norm_ws(ev.snippet)[:160] in _norm_ws(body)
+            ev.verified = ok
+            if ok:
+                verified.append(ev)
+        result.evidence = verified
+        result.citations = [c for c in result.citations
+                            if any(ev.doc_id == c.doc_id for ev in verified)]
+        return result
+    except Exception:  # noqa: BLE001
+        return result
+
+
+def groundedness(result: ResearchResult) -> float:
+    """Share of evidence snippets verified verbatim in the corpus (0..1)."""
+    try:
+        if not result.evidence:
+            return 0.0
+        return round(sum(1 for ev in result.evidence if ev.verified)
+                     / len(result.evidence), 2)
+    except Exception:  # noqa: BLE001
+        return 0.0
 
 
 class LegalResearch:
@@ -276,18 +416,30 @@ class LegalResearch:
         except Exception:  # noqa: BLE001
             return []
 
-    def research(self, query: str) -> ResearchResult:
+    def research(self, query: str, *, expand: bool = True) -> ResearchResult:
         """Research ``query`` against the verified corpus. Never raises.
 
         Returns an honest "I don't know" when the corpus has no coverage —
         it never fabricates an answer from outside the corpus.
+
+        ``expand``: also search legal-synonym variants of the query and
+        merge the results (Schwarcz/Vincent pattern — RAG wins on narrow
+        issues, and expansion narrows them).
         """
         q = (query or "").strip()
         if not q:
             return self._unknown(q, "Ask a legal question first.")
 
-        hits = self._search(q)
-        scored = [(h, float(h.get("score") or 0.0)) for h in hits]
+        variants = expand_query(q) if expand else [q]
+        merged: dict[str, tuple[dict, float]] = {}
+        for v in variants:
+            for h in self._search(v):
+                doc_id = str(h.get("doc_id") or "")
+                score = float(h.get("score") or 0.0)
+                if doc_id and (doc_id not in merged
+                               or score > merged[doc_id][1]):
+                    merged[doc_id] = (h, score)
+        scored = sorted(merged.values(), key=lambda hs: hs[1], reverse=True)
         top_score = scored[0][1] if scored else 0.0
         if not scored or top_score < _MIN_TOP_SCORE:
             return self._unknown(q)
@@ -317,15 +469,16 @@ class LegalResearch:
             citations.append(Citation(doc_id=doc_id, title=title,
                                      section=section, snippet=snippet))
 
-        confidence = _calibrate(top_score, len(seen_docs))
-        return ResearchResult(
-            query=q,
-            answered=True,
-            text=self._compose(q, evidence),
-            confidence=confidence,
-            citations=citations,
-            evidence=evidence,
-        )
+        # Harvey LAB pattern: verify every snippet verbatim against the
+        # source section before composing. Unverifiable claims don't ship.
+        result = ResearchResult(query=q, answered=True, text="",
+                                evidence=evidence, citations=citations)
+        verify_citations(result, self._sections)
+        if not result.evidence:
+            return self._unknown(q)
+        result.text = self._compose(q, result.evidence)
+        result.confidence = _calibrate(top_score, len(seen_docs))
+        return result
 
     def _unknown(self, query: str, note: str = "") -> ResearchResult:
         """The honest fallback: no coverage, no fabrication."""
@@ -344,11 +497,63 @@ class LegalResearch:
             lines.append(f"{i}. *{heading}*\n   {ev.snippet}")
         return "\n\n".join(lines)
 
+    def describe_corpus(self) -> str:
+        """Coverage report: what the corpus covers, by document and section.
 
-def format_research(result: ResearchResult) -> str:
-    """Render a :class:`ResearchResult` for chat. Never raises."""
+        The Case Radar lesson — corpus is the moat. This makes the current
+        coverage inspectable instead of implied. Never raises.
+        """
+        try:
+            if not self._sections:
+                return ("The legal corpus is empty on this device.\n\n"
+                        + DISCLAIMER)
+            docs: dict[str, dict] = {}
+            for doc_id, (title, heading, _body) in self._sections.items():
+                base = doc_id.split("#")[0]
+                d = docs.setdefault(base, {"title": title, "sections": []})
+                if heading and heading not in d["sections"]:
+                    d["sections"].append(heading)
+            lines = [f"📚 Legal corpus — {len(docs)} document(s), "
+                     f"{len(self._sections)} section(s):"]
+            for base in sorted(docs):
+                d = docs[base]
+                lines.append(f"\n• *{d['title']}*")
+                for s in d["sections"][:10]:
+                    lines.append(f"    – {s}")
+                if len(d["sections"]) > 10:
+                    lines.append(f"    …and {len(d['sections']) - 10} more")
+            lines.append("\n" + CONFIDENTIALITY)
+            return "\n".join(lines)
+        except Exception:  # noqa: BLE001
+            return DISCLAIMER
+
+    def related_sections(self, result: ResearchResult,
+                         max_n: int = 4) -> list[str]:
+        """Other sections from the same documents as the evidence —
+        "also in this area". Never raises."""
+        try:
+            seen_docs = {ev.doc_id.split("#")[0] for ev in result.evidence}
+            used = {ev.doc_id for ev in result.evidence}
+            out: list[str] = []
+            for doc_id, (title, heading, _body) in self._sections.items():
+                if doc_id.split("#")[0] in seen_docs and doc_id not in used:
+                    label = f"{title} — {heading}" if heading else title
+                    if label not in out:
+                        out.append(label)
+                if len(out) >= max_n:
+                    break
+            return out
+        except Exception:  # noqa: BLE001
+            return []
+
+
+def format_research(result: ResearchResult, style: str = "full") -> str:
+    """Render a :class:`ResearchResult` for chat. Never raises.
+
+    ``style`` is "full" (default) or "brief".
+    """
     try:
-        return result.render()
+        return result.render(style=style)
     except Exception:  # noqa: BLE001
         return DISCLAIMER
 

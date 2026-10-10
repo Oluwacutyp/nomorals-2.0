@@ -33,6 +33,8 @@ from ..core.logging_setup import get_logger
 __all__ = [
     "DISCLAIMER",
     "REGULATORS",
+    "REGULATORY_CALENDAR",
+    "ALERT_STYLES",
     "Regulator",
     "RegulatoryItem",
     "RegWatch",
@@ -40,6 +42,9 @@ __all__ = [
     "OBLIGATION_CONTROLS",
     "controls_for",
     "alert_text",
+    "impact_score",
+    "upcoming_deadlines",
+    "sync_calendar_to_portfolio",
     "check_all",
     "ensure_schedule",
     "control_regwatch",
@@ -107,7 +112,47 @@ REGULATORS: dict[str, Regulator] = {
         typical_topics=["tax", "VAT", "withholding tax", "e-invoicing",
                         "filing deadlines"],
     ),
+    "CAC": Regulator(
+        code="CAC",
+        name="Corporate Affairs Commission",
+        site="https://www.cac.gov.ng",
+        blurb="Company registration, annual returns, post-incorporation "
+              "filings, beneficial-ownership rules.",
+        typical_topics=["annual returns", "incorporation", "company filing",
+                        "beneficial ownership"],
+    ),
+    "NCC": Regulator(
+        code="NCC",
+        name="Nigerian Communications Commission",
+        site="https://www.ncc.gov.ng",
+        blurb="Telecom licensing, SIM registration, data and tariff rules, "
+              "VAS/aggregator regulation.",
+        typical_topics=["telecom licensing", "SIM registration", "tariffs",
+                        "data regulation"],
+    ),
+    "SON": Regulator(
+        code="SON",
+        name="Standards Organisation of Nigeria",
+        site="https://son.gov.ng",
+        blurb="Product standards, SONCAP certification for imports, MANCAP "
+              "for manufactured goods.",
+        typical_topics=["product standards", "SONCAP", "MANCAP",
+                        "certification"],
+    ),
 }
+
+#: Alert output styles.
+ALERT_STYLES = ("full", "brief")
+
+#: Recurring regulatory deadlines — the compliance calendar. (month, day,
+#: regulator, title). Year-agnostic; resolved against the current year.
+REGULATORY_CALENDAR: tuple[tuple[int, int, str, str], ...] = (
+    (3, 31, "NDPA", "NDPC Compliance Audit Return (CAR) filing deadline"),
+    (1, 1, "CAC", "CAC annual returns window opens (file early in the year)"),
+    (12, 31, "CAC", "CAC annual returns — year-end cutoff reminder"),
+    (1, 31, "FIRS", "VAT returns rhythm check — monthly filing discipline"),
+    (6, 30, "FIRS", "Companies income tax — 6-month post-year-end checkpoint"),
+)
 
 #: Words that mark an item as needing the owner's attention *today*.
 _URGENT_WORDS = frozenset(
@@ -144,6 +189,8 @@ class RegulatoryItem:
     published: float = 0.0
     topics: list[str] = field(default_factory=list)
     urgency: str | None = None  # None → auto-detect; "normal" | "urgent"
+    effective_date: float = 0.0  # when the change takes effect (0 = unknown)
+    updated: bool = False  # True when this is a change to a seen item
 
     def __post_init__(self) -> None:
         if self.urgency in ("normal", "urgent"):
@@ -152,6 +199,15 @@ class RegulatoryItem:
             self.urgency = "urgent"
         else:
             self.urgency = "normal"
+
+    def digest(self) -> str:
+        """Content hash for change detection (TR Regulatory Intelligence
+        pattern: detect changes over time, not just new items)."""
+        import hashlib
+        h = hashlib.sha1()
+        h.update(f"{self.title}\n{self.summary}\n{self.ref_no}".encode(
+            "utf-8", "replace"))
+        return h.hexdigest()[:16]
 
 
 def item_from_dict(d: dict) -> Optional[RegulatoryItem]:
@@ -176,6 +232,10 @@ def item_from_dict(d: dict) -> Optional[RegulatoryItem]:
             ref_no=str(d.get("ref_no", "") or ""),
             published=float(d.get("published") or 0.0),
             topics=[str(t) for t in (d.get("topics") or []) if str(t).strip()],
+            urgency=(str(d.get("urgency") or "").strip().lower()
+                     if str(d.get("urgency") or "").strip().lower()
+                     in ("normal", "urgent") else None),
+            effective_date=float(d.get("effective_date") or 0.0),
         )
     except Exception:  # noqa: BLE001 — bad source data, not a crash
         return None
@@ -248,6 +308,43 @@ OBLIGATION_CONTROLS: dict[str, Control] = {
         ],
         regulators=["SEC"],
     ),
+    "annual returns": Control(
+        obligation="CAC: every registered company/business name must file "
+                   "annual returns each year and keep its records current "
+                   "(directors, address, beneficial ownership).",
+        template="CAC annual-returns filing checklist",
+        checklist=[
+            "Confirm your RC/BN number and filing status on the CAC portal.",
+            "Update directors, registered address, and share capital if changed.",
+            "Declare beneficial owners where required.",
+            "File the annual return and keep the receipt.",
+        ],
+        regulators=["CAC"],
+    ),
+    "telecom licensing": Control(
+        obligation="NCC: telecom and value-added services need the right "
+                   "licence class; SIM registration and tariff/data rules "
+                   "apply to consumer-facing services.",
+        template="NCC licence-class checklist",
+        checklist=[
+            "Match your service to an NCC licence class.",
+            "Confirm SIM-registration compliance for subscriber services.",
+            "Check current tariff and data-rollover rules.",
+        ],
+        regulators=["NCC"],
+    ),
+    "product standards": Control(
+        obligation="SON: regulated products need SONCAP certification "
+                   "(imports) or MANCAP (locally manufactured) before sale "
+                   "in Nigeria.",
+        template="SON certification checklist",
+        checklist=[
+            "Confirm whether your product category is regulated.",
+            "Obtain SONCAP for imports / MANCAP for local manufacture.",
+            "Keep test reports and certificates on file for inspection.",
+        ],
+        regulators=["SON"],
+    ),
 }
 
 
@@ -263,6 +360,99 @@ def controls_for(item: RegulatoryItem) -> list[Control]:
         if key_hit or reg_hit:
             out.append(control)
     return out
+
+
+def impact_score(item: RegulatoryItem,
+                 profile: dict | None = None) -> int:
+    """Impact score 0–100 for an item against a business profile.
+
+    Compliance.ai pattern: not just "relevant", but *how much it matters*.
+    Urgency is the base; profile-keyword matches raise it; an update to a
+    previously seen rule (item.updated) raises it further.
+    """
+    try:
+        score = 55 if item.urgency == "urgent" else 25
+        hay = " ".join([item.title, item.summary] + item.topics).lower()
+        if profile:
+            keywords = [str(k).lower() for k in
+                        (profile.get("keywords") or [])
+                        + [profile.get("business_type") or ""]
+                        + (profile.get("sectors") or [])]
+            keywords = [k for k in keywords if k.strip()]
+            hits = sum(1 for k in keywords if k in hay)
+            score += min(30, hits * 10)
+        if item.updated:
+            score += 10
+        if item.effective_date and item.effective_date > 0:
+            import time as _t
+            days_out = (item.effective_date - _t.time()) / 86400
+            if 0 <= days_out <= 30:
+                score += 10  # takes effect soon
+        return max(0, min(100, score))
+    except Exception:  # noqa: BLE001
+        return 0
+
+
+# ── regulatory calendar ─────────────────────────────────────────────
+
+def upcoming_deadlines(months: int = 6,
+                       now: float | None = None) -> list[dict]:
+    """Recurring regulatory deadlines in the next ``months``.
+
+    Returns [{month, day, regulator, title, date_ts}]. Never raises.
+    """
+    try:
+        import datetime
+        now = now if now is not None else time.time()
+        today = datetime.date.fromtimestamp(now)
+        out: list[dict] = []
+        for month, day, reg, title in REGULATORY_CALENDAR:
+            for year in (today.year, today.year + 1):
+                try:
+                    d = datetime.date(year, month, day)
+                except ValueError:
+                    continue
+                ts = datetime.datetime(year, month, day).timestamp()
+                if today <= d <= today + datetime.timedelta(
+                        days=int(months * 30.44)):
+                    out.append({"month": month, "day": day,
+                                "regulator": reg, "title": title,
+                                "date_ts": ts})
+                    break
+        out.sort(key=lambda e: e["date_ts"])
+        return out
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def sync_calendar_to_portfolio(portfolio: Any,
+                               months: int = 6) -> int:
+    """Track upcoming regulatory deadlines as portfolio obligations.
+
+    Cross-module wiring: the contract portfolio becomes the single
+    obligation surface — contract dates AND regulatory deadlines.
+    Returns the number of deadlines tracked. Never raises.
+    """
+    try:
+        if portfolio is None:
+            return 0
+        import datetime
+        count = 0
+        existing = {(o.description, int(o.due_at))
+                    for o in portfolio.obligations(include_done=True)}
+        for entry in upcoming_deadlines(months):
+            desc = (f"[{entry['regulator']}] {entry['title']} — "
+                    f"{datetime.date.fromtimestamp(entry['date_ts']).isoformat()}")
+            key = (desc, int(entry["date_ts"]))
+            if key in existing:
+                continue
+            oid = portfolio.track_obligation("", desc, entry["date_ts"])
+            if oid:
+                count += 1
+                existing.add(key)
+        return count
+    except Exception:  # noqa: BLE001
+        return 0
 
 
 # ── the watch store ───────────────────────────────────────────────────
@@ -303,8 +493,17 @@ class RegulatoryWatch:
             self._db.execute(
                 """CREATE TABLE IF NOT EXISTS reg_seen (
                        item_id TEXT PRIMARY KEY, watch_id TEXT,
-                       seen_at REAL)"""
+                       seen_at REAL, digest TEXT DEFAULT '',
+                       dismissed INTEGER DEFAULT 0)"""
             )
+            self._db.execute(
+                """CREATE TABLE IF NOT EXISTS reg_items (
+                       item_id TEXT PRIMARY KEY, regulator TEXT, title TEXT,
+                       summary TEXT, source_url TEXT, ref_no TEXT,
+                       published REAL DEFAULT 0, effective_date REAL DEFAULT 0,
+                       topics_json TEXT, urgency TEXT DEFAULT 'normal')"""
+            )
+            self._migrate()
             self._db.commit()
         except Exception:  # noqa: BLE001 — degraded mode
             _log.warning("regulatory db unavailable; watches in-memory only")
@@ -318,10 +517,32 @@ class RegulatoryWatch:
             self._db.execute(
                 """CREATE TABLE IF NOT EXISTS reg_seen (
                        item_id TEXT PRIMARY KEY, watch_id TEXT,
-                       seen_at REAL)"""
+                       seen_at REAL, digest TEXT DEFAULT '',
+                       dismissed INTEGER DEFAULT 0)"""
+            )
+            self._db.execute(
+                """CREATE TABLE IF NOT EXISTS reg_items (
+                       item_id TEXT PRIMARY KEY, regulator TEXT, title TEXT,
+                       summary TEXT, source_url TEXT, ref_no TEXT,
+                       published REAL DEFAULT 0, effective_date REAL DEFAULT 0,
+                       topics_json TEXT, urgency TEXT DEFAULT 'normal')"""
             )
         import json
         self._json = json
+
+    def _migrate(self) -> None:
+        """Add sweep columns to older databases. Never raises."""
+        try:
+            cols = {r[1] for r in self._db.execute(
+                "PRAGMA table_info(reg_seen)").fetchall()}
+            if "digest" not in cols:
+                self._db.execute(
+                    "ALTER TABLE reg_seen ADD COLUMN digest TEXT DEFAULT ''")
+            if "dismissed" not in cols:
+                self._db.execute(
+                    "ALTER TABLE reg_seen ADD COLUMN dismissed INTEGER DEFAULT 0")
+        except Exception:  # noqa: BLE001
+            _log.debug("regulatory migration skipped", exc_info=True)
 
     # ── watch management ──────────────────────────────────────────
 
@@ -414,37 +635,166 @@ class RegulatoryWatch:
                     continue
                 if not self.relevant(item, watch, profile):
                     continue
-                seen = self._db.execute(
-                    "SELECT 1 FROM reg_seen WHERE item_id = ?",
+                row = self._db.execute(
+                    "SELECT digest, dismissed FROM reg_seen WHERE item_id = ?",
                     (item.id,)).fetchone()
-                if seen:
-                    continue
-                self._db.execute(
-                    "INSERT OR IGNORE INTO reg_seen VALUES (?, ?, ?)",
-                    (item.id, watch.id, now))
-                new_items.append(item)
+                if row is not None and (row["dismissed"] or 0):
+                    continue  # owner dismissed this item — never alert again
+                digest = item.digest()
+                if row is None:
+                    self._db.execute(
+                        "INSERT OR IGNORE INTO reg_seen "
+                        "(item_id, watch_id, seen_at, digest, dismissed) "
+                        "VALUES (?, ?, ?, ?, 0)",
+                        (item.id, watch.id, now, digest))
+                    new_items.append(item)
+                elif (row["digest"] or "") != digest:
+                    # TR Regulatory Intelligence pattern: the item changed
+                    # since we last saw it — alert on the update.
+                    self._db.execute(
+                        "UPDATE reg_seen SET digest = ?, seen_at = ? "
+                        "WHERE item_id = ?",
+                        (digest, now, item.id))
+                    item.updated = True
+                    new_items.append(item)
+                # unchanged items: no alert
         self._db.commit()
         return sorted(new_items,
                       key=lambda i: (i.urgency != "urgent", -i.published))
+
+    def dismiss(self, item_id: str) -> bool:
+        """Dismiss an item — never alert on it again (relevance feedback).
+
+        The RegTech pattern: owner feedback tunes future relevance.
+        """
+        try:
+            cur = self._db.execute(
+                "UPDATE reg_seen SET dismissed = 1 WHERE item_id = ?",
+                (item_id,))
+            self._db.commit()
+            return cur.rowcount > 0
+        except Exception:  # noqa: BLE001
+            return False
+
+    def upcoming_effective(self, days: float = 90,
+                           now: float | None = None) -> list[RegulatoryItem]:
+        """Items with a known effective date in the next ``days``.
+
+        Pending-change visibility (TR Regulatory Intelligence pattern):
+        "this rule takes effect on <date>". Populated by ``note_item()``.
+        Never raises.
+        """
+        try:
+            now = now if now is not None else time.time()
+            rows = self._db.execute(
+                """SELECT * FROM reg_items
+                   WHERE effective_date > ? AND effective_date <= ?
+                   ORDER BY effective_date""",
+                (now, now + days * 86400)).fetchall()
+            out = []
+            for r in rows:
+                try:
+                    out.append(RegulatoryItem(
+                        id=r["item_id"], regulator=r["regulator"],
+                        title=r["title"], summary=r["summary"] or "",
+                        source_url=r["source_url"] or "",
+                        ref_no=r["ref_no"] or "",
+                        published=r["published"] or 0.0,
+                        topics=self._json.loads(r["topics_json"] or "[]"),
+                        urgency=r["urgency"] or None,
+                        effective_date=r["effective_date"] or 0.0))
+                except Exception:  # noqa: BLE001 — one bad row != dead query
+                    continue
+            return out
+        except Exception:  # noqa: BLE001
+            return []
+
+    def note_item(self, item: RegulatoryItem) -> bool:
+        """Record an item directly (e.g. from a manual scan). Returns True
+        when the item is new or changed (i.e. alert-worthy). Never raises.
+        """
+        try:
+            if item.regulator not in REGULATORS or not item.title:
+                return False
+            row = self._db.execute(
+                "SELECT digest, dismissed FROM reg_seen WHERE item_id = ?",
+                (item.id,)).fetchone()
+            if row is not None and (row["dismissed"] or 0):
+                return False
+            digest = item.digest()
+            self._db.execute(
+                """INSERT OR REPLACE INTO reg_items
+                       (item_id, regulator, title, summary, source_url,
+                        ref_no, published, effective_date, topics_json,
+                        urgency)
+                   VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                (item.id, item.regulator, item.title[:500],
+                 item.summary[:2000], item.source_url[:500],
+                 item.ref_no[:120], item.published,
+                 item.effective_date,
+                 self._json.dumps(item.topics[:20]),
+                 item.urgency or "normal"))
+            if row is None:
+                self._db.execute(
+                    "INSERT OR IGNORE INTO reg_seen "
+                    "(item_id, watch_id, seen_at, digest, dismissed) "
+                    "VALUES (?, ?, ?, ?, 0)",
+                    (item.id, "", time.time(), digest))
+                self._db.commit()
+                return True
+            if (row["digest"] or "") != digest:
+                self._db.execute(
+                    "UPDATE reg_seen SET digest = ?, seen_at = ? "
+                    "WHERE item_id = ?", (digest, time.time(), item.id))
+                self._db.commit()
+                item.updated = True
+                return True
+            self._db.commit()
+            return False
+        except Exception:  # noqa: BLE001
+            return False
 
 
 # ── alerts ──────────────────────────────────────────────────────────
 
 def alert_text(item: RegulatoryItem, *,
-               profile: dict | None = None) -> str:
+               profile: dict | None = None,
+               style: str = "full") -> str:
     """Plain-language regulatory alert. Information, never advice.
 
     "CBN changed X — here's what it means for you, here's what to do."
     The "what to do" is: read the official source, check the control
     checklist, verify consequential changes with a professional.
+
+    ``style`` is "full" (default) or "brief" (one screen).
     """
+    style = (style or "full").lower()
+    if style not in ALERT_STYLES:
+        style = "full"
     reg = REGULATORS.get(item.regulator)
     reg_name = reg.name if reg else item.regulator
     badge = "🚨 URGENT" if item.urgency == "urgent" else "📜"
-    lines = [f"{badge} {item.regulator}: {item.title}"]
+    updated_tag = " (UPDATED — this rule changed since the last alert)" \
+        if item.updated else ""
+    score = impact_score(item, profile)
+    lines = [f"{badge} {item.regulator}: {item.title}{updated_tag}"]
+    if style == "brief":
+        lines.append(f"Impact: {score}/100")
+        if item.ref_no:
+            lines.append(f"Ref: {item.ref_no}")
+        lines.append(f"Source: {item.source_url or (reg.site if reg else '')}")
+        lines.append(DISCLAIMER)
+        return "\n".join(lines)
     if item.ref_no:
         lines.append(f"Ref: {item.ref_no}")
+    lines.append(f"Impact score: {score}/100")
     lines.append("")
+    if item.effective_date:
+        import datetime
+        eff = datetime.date.fromtimestamp(
+            item.effective_date).isoformat()
+        lines.append(f"Takes effect: {eff}")
+        lines.append("")
     if profile and profile.get("business_type"):
         lines.append(
             f"Why this may matter to you: you operate as "
@@ -546,6 +896,9 @@ def _usage() -> str:
         "  /regwatch list — your watches\n"
         "  /regwatch remove <id> — stop a watch\n"
         "  /regwatch check — run a scan now\n"
+        "  /regwatch calendar [months] — upcoming recurring deadlines\n"
+        "  /regwatch effective [days] — rules taking effect soon\n"
+        "  /regwatch dismiss <item id> — never alert on an item again\n"
         "  /regwatch regulators — official source list\n"
         "Owner only. Legal information, never legal advice; Devon is not a "
         "lawyer.\n" + DISCLAIMER
@@ -620,6 +973,50 @@ def control_regwatch(tail: str, context: Any = None, chat: Any = None,
             for i in items:
                 out.append(alert_text(i, profile=profile))
             return "\n\n".join(out)
+
+        if cmd == "calendar":
+            months = 6
+            if len(parts) > 1:
+                try:
+                    months = max(1, min(24, int(parts[1])))
+                except ValueError:
+                    pass
+            entries = upcoming_deadlines(months)
+            if not entries:
+                return ("No recurring deadlines in the next "
+                        f"{months} months.\n" + DISCLAIMER)
+            lines = [f"📅 Regulatory calendar (next {months} months):"]
+            for e in entries:
+                import datetime
+                d = datetime.date.fromtimestamp(e["date_ts"]).isoformat()
+                lines.append(f"  • {d} — [{e['regulator']}] {e['title']}")
+            return "\n".join(lines) + "\n\n" + DISCLAIMER
+
+        if cmd == "effective":
+            days = 90.0
+            if len(parts) > 1:
+                try:
+                    days = max(1.0, float(parts[1]))
+                except ValueError:
+                    pass
+            items = s.upcoming_effective(days)
+            if not items:
+                return (f"No tracked rules taking effect in the next "
+                        f"{int(days)} days.\n" + DISCLAIMER)
+            lines = [f"⏳ Rules taking effect (next {int(days)} days):"]
+            for i in items[:10]:
+                import datetime
+                d = datetime.date.fromtimestamp(
+                    i.effective_date).isoformat()
+                lines.append(f"  • {d} — {i.regulator}: {i.title}")
+            return "\n".join(lines) + "\n\n" + DISCLAIMER
+
+        if cmd == "dismiss":
+            if len(parts) < 2:
+                return "Usage: /regwatch dismiss <item id>\n" + DISCLAIMER
+            ok = s.dismiss(parts[1])
+            return (f"Item {parts[1]} dismissed — it won't alert again."
+                    if ok else f"No tracked item {parts[1]}.") + "\n" + DISCLAIMER
 
         return "Unknown subcommand.\n" + _usage()
     except Exception as e:  # noqa: BLE001 — never raise from chat
