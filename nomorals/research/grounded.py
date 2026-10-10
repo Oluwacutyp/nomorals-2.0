@@ -48,11 +48,21 @@ class Source:
 
 
 @dataclass
+class Claim:
+    """An atomic factual claim extracted from a synthesis, linked to evidence."""
+    text: str
+    source_ids: list[str] = field(default_factory=list)
+    verified: bool = False
+    confidence: str = "low"  # high | medium | low
+
+
+@dataclass
 class GroundedAnswer:
     text: str                    # answer with [n] citations
     sources: list[Source] = field(default_factory=list)
     refused: bool = False
     query: str = ""
+    claims: list[Claim] = field(default_factory=list)
 
     def render(self) -> str:
         """Full answer text + Sources section."""
@@ -62,6 +72,51 @@ class GroundedAnswer:
         for i, s in enumerate(self.sources, 1):
             lines.append(f"[{i}] {s.title} — {s.snippet[:160]}")
         return "\n".join(lines)
+
+    def unverified_claims(self) -> list[Claim]:
+        """Claims with no supporting evidence — the fact-check failures."""
+        return [c for c in self.claims if not c.verified]
+
+
+def extract_claims(text: str, sources: list[Source]) -> list[Claim]:
+    """Split answer text into atomic claims, link each to source evidence.
+
+    A claim is a single sentence containing a factual assertion. Each claim
+    is checked against the source texts: verified when the claim's key
+    terms appear in at least one cited source.
+    """
+    import re as _re
+    sentences = _re.split(r'(?<=[.!?])\s+', text.strip())
+    claims = []
+    for sent in sentences:
+        sent = sent.strip()
+        if len(sent) < 20:
+            continue
+        # Skip non-factual sentences (questions, pure transitions)
+        if sent.endswith("?"):
+            continue
+        claim = Claim(text=sent)
+        # Find which sources support this claim
+        sent_lower = sent.lower()
+        key_terms = [w for w in _re.findall(r'\b[a-z]{4,}\b', sent_lower)
+                     if w not in _STOP]
+        for src in sources:
+            src_text = f"{src.title} {src.snippet}".lower()
+            matches = sum(1 for t in key_terms[:8] if t in src_text)
+            if matches >= 2:
+                claim.source_ids.append(src.doc_id)
+        claim.verified = bool(claim.source_ids)
+        claim.confidence = ("high" if len(claim.source_ids) >= 2
+                            else "medium" if claim.verified else "low")
+        claims.append(claim)
+    return claims
+
+
+_STOP = frozenset(
+    "that this with from have were they will would there their what when "
+    "which about into through during before after above below over under "
+    "again further then once here there when where which while".split()
+)
 
 
 #: the model cites with [Label]; code assigns the numbers
