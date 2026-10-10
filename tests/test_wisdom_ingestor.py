@@ -272,8 +272,10 @@ class SearchTests(unittest.TestCase):
             first["url"], "https://archive.org/details/gospelthomas")
         self.assertEqual(first["description"], "Sayings gospel.")
         # archive.org must be hit, with the query encoded in the URL
-        hit = ing._http.calls[0]
-        self.assertIn("archive.org/advancedsearch.php", hit)
+        # (Gutendex is tried first by design; archive.org follows)
+        hits = [c for c in ing._http.calls if "archive.org/advancedsearch.php" in c]
+        self.assertTrue(hits, "archive.org was never queried")
+        hit = hits[0]
         self.assertIn("thomas", hit)
 
     def test_search_does_not_auto_ingest(self):
