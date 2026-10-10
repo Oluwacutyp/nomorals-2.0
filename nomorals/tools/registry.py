@@ -8,6 +8,7 @@ which is the minimum bar for leaving an autonomous system running unattended.
 
 from __future__ import annotations
 
+import fnmatch
 import hashlib
 import inspect
 import json
@@ -15,7 +16,7 @@ import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Callable
 
 from ..core.errors import CapabilityDenied, NotFound, ToolError, ToolNotFound, classify
@@ -24,7 +25,7 @@ from ..core.logging_setup import get_logger
 from ..core.policy import CapabilitySet
 from ..core.result import Err, Ok, Outcome
 
-__all__ = ["ToolRegistry", "ToolSpec", "sanitize_tool_description"]
+__all__ = ["ToolRegistry", "ToolSpec", "ToolHealth", "sanitize_tool_description"]
 
 _log = get_logger(__name__)
 
@@ -93,6 +94,11 @@ class ToolSpec:
     confirm: bool | str = False
     kind: str = "io"
     metadata: dict[str, Any] = field(default_factory=dict)
+    # Lifecycle: version of the tool implementation; deprecation marks the
+    # tool as superseded (warned once per registry, still callable).
+    version: str = ""
+    deprecated: bool = False
+    replaced_by: str = ""
 
     def schema(self) -> dict[str, Any]:
         """JSON-schema-ish description, for feeding a model a tool list."""
@@ -101,6 +107,33 @@ class ToolSpec:
             "description": self.description,
             "capability": self.capability,
             "parameters": self.parameters,
+        }
+
+
+@dataclass
+class ToolHealth:
+    """Health state for one tool (opencapx ping pattern).
+
+    ``status``: unknown → ok → degraded (1-2 probe failures) → down
+    (3+ consecutive failures). Probes run with a timeout; a probe that
+    raises or times out counts as a failure.
+    """
+
+    name: str
+    status: str = "unknown"
+    consecutive_failures: int = 0
+    last_check: float = 0.0
+    last_error: str = ""
+    timeout_s: float = 5.0
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "name": self.name,
+            "status": self.status,
+            "consecutive_failures": self.consecutive_failures,
+            "last_check": self.last_check,
+            "last_error": self.last_error,
+            "timeout_s": self.timeout_s,
         }
 
 
@@ -117,6 +150,11 @@ class ToolRegistry:
         self._builtin_registered = False
         # Phase D: guards shared audit/stats state for parallel call_many.
         self._lock = threading.Lock()
+        # Per-tool stats and health (introspection + routing demotion).
+        self._tool_stats: dict[str, dict[str, Any]] = {}
+        self._health: dict[str, ToolHealth] = {}
+        self._health_probes: dict[str, tuple[Callable[[], Any], float]] = {}
+        self._deprecated_warned: set[str] = set()
 
     # ── registration ─────────────────────────────────────────────────────────
     def register(
@@ -129,6 +167,9 @@ class ToolRegistry:
         parameters: dict[str, Any] | None = None,
         confirm: bool | str = False,
         kind: str = "io",
+        version: str = "",
+        deprecated: bool = False,
+        replaced_by: str = "",
     ) -> Callable[..., Any]:
         """Register a tool, usable directly or as a decorator."""
 
@@ -147,6 +188,9 @@ class ToolRegistry:
                 parameters=parameters or _infer_parameters(func),
                 confirm=confirm,
                 kind=kind,
+                version=version,
+                deprecated=deprecated,
+                replaced_by=replaced_by,
             )
             self._tools[name] = spec
             return func
@@ -154,6 +198,56 @@ class ToolRegistry:
         if fn is not None:
             return do_register(fn)
         return do_register
+
+    def alias(self, new_name: str, target: str) -> bool:
+        """Register ``new_name`` as an alias of the existing tool ``target``.
+
+        The alias shares the implementation and capability; its metadata
+        records ``alias_of``. Returns False when ``target`` is unknown.
+        """
+        spec = self._tools.get(target)
+        if spec is None:
+            return False
+        self._tools[new_name] = replace(
+            spec, name=new_name,
+            metadata={**spec.metadata, "alias_of": target})
+        return True
+
+    def deprecate(self, name: str, *, replaced_by: str = "",
+                  note: str = "") -> bool:
+        """Mark a tool deprecated. It stays callable; calls log a warning
+        once per registry (pointing at ``replaced_by`` when given)."""
+        spec = self._tools.get(name)
+        if spec is None:
+            return False
+        spec.deprecated = True
+        spec.replaced_by = replaced_by
+        if note:
+            spec.metadata["deprecation_note"] = note
+        return True
+
+    def reload_builtin(self, name: str) -> Outcome[dict[str, Any]]:
+        """Re-import ``nomorals.tools.<name>`` and re-run its register hook.
+
+        Registration overwrites by name, so this is idempotent — the mining
+        requirement that setup() be safe to run twice. Returns an Outcome;
+        a broken module is reported, never raised.
+        """
+        import importlib
+
+        try:
+            module = importlib.import_module(f"{__package__}.{name}")
+            module = importlib.reload(module)
+        except Exception as exc:  # noqa: BLE001
+            return Err(ToolError(f"cannot reload tool module {name!r}: {exc}"))
+        hook = getattr(module, "register", None)
+        if hook is None:
+            return Err(ToolError(f"tool module {name!r} has no register() hook"))
+        try:
+            hook(self)
+        except Exception as exc:  # noqa: BLE001
+            return Err(ToolError(f"tool module {name!r} re-register failed: {exc}"))
+        return Ok({"reloaded": name, "tools": len(self._tools)})
 
     def register_builtins(self) -> "ToolRegistry":
         """Wire up the standard tool set. Imports are deferred per tool."""
@@ -343,6 +437,169 @@ class ToolRegistry:
             lines.append(f"- {schema['name']}({params}): {schema['description']}")
         return "\n".join(lines)
 
+    def describe(self, name: str) -> dict[str, Any] | None:
+        """Rich introspection for one tool: identity, source location,
+        capability, lifecycle, health, and per-tool stats. Powers
+        ``nm tools describe <name>``. None when unknown."""
+        spec = self._tools.get(name)
+        if spec is None:
+            return None
+        try:
+            source = inspect.getsourcefile(spec.fn) or ""
+        except (TypeError, OSError):
+            source = ""
+        try:
+            _, lineno = inspect.getsourcelines(spec.fn)
+        except (TypeError, OSError):
+            lineno = 0
+        health = self._health.get(name)
+        return {
+            "name": spec.name,
+            "description": spec.description,
+            "capability": spec.capability,
+            "confirm": spec.confirm,
+            "kind": spec.kind,
+            "version": spec.version,
+            "deprecated": spec.deprecated,
+            "replaced_by": spec.replaced_by,
+            "parameters": spec.parameters,
+            "module": getattr(spec.fn, "__module__", ""),
+            "source": source,
+            "line": lineno,
+            "alias_of": spec.metadata.get("alias_of", ""),
+            "health": health.to_dict() if health else None,
+            "stats": self.tool_stats(name),
+        }
+
+    def by_capability(self, capability: str) -> list[str]:
+        """Tool names whose declared capability matches ``capability``
+        (exact or fnmatch pattern)."""
+        return sorted(
+            name for name, spec in self._tools.items()
+            if spec.capability and (
+                spec.capability == capability
+                or fnmatch.fnmatchcase(spec.capability, capability)
+                or fnmatch.fnmatchcase(capability, spec.capability)))
+
+    def by_kind(self, kind: str) -> list[str]:
+        return sorted(name for name, spec in self._tools.items()
+                      if spec.kind == kind)
+
+    def capabilities_used(self) -> list[str]:
+        """Every capability declared by at least one tool, sorted."""
+        return sorted({spec.capability for spec in self._tools.values()
+                       if spec.capability})
+
+    def tool_stats(self, name: str) -> dict[str, Any]:
+        """Per-tool counters: calls, denied, errors, seconds, last call info.
+        Unknown tools yield a zeroed record."""
+        with self._lock:
+            stats = self._tool_stats.get(name)
+            return dict(stats) if stats else {
+                "calls": 0, "denied": 0, "errors": 0, "seconds": 0.0,
+                "last_ts": 0.0, "last_status": "", "last_error": "",
+                "last_duration_ms": 0.0,
+            }
+
+    # ── health ───────────────────────────────────────────────────────────────
+    def register_health(self, name: str, probe: Callable[[], Any], *,
+                        timeout_s: float = 5.0) -> bool:
+        """Attach a health probe to a tool.
+
+        The probe is a zero-arg callable: truthy (or ``(True, msg)``) means
+        healthy; falsy, a raised exception, or a timeout means failure.
+        Returns False when the tool is unknown.
+        """
+        if name not in self._tools:
+            return False
+        with self._lock:
+            self._health_probes[name] = (probe, timeout_s)
+            existing = self._health.get(name)
+            if existing is None:
+                self._health[name] = ToolHealth(name=name, timeout_s=timeout_s)
+            else:
+                existing.timeout_s = timeout_s
+        return True
+
+    def check_health(self, name: str) -> ToolHealth | None:
+        """Run one tool's probe now; updates and returns its health record."""
+        with self._lock:
+            entry = self._health.get(name)
+            probe_pack = self._health_probes.get(name)
+        if entry is None or probe_pack is None:
+            return None
+        probe, timeout_s = probe_pack
+        ok, error = self._run_probe(probe, timeout_s)
+        with self._lock:
+            entry.last_check = time.time()
+            entry.timeout_s = timeout_s
+            if ok:
+                entry.status = "ok"
+                entry.consecutive_failures = 0
+                entry.last_error = ""
+            else:
+                entry.consecutive_failures += 1
+                entry.last_error = error
+                # opencapx rule: 3 consecutive failures → down
+                entry.status = ("down" if entry.consecutive_failures >= 3
+                                else "degraded")
+            return entry
+
+    def check_all_health(self, *, max_workers: int = 8) -> dict[str, ToolHealth]:
+        """Run every registered probe (bounded parallelism); returns the
+        health records keyed by tool name."""
+        with self._lock:
+            names = list(self._health_probes)
+        if not names:
+            return {}
+        with ThreadPoolExecutor(max_workers=max(1, max_workers),
+                                thread_name_prefix="tool-health") as pool:
+            results = list(pool.map(self.check_health, names))
+        return {name: entry for name, entry in zip(names, results)
+                if entry is not None}
+
+    def health_report(self) -> dict[str, Any]:
+        """Aggregate health: counts per status plus the per-tool records."""
+        with self._lock:
+            records = {name: entry.to_dict()
+                       for name, entry in self._health.items()}
+        counts: dict[str, int] = {}
+        for record in records.values():
+            counts[record["status"]] = counts.get(record["status"], 0) + 1
+        return {
+            "tools": len(self._tools),
+            "probed": len(records),
+            "counts": counts,
+            "records": records,
+            "failed_modules": self.failed_modules(),
+        }
+
+    @staticmethod
+    def _run_probe(probe: Callable[[], Any],
+                   timeout_s: float) -> tuple[bool, str]:
+        box: dict[str, Any] = {}
+
+        def target() -> None:
+            try:
+                box["result"] = probe()
+            except Exception as exc:  # noqa: BLE001
+                box["error"] = f"{type(exc).__name__}: {exc}"
+
+        thread = threading.Thread(target=target, daemon=True,
+                                  name="tool-health-probe")
+        thread.start()
+        thread.join(timeout_s)
+        if thread.is_alive():
+            return False, f"probe timed out after {timeout_s:g}s"
+        if "error" in box:
+            return False, str(box["error"])
+        result = box.get("result", False)
+        if isinstance(result, tuple):
+            ok = bool(result[0])
+            msg = str(result[1]) if len(result) > 1 else ""
+            return ok, "" if ok else (msg or "probe reported unhealthy")
+        return bool(result), "" if result else "probe returned falsy"
+
     # ── dispatch ─────────────────────────────────────────────────────────────
     def call(
         self,
@@ -365,6 +622,13 @@ class ToolRegistry:
         spec = self._tools.get(name)
         if spec is None:
             return Err(ToolNotFound(f"unknown tool {name!r}; available: {self.names()[:20]}"))
+        if spec.deprecated and name not in self._deprecated_warned:
+            with self._lock:
+                self._deprecated_warned.add(name)
+            _log.warning(
+                "tool %r is deprecated%s", name,
+                f"; use {spec.replaced_by!r} instead" if spec.replaced_by
+                else "")
 
         started = time.perf_counter()
         grant = capabilities if capabilities is not None else CapabilitySet.all()
@@ -529,6 +793,23 @@ class ToolRegistry:
             self.calls.append(entry)
             if len(self.calls) > self._call_limit:
                 del self.calls[: len(self.calls) - self._call_limit]
+            # Per-tool stats: what lets routing demote what keeps breaking.
+            per = self._tool_stats.setdefault(name, {
+                "calls": 0, "denied": 0, "errors": 0, "seconds": 0.0,
+                "last_ts": 0.0, "last_status": "", "last_error": "",
+                "last_duration_ms": 0.0,
+            })
+            status = entry["status"]
+            per["calls"] += 1
+            if status == "denied":
+                per["denied"] += 1
+            elif status == "error":
+                per["errors"] += 1
+            per["seconds"] = round(per["seconds"] + elapsed, 3)
+            per["last_ts"] = entry["ts"]
+            per["last_status"] = status
+            per["last_error"] = error
+            per["last_duration_ms"] = entry["duration_ms"]
         db = getattr(self.context, "db", None) if self.context else None
         if db is not None:
             try:
