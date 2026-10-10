@@ -543,7 +543,7 @@ def build_router(settings: Settings, bus: EventBus, *, db: Any | None = None,
                             lc.load(model.id)
                             from ..llm.providers.llama_cpp import LlamaCppProvider
                             # Get the server URL from the provisioner
-                            provisioner = lc._provisioner(model)
+                            provisioner = lc.provisioner
                             if hasattr(provisioner, '_managers') and model.id in provisioner._managers:
                                 manager = provisioner._managers[model.id]
                                 base_url = f"http://{manager.host}:{manager.port}"

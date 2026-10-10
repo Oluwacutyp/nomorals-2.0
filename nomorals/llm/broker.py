@@ -158,7 +158,9 @@ class ModelBroker:
             provider = router.get(name)
             if provider is None:
                 continue
-            card = ModelCard.from_provider(provider, card_id=name)
+            ctx_len = int(getattr(provider, "context_len", 0) or 0)
+            card = ModelCard.from_provider(
+                provider, card_id=name, context_len=ctx_len)
             self.register(card)
             built.append(card)
         return built

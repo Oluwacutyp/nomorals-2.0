@@ -1928,7 +1928,9 @@ class CoreMind:
             ok = False
             try:
                 note = job() or ""
-                ok = True
+                # Honest success: organ jobs that fail return "❌..." text
+                # instead of raising — don't mark those done.
+                ok = not note.lstrip().startswith("❌")
             except Exception as exc:  # noqa: BLE001
                 _log.exception("coremind job %s failed", job_id)
                 note = str(exc)[:300]

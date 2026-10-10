@@ -109,7 +109,7 @@ def register(registry: Any) -> None:
         return rough_cut(path, out=str(out))
 
     @registry.register(
-        "studio_batch",
+        "studio_automation_batch",
         description=("Apply one automation op (cut_silences, auto_reframe) to "
                      "many files at once. ('cut silences from all of these')."),
         capability=Capability.FS_WRITE,
