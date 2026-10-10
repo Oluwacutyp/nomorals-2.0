@@ -98,63 +98,132 @@ def rest_pose() -> np.ndarray:
     return kp
 
 
-def _fist(wrist: np.ndarray, size: float = 0.035) -> np.ndarray:
-    """Curled fist keypoints around a wrist position."""
+# ── parametric fingers ─────────────────────────────────────────────
+# Each finger is a serial chain: MCP (flexion + abduction) -> PIP -> DIP.
+# Flexion 0.0 = fully extended, 1.0 = fully curled. DIP follows PIP via
+# tendon coupling (~0.65) unless given explicitly. Angles in radians.
+FINGERS = ("thumb", "index", "middle", "ring", "pinky")
+_FINGER_KP = {  # MediaPipe-order keypoint indices per finger
+    "thumb": (1, 2, 3, 4),
+    "index": (5, 6, 7, 8),
+    "middle": (9, 10, 11, 12),
+    "ring": (13, 14, 15, 16),
+    "pinky": (17, 18, 19, 20),
+}
+_FINGER_BASE_ANG = {  # fan-out from wrist, 0 = up (-y)
+    "thumb": 0.85, "index": 0.30, "middle": 0.02,
+    "ring": -0.26, "pinky": -0.52,
+}
+_FINGER_SEG = {  # (proximal, middle, distal) segment lens, fraction of hand size
+    "thumb": (0.30, 0.26, 0.22),
+    "index": (0.32, 0.24, 0.18),
+    "middle": (0.34, 0.26, 0.20),
+    "ring": (0.32, 0.24, 0.18),
+    "pinky": (0.26, 0.20, 0.16),
+}
+_FLEX_MAX = {  # max radians per joint row (mcp, pip, dip)
+    "thumb": (1.1, 1.3, 0.0),
+    "index": (1.6, 1.8, 1.2),
+    "middle": (1.6, 1.8, 1.2),
+    "ring": (1.6, 1.8, 1.2),
+    "pinky": (1.6, 1.8, 1.2),
+}
+_KNUCKLE_DIST = 0.34   # wrist -> knuckle, fraction of hand size
+_DIP_COUPLING = 0.65   # DIP flexion follows PIP when not specified
+
+# Finger state: finger -> (mcp_flex, pip_flex, dip_flex, abduct), all 0..1
+# (abduct -1..1 spreads the finger away from the middle finger axis)
+
+
+def finger_state_from_pose(pose: str) -> dict[str, tuple[float, float, float, float]]:
+    """Legacy unit pose -> per-finger flexion state."""
+    curled = {f: (1.0, 1.0, _DIP_COUPLING, 0.0) for f in FINGERS}
+    if pose == "fist":
+        return curled
+    if pose == "open":
+        return {f: (0.0, 0.0, 0.0, 0.0) for f in FINGERS}
+    if pose == "peace":
+        s = dict(curled)
+        s["index"] = (0.0, 0.0, 0.0, 0.25)
+        s["middle"] = (0.0, 0.0, 0.0, -0.25)
+        return s
+    if pose == "point":
+        s = dict(curled)
+        s["index"] = (0.05, 0.05, 0.03, 0.0)
+        return s
+    if pose == "thumbs":
+        s = dict(curled)
+        s["thumb"] = (0.15, 0.10, 0.0, 0.45)
+        return s
+    return curled
+
+
+def expand_flex(flex: float | list | tuple) -> tuple[float, float, float]:
+    """Uniform flex or explicit (mcp, pip, dip) triple -> triple.
+
+    Uniform flex applies DIP tendon coupling automatically.
+    """
+    if isinstance(flex, (list, tuple)):
+        vals = [max(0.0, min(1.0, float(v))) for v in list(flex)[:3]]
+        while len(vals) < 3:
+            vals.append(vals[-1] if vals else 0.0)
+        return (vals[0], vals[1], vals[2])
+    f = max(0.0, min(1.0, float(flex)))
+    return (f, f, f * _DIP_COUPLING)
+
+
+def render_fingers(wrist: np.ndarray, size: float,
+                   state: dict[str, tuple[float, float, float, float]],
+                   spread: float = 1.0) -> np.ndarray:
+    """Parametric finger forward kinematics -> (21, 2) MediaPipe-order keypoints.
+
+    state: finger -> (mcp_flex, pip_flex, dip_flex, abduct). Deterministic —
+    no randomness, so frames don't jitter during blends.
+    """
     pts = np.zeros((N_HAND, 2))
     pts[0] = wrist
-    rng = np.random.RandomState(7)
-    for f in range(5):
-        base_ang = -math.pi / 2 + (f - 2) * 0.28
-        for j, frac in enumerate((0.35, 0.55, 0.62, 0.60)):
-            idx = 1 + f * 4 + j
-            ang = base_ang + rng.randn() * 0.05
-            pts[idx] = wrist + np.array(
-                [math.cos(ang), math.sin(ang)]) * size * frac
+    for f in FINGERS:
+        mcp_f, pip_f, dip_f, abduct = state.get(f, (1.0, 1.0, 0.65, 0.0))
+        maxes = _FLEX_MAX[f]
+        segs = _FINGER_SEG[f]
+        base = -math.pi / 2 + (_FINGER_BASE_ANG[f] + abduct * 0.35) * spread
+        kx = wrist[0] + math.cos(base) * size * _KNUCKLE_DIST
+        ky = wrist[1] + math.sin(base) * size * _KNUCKLE_DIST
+        j0, j1, j2, j3 = _FINGER_KP[f]
+        pts[j0] = (kx, ky)
+        curl = 0.0
+        p = np.array([kx, ky])
+        for s, (fl, mx) in enumerate(zip((mcp_f, pip_f, dip_f), maxes)):
+            curl += fl * mx
+            ang = base + curl
+            p = p + np.array([math.cos(ang), math.sin(ang)]) * size * segs[s]
+            pts[(j1, j2, j3)[s]] = p
     return pts
+
+
+def _fist(wrist: np.ndarray, size: float = 0.035) -> np.ndarray:
+    """Curled fist keypoints around a wrist position."""
+    return render_fingers(wrist, size, finger_state_from_pose("fist"))
 
 
 def _open_hand(wrist: np.ndarray, size: float = 0.045,
                spread: float = 1.0) -> np.ndarray:
     """Open palm, fingers extended upward from wrist."""
-    pts = np.zeros((N_HAND, 2))
-    pts[0] = wrist
-    for f in range(5):
-        ang = -math.pi / 2 + (f - 2) * 0.30 * spread
-        lens = (0.45, 0.75, 0.95, 1.0) if f else (0.4, 0.6, 0.75, 0.8)
-        for j, frac in enumerate(lens):
-            idx = 1 + f * 4 + j
-            pts[idx] = wrist + np.array(
-                [math.cos(ang), math.sin(ang)]) * size * frac
-    return pts
+    return render_fingers(wrist, size, finger_state_from_pose("open"),
+                          spread=spread)
 
 
 def _peace_hand(wrist: np.ndarray, size: float = 0.045) -> np.ndarray:
     """Two fingers up (index + middle extended, rest curled)."""
-    pts = _fist(wrist, size)
-    for f, idx0 in ((1, 5), (2, 9)):  # index, middle
-        for j, frac in enumerate((0.5, 0.8, 1.0, 1.05)):
-            ang = -math.pi / 2 + (f - 1.5) * 0.22
-            pts[idx0 + j] = wrist + np.array(
-                [math.cos(ang), math.sin(ang)]) * size * frac
-    return pts
+    return render_fingers(wrist, size, finger_state_from_pose("peace"))
 
 
 def _point_hand(wrist: np.ndarray, size: float = 0.045) -> np.ndarray:
-    pts = _fist(wrist, size)
-    for j, frac in enumerate((0.5, 0.8, 1.0, 1.05)):
-        ang = -math.pi / 2
-        pts[5 + j] = wrist + np.array(
-            [math.cos(ang), math.sin(ang)]) * size * frac
-    return pts
+    return render_fingers(wrist, size, finger_state_from_pose("point"))
 
 
 def _thumbs_hand(wrist: np.ndarray, size: float = 0.045) -> np.ndarray:
-    pts = _fist(wrist, size)
-    for j, frac in enumerate((0.45, 0.7, 0.9, 1.0)):
-        ang = -math.pi / 2 + 0.9  # thumb out to the side-up
-        pts[1 + j] = wrist + np.array(
-            [math.cos(ang), math.sin(ang)]) * size * frac
-    return pts
+    return render_fingers(wrist, size, finger_state_from_pose("thumbs"))
 
 
 def _ease(t: float) -> float:
@@ -178,6 +247,10 @@ class PoseTrack:
     action: str = ""
     width: int = 512
     height: int = 512
+    root: np.ndarray | None = None  # (F, 3): root dx, dy, scale per frame.
+    # Root = pelvis translation channel. Foot-planted frames have ankles
+    # pinned in world space (see motion_score.compile_score); the channel
+    # lets consumers distinguish travel from in-place motion.
 
     @property
     def n_frames(self) -> int:
