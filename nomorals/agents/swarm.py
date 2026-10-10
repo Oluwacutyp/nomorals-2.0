@@ -29,7 +29,7 @@ import re
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Callable
 
 from ..llm.brain import brain_for
 from ..core.ids import new_short_id
@@ -116,13 +116,26 @@ class SwarmAgent:
         gateway: Any = None,
         wall_seconds: float = 420.0,
         blackboard: Any = None,
+        on_leg: Callable[[int, int, dict[str, Any]], None] | None = None,
     ) -> None:
         self.context = context
         self.brain = brain
         self.gateway = gateway
         self.wall_seconds = float(wall_seconds)
         self.blackboard = blackboard
+        #: Progress hook: called as legs complete — (index, total, leg).
+        #: Long swarms are otherwise silent; this feeds live UIs.
+        self.on_leg = on_leg
         self._last_result: SwarmResult | None = None
+
+    def _emit_leg(self, index: int, total: int, leg: dict[str, Any]) -> None:
+        """Fire the leg-progress hook. Never raises."""
+        if self.on_leg is None:
+            return
+        try:
+            self.on_leg(index, total, leg)
+        except Exception:  # noqa: BLE001 — telemetry never breaks the swarm
+            _log.debug("swarm on_leg hook failed", exc_info=True)
 
     # ── decomposition ────────────────────────────────────────────────────────
     def _model_available(self) -> bool:
@@ -334,6 +347,7 @@ class SwarmAgent:
                 }
                 self._post_leg(result.run_id, i, leg)
             result.legs.append(leg)
+            self._emit_leg(i, len(subtasks), leg)
         # Don't wait on late legs past the swarm's own deadline: they are
         # bounded by devon's internal step budgets and finish on their own.
         pool.shutdown(wait=False, cancel_futures=True)
@@ -433,3 +447,41 @@ class SwarmAgent:
                   result.run_id, len(kept), len(pending),
                   sum(1 for l in result.legs if l["ok"]), len(result.legs))
         return result
+
+
+# ── presentation ──────────────────────────────────────────────────────
+# A swarm run is a mission report: lead with the fused answer, then show
+# every leg's status. Legs are evidence, not a log tail.
+
+def render_swarm(result: "SwarmResult") -> str:
+    """Render a swarm run as a human-readable mission report. Never raises."""
+    from .render import ICONS, banner, bar, kv, section, table, truncate
+
+    try:
+        legs = result.legs or []
+        done = sum(1 for leg in legs if leg.get("ok"))
+        head = {
+            "goal": truncate(result.goal, 80),
+            "legs": f"{done}/{len(legs)} ok",
+            "time": f"{result.seconds:.1f}s",
+            "run": result.run_id,
+        }
+        lines = [banner("Swarm", ICONS["thinking"]), kv(head.items()),
+                 "", bar(done / len(legs) if legs else 0.0)]
+        if legs:
+            rows = []
+            for i, leg in enumerate(legs, 1):
+                icon = ICONS["ok"] if leg.get("ok") else ICONS["fail"]
+                rows.append([f"{icon} {i}",
+                             truncate(str(leg.get("subtask", "")), 36),
+                             truncate(str(leg.get("digest", "")), 60),
+                             f"{leg.get('seconds', 0)}s"])
+            lines.append("")
+            lines.append(table(["#", "subtask", "digest", "time"], rows))
+        lines.append("")
+        lines.append(section("Fused answer",
+                             truncate(result.synthesis or "(none)", 1200),
+                             ICONS["star"]))
+        return "\n".join(lines)
+    except Exception:  # noqa: BLE001 — rendering never breaks callers
+        return f"swarm {getattr(result, 'run_id', '?')} (render failed)"

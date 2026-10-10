@@ -113,6 +113,11 @@ class Blackboard:
         self._prune = prune_expired
         self.stats = {"writes": 0, "reads": 0, "misses": 0,
                       "triggers_fired": 0}
+        #: Immutable audit snapshots of every write — the existing
+        #: ``_history`` list reuses the same entry objects (mutated on
+        #: update), so it can't serve as an audit trail. ``_audit`` can:
+        #: who wrote what, when, at which version.
+        self._audit: list[dict[str, Any]] = []
 
     # ── writes ───────────────────────────────────────────────────────────────
     def post(
@@ -144,6 +149,21 @@ class Blackboard:
                 self._entries[key] = entry
                 self._history.append(entry)
             self.stats["writes"] += 1
+            # Immutable audit snapshot (see _audit in __init__).
+            try:
+                value_preview = str(value)
+                if len(value_preview) > 500:
+                    value_preview = value_preview[:497] + "…"
+            except Exception:  # noqa: BLE001
+                value_preview = "(unprintable)"
+            self._audit.append({
+                "key": key, "version": entry.version,
+                "author": entry.author, "topic": entry.topic,
+                "updated_at": entry.updated_at,
+                "value_preview": value_preview,
+            })
+            if len(self._audit) > 2000:
+                del self._audit[:1000]
             watchers = [
                 callback
                 for pattern, callback in self._watchers
@@ -293,6 +313,94 @@ class Blackboard:
     def most_read(self, limit: int = 10) -> list[BlackboardEntry]:
         with self._lock:
             return sorted(self._entries.values(), key=lambda e: -e.reads)[:limit]
+
+    # ── audit, persistence, presentation ────────────────────────────────────
+    def history(self, key: str, limit: int = 20) -> list[dict[str, Any]]:
+        """Audit trail for one key: every write, who, when, at which version.
+
+        Oldest first. Never raises.
+        """
+        try:
+            with self._lock:
+                hits = [a for a in self._audit if a["key"] == key]
+            return hits[-max(1, int(limit)):]
+        except Exception:  # noqa: BLE001
+            return []
+
+    def export(self) -> dict[str, Any]:
+        """Full board snapshot as plain data — persistence across restarts."""
+        import time as _t
+        with self._lock:
+            return {
+                "exported_at": _t.time(),
+                "entries": {k: e.to_dict() for k, e in self._entries.items()},
+                "audit": list(self._audit[-500:]),
+                "stats": dict(self.stats),
+            }
+
+    def import_snapshot(self, data: dict[str, Any]) -> int:
+        """Restore entries from :meth:`export`. Returns entries restored.
+
+        Existing keys are overwritten (imported versions win); the audit
+        trail is appended so the import itself stays visible. Never raises.
+        """
+        restored = 0
+        try:
+            entries = (data or {}).get("entries") or {}
+            with self._lock:
+                for key, payload in entries.items():
+                    try:
+                        entry = BlackboardEntry(
+                            key=str(payload.get("key", key)),
+                            value=payload.get("value"),
+                            author=str(payload.get("author", "")),
+                            topic=str(payload.get("topic", "")),
+                            version=int(payload.get("version", 1) or 1),
+                            reads=int(payload.get("reads", 0) or 0),
+                            metadata=dict(payload.get("metadata") or {}),
+                        )
+                        entry.created_at = float(
+                            payload.get("updated_at", entry.created_at) or 0)
+                        entry.updated_at = float(
+                            payload.get("updated_at", entry.updated_at) or 0)
+                        self._entries[key] = entry
+                        self._audit.append({
+                            "key": key, "version": entry.version,
+                            "author": "import", "topic": entry.topic,
+                            "updated_at": entry.updated_at,
+                            "value_preview": "(imported snapshot)",
+                        })
+                        restored += 1
+                    except Exception:  # noqa: BLE001 - one bad entry skips
+                        continue
+        except Exception:  # noqa: BLE001
+            pass
+        return restored
+
+    def render_board(self, topic: str | None = None,
+                     limit: int = 30) -> str:
+        """Human-readable board dump as markdown — the "what's on the
+        board right now" view. Never raises."""
+        from .render import ICONS, banner, table, truncate
+
+        try:
+            with self._lock:
+                entries = [
+                    e for e in self._entries.values() if not e.expired
+                ]
+            if topic:
+                entries = [e for e in entries if e.topic == topic]
+            entries.sort(key=lambda e: -e.updated_at)
+            entries = entries[:max(1, int(limit))]
+            title = f"Blackboard{f' — {topic}' if topic else ''}"
+            if not entries:
+                return banner(title, ICONS["info"]) + "\n(empty)"
+            rows = [[e.key, e.author or "—", f"v{e.version}",
+                     truncate(str(e.value), 60)] for e in entries]
+            return (banner(title, ICONS["info"]) + "\n"
+                    + table(["key", "author", "ver", "value"], rows))
+        except Exception:  # noqa: BLE001
+            return "blackboard (render failed)"
 
     # ── mutation ─────────────────────────────────────────────────────────────
     def delete(self, key: str) -> bool:

@@ -47,6 +47,163 @@ _PROFILE_PERF: dict[str, dict[str, Any]] = {
     "workstation": {"preset": "medium", "crf": 19, "threads": 0},
 }
 
+#: CRF quality presets (fftools guide: each +6 roughly halves file size).
+#: ``quality="social"`` → crf 28, etc. Explicit `crf=` always wins.
+CRF_PRESETS: dict[str, dict[str, Any]] = {
+    "archival": {"crf": 18, "note": "visually lossless — masters, archives"},
+    "high": {"crf": 21, "note": "high quality — client delivery"},
+    "balanced": {"crf": 23, "note": "default — great quality, sane size"},
+    "social": {"crf": 28, "note": "small files — feeds, stories, previews"},
+    "draft": {"crf": 32, "note": "tiny — review drafts only"},
+}
+
+
+def crf_for(quality: str | None, explicit: int | None = None) -> int | None:
+    """Resolve a quality preset name → CRF value. Never raises."""
+    if explicit is not None:
+        try:
+            return max(0, min(51, int(explicit)))
+        except (TypeError, ValueError):
+            return None
+    if not quality:
+        return None
+    preset = CRF_PRESETS.get(str(quality).lower())
+    return preset["crf"] if preset else None
+
+
+# ── render report + self-review ───────────────────────────────────────────────
+
+from dataclasses import dataclass, field  # noqa: E402
+
+
+@dataclass
+class RenderReport:
+    """Structured, JSON-serializable render report (fftools-style honesty).
+
+    Built by :func:`render_timeline` / :func:`assemble_segments` and
+    enriched by :meth:`self_review`, which runs ffprobe assertions
+    against the finished file (jianying portable-build pattern):
+    duration, dimensions, fps, frame count, codec.
+    """
+    output: str = ""
+    bytes: int = 0
+    duration: float = 0.0
+    width: int = 0
+    height: int = 0
+    fps: float = 0.0
+    crf: int | None = None
+    quality: str = ""
+    sha256: str = ""
+    filter_graph_path: str = ""
+    checks: list[dict[str, Any]] = field(default_factory=list)
+    passed: bool | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"output": self.output, "bytes": self.bytes,
+                "duration": round(self.duration, 2),
+                "width": self.width, "height": self.height,
+                "fps": round(self.fps, 2), "crf": self.crf,
+                "quality": self.quality, "sha256": self.sha256,
+                "filter_graph_path": self.filter_graph_path,
+                "checks": self.checks, "passed": self.passed}
+
+    def self_review(self, *, expect_duration: float = 0.0,
+                    tolerance_s: float = 0.5) -> "RenderReport":
+        """ffprobe the output and assert it matches the plan.
+
+        Checks: file exists + non-empty, H.264/yuv420p, dimensions,
+        fps, duration within tolerance, frame count consistent.
+        Records per-check pass/fail; ``passed`` is the AND of all.
+        Never raises — a missing ffprobe is itself a recorded check.
+        """
+        checks: list[dict[str, Any]] = []
+
+        def _check(name: str, ok: bool, detail: str = "") -> None:
+            checks.append({"name": name, "ok": bool(ok), "detail": detail})
+
+        p = Path(self.output)
+        _check("exists", p.is_file(),
+               f"{self.bytes} bytes" if p.is_file() else "missing")
+        if not p.is_file():
+            self.checks = checks
+            self.passed = False
+            return self
+        try:
+            probe = video_probe(str(p))
+        except Exception as exc:  # noqa: BLE001
+            _check("ffprobe", False, f"unavailable: {exc}")
+            self.checks = checks
+            self.passed = False
+            return self
+        _check("ffprobe", True, "ok")
+        streams = probe.get("streams", []) if isinstance(probe, dict) else []
+        v = next((s for s in streams if s.get("codec_type") == "video"),
+                 {}) if streams else {}
+        codec = str(v.get("codec_name", ""))
+        pix = str(v.get("pix_fmt", ""))
+        _check("codec", codec in ("h264", "hevc", "av1", "vp9"),
+               f"{codec}/{pix}")
+        w = int(v.get("width", 0) or 0)
+        h = int(v.get("height", 0) or 0)
+        if self.width and self.height:
+            _check("dimensions", w == self.width and h == self.height,
+                   f"{w}x{h} vs planned {self.width}x{self.height}")
+        else:
+            _check("dimensions", w > 0 and h > 0, f"{w}x{h}")
+            self.width, self.height = w, h
+        fps_s = str(v.get("avg_frame_rate", "0/1"))
+        try:
+            num, den = fps_s.split("/")
+            fps = float(num) / float(den) if float(den) else 0.0
+        except Exception:  # noqa: BLE001
+            fps = 0.0
+        if self.fps:
+            _check("fps", abs(fps - self.fps) < 0.5,
+                   f"{fps:.2f} vs planned {self.fps:.2f}")
+        else:
+            self.fps = round(fps, 2)
+            _check("fps", fps > 0, f"{fps:.2f}")
+        dur = float(v.get("duration", 0) or 0)
+        want = expect_duration or self.duration
+        if want:
+            _check("duration", abs(dur - want) <= tolerance_s,
+                   f"{dur:.2f}s vs planned {want:.2f}s (±{tolerance_s}s)")
+            self.duration = dur
+        nframes = int(v.get("nb_frames", 0) or 0)
+        if nframes and fps:
+            expect_n = int(round(dur * fps))
+            _check("frame_count", abs(nframes - expect_n) <= max(2, fps),
+                   f"{nframes} frames ≈ {dur:.1f}s × {fps:.1f}fps")
+        self.checks = checks
+        self.passed = all(c["ok"] for c in checks)
+        return self
+
+    def report_text(self) -> str:
+        """God-tier render summary."""
+        from ..style import theme as _theme
+        th = _theme()
+        title = "Render Report"
+        sub = self.quality or (f"crf {self.crf}" if self.crf else "default")
+        lines = [th.banner(title, sub)]
+        lines.append(th.kv([
+            ("output", self.output),
+            ("size", f"{self.bytes / 1048576:.1f} MiB"),
+            ("duration", f"{self.duration:.2f}s"),
+            ("dims", f"{self.width}x{self.height} @ {self.fps:.0f}fps"
+             if self.width else ""),
+            ("sha256", (self.sha256[:16] + "…") if self.sha256 else ""),
+        ]))
+        if self.checks:
+            lines.append(th.section("Self-review"))
+            for c in self.checks:
+                lines.append("  " + th.status_line(
+                    c["ok"], c["name"], c.get("detail", "")))
+            lines.append(th.status_line(
+                self.passed, "overall",
+                "all checks passed — safe to present"
+                if self.passed else "REVIEW FAILED — do not present"))
+        return "\n".join(lines)
+
 
 def _perf_for(profile: str | None) -> dict[str, Any]:
     kind = (profile or "").strip().lower()
@@ -662,6 +819,7 @@ def render_timeline(timeline: Timeline, *,
                     audio_mix: AudioMix | None = None,
                     out: str | os.PathLike[str] | None = None,
                     crf: int | None = None,
+                    quality: str | None = None,
                     preset: str | None = None,
                     profile: str | None = None,
                     keep_clip_audio: bool = False,
@@ -674,9 +832,15 @@ def render_timeline(timeline: Timeline, *,
     2. audio_mix → mix_layers (or clip audio when keep_clip_audio)
     3. text_layers → burn_text_layers
     Returns the run report.
+
+    ``quality`` picks a CRF preset (archival/high/balanced/social/draft);
+    explicit ``crf=`` always wins. The returned dict carries a
+    ``render_report`` (:class:`RenderReport`) — call ``.self_review()``
+    on it for ffprobe assertions before presenting the file.
     """
     if not timeline.video.clips:
         raise MediaEditError("Timeline needs at least one video clip")
+    crf = crf_for(quality, crf)
     tmp = Path(workdir) if workdir else Path(
         tempfile.mkdtemp(prefix="tl-"))
     tmp.mkdir(parents=True, exist_ok=True)
@@ -722,7 +886,22 @@ def render_timeline(timeline: Timeline, *,
     if final.resolve() != out_p.resolve():
         run_ffmpeg(["-i", str(final), "-c", "copy", str(out_p)],
                    duration=video_dur)
+    report = RenderReport(
+        output=str(out_p), bytes=out_p.stat().st_size,
+        duration=video_dur, width=timeline.width, height=timeline.height,
+        fps=float(timeline.fps or 0), crf=crf, quality=quality or "",
+        filter_graph_path=str(video.get("filter_graph", "")))
+    try:
+        import hashlib
+        h = hashlib.sha256()
+        with open(out_p, "rb") as f:
+            for chunk in iter(lambda: f.read(1 << 20), b""):
+                h.update(chunk)
+        report.sha256 = h.hexdigest()
+    except Exception:  # noqa: BLE001 — hash is best-effort
+        pass
     return {"output": str(out_p), "bytes": out_p.stat().st_size,
             "duration": video_dur, "profile": video["profile"],
             "video": video, "audio": audio_out, "text": text_out,
-            "workdir": str(tmp)}
+            "workdir": str(tmp), "render_report": report,
+            "quality": quality or "", "crf": crf}

@@ -64,7 +64,8 @@ from ..core.policy import Capability
 
 _log = get_logger(__name__)
 
-__all__ = ["MusicCreator", "Song", "StyleSpec", "STYLES", "register"]
+__all__ = ["MusicCreator", "Song", "SongDNA", "StyleSpec", "STYLES",
+           "score_memorability", "register"]
 
 
 # ─────────────────────────────── styles ──────────────────────────────────────
@@ -867,6 +868,63 @@ class Section:
 
 
 @dataclass
+@dataclass
+class SongDNA:
+    """The song's identity, decided BEFORE any section is written.
+
+    Mined from produzre/composer: songs sound procedural when randomness
+    sits at bar level while structure stays a static loop. DNA inverts
+    that — the hook, answer, bridge idea and signature lick are chosen
+    once by a memorability search, then every section derives from them:
+
+    * choruses all sing the SAME hook (phrase memory),
+    * verses answer the hook's question/image (call and response),
+    * the bridge contrasts the hook's rhyme group,
+    * the final chorus lifts (tagged by ``final_lift``) instead of
+      regenerating.
+    """
+    hook_line: str = ""            # the singable one-liner every chorus repeats
+    hook_rhyme_group: tuple[str, ...] = ()   # rhyme family the hook lives in
+    answer_image: str = ""         # verse imagery that answers the hook
+    bridge_contrast: str = ""      # bridge's contrasting idea
+    signature_lick: str = ""       # short melodic/rhythmic motif description
+    memorability: float = 0.0      # 0..1 — how sticky the hook scored
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"hook_line": self.hook_line,
+                "hook_rhyme_group": list(self.hook_rhyme_group),
+                "answer_image": self.answer_image,
+                "bridge_contrast": self.bridge_contrast,
+                "signature_lick": self.signature_lick,
+                "memorability": round(self.memorability, 3)}
+
+
+def score_memorability(hook_line: str, rhyme_group: tuple[str, ...]) -> float:
+    """0..1 stickiness score for a hook line.
+
+    Rewards: short singable lines (4-9 words), repetition-friendly
+    phonemes (open vowels, plosives), a rhyme word from a rich group
+    (more partners = more chorus material), title-topic echo. This is
+    the offline stand-in for produzre's memorability search — the DNA
+    builder generates candidates and keeps the winner.
+    """
+    words = re.findall(r"[a-zA-Z']+", hook_line or "")
+    n = len(words)
+    # length sweet spot: 4-9 words
+    length_score = 1.0 - min(1.0, abs(n - 6.5) / 6.5) if n else 0.0
+    # phoneme stickiness: open vowels + plosive/bilabial onsets
+    sticky = sum(1 for w in words
+                 if re.search(r"[aeiou]$|[pbtdkgm]", w.lower())) / max(1, n)
+    # rhyme richness: bigger group = more chorus material
+    rhyme_score = min(1.0, len(rhyme_group) / 6.0)
+    # no filler words
+    filler = {"just", "really", "very", "thing", "stuff", "gonna"}
+    filler_pen = sum(1 for w in words if w.lower() in filler) / max(1, n)
+    score = 0.45 * length_score + 0.30 * min(1.0, sticky) + \
+        0.25 * rhyme_score - 0.20 * filler_pen
+    return round(max(0.0, min(1.0, score)), 3)
+
+
 class Song:
     title: str
     style: str
@@ -887,6 +945,10 @@ class Song:
     vocal_path: str = ""
     vocal_note: str = ""
     seed: int = 0
+    #: song DNA — hook/answer/lick identity shared by all sections
+    dna: "SongDNA | None" = None
+    #: which chorus index gets the lift (final chorus variation)
+    lift_chorus: int = -1
     #: melody notes for staff notation: (midi_pitch, start_beat, dur_beats)
     melody_notes: list[tuple[int, float, float]] = field(default_factory=list)
     #: per-bar (bar_index, chord_symbol, section_name) for the notation
@@ -910,6 +972,8 @@ class Song:
             "synth_note": self.synth_note,
             "vocal_path": self.vocal_path,
             "vocal_note": self.vocal_note,
+            "dna": self.dna.to_dict() if self.dna else None,
+            "lift_chorus": self.lift_chorus,
         }
 
     def to_score_markdown(self) -> str:
@@ -941,30 +1005,48 @@ class Song:
         return "\n".join(lines).rstrip() + "\n"
 
     def to_markdown(self) -> str:
-        lines = [f"# {self.title}", "",
-                 f"**Style:** {self.style}  ·  **Key:** {self.key} "
-                 f"{self.mode}  ·  **Tempo:** {self.tempo} BPM  ·  "
-                 f"**Mood:** {self.mood}", ""]
-        if self.melody_description:
-            lines += [f"**Melody:** {self.melody_description}", ""]
-        for s in self.sections:
+        from .style import theme as _theme
+        th = _theme()
+        lines = [th.banner(self.title,
+                           f"{self.style.title()} · Key of {self.key} "
+                           f"{self.mode} · {self.tempo} BPM")]
+        lines.append(th.kv([
+            ("Mood", self.mood),
+            ("Melody", self.melody_description),
+            ("Instrumentation", ", ".join(self.instrumentation)),
+        ]))
+        if self.dna and self.dna.hook_line:
+            lines.append(th.section("Song DNA"))
+            lines.append(th.kv([
+                ("Hook", f"\"{self.dna.hook_line}\""),
+                ("Memorability",
+                 f"{th.bar(self.dna.memorability)} "
+                 f"{self.dna.memorability:.0%}"),
+                ("Signature lick", self.dna.signature_lick),
+                ("Bridge contrast", self.dna.bridge_contrast),
+            ]))
+        for idx, s in enumerate(self.sections):
             tag = s.name.upper()
-            head = f"## {tag}"
+            head = f"{tag} — {s.bars} bars"
             if s.chords:
-                head += f"  ({' — '.join(s.chords)})"
-            lines.append(head)
+                head += f"   ({' — '.join(s.chords)})"
+            if idx == self.lift_chorus and s.name == "chorus":
+                head += "  ▲ LIFT"
+            lines.append(th.section(head))
             if s.lyrics:
-                lines += [f"> {ln}" for ln in s.lyrics]
-            lines.append("")
-        if self.instrumentation:
-            lines += ["**Instrumentation:**",
-                      ", ".join(self.instrumentation), ""]
-        if self.midi_path:
-            lines.append(f"**MIDI file:** `{self.midi_path}`")
-        if self.audio_path:
-            lines.append(f"**Audio:** `{self.audio_path}`")
-        if self.score_pdf_path:
-            lines.append(f"**Score PDF:** `{self.score_pdf_path}`")
+                lines += [f"  > {ln}" for ln in s.lyrics]
+            if s.note:
+                lines.append(f"  *{s.note}*")
+        if self.midi_path or self.audio_path or self.score_pdf_path:
+            lines.append(th.section("Artifacts"))
+            lines.append(th.kv([
+                ("MIDI", self.midi_path),
+                ("Audio", self.audio_path),
+                ("Score PDF", self.score_pdf_path),
+                ("Vocals", self.vocal_path or self.vocal_note),
+            ]))
+        lines.append(th.status_line(True, "song composed",
+                                    f"seed {self.seed}"))
         return "\n".join(lines).rstrip() + "\n"
 
 
@@ -1019,7 +1101,13 @@ class MusicCreator:
         topic_words = _topic_words(topic)
         primary = topic_words[0].capitalize()
 
+        # Song DNA first: the hook every chorus will sing, chosen by a
+        # memorability search over candidates (produzre pattern).
+        dna = self._build_dna(topic, primary, topic_words, spec, rng)
+
         sections: list[Section] = []
+        chorus_seen = 0
+        n_choruses = sum(1 for n, _ in spec.sections if n == "chorus")
         for name, bars in spec.sections:
             chords = self._section_chords(name, progression, rng)
             if name in _INSTRUMENTAL_SECTIONS:
@@ -1027,16 +1115,20 @@ class MusicCreator:
                 sections.append(Section(name, bars, chords=chords, note=note))
             else:
                 lyrics = self._lyrics_for(name, topic, primary, topic_words,
-                                          spec, rng)
+                                          spec, rng, dna=dna)
                 sections.append(Section(name, bars, lyrics=lyrics,
                                         chords=chords))
+            if name == "chorus":
+                chorus_seen += 1
+        lift_chorus = n_choruses - 1 if n_choruses > 1 else -1
 
         melody_desc = self._melody_description(spec, rng, key, tempo)
         song = Song(title=title, style=spec.name, topic=topic, key=key,
                     mode=spec.mode, tempo=tempo, sections=sections,
                     melody_description=melody_desc,
                     instrumentation=spec.instrumentation,
-                    mood=", ".join(rng.sample(spec.palette, 3)), seed=seed)
+                    mood=", ".join(rng.sample(spec.palette, 3)), seed=seed,
+                    dna=dna, lift_chorus=lift_chorus)
 
         if with_midi:
             try:
@@ -1055,6 +1147,51 @@ class MusicCreator:
             except Exception as exc:  # noqa: BLE001
                 _log.warning("score pdf failed: %s", exc)
         return song
+
+    # ── song DNA ────────────────────────────────────────────────────────
+    def _build_dna(self, topic: str, primary: str, topic_words: list[str],
+                   spec: StyleSpec, rng: random.Random) -> SongDNA:
+        """Choose the song's identity by memorability search.
+
+        Generates hook candidates (template lines ending on a strong
+        rhyme word), scores each with :func:`score_memorability`, and
+        keeps the winner. The verse answer-image and bridge contrast
+        derive from the winning hook so the whole song is one idea.
+        """
+        topic_short = " ".join(topic_words[:3]).lower()
+        candidates: list[tuple[float, str, tuple[str, ...]]] = []
+        for _ in range(12):
+            group = rng.choice(_RHYME_GROUPS)
+            rhyme_word = rng.choice(group)
+            pat = rng.choice((
+                f"We {rng.choice(_VERB_BANK)} through the {primary} {rhyme_word}",
+                f"{primary} {rhyme_word}, we {rng.choice(_VERB_BANK)} on",
+                f"Hold the {primary}, chase the {rhyme_word}",
+                f"{topic_short} in the {rhyme_word}",
+                f"We {rng.choice(_VERB_BANK)} till the {rhyme_word}",
+                f"{primary} rising like {rhyme_word}",
+            ))
+            hook = pat[0].upper() + pat[1:]
+            candidates.append((score_memorability(hook, group), hook, group))
+        candidates.sort(key=lambda t: -t[0])
+        best_score, hook_line, group = candidates[0]
+        answer_image = rng.choice(_IMAGERY)
+        bridge_contrast = rng.choice((
+            f"stripped back — just {primary.lower()} and a heartbeat",
+            f"half-time, the {rng.choice(_EMOTION)} truth underneath",
+            f"key change whisper: what if the {group[0]} never came",
+        ))
+        lick = rng.choice((
+            "three-note rising motif, repeated with a pushed rhythm",
+            "syncopated octave hops on the off-beats",
+            "long held note falling a fourth into a quick turn",
+            "call-and-response riff: two bars statement, two bars answer",
+            "pentatonic run that lands on the downbeat of every chorus",
+        ))
+        return SongDNA(hook_line=hook_line, hook_rhyme_group=group,
+                       answer_image=answer_image,
+                       bridge_contrast=bridge_contrast,
+                       signature_lick=lick, memorability=best_score)
 
     # ── lyrics ──────────────────────────────────────────────────────────
     def _make_title(self, topic: str, spec: StyleSpec, rng: random.Random) -> str:
@@ -1103,10 +1240,11 @@ class MusicCreator:
 
     def _lyrics_for(self, name: str, topic: str, primary: str,
                     topic_words: list[str], spec: StyleSpec,
-                    rng: random.Random) -> list[str]:
+                    rng: random.Random, dna: "SongDNA | None" = None
+                    ) -> list[str]:
         if _model_available(self.context):
             try:
-                return self._model_lyrics(name, topic, spec)
+                return self._model_lyrics(name, topic, spec, dna=dna)
             except Exception as exc:  # noqa: BLE001
                 _log.debug("model lyrics failed, using template: %s", exc)
         n_lines = 8 if name == "verse" else (2 if name == "tag" else 4)
@@ -1126,7 +1264,11 @@ class MusicCreator:
                     scheme_letters[letter] = rng.choice(_RHYME_GROUPS)
                 groups[i] = scheme_letters[letter]
         elif name in ("chorus", "tag"):
-            hook_group = rng.choice(_RHYME_GROUPS)
+            # phrase memory: every chorus sings the DNA hook's rhyme group
+            # and opens on the identical hook line — returning choruses
+            # repeat note-for-note (produzre section-memory pattern).
+            hook_group = (dna.hook_rhyme_group if dna and dna.hook_rhyme_group
+                          else rng.choice(_RHYME_GROUPS))
             groups = [hook_group] * n_lines
         elif name in ("bridge", "pre-chorus"):
             for i in range(0, n_lines, 2):
@@ -1135,6 +1277,10 @@ class MusicCreator:
                 if i + 1 < n_lines:
                     groups[i + 1] = grp
         for i in range(n_lines):
+            if name == "chorus" and i == 0 and dna and dna.hook_line:
+                # the hook: identical in every chorus (section memory)
+                lines.append(dna.hook_line)
+                continue
             if name == "chorus" and i == 2 and lines:
                 # real choruses repeat the hook verbatim
                 lines.append(lines[0])
@@ -1255,17 +1401,25 @@ class MusicCreator:
         return best
 
     def _model_lyrics(self, section: str, topic: str,
-                      spec: StyleSpec) -> list[str]:
+                      spec: StyleSpec, dna: "SongDNA | None" = None
+                      ) -> list[str]:
         from ..llm.base import Message, SamplingParams
 
         router = self.context.router
         n = 8 if section == "verse" else 4
+        dna_note = ""
+        if dna and dna.hook_line and section == "chorus":
+            dna_note = (f" The chorus MUST open with this exact hook line "
+                        f"and repeat it: {dna.hook_line!r}.")
+        elif dna and dna.hook_line and section == "verse":
+            dna_note = (f" The verses answer this hook: {dna.hook_line!r} — "
+                        f"use its imagery ({dna.answer_image}).")
         prompt = (
             f"Write exactly {n} lines of {section} lyrics for a "
             f"{spec.label} song about: {topic!r}. "
             f"Style/mood: {', '.join(spec.palette)}. "
             "No titles, no labels, no markdown — just the lines, one per "
-            "line. Make them rhyme and singable."
+            f"line. Make them rhyme and singable.{dna_note}"
         )
         resp = brain_for(self.context).chat(
             [Message.user(prompt)],
@@ -1323,7 +1477,16 @@ class MusicCreator:
             (i for i, s in enumerate(song.sections) if s.name == "chorus"),
             default=-1)
         bar = 0
+        chorus_ord = -1  # 0-based ordinal among chorus sections
+        n_choruses = sum(1 for s in song.sections if s.name == "chorus")
+        song.lift_chorus = n_choruses - 1 if n_choruses > 1 else -1
         for idx, s in enumerate(song.sections):
+            if s.name == "chorus":
+                chorus_ord += 1
+            # DNA final-chorus lift: the last chorus sings an octave up,
+            # louder — a variation on the SAME motif, not a new melody
+            is_lift = (s.name == "chorus" and song.lift_chorus >= 0
+                       and chorus_ord == song.lift_chorus)
             # key change: modulating styles lift the final chorus (and
             # everything after it) a semitone — the classic last-chorus lift
             lift = 1 if (spec.modulate and last_chorus > 0
@@ -1409,9 +1572,15 @@ class MusicCreator:
                                   seed=seed + idx * 31 + 4, velocity=96,
                                   chord_tones=bar_chords)
             up = _MELODY_LIFT.get(s.name, 0)
+            if is_lift:
+                up = (up or 0) + 12
+                if "final lift" not in s.note:
+                    s.note = (s.note + " · " if s.note else "") + \
+                        "final lift: octave up, drums open"
             if up:
                 mel = [NoteEvent(min(127, e.note + up), e.start, e.duration,
-                                 e.velocity, e.channel) for e in mel]
+                                 min(127, e.velocity + (8 if is_lift else 0)),
+                                 e.channel) for e in mel]
             if s.name == "intro":
                 mel = mel[::2]  # sparse, spacious entrance
             sec["melody"].extend(humanize(mel, seed=seed + idx * 41 + 5))

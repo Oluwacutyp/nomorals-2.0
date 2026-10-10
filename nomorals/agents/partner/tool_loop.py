@@ -29,13 +29,15 @@ filtered tool list AND gets denied at call time if they reach for more.
 
 from __future__ import annotations
 
+import difflib
+import hashlib
 import json
 import logging
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
 from dataclasses import dataclass, field
-from typing import Any, Sequence
+from typing import Any, Callable, Sequence
 
 _log = logging.getLogger(__name__)
 
@@ -79,6 +81,40 @@ class ToolLoopResult:
     model: str = ""
     ok: bool = True
     error: str = ""
+
+
+@dataclass
+class ToolLoopEvent:
+    """One lifecycle event, for live UIs and telemetry.
+
+    ``kind`` is one of: ``turn_start``, ``turn_end``, ``tool_start``,
+    ``tool_end``, ``stalled``, ``final``. Mirrors OpenAI Agents SDK
+    lifecycle hooks / run_streamed(): the loop is observable while it
+    runs, not just when it finishes.
+    """
+    kind: str
+    iteration: int = 0
+    tool_name: str = ""
+    detail: str = ""
+    at: float = field(default_factory=time.time)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"kind": self.kind, "iteration": self.iteration,
+                "tool": self.tool_name, "detail": self.detail, "at": self.at}
+
+
+#: How many times the same (tool, args) may repeat back-to-back before the
+#: loop calls it a stall and degrades honestly instead of burning budget.
+_STALL_REPEATS = 3
+
+
+def _call_signature(call: "ToolCall") -> str:
+    """Stable hash of (tool name, canonical args) for stall detection."""
+    try:
+        canon = json.dumps(call.args, sort_keys=True, default=str)
+    except Exception:
+        canon = str(call.args)
+    return hashlib.sha256(f"{call.name}\n{canon}".encode()).hexdigest()[:16]
 
 
 def _scan_balanced(text: str, start: int) -> int:
@@ -225,6 +261,8 @@ class ToolCallingLoop:
         tool_timeout_s: float = 90.0,
         total_timeout_s: float = 300.0,
         max_tool_calls_per_turn: int = 5,
+        on_event: Callable[[ToolLoopEvent], None] | None = None,
+        parallel_per_turn: bool = False,
     ) -> None:
         self.llm = llm
         self.registry = registry
@@ -232,8 +270,26 @@ class ToolCallingLoop:
         self.tool_timeout_s = max(1.0, float(tool_timeout_s))
         self.total_timeout_s = max(10.0, float(total_timeout_s))
         self.max_tool_calls_per_turn = max(1, int(max_tool_calls_per_turn))
+        #: Lifecycle hook — called with a ToolLoopEvent for turn/tool/final
+        #: transitions. Never allowed to break the loop.
+        self.on_event = on_event
+        #: When True, a turn's tool calls execute concurrently in the pool
+        #: (smolagents ToolCallingAgent style) instead of sequentially.
+        self.parallel_per_turn = bool(parallel_per_turn)
         self._pool = ThreadPoolExecutor(
             max_workers=4, thread_name_prefix="tool-loop")
+
+    def _emit(self, kind: str, iteration: int = 0, tool_name: str = "",
+              detail: str = "") -> None:
+        """Fire a lifecycle event. Never raises."""
+        if self.on_event is None:
+            return
+        try:
+            self.on_event(ToolLoopEvent(
+                kind=kind, iteration=iteration, tool_name=tool_name,
+                detail=detail))
+        except Exception:  # noqa: BLE001 — telemetry never breaks the loop
+            _log.debug("tool loop event hook failed", exc_info=True)
 
     def _tool_listing(
         self,
@@ -277,7 +333,7 @@ class ToolCallingLoop:
                            if persona_extra.strip() else ""),
         )
 
-    def _execute(
+    def _invoke(
         self,
         call: ToolCall,
         *,
@@ -285,7 +341,12 @@ class ToolCallingLoop:
         capabilities: Any = None,
         loop_ctx: dict[str, Any] | None = None,
     ) -> str:
-        """Run one tool call with timeout. Never raises — failures are text."""
+        """Run one tool call synchronously. Never raises — failures are text.
+
+        This is the pool-free core: :meth:`_execute` wraps it in a timeout,
+        and parallel per-turn mode submits it directly (no nested pools,
+        which would deadlock the 4-worker executor).
+        """
         spec = None
         try:
             spec = self.registry.get(call.name)
@@ -299,7 +360,6 @@ class ToolCallingLoop:
                 pass
             hint = ""
             # Honest, useful: suggest the closest name when it's a near-miss.
-            import difflib
             close = difflib.get_close_matches(call.name, names, n=1, cutoff=0.7)
             if close:
                 hint = f" Did you mean '{close[0]}'?"
@@ -367,18 +427,12 @@ class ToolCallingLoop:
             return self.registry.call(
                 call.name, actor=actor, **kwargs, **call.args)
 
-        fut = self._pool.submit(_run)
+        # Outcome is Ok/Err — unwrap honestly.
         try:
-            outcome = fut.result(timeout=self.tool_timeout_s)
-        except FuturesTimeout:
-            self._note_tool_weakness(call.name, "timeout")
-            return (f"[tool error] '{call.name}' timed out after "
-                    f"{self.tool_timeout_s:.0f}s.")
-        except Exception as exc:  # noqa: BLE001 — execution must not kill the loop
+            outcome = _run()
+        except Exception as exc:  # noqa: BLE001
             self._note_tool_weakness(call.name, f"crashed: {exc}")
             return f"[tool error] '{call.name}' crashed: {exc}"
-
-        # Outcome is Ok/Err — unwrap honestly.
         try:
             if hasattr(outcome, "ok") and outcome.ok:
                 value = outcome.value if hasattr(outcome, "value") else outcome
@@ -394,6 +448,83 @@ class ToolCallingLoop:
                     f"{'you lack permission for this tool.' if denied else 'adapt or report honestly.'}")
         except Exception as exc:  # noqa: BLE001
             return f"[tool error] '{call.name}' result unreadable: {exc}"
+
+    def _execute(
+        self,
+        call: ToolCall,
+        *,
+        actor: str,
+        capabilities: Any = None,
+        loop_ctx: dict[str, Any] | None = None,
+    ) -> str:
+        """Run one tool call with timeout. Never raises — failures are text."""
+        fut = self._pool.submit(
+            self._invoke, call, actor=actor, capabilities=capabilities,
+            loop_ctx=loop_ctx)
+        try:
+            return fut.result(timeout=self.tool_timeout_s)
+        except FuturesTimeout:
+            self._note_tool_weakness(call.name, "timeout")
+            return (f"[tool error] '{call.name}' timed out after "
+                    f"{self.tool_timeout_s:.0f}s.")
+        except Exception as exc:  # noqa: BLE001 — execution must not kill the loop
+            self._note_tool_weakness(call.name, f"crashed: {exc}")
+            return f"[tool error] '{call.name}' crashed: {exc}"
+
+    def _execute_turn(
+        self,
+        calls: list[ToolCall],
+        *,
+        actor: str,
+        capabilities: Any = None,
+        loop_ctx: dict[str, Any] | None = None,
+        iteration: int = 0,
+    ) -> list[str]:
+        """Execute one turn's calls, observations in original call order.
+
+        Sequential by default (order preserved, tool B sees tool A's
+        result next turn). With ``parallel_per_turn=True`` the calls run
+        concurrently in the pool — smolagents ToolCallingAgent style —
+        which suits independent lookups.
+        """
+        if not self.parallel_per_turn or len(calls) < 2:
+            out: list[str] = []
+            for call in calls:
+                self._emit("tool_start", iteration=iteration,
+                           tool_name=call.name)
+                obs = self._execute(
+                    call, actor=actor, capabilities=capabilities,
+                    loop_ctx=loop_ctx)
+                self._emit("tool_end", iteration=iteration,
+                           tool_name=call.name,
+                           detail=obs[:120].replace("\n", " "))
+                out.append(obs)
+            return out
+        # Parallel: submit _invoke directly (never _execute — that would
+        # nest pool submissions and deadlock the 4-worker executor).
+        pending = [
+            (call, self._pool.submit(
+                self._invoke, call, actor=actor,
+                capabilities=capabilities, loop_ctx=loop_ctx))
+            for call in calls
+        ]
+        for call, _ in pending:
+            self._emit("tool_start", iteration=iteration, tool_name=call.name)
+        out = []
+        for call, fut in pending:
+            try:
+                obs = fut.result(timeout=self.tool_timeout_s)
+            except FuturesTimeout:
+                self._note_tool_weakness(call.name, "timeout")
+                obs = (f"[tool error] '{call.name}' timed out after "
+                       f"{self.tool_timeout_s:.0f}s.")
+            except Exception as exc:  # noqa: BLE001
+                self._note_tool_weakness(call.name, f"crashed: {exc}")
+                obs = f"[tool error] '{call.name}' crashed: {exc}"
+            self._emit("tool_end", iteration=iteration, tool_name=call.name,
+                       detail=str(obs)[:120].replace("\n", " "))
+            out.append(obs)
+        return out
 
     def _note_tool_weakness(self, tool_name: str, error: str) -> None:
         """Feed tool failures into weakness detection. Never breaks the loop."""
@@ -483,6 +614,10 @@ class ToolCallingLoop:
         degraded = False
         degrade_note = ""
         model_name = ""
+        #: Stall detection: the same (tool, args) repeated back-to-back means
+        #: the model is stuck. Durable-agent practice: stop burning budget
+        #: and degrade honestly instead.
+        recent_sigs: list[str] = []
 
         for iteration in range(1, self.max_iterations + 1):
             elapsed = time.time() - started
@@ -492,6 +627,7 @@ class ToolCallingLoop:
                     f"after {iteration - 1} iterations")
                 break
 
+            self._emit("turn_start", iteration=iteration)
             step_started = time.perf_counter()
             try:
                 resp = self.llm.chat(
@@ -530,22 +666,48 @@ class ToolCallingLoop:
                 # No tool calls: the model's text IS the final answer.
                 trace.append(step)
                 answer = _strip_tool_blocks(text).strip()
-                return ToolLoopResult(
+                result = ToolLoopResult(
                     answer=answer or "(empty response)",
                     tools_used=tools_used, iterations=iteration,
                     trace=trace, degraded=degraded,
                     degrade_note=degrade_note, model=model_name)
+                self._emit("final", iteration=iteration,
+                           detail=f"answer, {len(answer)} chars")
+                return result
+
+            # Stall detection: identical calls back-to-back = stuck model.
+            sigs = [_call_signature(c) for c in calls]
+            recent_sigs = (recent_sigs + sigs)[-_STALL_REPEATS:]
+            if (len(recent_sigs) == _STALL_REPEATS
+                    and len(set(recent_sigs)) == 1):
+                stall = calls[-1]
+                self._emit("stalled", iteration=iteration,
+                          tool_name=stall.name,
+                          detail=f"same call repeated {_STALL_REPEATS}x")
+                trace.append(step)
+                result = ToolLoopResult(
+                    answer=("I got stuck repeating the same tool call "
+                            f"('{stall.name}') — stopping instead of "
+                            "burning more budget."),
+                    tools_used=tools_used, iterations=iteration,
+                    trace=trace, degraded=True,
+                    degrade_note=(f"stall: '{stall.name}' repeated "
+                                  f"{_STALL_REPEATS}x consecutively"),
+                    model=model_name, ok=False,
+                    error="stall: repeated identical tool call")
+                self._emit("final", iteration=iteration, detail="stalled")
+                return result
 
             # Execute tools, feed observations back.
             messages.append(Message.assistant(text))
-            observations: list[str] = []
-            for call in calls:
-                obs = self._execute(
-                    call, actor=actor, capabilities=capabilities,
-                    loop_ctx=loop_ctx)
+            observations = self._execute_turn(
+                calls, actor=actor, capabilities=capabilities,
+                loop_ctx=loop_ctx, iteration=iteration)
+            for call, obs in zip(calls, observations):
                 tools_used.append(call.name)
-                observations.append(obs)
                 step.observations.append(obs[:500])
+            self._emit("turn_end", iteration=iteration,
+                       detail=f"{len(calls)} tool(s)")
             trace.append(step)
 
             obs_block = "\n\n".join(
@@ -561,7 +723,7 @@ class ToolCallingLoop:
                 f"{obs_block}"))
 
         # Budget exhausted without a final answer.
-        return ToolLoopResult(
+        result = ToolLoopResult(
             answer="(ran out of iterations before finishing)",
             tools_used=tools_used, iterations=self.max_iterations,
             trace=trace, degraded=True,
@@ -570,6 +732,9 @@ class ToolCallingLoop:
                 f"used: {', '.join(tools_used) or 'none'}"),
             model=model_name, ok=False,
             error="iteration budget exhausted")
+        self._emit("final", iteration=self.max_iterations,
+                   detail="budget exhausted")
+        return result
 
     def audit_reachability(
         self, capabilities: Any = None,
@@ -596,3 +761,42 @@ class ToolCallingLoop:
         missing = sorted(names - listed)
         return {"total": len(names), "listed": len(listed),
                 "missing": missing}
+
+
+def render_transcript(result: ToolLoopResult, *, max_obs_chars: int = 300) -> str:
+    """Render a run's trace as human-readable markdown.
+
+    The model's thinking is the narrative; tool calls are compact lines
+    with truncated observations. Designed for chat display — this is what
+    the user sees when they ask "what did you do?".
+    """
+    from ..render import ICONS, banner, bar, bullets, kv, truncate
+
+    lines = [banner("Tool loop", ICONS["tool"])]
+    head = {
+        "iterations": result.iterations,
+        "tools used": ", ".join(result.tools_used) or "none",
+        "model": result.model or "—",
+        "status": ("degraded — " + result.degrade_note) if result.degraded
+                  else ("failed — " + result.error if not result.ok else "ok"),
+    }
+    lines.append(kv(head.items()))
+    for step in result.trace:
+        lines.append("")
+        lines.append(f"**Turn {step.iteration}** "
+                     f"({step.latency_ms:.0f} ms)")
+        thought = _strip_tool_blocks(step.model_text).strip()
+        if thought:
+            lines.append(truncate(thought, 500))
+        for call in step.tool_calls:
+            arg_preview = truncate(
+                ", ".join(f"{k}={truncate(str(v), 40)}"
+                          for k, v in call.args.items()), 90)
+            lines.append(f"`{call.name}`({arg_preview})")
+        for obs in step.observations:
+            icon = (ICONS["fail"] if "[tool error]" in obs
+                    or "[tool failed]" in obs else ICONS["ok"])
+            lines.append(f"{icon} {truncate(obs, max_obs_chars)}")
+    lines.append("")
+    lines.append(f"**Answer:** {truncate(result.answer, 800)}")
+    return "\n".join(lines)

@@ -540,6 +540,213 @@ class NativePipeline:
             return self._generate_inner(prompt, cfg,
                                         conditioning=conditioning)
 
+    # ------------------------------------------------------------------
+    # diffusers-pattern API: components, scheduler swap, adapter stack,
+    # refine (img2img), chain (t2i → refine → upscale)
+    # ------------------------------------------------------------------
+
+    def components(self) -> dict:
+        """Reusable component dict (diffusers ``.components`` pattern).
+
+        Share heavy parts across modes instead of reloading: build an
+        img2img/refine or inpaint pipeline from the same UNet +
+        text encoder via :meth:`from_components`.
+        """
+        return {"unet": self.unet, "text_encoder": self.text_encoder,
+                "timesteps": self.timesteps, "schedule": self.schedule_name,
+                "device": self.device,
+                "controlnets": dict(self.controlnets)}
+
+    @classmethod
+    def from_components(cls, components: dict) -> "NativePipeline":
+        """Rebuild a pipeline sharing another pipeline's components."""
+        pipe = cls(components["unet"], components["text_encoder"],
+                   timesteps=components.get("timesteps", 1000),
+                   schedule=components.get("schedule", "linear"),
+                   device=components.get("device", ""))
+        for kind, net in (components.get("controlnets") or {}).items():
+            pipe.controlnets[kind] = net
+        return pipe
+
+    def swap_schedule(self, schedule: str) -> str:
+        """Swap the noise schedule (linear|cosine) without rebuilding.
+
+        Returns the previous schedule name.
+        """
+        if schedule not in ("linear", "cosine"):
+            raise ImgGenError(
+                f"unknown schedule {schedule!r}; use linear|cosine")
+        prev = self.schedule_name
+        self.schedule_name = schedule
+        return prev
+
+    # -- dynamic adapter (LoRA) stack -----------------------------------
+    # Native note: the UNet carries ONE LoRA slot (inject_lora wraps in
+    # place). The stack is a registry of named weight sets; one is
+    # active at a time — load/unload/switch is instant and honest,
+    # like diffusers' load_lora_weights/unload_lora_weights.
+
+    def load_adapter(self, name: str, state_dict: dict | None = None,
+                     r: int = 8, alpha: float = 16.0,
+                     weight: float = 1.0) -> dict:
+        """Load a LoRA adapter by name (dynamic, switchable).
+
+        Injects LoRA into the UNet on first use, optionally loads a
+        state dict into the A/B params, and activates it at ``weight``.
+        Returns {"name", "modules", "weight"}.
+        """
+        if not TORCH_AVAILABLE:
+            raise ImgGenError("adapters need torch")
+        from .lora import inject_lora
+        if not hasattr(self, "_adapters"):
+            self._adapters = {}
+            self._active_adapter = None
+        wrapped = inject_lora(self.unet, r=r, alpha=alpha)
+        if state_dict:
+            own = self.unet.state_dict()
+            loaded = 0
+            for k, v in state_dict.items():
+                if k in own and own[k].shape == v.shape:
+                    own[k].copy_(v)
+                    loaded += 1
+        else:
+            loaded = 0
+        self._adapters[name] = {"r": r, "alpha": alpha, "weight": weight,
+                                "modules": wrapped, "loaded": loaded}
+        self.set_adapter_weight(name, weight)
+        self._active_adapter = name
+        return {"name": name, "modules": wrapped, "weight": weight,
+                "loaded_params": loaded}
+
+    def set_adapter_weight(self, name: str, weight: float) -> None:
+        """Scale the active adapter's influence (0.0 = effectively off)."""
+        if not TORCH_AVAILABLE:
+            raise ImgGenError("adapters need torch")
+        from .lora import LoRALinear, LoRAConv2d
+        if not hasattr(self, "_adapters") or name not in self._adapters:
+            raise ImgGenError(f"no adapter {name!r} loaded")
+        base_scaling = self._adapters[name]["alpha"] / max(
+            1, self._adapters[name]["r"])
+        for mod in self.unet.modules():
+            if isinstance(mod, (LoRALinear, LoRAConv2d)):
+                mod.scaling = base_scaling * float(weight)
+        self._adapters[name]["weight"] = float(weight)
+        self._active_adapter = name if weight > 0 else self._active_adapter
+
+    def unload_adapter(self, name: str) -> None:
+        """Deactivate an adapter (zero its influence, keep weights)."""
+        self.set_adapter_weight(name, 0.0)
+        if hasattr(self, "_adapters"):
+            self._adapters[name]["weight"] = 0.0
+        if getattr(self, "_active_adapter", None) == name:
+            self._active_adapter = None
+
+    def list_adapters(self) -> list[dict]:
+        """All adapters in the stack with their live weights."""
+        return [{"name": n, **{k: v for k, v in a.items()
+                               if k != "modules"},
+                 "n_modules": len(a.get("modules", []))}
+                for n, a in getattr(self, "_adapters", {}).items()]
+
+    # -- refine (img2img) + chain ----------------------------------------
+
+    def refine(self, image, prompt: str,
+               cfg: "PipelineConfig | None" = None,
+               strength: float = 0.6,
+               conditioning: list[ControlCondition] | None = None
+               ) -> list:
+        """Image-to-image: denoise from a noised version of ``image``.
+
+        ``strength`` 0..1 = how much of the original to keep
+        (ComfyUI denoise semantics, inverted): 0.2 = light touch-up,
+        0.8 = near-regeneration guided by the prompt.
+        """
+        if not TORCH_AVAILABLE:
+            raise ImgGenError("refine needs torch")
+        from PIL import Image
+        import numpy as np
+        cfg = cfg or PipelineConfig()
+        strength = max(0.05, min(0.95, float(strength)))
+        sched = self._scheduler(cfg.sampler)
+        if isinstance(image, Image.Image):
+            pil = image.convert("RGB").resize((cfg.width, cfg.height))
+        else:
+            arr = np.asarray(image)
+            pil = Image.fromarray(
+                np.clip(arr, 0, 255).astype(np.uint8)).convert(
+                    "RGB").resize((cfg.width, cfg.height))
+        x0 = (torch.from_numpy(np.asarray(pil).astype("float32") / 255.0)
+              .permute(2, 0, 1).unsqueeze(0).to(self.device) * 2.0 - 1.0)
+        # start timestep from strength, then run the normal loop
+        t_start = int(strength * (self.timesteps - 1))
+        if cfg.sampler == "ddim":
+            ts = torch.linspace(t_start, 0, cfg.steps,
+                                dtype=torch.long)
+        else:
+            ts = torch.arange(t_start, -1, -1,
+                              dtype=torch.long)[:cfg.steps]
+        ctx = self.text_encoder([prompt]).to(self.device)
+        uncond = self.text_encoder(
+            [cfg.negative_prompt or ""]).to(self.device)
+        conds = self._check_conditioning(conditioning)
+        cond_tensors = [(c, self._condition_tensor(c, cfg.height, cfg.width))
+                        for c in conds]
+        g = torch.Generator(device=self.device)
+        if cfg.seed is not None:
+            g.manual_seed(cfg.seed)
+        noise = torch.randn(x0.shape, generator=g, device=self.device,
+                            dtype=torch.float32)
+        xt = sched.q_sample(x0, t_start, noise=noise)
+        with torch.no_grad():
+            for ti in ts:
+                t = ti.item()
+                t_batch = torch.full((2,), t, dtype=torch.long,
+                                     device=self.device)
+                x_in = torch.cat([xt, xt], dim=0)
+                context = torch.cat([ctx, uncond], dim=0)
+                eps = self.unet(x_in, t_batch, context)
+                eps_cond, eps_uncond = eps.chunk(2)
+                for c, cmap in cond_tensors:
+                    residual = self.controlnets[c.kind](
+                        xt, t_batch[:1], ctx, cmap)
+                    eps_cond = eps_cond + c.strength * residual
+                eps = (eps_uncond
+                       + cfg.guidance_scale * (eps_cond - eps_uncond))
+                xt = sched.p_sample(lambda _x, _t: eps, xt, t,
+                                    eta=cfg.eta)
+            return [self._to_pil(xt[0])]
+
+    def chain(self, prompt: str, cfg: "PipelineConfig | None" = None,
+              refine_strength: float = 0.45, upscale: float = 0.0,
+              conditioning: list[ControlCondition] | None = None
+              ) -> dict:
+        """One call, the working artist's sequence (ComfyUI pattern):
+
+        text-to-image → img2img refine → optional diffusion upscale.
+        Returns {"stages": [...], "final": PIL.Image}.
+        """
+        from .upscale import upscale_diffusion
+        cfg = cfg or PipelineConfig()
+        stages = []
+        imgs = self.generate(prompt, cfg, conditioning=conditioning)
+        stages.append({"stage": "txt2img", "image": imgs[0]})
+        if refine_strength > 0:
+            imgs = self.refine(imgs[0], prompt, cfg,
+                               strength=refine_strength,
+                               conditioning=conditioning)
+            stages.append({"stage": "refine", "strength": refine_strength,
+                           "image": imgs[0]})
+        if upscale and upscale > 1.0:
+            up = upscale_diffusion(self, imgs[0], prompt,
+                                   scale=float(upscale))
+            stages.append({"stage": "upscale", "scale": float(upscale),
+                           "image": up})
+            final = up
+        else:
+            final = imgs[0]
+        return {"stages": stages, "final": final,
+                "prompt": prompt, "seed": cfg.seed}
+
     def _generate_inner(self, prompt: str | list[str],
                         cfg: "PipelineConfig | None" = None,
                         conditioning=None) -> list:

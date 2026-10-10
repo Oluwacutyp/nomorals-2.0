@@ -25,7 +25,8 @@ from ..core.logging_setup import get_logger
 from ..core.policy import CapabilitySet
 from ..core.result import Err, Ok, Outcome
 
-__all__ = ["ToolRegistry", "ToolSpec", "ToolHealth", "sanitize_tool_description"]
+__all__ = ["ToolRegistry", "ToolSpec", "ToolHealth", "sanitize_tool_description",
+           "annotations_for_kind"]
 
 _log = get_logger(__name__)
 
@@ -99,15 +100,85 @@ class ToolSpec:
     version: str = ""
     deprecated: bool = False
     replaced_by: str = ""
+    # ── MCP-style surface (mined: modelcontextprotocol.io tool annotations) ──
+    # Human-readable display name; defaults to name.
+    title: str = ""
+    # Honest behavior flags hosts can gate on: read_only, destructive,
+    # idempotent, open_world. Defaults are derived from ``kind`` when not
+    # given explicitly (see annotations_for_kind).
+    annotations: dict[str, bool] = field(default_factory=dict)
+    # JSON schema describing the tool's result shape (optional but
+    # recommended — models use it to parse structured output).
+    output_schema: dict[str, Any] = field(default_factory=dict)
+    # Short usage examples shown to the model.
+    examples: list[str] = field(default_factory=list)
+    # Long string results are truncated past this many chars, with an
+    # explicit notice (MCP rule: never truncate silently).
+    max_result_chars: int = 200_000
+
+    def resolved_annotations(self) -> dict[str, bool]:
+        """Explicit annotations merged over kind-derived defaults."""
+        merged = annotations_for_kind(self.kind)
+        merged.update({k: bool(v) for k, v in self.annotations.items()})
+        return merged
 
     def schema(self) -> dict[str, Any]:
-        """JSON-schema-ish description, for feeding a model a tool list."""
-        return {
+        """JSON-schema-ish description, for feeding a model a tool list.
+
+        Tightened per MCP best practice: every property carries its
+        inferred type, ``required`` is exact, and
+        ``additionalProperties`` is false so the model doesn't invent
+        parameters.
+        """
+        params = dict(self.parameters or {})
+        required = sorted(
+            name for name, spec in params.items()
+            if isinstance(spec, dict) and spec.get("required"))
+        properties = {}
+        for name, spec in params.items():
+            entry = dict(spec) if isinstance(spec, dict) else {"type": "any"}
+            entry.pop("required", None)
+            entry.setdefault("description", name.replace("_", " "))
+            properties[name] = entry
+        out: dict[str, Any] = {
             "name": self.name,
+            "title": self.title or self.name,
             "description": self.description,
             "capability": self.capability,
-            "parameters": self.parameters,
+            "annotations": self.resolved_annotations(),
+            "parameters": {
+                "type": "object",
+                "properties": properties,
+                "required": required,
+                "additionalProperties": False,
+            },
         }
+        if self.output_schema:
+            out["output_schema"] = self.output_schema
+        if self.examples:
+            out["examples"] = list(self.examples)
+        return out
+
+
+def annotations_for_kind(kind: str) -> dict[str, bool]:
+    """Sensible MCP-style behavior flags derived from a tool's kind.
+
+    Explicit per-tool ``annotations`` always win over these defaults.
+    """
+    kind = (kind or "").lower()
+    if kind in {"query", "read", "search", "list"}:
+        return {"read_only": True, "destructive": False,
+                "idempotent": True, "open_world": False}
+    if kind in {"exec", "write", "delete", "mutate"}:
+        return {"read_only": False, "destructive": kind == "delete",
+                "idempotent": False, "open_world": False}
+    if kind in {"net", "web", "external"}:
+        return {"read_only": False, "destructive": False,
+                "idempotent": True, "open_world": True}
+    # "io" and anything unknown: conservative — not read-only, not
+    # claimed idempotent, may touch the outside world.
+    return {"read_only": False, "destructive": False,
+            "idempotent": False, "open_world": True}
 
 
 @dataclass
@@ -155,6 +226,10 @@ class ToolRegistry:
         self._health: dict[str, ToolHealth] = {}
         self._health_probes: dict[str, tuple[Callable[[], Any], float]] = {}
         self._deprecated_warned: set[str] = set()
+        # Idempotency cache: (tool name, idempotency_key) -> Outcome.
+        # Bounded so a long-lived registry can't grow without limit.
+        self._idempotency_cache: dict[tuple[str, str], Outcome[Any]] = {}
+        self._idempotency_limit = 512
 
     # ── registration ─────────────────────────────────────────────────────────
     def register(
@@ -170,6 +245,11 @@ class ToolRegistry:
         version: str = "",
         deprecated: bool = False,
         replaced_by: str = "",
+        title: str = "",
+        annotations: dict[str, bool] | None = None,
+        output_schema: dict[str, Any] | None = None,
+        examples: list[str] | None = None,
+        max_result_chars: int = 200_000,
     ) -> Callable[..., Any]:
         """Register a tool, usable directly or as a decorator."""
 
@@ -191,6 +271,11 @@ class ToolRegistry:
                 version=version,
                 deprecated=deprecated,
                 replaced_by=replaced_by,
+                title=title,
+                annotations=annotations or {},
+                output_schema=output_schema or {},
+                examples=examples or [],
+                max_result_chars=max_result_chars,
             )
             self._tools[name] = spec
             return func
@@ -532,10 +617,14 @@ class ToolRegistry:
         health = self._health.get(name)
         return {
             "name": spec.name,
+            "title": spec.title or spec.name,
             "description": spec.description,
             "capability": spec.capability,
             "confirm": spec.confirm,
             "kind": spec.kind,
+            "annotations": spec.resolved_annotations(),
+            "output_schema": spec.output_schema,
+            "examples": spec.examples,
             "version": spec.version,
             "deprecated": spec.deprecated,
             "replaced_by": spec.replaced_by,
@@ -686,19 +775,33 @@ class ToolRegistry:
         actor: str = "system",
         capabilities: CapabilitySet | None = None,
         confirmation: str | None = None,
+        idempotency_key: str | None = None,
         **kwargs: Any,
     ) -> Outcome[Any]:
-        """Check the capability, run the tool, and audit the call."""
+        """Check the capability, run the tool, and audit the call.
+
+        ``idempotency_key`` makes a call safely repeatable: when given,
+        a previous successful result for the same (tool, key) is
+        returned from the cache instead of re-executing — the MCP
+        two-step rule for destructive work (preview, then commit with a
+        key so a retry can't double-apply).
+        """
         # Reject extra positional arguments with a proper error outcome
         if args:
             return Err(ToolError(
                 f"call() takes 1 positional argument but {1 + len(args)} were given; "
                 f"pass tool parameters as keywords"
             ))
-        
+
         spec = self._tools.get(name)
         if spec is None:
-            return Err(ToolNotFound(f"unknown tool {name!r}; available: {self.names()[:20]}"))
+            return Err(ToolNotFound(_unknown_tool_message(name, self._tools)))
+        if idempotency_key:
+            cached = self._idempotency_cache.get((name, idempotency_key))
+            if cached is not None:
+                self._audit(name, actor, spec.capability, "allow", kwargs,
+                            0.0, ok=True)
+                return cached
         if spec.deprecated and name not in self._deprecated_warned:
             with self._lock:
                 self._deprecated_warned.add(name)
@@ -744,7 +847,10 @@ class ToolRegistry:
         elapsed = time.perf_counter() - started
         self._audit(name, actor, spec.capability, "allow", kwargs, elapsed, ok=True)
         self._bump_stats(calls=1, seconds=elapsed)
-        return Ok(result)
+        outcome: Outcome[Any] = Ok(_maybe_truncate(result, spec.max_result_chars))
+        if idempotency_key:
+            self._remember_idempotent(name, idempotency_key, outcome)
+        return outcome
 
     def _record_failure_ledger(self, tool: str, message: str,
                                 detail: str) -> None:
@@ -782,6 +888,15 @@ class ToolRegistry:
         with self._lock:
             for key, delta in deltas.items():
                 self.stats[key] = self.stats.get(key, 0.0) + delta
+
+    def _remember_idempotent(self, name: str, key: str,
+                             outcome: Outcome[Any]) -> None:
+        """Cache a successful idempotent result (bounded)."""
+        with self._lock:
+            self._idempotency_cache[(name, key)] = outcome
+            while len(self._idempotency_cache) > self._idempotency_limit:
+                self._idempotency_cache.pop(
+                    next(iter(self._idempotency_cache)))
 
     def call_many(self, calls: list[tuple[str, dict[str, Any]]],
                   *, max_workers: int = 1, **common: Any) -> list[Outcome[Any]]:
@@ -924,6 +1039,34 @@ def _digest(kwargs: dict[str, Any]) -> str:
     except (TypeError, ValueError):
         payload = repr(kwargs)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+
+
+def _unknown_tool_message(name: str, tools: dict[str, ToolSpec]) -> str:
+    """Teachable 'unknown tool' error: suggest close names and the
+    discovery tools instead of dumping the whole catalog."""
+    import difflib
+
+    candidates = difflib.get_close_matches(name, tools.keys(), n=5, cutoff=0.5)
+    msg = f"unknown tool {name!r}."
+    if candidates:
+        msg += f" Did you mean: {', '.join(candidates)}?"
+    msg += (" Use 'tools_list' to browse the catalog or describe() for one"
+            " tool's schema.")
+    return msg
+
+
+def _maybe_truncate(result: Any, limit: int) -> Any:
+    """Truncate over-long string results WITH an explicit notice.
+
+    MCP rule: never truncate silently — the model must know output was
+    cut so it can ask for the rest (pagination, offsets) instead of
+    reasoning from a fragment as if it were complete.
+    """
+    if not isinstance(result, str) or limit <= 0 or len(result) <= limit:
+        return result
+    notice = (f"\n\n[…truncated: showing {limit:,} of {len(result):,} chars — "
+              f"narrow the request or page through the source for the rest]")
+    return result[:limit] + notice
 
 
 def _infer_parameters(fn: Callable[..., Any]) -> dict[str, Any]:

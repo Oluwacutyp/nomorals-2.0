@@ -71,6 +71,9 @@ __all__ = [
     "verify_format_preserved",
     "write_text_verified",
     "apply_unified_diff",
+    "detect_placeholders",
+    "parse_search_replace_blocks",
+    "apply_search_replace_blocks",
 ]
 
 _log = get_logger(__name__)
@@ -306,6 +309,280 @@ def write_text_verified(path: str | Path, original: str, modified: str) -> None:
     except EditSyntaxError:
         path.write_text(original, encoding="utf-8")
         raise
+
+
+# ── flexible matching + SEARCH/REPLACE blocks (mined: Aider edit formats) ────
+# Aider's benchmarks: flexible patching (normalize hunks, relative leading
+# whitespace, sub-hunk splitting) is worth ~9x on apply success. The strict
+# exact matcher above stays the first attempt; these are the fallbacks, plus
+# the aider-native block format LLMs emit most reliably.
+
+
+def _normalize_ws(text: str) -> str:
+    """Collapse every whitespace run to a single space (for fuzzy match)."""
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _normalize_ws_mapped(text: str) -> tuple[str, list[int]]:
+    """``_normalize_ws`` plus a map: normalized index -> original index."""
+    out: list[str] = []
+    mapping: list[int] = []
+    i, n = 0, len(text)
+    while i < n and text[i] in " \t\r\n\f\v":
+        i += 1  # strip leading
+    while i < n:
+        ch = text[i]
+        if ch in " \t\r\n\f\v":
+            j = i
+            while j < n and text[j] in " \t\r\n\f\v":
+                j += 1
+            if j < n:  # not trailing - emit the single collapsed space
+                out.append(" ")
+                mapping.append(i)
+            i = j
+        else:
+            out.append(ch)
+            mapping.append(i)
+            i += 1
+    return "".join(out), mapping
+
+
+def _locate_flexible(text: str, needle: str, *,
+                     label: str = "edit") -> tuple[int, int, str]:
+    """Locate ``needle`` in ``text`` with Aider-style flexible fallbacks.
+
+    Strategies, in order: ``exact`` -> ``whitespace`` (every whitespace
+    run collapsed to one space - this also absorbs uniform re-indentation,
+    since leading runs collapse too). Returns (start, end, strategy).
+    Raises :class:`EditConflictError` unless exactly one strategy yields
+    exactly one match; the error teaches the model what to fix (closest
+    matching line shown).
+    """
+    if not needle:
+        raise EditConflictError(f"{label}: old_text is empty")
+    # 1. exact, unique
+    first = text.find(needle)
+    if first >= 0 and text.find(needle, first + 1) < 0:
+        return (first, first + len(needle), "exact")
+    if first >= 0:
+        raise EditConflictError(
+            f"{label}: old_text occurs {text.count(needle)} times; it must "
+            "be unique - include more surrounding context")
+    # 2. whitespace-normalized (unique), mapped back to original offsets
+    norm_text, mapping = _normalize_ws_mapped(text)
+    norm_needle = _normalize_ws(needle)
+    if norm_needle:
+        matches = []
+        start = 0
+        while True:
+            idx = norm_text.find(norm_needle, start)
+            if idx < 0:
+                break
+            matches.append(idx)
+            if len(matches) > 1:
+                break
+            start = idx + 1
+        if len(matches) == 1:
+            m = matches[0]
+            orig_start = mapping[m]
+            orig_end = mapping[m + len(norm_needle) - 1] + 1
+            return (orig_start, orig_end, "whitespace")
+        if len(matches) > 1:
+            raise EditConflictError(
+                f"{label}: old_text matches {len(matches)} blocks once "
+                "whitespace is normalized; it must be unique - include more "
+                "surrounding context")
+    # teachable failure: show the closest line we DID find
+    import difflib as _difflib
+
+    needle_lines = needle.strip().splitlines()[:4]
+    hint = ""
+    if needle_lines:
+        best: tuple[float, str] = (0.0, "")
+        for line in text.splitlines():
+            ratio = _difflib.SequenceMatcher(
+                None, needle_lines[0].strip(), line.strip()).ratio()
+            if ratio > best[0]:
+                best = (ratio, line.strip())
+        if best[0] > 0.5:
+            hint = (f" Closest line in the file ({best[0]:.0%} similar): "
+                    f"{best[1][:100]!r}.")
+    raise EditConflictError(
+        f"{label}: old_text not found (tried exact and whitespace-normalized "
+        f"matching).{hint} Re-read the file and copy the block "
+        "character-for-character, or use a smaller block.")
+
+
+
+
+_SEARCH_RE = re.compile(
+    r"^(?P<path>[^\s`][^\n`]*?)\s*\n"
+    r"```[^\n]*\n"
+    r"<<<<<<< SEARCH\s*\n"
+    r"(?P<search>.*?)"
+    r"^=======\s*$\n"
+    r"(?P<replace>.*?)"
+    r"^>>>>>>> REPLACE\s*$\n?"
+    r"```",
+    re.MULTILINE | re.DOTALL,
+)
+
+# Laziness placeholders models emit instead of real code (Aider measured
+# udiff cutting these 3x — we detect and reject them outright).
+_PLACEHOLDER_RES = (
+    re.compile(r"^\s*(#|//|--|;)\s*\.\.\.\s*(rest|remaining|code|other|etc)?",
+               re.IGNORECASE | re.MULTILINE),
+    re.compile(r"/\*\s*\.\.\.\s*(rest|remaining)?[^*]*\*/", re.IGNORECASE),
+    re.compile(r"^\s*\.\.\.\s*$", re.MULTILINE),
+    re.compile(r"\[\s*\.\.\.\s*(rest of .*?)?\]", re.IGNORECASE),
+)
+
+
+def detect_placeholders(text: str) -> list[str]:
+    """Return the laziness placeholders found in ``text`` (empty = clean).
+
+    Catches ``# ... rest of code ...``, ``// ...``, ``/* ... */``,
+    bare ``...`` lines and ``[... rest ...]`` — the shapes Aider's
+    benchmarks show models emit when being lazy.
+    """
+    found = []
+    for pat in _PLACEHOLDER_RES:
+        for match in pat.finditer(text or ""):
+            snippet = match.group(0).strip().splitlines()[0][:60]
+            if snippet not in found:
+                found.append(snippet)
+    return found
+
+
+def parse_search_replace_blocks(text: str) -> list[dict[str, str]]:
+    """Parse Aider-style SEARCH/REPLACE blocks from LLM output.
+
+    Format (file path on its own line, then a fenced block)::
+
+        path/to/file.py
+        ```
+        <<<<<<< SEARCH
+        old code
+        =======
+        new code
+        >>>>>>> REPLACE
+        ```
+
+    Returns ``[{"path", "search", "replace"}]``. An empty ``search``
+    means CREATE the file (Aider rule). Raises :class:`EditConflictError`
+    when no blocks are found.
+    """
+    blocks = []
+    for match in _SEARCH_RE.finditer(text or ""):
+        blocks.append({
+            "path": match.group("path").strip(),
+            "search": match.group("search"),
+            "replace": match.group("replace"),
+        })
+    if not blocks:
+        raise EditConflictError(
+            "no SEARCH/REPLACE blocks found — expected:\n"
+            "path/to/file.py\n```\n<<<<<<< SEARCH\n<old>\n=======\n<new>\n"
+            ">>>>>>> REPLACE\n```")
+    return blocks
+
+
+def apply_search_replace_blocks(
+    text: str,
+    root: str | Path,
+    *,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Apply :func:`parse_search_replace_blocks` output to files under root.
+
+    Each block: empty ``search`` creates the file; otherwise the search
+    block is located with :func:`_locate_flexible` (exact, then
+    whitespace-normalized) and replaced. Placeholder/laziness detection rejects blocks
+    whose replacement is ``...``-style filler. Python results are
+    compile-checked; everything is atomic per file (all-or-nothing).
+    """
+    root = Path(root)
+    blocks = parse_search_replace_blocks(text)
+    # group by file for atomicity
+    by_file: dict[str, list[dict[str, str]]] = {}
+    for block in blocks:
+        by_file.setdefault(block["path"], []).append(block)
+    diffs: list[str] = []
+    changed: list[str] = []
+    strategies: list[str] = []
+    for rel, file_blocks in by_file.items():
+        target = root / rel
+        if any(not b["search"].strip() for b in file_blocks):
+            create_blocks = [b for b in file_blocks if not b["search"].strip()]
+            if len(file_blocks) > 1:
+                raise EditConflictError(
+                    f"{rel}: a create-file block (empty SEARCH) cannot be "
+                    "mixed with edits to the same file")
+            body = create_blocks[0]["replace"]
+            placeholders = detect_placeholders(body)
+            if placeholders:
+                raise EditConflictError(
+                    f"{rel}: new file body looks like a laziness placeholder "
+                    f"({placeholders[0]!r}) — write the real code")
+            if dry_run:
+                diffs.append(f"--- /dev/null\n+++ b/{rel}\n@@ new file @@\n{body[:400]}")
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            original = ""
+            write_text_verified(target, original, body)
+            changed.append(rel)
+            diffs.append(f"--- /dev/null\n+++ b/{rel}\n(new file, {len(body)} chars)")
+            continue
+        if not target.is_file():
+            raise EditConflictError(f"{rel}: file does not exist (use an "
+                                    "empty SEARCH block to create it)")
+        original = target.read_text(encoding="utf-8", errors="ignore")
+        # Phase 1 — locate every SEARCH in the ORIGINAL (flexible match).
+        located: list[tuple[int, int, str, dict[str, str]]] = []
+        for i, block in enumerate(file_blocks):
+            placeholders = detect_placeholders(block["replace"])
+            if placeholders:
+                raise EditConflictError(
+                    f"{rel} block {i}: replacement looks like a laziness "
+                    f"placeholder ({placeholders[0]!r}) — write the real code")
+            if block["search"].strip() == block["replace"].strip():
+                raise EditConflictError(
+                    f"{rel} block {i}: SEARCH and REPLACE are identical — "
+                    "nothing would change")
+            start, end, strategy = _locate_flexible(
+                original, block["search"], label=f"{rel} block {i}")
+            strategies.append(strategy)
+            located.append((start, end, strategy, block))
+        # Phase 2 — reject overlapping spans before writing anything.
+        order = sorted(range(len(located)), key=lambda i: located[i][0])
+        for a, b in zip(order, order[1:]):
+            s1, e1 = located[a][0], located[a][1]
+            s2, e2 = located[b][0], located[b][1]
+            if max(s1, s2) < min(e1, e2):
+                raise EditConflictError(
+                    f"{rel}: blocks {a} and {b} overlap — disambiguate the "
+                    "SEARCH blocks")
+        # Phase 3 — apply back-to-front so earlier offsets stay valid.
+        buffer = original
+        for start, end, _strategy, block in sorted(
+                located, key=lambda t: t[0], reverse=True):
+            buffer = buffer[:start] + block["replace"] + buffer[end:]
+        spans = [(s, e) for s, e, _, _ in located]
+        if not verify_format_preserved(original, buffer, spans):
+            raise EditConflictError(
+                f"{rel}: format-preservation check failed; file left untouched")
+        diff = "".join(difflib.unified_diff(
+            original.splitlines(keepends=True),
+            buffer.splitlines(keepends=True),
+            fromfile=f"a/{rel}", tofile=f"b/{rel}"))
+        if dry_run:
+            diffs.append(diff)
+            continue
+        write_text_verified(target, original, buffer)
+        changed.append(rel)
+        diffs.append(diff)
+    return {"changed": changed, "diffs": diffs, "blocks": len(blocks),
+            "strategies": strategies}
 
 
 # ── unified diff engine (canonical home: nomorals.core.diff) ───────────────
@@ -760,11 +1037,12 @@ Return the COMPLETE modified file contents in a code block. Include ALL code, no
         *,
         dry_run: bool = False,
     ) -> str:
-        """Exact-text surgical replacement, no LLM involved.
+        """Surgical replacement with flexible matching, no LLM involved.
 
         The ``old_text`` must occur exactly once in the file; zero or
         multiple matches raise :class:`ValueError` so a sloppy match can
-        never silently edit the wrong place. Returns the unified diff.
+        never silently edit the wrong place. Matching is flexible
+        (exact, then whitespace-tolerant). Returns the unified diff.
 
         If the file is Python, the result is compile-checked; on SyntaxError
         the original content is restored and :class:`EditSyntaxError` is
@@ -778,16 +1056,16 @@ Return the COMPLETE modified file contents in a code block. Include ALL code, no
             raise FileNotFoundError(f"File not found: {file_path}")
 
         original = full_path.read_text(encoding="utf-8", errors="ignore")
-        occurrences = original.count(old_text)
-        if occurrences == 0:
-            raise ValueError(f"old_text not found in {file_path}")
-        if occurrences > 1:
-            raise ValueError(
-                f"old_text occurs {occurrences} times in {file_path}; "
-                "it must be unique — include more surrounding context"
-            )
+        try:
+            start, end, strategy = _locate_flexible(
+                original, old_text, label=file_path)
+        except EditConflictError as e:
+            raise ValueError(str(e)) from e
+        if strategy != "exact":
+            _log.info("surgical_replace %s matched via %s strategy",
+                      file_path, strategy)
 
-        modified = original.replace(old_text, new_text, 1)
+        modified = original[:start] + new_text + original[end:]
         diff = self._generate_diff(original, modified, file_path)
         if dry_run:
             return diff
@@ -928,9 +1206,11 @@ def register(registry: Any) -> None:
 
     @registry.register(
         "edit_file",
-        description=("Surgical exact-text replacement: old_text must occur exactly "
-                     "once in the file. No LLM involved."),
+        description=("Surgical text replacement: old_text must occur exactly "
+                     "once in the file (whitespace-tolerant matching). "
+                     "No LLM involved."),
         capability=Capability.FS_WRITE,
+        kind="write",
     )
     def edit_file(path: str, old_text: str, new_text: str) -> dict[str, Any]:
         target = safe_path(context, path, must_exist=True)
@@ -1052,3 +1332,28 @@ def register(registry: Any) -> None:
         except ValueError:
             rel = str(target)
         return git_diff(None, [rel], str(root))
+
+    @registry.register(
+        "apply_search_replace",
+        description=(
+            "Apply Aider-style SEARCH/REPLACE edit blocks (the format LLMs "
+            "emit most reliably). Each block names a file, gives the old "
+            "block between <<<<<<< SEARCH / =======, and the new block "
+            "before >>>>>>> REPLACE. Matching is flexible "
+            "(whitespace-tolerant); an empty SEARCH creates the file. "
+            "Laziness placeholders ('... rest of code ...') are rejected. "
+            "Atomic per file; Python results are compile-checked."),
+        capability=Capability.FS_WRITE,
+        kind="write",
+        annotations={"destructive": False, "idempotent": False,
+                     "read_only": False, "open_world": False},
+        examples=["apply_search_replace(blocks=\"src/a.py\\n```\\n"
+                  "<<<<<<< SEARCH\\nold()\\n=======\\nnew()\\n"
+                  ">>>>>>> REPLACE\\n```\")"],
+    )
+    def apply_search_replace(blocks: str, dry_run: bool = False) -> dict[str, Any]:
+        root = _workspace_root(context)
+        try:
+            return apply_search_replace_blocks(blocks, root, dry_run=dry_run)
+        except EditConflictError as e:
+            raise ToolError(str(e)) from e

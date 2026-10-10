@@ -45,6 +45,8 @@ __all__ = [
     "PlanStep",
     "ExecutionPlan",
     "ExecutionResult",
+    "StepResult",
+    "ReplanDecision",
 ]
 
 _log = get_logger(__name__)
@@ -74,6 +76,9 @@ class PlanStep:
     parameters: dict[str, Any] = field(default_factory=dict)
     depends_on: list[str] = field(default_factory=list)
     estimated_risk: str = "low"  # low, medium, high
+    # What the step should produce - the executor and replanner judge
+    # completion against this, not just "the command exited 0".
+    expected_output: str = ""
     
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -82,7 +87,13 @@ class PlanStep:
             "target": self.target,
             "description": self.description,
             "estimated_risk": self.estimated_risk,
+            "expected_output": self.expected_output,
         }
+
+    @property
+    def signature(self) -> str:
+        """Stable identity for loop detection."""
+        return f"{self.action}:{self.target}"
 
 
 @dataclass
@@ -117,6 +128,50 @@ class ExecutionPlan:
     @property
     def high_risk_steps(self) -> list[PlanStep]:
         return [s for s in self.steps if s.estimated_risk == "high"]
+
+
+@dataclass
+class StepResult:
+    """Result of executing a single plan step (LangGraph plan-and-execute)."""
+    
+    step_id: str
+    action: str = ""
+    target: str = ""
+    description: str = ""
+    output: str = ""
+    success: bool = True
+    error: str = ""
+    duration: float = 0.0
+    
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "step_id": self.step_id,
+            "action": self.action,
+            "target": self.target,
+            "description": self.description,
+            "output": self.output[:2000],
+            "success": self.success,
+            "error": self.error,
+            "duration": round(self.duration, 2),
+        }
+
+
+@dataclass
+class ReplanDecision:
+    """The replanner's verdict after a step: continue, replan, or finish."""
+    
+    action: str = "continue"  # continue | replan | finish
+    revised_steps: list["PlanStep"] = field(default_factory=list)
+    reasoning: str = ""
+    final_answer: str = ""
+    
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "action": self.action,
+            "revised_steps": [s.to_dict() for s in self.revised_steps],
+            "reasoning": self.reasoning,
+            "final_answer": self.final_answer,
+        }
 
 
 @dataclass

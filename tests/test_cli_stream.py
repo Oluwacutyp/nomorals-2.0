@@ -213,7 +213,7 @@ class TestStreamDispatchAndFacade(unittest.TestCase):
             )
         ).read()
         self.assertIn('_cmd_stream', src)
-        self.assertIn('args.command == "stream"', src)
+        self.assertIn('"stream": _CommandSpec(_cmd_stream)', src)
 
     def test_facade_exports_cmd_stream(self):
         self.assertTrue(hasattr(cli, "_cmd_stream"))

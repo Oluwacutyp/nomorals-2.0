@@ -904,3 +904,118 @@ def register(registry: Any) -> None:
             }
         except Exception as exc:  # noqa: BLE001
             return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+
+
+# ── plan diff + rendering ──────────────────────────────────────────────
+# When a plan is revised mid-run, the user should SEE what changed — not
+# re-read two dict dumps. diff_plans() gives added/removed/changed steps;
+# render_plan() is the god-tier plan table.
+
+_STATUS_ICON = {
+    "pending": "⏳", "executing": "🔁", "waiting_input": "❓",
+    "completed": "✅", "failed": "❌", "cancelled": "🚫",
+}
+
+
+def diff_plans(old: Plan, new: Plan) -> dict[str, Any]:
+    """What changed between plan v1 and v2?
+
+    Returns added/removed step ids, and changed steps as
+    {step_id: {field: (old, new)}} for name/description/action/status/
+    depends_on. Never raises.
+    """
+    try:
+        a = {s.step_id: s for s in old.steps}
+        b = {s.step_id: s for s in new.steps}
+        added = sorted(set(b) - set(a))
+        removed = sorted(set(a) - set(b))
+        changed: dict[str, dict[str, tuple[Any, Any]]] = {}
+        for sid in sorted(set(a) & set(b)):
+            sa, sb = a[sid], b[sid]
+            deltas: dict[str, tuple[Any, Any]] = {}
+            for field in ("name", "description", "action", "status"):
+                va, vb = getattr(sa, field), getattr(sb, field)
+                if va != vb:
+                    deltas[field] = (va, vb)
+            if sorted(sa.depends_on) != sorted(sb.depends_on):
+                deltas["depends_on"] = (sa.depends_on, sb.depends_on)
+            if deltas:
+                changed[sid] = deltas
+        return {
+            "from": old.plan_id, "to": new.plan_id,
+            "goal_changed": old.goal != new.goal,
+            "status_changed": (old.status, new.status)
+                              if old.status != new.status else None,
+            "added": added, "removed": removed, "changed": changed,
+        }
+    except Exception:  # noqa: BLE001
+        return {"from": getattr(old, "plan_id", "?"),
+                "to": getattr(new, "plan_id", "?"),
+                "error": "diff failed"}
+
+
+def render_plan_diff(diff: dict[str, Any]) -> str:
+    """Human-readable plan diff. Never raises."""
+    from .render import ICONS, banner, bullets, truncate
+
+    try:
+        lines = [banner(f"Plan changed: {diff.get('from', '?')} → "
+                        f"{diff.get('to', '?')}", ICONS["plan"])]
+        if diff.get("goal_changed"):
+            lines.append("🎯 goal changed")
+        if diff.get("status_changed"):
+            a, b = diff["status_changed"]
+            lines.append(f"status: {a} → {b}")
+        added, removed = diff.get("added", []), diff.get("removed", [])
+        changed = diff.get("changed", {})
+        if added:
+            lines.append("➕ added: " + ", ".join(added))
+        if removed:
+            lines.append("➖ removed: " + ", ".join(removed))
+        for sid, deltas in changed.items():
+            bits = "; ".join(
+                f"{f}: {truncate(str(o), 40)} → {truncate(str(n), 40)}"
+                for f, (o, n) in deltas.items())
+            lines.append(f"✏️ {sid}: {bits}")
+        if not added and not removed and not changed:
+            lines.append("no step changes")
+        return "\n".join(lines)
+    except Exception:  # noqa: BLE001
+        return "plan diff (render failed)"
+
+
+def render_plan(plan: Plan) -> str:
+    """The plan as a beautiful status table: step, status, action, deps."""
+    from .render import ICONS, banner, bar, kv, table, truncate
+
+    try:
+        done = sum(1 for s in plan.steps if s.status == "completed")
+        total = len(plan.steps)
+        frac = (done / total) if total else 0.0
+        head = {
+            "goal": truncate(plan.goal, 80),
+            "status": plan.status.value if hasattr(plan.status, "value")
+                      else str(plan.status),
+            "progress": bar(frac),
+        }
+        lines = [banner(f"Plan {plan.plan_id}", ICONS["plan"]),
+                 kv(head.items())]
+        if plan.plan_error:
+            lines.append(f"⚠️ planned from template (degraded): "
+                         f"{truncate(plan.plan_error, 120)}")
+        if plan.steps:
+            rows = []
+            for s in plan.steps:
+                icon = _STATUS_ICON.get(s.status, "•")
+                rows.append([f"{icon} {s.step_id}",
+                             truncate(s.name or s.action, 34),
+                             truncate(s.action, 22),
+                             ", ".join(s.depends_on) or "—"])
+            lines.append("")
+            lines.append(table(["step", "name", "action", "depends on"],
+                               rows))
+        if plan.error:
+            lines.append(f"\n❌ {truncate(plan.error, 200)}")
+        return "\n".join(lines)
+    except Exception:  # noqa: BLE001 — rendering never breaks callers
+        return f"plan {getattr(plan, 'plan_id', '?')} (render failed)"

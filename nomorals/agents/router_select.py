@@ -299,6 +299,33 @@ def default_strategies() -> list[ScoreStrategy]:
     ]
 
 
+class LearnedReliability(ScoreStrategy):
+    """NotDiamond-style feedback loop: real outcomes adjust routing.
+
+    ``ledger`` maps model name → rolling list of rewards in [0, 1].
+    Recorded via :meth:`TaskRouter.record_outcome`; models with no data
+    score 0 (neutral) so the chain's historical ranking is unchanged
+    until evidence arrives.
+    """
+
+    name = "learned_reliability"
+
+    def __init__(self, ledger: dict[str, list[float]] | None = None,
+                 weight: float = 1.0, window: int = 50) -> None:
+        self.ledger = ledger if ledger is not None else {}
+        self.weight = float(weight)
+        self.window = max(1, int(window))
+
+    def score(self, profile, task_type, objective, complexity) -> float:
+        rewards = self.ledger.get(profile.name)
+        if not rewards:
+            return 0.0
+        recent = rewards[-self.window:]
+        mean = sum(recent) / len(recent)
+        # Center on 0.5 (neutral): good models gain, bad models lose.
+        return mean - 0.5
+
+
 
 class TaskRouter:
     """Pick the best provider for a task type + objective."""
@@ -309,6 +336,16 @@ class TaskRouter:
         self.context = context
         self.settings = context.settings
         self._profiles: dict[str, ModelProfile] = {}
+        #: NotDiamond-style outcome ledger: model -> rolling rewards [0,1].
+        #: Fed by record_outcome(); read by the LearnedReliability strategy.
+        self._feedback: dict[str, list[float]] = {}
+        #: Epsilon-greedy exploration (0 = pure argmax). Set
+        #: ``router_exploration`` in settings to try non-best models.
+        try:
+            self.exploration = float(
+                getattr(self.settings, "router_exploration", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            self.exploration = 0.0
         #: The scoring chain.  Pass custom strategies to extend/replace the
         #: defaults; ``weights`` reweights by strategy name.
         self.strategies = strategies if strategies is not None else default_strategies()
@@ -316,6 +353,10 @@ class TaskRouter:
         for strategy in self.strategies:
             if strategy.name in weights:
                 strategy.weight = float(weights[strategy.name])
+        # The feedback strategy must read THIS router's ledger, so it is
+        # wired here rather than in default_strategies().
+        if not any(isinstance(s, LearnedReliability) for s in self.strategies):
+            self.strategies.append(LearnedReliability(ledger=self._feedback))
 
     # ── profiles ─────────────────────────────────────────────────────────────
     def _router(self):
@@ -430,19 +471,92 @@ class TaskRouter:
     def select(self, task_type: str = "chat",
                objective: str = "balanced",
                complexity: str | None = None) -> ModelProfile | None:
-        """Return the best profile, or None when routing is off/unavailable."""
+        """Return the best profile, or None when routing is off/unavailable.
+
+        With ``router_exploration`` > 0, epsilon-greedy: with probability
+        epsilon a random non-best candidate is picked instead of the
+        argmax, so the feedback ledger keeps learning about alternatives.
+        """
         task_type = (task_type or "chat").strip().lower()
         objective = (objective or "balanced").strip().lower()
         if not self.enabled():
             return None
-        best: ModelProfile | None = None
-        best_score = float("-inf")
+        ranked: list[tuple[ModelProfile, float]] = []
         for p in self.profiles():
-            sc = self.score(p, task_type, objective, complexity=complexity)
-            if sc > best_score:
-                best_score = sc
-                best = p
-        return best
+            ranked.append((p, self.score(p, task_type, objective,
+                                         complexity=complexity)))
+        ranked.sort(key=lambda t: t[1], reverse=True)
+        if not ranked:
+            return None
+        if self.exploration > 0 and len(ranked) > 1:
+            import random as _random
+            if _random.random() < self.exploration:
+                choice = _random.choice(ranked[1:])[0]
+                _log.info("router exploring: %s (epsilon=%.2f)",
+                          choice.name, self.exploration)
+                return choice
+        return ranked[0][0]
+
+    # ── feedback learning ────────────────────────────────────────────
+    def record_outcome(self, model: str, task_kind: str = "chat", *,
+                       ok: bool, latency_ms: float | None = None,
+                       note: str = "") -> None:
+        """Feed a real outcome back into routing (NotDiamond-style).
+
+        Reward: 1.0 for success, 0.0 for failure; slow successes are
+        discounted so latency creeps into the learned score. Never raises.
+        """
+        try:
+            reward = 1.0 if ok else 0.0
+            if ok and latency_ms:
+                # Halve the reward past 30s — slow is a soft failure.
+                try:
+                    if float(latency_ms) > 30_000:
+                        reward = 0.5
+                except (TypeError, ValueError):
+                    pass
+            ledger = self._feedback.setdefault(str(model), [])
+            ledger.append(reward)
+            del ledger[:-50]  # rolling window
+        except Exception:  # noqa: BLE001 — learning never breaks routing
+            _log.debug("router record_outcome failed", exc_info=True)
+
+    def feedback_score(self, model: str) -> float:
+        """Mean learned reward for a model, 0.5 when no data. Never raises."""
+        try:
+            rewards = self._feedback.get(str(model))
+            if not rewards:
+                return 0.5
+            return sum(rewards) / len(rewards)
+        except Exception:  # noqa: BLE001
+            return 0.5
+
+    def explain(self, profile: ModelProfile | None, task_type: str = "chat",
+                objective: str = "balanced",
+                complexity: str | None = None) -> str:
+        """One plain-language sentence: why this model was picked."""
+        from .render import truncate
+
+        if profile is None:
+            return ("intelligent routing is off — using the standard "
+                    "provider chain")
+        try:
+            breakdown = self.score_breakdown(profile, task_type, objective,
+                                             complexity=complexity)
+            top = sorted(
+                ((k, v) for k, v in breakdown.items() if v > 0),
+                key=lambda kv: kv[1], reverse=True)[:2]
+            drivers = ", ".join(
+                f"{k.replace('_', ' ')} (+{v})" for k, v in top)
+            fb = self.feedback_score(profile.name)
+            learned = (f"; learned reliability {fb:.2f} from "
+                       f"{len(self._feedback.get(profile.name, []))} outcomes"
+                       if profile.name in self._feedback else "")
+            bits = (f"picked **{profile.name}** for {task_type}/{objective}"
+                    + (f" (drivers: {drivers})" if drivers else "")
+            return truncate(bits + learned, 400)
+        except Exception:  # noqa: BLE001
+            return f"picked {getattr(profile, 'name', '?')}"
 
     def decision(self, task_type: str = "chat",
                  objective: str = "balanced",

@@ -33,7 +33,14 @@ _BUDGET_ERRORS = frozenset({"BudgetExceeded", "DeadlineExceeded"})
 
 @dataclass
 class RestartPolicy:
-    """How aggressively to retry a failed unit of work."""
+    """How aggressively to retry a failed unit of work.
+
+    Erlang/OTP intensity semantics: ``max_restarts`` restarts are allowed
+    per ``window_seconds`` — exceed that and the supervisor gives up
+    instead of hammering a permanently broken agent forever. The window
+    slides: old restarts age out, so a flaky-but-recovering agent is not
+    punished for yesterday's failures.
+    """
 
     max_restarts: int = 3
     window_seconds: float = 300.0
@@ -44,6 +51,13 @@ class RestartPolicy:
 
     def delay_for(self, attempt: int) -> float:
         return min(self.backoff_cap, self.backoff_base * (2 ** max(0, attempt - 1)))
+
+    def intensity_exceeded(self, restart_times: list[float],
+                           now: float) -> bool:
+        """True when restarts within the window hit the intensity limit."""
+        window = max(1.0, float(self.window_seconds))
+        recent = [t for t in restart_times if now - t <= window]
+        return len(recent) >= max(1, int(self.max_restarts))
 
 
 @dataclass
@@ -99,6 +113,8 @@ class _Record:
     window_start: float = field(default_factory=time.time)
     last_error: str = ""
     given_up: bool = False
+    #: Monotonic timestamps of every restart — the OTP intensity window.
+    restart_times: list[float] = field(default_factory=list)
 
 
 class Supervisor:
@@ -226,10 +242,27 @@ class Supervisor:
                 self.stats["give_ups"] += 1
                 return result
 
-            if record.restarts >= self.policy.max_restarts or record.given_up:
-                self._emit(SupervisorEvent("give_up", current.name, result.error))
+            # OTP intensity (replaces the old lifetime cap): restarts are
+            # only allowed max_restarts per window_seconds. A persistently
+            # broken agent trips this within seconds (backoff delays are
+            # short); a flaky-but-recovering one ages out of the window and
+            # keeps its restart budget. Hammering forever is the failure
+            # mode this prevents.
+            now = self._clock()
+            if record.given_up:
+                self._emit(SupervisorEvent("give_up", current.name,
+                                           "already given up"))
                 self.stats["give_ups"] += 1
                 return result
+            if self.policy.intensity_exceeded(record.restart_times, now):
+                detail = (f"restart intensity exceeded: "
+                          f"{self.policy.max_restarts} restarts in "
+                          f"{self.policy.window_seconds:g}s — giving up")
+                self._emit(SupervisorEvent("give_up", current.name, detail))
+                self.stats["give_ups"] += 1
+                record.given_up = True
+                return result
+            record.restart_times.append(now)
 
             if record.failures >= self.policy.escalate_after:
                 self.stats["escalations"] += 1
@@ -267,6 +300,7 @@ class Supervisor:
         *,
         factories: dict[str, Callable[[], Agent]] | None = None,
         max_workers: int | None = None,
+        dependencies: dict[str, list[str]] | None = None,
     ) -> TeamResult:
         """Run a team of agents in parallel, each under the restart policy.
 
@@ -277,6 +311,12 @@ class Supervisor:
         kills its teammates. ``agents`` may be a list (names come from
         ``agent.name``) or a name → agent dict; ``factories`` optionally
         gives per-name fresh-instance factories for restarts.
+
+        ``dependencies`` maps agent name → names it depends on. When given,
+        Erlang/OTP ``rest_for_one`` semantics apply after the team run: a
+        failed dependency restarts itself AND its dependents, because a
+        dependent that ran on a broken dependency's output can't be
+        trusted.
         """
         started = time.perf_counter()
         if isinstance(agents, dict):
@@ -284,6 +324,7 @@ class Supervisor:
         else:
             items = [(a.name, a) for a in agents]
         factories = factories or {}
+        by_name = dict(items)
         results: dict[str, AgentResult] = {}
 
         def _one(name: str, agent: Agent) -> tuple[str, AgentResult]:
@@ -308,11 +349,71 @@ class Supervisor:
                 name, result = future.result()
                 results[name] = result
 
+        # rest_for_one: a failed dependency poisons its dependents.
+        if dependencies:
+            dependents = self._dependents(dependencies)
+            failed_deps = {name for name, r in results.items()
+                           if not r.ok and name in dependents}
+            poisoned = set(failed_deps)
+            for dep in failed_deps:
+                poisoned.update(dependents.get(dep, ()))
+            for name in sorted(poisoned):
+                agent = by_name.get(name)
+                if agent is None:
+                    continue
+                _log.info("rest_for_one: restarting %r (dependency failed)",
+                          name)
+                self._emit(SupervisorEvent(
+                    "restart", name,
+                    "rest_for_one: dependency failed, restarting"))
+                _, results[name] = _one(name, agent)
+
         team = TeamResult(results=results,
                           seconds=time.perf_counter() - started)
         _log.info("supervised team run: %d/%d agents ok (%.1fs)",
                   team.succeeded, len(results), team.seconds)
         return team
+
+    @staticmethod
+    def _dependents(dependencies: dict[str, list[str]]) -> dict[str, list[str]]:
+        """Invert name → [deps] into dep → [dependents]."""
+        out: dict[str, list[str]] = {}
+        for name, deps in (dependencies or {}).items():
+            for dep in deps or []:
+                out.setdefault(dep, []).append(name)
+        return out
+
+    # ── presentation ─────────────────────────────────────────────────────
+    def render_tree(self) -> str:
+        """Human-readable supervision status: who restarted, who gave up."""
+        from .render import ICONS, banner, kv, table, truncate
+
+        try:
+            lines = [banner("Supervision tree", ICONS["shield"]),
+                     kv({"watched": self.stats.get("watched", 0),
+                         "restarts": self.stats.get("restarts", 0),
+                         "escalations": self.stats.get("escalations", 0),
+                         "give_ups": self.stats.get("give_ups", 0),
+                         "budget stops": self.stats.get("budget_stops", 0)}
+                        .items())]
+            rows = []
+            for name, rec in sorted(self._records.items()):
+                if rec.given_up:
+                    icon, state = ICONS["fail"], "given up"
+                elif rec.restarts:
+                    icon, state = ICONS["retry"], f"{rec.restarts} restart(s)"
+                elif rec.failures:
+                    icon, state = ICONS["warn"], f"{rec.failures} failure(s)"
+                else:
+                    icon, state = ICONS["ok"], "healthy"
+                rows.append([f"{icon} {name}", state,
+                             truncate(rec.last_error, 60)])
+            if rows:
+                lines.append("")
+                lines.append(table(["agent", "state", "last error"], rows))
+            return "\n".join(lines)
+        except Exception:  # noqa: BLE001 — rendering never breaks callers
+            return "supervision tree (render failed)"
 
     # ── tasks ────────────────────────────────────────────────────────────────
     def retry_task(self, graph: TaskGraph, task: Task, run: Callable[[Task], Any]) -> Task:

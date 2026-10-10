@@ -30,6 +30,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import random
 import time
 import wave
 from array import array
@@ -50,8 +51,15 @@ __all__ = [
     "track_energy",
     "camelot_code",
     "harmonic_score",
+    "harmonic_path",
+    "path_harmonic_score",
+    "tempo_compatible",
+    "sync_ratio",
     "plan_transition",
     "plan_energy_arc",
+    "energy_curve",
+    "ENERGY_CURVES",
+    "arc_report",
     "render_beatmatched_transition",
     "TasteModel",
     "HeuristicTaste",
@@ -362,6 +370,70 @@ def _camelot_parts(code: str) -> tuple[int, str] | None:
         return None
 
 
+def _camelot_neighbors(code: str) -> list[str]:
+    """The T-shape: same key, ±1 step same letter, same number letter-flip.
+
+    (Mixed In Key's three rules, as graph edges.)
+    """
+    parts = _camelot_parts(code)
+    if not parts:
+        return []
+    n, letter = parts
+    up = n % 12 + 1
+    down = (n - 2) % 12 + 1
+    flip = "B" if letter == "A" else "A"
+    return [code, f"{up}{letter}", f"{down}{letter}", f"{n}{flip}"]
+
+
+def harmonic_path(from_code: str, to_code: str) -> list[str]:
+    """Shortest harmonic journey between two Camelot codes (BFS).
+
+    Lets the planner route a set between distant keys — e.g. 8A→3A —
+    through intermediate compatible keys instead of jumping and
+    clashing. Returns [] when either code is unknown.
+    Deterministic. Mined from dj-harmonic-analyzer's key-to-key paths.
+    """
+    if not _camelot_parts(from_code) or not _camelot_parts(to_code):
+        return []
+    if from_code == to_code:
+        return [from_code]
+    from collections import deque
+    seen = {from_code}
+    queue: deque[tuple[str, list[str]]] = deque([(from_code, [from_code])])
+    while queue:
+        cur, path = queue.popleft()
+        for nxt in _camelot_neighbors(cur):
+            if nxt in seen:
+                continue
+            seen.add(nxt)
+            if nxt == to_code:
+                return path + [nxt]
+            queue.append((nxt, path + [nxt]))
+    return [from_code, to_code]  # unreachable in practice (wheel is connected)
+
+
+def path_harmonic_score(path: list[str]) -> float:
+    """Mean step score along a harmonic path (1.0 = perfectly smooth)."""
+    if len(path) < 2:
+        return 1.0
+    scores = []
+    for a, b in zip(path, path[1:]):
+        pa, pb = _camelot_parts(a), _camelot_parts(b)
+        if not pa or not pb:
+            scores.append(0.5)
+            continue
+        (na, la), (nb, lb) = pa, pb
+        if (na, la) == (nb, lb):
+            scores.append(1.0)
+        elif na == nb:
+            scores.append(0.7)
+        elif lb == la:
+            scores.append(0.8)
+        else:
+            scores.append(0.3)
+    return round(sum(scores) / len(scores), 3)
+
+
 def harmonic_score(a: TrackAnalysis, b: TrackAnalysis) -> float:
     """0..1 harmonic compatibility between two tracks.
 
@@ -388,10 +460,33 @@ def harmonic_score(a: TrackAnalysis, b: TrackAnalysis) -> float:
 
 def tempo_compatible(a: TrackAnalysis, b: TrackAnalysis,
                      max_ratio: float = 0.08) -> bool:
-    """Can `b` be pitch-shifted onto `a`'s tempo within ±8%? Deterministic."""
+    """Can `b` be pitch-shifted onto `a`'s tempo within ±8%? Deterministic.
+
+    Also tries half/double-time equivalence (87 ≈ 174 BPM) — returns
+    True when any of 1×, 2×, 0.5× lands within range. Use
+    :func:`sync_ratio` for the exact ratio to apply.
+    """
     if not a.bpm or not b.bpm:
         return False
-    return abs(b.bpm - a.bpm) / a.bpm <= max_ratio
+    for mult in (1.0, 2.0, 0.5):
+        if abs(b.bpm * mult - a.bpm) / a.bpm <= max_ratio:
+            return True
+    return False
+
+
+def sync_ratio(out_trk: TrackAnalysis, in_trk: TrackAnalysis,
+               max_ratio: float = 0.08) -> float | None:
+    """Exact resample ratio to sync `in_trk` onto `out_trk`'s tempo.
+
+    Returns None when no 1×/2×/0.5× ratio lands within ±8% — the
+    caller must NOT claim a sync then (honest degradation).
+    """
+    if not out_trk.bpm or not in_trk.bpm:
+        return None
+    for mult in (1.0, 2.0, 0.5):
+        if abs(in_trk.bpm * mult - out_trk.bpm) / out_trk.bpm <= max_ratio:
+            return out_trk.bpm / (in_trk.bpm * mult)
+    return None
 
 
 # ───────────────────────── transition planning ───────────────────────────────
@@ -413,22 +508,24 @@ class TransitionPlan:
 def plan_transition(out_trk: TrackAnalysis, in_trk: TrackAnalysis) -> TransitionPlan:
     """Choose the transition between two analyzed tracks. Deterministic.
 
-    * both BPM known + within ±8% → beatmatched phrase blend (16 beats)
+    * both BPM known + syncable (1×/2×/0.5× within ±8%) → beatmatched
+      phrase blend (16 beats)
     * harmonic score ≥ 0.7 → echo-out + drop on the one (key-safe)
     * otherwise → break (voice break between, no fake blend)
     """
     harm = harmonic_score(out_trk, in_trk)
-    if out_trk.bpm and in_trk.bpm and tempo_compatible(out_trk, in_trk):
-        ratio = out_trk.bpm / in_trk.bpm
+    ratio = sync_ratio(out_trk, in_trk)
+    if ratio is not None:
         # phrase-align: blend starts on a bar boundary near the track end
         blend_beats = 16
         total_beats = int((out_trk.duration_s * out_trk.bpm) / 60.0)
         start_beat = max(0, (total_beats - blend_beats) // 4 * 4)
+        half = " (half/double-time)" if abs(ratio - 1.0) > 0.5 else ""
         return TransitionPlan(
             kind="blend", blend_beats=blend_beats, sync_ratio=ratio,
             start_beat=start_beat,
             reason=(f"beatmatched {in_trk.bpm}→{out_trk.bpm} BPM "
-                    f"(×{ratio:.3f}), {in_trk.camelot or '?'}→"
+                    f"(×{ratio:.3f}){half}, {in_trk.camelot or '?'}→"
                     f"{out_trk.camelot or '?'} harmonic {harm:.1f}"))
     if harm >= 0.7:
         return TransitionPlan(
@@ -440,29 +537,140 @@ def plan_transition(out_trk: TrackAnalysis, in_trk: TrackAnalysis) -> Transition
         reason=(f"clean break (harmonic {harm:.1f} — no fake blend)"))
 
 
-def plan_energy_arc(tracks: list[TrackAnalysis],
-                    seed: int | None = None) -> list[TrackAnalysis]:
-    """Order tracks warm-up → peak → cool-down by energy. Deterministic.
+# ── energy curves (spotify-mixmaster pattern) ─────────────────────────────────
 
-    Keeps the highest-energy track for the peak (middle), ramps up to it
-    and down after. Stable: ties keep input order.
+#: Named energy-curve presets: target energy at each set position (0..1).
+#: ``late_peak`` is the classic club arc (warm-up → peak at ~70% → cool-down).
+ENERGY_CURVES: dict[str, tuple[float, ...]] = {
+    "late_peak": (0.25, 0.35, 0.45, 0.55, 0.68, 0.8, 0.92, 1.0, 0.85, 0.6),
+    "linear": (0.3, 0.38, 0.46, 0.54, 0.62, 0.7, 0.78, 0.86, 0.94, 1.0),
+    "wave": (0.4, 0.6, 0.45, 0.7, 0.5, 0.85, 0.6, 1.0, 0.7, 0.45),
+    "flat": (0.6, 0.6, 0.6, 0.6, 0.6, 0.6, 0.6, 0.6, 0.6, 0.6),
+}
+
+
+def energy_curve(name: str, n: int) -> list[float]:
+    """Resample a named energy curve to `n` positions. Never raises."""
+    curve = ENERGY_CURVES.get(name, ENERGY_CURVES["late_peak"])
+    if n <= 0:
+        return []
+    if n == 1:
+        return [curve[len(curve) // 2]]
+    out = []
+    for i in range(n):
+        pos = i * (len(curve) - 1) / (n - 1)
+        lo, hi = int(pos), min(len(curve) - 1, int(pos) + 1)
+        frac = pos - lo
+        out.append(round(curve[lo] * (1 - frac) + curve[hi] * frac, 3))
+    return out
+
+
+def plan_energy_arc(tracks: list[TrackAnalysis],
+                    seed: int | None = None, *,
+                    curve: str = "late_peak",
+                    quality_floor: float = 0.0,
+                    taste: "TasteModel | None" = None) -> list[TrackAnalysis]:
+    """Order tracks along an energy curve with harmonic sanity.
+
+    * Positions follow the named ``curve`` (``late_peak``/``linear``/
+      ``wave``/``flat``): each slot gets the remaining track whose
+      energy best matches the slot's target.
+    * Consecutive tracks are checked with the taste model (harmonic +
+      tempo compatibility); a track that would force a transition below
+      ``quality_floor`` is skipped for a later slot.
+    * **Quality floor honesty** (spotify-mixmaster): when no remaining
+      track clears the floor for a slot, the set ENDS SHORT with the
+      reason recorded on the dropped tracks' plan — never padded with
+      a bad transition.
+    * ``seed`` makes tie-breaking deterministic and reproducible.
+
+    Returns the ordered tracks. Dropped tracks are attached as
+    ``plan.dropped`` on the function's ``last_dropped`` attribute.
     """
+    plan_energy_arc.last_dropped = []
     if len(tracks) <= 2:
         return list(tracks)
-    ordered = sorted(tracks, key=lambda t: (t.energy, t.title))
-    n = len(ordered)
-    peak_idx = n // 2
-    # build arc: low → peak → low
-    lows = ordered[:peak_idx]
-    peak = ordered[peak_idx:]
-    # interleave: ascending lows, then descending from peak
-    arc = sorted(lows, key=lambda t: t.energy)
-    arc += sorted(peak, key=lambda t: -t.energy)
-    # ensure the single hottest track sits at the peak position
-    hottest = max(tracks, key=lambda t: (t.energy, t.title))
-    arc.remove(hottest)
-    arc.insert(min(peak_idx, len(arc)), hottest)
-    return arc
+    rng = random.Random(seed)
+    targets = energy_curve(curve, len(tracks))
+    remaining = list(tracks)
+    ordered: list[TrackAnalysis] = []
+    dropped: list[TrackAnalysis] = []
+    scorer = taste or HeuristicTaste()
+
+    for slot, target in enumerate(targets):
+        if not remaining:
+            break
+        # rank by |energy - target|, tie-broken by seed
+        cands = sorted(remaining,
+                       key=lambda t: (abs(t.energy - target),
+                                      rng.random()))
+        pick = None
+        for cand in cands:
+            if not ordered:
+                pick = cand
+                break
+            prev = ordered[-1]
+            plan = plan_transition(prev, cand)
+            t_score = scorer.score_transition(prev, cand, plan)
+            h_score = harmonic_score(prev, cand)
+            combined = 0.6 * t_score + 0.4 * h_score
+            if combined >= quality_floor:
+                pick = cand
+                break
+        if pick is None:
+            # quality floor: end the set short, honestly
+            for cand in remaining:
+                cand_dict = cand.to_dict()
+                cand_dict["dropped_reason"] = (
+                    f"no transition from "
+                    f"{ordered[-1].title if ordered else '?'} cleared the "
+                    f"quality floor {quality_floor:.2f}")
+                dropped.append(cand)
+            remaining.clear()
+            break
+        ordered.append(pick)
+        remaining.remove(pick)
+
+    plan_energy_arc.last_dropped = dropped
+    return ordered
+
+
+plan_energy_arc.last_dropped = []  # type: ignore[attr-defined]
+
+
+def arc_report(ordered: list[TrackAnalysis],
+               curve: str = "late_peak") -> str:
+    """God-tier set report: journey map, energy sparkbar, transitions."""
+    from .style import theme as _theme
+    th = _theme()
+    lines = [th.banner("DJ Set Plan", f"curve: {curve}")]
+    stops = [t.camelot or "?" for t in ordered]
+    lines.append(th.section("Harmonic journey"))
+    lines.append(th.journey_map(stops))
+    lines.append("")
+    lines.append(th.section("Energy arc"))
+    lines.append("  " + th.sparkbar([t.energy for t in ordered]))
+    lines.append(th.kv([
+        ("tracks", len(ordered)),
+        ("bpm range",
+         f"{min((t.bpm or 0) for t in ordered):.0f}–"
+         f"{max((t.bpm or 0) for t in ordered):.0f}"
+         if any(t.bpm for t in ordered) else "unknown"),
+    ]))
+    lines.append(th.section("Transitions"))
+    for a, b in zip(ordered, ordered[1:]):
+        plan = plan_transition(a, b)
+        glyph = th.ok if plan.kind == "blend" else th.warn
+        lines.append(f"  [{glyph}] {a.title or '?'} → {b.title or '?'}: "
+                     f"{plan.kind} — {plan.reason}")
+    dropped = getattr(plan_energy_arc, "last_dropped", [])
+    if dropped:
+        lines.append(th.section("Dropped (quality floor)"))
+        for t in dropped:
+            d = t.to_dict() if hasattr(t, "to_dict") else {}
+            lines.append(f"  [{th.fail}] {t.title or '?'} — "
+                         f"{d.get('dropped_reason', '')}")
+    return "\n".join(lines)
 
 
 # ───────────────────────── rendering ─────────────────────────────────────────

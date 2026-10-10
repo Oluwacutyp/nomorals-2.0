@@ -537,3 +537,263 @@ def arbitrate(
         except Exception:  # noqa: BLE001 - telemetry never breaks arbitration
             pass
     return result
+
+
+# ── symmetric debate (Du et al. 2023) ─────────────────────────────────
+# "Improving Factuality and Reasoning in Language Models through
+# Multiagent Debate" (arXiv:2305.14325): every agent answers
+# INDEPENDENTLY first, then each round every agent sees ALL others'
+# answers and revises its own. Final answer comes from converged
+# consensus — 3 agents × 2 rounds beat single-model baselines by ~15pp
+# on GSM8K/MMLU and cut biography hallucinations. This is the
+# reveal-and-revise protocol: agreement must be EARNED, not assumed.
+
+
+@dataclass
+class SymmetricDebateResult:
+    """Outcome of a :class:`SymmetricDebate`."""
+    debate_id: str
+    verdict: str  # consensus | judge_decided | no_consensus
+    rounds: int
+    final_answer: str
+    answers: dict[str, str]  # label -> final answer
+    converged: bool
+    transcript: list[dict[str, Any]] = field(default_factory=list)
+    reason: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "debate_id": self.debate_id, "verdict": self.verdict,
+            "rounds": self.rounds, "final_answer": self.final_answer,
+            "answers": dict(self.answers), "converged": self.converged,
+            "reason": self.reason, "transcript": self.transcript,
+        }
+
+
+class SymmetricDebate:
+    """Peer debate, not coder-vs-critic.
+
+    ``debater_fns`` maps label → ``fn(brief, others) -> str`` where
+    ``others`` is ``{label: answer}`` (empty on the independent round).
+    Debaters are injected callables, so the protocol is fully testable
+    without a model; in production they are router calls with peer
+    personas.
+
+    Protocol (Du et al. 2023):
+      1. Round 0 — independent answers, no one sees anyone.
+      2. Rounds 1..N — each debater sees every other answer and revises.
+      3. Stop early when all answers converge (exact match) or the judge
+         says they've converged.
+      4. No convergence by ``max_rounds`` → ``judge_fn`` picks; without a
+         judge → ``no_consensus`` (honest, never a fake consensus).
+    """
+
+    def __init__(
+        self,
+        *,
+        debater_fns: dict[str, Callable[[str, dict[str, str]], str]],
+        judge_fn: Callable[[dict[str, str]], dict[str, Any]] | None = None,
+        max_rounds: int = 2,
+        blackboard: Blackboard | None = None,
+        context: Any = None,
+        parallel: bool = True,
+    ) -> None:
+        if len(debater_fns) < 2:
+            raise ValueError("symmetric debate needs at least 2 debaters")
+        self.debater_fns = dict(debater_fns)
+        self.judge_fn = judge_fn
+        self.max_rounds = max(1, int(max_rounds))
+        self.blackboard = (blackboard if blackboard is not None
+                           else Blackboard())
+        self.context = context
+        self.parallel = bool(parallel)
+        self.debate_id = f"sdebate-{new_id()[-8:]}"
+
+    # ── main loop ────────────────────────────────────────────────
+    def run(self, brief: str) -> SymmetricDebateResult:
+        transcript: list[dict[str, Any]] = []
+        answers: dict[str, str] = {}
+
+        def _post(key: str, value: Any, *, author: str, round_no: int) -> None:
+            self.blackboard.post(
+                f"{self.debate_id}.{key}", value, author=author,
+                topic=self.debate_id,
+                metadata={"debate_id": self.debate_id, "round": round_no})
+
+        # Round 0: independent answers. No one sees anyone.
+        answers = self._collect(brief, {}, round_no=0)
+        transcript.append({"round": 0, "answers": dict(answers),
+                           "mode": "independent"})
+        for label, ans in answers.items():
+            _post(f"round.0.{label}", {"answer": ans}, author=label, round_no=0)
+
+        if self._converged(answers):
+            return self._finish("consensus", 0, answers, transcript,
+                                "independent answers already agreed")
+
+        for round_no in range(1, self.max_rounds + 1):
+            round_answers: dict[str, str] = {}
+            new_answers = self._collect(brief, answers, round_no=round_no)
+            for label, ans in new_answers.items():
+                round_answers[label] = ans
+                _post(f"round.{round_no}.{label}", {"answer": ans},
+                      author=label, round_no=round_no)
+            answers = round_answers
+            transcript.append({"round": round_no, "answers": dict(answers),
+                               "mode": "reveal_and_revise"})
+            if self.context is not None:
+                try:
+                    self.context.emit("swarm.symmetric_round",
+                                      debate_id=self.debate_id,
+                                      round=round_no, n_debaters=len(answers))
+                except Exception:  # noqa: BLE001 - telemetry never breaks debate
+                    pass
+            if self._converged(answers):
+                return self._finish("consensus", round_no, answers, transcript,
+                                    f"debaters converged after round {round_no}")
+
+        # No convergence: the judge decides, or honesty.
+        return self._judge_or_honest(brief, answers, transcript)
+
+    def _collect(self, brief: str, others: dict[str, str],
+                 *, round_no: int) -> dict[str, str]:
+        """Run every debater; parallel when enabled (debates are slow)."""
+        labels = list(self.debater_fns)
+        if not self.parallel or len(labels) < 2:
+            return {label: self._safe_call(label, brief, others)
+                    for label in labels}
+        import concurrent.futures as _cf
+        out: dict[str, str] = {}
+        with _cf.ThreadPoolExecutor(
+                max_workers=min(len(labels), 8),
+                thread_name_prefix="symmetric-debate") as pool:
+            futs = {pool.submit(self._safe_call, label, brief, others): label
+                    for label in labels}
+            for fut in _cf.as_completed(futs):
+                label = futs[fut]
+                try:
+                    out[label] = fut.result()
+                except Exception:  # noqa: BLE001
+                    out[label] = "(no answer)"
+        # Preserve debater order for deterministic transcripts.
+        return {label: out.get(label, "(no answer)") for label in labels}
+
+    def _safe_call(self, label: str, brief: str,
+                   others: dict[str, str]) -> str:
+        try:
+            visible = {k: v for k, v in others.items() if k != label}
+            ans = self.debater_fns[label](brief, visible)
+            text = str(ans or "").strip()
+            return text or "(no answer)"
+        except Exception as exc:  # noqa: BLE001 - a dead debater is a record
+            _log.warning("symmetric debater %r failed: %s", label, exc)
+            return f"(error: {exc})"
+
+    @staticmethod
+    def _converged(answers: dict[str, str]) -> bool:
+        """All answers agree (exact match after whitespace normalization)."""
+        texts = {str(a or "").strip() for a in answers.values()}
+        return len(texts) == 1 and next(iter(texts)) not in {"", "(no answer)"}
+
+    def _judge_or_honest(self, brief: str, answers: dict[str, str],
+                         transcript: list[dict[str, Any]]) -> SymmetricDebateResult:
+        if self.judge_fn is not None:
+            try:
+                ruling = self.judge_fn(dict(answers))
+            except Exception as exc:  # noqa: BLE001 - a bad judge abstains
+                ruling = None
+                _log.warning("symmetric judge failed: %s", exc)
+            if isinstance(ruling, dict) and ruling.get("answer"):
+                final = str(ruling["answer"])
+                reason = str(ruling.get("rationale", "judge decided"))
+                self.blackboard.post(
+                    f"{self.debate_id}.judge",
+                    {"final": final, "rationale": reason},
+                    author="judge", topic=self.debate_id)
+                return self._finish("judge_decided", self.max_rounds, answers,
+                                    transcript, reason, final_answer=final)
+        return self._finish("no_consensus", self.max_rounds, answers,
+                            transcript,
+                            f"{self.max_rounds} rounds without convergence; "
+                            "no judge — refusing to fake consensus")
+
+    def _finish(self, verdict: str, rounds: int, answers: dict[str, str],
+                transcript: list[dict[str, Any]], reason: str,
+                final_answer: str = "") -> SymmetricDebateResult:
+        if not final_answer:
+            # Consensus verdicts share one answer by construction.
+            final_answer = next(iter(answers.values()), "")
+        result = SymmetricDebateResult(
+            debate_id=self.debate_id, verdict=verdict, rounds=rounds,
+            final_answer=final_answer, answers=dict(answers),
+            converged=(verdict == "consensus"), transcript=transcript,
+            reason=reason)
+        self.blackboard.post(f"{self.debate_id}.result", result.to_dict(),
+                             author="symmetric_debate", topic=self.debate_id)
+        _log.info("symmetric debate %s finished: %s (%s)",
+                  self.debate_id, verdict, reason)
+        return result
+
+
+# ── rendering ─────────────────────────────────────────────────────────
+# Debate transcripts are decision records: they should read like one.
+
+def render_debate(result: Any) -> str:
+    """Render any debate result as human-readable markdown.
+
+    Accepts DebateResult, PanelResult, or SymmetricDebateResult.
+    Never raises.
+    """
+    from .render import ICONS, banner, bullets, kv, section, truncate
+
+    try:
+        verdict = getattr(result, "verdict", "?")
+        rounds = getattr(result, "rounds", 0)
+        reason = getattr(result, "reason", "") or ""
+        did = (getattr(result, "debate_id", None)
+               or getattr(result, "panel_id", "?"))
+        good = verdict in {"approved", "decided", "tie_arbitrated",
+                           "consensus", "judge_decided"}
+        head = {
+            "verdict": verdict,
+            "rounds": rounds,
+            "id": did,
+            "why": reason,
+        }
+        lines = [banner(f"Debate {did}", ICONS["debate"]),
+                 kv(head.items())]
+        transcript = getattr(result, "transcript", None) or []
+        for entry in transcript:
+            rnd = entry.get("round", "?")
+            lines.append("")
+            lines.append(f"**Round {rnd}**")
+            if "answers" in entry:  # symmetric: peer answers
+                for label, ans in entry["answers"].items():
+                    lines.append(f"_{label}_: {truncate(ans, 300)}")
+            if "coder" in entry:  # coder-vs-critic
+                coder = entry["coder"] or {}
+                critic = entry["critic"] or {}
+                lines.append(f"🧑‍💻 coder: "
+                             f"{truncate(str(coder.get('content', '')), 200)}")
+                lines.append(f"🔍 critic [{critic.get('verdict', '?')}, "
+                             f"score {critic.get('score', '?')}]: "
+                             f"{truncate(str(critic.get('notes', '')), 200)}")
+            if "scores" in entry and "answers" not in entry:  # panel
+                scores = ", ".join(
+                    f"{k}={v}" for k, v in entry["scores"].items())
+                lines.append(f"scores: {scores}")
+        final = (getattr(result, "final_answer", None)
+                 or (getattr(result, "final_artifact", None)
+                     and getattr(result.final_artifact, "content", None))
+                 or (getattr(result, "winner", None)
+                     and getattr(result.winner, "label", None)))
+        lines.append("")
+        lines.append(section("Final",
+                             f"{'✅' if good else '⚠️'} {truncate(str(final), 600)}",
+                             ICONS["star"]))
+        return "\n".join(lines)
+    except Exception:  # noqa: BLE001 — rendering never breaks callers
+        return f"debate result ({type(result).__name__}): {verdict}"
+
+
+__all__ = __all__ + ["SymmetricDebate", "SymmetricDebateResult", "render_debate"]

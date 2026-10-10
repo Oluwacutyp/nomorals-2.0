@@ -118,17 +118,36 @@ class ReasoningResult:
 
 
 def trace_text(result: ReasoningResult) -> str:
-    """Render a result for a human: the work, then the answer."""
-    lines = [f"reasoning [{result.strategy}] "
-             f"({result.llm_calls} calls, {result.seconds:.1f}s, "
-             f"conf {result.confidence:.2f}, {result.stopped})"]
+    """Render a result for a human: the work, then the answer.
+
+    God-tier trace view: verdict first, per-step icons with confidence
+    bars, and the final answer. Built on the shared render primitives so
+    every agent surface reads the same.
+    """
+    from .render import ICONS, banner, bar, kv, section, truncate
+
+    head = {
+        "strategy": result.strategy,
+        "llm calls": result.llm_calls,
+        "time": f"{result.seconds:.1f}s",
+        "confidence": f"{result.confidence:.2f}",
+        "stopped": result.stopped,
+    }
+    lines = [banner("Reasoning", ICONS["thinking"]), kv(head.items()), ""]
     icons = {"plan": "◆", "subgoal": "◇", "action": "→",
              "observation": "•", "critique": "✎", "verdict": "■",
-             "note": "·"}
+             "sample": "⧉", "note": "·"}
     for s in result.trace:
-        text = s.text if len(s.text) <= 240 else s.text[:237] + "…"
-        lines.append(f"  {icons.get(s.kind, '·')} [{s.kind}] {text}")
-    lines.append(f"■ ANSWER: {result.answer}")
+        text = truncate(s.text, 220)
+        lines.append(f"  {icons.get(s.kind, '·')} [{s.kind}] {text} "
+                     f"{bar(s.confidence, 8)}")
+    lines.append("")
+    conf_icon = (ICONS["ok"] if result.confidence >= 0.75
+                 else ICONS["warn"] if result.confidence >= 0.45
+                 else ICONS["fail"])
+    lines.append(section("Answer",
+                         f"{conf_icon} {truncate(result.answer, 800)}",
+                         ICONS["star"]))
     return "\n".join(lines)
 
 
@@ -228,6 +247,9 @@ class ReasoningEngine:
             if strategy == "decompose":
                 answer, confidence, subgoals = self._decompose(
                     goal, trace, depth, extra_context)
+            elif strategy == "self_consistency":
+                answer, confidence = self._self_consistency(
+                    goal, trace, extra_context)
             elif strategy == "hypothesize":
                 answer, confidence, hypotheses = self._hypothesize(
                     goal, trace, extra_context)
@@ -327,6 +349,59 @@ class ReasoningEngine:
             answer = "(no answer produced)"
         self._step(trace, "verdict", answer[:300], confidence)
         return answer, confidence
+
+    def _self_consistency(self, goal: str, trace: list[ReasoningStep],
+                          extra_context: str, samples: int = 5
+                          ) -> tuple[str, float]:
+        """Self-consistency (Wang et al. 2022): sample N reasoning chains
+        at temperature and take the majority answer.
+
+        The cheapest reasoning upgrade in the literature: diverse chains
+        cancel out one-off mistakes. Confidence = the vote share, so the
+        verdict step carries real evidence instead of a guess.
+        """
+        ctx = f"\nRelevant context:\n{extra_context}" if extra_context else ""
+        prompt = (
+            f"Reason about this, step by step.{ctx}\n\n"
+            f"QUESTION:\n{goal}\n\n"
+            "Respond in EXACTLY this format (no extra text):\n"
+            "REASONING:\n1. <first step>\n2. <next step>\n"
+            "...\nANSWER: <final answer>\nCONFIDENCE: <0.0-1.0>")
+        samples = max(3, min(int(samples), 9))
+        votes: list[tuple[str, float]] = []
+        for i in range(samples):
+            try:
+                raw = self._llm(prompt, temperature=0.7)
+            except _BudgetExhausted:
+                break
+            sub_trace: list[ReasoningStep] = []
+            answer, conf = self._parse_cot_reply(raw, sub_trace)
+            if answer and answer != "(no answer produced)":
+                votes.append((answer.strip(), conf))
+                self._step(trace, "sample",
+                           f"chain {i + 1}/{samples}: {answer[:160]}", conf)
+        if not votes:
+            return "(no answer produced)", 0.1
+        # Majority vote on normalized answers.
+        buckets: dict[str, list[float]] = {}
+        order: list[str] = []
+        for answer, conf in votes:
+            key = " ".join(answer.lower().split())
+            if key not in buckets:
+                buckets[key] = []
+                order.append(key)
+            buckets[key].append(conf)
+        best = max(order, key=lambda k: (len(buckets[k]),
+                                         sum(buckets[k]) / len(buckets[k])))
+        winners = [a for a, _ in votes
+                   if " ".join(a.lower().split()) == best]
+        share = len(buckets[best]) / len(votes)
+        mean_conf = sum(buckets[best]) / len(buckets[best])
+        confidence = round(0.5 * share + 0.5 * mean_conf, 3)
+        self._step(trace, "verdict",
+                   f"self-consistency: {len(buckets[best])}/{len(votes)} "
+                   f"chains agree → {winners[0][:300]}", confidence)
+        return winners[0], confidence
 
     def _decompose(self, goal: str, trace: list[ReasoningStep],
                    depth: int, extra_context: str
@@ -810,14 +885,15 @@ def register(registry: Any) -> None:
             "Explicit multi-strategy reasoning with a full auditable trace: "
             "cot (step chain), decompose (subgoals), hypothesize (evidence-"
             "scored hypotheses), critique (draft/review/revise), tree "
-            "(plan-branch-evaluate), auto (classify + dispatch). Optional "
+            "(plan-branch-evaluate), self_consistency (N chains, majority "
+            "vote), auto (classify + dispatch). Optional "
             "tool access for action steps. Returns answer + trace + "
             "confidence."
         ),
         capability=Capability.MODEL_CALL,
         parameters={
             "goal": "str — the question, problem, or thing to review",
-            "strategy": "str (optional, auto) — cot|decompose|hypothesize|critique|tree|auto",
+            "strategy": "str (optional, auto) — cot|decompose|hypothesize|critique|tree|self_consistency|auto",
             "depth": "int (optional, 1, max 3) — recursion for decompose/tree",
             "use_tools": "bool (optional, false) — let action steps call tools",
             "context": "str (optional) — extra facts to reason with",

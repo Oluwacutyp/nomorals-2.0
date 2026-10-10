@@ -124,6 +124,86 @@ class Checkpoint:
         code = "code+convo" if self.code_captured else "convo-only"
         return f"{self.id} · {when}{label} · {code}"
 
+    def verify(self, store: "CheckpointStore") -> dict[str, Any]:
+        """Integrity check: is this checkpoint actually restorable?
+
+        Checks the meta file, the git objects referenced (HEAD commit and
+        stash still present in the workdir repo), and every captured
+        untracked file still on disk. A saved checkpoint you can't restore
+        is a lie — this is the difference between "saved" and
+        "trustworthy" (durable-agent checklist).
+        """
+        problems: list[str] = []
+        meta = store._meta_path(self.id)
+        if not meta.exists():
+            problems.append("meta file missing")
+        if self.code_captured and self.workdir:
+            workdir = Path(self.workdir)
+            if not store._is_repo(workdir):
+                problems.append("workdir is no longer a git repo")
+            else:
+                for ref, name in ((self.head_hash, "HEAD"),
+                                  (self.stash_hash, "stash")):
+                    if not ref:
+                        continue
+                    try:
+                        proc = store._git(
+                            ["cat-file", "-e", f"{ref}^{{commit}}"], workdir)
+                        if proc.returncode != 0:
+                            problems.append(f"{name} commit {ref[:12]} gone")
+                    except Exception:  # noqa: BLE001
+                        problems.append(f"could not check {name} commit")
+        files_dir = store._files_dir(self.id)
+        missing = [rel for rel in self.untracked_files
+                   if not (files_dir / rel).exists()]
+        if missing:
+            problems.append(f"{len(missing)} untracked file(s) missing: "
+                            + ", ".join(missing[:5]))
+        return {"ok": not problems, "problems": problems}
+
+    def describe(self) -> str:
+        """Human-readable checkpoint card (god-tier /checkpoints listing)."""
+        from .render import ICONS, banner, kv, truncate
+
+        when = datetime.fromtimestamp(self.ts).strftime("%Y-%m-%d %H:%M")
+        icon = ICONS["ok"] if self.code_captured else ICONS["warn"]
+        head = {
+            "id": self.id,
+            "when": when,
+            "label": self.label or "—",
+            "head": self.head_hash[:12] if self.head_hash else "—",
+            "scope": f"{len(self.scope_files)} tracked file(s) changed",
+            "untracked": f"{len(self.untracked_files)} captured"
+                         + (f" ({len(self.skipped_files)} skipped)"
+                            if self.skipped_files else ""),
+            "task": truncate(str(self.convo.get("task", "—")), 80),
+        }
+        lines = [banner(f"Checkpoint {self.id}", icon), kv(head.items())]
+        if self.note:
+            lines.append(f"note: {self.note}")
+        return "\n".join(lines)
+
+    def diff(self, other: "Checkpoint") -> dict[str, Any]:
+        """What changed between two checkpoints?
+
+        Returns added/removed/changed file lists across scope_files and
+        untracked_files, plus whether the git HEAD moved. Never raises.
+        """
+        try:
+            a_scope, b_scope = set(self.scope_files), set(other.scope_files)
+            a_un, b_un = set(self.untracked_files), set(other.untracked_files)
+            return {
+                "from": self.id, "to": other.id,
+                "head_moved": self.head_hash != other.head_hash,
+                "scope_added": sorted(b_scope - a_scope),
+                "scope_removed": sorted(a_scope - b_scope),
+                "scope_common": sorted(a_scope & b_scope),
+                "untracked_added": sorted(b_un - a_un),
+                "untracked_removed": sorted(a_un - b_un),
+            }
+        except Exception:  # noqa: BLE001
+            return {"from": self.id, "to": other.id, "error": "diff failed"}
+
 
 class CheckpointStore:
     """Disk-backed checkpoint index + capture/restore machinery.

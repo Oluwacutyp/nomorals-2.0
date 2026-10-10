@@ -19,6 +19,7 @@ import os
 import subprocess
 import tempfile
 from dataclasses import dataclass, field
+from typing import Any
 
 
 @dataclass
@@ -205,6 +206,176 @@ def _adaptive_peaks(curve: list[float], min_rise: float = 0.25,
                    for k in range(min_sustain)):
                 peaks.append(i)
     return peaks
+
+
+# ── excitement events + reel assembly (highlight-studio pattern) ──────────────
+
+@dataclass
+class ExcitementEvent:
+    """One excitement spike, expanded into a real window."""
+    peak_s: float          # where the spike peaked (seconds)
+    start: float           # window start (peak - pre_roll)
+    end: float             # window end (peak + post_roll)
+    peak_db: float         # rise above baseline in dB
+    energy_area: float     # integrated excitement (for greedy ranking)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"peak_s": round(self.peak_s, 2),
+                "start": round(self.start, 2),
+                "end": round(self.end, 2),
+                "peak_db": round(self.peak_db, 2),
+                "energy_area": round(self.energy_area, 3)}
+
+
+def excitement_events(src: str, *, min_rise_db: float = 4.0,
+                      min_sustain_s: float = 3.0,
+                      pre_roll: float = 12.0, post_roll: float = 6.0,
+                      baseline_window_s: float = 90.0) -> list[ExcitementEvent]:
+    """Detect excitement events in a video's audio.
+
+    The highlight-studio recipe, dependency-free:
+    1. log-RMS energy envelope at 10 Hz,
+    2. adaptive rolling-median baseline (adapts to loud/quiet venues),
+    3. rise + sustain gating (rejects whistles/thumps — transients),
+    4. **expand-first windowing**: pre_roll lead-in + post_roll aftermath
+       applied BEFORE merging, so no duplicate/overlapping cuts.
+
+    Returns merged, non-overlapping windows sorted by time. [] on any
+    failure (honest degradation).
+    """
+    try:
+        curve = _audio_energy_curve(src)  # 10Hz, 0..1 normalized
+        if len(curve) < 50:
+            return []
+        hz = 10.0
+        # work in dB-ish space: invert the 0..1 normalization
+        db = [(v * 60.0) - 60.0 for v in curve]
+        bw = max(10, int(baseline_window_s * hz))
+        sustain_n = max(1, int(min_sustain_s * hz))
+        raw: list[tuple[int, float]] = []  # (peak_idx, rise_db)
+        for i in range(len(db)):
+            lo = max(0, i - bw)
+            window = sorted(db[lo:i + 1])
+            baseline = window[len(window) // 2]
+            rise = db[i] - baseline
+            if rise >= min_rise_db:
+                if all(db[min(len(db) - 1, i + k)] - baseline
+                       >= min_rise_db * 0.5 for k in range(sustain_n)):
+                    raw.append((i, rise))
+        if not raw:
+            return []
+        # expand-first: each spike becomes a window immediately
+        pre_n = int(pre_roll * hz)
+        post_n = int(post_roll * hz)
+        windows: list[tuple[float, float, float, float]] = []
+        for idx, rise in raw:
+            s = max(0.0, (idx - pre_n) / hz)
+            e = (idx + post_n) / hz
+            # energy area = integrated dB above local baseline in window
+            lo = max(0, idx - pre_n)
+            hi = min(len(db), idx + post_n)
+            area = sum(max(0.0, db[j] - (db[idx] - rise)) for j in range(lo, hi)) / hz
+            windows.append((s, e, idx / hz, rise if area > 0 else rise))
+            windows[-1] = (s, e, idx / hz, rise)
+        # merge overlapping windows (keep the stronger peak's area)
+        windows.sort()
+        merged: list[list[float]] = []
+        for s, e, peak, rise in windows:
+            if merged and s <= merged[-1][1]:
+                m = merged[-1]
+                m[1] = max(m[1], e)
+                if rise > m[3]:
+                    m[2], m[3] = peak, rise
+            else:
+                merged.append([s, e, peak, rise])
+        out = []
+        for s, e, peak, rise in merged:
+            lo = max(0, int(s * hz))
+            hi = min(len(db), int(e * hz))
+            base = sorted(db[max(0, lo - bw):lo + 1] or [db[0]])[0] \
+                if lo else db[0]
+            area = sum(max(0.0, db[j] - base) for j in range(lo, hi)) / hz
+            out.append(ExcitementEvent(peak_s=peak, start=s, end=e,
+                                       peak_db=rise, energy_area=area))
+        return out
+    except Exception:
+        return []
+
+
+@dataclass
+class HighlightReel:
+    """A budgeted highlight reel plan."""
+    events: list[ExcitementEvent] = field(default_factory=list)
+    target_s: float = 60.0
+    total_s: float = 0.0
+    fade_s: float = 0.25
+    manifest: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"target_s": self.target_s,
+                "total_s": round(self.total_s, 2),
+                "fade_s": self.fade_s,
+                "events": [e.to_dict() for e in self.events],
+                "manifest": self.manifest}
+
+
+def assemble_highlight_reel(src: str, *, target_s: float = 60.0,
+                            fade_s: float = 0.25,
+                            **event_kw: Any) -> HighlightReel:
+    """Greedy budget assembly: rank events by energy area, take until the
+    target duration is filled, join with `fade_s` crossfades.
+
+    Returns a :class:`HighlightReel` with a JSON manifest
+    (events, fades, total) — the highlight-studio deliverable, driven by
+    our multi-modal excitement detection. Renders via
+    ``edit_engine.assemble_segments`` with the fade plan.
+    """
+    events = excitement_events(src, **event_kw)
+    ranked = sorted(events, key=lambda e: -e.energy_area)
+    picked: list[ExcitementEvent] = []
+    total = 0.0
+    for ev in ranked:
+        dur = ev.end - ev.start
+        if total + dur <= target_s or not picked:
+            picked.append(ev)
+            total += dur
+        if total >= target_s:
+            break
+    picked.sort(key=lambda e: e.start)  # chronological for the reel
+    manifest = {
+        "source": str(src),
+        "target_s": target_s,
+        "total_s": round(total, 2),
+        "n_events": len(picked),
+        "fade_s": fade_s,
+        "cuts": [
+            {"start": round(e.start, 2), "end": round(e.end, 2),
+             "peak_s": round(e.peak_s, 2),
+             "xfade_in": fade_s if i > 0 else 0.0,
+             "xfade_out": fade_s if i < len(picked) - 1 else 0.0}
+            for i, e in enumerate(picked)
+        ],
+    }
+    return HighlightReel(events=picked, target_s=target_s, total_s=total,
+                         fade_s=fade_s, manifest=manifest)
+
+
+def reel_report(reel: HighlightReel) -> str:
+    """God-tier highlight reel summary."""
+    from ..style import theme as _theme
+    th = _theme()
+    lines = [th.banner("Highlight Reel",
+                       f"{len(reel.events)} moments · "
+                       f"{reel.total_s:.0f}s / {reel.target_s:.0f}s target")]
+    for i, e in enumerate(reel.events, 1):
+        lines.append(
+            f"  [{th.ok}] #{i} {e.start:6.1f}s → {e.end:6.1f}s  "
+            f"peak {e.peak_s:6.1f}s  {th.bar(min(1.0, e.peak_db / 12.0))} "
+            f"+{e.peak_db:.1f}dB")
+    lines.append(th.status_line(True, "reel assembled",
+                                f"{len(reel.events)} cuts, "
+                                f"{reel.fade_s}s fades"))
+    return "\n".join(lines)
 
 
 def score_segments(src: str, segments: list[tuple[float, float]],
