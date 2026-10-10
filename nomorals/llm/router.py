@@ -24,7 +24,7 @@ from ..core.errors import ModelError, ProviderUnavailable, classify
 from ..core.events import EventBus
 from ..core.logging_setup import get_logger
 from ..core.retry import CircuitBreaker, CircuitOpen
-from ..research.pipeline import COST_TABLE
+from ..research.costs import COST_TABLE
 from .base import LLMProvider, LLMResponse, Message, SamplingParams
 
 __all__ = [
@@ -265,6 +265,9 @@ class ProviderHealth:
     total_latency_ms: float = 0.0
     cooldown_until: float = 0.0
     breaker: CircuitBreaker | None = field(default=None, repr=False)
+    #: Typed failure class of the most recent failure
+    #: (``nomorals.llm.failures.FailureClass`` value, "" when none).
+    failure_class: str = ""
 
     @property
     def error_rate(self) -> float:
@@ -305,6 +308,7 @@ class ProviderHealth:
             "last_error": self.last_error,
             "cooling_down": not self.available(),
             "breaker_state": self.breaker.state if self.breaker is not None else "closed",
+            "failure_class": self.failure_class,
         }
 
 
@@ -324,6 +328,7 @@ class LLMRouter:
         rate_limit_cooldown_seconds: float = 120.0,
         failure_threshold: int = 3,
         max_cooldown_seconds: float = 900.0,
+        auth_cooldown_seconds: float = 600.0,
         bus: EventBus | None = None,
         clock: Callable[[], float] = time.monotonic,
         repair_hooks: dict[str, Callable] | list[Callable] | None = None,
@@ -339,6 +344,10 @@ class LLMRouter:
         # more quota. Back off for 2 minutes on rate limits.
         self.rate_limit_cooldown_seconds = rate_limit_cooldown_seconds
         self.failure_threshold = failure_threshold
+        # Auth/config failures (bad key, retired model name) are not
+        # transient: park the provider long so we stop burning quota on a
+        # credential that will never work until the operator fixes it.
+        self.auth_cooldown_seconds = auth_cooldown_seconds
         # Circuit breaker: the cooldown grows exponentially with consecutive
         # failures (LiteLLM's cooldown_time pattern taken one step further —
         # a provider that fails 20 times in a row is not "transient", it is
@@ -800,6 +809,15 @@ class LLMRouter:
             chain_note = "; ".join(f"{name} failed ({err})" for name, err in failed)
             last.fallback_note = (f"{chain_note}; no provider served this call"
                                   if not last.fallback_note else last.fallback_note)
+        # Typed failure class on the terminal response, so the brain and
+        # callers recover the RIGHT way (shrink context vs back off vs
+        # report a bad key) instead of guessing from the message text.
+        if last.error and not last.failure_class:
+            from .failures import classify_failure
+            try:
+                last.failure_class = classify_failure(last.error).failure_class.value
+            except Exception:  # noqa: BLE001 — tagging never breaks the call
+                pass
         return last
 
     def _note_success(self, name: str) -> None:
@@ -810,38 +828,65 @@ class LLMRouter:
                 # A success closes the breaker — including after a half-open
                 # probe, which is how a recovered provider rejoins rotation.
                 health.breaker.record_success()
+        # Error-budget heartbeat: feeds real success ratios (not failure-only).
+        try:
+            from ..core.error_system import heartbeat
+            heartbeat(f"llm/{name}", True)
+        except Exception:  # noqa: BLE001 - telemetry never breaks routing
+            pass
 
     def _note_failure(self, name: str, error: str) -> None:
+        from .failures import FailureClass, classify_failure
+
         health = self._health.get(name)
         if health is None:
             return
-        # Dynamic circuit-breaker timeout (LiteLLM's reliability pattern:
-        # cooldown after allowed_fails, immediate cooldown on 429 — with the
-        # backoff made exponential so a provider failing 20 times in a row
-        # is treated as down, not transient).  The first cooldown after the
-        # threshold is the base; each further consecutive failure doubles it,
-        # capped at max_cooldown_seconds, with ±10% jitter so concurrent
-        # callers do not re-probe a recovering provider in lockstep.
-        low = (error or "").lower()
-        is_rate_limit = ("429" in low or "rate limit" in low
-                         or "rate_limit" in low or "ratelimit" in low)
+        # Typed failure, typed recovery.  The old code treated every
+        # failure the same (substring "429" check + exponential cooldown);
+        # the taxonomy distinguishes rate-limit vs auth vs context-overflow
+        # vs network, each with the RIGHT recovery:
+        #
+        # * context_overflow is a CALLER-side bug (prompt too big) — never
+        #   park the provider for it, and never feed the breaker.  The
+        #   brain shrinks the context and retries instead.
+        # * auth/config are not transient — park long, stop burning quota.
+        # * rate limits keep the long backoff; everything else the classic
+        #   threshold → exponential path.
+        info = classify_failure(error)
+        fc = info.failure_class
+        health.failure_class = fc.value
         consecutive = health.consecutive_failures + 1  # this failure included
-        if is_rate_limit:
+        feed_breaker = True
+        if fc is FailureClass.CONTEXT_OVERFLOW:
+            cooldown = 0.0
+            feed_breaker = False
+        elif fc in (FailureClass.AUTH, FailureClass.CONFIG):
+            base = max(self.auth_cooldown_seconds, self.cooldown_seconds)
+            steps = max(0, consecutive - 1)
+            cooldown = min(self.max_cooldown_seconds, base * (2.0 ** steps))
+            cooldown = max(1.0, cooldown * random.uniform(0.9, 1.1))
+        elif fc is FailureClass.RATE_LIMITED:
             base, steps = self.rate_limit_cooldown_seconds, max(0, consecutive - 1)
+            cooldown = min(self.max_cooldown_seconds, base * (2.0 ** steps))
+            cooldown = max(1.0, cooldown * random.uniform(0.9, 1.1))
         elif consecutive >= self.failure_threshold:
             base, steps = self.cooldown_seconds, consecutive - self.failure_threshold
-        else:
-            base, steps = 0.0, 0
-        if base > 0:
             cooldown = min(self.max_cooldown_seconds, base * (2.0 ** steps))
             cooldown = max(1.0, cooldown * random.uniform(0.9, 1.1))
         else:
             cooldown = 0.0
         health.record_failure(error, cooldown, now=self._clock())
+        # Error-budget heartbeat: feeds real failure ratios.
+        try:
+            from ..core.error_system import heartbeat
+            heartbeat(f"llm/{name}", False)
+        except Exception:  # noqa: BLE001 - telemetry never breaks routing
+            pass
         if health.breaker is not None:
             if cooldown > 0:
                 health.breaker.reset_timeout = cooldown
-            health.breaker.record_failure()
+            if feed_breaker:
+                health.breaker.record_failure()
 
         # Call repair hooks with cooldown
         now = self._clock()
