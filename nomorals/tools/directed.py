@@ -92,6 +92,144 @@ def register(registry: Any) -> None:
         return {"ok": True, "actions": _la()}
 
     @registry.register(
+        "structure_prompt",
+        description=(
+            "Run a plain description through the prompt engine -> "
+            "model-optimized structured prompt (action-first, time-stamped "
+            "beats, camera specs, lighting, physical details, negatives). "
+            "('make this prompt hit harder for LTX'). backend: ltx | wan "
+            "| motion | image."
+        ),
+        capability=Capability.MEDIA,
+    )
+    def structure_prompt(plain: str, *, backend: str = "ltx",
+                         duration_s: float = 5.0) -> dict[str, Any]:
+        from ..media.directed.prompt_engine import structure
+        try:
+            sp = structure(plain, backend=backend, duration_s=duration_s)
+            r = sp.render(backend)
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "error": str(exc)}
+        return {"ok": True, "prompt": r["prompt"],
+                "negative_prompt": r["negative_prompt"],
+                "beats": sp.beats, "backend": r["backend"]}
+
+    @registry.register(
+        "edit_image",
+        description=(
+            "AI image editing arsenal, one op at a time. op: inpaint | "
+            "outpaint | style | faceswap | bgreplace | remove | add | "
+            "relight | expression. ('remove the trash can from this photo', "
+            "'swap this face onto that photo', 'relight this portrait "
+            "rembrandt style'). mask_path marks the region (white = edit) "
+            "for inpaint/remove/add. Honest backend labels; neural ops "
+            "raise a clear error when the model isn't installed."
+        ),
+        capability=Capability.MEDIA,
+    )
+    def edit_image(image: str, op: str, *,
+                   mask_path: str = "",
+                   prompt: str = "",
+                   source_path: str = "",
+                   bg_path: str = "",
+                   direction: str = "left",
+                   warmth: float = 0.0,
+                   width: int = 0, height: int = 0) -> dict[str, Any]:
+        from PIL import Image as _I
+        from ..media.directed import ai_edit as _ae
+        try:
+            img = _I.open(image).convert("RGB")
+            mask = _I.open(mask_path).convert("L") if mask_path else None
+            o = (op or "").lower().strip()
+            if o == "inpaint":
+                if mask is None:
+                    return {"ok": False, "error":
+                            "inpaint needs mask_path (white = fill region)"}
+                out, backend = _ae.inpaint(img, mask, prompt)
+            elif o == "outpaint":
+                out, backend = _ae.outpaint(img, width or img.width * 2,
+                                            height or img.height,
+                                            prompt=prompt)
+            elif o == "style":
+                out, backend = _ae.style_transfer(img, prompt)
+            elif o == "faceswap":
+                if not source_path:
+                    return {"ok": False, "error":
+                            "faceswap needs source_path (the face to use)"}
+                out, backend = _ae.face_swap(_I.open(source_path), img)
+            elif o == "bgreplace":
+                if not bg_path or mask is None:
+                    return {"ok": False, "error":
+                            "bgreplace needs bg_path + mask_path"}
+                out, backend = _ae.background_replace(
+                    img, _I.open(bg_path), mask)
+            elif o == "remove":
+                if mask is None:
+                    return {"ok": False, "error":
+                            "remove needs mask_path (white = object)"}
+                out, backend = _ae.object_removal(img, mask, prompt=prompt)
+            elif o == "add":
+                if mask is None or not prompt:
+                    return {"ok": False, "error":
+                            "add needs mask_path + prompt (what to add)"}
+                out, backend = _ae.object_addition(img, mask, prompt)
+            elif o == "relight":
+                out, backend = _ae.relight_photo(img, direction, warmth)
+            elif o == "expression":
+                if not source_path:
+                    return {"ok": False, "error":
+                            "expression needs source_path (expression ref)"}
+                out, backend = _ae.expression_edit(
+                    img, _I.open(source_path))
+            else:
+                return {"ok": False, "error":
+                        f"unknown op {op!r}"}
+            from pathlib import Path as _P
+            import tempfile as _t
+            out_path = str(_P(_t.mkdtemp(prefix="edit_")) / f"{o}.png")
+            out.save(out_path)
+        except _ae.ModelUnavailable as exc:
+            return {"ok": False, "error": str(exc)}
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "error": str(exc)}
+        return {"ok": True, "path": out_path, "op": o,
+                "backend": backend}
+
+    @registry.register(
+        "fill_media",
+        description=(
+            "img2img filler: synthesize in-between frames (fill_frames), "
+            "extend an image's background (extend_bg), or repair a dropped "
+            "video segment (fill_gap). ('fill the gap between 2s and 4s', "
+            "'make this photo wider')."
+        ),
+        capability=Capability.MEDIA,
+    )
+    def fill_media(kind: str, *, image: str = "", video: str = "",
+                   t0: float = 0.0, t1: float = 0.0,
+                   width: int = 0, height: int = 0,
+                   prompt: str = "") -> dict[str, Any]:
+        from ..media.directed import filler as _f
+        try:
+            k = (kind or "").lower().strip()
+            if k == "extend_bg":
+                from PIL import Image as _I
+                out, backend = _f.extend_background(
+                    _I.open(image).convert("RGB"), width, height,
+                    prompt=prompt)
+                import tempfile as _t
+                from pathlib import Path as _P
+                p = str(_P(_t.mkdtemp(prefix="fill_")) / "extended.png")
+                out.save(p)
+                return {"ok": True, "path": p, "backend": backend}
+            if k == "fill_gap":
+                p = _f.fill_video_gap(video, t0, t1)
+                return {"ok": True, "path": p, "backend": "morph-bridge"}
+            return {"ok": False, "error": f"unknown kind {kind!r}"}
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "error": str(exc)}
+
+    @registry.register(
         "direct_to_timeline",
         description=("Drop a directed-animation clip into an edit timeline "
                      "file (grading/cutting like any footage)."),

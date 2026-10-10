@@ -187,3 +187,64 @@ def test_warp_lipsync_changes_mouth(tmp_path):
     assert res.backend == "warp"
     import os
     assert os.path.getsize(res.path) > 1000
+
+
+def test_prompt_engine_structure():
+    from nomorals.media.directed.prompt_engine import structure
+    sp = structure("make the person raise two fingers up, selfie style, cinematic",
+                   backend="ltx")
+    r = sp.render()
+    assert len(r["prompt"].split()) <= 200
+    assert len(sp.beats) == 3 and sp.beats[0].startswith("At 0.0s")
+    assert "blurry" in r["negative_prompt"]
+    assert "handheld" in r["prompt"].lower() or "selfie" in r["prompt"].lower()
+    m = structure("a robot walks", backend="motion").render("motion")
+    assert "walks" in m["prompt"]
+
+
+def test_filler_frames_and_extend(tmp_path):
+    from PIL import Image
+    from nomorals.media.directed.filler import fill_frames, extend_background
+    a = Image.new("RGB", (48, 48), (200, 50, 50))
+    b = Image.new("RGB", (48, 48), (50, 50, 200))
+    mids = fill_frames(a, b, 3)
+    assert len(mids) == 3 and all(m.size == (48, 48) for m in mids)
+    ext, backend = extend_background(a, 96, 72)
+    assert ext.size == (96, 72) and backend == "mirror-pad"
+
+
+def test_ai_edit_cpu_ops():
+    from PIL import Image, ImageDraw
+    from nomorals.media.directed import ai_edit as ae
+    img = Image.new("RGB", (64, 64), (120, 100, 90))
+    mask = Image.new("L", (64, 64), 0)
+    ImageDraw.Draw(mask).ellipse([16, 16, 48, 48], fill=255)
+    out, b = ae.object_removal(img, mask)
+    assert b == "diffusion-fill" and out.size == (64, 64)
+    out, b = ae.relight_photo(img, "rembrandt", warmth=0.4)
+    assert b == "photo-relight(rembrandt)"
+    out, b = ae.background_replace(img, Image.new("RGB", (64, 64), (10, 40, 90)), mask)
+    assert b == "composite"
+    # neural-only ops fail honestly
+    for fn in (lambda: ae.style_transfer(img, "oil"),
+               lambda: ae.face_swap(img, img),
+               lambda: ae.object_addition(img, mask, "a cat"),
+               lambda: ae.expression_edit(img, img)):
+        try:
+            fn()
+            raise AssertionError("should have raised")
+        except ae.ModelUnavailable:
+            pass
+
+
+def test_spine_tools_registered():
+    from nomorals.tools import directed as mod
+    from nomorals.tools.registry import ToolRegistry
+    reg = ToolRegistry()
+    mod.register(reg)
+    names = set(reg.names())
+    for n in ("structure_prompt", "edit_image", "fill_media",
+              "lip_sync", "talk_photo", "dub_video",
+              "direct_to_timeline", "animate_photo",
+              "camera_look", "list_actions"):
+        assert n in names, n

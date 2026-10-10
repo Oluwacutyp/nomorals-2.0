@@ -83,6 +83,8 @@ class Capability:
     # Agents
     AGENT_SPAWN = "agent.spawn"
     MISSION_START = "mission.start"
+    # Media
+    MEDIA = "media.gen"
     # Social
     SOCIAL_POST = "social.post"
     SOCIAL_READ = "social.read"
@@ -102,6 +104,7 @@ class Capability:
         AGENT_SPAWN, MISSION_START,
         SOCIAL_POST, SOCIAL_READ, SOCIAL_DM, SOCIAL_BULK,
         SYS_CONFIG, SYS_BACKUP, SYS_SHUTDOWN,
+        MEDIA,
     )
 
     #: Capabilities that require an explicit operator confirmation token.

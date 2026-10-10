@@ -44,13 +44,34 @@ def _out_path(workdir: str | None, stem: str) -> str:
     return str(wd / f"{stem}.mp4")
 
 
+def _structure_prompt(prompt: str, backend: str,
+                      duration_s: float) -> tuple[str, str]:
+    """Run a plain prompt through the prompt engine. Always safe to call."""
+    try:
+        from .directed.prompt_engine import structure
+        sp = structure(prompt, backend=backend, duration_s=duration_s)
+        r = sp.render(backend)
+        return r["prompt"], r["negative_prompt"]
+    except Exception:
+        return prompt, ""
+
+
 def text_to_shot(prompt: str, *, duration_s: float = 5.0,
-                 workdir: str | None = None) -> GenShot:
-    """Text → video shot. Neural when available, motion-studio on CPU."""
+                 workdir: str | None = None,
+                 structure_prompt: bool = True) -> GenShot:
+    """Text → video shot. Neural when available, motion-studio on CPU.
+
+    structure_prompt: run the plain prompt through the prompt engine
+    (action-first, beats, camera, lighting, negatives) before the backend.
+    """
     from .videogen.pipeline import generate
     out = _out_path(workdir, "t2v_shot")
+    neg = ""
+    if structure_prompt:
+        prompt, neg = _structure_prompt(prompt, "ltx", duration_s)
     try:
-        result = generate(prompt, duration_s=duration_s, out_path=out)
+        result = generate(prompt, duration_s=duration_s, out_path=out,
+                          negative_prompt=neg or None)
         return GenShot(path=result.path, mode="t2v", prompt=prompt,
                        duration_s=duration_s, backend=result.backend)
     except Exception as exc:
@@ -59,8 +80,11 @@ def text_to_shot(prompt: str, *, duration_s: float = 5.0,
 
 def image_to_shot(image: str, prompt: str = "", *,
                   duration_s: float = 5.0,
-                  workdir: str | None = None) -> GenShot:
+                  workdir: str | None = None,
+                  structure_prompt: bool = True) -> GenShot:
     """Image → video shot (i2v). Animates a still into motion."""
+    if structure_prompt and prompt:
+        prompt, _neg = _structure_prompt(prompt, "ltx", duration_s)
     from .videogen.ltx_backend import LTXBackend
     backend = LTXBackend()
     info = backend.check()

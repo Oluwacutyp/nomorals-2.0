@@ -168,6 +168,21 @@ Source: `nomorals/media/directed/`.
 
 ---
 
+## 4c. AI Editing Arsenal Models
+
+Source: `nomorals/media/directed/ai_edit.py`.
+
+| Model | For | Size 💰 | Platform | Install |
+|-------|-----|---------|----------|---------|
+| **inswapper_128.onnx** (InsightFace) | Face swap — **CPU-capable** | ~500 MB 💰 | 📱💻🖥️ | `pip install onnxruntime` + download from `https://github.com/facefusion/facefusion-assets/releases` → `~/.devon-models/inswapper/inswapper_128.onnx` + `git clone https://github.com/haofanwang/inswapper ~/.devon-models/inswapper/repo` |
+| **SynthLight** | Neural portrait relighting | ~2 GB 💰 | 🖥️ | `https://github.com/vrroom/synthlight` (wrapper pending — photographic relight is the working path) |
+| **LivePortrait** | Expression transfer | ~500 MB 💰 | 💻🖥️ | `https://github.com/KwaiVGI/LivePortrait` (wrapper pending — honest gap) |
+| **SD1.5** (`DEVON_SD_CKPT`) | Neural inpaint / outpaint / style / object add | ~4 GB 💰 | 💻🖥️ | Any SD1.5 `.safetensors` at `~/.devon-models/sd15/` |
+
+**CPU fallbacks (always work):** diffusion-fill inpaint, mirror-pad outpaint, photographic relight, feathered composite bg-replace.
+
+---
+
 ## 5. Image Models
 
 Source: `nomorals/media/imggen/`. Devon's own UNet/DDPM implementation; can load open SD1.5 weights.
