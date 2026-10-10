@@ -6,6 +6,7 @@ import json
 import os
 import time
 from ...core.logging_setup import get_logger
+from ...storage.kv import KVStore
 from .approvals import _key_set
 _log = get_logger(__name__)
 
@@ -165,12 +166,7 @@ class RuntimeMetaMixin:
             return "usage: /mode off|suggest|auto"
         self.settings.partner.autonomy_mode = mode
         try:
-            with self.context.db.transaction():
-                self.context.db.execute(
-                    "INSERT INTO kv_store (key, value, kind, updated_at) VALUES (?, ?, 'json', ?) "
-                    "ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
-                    ("partner.autonomy_mode", json.dumps({"mode": mode}), time.time()),
-                )
+            KVStore(self.context.db).set("partner.autonomy_mode", {"mode": mode})
         except Exception:  # noqa: BLE001 - a write failure must not block the switch
             pass
         try:
@@ -499,13 +495,8 @@ class RuntimeMetaMixin:
             current = creator.get_owner_identity() or {}
             current[field] = value
             try:
-                import json, time
                 if creator.db is not None:
-                    creator.db.execute(
-                        "INSERT OR REPLACE INTO kv_store (key, value, kind, updated_at)"
-                        " VALUES (?, ?, 'json', ?)",
-                        (creator.IDENTITY_KV_KEY, json.dumps(current), time.time()),
-                    )
+                    KVStore(creator.db).set(creator.IDENTITY_KV_KEY, current)
                 creator._owner_identity = dict(current)
             except Exception as exc:  # noqa: BLE001
                 return f"save failed: {exc}"
@@ -519,10 +510,7 @@ class RuntimeMetaMixin:
             # Clear by setting empty (will fail validation, so do direct kv delete)
             try:
                 if creator.db is not None:
-                    creator.db.execute(
-                        "DELETE FROM kv_store WHERE key = ?",
-                        (creator.IDENTITY_KV_KEY,),
-                    )
+                    KVStore(creator.db).delete(creator.IDENTITY_KV_KEY)
                 creator._owner_identity = None
                 return "identity bank cleared."
             except Exception as exc:  # noqa: BLE001

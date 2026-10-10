@@ -13,6 +13,7 @@ from ...core.config import Settings
 from ...core.ids import ulid_now
 from ...core.logging_setup import get_logger
 from ...llm.base import Message, SamplingParams
+from ...storage.kv import KVStore
 from ...partner.background import BackgroundSelector
 from ...partner.lexicon_feed import LexiconFeed, seed_partner_lexicon
 from ...partner.mood import MoodEngine
@@ -716,15 +717,13 @@ class PartnerBrain:
         except Exception:  # noqa: BLE001 - continuity is a niceness, never fatal
             pass
         try:
-            row = db.query_one("SELECT value FROM kv_store WHERE key = 'partner.open_loops'")
-            if row:
-                loops = json.loads(row["value"] or "[]")
-                fresh = [
-                    loop for loop in loops
-                    if isinstance(loop, dict)
-                    and time.time() - float(loop.get("ts", 0.0)) < 48 * 3600
-                ]
-                for loop in fresh[-3:]:
+            loops = KVStore(db).get("partner.open_loops", default=[])
+            fresh = [
+                loop for loop in loops
+                if isinstance(loop, dict)
+                and time.time() - float(loop.get("ts", 0.0)) < 48 * 3600
+            ]
+            for loop in fresh[-3:]:
                     platform = loop.get("platform", "somewhere")
                     text = str(loop.get("text", "")).strip()
                     if text:
@@ -822,8 +821,8 @@ class PartnerBrain:
             return
         db = self.context.db
         try:
-            row = db.query_one("SELECT value FROM kv_store WHERE key = ?", (f"curated.{chat_key}",))
-            last = float(json.loads(row["value"]).get("ts", 0.0)) if row else 0.0
+            data = KVStore(db).get(f"curated.{chat_key}", default={})
+            last = float(data.get("ts", 0.0))
         except Exception:  # noqa: BLE001
             last = 0.0
         count = int(db.scalar(
@@ -834,11 +833,7 @@ class PartnerBrain:
         if count < 6 or (time.time() - last) < 900:
             return
         try:
-            db.execute(
-                "INSERT INTO kv_store (key, value, kind, updated_at) VALUES (?, ?, 'json', ?) "
-                "ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
-                (f"curated.{chat_key}", json.dumps({"ts": time.time()}), time.time()),
-            )
+            KVStore(db).set(f"curated.{chat_key}", {"ts": time.time()})
         except Exception:  # noqa: BLE001
             pass
         if self.curator_hook is not None:
@@ -942,8 +937,7 @@ class PartnerBrain:
         """
         db = self.context.db
         try:
-            row = db.query_one("SELECT value FROM kv_store WHERE key = 'partner.open_loops'")
-            existing = json.loads(row["value"] or "[]") if row else []
+            existing = KVStore(db).get("partner.open_loops", default=[])
         except Exception:  # noqa: BLE001
             existing = []
         if not isinstance(existing, list):
@@ -970,11 +964,7 @@ class PartnerBrain:
                 fresh.append({"text": text, "platform": platform, "ts": now})
         fresh = fresh[-10:]
         try:
-            db.execute(
-                "INSERT INTO kv_store (key, value, kind, updated_at) VALUES (?, ?, 'json', ?) "
-                "ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
-                ("partner.open_loops", json.dumps(fresh), now),
-            )
+            KVStore(db).set("partner.open_loops", fresh)
         except Exception as exc:  # noqa: BLE001
             _log.debug("open_loops write failed: %s", exc)
         return [str(loop.get("text", "")) for loop in fresh]

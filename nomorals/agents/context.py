@@ -20,6 +20,7 @@ from ..core.observability import Metrics, Tracer
 from ..core.policy import CapabilitySet, Policy
 from ..core.ratelimit import SemaphorePool
 from ..storage.db import Database, open_database
+from ..storage.kv import KVStore
 
 __all__ = ["AgentContext", "build_context", "build_router",
            "persist_provider_override", "ensure_local_gguf"]
@@ -354,36 +355,28 @@ def persist_provider_override(db: Any, provider: str,
     provider = (provider or "").strip().lower()
     if not provider:
         raise ValueError("provider name required")
-    import time as _time
 
+    kv = KVStore(db)
     for key, payload in (
         (PROVIDER_OVERRIDE_KEY, {"provider": provider}),
         (FALLBACK_CHAIN_KEY, {"chain": [c.strip().lower() for c in (chain or []) if c.strip()]}),
     ):
-        db.execute(
-            "INSERT INTO kv_store (key, value, kind, updated_at) VALUES (?, ?, 'json', ?) "
-            "ON CONFLICT(key) DO UPDATE SET value = excluded.value, "
-            "updated_at = excluded.updated_at",
-            (key, _json.dumps(payload), _time.time()),
-        )
+        kv.set(key, payload)
 
 
 def _apply_provider_override(db: Any, settings: Settings) -> None:
     """kv_store wins over the .env defaults for provider + fallback chain."""
-    import json as _json
-
     try:
-        row = db.query_one(
-            "SELECT value FROM kv_store WHERE key = ?", (PROVIDER_OVERRIDE_KEY,))
-        if row and row["value"]:
-            provider = str(_json.loads(row["value"]).get("provider") or "").strip().lower()
+        kv = KVStore(db)
+        data = kv.get(PROVIDER_OVERRIDE_KEY)
+        if data:
+            provider = str(data.get("provider") or "").strip().lower()
             if provider:
                 settings.llm.provider = provider
-        crow = db.query_one(
-            "SELECT value FROM kv_store WHERE key = ?", (FALLBACK_CHAIN_KEY,))
-        if crow and crow["value"]:
+        cdata = kv.get(FALLBACK_CHAIN_KEY)
+        if cdata:
             chain = [str(c).strip().lower() for c in
-                     (_json.loads(crow["value"]).get("chain") or []) if str(c).strip()]
+                     (cdata.get("chain") or []) if str(c).strip()]
             if chain:
                 settings.llm.fallback_chain = chain
     except Exception as exc:  # noqa: BLE001 — a broken override must not stop the boot

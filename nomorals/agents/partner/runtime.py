@@ -16,6 +16,7 @@ from ...partner.gating import gate_decision, is_owner_chat, is_restricted
 from ...partner.presence import Presence, decide_presence, human_typing_seconds
 from ...social.chat.base import ChatKind, ChatMessage, ChatRef
 from ...social.chat.gateway import ChatGateway
+from ...storage.kv import KVStore
 from .brain import PartnerBrain
 from .approvals import _direct_approve, _direct_deny, _key_set
 from .runtime_live import RuntimeLiveMixin
@@ -1779,13 +1780,10 @@ class PartnerRuntime(
     def _apply_persisted_mode(self) -> None:
         """A /mode switch (or `nm partner --mode`) persists; honor it on boot."""
         try:
-            row = self.context.db.query_one(
-                "SELECT value FROM kv_store WHERE key = 'partner.autonomy_mode'"
-            )
-            if row:
-                persisted = str(json.loads(row["value"]).get("mode") or "")
-                if persisted in {"off", "suggest", "auto"}:
-                    self.settings.partner.autonomy_mode = persisted
+            data = KVStore(self.context.db).get("partner.autonomy_mode", default={})
+            persisted = str(data.get("mode") or "")
+            if persisted in {"off", "suggest", "auto"}:
+                self.settings.partner.autonomy_mode = persisted
         except Exception:  # noqa: BLE001 - a stale kv row must not break boot
             pass
 
