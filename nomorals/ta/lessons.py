@@ -1,11 +1,13 @@
-"""Hard lessons from Sentinel.py's honest backtests (2026-09-07).
+"""Hard lessons from honest backtests.
 
 This module exists so Devon never repeats proven mistakes. Every lesson
 below comes from a real backtest with real numbers — not theory, not
 guru courses, not broker marketing.
 
-Source: ``vendor/sentinel/Sentinel_PHASE_BCD_REPORT.md``
-Capital per scenario: $10,000. ML: OFF. No in-sample tuning.
+Sources:
+- ``vendor/sentinel/Sentinel_PHASE_BCD_REPORT.md`` (2026-09-07)
+- Devon's own TA walk-forward backtest (2026-10-10): XAUUSD 1h, 2yr,
+  11,454 bars, no lookahead, realistic costs.
 
 The cardinal rule: **backtest results are evidence. Treat them as such.**
 """
@@ -102,6 +104,41 @@ LESSONS: tuple[dict, ...] = (
         ),
         "what_was_tried": "Base engine only (sentiment OFF).",
         "conditions_to_revisit": "None. The 1h timeframe holds the edge, if any.",
+    },
+    {
+        "id": "devon-ta-xau-no-edge",
+        "symbol": "XAUUSD",
+        "timeframes": ("1h",),
+        "verdict": "DO NOT TRADE",
+        "evidence": (
+            "Devon's own TA backtest (2026-10-10): XAUUSD 1h, 2 years, "
+            "11,454 bars (GC=F futures). 123 trades: -6.53% return, "
+            "PF 0.85, WR 36.6%, MaxDD 8.32%, Sharpe -0.54. "
+            "Buy & hold over same period: +56.59%. "
+            "Walk-forward, no lookahead, $0.35 spread + $0.10 slippage, "
+            "1% risk/trade, 500-bar rolling window."
+        ),
+        "why": (
+            "Devon's TA (structure + SMC + adaptive + regime + sessions + "
+            "analyst fusion) does not have an edge on XAUUSD 1h. It "
+            "outperforms Sentinel's -23.23% (better risk management: 8.3% "
+            "vs 29.7% max DD) but still loses money while buy-and-hold "
+            "gains 57%. The system takes too many counter-trend signals "
+            "in a strong bull market. 36.6% win rate with PF 0.85 means "
+            "the losers outweigh the winners."
+        ),
+        "what_was_tried": (
+            "Full TA pipeline: fractal swings, S/R zones, order blocks, "
+            "FVG, liquidity sweeps, volatility-breathing parameters, "
+            "5-state regime detector, session killzones, analyst signal "
+            "fusion with disagreement penalty. Min confidence 55."
+        ),
+        "conditions_to_revisit": (
+            "Backtest on range-bound XAU periods (not just bull market). "
+            "Try higher confidence threshold (>70). Add trend filter: "
+            "no shorts when HTF is strongly bullish. Each change needs "
+            "a fresh walk-forward backtest before the block lifts."
+        ),
     },
     {
         "id": "sizing-is-survival",
