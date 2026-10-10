@@ -196,6 +196,8 @@ class LTXBackend:
         """
         req = LTXClipRequest(prompt=prompt, **kw) if not isinstance(
             prompt, LTXClipRequest) else prompt
+        from .autotune import autotune_request
+        req = autotune_request("ltx", req)
         self.require()
         if not req.prompt.strip():
             raise VideogenError("empty prompt — nothing to generate")
@@ -264,6 +266,8 @@ class LTXBackend:
         record_ledger({"kind": "videogen.ltx", "path": str(out_path),
                        "mode": mode, "model": self.model_id,
                        "frames": num_frames, "steps": steps,
+                       "width": width, "height": height,
+                       "duration_s": req.duration_s,
                        "prompt": req.prompt[:120]})
         return str(out_path)
 

@@ -24,6 +24,12 @@ from .capabilities import (
 )
 from .pipeline import generate, request_hero_clip, capability_report, VideoResult
 from .chaining import chain_scenes, ChainReport
+from .autotune import autotune_request, AUTOTUNE
+from .consistency import (
+    consistency_pass,
+    boundary_metric,
+    reinhard_match,
+)
 
 __all__ = [
     "VideogenError",
@@ -36,4 +42,9 @@ __all__ = [
     "VideoResult",
     "chain_scenes",
     "ChainReport",
+    "autotune_request",
+    "AUTOTUNE",
+    "consistency_pass",
+    "boundary_metric",
+    "reinhard_match",
 ]

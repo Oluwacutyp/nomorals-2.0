@@ -131,6 +131,8 @@ class WanBackend:
         """Generate a 720p24 clip. Returns the output mp4 path."""
         req = WanClipRequest(prompt=prompt, **kw) if not isinstance(
             prompt, WanClipRequest) else prompt
+        from .autotune import autotune_request
+        req = autotune_request("wan", req)
         self.require()
         if not req.prompt.strip():
             raise VideogenError("empty prompt — nothing to generate")
@@ -174,6 +176,8 @@ class WanBackend:
         record_ledger({"kind": "videogen.wan", "path": str(out_path),
                        "mode": mode, "model": self.model_id,
                        "frames": num_frames, "steps": steps,
+                       "width": req.width, "height": req.height,
+                       "duration_s": req.duration_s,
                        "prompt": req.prompt[:120]})
         return str(out_path)
 

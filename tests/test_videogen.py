@@ -328,3 +328,60 @@ def test_chain_scenes_consistency_wired(cover_png, tmp_path):
         consistency=False,
     )
     assert report2.consistency == {}
+
+
+# -- profile auto-tune ---------------------------------------------------------
+
+def test_autotune_ltx_termux_scales_down():
+    from nomorals.media.videogen.autotune import autotune_request
+    from nomorals.media.videogen.ltx_backend import LTXClipRequest
+    tuned = autotune_request("ltx", LTXClipRequest(prompt="x"),
+                             profile="termux")
+    assert (tuned.width, tuned.height) == (512, 320)
+    assert tuned.duration_s == 3.0 and tuned.fps == 16
+
+
+def test_autotune_preserves_explicit_values():
+    from nomorals.media.videogen.autotune import autotune_request
+    from nomorals.media.videogen.ltx_backend import LTXClipRequest
+    from nomorals.media.videogen.wan_backend import WanClipRequest
+    tuned = autotune_request(
+        "ltx", LTXClipRequest(prompt="x", width=1024, duration_s=9.0),
+        profile="termux")
+    assert tuned.width == 1024 and tuned.duration_s == 9.0
+    # ... but unset fields still tune
+    assert tuned.fps == 16
+    tuned_w = autotune_request("wan", WanClipRequest(prompt="x"),
+                               profile="laptop")
+    assert (tuned_w.width, tuned_w.height) == (960, 540)
+    assert tuned_w.duration_s == 4.0
+    assert tuned_w.num_inference_steps == 40
+
+
+def test_autotune_workstation_keeps_defaults():
+    from nomorals.media.videogen.autotune import autotune_request
+    from nomorals.media.videogen.ltx_backend import LTXClipRequest
+    from nomorals.media.videogen.wan_backend import WanClipRequest
+    ltx = autotune_request("ltx", LTXClipRequest(prompt="x"),
+                           profile="workstation")
+    assert (ltx.width, ltx.height, ltx.duration_s) == (768, 512, 5.0)
+    wan = autotune_request("wan", WanClipRequest(prompt="x"),
+                           profile="workstation")
+    assert (wan.width, wan.height) == (1280, 720)
+    # unknown profile / backend → full capability, never a crash
+    same = autotune_request("nope", WanClipRequest(prompt="x"),
+                            profile="mystery")
+    assert (same.width, same.height) == (1280, 720)
+
+
+def test_autotune_uses_live_profile(monkeypatch):
+    from nomorals.media.videogen import autotune as at
+    from nomorals.media.videogen.ltx_backend import LTXClipRequest
+    monkeypatch.setattr(at, "get_profile_kind", lambda: "termux",
+                        raising=False)
+    # autotune imports get_profile_kind inside the function from
+    # nomorals.core.profiles — patch the source instead
+    import nomorals.core.profiles as prof
+    monkeypatch.setattr(prof, "get_profile_kind", lambda pinned="": "termux")
+    tuned = at.autotune_request("ltx", LTXClipRequest(prompt="x"))
+    assert tuned.width == 512
