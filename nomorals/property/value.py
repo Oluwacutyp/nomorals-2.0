@@ -11,14 +11,18 @@ Pipeline
 --------
 1. ``estimate_value(desc)`` — parse area + bedroom count, pull
    comparables (injectable ``comp_source``; default = seeded Lagos
-   norms, honestly labeled), weight by similarity, and return
+   norms, honestly labeled), weight by similarity × source trust
+   (HouseCanary: surface the underlying data quality), and return
    ``(low, point, high, fsd, comps)`` where ``fsd`` is the
-   forecast-standard-deviation fraction (HouseCanary pattern).
+   forecast-standard-deviation fraction (HouseCanary pattern) and the
+   confidence score is simply ``1 - fsd``.
 2. Thin markets (fewer than 3 comps) get an honestly wide band —
    Homes.com's 16% cautionary: public-records-only is not enough.
 3. Comp-picker (Redfin trick): the owner vetoes/swaps weak comps,
    ``pick_comps(estimate_id, keep_ids)`` recomputes the range from
    the kept set only.
+4. ``ValueStore.history()`` / ``trend()``: watch the direction of
+   value over time (Zillow guidance) across stored estimates.
 
 Never raises. Fully offline-capable via the ``comp_source`` seam.
 """
@@ -65,12 +69,18 @@ _CONFIDENCE_MULT = 1.6  # low/high = point ± mult * fsd * point
 # ── data types ──────────────────────────────────────────────────────
 
 class Comp:
-    """One comparable listing."""
+    """One comparable listing.
+
+    ``source_trust`` (0–1) is the HouseCanary honesty pattern: a live
+    scraped listing scores 1.0, seeded norms 0.6. It multiplies the
+    similarity weight, so mixed-quality comp sets degrade gracefully.
+    """
 
     def __init__(self, comp_id: str = "", price_kobo: int = 0,
                  area: str = "", bedrooms: str = "",
                  title: str = "", source: str = "",
-                 similarity: float = 0.5) -> None:
+                 similarity: float = 0.5,
+                 source_trust: float = 1.0) -> None:
         self.id = comp_id or ("comp_" + uuid.uuid4().hex[:8])
         self.price_kobo = max(0, int(price_kobo or 0))
         self.area = (area or "").strip()
@@ -81,12 +91,17 @@ class Comp:
             self.similarity = max(0.0, min(1.0, float(similarity)))
         except (TypeError, ValueError):
             self.similarity = 0.5
+        try:
+            self.source_trust = max(0.0, min(1.0, float(source_trust)))
+        except (TypeError, ValueError):
+            self.source_trust = 1.0
 
     def to_dict(self) -> dict:
         return {"id": self.id, "price_kobo": self.price_kobo,
                 "area": self.area, "bedrooms": self.bedrooms,
                 "title": self.title, "source": self.source,
-                "similarity": self.similarity}
+                "similarity": self.similarity,
+                "source_trust": self.source_trust}
 
     @classmethod
     def from_dict(cls, d: dict) -> "Comp":
@@ -97,7 +112,8 @@ class Comp:
                    bedrooms=str(d.get("bedrooms", "")),
                    title=str(d.get("title", "")),
                    source=str(d.get("source", "")),
-                   similarity=d.get("similarity", 0.5))
+                   similarity=d.get("similarity", 0.5),
+                   source_trust=d.get("source_trust", 1.0))
 
 
 class ValueEstimate:
@@ -122,6 +138,15 @@ class ValueEstimate:
         self.thin_market = bool(thin_market)
         self.created_at = created_at or time.time()
 
+    @property
+    def confidence(self) -> int:
+        """HouseCanary pattern: confidence score = 1 − FSD, as a
+        percentage. FSD .12 → 88% confidence."""
+        try:
+            return max(0, min(100, int(round((1.0 - self.fsd) * 100))))
+        except Exception:  # noqa: BLE001
+            return 0
+
     def format(self) -> str:
         """Chat rendering: range + comps + comp-picker nudge + disclaimer."""
         def naira(k: int) -> str:
@@ -131,7 +156,8 @@ class ValueEstimate:
         lines = [
             f"🏠 Value estimate — {br} in {area_lbl}",
             f"   {naira(self.low_kobo)} – {naira(self.high_kobo)}  "
-            f"(midpoint {naira(self.point_kobo)}, ±{self.fsd*100:.0f}%)",
+            f"(midpoint {naira(self.point_kobo)}, ±{self.fsd*100:.0f}%, "
+            f"confidence {self.confidence}%)",
         ]
         if self.thin_market:
             lines.append("   ⚠️ thin market — few comparables, band is "
@@ -139,8 +165,9 @@ class ValueEstimate:
         lines.append(f"   Based on {len(self.comps)} comparable(s):")
         for i, c in enumerate(self.comps[:8], 1):
             kept = " ✓ kept" if c.id in self.kept_ids else ""
+            trust = (" [seeded]" if c.source_trust < 0.9 else "")
             lines.append(f"   {i}. {naira(c.price_kobo)} — {c.title or c.area}"
-                         f"{kept}")
+                         f"{trust}{kept}")
         lines.append("   Pick which comps look right: "
                      f"/valuepick {self.id} <1,2,4> "
                      "(numbers above; reruns the range)")
@@ -190,6 +217,9 @@ def seed_comp_source(area: str, bedrooms: str) -> list[Comp]:
 
     Returns 6 comps spread ±18% around the area norm so the model has
     something real-shaped to work with when no live source is wired.
+    Seeded comps carry ``source_trust=0.6`` (not live listings) — they
+    count less than live comps in a mixed set, and the thin-market FSD
+    floor still applies.
     """
     try:
         norm = (AREA_NORMS.get(area, {}) or {}).get(bedrooms or "2br")
@@ -204,6 +234,7 @@ def seed_comp_source(area: str, bedrooms: str) -> list[Comp]:
                 title=f"{bedrooms} listing #{i+1} — {area.title()}",
                 source="seeded Lagos norms (not live listings)",
                 similarity=0.9 - 0.05 * abs(i - 2.5),
+                source_trust=0.6,
             ))
         return comps
     except Exception:  # noqa: BLE001
@@ -213,13 +244,19 @@ def seed_comp_source(area: str, bedrooms: str) -> list[Comp]:
 # ── the model ───────────────────────────────────────────────────────
 
 def _estimate_from_comps(comps: list[Comp]) -> tuple[int, int, int, float, bool]:
-    """(point, low, high, fsd) from weighted comps. Pure; never raises."""
+    """(point, low, high, fsd) from weighted comps. Pure; never raises.
+
+    Weight = similarity × source_trust (HouseCanary: surface data
+    quality, don't pretend all comps are equal).  Uniform trust across
+    a set leaves point/fsd unchanged.
+    """
     try:
         comps = [c for c in (comps or []) if c.price_kobo > 0]
         if not comps:
             return 0, 0, 0, 0.0, True
         prices = [c.price_kobo for c in comps]
-        weights = [max(0.05, c.similarity) for c in comps]
+        weights = [max(0.05, c.similarity) * max(0.05, c.source_trust)
+                   for c in comps]
         wsum = sum(weights)
         point = sum(p * w for p, w in zip(prices, weights)) / wsum
         # Weighted standard deviation → fsd fraction.
@@ -305,6 +342,64 @@ class ValueStore:
                 created_at=row["created_at"])
         except Exception:  # noqa: BLE001
             return None
+
+
+    def history(self, area: str = "", bedrooms: str = "",
+                limit: int = 20) -> list[ValueEstimate]:
+        """Past estimates for an area/bedroom class, newest first."""
+        try:
+            if self._db is None:
+                return []
+            q = ("SELECT * FROM value_estimates WHERE 1=1")
+            params: list = []
+            if area:
+                q += " AND area = ?"
+                params.append(area)
+            if bedrooms:
+                q += " AND bedrooms = ?"
+                params.append(bedrooms)
+            q += " ORDER BY created_at DESC LIMIT ?"
+            params.append(max(1, int(limit or 20)))
+            out = []
+            for row in self._db.execute(q, params):
+                comps = [Comp.from_dict(d)
+                         for d in json.loads(row["comps_json"] or "[]")]
+                out.append(ValueEstimate(
+                    estimate_id=row["id"], area=row["area"],
+                    bedrooms=row["bedrooms"], point_kobo=row["point_kobo"],
+                    low_kobo=row["low_kobo"], high_kobo=row["high_kobo"],
+                    fsd=row["fsd"], comps=comps,
+                    kept_ids=json.loads(row["kept_ids_json"] or "[]"),
+                    thin_market=bool(row["thin_market"]),
+                    created_at=row["created_at"]))
+            return out
+        except Exception:  # noqa: BLE001
+            return []
+
+    def trend(self, area: str = "", bedrooms: str = "") -> dict:
+        """Direction of value over time (Zillow: watch the direction of
+        your equity). Needs ≥2 stored estimates. Never raises."""
+        try:
+            hist = self.history(area, bedrooms, limit=20)
+            pts = [(e.created_at, e.point_kobo) for e in hist
+                   if e.point_kobo > 0]
+            if len(pts) < 2:
+                return {"ok": False,
+                        "reason": "need at least two stored estimates"}
+            pts.sort(key=lambda x: x[0])
+            oldest, newest = pts[0][1], pts[-1][1]
+            pct = (newest - oldest) / oldest * 100 if oldest > 0 else 0.0
+            if abs(pct) < 2.0:
+                direction = "stable"
+            else:
+                direction = "up" if pct > 0 else "down"
+            return {"ok": True, "direction": direction,
+                    "pct": round(pct, 1), "n": len(pts),
+                    "oldest_kobo": oldest, "newest_kobo": newest,
+                    "verdict": f"{direction} {abs(round(pct, 1))}% across "
+                               f"{len(pts)} estimates"}
+        except Exception:  # noqa: BLE001
+            return {"ok": False, "reason": "couldn't compute trend"}
 
 
 def estimate_value(property_desc: str, *,

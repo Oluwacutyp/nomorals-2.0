@@ -12,6 +12,12 @@ getting emotionally attached: "₦2.5m/yr headline = ₦3.35m real move-in."
 
 Kwaba-pattern affordability: rent is affordable when the monthly rent is
 at most 33% of monthly income (band midpoint used as the income estimate).
+That matches OpenRent's standard (tenant ≥ 2.5× annual rent); guarantors
+face the stricter 3× rule.
+
+Verify-once pattern (Zillow): one application covers unlimited
+applications for 30 days — so the passport carries ``attested_at`` and
+goes stale after 30 days, exactly like Zillow's reused reports.
 """
 
 from __future__ import annotations
@@ -32,6 +38,8 @@ __all__ = [
     "AGENCY_PCT",
     "LEGAL_PCT",
     "AFFORDABILITY_RATIO",
+    "ATTESTATION_VALID_DAYS",
+    "NIGERIA_KYC_DOCS",
     "RentalHistory",
     "Reference",
     "DocRef",
@@ -41,6 +49,12 @@ __all__ = [
     "true_cost",
     "can_afford",
     "affordability",
+    "required_monthly_income",
+    "required_income_band",
+    "can_guarantee",
+    "combined_affordability",
+    "missing_kyc_docs",
+    "referencing_readiness",
     "control_passport",
     "control_truecost",
     "register",
@@ -66,6 +80,21 @@ LEGAL_PCT = 10.0    # legal/documentation agreement fee, typically 10%
 
 #: Kwaba-pattern affordability: monthly rent ≤ 33% of monthly income.
 AFFORDABILITY_RATIO = 0.33
+
+
+#: How long a passport's attestation stays fresh (Zillow pattern: one
+#: application is reused for 30 days, then the reports are stale).
+ATTESTATION_VALID_DAYS = 30
+
+#: Standard Nigerian tenant KYC documents (Kwaba pattern: valid BVN,
+#: recent utility bill, work details, government-issued ID).
+NIGERIA_KYC_DOCS = [
+    "NIN slip / national ID",
+    "recent utility bill",
+    "employment letter / staff ID",
+    "3 months' bank statement",
+    "passport photograph",
+]
 
 
 def _default_db() -> str:
@@ -171,6 +200,32 @@ class RentalPassport:
     doc_refs: list[DocRef] = field(default_factory=list)
     created_at: float = 0.0
     updated_at: float = 0.0
+    attested_at: float = 0.0   # Zillow pattern: attestation goes stale
+
+    def is_fresh(self, max_age_days: float = ATTESTATION_VALID_DAYS) -> bool:
+        """An attestation older than ``max_age_days`` is stale — re-attest
+        before sharing (Zillow's 30-day reuse rule)."""
+        try:
+            if not self.attested_at:
+                return False
+            return (time.time() - self.attested_at) <= max_age_days * 86400
+        except Exception:  # noqa: BLE001
+            return False
+
+    def freshness_note(self) -> str:
+        """One-line freshness status for the export."""
+        try:
+            if not self.attested_at:
+                return "attestation: none yet — verify once, then share"
+            age_days = (time.time() - self.attested_at) / 86400
+            if self.is_fresh():
+                left = int(ATTESTATION_VALID_DAYS - age_days)
+                return (f"attested {int(age_days)}d ago — fresh for "
+                        f"~{max(0, left)} more days")
+            return (f"attested {int(age_days)}d ago — STALE, re-attest "
+                    f"before sharing (30-day validity)")
+        except Exception:  # noqa: BLE001
+            return "attestation: unknown"
 
 
 class PassportStore:
@@ -187,6 +242,13 @@ class PassportStore:
                 """CREATE TABLE IF NOT EXISTS passports (
                        id TEXT PRIMARY KEY, owner_name TEXT, kyc_summary TEXT,
                        income_band TEXT, created_at REAL, updated_at REAL)""")
+            # Migration for pre-existing DBs: attested_at (Zillow pattern).
+            try:
+                self._db.execute(
+                    "ALTER TABLE passports ADD COLUMN attested_at REAL")
+                self._db.commit()
+            except sqlite3.OperationalError:
+                pass  # column already there
             self._db.execute(
                 """CREATE TABLE IF NOT EXISTS history (
                        id TEXT PRIMARY KEY, passport_id TEXT, address TEXT,
@@ -230,7 +292,8 @@ class PassportStore:
                 owner_name=name or "owner",
                 kyc_summary=kyc,
                 income_band=band,
-                created_at=time.time(), updated_at=time.time())
+                created_at=time.time(), updated_at=time.time(),
+                attested_at=time.time())
             for h in (mem.get("rental_history") or [])[:10]:
                 if isinstance(h, dict):
                     p.history.append(RentalHistory(
@@ -241,9 +304,9 @@ class PassportStore:
             if self._db is None:
                 return p
             self._db.execute(
-                "INSERT INTO passports VALUES (?, ?, ?, ?, ?, ?)",
+                "INSERT INTO passports VALUES (?, ?, ?, ?, ?, ?, ?)",
                 (p.passport_id, p.owner_name, p.kyc_summary, p.income_band,
-                 p.created_at, p.updated_at))
+                 p.created_at, p.updated_at, p.attested_at))
             for h in p.history:
                 self._db.execute(
                     "INSERT INTO history VALUES (?, ?, ?, ?, ?, ?)",
@@ -269,7 +332,9 @@ class PassportStore:
                                kyc_summary=row["kyc_summary"] or "",
                                income_band=row["income_band"] or "",
                                created_at=row["created_at"] or 0.0,
-                               updated_at=row["updated_at"] or 0.0)
+                               updated_at=row["updated_at"] or 0.0,
+                               attested_at=(row["attested_at"] or 0.0)
+                               if "attested_at" in row.keys() else 0.0)
             for h in self._db.execute(
                     "SELECT * FROM history WHERE passport_id = ?",
                     (p.passport_id,)):
@@ -392,6 +457,20 @@ class PassportStore:
 
     # ── export ──
 
+    def reattest(self, passport_id: str) -> bool:
+        """Renew the 30-day attestation (Zillow pattern: reports pulled
+        fresh at the start of the reuse period)."""
+        try:
+            if self._db is None:
+                return False
+            self._db.execute(
+                "UPDATE passports SET attested_at = ? WHERE id = ?",
+                (time.time(), passport_id))
+            self._touch(passport_id)
+            return True
+        except Exception:  # noqa: BLE001
+            return False
+
     def export_text(self, passport_id: str) -> str:
         """Shareable tenant summary. Contains bands and reference IDs —
         no exact income, no secrets, no raw contacts."""
@@ -399,6 +478,7 @@ class PassportStore:
         if p is None:
             return "no such passport."
         lines = ["🪪 Rental passport — verify once, share anywhere"]
+        lines.append(f"Status: {p.freshness_note()}")
         if p.owner_name:
             lines.append(f"Name: {p.owner_name}")
         if p.kyc_summary:
@@ -430,7 +510,91 @@ class PassportStore:
             lines.append("Verified documents (vault-held, shared by ID):")
             for d in p.doc_refs:
                 lines.append(f"  • {d.label or 'document'} — {d.vault_id}")
+        missing = missing_kyc_docs(p)
+        if missing:
+            lines.append("Still missing from the KYC pack: "
+                         + ", ".join(missing))
         return "\n".join(lines)
+
+
+# ── referencing readiness ───────────────────────────────────────────
+# OpenRent's comprehensive-referencing components: affordability,
+# credit/identity, previous-landlord history, income/employment,
+# fraud/identity. The passport can't run credit checks, so it scores
+# what it holds and names the gaps.
+
+def missing_kyc_docs(passport: RentalPassport) -> list[str]:
+    """Standard Nigerian KYC pack (Kwaba pattern) vs the passport's
+    doc-ref labels. Never raises."""
+    try:
+        labels = " ".join(
+            (d.label or "").lower() for d in (passport.doc_refs or []))
+        missing: list[str] = []
+        # label keywords that count as each doc being present
+        have = {
+            "NIN slip / national ID": ("nin", "national id", "voter",
+                                       "passport", "driver"),
+            "recent utility bill": ("utility", "nepa", "phcn", "ikedc",
+                                    "ekedc", "bill"),
+            "employment letter / staff ID": ("employ", "staff id",
+                                             "work id", "offer letter"),
+            "3 months' bank statement": ("bank statement", "statement"),
+            "passport photograph": ("photograph", "photo"),
+        }
+        for doc, keys in have.items():
+            if not any(k in labels for k in keys):
+                missing.append(doc)
+        return missing
+    except Exception:  # noqa: BLE001
+        return list(NIGERIA_KYC_DOCS)
+
+
+def referencing_readiness(passport: RentalPassport | None) -> dict:
+    """OpenRent-style referencing readiness: score the five components
+    a landlord's referencing report checks, from what the passport
+    holds. Returns components, score %, and the gaps. Never raises."""
+    blank = {"ok": False, "score": 0, "components": {},
+             "missing": ["no passport"], "verdict": "no passport"}
+    try:
+        if passport is None:
+            return blank
+        components = {
+            "affordability": (bool(passport.income_band
+                                   and passport.income_band in INCOME_BANDS),
+                              "income band attested"),
+            "identity_kyc": (bool(passport.kyc_summary.strip()),
+                             "KYC summary present"),
+            "rental_history": (bool(passport.history),
+                               f"{len(passport.history)} past tenanc(ies)"),
+            "references": (bool(passport.references),
+                           f"{len(passport.references)} reference(s)"),
+            "documents": (bool(passport.doc_refs),
+                          f"{len(passport.doc_refs)} vault doc ref(s)"),
+        }
+        detail = {}
+        missing = []
+        for name, (ok, note) in components.items():
+            detail[name] = {"ok": bool(ok), "note": note}
+            if not ok:
+                missing.append(name)
+        kyc_missing = missing_kyc_docs(passport)
+        if kyc_missing and detail["documents"]["ok"]:
+            detail["documents"]["note"] += (
+                f" — KYC pack gaps: {', '.join(kyc_missing)}")
+        score = round(sum(1 for c in detail.values() if c["ok"])
+                      / len(detail) * 100)
+        verdict = ("referencing-ready — share the passport"
+                   if score == 100 else
+                   "mostly ready — fill the gaps below"
+                   if score >= 60 else
+                   "not referencing-ready yet")
+        return {"ok": score == 100, "score": score,
+                "components": detail,
+                "missing": missing + (["kyc: " + ", ".join(kyc_missing)]
+                                      if kyc_missing else []),
+                "verdict": verdict}
+    except Exception:  # noqa: BLE001
+        return blank
 
 
 # ── true cost ─────────────────────────────────────────────────────────
@@ -446,6 +610,7 @@ class CostBreakdown:
     caution_kobo: int = 0        # refundable deposit
     other: list[tuple[str, int]] = field(default_factory=list)
     assumptions: list[str] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
 
     @property
     def total_kobo(self) -> int:
@@ -453,6 +618,12 @@ class CostBreakdown:
                 + self.service_kobo + self.inspection_kobo
                 + self.caution_kobo
                 + sum(k for _, k in self.other))
+
+    @property
+    def monthly_kobo(self) -> int:
+        """Amortized true monthly housing cost — the operative number
+        for affordability (Kwaba monthly-installment pattern)."""
+        return int(round(self.total_kobo / 12)) if self.total_kobo else 0
 
     def format(self) -> str:
         lines = ["🏠 True cost — headline vs real move-in"]
@@ -471,6 +642,11 @@ class CostBreakdown:
         for label, k in self.other:
             lines.append(f"+ {label}: {_naira(k)}")
         lines.append(f"= Real move-in: {_naira(self.total_kobo)}")
+        if self.monthly_kobo:
+            lines.append(f"  ≈ {_naira(self.monthly_kobo)}/mo amortized")
+        if self.warnings:
+            for w in self.warnings:
+                lines.append(f"⚠️ {w}")
         if self.assumptions:
             lines.append("Assumptions: " + "; ".join(self.assumptions))
         return "\n".join(lines)
@@ -520,6 +696,18 @@ def true_cost(listing_text: str) -> CostBreakdown:
 
         caution, _ = _fee_kobo(text, _CAUTION_KEYS, rent)
         bd.caution_kobo = caution
+
+        # LASRERA/Joliba: unlawful to collect more than one year's rent
+        # upfront. Detect multi-year advance demands ("2 years", "two
+        # years rent") and warn — this is a Lagos-specific money trap.
+        t = text.lower()
+        multi = re.search(
+            r"\b(1\.5|2|3|two|three)\s*(?:-\s*)?years?\b", t)
+        if multi:
+            bd.warnings.append(
+                "more than one year's rent demanded upfront — LASRERA "
+                "says collecting over a year in advance is unlawful; "
+                "negotiate down before committing")
         return bd
     except Exception:  # noqa: BLE001
         _log.warning("true_cost failed", exc_info=True)
@@ -563,6 +751,81 @@ def can_afford(rent_kobo: int, income_band: str) -> bool:
         return False
 
 
+def required_monthly_income(rent_kobo: int,
+                            ratio: float = AFFORDABILITY_RATIO) -> int:
+    """Monthly income needed to afford this rent at the given ratio
+    (OpenRent: 1/2.5 of annual rent ≈ 40% of monthly; we use the 33%
+    Kwaba bar by default). Never raises."""
+    try:
+        if rent_kobo <= 0 or ratio <= 0:
+            return 0
+        return int(round(rent_kobo / 100 / 12 / ratio))
+    except Exception:  # noqa: BLE001
+        return 0
+
+
+def required_income_band(rent_kobo: int) -> str:
+    """Lowest income band whose midpoint passes affordability. "" for
+    unknown. Never raises."""
+    try:
+        for band in INCOME_BANDS:
+            if can_afford(rent_kobo, band):
+                return band
+        return ""
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def can_guarantee(rent_kobo: int, income_band: str) -> bool:
+    """OpenRent guarantor rule: guarantor must earn ≥ 3× the annual rent.
+    Stricter than the tenant's 2.5×/33% bar. Never raises."""
+    try:
+        band = (income_band or "").strip().lower()
+        if band not in INCOME_BANDS or rent_kobo <= 0:
+            return False
+        low, high = INCOME_BANDS[band]
+        mid_monthly = low if high is None else (low + high) / 2
+        return mid_monthly * 12 >= (rent_kobo / 100) * 3
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def combined_affordability(rent_kobo: int,
+                           income_bands: list[str]) -> dict:
+    """OpenRent 'passed in conjunction': joint tenants pass together when
+    their combined band midpoints cover the rent at the 33% bar.
+    Never raises."""
+    try:
+        mids = []
+        for b in (income_bands or []):
+            b = (b or "").strip().lower()
+            if b in INCOME_BANDS:
+                low, high = INCOME_BANDS[b]
+                mids.append(low if high is None else (low + high) / 2)
+        if not mids or rent_kobo <= 0:
+            return {"ok": False,
+                    "reason": "need at least one valid income band "
+                              "and a rent figure"}
+        combined = sum(mids)
+        monthly_rent = rent_kobo / 100 / 12
+        ratio = monthly_rent / combined if combined > 0 else 9.0
+        ok = ratio <= AFFORDABILITY_RATIO
+        return {
+            "ok": ok,
+            "tenants": len(mids),
+            "combined_monthly": int(combined),
+            "monthly_rent": int(monthly_rent),
+            "ratio": round(ratio, 2),
+            "verdict": ("affordable in conjunction — combined income covers it"
+                        if ok else
+                        "tight even combined — rent exceeds 33% of the "
+                        "pooled income"),
+        }
+    except Exception:  # noqa: BLE001
+        return {"ok": False, "reason": "couldn't assess combined "
+                                       "affordability"}
+
+
 # ── chat ──────────────────────────────────────────────────────────────
 
 def _usage() -> str:
@@ -576,7 +839,9 @@ def _usage() -> str:
         "  ref add <name> | <relationship> | <contact-ref-id>\n"
         "  doc add <vault-doc-id> | <label> — vault reference only, "
         "never the document\n"
-        "  export [id] — shareable tenant summary")
+        "  export [id] — shareable tenant summary\n"
+        "  readiness — OpenRent-style referencing readiness score\n"
+        "  reattest — renew the 30-day attestation")
 
 
 def _memory_facts(context) -> dict:
@@ -612,6 +877,28 @@ def control_passport(tail: str, context=None, chat=None, **kwargs) -> str:
         if not rest or rest.lower() in ("help", "?"):
             return _usage()
         low = rest.lower()
+
+        if low.startswith("readiness"):
+            p = store.default()
+            if p is None:
+                return "no passport yet — /passport generate first."
+            r = referencing_readiness(p)
+            lines = [f"📋 Referencing readiness: {r['score']}% — "
+                     f"{r['verdict']}"]
+            for name, c in r["components"].items():
+                icon = "✅" if c["ok"] else "⬜"
+                lines.append(f"  {icon} {name}: {c['note']}")
+            if r["missing"]:
+                lines.append("Fill: " + "; ".join(r["missing"]))
+            return "\n".join(lines)
+
+        if low.startswith("reattest"):
+            p = store.default()
+            if p is None:
+                return "no passport yet — /passport generate first."
+            ok = store.reattest(p.passport_id)
+            return ("🪪 attestation renewed — fresh for 30 days."
+                    if ok else "couldn't renew the attestation.")
 
         if low.startswith("generate"):
             name = rest[8:].strip()

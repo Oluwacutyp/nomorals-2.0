@@ -1,7 +1,7 @@
 """Nigerian rental scam-detection engine (build-map #93).
 
 Paste a Jiji / PropertyPro / Nigeria Property Centre link (or the
-listing text) → a verdict in seconds.  Six automated checks:
+listing text) → a verdict in seconds.  Seven automated checks:
 
 1. Price anomaly vs area norms (>25% below the area average → flag).
 2. Duplicate detection: photo hashing + address normalization across
@@ -10,7 +10,18 @@ listing text) → a verdict in seconds.  Six automated checks:
 4. Fee-language scan: "inspection / registration / caution /
    documentation fee" — LASRERA declared these illegal.
 5. Address test: landmark-only, no street/number → flag.
-6. Payment-channel check: personal account + urgency language → hard stop.
+6. Payment-channel check: personal account / irreversible route
+   (crypto, gift cards, Western Union) + urgency language → hard stop.
+7. Viewing check (Fredy pattern): landlord-abroad + keys-by-post, or
+   money demanded before any viewing → flags.
+
+Signal model follows orangecoding/fredy's scam-detection doc:
+signals carry weights 1–3 and corroborate — a single weak signal
+never fires a verdict alone; weight-3 signals (money before viewing,
+irreversible payment routes, illegal fees) fire on their own.
+Deliberately NOT signals: a refundable deposit, agency fees, and a
+phone/email in the ad — all normal in honest Lagos listings
+(Fredy's false-positive discipline).
 
 Flag language is factual, never moralizing.  Every function never
 raises.  ``check_listing`` is pure apart from the optional injectable
@@ -85,16 +96,36 @@ ILLEGAL_FEE_TERMS = [
 # Severity → score deduction.
 _DEDUCT = {"info": 5, "warn": 15, "danger": 30, "hard_stop": 100}
 
+# Signal weights (Fredy pattern): 1 = weak, 3 = fires on its own.
+# Weak signals corroborate — one weight-2 signal alone never sinks a
+# listing.  The weight is informational; the verdict still comes from
+# the severity-deducted score so existing behavior is unchanged.
+_WEIGHT = {
+    "price_anomaly": 2,
+    "duplicate": 2,
+    "reverse_image": 2,
+    "illegal_fee": 3,
+    "vague_address": 2,
+    "payment_channel": 3,
+    "no_viewing": 3,
+}
+
 
 # ── data types ──────────────────────────────────────────────────────
 
 @dataclass
 class ScamFlag:
     code: str          # price_anomaly | duplicate | reverse_image |
-                       # illegal_fee | vague_address | payment_channel
+                       # illegal_fee | vague_address | payment_channel |
+                       # no_viewing
     severity: str      # info | warn | danger | hard_stop
     message: str       # factual, never moralizing
     evidence: str = ""
+    weight: int = 0    # Fredy-style signal weight (1–3); 0 = unrated
+
+    def __post_init__(self) -> None:
+        if not self.weight:
+            self.weight = _WEIGHT.get(self.code, 1)
 
 
 @dataclass
@@ -123,8 +154,20 @@ class ScamReport:
             if f.evidence:
                 lines.append(f"   ↳ {f.evidence[:120]}")
         if not self.flags:
-            lines.append("No red flags found in the six automated checks.")
-        lines.append("Always inspect in person before paying anything.")
+            lines.append("No red flags found in the seven automated checks.")
+        lines.append("")
+        lines.append("Before paying anything:")
+        lines.append("  1. Always inspect in person — never pay for a "
+                     "flat you haven't entered.")
+        lines.append("  2. Verify the address on a map; landmark-only "
+                     "addresses can't be checked.")
+        lines.append("  3. Reverse-image-search the photos — recycled photos "
+                     "are a top scam tell.")
+        lines.append("  4. Keep chat and payment on traceable channels; "
+                     "irreversible routes (crypto, gift cards, wire) can't "
+                     "be recovered.")
+        lines.append("  5. Suspected fraud in Lagos can be reported to "
+                     "LASRERA, the state regulator.")
         return "\n".join(lines)
 
 
@@ -254,10 +297,12 @@ def _is_url(s: str) -> bool:
     return bool(re.match(r"https?://", (s or "").strip(), re.I))
 
 
-# ── the six checks ──────────────────────────────────────────────────
+# ── the checks ────────────────────────────────────────────────────
 
 def _check_price(text: str, area: str, bedrooms: str,
                  price_kobo: int) -> list[ScamFlag]:
+    """Fredy note: a cheap flat is not a scam. Price alone only ever
+    produces info/warn — the danger verdict needs corroboration."""
     flags: list[ScamFlag] = []
     if not area or not price_kobo:
         return flags
@@ -340,6 +385,10 @@ def _check_address(text: str) -> list[ScamFlag]:
     return []
 
 
+_IRREVERSIBLE = re.compile(
+    r"western\s*union|money\s*gram|gift\s*card|crypto|usdt|btc\b|bitcoin|"
+    r"binance|usdc\b", re.I)
+
 _URGENCY = ["urgent", "hurry", "asap", "first come", "limited",
             "going fast", "don't miss", "last chance", "today only"]
 
@@ -350,18 +399,66 @@ def _check_payment(text: str) -> list[ScamFlag]:
         r"(personal|private|my own)\s+account|pay\s+(me|directly)|"
         r"opay|palmpay|moniepoint.*(personal|my)|"
         r"account\s+(name|number).*(?!company|agency|ltd|limited)", t))
+    irreversible = bool(_IRREVERSIBLE.search(t))
     urgent = any(w in t for w in _URGENCY)
-    if personal and urgent:
+    route = personal or irreversible
+    if route and urgent:
+        why = ("an irreversible route (crypto/gift card/wire — works like "
+               "cash, can't be recovered)"
+               if irreversible else "a personal account")
         return [ScamFlag(
             "payment_channel", "hard_stop",
-            "Payment to a personal account under urgency pressure — "
+            f"Payment to {why} under urgency pressure — "
             "do not send money. Inspect first, pay to a verifiable account.",
-            "personal-account + urgency is the #1 rental-scam pattern")]
+            "irreversible-payment + urgency is the #1 rental-scam pattern")]
+    if irreversible:
+        return [ScamFlag(
+            "payment_channel", "danger",
+            "Payment requested via an irreversible route (crypto, gift "
+            "card, or wire transfer) — these work like cash and can't be "
+            "recovered once sent. Legitimate agents accept traceable "
+            "payment.",
+            "FTC rental-scam guidance: wire/gift-card/crypto demands")]
     if personal:
         return [ScamFlag(
             "payment_channel", "warn",
             "Payment requested to a personal account — "
             "verify the recipient's identity before paying anything.",
+            "")]
+    return []
+
+
+_NO_VIEWING_HARD = re.compile(
+    r"pay\s+(?:me|us)?\s*(?:before|prior to)\s+(?:any\s+)?(?:viewing|inspection)|"
+    r"money\s+before\s+(?:you\s+)?(?:view|inspect)|"
+    r"payment\s+before\s+(?:viewing|inspection)|"
+    r"keys?\s+(?:will\s+be\s+)?(?:sent\s+)?(?:by|via|through)\s+"
+    r"(?:post|courier|dhl|fedex)|"
+    r"send(?:ing)?\s+the\s+keys?", re.I)
+_NO_VIEWING_SOFT = re.compile(
+    r"\bi['’]?m\s+abroad\b|i\s+am\s+abroad|out\s+of\s+the\s+country|"
+    r"not\s+in\s+nigeria|can['’]?t\s+view|cannot\s+view|"
+    r"no\s+viewing|viewing\s+(?:is\s+)?(?:not|im)possible|"
+    r"no\s+inspection\s+possible", re.I)
+
+
+def _check_no_viewing(text: str) -> list[ScamFlag]:
+    """Fredy pattern: the script is price-far-below-market + landlord
+    can't do a viewing (abroad) + keys by post + money before viewing."""
+    t = text or ""
+    if _NO_VIEWING_HARD.search(t):
+        return [ScamFlag(
+            "no_viewing", "danger",
+            "Money demanded before any viewing, or keys promised by post/"
+            "courier — you would be paying for a flat nobody has shown "
+            "you. Insist on an in-person viewing first.",
+            "advance-payment-before-viewing is a classic scam script")]
+    if _NO_VIEWING_SOFT.search(t):
+        return [ScamFlag(
+            "no_viewing", "warn",
+            "The landlord says no viewing is possible (abroad / can't "
+            "show the flat) — verify the property exists independently "
+            "before any commitment.",
             "")]
     return []
 
@@ -409,6 +506,7 @@ def check_listing(url_or_text: str, *,
         flags += _check_fees(text)
         flags += _check_address(text)
         flags += _check_payment(text)
+        flags += _check_no_viewing(text)
 
         score = 100
         for f in flags:
@@ -435,7 +533,7 @@ def check_listing(url_or_text: str, *,
 
 def _usage() -> str:
     return ("/scamcheck <jiji/propertypro link or listing text> [photo:<path>] — "
-            "six automated scam checks, verdict in seconds. "
+            "seven automated scam checks, verdict in seconds. "
             "Example: /scamcheck https://jiji.ng/... ")
 
 
@@ -472,6 +570,6 @@ def register(registry) -> None:
     """Tool-registry hook."""
     try:
         registry.register("scamcheck", control_scamcheck,
-                          "Nigerian rental scam check — six automated checks on any listing.")
+                          "Nigerian rental scam check — seven automated checks on any listing.")
     except Exception:  # noqa: BLE001
         _log.debug("scamcheck register failed", exc_info=True)
