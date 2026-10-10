@@ -554,8 +554,29 @@ class Producer:
                 parts["counter"].extend(
                     realize_motif(inv, scale, bar * 4.0, velocity=72))
 
-            # — drums matched to energy —
-            self._drums(parts["drums"], bar, bars, name, e, rng)
+            # — drums: generative rhythm engine (not mechanical patterns) —
+            # Build a minimal spec/section for the rhythm engine from the
+            # reference profile's energy and groove feel.
+            from .rhythm import generate_drums
+            from .songspec import GrooveSpec, SectionSpec
+            _groove = GrooveSpec(
+                feel=getattr(profile, "groove_feel", "") or "driving",
+                swing=0.0,
+                kick_style="energy-matched",
+                snare_style="backbeat",
+                hat_style="energy-matched",
+            )
+            _spec = type("Spec", (), {"groove": _groove, "tempo": 120})()
+            _sec = SectionSpec(name=name, bars=bars, energy=e,
+                               chords=list(progression[:bars]))
+            _next_e = None
+            if idx + 1 < len(plan):
+                _next_name = plan[idx + 1][0]
+                _next_e = e + (0.15 if _next_name in
+                               ("chorus", "drop") else -0.1)
+            drums = generate_drums(_spec, _sec, bar, rng,
+                                   next_energy=_next_e)
+            parts["drums"].extend(drums)
 
             bar += bars
         return parts
