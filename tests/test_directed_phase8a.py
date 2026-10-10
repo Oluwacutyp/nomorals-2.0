@@ -65,3 +65,71 @@ def test_new_easings_compile_into_score():
         "moves": [{"joint": "r_wrist", "to": [0.5, 0.4]}]}]}
     track, notes = ms.compile_score(score, n_frames=10)
     assert track.frames.shape[0] == 10
+
+
+# ── finger IK ────────────────────────────────────────────────────────
+from nomorals.media.directed import pose_rig as pr
+
+
+def _tip_of(state_dict, finger, wrist=None, size=0.045):
+    wrist = pr.rest_pose()[4] if wrist is None else wrist
+    pts = pr.render_fingers(wrist, size, state_dict)
+    return pts[{"thumb": 4, "index": 8, "middle": 12,
+                "ring": 16, "pinky": 20}[finger]]
+
+
+def test_finger_ik_roundtrip_all_fingers():
+    rng = np.random.RandomState(1)
+    wrist = pr.rest_pose()[4]
+    worst = 0.0
+    for f in pr.FINGERS:
+        for _ in range(20):
+            q = tuple(rng.uniform(0.05, 0.9, 3))
+            q = (q[0], q[1], min(q[2], q[1] * pr._DIP_COUPLING))
+            tgt = pr._tip_fk(wrist, f, 0.045, q, 1.0, 0.0)
+            sol = pr.finger_ik(wrist, f, tgt, size=0.045)
+            assert sol.reached, (f, q)
+            st = {ff: (1.0, 1.0, 0.65, 0.0) for ff in pr.FINGERS}
+            st[f] = (*sol.flex, sol.abduct)
+            err = float(np.linalg.norm(_tip_of(st, f) - tgt))
+            worst = max(worst, err)
+            assert err < 5e-4, (f, q, err)
+    assert worst < 5e-4
+
+
+def test_finger_ik_reach_clamp():
+    wrist = pr.rest_pose()[4]
+    # far beyond reach: clamps to the reach circle, honest flag
+    sol = pr.finger_ik(wrist, "index", wrist + np.array([0.0, -0.5]),
+                       size=0.045)
+    assert not sol.reached
+    k, _ = pr._knuckle(wrist, "index", 0.045, 1.0, 0.0)
+    rmax = pr.finger_reach("index", 0.045)[1]
+    assert abs(float(np.linalg.norm(np.array(sol.tip) - k)) - rmax) < 1e-3
+    # tendon coupling: dip follows pip
+    assert abs(sol.flex[2] - min(1.0, sol.flex[1] * pr._DIP_COUPLING)) < 1e-9
+    # flexions stay in joint limits
+    assert all(0.0 <= v <= 1.0 for v in sol.flex)
+    # unknown finger raises
+    with pytest.raises(ValueError):
+        pr.finger_ik(wrist, "extra", (0.5, 0.5))
+
+
+def test_fingertip_move_compiles_and_lands():
+    score = {"action": "press key", "phases": [
+        {"name": "reach", "t": [0.0, 0.6], "easing": "ease_out", "moves": [
+            {"joint": "r_wrist", "to": [0.55, 0.45]}]},
+        {"name": "press", "t": [0.6, 1.0], "easing": "ease_in_out",
+         "moves": [{"hand": "right",
+                    "fingertips": {"index": [0.58, 0.42]}}]},
+    ]}
+    track, notes = ms.compile_score(score, n_frames=20)
+    tip = track.frames[-1][pr.N_BODY + 8]
+    assert float(np.linalg.norm(tip - np.array([0.58, 0.42]))) < 1e-3
+    assert np.isfinite(track.frames).all()
+    # unreachable target -> honest note, no NaN
+    score["phases"][1]["moves"] = [
+        {"hand": "right", "fingertips": {"index": [0.95, 0.05]}}]
+    track, notes = ms.compile_score(score, n_frames=20)
+    assert any("beyond reach" in n for n in notes)
+    assert np.isfinite(track.frames).all()

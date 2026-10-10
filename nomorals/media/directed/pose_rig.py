@@ -226,6 +226,152 @@ def _thumbs_hand(wrist: np.ndarray, size: float = 0.045) -> np.ndarray:
     return render_fingers(wrist, size, finger_state_from_pose("thumbs"))
 
 
+# ── finger IK ────────────────────────────────────────────────────────
+# Two-bone analytic IK per finger: bone A = proximal segment, bone B =
+# middle + distal as one link (the DIP joint then follows PIP via the
+# existing tendon coupling, refined by two chord-correction iterations).
+# Forward kinematics (render_fingers) is the ground truth; the solver is
+# checked against it. Unreachable targets clamp to the reach circle —
+# the finger points at the target but never teleports past its anatomy.
+
+_REACH_EPS = 1e-6
+
+
+@dataclass
+class IKSolution:
+    """Result of solving a finger onto a target."""
+    flex: tuple[float, float, float]   # (mcp, pip, dip) flexion 0..1
+    abduct: float                      # kept from the request
+    reached: bool                      # False when the target was clamped
+    tip: tuple[float, float]           # actual fingertip after solving
+    residual: float                    # |tip - clamped target| (normalized)
+
+
+def finger_reach(finger: str, size: float = 0.045) -> tuple[float, float]:
+    """(min, max) reach of a fingertip from the knuckle, normalized units."""
+    s1, s2, s3 = _FINGER_SEG[finger]
+    return (abs(s1 - (s2 + s3)) * size + _REACH_EPS,
+            (s1 + s2 + s3) * size - _REACH_EPS)
+
+
+def _knuckle(wrist: np.ndarray, finger: str, size: float,
+             spread: float, abduct: float) -> tuple[np.ndarray, float]:
+    """Knuckle (MCP) position + base direction angle, matching render_fingers."""
+    base = -math.pi / 2 + (_FINGER_BASE_ANG[finger] + abduct * 0.35) * spread
+    k = np.array([wrist[0] + math.cos(base) * size * _KNUCKLE_DIST,
+                  wrist[1] + math.sin(base) * size * _KNUCKLE_DIST])
+    return k, base
+
+
+def _tip_fk(wrist: np.ndarray, finger: str, size: float,
+            flex: tuple[float, float, float],
+            spread: float, abduct: float) -> np.ndarray:
+    """Single-finger forward kinematics — ground truth for the solver."""
+    mcp_f, pip_f, dip_f = flex
+    maxes = _FLEX_MAX[finger]
+    segs = _FINGER_SEG[finger]
+    k, base = _knuckle(wrist, finger, size, spread, abduct)
+    curl = 0.0
+    p = k.copy()
+    for fl, mx, s in zip((mcp_f, pip_f, dip_f), maxes, segs):
+        curl += fl * mx
+        ang = base + curl
+        p = p + np.array([math.cos(ang), math.sin(ang)]) * size * s
+    return p
+
+
+def finger_ik(wrist: np.ndarray, finger: str,
+              target: tuple[float, float] | np.ndarray,
+              size: float = 0.045, spread: float = 1.0,
+              abduct: float = 0.0) -> IKSolution:
+    """Two-bone IK: bend ``finger`` so its tip reaches ``target``.
+
+    All coordinates normalized [0,1] (same space as render_fingers).
+    Tendon coupling: DIP flexion = PIP flexion * _DIP_COUPLING, refined
+    with two chord-correction iterations so the solved tip matches the
+    target to <1% of hand size. Targets outside the reach annulus are
+    clamped to it (``reached=False``) — the finger stretches toward the
+    target as far as anatomy allows.
+    """
+    if finger not in FINGERS:
+        raise ValueError(f"unknown finger {finger!r}; pick from {FINGERS}")
+    wrist = np.asarray(wrist, dtype=float)
+    target = np.asarray(target, dtype=float)
+    k, base = _knuckle(wrist, finger, size, spread, abduct)
+    s1, s2, s3 = (s * size for s in _FINGER_SEG[finger])
+    mcp_max, pip_max, dip_max = _FLEX_MAX[finger]
+
+    d = target - k
+    dist = float(np.linalg.norm(d))
+    rmin, rmax = finger_reach(finger, size)
+    reached = rmin <= dist <= rmax
+    dc = min(max(dist, rmin), rmax)
+    u = d / (dist + 1e-12)
+    aim = k + u * dc  # clamped target
+
+    # Analytic two-bone seed: bone A = proximal, bone B = middle+distal
+    # chord. Fast, gets us into the right basin.
+    bone_a = s1
+    bone_b = s2 + s3
+    cos_a = (bone_a ** 2 + dc ** 2 - bone_b ** 2) / (2 * bone_a * dc + 1e-12)
+    ang_a = math.acos(max(-1.0, min(1.0, cos_a)))
+    cands: list[tuple[np.ndarray, float]] = []
+    for sgn in (1.0, -1.0):
+        rot = np.array([[math.cos(sgn * ang_a), -math.sin(sgn * ang_a)],
+                        [math.sin(sgn * ang_a), math.cos(sgn * ang_a)]])
+        elbow = k + rot @ (u * bone_a)
+        v1 = (elbow - k) / (bone_a + 1e-12)
+        v2 = (aim - elbow)
+        v2 = v2 / (float(np.linalg.norm(v2)) + 1e-12)
+        pip_ang = math.atan2(v1[0] * v2[1] - v1[1] * v2[0],
+                             float(np.dot(v1, v2)))
+        cands.append((elbow, pip_ang))
+    pos = [c for c in cands if c[1] >= 0.0]
+    elbow, pip_ang = (max(pos, key=lambda c: c[1]) if pos
+                      else max(cands, key=lambda c: c[1]))
+    v0 = np.array([math.cos(base), math.sin(base)])
+    v1 = (elbow - k) / (bone_a + 1e-12)
+    mcp_ang = math.atan2(v0[0] * v1[1] - v0[1] * v1[0],
+                         float(np.dot(v0, v1)))
+    q = np.array([max(0.0, min(1.0, mcp_ang / (mcp_max + 1e-12))),
+                  max(0.0, min(1.0, pip_ang / (pip_max + 1e-12)))])
+
+    # Damped-least-squares polish on the TRUE forward kinematics
+    # (MCP + PIP free, DIP follows tendon coupling). Analytic Jacobian.
+    def _fk_tip(qv: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        t0 = base + qv[0] * mcp_max
+        t1 = t0 + qv[1] * pip_max
+        t2 = t1 + min(1.0, qv[1] * _DIP_COUPLING) * dip_max
+        tip = (k + s1 * np.array([math.cos(t0), math.sin(t0)])
+               + s2 * np.array([math.cos(t1), math.sin(t1)])
+               + s3 * np.array([math.cos(t2), math.sin(t2)]))
+        d0 = np.array([-math.sin(t0), math.cos(t0)])
+        d1 = np.array([-math.sin(t1), math.cos(t1)])
+        d2 = np.array([-math.sin(t2), math.cos(t2)])
+        j0 = (s1 * mcp_max) * d0 + (s2 * mcp_max) * d1 + (s3 * mcp_max) * d2
+        j1 = (s2 * pip_max) * d1 + (s3 * (pip_max + _DIP_COUPLING * dip_max)) * d2
+        return tip, np.column_stack([j0, j1])
+
+    lam2 = (0.25 * size) ** 2
+    for _ in range(24):
+        tip, jac = _fk_tip(q)
+        err = aim - tip
+        if float(np.linalg.norm(err)) < 1e-6:
+            break
+        dq = jac.T @ np.linalg.solve(jac @ jac.T + lam2 * np.eye(2), err)
+        q = np.clip(q + dq, 0.0, 1.0)
+
+    mcp_flex, pip_flex = float(q[0]), float(q[1])
+    dip_flex = min(1.0, pip_flex * _DIP_COUPLING)
+    flex = (mcp_flex, pip_flex, dip_flex)
+    tip = _tip_fk(wrist, finger, size, flex, spread, abduct)
+    residual = float(np.linalg.norm(tip - (k + u * dc)))
+    if residual > 0.02 * size:
+        reached = False
+    return IKSolution(flex=flex, abduct=abduct, reached=bool(reached),
+                      tip=(float(tip[0]), float(tip[1])), residual=residual)
+
+
 def _ease(t: float) -> float:
     """Smoothstep easing."""
     t = max(0.0, min(1.0, t))

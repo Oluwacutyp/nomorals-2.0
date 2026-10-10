@@ -32,6 +32,7 @@ import numpy as np
 from .pose_rig import (
     BODY_NAMES, N_KP, R_HAND, L_HAND, PoseTrack, rest_pose,
     FINGERS, finger_state_from_pose, expand_flex, render_fingers,
+    finger_ik,
     _fist, _open_hand, _peace_hand, _point_hand, _thumbs_hand,
     _ease, _phase, resolve_action, build_track,
 )
@@ -98,6 +99,10 @@ HANDS: "hand": "right"|"left". Three ways to pose, from coarse to fine:
 - Single-finger detail: "finger": "index", "flex": [mcp, pip, dip]
   (each 0..1, explicit joints) or "flex": 0.5 (uniform; DIP follows PIP
   via tendon coupling), plus "abduct": 0..1 to spread it sideways.
+- Fingertip targeting: "fingertips": {{"index": [0.55, 0.30]}} — absolute
+  normalized positions; a two-bone IK solver bends each finger so its tip
+  lands there (clamped to anatomical reach). Example — press a piano key
+  at [0.55, 0.30]: {{"hand": "right", "fingertips": {{"index": [0.55, 0.30]}}}}.
 
 ROOT MOTION: "root": {{"to": [dx, dy]}} — pelvis translation, RELATIVE
 offset in normalized units (e.g. [0.08, 0] steps right, [0, -0.05] hops
@@ -195,6 +200,7 @@ class _CompiledMove:
     to: tuple[float, float] | None = None
     hand_pose: str | None = None   # legacy unit pose shorthand
     fingers: dict | None = None    # {finger: (mcp,pip,dip,abduct)}
+    fingertips: dict | None = None  # {finger: (x, y)} absolute IK targets
     spread: float | None = None    # whole-hand abduction multiplier
 
 
@@ -216,10 +222,13 @@ class _CompiledPhase:
     repeat: int = 1
 
 
-def _parse_finger_state(m: dict[str, Any]) -> tuple[dict | None, float | None]:
-    """Parse fine-finger choreography -> (fingers dict, spread).
+def _parse_finger_state(m: dict[str, Any]
+                       ) -> tuple[dict | None, float | None, dict | None]:
+    """Parse fine-finger choreography -> (fingers dict, spread, fingertips).
 
     fingers dict: finger -> (mcp_flex, pip_flex, dip_flex, abduct).
+    fingertips: finger -> (x, y) absolute IK target, solved per-frame in
+    compile_score via pose_rig.finger_ik.
     """
     fingers: dict[str, tuple[float, float, float, float]] = {}
     spread: float | None = None
@@ -241,7 +250,21 @@ def _parse_finger_state(m: dict[str, Any]) -> tuple[dict | None, float | None]:
         except (TypeError, ValueError):
             abduct = 0.0
         fingers[fname] = (*flex, abduct)
-    return (fingers or None), spread
+    fingertips: dict[str, tuple[float, float]] = {}
+    fm2 = m.get("fingertips")
+    if isinstance(fm2, dict):
+        for fname, to in fm2.items():
+            if (fname in FINGERS and isinstance(to, (list, tuple))
+                    and len(to) == 2
+                    and all(isinstance(v, (int, float)) for v in to)):
+                fingertips[fname] = (float(to[0]), float(to[1]))
+    f1 = m.get("fingertip")
+    if isinstance(f1, dict) and f1.get("finger") in FINGERS:
+        to = f1.get("to")
+        if (isinstance(to, (list, tuple)) and len(to) == 2
+                and all(isinstance(v, (int, float)) for v in to)):
+            fingertips[f1["finger"]] = (float(to[0]), float(to[1]))
+    return (fingers or None), spread, (fingertips or None)
 
 
 def _parse_phase(raw: dict[str, Any]) -> _CompiledPhase:
@@ -271,13 +294,14 @@ def _parse_phase(raw: dict[str, Any]) -> _CompiledPhase:
                 moves.append(_CompiledMove(
                     joint=m["joint"], to=(float(to[0]), float(to[1]))))
         elif m.get("hand") in ("right", "left"):
-            fingers, spread = _parse_finger_state(m)
+            fingers, spread, fingertips = _parse_finger_state(m)
             pose = str(m.get("pose", "")).lower() or None
             if pose not in HAND_POSES:
                 pose = None
-            if fingers or spread is not None or pose:
+            if fingers or spread is not None or pose or fingertips:
                 moves.append(_CompiledMove(hand=m["hand"], hand_pose=pose,
-                                           fingers=fingers, spread=spread))
+                                           fingers=fingers, spread=spread,
+                                           fingertips=fingertips))
     plant = raw.get("plant")
     if plant not in ("left", "right", "both"):
         plant = None
@@ -595,6 +619,9 @@ def compile_score(score: dict[str, Any], *, n_frames: int = 40,
     root_chan: list[list[float]] = []
     prev_kp = b.copy()
     committed: set[int] = set()  # phase indices whose effects are committed
+    # fingertip IK solutions captured at phase end (e ~= 1), keyed by
+    # phase id -> {hand: {finger: (state, reached)}} for commit
+    fingertip_end: dict[int, dict[str, dict]] = {}
     for i in range(n_frames):
         t = i / max(1, n_frames - 1)
         kp = b.copy()
@@ -693,6 +720,19 @@ def compile_score(score: dict[str, Any], *, n_frames: int = 40,
                         tgt.update(mv.fingers)
                     spread = (mv.spread if mv.spread is not None
                               else hand_state[mv.hand]["spread"])
+                    if mv.fingertips:
+                        # IK targets are absolute (world space); solve
+                        # against this frame's wrist so the finger tracks
+                        # the target as the arm moves through the phase
+                        end_state: dict[str, tuple[tuple, bool]] = {}
+                        for fname, txy in mv.fingertips.items():
+                            sol = finger_ik(wrist, fname, np.array(txy),
+                                            size=0.045, spread=spread)
+                            tgt[fname] = (*sol.flex, sol.abduct)
+                            end_state[fname] = (tgt[fname], sol.reached)
+                        if e > 0.999:
+                            fingertip_end.setdefault(
+                                id(ph), {})[mv.hand] = end_state
                     kp[sl] = render_fingers(wrist, 0.045,
                                             _blend_finger_states(cur, tgt, e),
                                             spread)
@@ -724,6 +764,32 @@ def compile_score(score: dict[str, Any], *, n_frames: int = 40,
                         hs["fingers"] = finger_state_from_pose(mv.hand_pose)
                     if mv.fingers:
                         hs["fingers"].update(mv.fingers)
+                    if mv.fingertips:
+                        solved = fingertip_end.get(id(ph), {}).get(mv.hand)
+                        unreached: list[str] = []
+                        if solved is None:
+                            # phase ended between frames: solve against the
+                            # committed wrist in world space
+                            wname = ("r_wrist" if mv.hand == "right"
+                                     else "l_wrist")
+                            spread = (mv.spread if mv.spread is not None
+                                      else hs["spread"])
+                            wrist_w = _to_world(joint_pos[wname])
+                            solved = {}
+                            for fname, txy in mv.fingertips.items():
+                                sol = finger_ik(wrist_w, fname,
+                                                np.array(txy), size=0.045,
+                                                spread=spread)
+                                solved[fname] = ((*sol.flex, sol.abduct),
+                                                 sol.reached)
+                        for fname, (state, reached) in solved.items():
+                            hs["fingers"][fname] = state
+                            if not reached:
+                                unreached.append(fname)
+                        if unreached:
+                            notes.append(
+                                f"fingertip(s) {', '.join(unreached)} beyond "
+                                f"reach in '{ph.name}' — clamped to reach")
                     if mv.spread is not None:
                         hs["spread"] = mv.spread
             for rt in ph.roots:
