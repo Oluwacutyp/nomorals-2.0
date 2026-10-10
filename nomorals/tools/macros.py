@@ -32,7 +32,9 @@ from ..core.policy import Capability
 _log = get_logger(__name__)
 
 __all__ = ["record_start", "record_step", "record_stop", "record_status",
-           "list_macros", "show_macro", "run_macro", "delete_macro", "register"]
+           "record_checkpoint", "record_continue",
+           "list_macros", "show_macro", "run_macro", "delete_macro",
+           "export_macro", "import_macro", "register"]
 
 _NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,47}$")
 
@@ -40,17 +42,68 @@ _NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,47}$")
 
 _recorder_lock = threading.Lock()
 _active: dict[str, Any] = {}  # name -> {"steps": [...], "started_at": float}
+_DEFAULT_IDLE_TIMEOUT_S = 1200.0  # 20 min, like playwriter's auto-stop
 
 
-def record_start(name: str, description: str = "") -> dict[str, Any]:
+def record_start(name: str, description: str = "",
+                 idle_timeout_s: float = _DEFAULT_IDLE_TIMEOUT_S) -> dict[str, Any]:
     name = (name or "").strip()
     if not _NAME_RE.match(name):
         raise ToolError(f"bad macro name {name!r} — letters/digits/._-, <= 48 chars")
     with _recorder_lock:
         _active["current"] = {"name": name, "description": description,
-                              "steps": [], "started_at": time.time()}
+                              "steps": [], "started_at": time.time(),
+                              "last_step_at": time.time(),
+                              "idle_timeout_s": max(60.0, float(idle_timeout_s or 0))}
     _log.info("macro recording started: %s", name)
     return {"recording": name, "steps": 0}
+
+
+def _auto_stop_if_idle(registry: Any = None,
+                       context: Any = None) -> dict[str, Any] | None:
+    """Save the recording when it has been idle past its timeout.
+
+    Returns the save result when an auto-stop fired, else None.
+    """
+    with _recorder_lock:
+        rec = _active.get("current")
+        if rec is None:
+            return None
+        idle_for = time.time() - float(rec.get("last_step_at", 0))
+        if idle_for < float(rec.get("idle_timeout_s", _DEFAULT_IDLE_TIMEOUT_S)):
+            return None
+    _log.info("macro %s auto-stopped after %.0fs idle", rec["name"], idle_for)
+    try:
+        result = record_stop(registry=registry, context=context)
+    except ToolError:
+        return None
+    result["auto_stopped"] = True
+    result["idle_seconds"] = round(idle_for, 1)
+    return result
+
+
+def record_checkpoint(description: str, *, tool: str = "",
+                      args: dict[str, Any] | None = None,
+                      expect_contains: str = "") -> dict[str, Any]:
+    """Record an assertion into the active macro (Playwright-codegen checks).
+
+    A checkpoint says what SHOULD be true at this point in the replay.
+    On replay, when ``tool`` is given the macro runs it and verifies the
+    output contains ``expect_contains``; otherwise the checkpoint is a
+    manual verification note in the run trace.
+    """
+    with _recorder_lock:
+        rec = _active.get("current")
+        if rec is None:
+            raise ToolError("no recording active — record_start first")
+        step = {"tool": "__checkpoint__",
+                "args": {"description": description, "verify_tool": tool,
+                         "verify_args": dict(args or {}),
+                         "expect_contains": expect_contains}}
+        rec["steps"].append(step)
+        rec["last_step_at"] = time.time()
+        count = len(rec["steps"])
+    return {"recording": True, "steps": count, "checkpoint": description}
 
 
 def record_step(tool: str, args: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -62,6 +115,7 @@ def record_step(tool: str, args: dict[str, Any] | None = None) -> dict[str, Any]
             return {"recording": False, "note": "no recording active"}
         step = {"tool": str(tool or ""), "args": dict(args or {})}
         rec["steps"].append(step)
+        rec["last_step_at"] = time.time()
         count = len(rec["steps"])
         name = rec["name"]
     _log.debug("macro %s: step %d = %s", name, count, tool)
@@ -79,6 +133,71 @@ def record_stop(registry: Any = None, context: Any = None) -> dict[str, Any]:
         raise ToolError("recording captured no steps — nothing to save")
     result = save_macro(context, registry, rec["name"], rec["description"], steps)
     return result
+
+
+def record_continue(context: Any, name: str,
+                    new_description: str = "") -> dict[str, Any]:
+    """Continue recording from an existing macro (demo-maker continue-from).
+
+    The macro's steps become the recording prefix; new steps append after
+    them. ``record_stop`` saves the extended macro (same name = overwrite).
+    """
+    db = _db(context)
+    row = db.query_one("SELECT steps, description FROM macros WHERE name = ?",
+                       ((name or "").strip(),))
+    if row is None:
+        raise ToolError(f"no macro named {name!r}")
+    steps = json.loads(row["steps"] or "[]")
+    record_start(name, new_description or (row["description"] or ""))
+    with _recorder_lock:
+        rec = _active.get("current")
+        if rec is not None:
+            rec["steps"] = list(steps)
+            rec["last_step_at"] = time.time()
+    return {"recording": name, "steps": len(steps),
+            "continued_from": len(steps)}
+
+
+def export_macro(context: Any, name: str,
+                 format: str = "json") -> dict[str, Any]:
+    """Export a macro as portable JSON (or YAML when pyyaml is installed)."""
+    macro = show_macro(context, name)
+    payload = {"name": macro["name"], "description": macro["description"],
+               "steps": macro["steps"], "exported_at": time.time(),
+               "format_version": 1}
+    if (format or "json").lower() == "yaml":
+        try:
+            import yaml  # type: ignore
+            return {"name": name, "format": "yaml",
+                    "text": yaml.safe_dump(payload, sort_keys=False)}
+        except Exception:  # noqa: BLE001 - fall back to JSON
+            pass
+    return {"name": name, "format": "json",
+            "text": json.dumps(payload, indent=2)}
+
+
+def import_macro(context: Any, registry: Any, text: str,
+                 name: str = "") -> dict[str, Any]:
+    """Import a macro exported by :func:`export_macro` (JSON or YAML)."""
+    text = (text or "").strip()
+    if not text:
+        raise ToolError("nothing to import")
+    payload: dict[str, Any] | None = None
+    try:
+        payload = json.loads(text)
+    except (ValueError, TypeError):
+        try:
+            import yaml  # type: ignore
+            payload = yaml.safe_load(text)
+        except Exception as exc:  # noqa: BLE001
+            raise ToolError(f"could not parse macro (not JSON/YAML): {exc}") from exc
+    if not isinstance(payload, dict) or not isinstance(
+            payload.get("steps"), list):
+        raise ToolError("macro payload needs a 'steps' list")
+    macro_name = (name or str(payload.get("name") or "")).strip()
+    return save_macro(context, registry, macro_name,
+                      str(payload.get("description") or ""),
+                      payload["steps"])
 
 
 def record_status() -> dict[str, Any]:
@@ -152,7 +271,8 @@ def save_macro(context: Any, registry: Any, name: str, description: str,
         if not tool:
             raise ToolError("macro steps need a tool name")
         if registry_names is not None and tool not in registry_names \
-                and not tool.startswith("macro_"):
+                and not tool.startswith("macro_") \
+                and tool != "__checkpoint__":
             raise ToolError(f"unknown tool {tool!r} in macro — record real steps only")
         if not isinstance(args, dict):
             raise ToolError("macro step args must be an object")
@@ -204,6 +324,25 @@ def _register_tool(registry: Any, context: Any, name: str,
     setattr(macro_tool, "_nm_macro", name)
 
 
+def _run_checkpoint(registry: Any, args: dict[str, Any]) -> tuple[bool, str]:
+    """Execute one recorded checkpoint during replay."""
+    description = str(args.get("description") or "checkpoint")
+    verify_tool = str(args.get("verify_tool") or "")
+    if not verify_tool:
+        return True, f"VERIFY: {description}"
+    outcome = registry.call(verify_tool, actor="macro",
+                            **dict(args.get("verify_args") or {}))
+    if not outcome.ok:
+        return False, (f"checkpoint FAILED ({description}): verify tool "
+                       f"{verify_tool} errored: "
+                       f"{getattr(outcome.error, 'message', outcome.error)}")
+    expect = str(args.get("expect_contains") or "")
+    if expect and expect not in str(outcome.value):
+        return False, (f"checkpoint FAILED ({description}): output of "
+                       f"{verify_tool} did not contain {expect!r}")
+    return True, f"checkpoint ok: {description}"
+
+
 def run_macro(context: Any, registry: Any, name: str, overrides: str = "") -> dict[str, Any]:
     name = (name or "").strip()
     db = _db(context)
@@ -232,6 +371,14 @@ def run_macro(context: Any, registry: Any, name: str, overrides: str = "") -> di
     results: list[dict[str, Any]] = []
     failed_at: int | None = None
     for idx, step in enumerate(steps):
+        if step["tool"] == "__checkpoint__":
+            ok, note = _run_checkpoint(registry, step["args"] or {})
+            results.append({"step": idx, "tool": "__checkpoint__", "ok": ok,
+                            "result": note[:300]})
+            if not ok:
+                failed_at = idx
+                break
+            continue
         args = override_map.get(idx, step["args"])
         outcome = registry.call(step["tool"], actor="macro", **args)
         ok = bool(outcome.ok)
@@ -342,6 +489,56 @@ def register(registry: Any) -> None:
         except Exception:  # noqa: BLE001 - row is gone; a stale tool is harmless
             _log.debug("could not unregister macro_%s", name, exc_info=True)
         return out
+
+    @registry.register(
+        "record_checkpoint",
+        description=("Record an assertion into the active macro: what SHOULD "
+                     "be true at this point. On replay the checkpoint runs "
+                     "an optional verify tool and checks its output."),
+        capability=Capability.DB_WRITE,
+        parameters={"description": "str",
+                    "tool": "str (optional) — verify tool",
+                    "args": "str (optional) — JSON args for the verify tool",
+                    "expect_contains": "str (optional)"},
+    )
+    def record_checkpoint_tool(description: str, *, tool: str = "",
+                               args: str = "",
+                               expect_contains: str = "") -> dict[str, Any]:
+        parsed: dict[str, Any] = {}
+        if (args or "").strip():
+            parsed = json.loads(args)
+        return record_checkpoint(description, tool=tool, args=parsed,
+                                 expect_contains=expect_contains)
+
+    @registry.register(
+        "record_continue",
+        description=("Continue recording from an existing macro: its steps "
+                     "become the prefix, new steps append after them."),
+        capability=Capability.DB_WRITE,
+        parameters={"name": "str", "new_description": "str (optional)"},
+    )
+    def record_continue_tool(name: str, *,
+                             new_description: str = "") -> dict[str, Any]:
+        return record_continue(context, name, new_description)
+
+    @registry.register(
+        "macro_export",
+        description="Export a macro as portable JSON (or YAML).",
+        capability=Capability.DB_READ,
+        parameters={"name": "str", "format": "str — json|yaml (default json)"},
+    )
+    def macro_export_tool(name: str, *, format: str = "json") -> dict[str, Any]:
+        return export_macro(context, name, format)
+
+    @registry.register(
+        "macro_import",
+        description="Import a macro exported by macro_export (JSON or YAML).",
+        capability=Capability.DB_WRITE,
+        parameters={"text": "str — exported macro",
+                    "name": "str (optional) — override the macro name"},
+    )
+    def macro_import_tool(text: str, *, name: str = "") -> dict[str, Any]:
+        return import_macro(context, registry, text, name)
 
     # Register every macro already on disk as a live tool at boot.
     try:

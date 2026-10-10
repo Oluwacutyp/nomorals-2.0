@@ -143,16 +143,30 @@ def _has_pytest() -> bool:
 
 def format_test_result(tres: dict[str, Any]) -> str:
     """One screen of test-runner output for the fix loop and the journal."""
-    lines = [f"{tres.get('runner', '?')}: {tres.get('passed', 0)} passed, "
-             f"{len(tres.get('failed', []))} failed "
-             f"({tres.get('seconds', 0)}s)"]
-    for fail in tres.get("failed", [])[:3]:
-        lines.append(f"FAILED {fail.get('test_id')}")
+    from . import _style as _style
+
+    passed = tres.get("passed", 0)
+    failed = tres.get("failed", [])
+    total = passed + len(failed)
+    frac = (passed / total) if total else 1.0
+    lines = [_style.banner(
+        f"{tres.get('runner', '?')} — {passed} passed, {len(failed)} failed",
+        sub=f"{tres.get('seconds', 0)}s")]
+    lines.append(_style.progress_bar(frac, label=f"{passed}/{total}"))
+    for fail in failed[:3]:
+        lines.append(_style.status_line(_style.FAIL,
+                                        str(fail.get("test_id"))))
         if fail.get("error_snippet"):
-            lines.append(str(fail["error_snippet"])[:800])
+            lines.append(_style.colorize(str(fail["error_snippet"])[:800],
+                                         "dim"))
+    if len(failed) > 3:
+        lines.append(_style.colorize(
+            f"… and {len(failed) - 3} more failures", "dim"))
     note = tres.get("note")
     if note:
         lines.append(str(note))
+    if not failed:
+        lines.append(_style.status_line(_style.OK, "all green"))
     return "\n".join(lines)
 
 

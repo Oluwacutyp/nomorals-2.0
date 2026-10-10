@@ -546,6 +546,94 @@ def osint_threat(context: Any, target: str) -> dict[str, Any]:
 # ── sweep: fan-out with per-source isolation ──────────────────────────────────
 
 
+def _crtsh_subdomains(domain: str, timeout: float) -> dict[str, Any]:
+    """crt.sh certificate-transparency subdomain enumeration.
+
+    The single biggest free passive subdomain feed (theHarvester lists
+    crtsh among its core sources). Returns distinct subdomains seen in
+    certificates for %.domain plus the raw cert count.
+    """
+    url = ("https://crt.sh/?q=%25." + urllib.parse.quote(domain) +
+           "&output=json")
+    try:
+        response = HttpClient(timeout=timeout).get(url)
+        certs = response.json() if response.ok else []
+    except Exception:
+        certs = []
+    names: set[str] = set()
+    if isinstance(certs, list):
+        for entry in certs:
+            for name in str(entry.get("name_value") or "").split("\n"):
+                name = name.strip().lower().rstrip(".")
+                if name and not name.startswith("*"):
+                    names.add(name)
+    suffix = "." + domain.lower()
+    subs = sorted(n for n in names if n == domain.lower() or n.endswith(suffix))
+    return {"subdomains": subs, "count": len(subs),
+            "certs_seen": len(certs) if isinstance(certs, list) else 0}
+
+
+def _certspotter_subdomains(domain: str, timeout: float) -> dict[str, Any]:
+    """certspotter.com CT API - distinct DNS names from certificates."""
+    url = ("https://api.certspotter.com/v1/issuances?domain=" +
+           urllib.parse.quote(domain) +
+           "&include_subdomains=true&expand=dns_names")
+    try:
+        response = HttpClient(timeout=timeout).get(url)
+        issuances = response.json() if response.ok else []
+    except Exception:
+        issuances = []
+    names: set[str] = set()
+    if isinstance(issuances, list):
+        for item in issuances:
+            for name in (item.get("dns_names") or []):
+                name = str(name).strip().lower().rstrip(".")
+                if name and not name.startswith("*"):
+                    names.add(name)
+    suffix = "." + domain.lower()
+    subs = sorted(n for n in names if n == domain.lower() or n.endswith(suffix))
+    return {"subdomains": subs, "count": len(subs)}
+
+
+def _rapiddns_subdomains(domain: str, timeout: float) -> dict[str, Any]:
+    """rapiddns.io passive DNS table (HTML scrape, no key)."""
+    url = f"https://rapiddns.io/subdomain/{urllib.parse.quote(domain)}?full=1"
+    try:
+        response = HttpClient(timeout=timeout).get(url)
+        html = response.text if response.ok else ""
+    except Exception:
+        html = ""
+    subs = sorted(set(
+        m.group(1).lower().rstrip(".")
+        for m in re.finditer(
+            r'<td[^>]*>\s*([a-z0-9_\-\.]+\.' + re.escape(domain.lower()) +
+            r')\s*</td>', html or "", re.IGNORECASE)))
+    return {"subdomains": subs, "count": len(subs)}
+
+
+def _verify_hosts_live(hosts: list[str], timeout: float) -> dict[str, Any]:
+    """ACTIVE step: DNS-verify discovered hostnames (theHarvester -v).
+
+    Only runs in active mode - it sends DNS queries for the discovered
+    names (still no packets to the target itself, just resolvers).
+    """
+    from .network import dns_query as _dns_query
+
+    live: dict[str, list[str]] = {}
+    dead: list[str] = []
+    for host in hosts[:200]:
+        try:
+            ips = _dns_query(host, "A", timeout=min(3.0, timeout))
+            if ips:
+                live[host] = ips
+            else:
+                dead.append(host)
+        except Exception:  # noqa: BLE001 - per-host isolation
+            dead.append(host)
+    return {"live": live, "live_count": len(live),
+            "dead": dead[:50], "dead_count": len(dead)}
+
+
 def _run_source(name: str, fn: Any) -> dict[str, Any]:
     """Run one source, isolating errors and capturing wall time. Never raises."""
     started = time.monotonic()
@@ -566,6 +654,9 @@ def _sweep_sections(context: Any, kind: str, target: str,
     if kind in {"domain", "email"}:
         jobs = [
             ("dns_doh", lambda: osint_dns(context, domain)),
+            ("crtsh", lambda: _crtsh_subdomains(domain, src_timeout)),
+            ("certspotter", lambda: _certspotter_subdomains(domain, src_timeout)),
+            ("rapiddns", lambda: _rapiddns_subdomains(domain, src_timeout)),
             ("urlscan", lambda: _urlscan_search(domain, "domain", src_timeout)),
             ("urlhaus", lambda: _urlhaus_host(domain, src_timeout)),
             ("threatfox", lambda: _threatfox_search(domain, src_timeout)),
@@ -589,24 +680,42 @@ def _sweep_sections(context: Any, kind: str, target: str,
     return {name: _run_source(name, fn) for name, fn in jobs}
 
 
-def osint_sweep(context: Any, target: str) -> dict[str, Any]:
+def osint_sweep(context: Any, target: str,
+                mode: str = "passive") -> dict[str, Any]:
     """Unified sweep: auto-classifies the target, runs the base bundle plus every
     applicable keyless source, merges into one report. One dead source never
     kills the sweep — failures are isolated per source with timings recorded.
+
+    ``mode`` (theHarvester dual-mode): "passive" (default) never touches the
+    target - every query goes to third parties. "active" additionally
+    DNS-verifies discovered hostnames (like theHarvester -v) so the report
+    distinguishes live hosts from stale records.
     """
     timeout, *_ = _settings(context)
     target = (target or "").strip()
     if not target:
         raise ToolError("osint_sweep needs a target")
+    mode = (mode or "passive").lower()
+    if mode not in ("passive", "active"):
+        raise ToolError(f"bad osint mode {mode!r} - want passive|active")
     kind = _classify(target)
     base = {"domain": osint_domain, "ip": osint_ip,
             "url": osint_url, "email": osint_email}[kind](context, target)
     sections = _sweep_sections(context, kind, target, _sweep_domain(kind, target), timeout)
-    ok = sum(1 for section in sections.values() if section["ok"])
-    return {
-        "target": target, "kind": kind, "base": base, "sources": sections,
-        "sources_ok": ok, "sources_failed": len(sections) - ok,
+    out: dict[str, Any] = {
+        "target": target, "kind": kind, "mode": mode, "base": base,
+        "sources": sections,
+        "sources_ok": sum(1 for s in sections.values() if s["ok"]),
+        "sources_failed": sum(1 for s in sections.values() if not s["ok"]),
     }
+    if mode == "active" and kind in ("domain", "email"):
+        hosts: set[str] = set()
+        for name in ("crtsh", "certspotter", "rapiddns"):
+            data = (sections.get(name) or {}).get("data") or {}
+            hosts.update(data.get("subdomains") or [])
+        out["host_verification"] = _verify_hosts_live(sorted(hosts),
+                                                       min(timeout, 8.0))
+    return out
 
 
 # ── report: auto-detect + compose ────────────────────────────────────────────
@@ -718,11 +827,13 @@ def register(registry: Any) -> None:
         description=(
             "Unified OSINT sweep: auto-classifies the target (domain/ip/url/email), "
             "runs the base bundle plus every applicable keyless source "
-            "(DNS-over-HTTPS, urlscan, urlhaus, ThreatFox, hackertarget, ip-api) "
-            "with per-source timings and isolated errors."
+            "(DNS-over-HTTPS, crt.sh/certspotter/rapiddns subdomain feeds, "
+            "urlscan, urlhaus, ThreatFox, hackertarget, ip-api) "
+            "with per-source timings and isolated errors. mode=active "
+            "DNS-verifies discovered hosts (passive never touches the target)."
         ),
         capability=Capability.NET_OUT,
         parameters={"target": "str — domain, IP, URL, or email"},
     )
-    def osint_sweep_tool(target: str) -> dict[str, Any]:
-        return osint_sweep(context, target)
+    def osint_sweep_tool(target: str, mode: str = "passive") -> dict[str, Any]:
+        return osint_sweep(context, target, mode)

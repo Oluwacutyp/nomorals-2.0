@@ -278,30 +278,97 @@ _HEADING_RE = re.compile(r"(?is)<h[1-6]\b[^>]*>(.*?)</h[1-6]>")
 _MIN_BLOCK_CHARS = 280
 
 
-def readability_extract(markup: str) -> dict[str, Any]:
+def _trafilatura_extract(markup: str, url: str = "",
+                     favor_recall: bool = False,
+                     output_format: str = "txt") -> dict[str, Any] | None:
+    """Try trafilatura (best general-purpose extractor, F1 ~0.94).
+
+    Returns None when trafilatura is not installed or extraction yields
+    nothing - the caller falls back to the built-in scorer. Metadata
+    (title/author/date) comes from trafilatura's JSON output.
+    """
+    try:
+        import trafilatura  # type: ignore
+    except Exception:  # noqa: BLE001 - optional dependency
+        return None
+    try:
+        if output_format == "json":
+            raw = trafilatura.extract(
+                markup, output_format="json", include_tables=True,
+                favor_recall=favor_recall, url=url or None)
+            if not raw:
+                return None
+            data = json.loads(raw)
+            text = data.get("text") or ""
+            if not text.strip():
+                return None
+            return {
+                "title": data.get("title") or "",
+                "author": data.get("author") or "",
+                "date": data.get("date") or "",
+                "text": text,
+                "words": len(text.split()),
+                "engine": "trafilatura",
+                "confidence": "high",
+            }
+        fmt = "markdown" if output_format == "markdown" else "txt"
+        text = trafilatura.extract(
+            markup, output_format=fmt, include_tables=True,
+            include_links=(fmt == "markdown"),
+            favor_recall=favor_recall, url=url or None)
+        if not text or not text.strip():
+            return None
+        return {
+            "title": _extract_title(markup),
+            "text": text,
+            "words": len(text.split()),
+            "engine": "trafilatura",
+            "confidence": "high",
+        }
+    except Exception:  # noqa: BLE001 - fall back to the built-in scorer
+        return None
+
+
+def readability_extract(markup: str, url: str = "",
+                        favor_recall: bool = False,
+                        output_format: str = "txt") -> dict[str, Any]:
     """Pull the main article out of a page.
 
-    Strips nav/header/footer/aside/script/style, then scores candidate blocks
-    by text length penalised for link density (nav-shaped blocks are mostly
-    links). ``<article>`` wins outright when present and non-trivial.
-    Returns title + best content + word count.
+    Extraction ladder (mined best practice): trafilatura first (best
+    general-purpose extractor), then the built-in scorer (boilerplate
+    strip + block scoring by length penalized by link density;
+    ``<article>`` wins outright when present and non-trivial).
+
+    ``output_format``: "txt" (default), "markdown" (keeps headings,
+    lists, tables, links - best for LLM ingestion), or "json" (adds
+    author/date metadata when the engine provides it).
+    ``favor_recall`` extracts more (less precision) for difficult pages.
+    The result always names its ``engine`` and a ``confidence`` note so
+    callers know when the page defeated the extractor.
     """
     if not markup:
-        return {"title": "", "text": "", "words": 0}
+        return {"title": "", "text": "", "words": 0,
+                "engine": "none", "confidence": "empty"}
+    first = _trafilatura_extract(markup, url, favor_recall, output_format)
+    if first is not None:
+        return first
     title = _extract_title(markup)
     cleaned = _BOILERPLATE.sub(" ", markup)
 
     # An explicit <article> is the page telling us where the content is.
-    best: str | None = None
+    best_html: str | None = None
+    best_text: str | None = None
     for match in re.finditer(r"(?is)<article\b[^>]*>(.*?)</article>", cleaned):
         text = html_to_text(match.group(1))
-        if len(text) >= _MIN_BLOCK_CHARS and (best is None or len(text) > len(best)):
-            best = text
-    if best is not None:
-        text = best
-        return {"title": title, "text": text, "words": len(text.split())}
+        if len(text) >= _MIN_BLOCK_CHARS and (best_text is None or len(text) > len(best_text)):
+            best_text, best_html = text, match.group(1)
+    if best_text is not None:
+        text = (_html_to_markdown(best_html)
+                if output_format == "markdown" and best_html else best_text)
+        return {"title": title, "text": text, "words": len(text.split()),
+                "engine": "builtin", "confidence": "medium"}
 
-    scored: list[tuple[float, str]] = []
+    scored: list[tuple[float, str, str]] = []
     for match in _BLOCK_RE.finditer(cleaned):
         inner = match.group(2)
         if "<article" in inner.lower():
@@ -315,16 +382,48 @@ def readability_extract(markup: str) -> dict[str, Any]:
         density = len(link_text) / max(len(text), 1)
         heading_bonus = len(_HEADING_RE.findall(inner)) * 60.0
         score = len(text) * (1.0 - min(density, 0.95)) + heading_bonus
-        scored.append((score, text))
+        scored.append((score, text, inner))
 
     if scored:
         scored.sort(key=lambda item: item[0], reverse=True)
-        text = scored[0][1]
-        return {"title": title, "text": text, "words": len(text.split())}
+        _score, text, inner = scored[0]
+        if output_format == "markdown":
+            text = _html_to_markdown(inner)
+        return {"title": title, "text": text, "words": len(text.split()),
+                "engine": "builtin", "confidence": "medium"}
 
     # Nothing scored: the page is flat (or the regexes missed it). Whole page.
+    # Low confidence - the caller should know this may be boilerplate.
     text = html_to_text(cleaned)
-    return {"title": title, "text": text, "words": len(text.split())}
+    if output_format == "markdown":
+        text = _html_to_markdown(cleaned)
+    return {"title": title, "text": text, "words": len(text.split()),
+            "engine": "builtin", "confidence": "low"}
+
+
+def _html_to_markdown(html: str) -> str:
+    """Best-effort HTML -> markdown for LLM ingestion.
+
+    markdownify when installed (better nested lists/tables), else the
+    stdlib fallback below. Never raises.
+    """
+    try:
+        import markdownify  # type: ignore
+        return markdownify.markdownify(html or "", heading_style="ATX").strip()
+    except Exception:  # noqa: BLE001 - optional dependency
+        pass
+    text = html or ""
+    text = re.sub(r"(?is)<h([1-6])[^>]*>(.*?)</h\1>",
+                  lambda m: "\n" + "#" * int(m.group(1)) + " " +
+                  _TAGS.sub("", m.group(2)).strip() + "\n", text)
+    text = re.sub(r"(?is)<(strong|b)[^>]*>(.*?)</\1>", r"**\2**", text)
+    text = re.sub(r"(?is)<(em|i)[^>]*>(.*?)</\1>", r"*\2*", text)
+    text = re.sub(r'(?is)<a[^>]+href="([^"]+)"[^>]*>(.*?)</a>',
+                  lambda m: "[" + _TAGS.sub("", m.group(2)).strip() + "](" +
+                  m.group(1) + ")", text)
+    text = re.sub(r"(?is)<li[^>]*>", "\n- ", text)
+    text = re.sub(r"(?is)<(br|p|tr)[^>]*>", "\n", text)
+    return html_to_text(text).strip()
 
 
 # ── search ───────────────────────────────────────────────────────────────────

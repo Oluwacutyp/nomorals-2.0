@@ -1701,6 +1701,220 @@ _ROTATE_KV = "proxy.rotate"
 _STRATEGIES = ("round_robin", "random", "sticky", "least_used")
 
 
+# ── operational discipline (mined: production proxy practice) ─────────────
+# A proxy is one lever of an identity, not the whole disguise. These are
+# the operational pieces the pool was missing:
+#   * classify_response: DATA | BLOCK | CHALLENGE | THROTTLE per response
+#   * ProxyIdentity: proxy + cookies + UA + fingerprint bound for a whole
+#     logical session (rotate whole identities, never the proxy mid-session)
+#   * SubnetTracker: bans cluster by subnet/ASN, not by single IP
+#   * pool_tiers: gold / silver / bronze / cooling / dead
+
+
+def classify_response(status_code: int, body: str = "",
+                      headers: dict[str, str] | None = None) -> tuple[str, str]:
+    """Classify an HTTP response: DATA | BLOCK | CHALLENGE | THROTTLE.
+
+    A BLOCK retires the burned identity; a CHALLENGE routes to the
+    captcha pipeline instead of being parsed as data; a THROTTLE backs
+    off honoring Retry-After. Returns (kind, reason).
+    """
+    headers = headers or {}
+    body_l = (body or "")[:2000].lower()
+    if status_code == 429:
+        return ("throttle", "HTTP 429 rate limited")
+    if status_code in (403, 401):
+        markers = ("captcha", "challenge", "verify you are human",
+                   "attention required", "access denied", "blocked",
+                   "cloudflare", "perimeterx", "datadome")
+        if any(m in body_l for m in markers):
+            if any(m in body_l for m in ("captcha", "challenge",
+                                         "verify you are human")):
+                return ("challenge", f"HTTP {status_code} challenge page")
+            return ("block", f"HTTP {status_code} forbidden")
+        return ("block", f"HTTP {status_code}")
+    if status_code in (503, 509):
+        return ("throttle", f"HTTP {status_code} service unavailable")
+    if status_code >= 500:
+        return ("block", f"HTTP {status_code} server error")
+    challenge_markers = ("cf-turnstile", "g-recaptcha", "h-captcha",
+                         "verify you are human", "one more step")
+    if status_code == 200 and any(m in body_l for m in challenge_markers):
+        return ("challenge", "challenge widget in 200 response")
+    return ("data", "ok")
+
+
+def retry_after_delay(headers: dict[str, str] | None,
+                      default: float = 60.0) -> float:
+    """Seconds to wait honoring Retry-After (never hammer through a 429)."""
+    if not headers:
+        return default
+    raw = None
+    for key, value in headers.items():
+        if key.lower() == "retry-after":
+            raw = value
+            break
+    if raw is None:
+        return default
+    try:
+        return max(1.0, min(float(str(raw).strip()), 3600.0))
+    except (TypeError, ValueError):
+        pass
+    # HTTP-date form: parse and diff against now
+    try:
+        import email.utils as _eu
+        import datetime as _dt
+        dt = _eu.parsedate_to_datetime(str(raw))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=_dt.timezone.utc)
+        delta = (dt - _dt.datetime.now(_dt.timezone.utc)).total_seconds()
+        return max(1.0, min(delta, 3600.0))
+    except Exception:  # noqa: BLE001
+        return default
+
+
+@dataclass
+class ProxyIdentity:
+    """One routable identity: proxy + cookies + UA + fingerprint.
+
+    Bound for the life of a logical session (sticky). Rotating the proxy
+    alone mid-session while keeping cookies is the classic
+    self-inflicted wound - the origin jumps but the session doesn't, and
+    behavioral systems notice. Rotate WHOLE identities instead.
+    """
+
+    proxy_url: str
+    cookies: dict[str, str] = field(default_factory=dict)
+    user_agent: str = ""
+    fingerprint: str = ""  # TLS/HTTP2 fingerprint label, when known
+    session_id: str = ""
+    created_at: float = field(default_factory=time.time)
+    uses: int = 0
+    burned: bool = False
+    burn_reason: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.session_id:
+            import secrets as _secrets
+            self.session_id = _secrets.token_hex(8)
+
+    def headers(self) -> dict[str, str]:
+        out: dict[str, str] = {}
+        if self.user_agent:
+            out["User-Agent"] = self.user_agent
+        if self.cookies:
+            out["Cookie"] = "; ".join(f"{k}={v}"
+                                      for k, v in self.cookies.items())
+        return out
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "proxy_url": self.proxy_url,
+            "user_agent": self.user_agent,
+            "fingerprint": self.fingerprint,
+            "session_id": self.session_id,
+            "uses": self.uses,
+            "burned": self.burned,
+            "burn_reason": self.burn_reason,
+            "age_s": round(time.time() - self.created_at, 1),
+        }
+
+
+def _subnet_of(host: str, prefix: int = 24) -> str:
+    """Map an IPv4 host to its /24 (bans cluster by subnet)."""
+    try:
+        import ipaddress as _ip
+        ip = _ip.ip_address(host)
+        if isinstance(ip, _ip.IPv4Address):
+            net = _ip.ip_network(f"{host}/{prefix}", strict=False)
+            return str(net)
+        return str(_ip.ip_network(f"{host}/64", strict=False))
+    except Exception:  # noqa: BLE001
+        return host
+
+
+class SubnetTracker:
+    """Per-subnet success stats: bans cluster by subnet/ASN, not IP.
+
+    A single proxy failing is noise; a whole /24 failing is a burn
+    signal - the tracker surfaces subnets whose failure rate crosses
+    the threshold so the pool stops routing into burned ranges.
+    """
+
+    def __init__(self, burn_threshold: float = 0.6,
+                 min_samples: int = 5) -> None:
+        self.burn_threshold = burn_threshold
+        self.min_samples = min_samples
+        self._stats: dict[str, dict[str, int]] = {}
+        self._lock = threading.Lock()
+
+    def note(self, host: str, ok: bool) -> None:
+        subnet = _subnet_of(host)
+        with self._lock:
+            entry = self._stats.setdefault(subnet, {"ok": 0, "fail": 0})
+            entry["ok" if ok else "fail"] += 1
+
+    def failure_rate(self, host: str) -> float:
+        subnet = _subnet_of(host)
+        with self._lock:
+            entry = self._stats.get(subnet, {"ok": 0, "fail": 0})
+        total = entry["ok"] + entry["fail"]
+        return (entry["fail"] / total) if total else 0.0
+
+    def burned_subnets(self) -> list[dict[str, Any]]:
+        """Subnets past the burn threshold with enough samples."""
+        out = []
+        with self._lock:
+            items = list(self._stats.items())
+        for subnet, entry in items:
+            total = entry["ok"] + entry["fail"]
+            if total >= self.min_samples:
+                rate = entry["fail"] / total
+                if rate >= self.burn_threshold:
+                    out.append({"subnet": subnet,
+                                "failure_rate": round(rate, 3),
+                                "samples": total})
+        out.sort(key=lambda d: -d["failure_rate"])
+        return out
+
+    def to_dict(self) -> dict[str, Any]:
+        with self._lock:
+            total = sum(e["ok"] + e["fail"] for e in self._stats.values())
+            return {"subnets_tracked": len(self._stats),
+                    "samples": total,
+                    "burned": self.burned_subnets()[:10]}
+
+
+def pool_tiers(proxies: list["Proxy"],
+               at: float | None = None) -> dict[str, list[str]]:
+    """Classify a pool into gold / silver / bronze / cooling / dead.
+
+    Mirrors the proxy-pool REST tier model: gold (score>=80) for the
+    sensitive targets, silver (>=50) for general use, bronze for the
+    rest, cooling for backoff, dead for the retired.
+    """
+    now = at if at is not None else time.time()
+    tiers: dict[str, list[str]] = {
+        "gold": [], "silver": [], "bronze": [], "cooling": [], "dead": []}
+    for proxy in proxies:
+        if not proxy.alive:
+            tiers["dead"].append(proxy.url)
+            continue
+        if float(proxy.backoff_until or 0.0) > now:
+            tiers["cooling"].append(proxy.url)
+            continue
+        # score_proxy returns roughly 0..10 (anon*2 + latency*3 + bonus);
+        # normalize to 0..100 for the tier cutoffs.
+        score = max(0.0, min(100.0, score_proxy(proxy, at=now) * 10.0))
+        if score >= 80:
+            tiers["gold"].append(proxy.url)
+        elif score >= 50:
+            tiers["silver"].append(proxy.url)
+        else:
+            tiers["bronze"].append(proxy.url)
+    return tiers
+
+
 class ProxyRotationManager:
     """Cycles the working pool through outbound requests — with failover.
 
@@ -2054,6 +2268,48 @@ class ProxyRotationManager:
     def next(self) -> str:
         """Force rotation to the next proxy now (returns the new pick)."""
         return self.pick()
+
+    def report_block(self, proxy_url: str, kind: str = "block",
+                     reason: str = "", retry_after: float = 0.0) -> None:
+        """A response classified as BLOCK/CHALLENGE/THROTTLE came back.
+
+        ``kind`` comes from :func:`classify_response`. A BLOCK retires
+        the identity (long cooldown + burned mark); a CHALLENGE cools
+        briefly (the captcha pipeline may clear it); a THROTTLE honors
+        Retry-After instead of hammering. Sticky sessions fail over to a
+        WHOLE new identity, never just a new proxy on the same cookies.
+        """
+        proxy_url = (proxy_url or "").strip()
+        if not proxy_url:
+            return
+        st = self.state
+        now = time.time()
+        if kind == "block":
+            st["cooldown"][proxy_url] = now + 3600.0
+            entry = st["usage"].setdefault(proxy_url,
+                                           {"served": 0, "failures": 0})
+            entry["failures"] = int(entry.get("failures", 0)) + 3
+            st["stats"]["failovers"] += 1
+            _log.warning("rotation: %s BLOCKED (%s) - retired 1h",
+                         proxy_url, reason[:120])
+        elif kind == "challenge":
+            st["cooldown"][proxy_url] = now + 300.0
+            _log.info("rotation: %s challenged (%s) - cooling 5m",
+                      proxy_url, reason[:120])
+        else:  # throttle
+            wait = retry_after if retry_after > 0 else 60.0
+            st["cooldown"][proxy_url] = now + min(wait, 3600.0)
+            _log.info("rotation: %s throttled - backing off %.0fs",
+                      proxy_url, min(wait, 3600.0))
+        if st.get("strategy") == "sticky" and st.get("current") == proxy_url:
+            st["current"] = ""  # whole-identity rotation, not proxy-only
+        try:
+            self._lab().store.record_routing_result(
+                proxy_url, ok=False, reason=f"{kind}: {reason}",
+                backoff_seconds=300.0)
+        except Exception as exc:  # noqa: BLE001
+            _log.warning("rotation block record failed: %s", exc)
+        self._save_state()
 
     # -- lifecycle ---------------------------------------------------------------
     def enable(self, *, strategy: str = "round_robin",

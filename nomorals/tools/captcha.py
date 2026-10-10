@@ -159,6 +159,8 @@ class SolveResult:
     takeover: bool = False    # True when the owner must solve it by hand
     elapsed_ms: int = 0
     detail: str = ""
+    task_id: str = ""         # solving-service task id (for report_solve)
+    cost_usd: float = 0.0     # what this solve cost, when known
 
     def to_dict(self) -> dict[str, Any]:
         d = {
@@ -170,6 +172,10 @@ class SolveResult:
             d["token"] = self.token
         if self.text:
             d["text"] = self.text
+        if self.task_id:
+            d["task_id"] = self.task_id
+        if self.cost_usd:
+            d["cost_usd"] = round(self.cost_usd, 6)
         return d
 
 
@@ -744,7 +750,9 @@ class ServiceBackend(CaptchaBackend):
     def __init__(self, api_key: str = "", api_url: str = "",
                  sleeper: Callable[[float], None] | None = None,
                  limiter: "SolverRateLimiter | None" = None,
-                 proxy: str = "", settings: Any = None) -> None:
+                 proxy: str = "", settings: Any = None,
+                 budget: "SolveBudget | None" = None,
+                 api_mode: str = "") -> None:
         self._key = api_key or os.environ.get("CAPTCHA_API_KEY", "")
         self._api_url = (api_url or os.environ.get("CAPTCHA_API_URL", "")
                          or _DEFAULT_API_URL).rstrip("/")
@@ -752,6 +760,11 @@ class ServiceBackend(CaptchaBackend):
         self._limiter = limiter if limiter is not None else rate_limiter(
             settings)
         self._proxy = proxy or os.environ.get("CAPTCHA_PROXY", "")
+        self._budget = budget if budget is not None else SolveBudget(settings)
+        # "json" = modern createTask/getTaskResult API; "legacy" = in.php/res.php
+        self._api_mode = (api_mode or os.environ.get(
+            "NM_CAPTCHA_API_MODE", "legacy")).lower()
+        self._settings = settings
 
     # -- availability -------------------------------------------------------
     def available(self) -> bool:
@@ -864,6 +877,15 @@ class ServiceBackend(CaptchaBackend):
                                f"{challenge.kind!r} "
                                f"(try takeover)")
 
+        # Layer-3 budget gate: paid solving is the last resort - never
+        # spend past the daily/monthly caps (default-deny when caps are 0).
+        ok, reason = self._budget.can_spend()
+        if not ok:
+            raise CaptchaError(f"paid solve blocked by budget: {reason}")
+
+        if self._api_mode == "json":
+            return self._solve_json(challenge, started)
+
         params = self._task_params(challenge, method)
 
         # rate-limit check happens right before submission, and the
@@ -875,12 +897,17 @@ class ServiceBackend(CaptchaBackend):
         task_id = str(created["request"])
 
         token = ""
+        cost = 0.0
         for _ in range(_MAX_POLLS):
             self._sleep(_POLL_INTERVAL)
             got = self._get("/res.php", {"key": self._key, "json": "1",
                                          "action": "get", "id": task_id})
             if got.get("status") == 1:
                 token = str(got["request"])
+                try:
+                    cost = float(got.get("cost") or 0.0)
+                except (TypeError, ValueError):
+                    cost = 0.0
                 break
             # status 0 + CAPCHA_NOT_READY → keep polling; anything else
             # already raised inside _get.
@@ -890,18 +917,221 @@ class ServiceBackend(CaptchaBackend):
 
         self._limiter.record_success()
         elapsed = int((time.time() - started) * 1000)
+        if cost:
+            self._budget.record_spend(cost, task_id, challenge.kind)
         if challenge.kind in (CaptchaKind.IMAGE_CAPTCHA,
                               CaptchaKind.AUDIO_CAPTCHA):
             return SolveResult(ok=True, kind=challenge.kind,
                                backend=self.name, text=token,
-                               elapsed_ms=elapsed)
+                               elapsed_ms=elapsed, task_id=task_id,
+                               cost_usd=cost)
         if challenge.kind == CaptchaKind.ARKOSE:
             # funcaptcha answers are tokens for the fc-token field
             return SolveResult(ok=True, kind=challenge.kind,
                                backend=self.name, token=token,
-                               elapsed_ms=elapsed)
+                               elapsed_ms=elapsed, task_id=task_id,
+                               cost_usd=cost)
         return SolveResult(ok=True, kind=challenge.kind, backend=self.name,
-                           token=token, elapsed_ms=elapsed)
+                           token=token, elapsed_ms=elapsed, task_id=task_id,
+                           cost_usd=cost)
+
+    # -- modern JSON API (createTask / getTaskResult) -----------------------
+    _JSON_TASK_FOR_KIND = {
+        CaptchaKind.RECAPTCHA_V2: "RecaptchaV2TaskProxyless",
+        CaptchaKind.RECAPTCHA_V3: "RecaptchaV3TaskProxyless",
+        CaptchaKind.RECAPTCHA_ENTERPRISE: "RecaptchaV2EnterpriseTaskProxyless",
+        CaptchaKind.HCAPTCHA: "HCaptchaTaskProxyless",
+        CaptchaKind.TURNSTILE: "TurnstileTaskProxyless",
+        CaptchaKind.GEETEST: "GeeTestTaskProxyless",
+        CaptchaKind.ARKOSE: "FunCaptchaTaskProxyless",
+        CaptchaKind.IMAGE_CAPTCHA: "ImageToTextTask",
+        CaptchaKind.AUDIO_CAPTCHA: "AudioTask",
+    }
+
+    def _post_json(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
+        data = json.dumps(payload).encode()
+        req = urllib.request.Request(
+            f"{self._api_url}{path}", data=data,
+            headers={"Content-Type": "application/json",
+                     "User-Agent": "nomorals-captcha/1.0"})
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                body = resp.read().decode("utf-8", "replace")
+        except urllib.error.HTTPError as exc:
+            if exc.code == 429:
+                self._limiter.record_failure(hard=False)
+                raise CaptchaError(
+                    "solver API rate-limited us (429) - backing off") from exc
+            self._limiter.record_failure()
+            raise CaptchaError(f"solver API unreachable: {exc}") from exc
+        except Exception as exc:  # noqa: BLE001
+            self._limiter.record_failure()
+            raise CaptchaError(f"solver API unreachable: {exc}") from exc
+        try:
+            result = json.loads(body)
+        except json.JSONDecodeError as exc:
+            self._limiter.record_failure()
+            raise CaptchaError(
+                f"solver API returned non-JSON: {body[:120]}") from exc
+        if result.get("errorId") != 0:
+            desc = str(result.get("errorDescription", "unknown error"))
+            self._limiter.record_failure(hard=_hard_error(desc))
+            raise CaptchaError(_friendly_error(desc))
+        return result
+
+    def _json_task(self, challenge: CaptchaChallenge) -> dict[str, Any]:
+        task_type = self._JSON_TASK_FOR_KIND.get(challenge.kind)
+        if not task_type:
+            raise CaptchaError(f"json API cannot solve kind {challenge.kind!r}")
+        task: dict[str, Any] = {"type": task_type}
+        if challenge.kind in (CaptchaKind.IMAGE_CAPTCHA,
+                              CaptchaKind.AUDIO_CAPTCHA):
+            if not challenge.image_bytes:
+                raise CaptchaError(f"{challenge.kind} needs image/audio bytes")
+            task["body"] = base64.b64encode(challenge.image_bytes).decode()
+            if challenge.kind == CaptchaKind.AUDIO_CAPTCHA:
+                task["lang"] = "en"
+        else:
+            if not challenge.sitekey:
+                raise CaptchaError(f"{challenge.kind} needs a sitekey")
+            task["websiteURL"] = challenge.page_url or "about:blank"
+            task["websiteKey"] = challenge.sitekey
+            if challenge.kind == CaptchaKind.RECAPTCHA_V3:
+                task["pageAction"] = challenge.action or "verify"
+                task["minScore"] = challenge.min_score
+        if self._proxy:
+            ptype, _, paddr = self._proxy.partition("://")
+            task["proxyType"] = (ptype.upper() if ptype in
+                                 ("http", "https", "socks4", "socks5")
+                                 else "HTTP")
+            task["proxyAddress"] = paddr or self._proxy
+        return task
+
+    def _solve_json(self, challenge: CaptchaChallenge,
+                    started: float) -> SolveResult:
+        """Solve via the modern createTask/getTaskResult JSON API."""
+        self._limiter.check()
+        self._limiter.record_submit()
+        created = self._post_json("/createTask", {
+            "clientKey": self._key, "task": self._json_task(challenge)})
+        task_id = str(created.get("taskId", ""))
+        if not task_id:
+            raise CaptchaError("solver returned no taskId")
+        token = ""
+        cost = 0.0
+        for _ in range(_MAX_POLLS):
+            self._sleep(_POLL_INTERVAL)
+            got = self._post_json("/getTaskResult", {
+                "clientKey": self._key, "taskId": task_id})
+            if got.get("status") == "ready":
+                solution = got.get("solution") or {}
+                token = (solution.get("gRecaptchaResponse")
+                         or solution.get("token") or solution.get("text")
+                         or "")
+                try:
+                    cost = float(got.get("cost") or 0.0)
+                except (TypeError, ValueError):
+                    cost = 0.0
+                break
+        if not token:
+            self._limiter.record_failure()
+            raise CaptchaError("solver timed out waiting for a token")
+        self._limiter.record_success()
+        if cost:
+            self._budget.record_spend(cost, task_id, challenge.kind)
+        elapsed = int((time.time() - started) * 1000)
+        if challenge.kind in (CaptchaKind.IMAGE_CAPTCHA,
+                              CaptchaKind.AUDIO_CAPTCHA):
+            return SolveResult(ok=True, kind=challenge.kind,
+                               backend=self.name + "+json", text=token,
+                               elapsed_ms=elapsed, task_id=task_id,
+                               cost_usd=cost)
+        return SolveResult(ok=True, kind=challenge.kind,
+                           backend=self.name + "+json", token=token,
+                           elapsed_ms=elapsed, task_id=task_id,
+                           cost_usd=cost)
+
+    def report_solve(self, task_id: str, good: bool) -> bool:
+        """Tell the service whether a solve was correct.
+
+        Quality feedback (reportCorrect/reportIncorrect) improves future
+        solves and is how the service prices fairly. Best-effort: never
+        raises, returns False when the report could not be sent.
+        """
+        if not task_id or not self.available():
+            return False
+        try:
+            if self._api_mode == "json":
+                self._post_json(
+                    "/reportCorrect" if good else "/reportIncorrect",
+                    {"clientKey": self._key, "taskId": task_id})
+            else:
+                self._get("/res.php", {"key": self._key, "json": "1",
+                                       "action": "reportgood" if good
+                                       else "reportbad", "id": task_id})
+            return True
+        except Exception:  # noqa: BLE001 - feedback never sinks anything
+            _log.debug("solve quality report failed", exc_info=True)
+            return False
+
+    def budget_status(self) -> dict[str, Any]:
+        """Audit-visible spend dashboard for the solving service."""
+        return self._budget.budget_status()
+
+
+# ── layered pipeline (mined: ghostmcp 3-layer design) ─────────────
+
+
+class AutoPipelineBackend(CaptchaBackend):
+    """Detect -> self-serve -> paid service, cheapest first.
+
+    Layer 1 (detect): identify the challenge kind/sitekey/domain so the
+    caller can decide. Layer 2 (self-serve): the TakeoverBackend's owner
+    hints - free when the owner is around. Layer 3 (service): the paid
+    solving service, gated by SolveBudget (default-deny when caps are 0).
+
+    The pipeline escalates only when cheaper layers cannot solve: a
+    detect-only challenge returns its report; when a service key exists
+    AND the budget allows, the paid solve runs; otherwise the owner
+    takeover path explains exactly what to click. Every attempt is
+    audited with its layer.
+    """
+
+    name = "pipeline"
+
+    def __init__(self, settings: Any = None, **kwargs: Any) -> None:
+        self._settings = settings
+        self._kwargs = kwargs
+        self._detect = DetectOnlyBackend()
+        self._takeover = TakeoverBackend()
+        self._service = ServiceBackend(settings=settings, **kwargs)
+
+    def available(self) -> bool:
+        return True  # the pipeline always has *something* to say
+
+    def solve(self, challenge: CaptchaChallenge) -> SolveResult:
+        started = time.time()
+        trace = [f"layer1/detect: {challenge.kind}"]
+        # Layer 3 first when it is usable: paid solving is autonomous.
+        if self._service.available():
+            ok, reason = self._service._budget.can_spend()
+            if ok:
+                trace.append("layer3/service: budget ok, solving")
+                try:
+                    result = self._service.solve(challenge)
+                    result.detail = " | ".join(trace)
+                    return result
+                except CaptchaError as e:
+                    trace.append(f"layer3/service failed: {e}")
+            else:
+                trace.append(f"layer3/service skipped: {reason}")
+        else:
+            trace.append("layer3/service skipped: no CAPTCHA_API_KEY")
+        # Layer 2: owner takeover with exact instructions.
+        result = self._takeover.solve(challenge)
+        result.detail = " | ".join(trace) + " | " + result.detail
+        result.elapsed_ms = int((time.time() - started) * 1000)
+        return result
 
 
 # ── audit trail ──────────────────────────────────────────────────────────────
@@ -928,12 +1158,144 @@ def _audit(entry: dict[str, Any], settings: Any = None) -> None:
         _log.warning("captcha audit write failed")
 
 
+# ── spend budget (mined: ghostmcp Layer-3 budget controls) ──────────
+
+
+class SolveBudget:
+    """Dollar budget for the commercial solving service.
+
+    Paid solves are the last resort (Layer 3 after detect/takeover), so
+    spending is capped twice: a daily cap and a monthly cap, both
+    auto-resetting on the day/month boundary. Every solve's cost is
+    recorded in a JSON ledger (survives restarts) and
+    :meth:`budget_status` reports the remaining budget for audit
+    visibility.
+
+    Env:
+    * ``NM_CAPTCHA_DAILY_CAP_USD``   - default 0.50
+    * ``NM_CAPTCHA_MONTHLY_CAP_USD`` - default 5.00
+    A cap of 0 disables paid solving entirely (default-deny spending).
+    """
+
+    def __init__(self, settings: Any = None, *,
+                 daily_cap_usd: float | None = None,
+                 monthly_cap_usd: float | None = None) -> None:
+        self._path = _budget_path(settings)
+        self._daily_cap = (daily_cap_usd if daily_cap_usd is not None
+                           else float(os.environ.get(
+                               "NM_CAPTCHA_DAILY_CAP_USD", "0.50")))
+        self._monthly_cap = (monthly_cap_usd if monthly_cap_usd is not None
+                             else float(os.environ.get(
+                                 "NM_CAPTCHA_MONTHLY_CAP_USD", "5.00")))
+
+    # -- state ------------------------------------------------------------
+    def _load(self) -> dict[str, Any]:
+        try:
+            with open(self._path, encoding="utf-8") as fh:
+                state = json.load(fh)
+            if isinstance(state, dict):
+                return state
+        except Exception:  # noqa: BLE001 - missing/corrupt state is fine
+            pass
+        return {}
+
+    def _save(self, state: dict[str, Any]) -> None:
+        try:
+            os.makedirs(os.path.dirname(self._path), exist_ok=True)
+            tmp = self._path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as fh:
+                json.dump(state, fh)
+            os.replace(tmp, self._path)
+        except Exception:  # noqa: BLE001 - the budget never sinks a solve
+            _log.warning("captcha budget save failed")
+
+    @staticmethod
+    def _period_keys(now: float | None = None) -> tuple[str, str]:
+        import datetime as _dt
+        dt = _dt.datetime.fromtimestamp(now or time.time())
+        return dt.strftime("%Y-%m-%d"), dt.strftime("%Y-%m")
+
+    def _fresh(self, state: dict[str, Any]) -> dict[str, Any]:
+        """Zero counters whose period rolled over."""
+        day, month = self._period_keys()
+        if state.get("day") != day:
+            state = {"day": day, "month": state.get("month"),
+                     "day_spend": 0.0, "month_spend": state.get(
+                         "month_spend", 0.0), "solves": []}
+        if state.get("month") != month:
+            state["month"] = month
+            state["month_spend"] = 0.0
+        state.setdefault("solves", [])
+        return state
+
+    # -- API ---------------------------------------------------------------
+    def can_spend(self, estimate_usd: float = 0.003) -> tuple[bool, str]:
+        """True when a solve estimated at ``estimate_usd`` fits the caps."""
+        if self._daily_cap <= 0 or self._monthly_cap <= 0:
+            return False, "paid solving disabled (spend cap is 0)"
+        state = self._fresh(self._load())
+        if state.get("day_spend", 0.0) + estimate_usd > self._daily_cap:
+            return False, (f"daily cap ${self._daily_cap:.2f} would be "
+                           f"exceeded (${state['day_spend']:.4f} spent)")
+        if state.get("month_spend", 0.0) + estimate_usd > self._monthly_cap:
+            return False, (f"monthly cap ${self._monthly_cap:.2f} would be "
+                           f"exceeded (${state['month_spend']:.4f} spent)")
+        return True, ""
+
+    def record_spend(self, cost_usd: float, task_id: str = "",
+                     kind: str = "") -> None:
+        """Ledger one paid solve."""
+        state = self._fresh(self._load())
+        state["day_spend"] = round(state.get("day_spend", 0.0) + cost_usd, 6)
+        state["month_spend"] = round(
+            state.get("month_spend", 0.0) + cost_usd, 6)
+        solves = state.get("solves", [])
+        solves.append({"task_id": task_id, "kind": str(kind),
+                       "cost_usd": cost_usd, "ts": time.time()})
+        state["solves"] = solves[-200:]
+        self._save(state)
+
+    def budget_status(self) -> dict[str, Any]:
+        """Audit-visible budget dashboard."""
+        state = self._fresh(self._load())
+        day, month = self._period_keys()
+        return {
+            "day": day,
+            "daily_cap_usd": self._daily_cap,
+            "daily_spent_usd": round(state.get("day_spend", 0.0), 6),
+            "daily_remaining_usd": round(
+                max(0.0, self._daily_cap - state.get("day_spend", 0.0)), 6),
+            "month": month,
+            "monthly_cap_usd": self._monthly_cap,
+            "monthly_spent_usd": round(state.get("month_spend", 0.0), 6),
+            "monthly_remaining_usd": round(
+                max(0.0, self._monthly_cap - state.get("month_spend", 0.0)),
+                6),
+            "solves_today": len([s for s in state.get("solves", [])
+                                 if s.get("ts", 0) >= time.time() - 86400]),
+            "paid_solving_enabled": self._daily_cap > 0 and
+            self._monthly_cap > 0,
+        }
+
+
+def _budget_path(settings: Any = None) -> str:
+    if settings is not None:
+        try:
+            return str(settings.resolve("data/captcha/budget.json"))
+        except Exception:  # noqa: BLE001
+            pass
+    root = os.environ.get("NOMORALS_CAPTCHA_DIR") or os.path.join(
+        os.path.expanduser("~"), ".config", "nomorals", "captcha")
+    return os.path.join(root, "budget.json")
+
+
 # ── orchestration ────────────────────────────────────────────────────────────
 
 _BACKENDS: dict[str, type[CaptchaBackend]] = {
     "service": ServiceBackend,
     "takeover": TakeoverBackend,
     "detect": DetectOnlyBackend,
+    "pipeline": AutoPipelineBackend,
 }
 
 

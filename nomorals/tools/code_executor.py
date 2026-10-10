@@ -187,6 +187,8 @@ class ExecutionResult:
     error: str = ""
     duration: float = 0.0
     changes_made: list[str] = field(default_factory=list)
+    step_results: list[StepResult] = field(default_factory=list)
+    replans: int = 0
     
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -197,6 +199,8 @@ class ExecutionResult:
             "test_passed": self.test_result.passed if self.test_result else None,
             "error": self.error,
             "changes_made": self.changes_made,
+            "steps": [s.to_dict() for s in self.step_results],
+            "replans": self.replans,
         }
 
 
@@ -325,15 +329,23 @@ Return your plan as JSON:
         plan: ExecutionPlan,
         *,
         confirm_step: Any = None,
+        max_replans: int = 2,
     ) -> ExecutionResult:
-        """Execute an execution plan.
-        
+        """Execute an execution plan (plan-and-execute with replanning).
+
+        The executor runs one step at a time and records a StepResult per
+        step. When a step fails, the replanner is asked whether to continue,
+        revise the remaining plan, or finish early - instead of dying at
+        the first failure. Loop detection aborts when the same step fails
+        three times in a row (the plan is broken, not the step).
+
         Args:
             plan: The plan to execute
             confirm_step: Optional callback to confirm each step
-            
+            max_replans: How many times the replanner may revise the plan
+
         Returns:
-            ExecutionResult with status
+            ExecutionResult with per-step results and replan count
         """
         start = time.time()
         result = ExecutionResult(
@@ -341,72 +353,78 @@ Return your plan as JSON:
             goal=plan.goal,
             steps_total=plan.step_count,
         )
-        
+
         _log.info(f"Executing plan: {plan.plan_id} ({plan.step_count} steps)")
-        
-        for i, step in enumerate(plan.steps):
-            _log.info(f"Step {i+1}/{plan.step_count}: {step.action} {step.target}")
-            
+
+        remaining: list[PlanStep] = list(plan.steps)
+        fail_streak: dict[str, int] = {}
+        replans_used = 0
+
+        while remaining:
+            step = remaining.pop(0)
+            idx = result.steps_completed
+            _log.info(f"Step {idx+1}: {step.action} {step.target}")
+
             # Confirm step if callback provided
             if confirm_step:
                 approved = await confirm_step(step)
                 if not approved:
-                    result.error = f"Step {i+1} rejected by user"
+                    result.step_results.append(StepResult(
+                        step_id=step.step_id, action=step.action,
+                        target=step.target, description=step.description,
+                        success=False, error="rejected by user"))
+                    result.error = f"Step {step.step_id} rejected by user"
                     result.success = False
                     break
-            
-            try:
-                if step.action == "edit_file":
-                    edit_result = await self.edit_loop.edit_file(
-                        step.target,
-                        step.description,
-                    )
-                    result.edit_results.append(edit_result)
-                    
-                    if not edit_result.success:
-                        result.success = False
-                        result.error = f"Edit failed: {edit_result.error}"
-                        break
-                    
-                    result.changes_made.append(f"Edited: {step.target}")
-                
-                elif step.action == "create_file":
-                    await self._create_file(step.target, step.description)
-                    result.changes_made.append(f"Created: {step.target}")
-                
-                elif step.action == "delete_file":
-                    await self._delete_file(step.target)
-                    result.changes_made.append(f"Deleted: {step.target}")
 
-                elif step.action == "restore_file":
-                    from ..tools.git import restore as _git_restore
+            step_result = await self._execute_step(step, plan)
+            result.step_results.append(step_result)
+            if getattr(step_result, "test_result", None) is not None:
+                result.test_result = step_result.test_result
+            if step_result.success:
+                result.steps_completed += 1
+                fail_streak.pop(step.signature, None)
+                continue
 
-                    _git_restore(step.target, str(self.project_root))
-                    result.changes_made.append(f"Restored: {step.target}")
-                
-                elif step.action == "run_command":
-                    cmd_result = await self.edit_loop.run_tests(step.target)
-                    if not cmd_result.passed:
-                        _log.warning(f"Command failed: {step.target}")
-                
-                elif step.action == "run_tests":
-                    result.test_result = await self.edit_loop.run_tests(
-                        step.target or plan.test_command
-                    )
-                    if not result.test_result.passed:
-                        result.success = False
-                        result.error = "Tests failed"
-                        break
-                
-                result.steps_completed = i + 1
-                
-            except Exception as e:
-                _log.error(f"Step {i+1} failed: {e}")
+            # --- failure path: loop detection, then the replanner ---
+            streak = fail_streak.get(step.signature, 0) + 1
+            fail_streak[step.signature] = streak
+            if streak >= 3:
                 result.success = False
-                result.error = str(e)
+                result.error = (
+                    f"loop detected: {step.signature} failed {streak}x in a "
+                    f"row ({step_result.error}). The plan is broken, not the "
+                    "step - revise the goal or the plan.")
+                _log.error(result.error)
                 break
-        
-        # Run final tests if we have a test command and no test step
+
+            if replans_used >= max_replans:
+                result.success = False
+                result.error = (f"Step {step.step_id} failed "
+                                f"({step_result.error}); replan budget "
+                                f"({max_replans}) exhausted")
+                break
+
+            decision = await self.replan(plan, result.step_results, remaining)
+            replans_used += 1
+            result.replans = replans_used
+            _log.info("replan %d/%d: %s - %s", replans_used, max_replans,
+                      decision.action, decision.reasoning[:120])
+            if decision.action == "finish":
+                result.success = False
+                result.error = (decision.final_answer or
+                                f"replanner gave up after {step.step_id}: "
+                                f"{step_result.error} ({decision.reasoning})")
+                break
+            if decision.action == "replan" and decision.revised_steps:
+                remaining = list(decision.revised_steps)
+                _log.info("plan revised: %d remaining steps",
+                          len(remaining))
+            # "continue" falls through: retry the remaining plan as-is
+            # (the failed step stays failed in the record; the next step
+            # may still succeed - e.g. independent steps).
+
+        # Run final tests if we have a test command and no test step ran
         if result.success and plan.test_command and not result.test_result:
             result.test_result = await self.edit_loop.run_tests(plan.test_command)
             if not result.test_result.passed:
@@ -415,7 +433,7 @@ Return your plan as JSON:
 
         # Automatic rollback on failure: undo the steps that ran, in reverse.
         if not result.success and plan.rollback_steps:
-            _log.warning("plan failed (%s) — running %d rollback steps",
+            _log.warning("plan failed (%s) - running %d rollback steps",
                          result.error, len(plan.rollback_steps))
             rollback_errors = []
             for rb in plan.rollback_steps:
@@ -430,16 +448,175 @@ Return your plan as JSON:
                         await self.edit_loop.run_tests(rb.target)
                     else:
                         _log.warning("no rollback handler for action %r", rb.action)
-                except Exception as e:  # noqa: BLE001 — best-effort rollback
+                except Exception as e:  # noqa: BLE001 - best-effort rollback
                     rollback_errors.append(f"{rb.step_id}: {e}")
             if rollback_errors:
                 result.error += f" | rollback issues: {'; '.join(rollback_errors)}"
 
+        # A failed FINAL step is a failed plan: the replanner's
+        # "continue" only redeems mid-plan failures (later independent
+        # steps may still succeed).
+        if (result.success and result.step_results
+                and not result.step_results[-1].success):
+            last = result.step_results[-1]
+            result.success = False
+            result.error = (f"Step {last.step_id} failed ({last.error}); "
+                            "no recovery")
+
         result.duration = time.time() - start
-        _log.info(f"Plan execution complete: {result.steps_completed}/{result.steps_total} steps")
-        
+        result.steps_total = len(result.step_results)
+        _log.info("Plan execution complete: %d/%d steps (%d replans)",
+                  result.steps_completed, result.steps_total, result.replans)
         return result
-    
+
+    async def _execute_step(self, step: PlanStep,
+                            plan: ExecutionPlan) -> StepResult:
+        """Run one plan step; never raises - failures become StepResult."""
+        started = time.time()
+        sr = StepResult(step_id=step.step_id, action=step.action,
+                        target=step.target, description=step.description)
+        try:
+            if step.action == "edit_file":
+                edit_result = await self.edit_loop.edit_file(
+                    step.target, step.description)
+                if not edit_result.success:
+                    sr.success = False
+                    sr.error = f"Edit failed: {edit_result.error}"
+                else:
+                    sr.output = f"Edited: {step.target}"
+            elif step.action == "create_file":
+                await self._create_file(step.target, step.description)
+                sr.output = f"Created: {step.target}"
+            elif step.action == "delete_file":
+                await self._delete_file(step.target)
+                sr.output = f"Deleted: {step.target}"
+            elif step.action == "restore_file":
+                from ..tools.git import restore as _git_restore
+
+                _git_restore(step.target, str(self.project_root))
+                sr.output = f"Restored: {step.target}"
+            elif step.action == "run_command":
+                cmd_result = await self.edit_loop.run_tests(step.target)
+                sr.output = (cmd_result.output or "")[:2000]
+                if not cmd_result.passed:
+                    sr.success = False
+                    sr.error = f"Command failed: {step.target}"
+            elif step.action == "run_tests":
+                test_result = await self.edit_loop.run_tests(
+                    step.target or plan.test_command)
+                sr.test_result = test_result  # surfaced on ExecutionResult
+                sr.output = (test_result.output or "")[:2000]
+                if not test_result.passed:
+                    sr.success = False
+                    sr.error = "Tests failed"
+            else:
+                sr.success = False
+                sr.error = f"unknown step action {step.action!r}"
+        except Exception as e:  # noqa: BLE001 - step failures are results
+            sr.success = False
+            sr.error = str(e)
+        sr.duration = time.time() - started
+        return sr
+
+    async def replan(self, plan: ExecutionPlan,
+                     completed: list[StepResult],
+                     remaining: list[PlanStep]) -> ReplanDecision:
+        """Ask the agent whether to continue, revise, or finish.
+
+        The replanner sees the goal, what each finished step produced,
+        and the remaining steps, and returns a ReplanDecision. A broken
+        or unparseable answer degrades to "continue" (never crash the
+        run on the replanner itself).
+        """
+        import json as _json
+        import re as _re
+
+        done = "\n".join(
+            f"- {s.step_id} [{s.action} {s.target}]: "
+            f"{'OK' if s.success else 'FAILED: ' + s.error}"
+            + (f" -> {s.output[:200]}" if s.success and s.output else "")
+            for s in completed)
+        todo = "\n".join(
+            f"- {s.step_id} [{s.action} {s.target}]: {s.description}"
+            for s in remaining)
+        prompt = f"""You are replanning a coding task after a step failed.
+
+GOAL: {plan.goal}
+
+COMPLETED STEPS:
+{done or "(none)"}
+
+REMAINING STEPS:
+{todo or "(none)"}
+
+Decide: "continue" (keep the remaining plan as-is), "replan" (revise the
+remaining steps to route around the failure), or "finish" (the goal is
+unreachable - stop now). When replanning, emit the FULL revised remaining
+step list (same shape as a plan: action, target, description,
+estimated_risk, expected_output).
+
+Reply as JSON only:
+```json
+{{"action": "continue|replan|finish",
+  "reasoning": "why",
+  "revised_steps": [{{"action": "edit_file", "target": "x.py",
+                      "description": "...", "estimated_risk": "low",
+                      "expected_output": "..."}}],
+  "final_answer": "only when action=finish"}}
+```"""
+        try:
+            response = self.agent.chat(prompt)
+            content = getattr(response, "content", str(response))
+            match = _re.search(r"```json\s*(.*?)\s*```", content, _re.DOTALL)
+            data = _json.loads(match.group(1) if match else content)
+        except Exception as e:  # noqa: BLE001 - replanner never sinks the run
+            _log.warning("replan parse failed (%s); continuing", e)
+            return ReplanDecision(action="continue",
+                                  reasoning="replan output unparseable")
+        action = str(data.get("action", "continue")).lower()
+        if action not in ("continue", "replan", "finish"):
+            action = "continue"
+        revised: list[PlanStep] = []
+        for i, sd in enumerate(data.get("revised_steps") or []):
+            revised.append(PlanStep(
+                step_id=f"replan_{i+1}",
+                action=sd.get("action", "edit_file"),
+                target=sd.get("target", ""),
+                description=sd.get("description", ""),
+                estimated_risk=sd.get("estimated_risk", "medium"),
+                expected_output=sd.get("expected_output", ""),
+            ))
+        return ReplanDecision(action=action, revised_steps=revised,
+                              reasoning=str(data.get("reasoning", "")),
+                              final_answer=str(data.get("final_answer", "")))
+
+    def synthesize(self, plan: ExecutionPlan,
+                   result: ExecutionResult) -> str:
+        """Combine step results into the final narrative (the Synthesizer).
+
+        Pure function - no model call. The executor already recorded what
+        happened; this renders it as the human-readable outcome.
+        """
+        from . import _style as _style
+
+        lines = [_style.banner(f"Plan: {plan.goal}")]
+        for sr in result.step_results:
+            status = _style.OK if sr.success else _style.FAIL
+            detail = sr.output or sr.error or sr.description
+            lines.append(_style.status_line(
+                status, f"{sr.step_id} [{sr.action} {sr.target}] {detail}"[:160]))
+        verdict = ("SUCCEEDED" if result.success else "FAILED")
+        lines.append("")
+        lines.append(_style.status_line(
+            _style.OK if result.success else _style.FAIL,
+            f"{verdict}: {result.steps_completed}/{len(result.step_results)} "
+            f"steps ok"
+            + (f" ({result.replans} replans)" if result.replans else "")
+            + (f" in {result.duration:.1f}s" if result.duration else "")))
+        if result.error:
+            lines.append(_style.status_line(_style.WARN, result.error[:300]))
+        return "\n".join(lines)
+
     async def act(
         self,
         goal: str,

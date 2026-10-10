@@ -893,6 +893,135 @@ def get_repo_index(root: str | Path) -> RepoIndex:
     return idx
 
 
+def render_repo_map(root: str | Path, *, max_tokens: int = 1024,
+                  focus_files: list[str] | None = None,
+                  include_private: bool = False) -> str:
+    """Aider-style repository map: signatures, not bodies.
+
+    The model needs to know *what exists and how it connects*, not how
+    it's implemented (implementation comes from on-demand file reads).
+    This renders the most-referenced symbols first, within a token
+    budget (default 1024, Aider's default):
+
+    1. **Reference ranking** (PageRank stand-in): each file scores from
+       how many other files import it, plus its symbol count - the
+       most-connected files come first.
+    2. **Personalized boost**: files in ``focus_files`` (the files
+       currently in the agent's working set) and their importers get
+       boosted, like Aider's personalized PageRank.
+    3. **Budgeted output**: signatures only (``def f(x, y):`` /
+       ``class C:``), one doc line when short; stops *before* exceeding
+       the budget.
+
+    ``include_private`` adds ``_private`` symbols (off by default -
+    they're rarely what the model is looking for).
+    """
+    idx = get_repo_index(root)
+    root_p = Path(root).expanduser().resolve()
+    focus = {f for f in (focus_files or [])}
+
+    # -- reference counts: importers per file + symbol counts ------------
+    importers: dict[str, int] = {}
+    file_symbols: dict[str, list[SymbolInfo]] = {}
+    for rel in idx._files:
+        if not idx._files[rel].is_python:
+            continue
+        file_symbols[rel] = [s for s in idx._all_symbols.get(rel, [])
+                             if s.kind in ("function", "class")
+                             and (include_private or not s.name.startswith("_"))]
+    for rel in file_symbols:
+        try:
+            for imp in idx._ensure_imports(rel):
+                target = idx._module_to_file.get(imp.module, "")
+                if target and target != rel:
+                    importers[target] = importers.get(target, 0) + 1
+        except Exception:  # noqa: BLE001 - one bad file never sinks the map
+            continue
+
+    # -- personalized boost ------------------------------------------------
+    boosted: set[str] = set(focus)
+    for rel in file_symbols:
+        try:
+            for imp in idx._ensure_imports(rel):
+                target = idx._module_to_file.get(imp.module, "")
+                if target in focus:
+                    boosted.add(rel)  # imports a focus file
+        except Exception:  # noqa: BLE001
+            continue
+
+    def _score(rel: str) -> float:
+        score = float(importers.get(rel, 0)) * 2.0
+        score += min(len(file_symbols.get(rel, [])), 50) * 0.1
+        if rel in boosted:
+            score += 10.0
+        return score
+
+    ranked = sorted(file_symbols, key=_score, reverse=True)
+
+    # -- budgeted signature rendering --------------------------------------
+    char_budget = max(400, max_tokens * CHARS_PER_TOKEN)
+    lines: list[str] = []
+    used = 0
+
+    def _emit(text: str) -> bool:
+        nonlocal used
+        if used + len(text) > char_budget:
+            return False
+        lines.append(text)
+        used += len(text)
+        return True
+
+    # cache file lines for signature reads
+    line_cache: dict[str, list[str]] = {}
+
+    def _sig_line(rel: str, sym: SymbolInfo) -> str:
+        try:
+            cached = line_cache.get(rel)
+            if cached is None:
+                cached = (root_p / rel).read_text(
+                    encoding="utf-8", errors="ignore").splitlines()
+                line_cache[rel] = cached
+            raw = cached[sym.line - 1].strip() if 0 < sym.line <= len(cached) else ""
+        except OSError:
+            raw = ""
+        if not raw:
+            raw = (f"class {sym.name}:" if sym.kind == "class"
+                   else f"def {sym.name}(...):")
+        # one-line the signature (multi-line defs collapse)
+        raw = " ".join(raw.split())
+        if len(raw) > 100:
+            raw = raw[:97] + "..."
+        prefix = "  " if sym.kind == "method" else ""
+        doc = f"  # {sym.doc[:60]}" if sym.doc else ""
+        # methods render under their class; show Class.method
+        name = f"{sym.parent}.{sym.name}" if sym.parent else sym.name
+        if sym.kind == "class":
+            shown = f"class {sym.name}:"
+        elif raw.startswith("def "):
+            shown = raw.replace(f"def {sym.name}",
+                                f"def {name}", 1)
+        else:
+            shown = raw
+        return f"{prefix}{shown}{doc}"
+
+    for rel in ranked:
+        syms = file_symbols[rel]
+        if not syms:
+            continue
+        header = f"{rel}:"
+        # dry-run the whole file block against the budget
+        block = [header] + [_sig_line(rel, s) for s in syms[:40]]
+        text = "\n".join(block) + "\n"
+        if not _emit(text):
+            break
+    summary = (f"# repo map: {len(ranked)} python files, "
+               f"~{used // CHARS_PER_TOKEN} tokens "
+               f"(budget {max_tokens})")
+    if focus:
+        summary += f", focused on {len(focus)} file(s)"
+    return summary + "\n" + "".join(lines)
+
+
 def find_symbol(root: str | Path, name: str, *, kind: str | None = None,
                 fuzzy: bool = False, limit: int = 50) -> list[SymbolHit]:
     """Ranked symbol search over ``root``.

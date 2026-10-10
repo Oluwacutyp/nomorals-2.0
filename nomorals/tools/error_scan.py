@@ -235,21 +235,30 @@ def scan(paths: list[str] | None = None,
 
 
 def format_report(report: ScanReport) -> str:
-    lines = [f"error_scan: {report.files_scanned} files, "
-             f"{len(report.findings)} findings "
-             f"({len(report.errors)} errors) in {report.elapsed_s:.1f}s"]
+    from . import _style as _style
+
+    lines = [_style.banner(
+        f"error_scan — {report.files_scanned} files, "
+        f"{len(report.findings)} findings ({len(report.errors)} errors)",
+        sub=f"completed in {report.elapsed_s:.1f}s")]
     if report.files_failed:
-        lines.append(f"  !! {report.files_failed} files could not be parsed")
+        lines.append(_style.status_line(
+            _style.WARN,
+            f"{report.files_failed} files could not be parsed"))
     current = ""
     for f in report.findings:
         if f.file != current:
             current = f.file
-            lines.append(f"\n{current}")
-        lines.append(f"  {f.line}:{f.col} [{f.rule}/{f.severity}] {f.message}")
+            lines.append("")
+            lines.append(_style.colorize(current, "heading"))
+        status = _style.FAIL if f.severity == "error" else _style.WARN
+        lines.append(_style.status_line(
+            status, f"{f.line}:{f.col} [{f.rule}] {f.message}"))
         if f.context:
-            lines.append(f"      > {f.context}")
+            lines.append(_style.colorize(f"      > {f.context}", "dim"))
     if not report.findings:
-        lines.append("clean: no error-handling problems found")
+        lines.append(_style.status_line(_style.OK, "clean: no error-handling "
+                                                   "problems found"))
     return "\n".join(lines)
 
 
