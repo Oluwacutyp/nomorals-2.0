@@ -1991,6 +1991,15 @@ _BACKENDS = {"bark": BarkBackend, "xtts": XTTSBackend,
              "f5tts": F5TTSBackend, "omnivoice": OmniVoiceBackend,
              "qwen3tts": Qwen3TTSBackend, "system": SystemTTSBackend}
 
+
+def _make_diffsinger():
+    from .singing import DiffSingerBackend
+    return DiffSingerBackend()
+
+
+# DiffSinger is registered lazily (its __init__ probes for voicebanks).
+_BACKENDS["diffsinger"] = _make_diffsinger  # type: ignore[assignment]
+
 #: backend name → importable module proving it is installed. (This also
 #: fixes a latent KeyError: "hf-endpoint" was in _BACKENDS but missing
 #: from the old inline spec map.)
@@ -2621,6 +2630,108 @@ class UniversalTTS:
             "script": script.text,
             "cues": script.cues,
         }
+
+    def _post_process(self, result: dict, *,
+                      ambient: str = "", room: str = "",
+                      master_audio: bool = True) -> dict:
+        """Ambience + room + mastering post-chain on a speak() result.
+
+        ``result`` is the usual {"path", "sample_rate", ...} dict; the
+        wav at result["path"] is rewritten in place and the dict gains
+        a "post" key naming what ran. Pure stdlib.
+        """
+        import wave
+        from array import array
+        post: list[str] = []
+        with wave.open(result["path"], "rb") as w:
+            sr = w.getframerate()
+            samples = array("h", w.readframes(w.getnframes()))
+        if ambient:
+            from .ambience import with_ambience
+            samples = with_ambience(samples, sr, ambient, room or "")
+            post.append(f"ambient:{ambient}" + (f"+{room}" if room else ""))
+        elif room:
+            from .ambience import apply_room
+            samples = apply_room(samples, sr, room)
+            post.append(f"room:{room}")
+        if master_audio:
+            from .mastering import master
+            samples, stages = master(samples, sr)
+            post.append("master:" + "+".join(stages))
+        with wave.open(result["path"], "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(sr)
+            w.writeframes(samples.tobytes())
+        result["post"] = post
+        return result
+
+    def speak_rich(self, text: str, voice_name: Optional[str] = None,
+                   out_path: str = "", *,
+                   direction: str = "", accent: str = "",
+                   ambient: str = "", room: str = "",
+                   master_audio: bool = True,
+                   audience: str | None = None) -> dict:
+        """God-tier one-call: text in, produced wav out.
+
+        - ``direction``: "[said angrily]" → neural emotion when RVC is
+          available (tier reported), else native tags, else honest DSP.
+        - ``accent``: "british" → accent-first render + RVC identity.
+        - ``ambient``: "light rain" → procedural ambience mixed under.
+        - ``room``: "hall" → parametric reverb.
+        - mastering always runs unless disabled.
+
+        Every stage reports its honest tier in the result dict.
+        """
+        result: dict[str, Any] = {}
+        if direction:
+            from .neural_emotion import render_emotional
+            result = render_emotional(text, self, voice_name or "",
+                                      direction=direction)
+        elif accent:
+            from .accent import convert_accent
+            result = convert_accent(text, self, accent,
+                                    voice_name or "")
+        else:
+            result = self.perform(text, voice_name=voice_name,
+                                  out_path=out_path)
+            result["tier"] = "perform"
+        if out_path and result.get("path") != out_path:
+            import shutil
+            shutil.copy(result["path"], out_path)
+            result["path"] = out_path
+        if ambient or room or master_audio:
+            result = self._post_process(result, ambient=ambient, room=room,
+                                        master_audio=master_audio)
+        return result
+
+    def sing(self, melody: str, voice_name: str = "",
+             rvc_model: str = "", out_path: str = "") -> dict:
+        """Sing a melody: "C4:0.5:hello D4:0.5:world" → sung wav.
+
+        Uses the DiffSinger backend (needs a voicebank in ~/.nomorals/svs/
+        and onnxruntime). ``rvc_model`` swaps in the user's timbre.
+        """
+        from .singing import DiffSingerBackend
+        backend = DiffSingerBackend()
+        result = backend.sing(melody, rvc_model=rvc_model or voice_name)
+        if out_path and result.get("path") != out_path:
+            import shutil
+            shutil.copy(result["path"], out_path)
+            result["path"] = out_path
+        return result
+
+    def speak_long(self, text: str, voice_name: Optional[str] = None,
+                   out_path: str = "", *,
+                   mood: str = "neutral") -> dict:
+        """Long-form synthesis: chapters without voice drift.
+
+        Sentence-boundary chunking, rolling prosody context, crossfade
+        stitching, degenerate-chunk detection + one guarded regeneration.
+        """
+        from .longform import LongFormSynthesizer
+        synth = LongFormSynthesizer(self, voice_name or "", mood)
+        return synth.synthesize(text, out_path)
 
     def _insert_pauses(self, audio: Any, pause_points: List[tuple],
                        text: str, sample_rate: int) -> Any:

@@ -207,6 +207,36 @@ MODEL_REGISTRY = {
         ),
         "alt_repos": [],
     },
+    "diffsinger": {
+        "hf_repo": "",
+        "license": "MIT (engine); voicebanks carry their creators' licenses",
+        "approx_size": "varies by voicebank (~100-500 MB)",
+        "notes": (
+            "Open-source singing voice synthesis (MoonInTheRiver/"
+            "DiffSinger, MIT): diffusion acoustic model conditioned on "
+            "music score (lyrics + pitch). Voicebanks ship in OpenUtau "
+            "DiffSinger format — drop a bank into ~/.nomorals/svs/. "
+            "Needs onnxruntime (pip install onnxruntime). No single "
+            "official bank repo; banks come from their creators "
+            "(OpenUtau community). Use --repo with a specific bank."
+        ),
+        "alt_repos": [],
+    },
+    "rvc": {
+        "hf_repo": "",
+        "license": "MIT",
+        "approx_size": "model-dependent (~100-300 MB per voice model)",
+        "notes": (
+            "Retrieval-based Voice Conversion (RVC-Project, MIT): "
+            "speech→speech identity conversion preserving emotion, "
+            "prosody, timing. Powers neural emotion transfer, accent "
+            "keeping, and singing timbre swap. Install the WebUI "
+            "(github.com/RVC-Project/Retrieval-based-Voice-Conversion-"
+            "WebUI) and set RVC_HOME, or pip install rvc-python. "
+            "Trained .pth models go in $RVC_HOME/models/<name>/."
+        ),
+        "alt_repos": [],
+    },
 }
 
 

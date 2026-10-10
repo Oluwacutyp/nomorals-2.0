@@ -24,6 +24,8 @@ bridge.
 """
 from __future__ import annotations
 
+from .accent import convert_accent, normalize_accent
+from .ambience import apply_room, generate_ambience, mix_under, with_ambience
 from .director import (
     CANONICAL_BURSTS,
     CANONICAL_DELIVERY,
@@ -41,7 +43,12 @@ from .director import (
     render_orpheus,
     render_plain,
 )
+from .longform import synthesize_long
+from .mastering import master
+from .neural_emotion import render_emotional
+from .rvc_bridge import RVCUnavailable, convert as rvc_convert, detect_rvc
 from .session import make_local_stt
+from .singing import parse_melody, sing
 from .stt import UniversalSTT, available_stt_backends, make_session_stt
 from .tts import (
     TagProcessor,
@@ -61,27 +68,41 @@ __all__ = [
     "CANONICAL_EMOTIONS",
     "CANONICAL_FILLERS",
     "ONOMATOPOEIA",
+    "RVCUnavailable",
     "TagProcessor",
     "UniversalSTT",
     "UniversalTTS",
     "VoiceLibrary",
     "VoiceProfile",
+    "apply_room",
     "available_backends",
     "available_stt_backends",
+    "convert_accent",
+    "detect_rvc",
     "direct",
+    "generate_ambience",
     "make_local_stt",
     "make_session_stt",
+    "master",
+    "mix_under",
     "mood_to_tagged_text",
+    "normalize_accent",
+    "parse_melody",
     "probe_reference_audio",
-    "voice_print",
-    "voice_print_distance",
     "render_bark",
     "render_chatterbox",
     "render_cosyvoice",
     "render_dia",
+    "render_emotional",
     "render_fish",
     "render_for",
     "render_omnivoice",
     "render_orpheus",
     "render_plain",
+    "rvc_convert",
+    "sing",
+    "synthesize_long",
+    "voice_print",
+    "voice_print_distance",
+    "with_ambience",
 ]
