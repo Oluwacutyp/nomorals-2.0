@@ -305,3 +305,62 @@ class VoiceBridge:
         else:
             _log.error(f"Unsupported platform: {platform}")
             return False
+
+    async def broadcast_voice(
+        self,
+        targets: list[tuple[str, Any]],
+        text: str,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        """One synthesis, many chats: fan a voice note out.
+
+        ``targets``: ``[("whatsapp", chat_ref), ("telegram", chat_id),
+        ...]``. The audio renders ONCE and is reused for every send
+        (no re-synthesis per chat). Returns ``{"sent", "failed",
+        "receipts"}`` — receipts name each target and its outcome.
+        """
+        receipts: list[dict[str, Any]] = []
+        sent, failed = 0, 0
+        try:
+            audio_path = await self._synthesize(text)
+        except Exception as exc:
+            return {"sent": 0, "failed": len(targets),
+                    "receipts": [],
+                    "error": f"synthesis failed: {exc}"}
+        for platform, chat_id in targets:
+            ok = False
+            error = ""
+            try:
+                if platform == "whatsapp":
+                    if not isinstance(chat_id, ChatRef):
+                        raise ValueError("WhatsApp requires ChatRef")
+                    if not self.whatsapp:
+                        raise RuntimeError("WhatsApp adapter not available")
+                    result = self.whatsapp.send_voice(
+                        chat_id, audio_path,
+                        caption=str(kwargs.get("caption", "")))
+                    ok = bool(getattr(result, "ok", False))
+                    error = str(getattr(result, "error", "") or "")
+                elif platform == "telegram":
+                    if not self.telegram:
+                        raise RuntimeError("Telegram adapter not available")
+                    await self.telegram.client.send_file(
+                        chat_id, audio_path, voice_note=True,
+                        caption=str(kwargs.get("caption", "")))
+                    ok = True
+                else:
+                    error = f"unsupported platform {platform!r}"
+            except Exception as exc:  # noqa: BLE001 - per-target degrade
+                error = str(exc)
+            receipts.append({"platform": platform,
+                             "chat": str(chat_id),
+                             "ok": ok, "error": error})
+            if ok:
+                sent += 1
+            else:
+                failed += 1
+        try:
+            Path(audio_path).unlink(missing_ok=True)
+        except Exception:  # noqa: E103 - temp file cleanup is best-effort
+            pass
+        return {"sent": sent, "failed": failed, "receipts": receipts}

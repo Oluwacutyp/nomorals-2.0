@@ -76,10 +76,13 @@ def voice_turn(audio_path: str, *, chat_key: str = "",
 
     Transcribes the incoming note, generates a reply through the brain,
     synthesizes it, and returns ``{"ok", "heard", "reply_text",
-    "audio_path", "latency_s"}``. Delivery is the caller's job (it owns
+    "audio_path", "voice_used", "latency_s", "timings"}`` — ``timings``
+    breaks the turn into ``heard_s``/``thought_s``/``spoke_s`` so slow
+    turns can be diagnosed. Delivery is the caller's job (it owns
     the chat reference); this function owns the pipeline.
     """
     t0 = time.time()
+    timings: dict[str, float] = {}
     if not audio_path or not os.path.exists(audio_path):
         return {"ok": False, "reason": "audio not found"}
 
@@ -93,9 +96,11 @@ def voice_turn(audio_path: str, *, chat_key: str = "",
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "reason": f"transcription failed: {exc}",
                 "latency_s": round(time.time() - t0, 1)}
+    timings["heard_s"] = round(time.time() - t0, 2)
     if not heard:
         return {"ok": False, "reason": "heard nothing intelligible",
-                "latency_s": round(time.time() - t0, 1)}
+                "latency_s": round(time.time() - t0, 1),
+                "timings": timings}
 
     # 2. think — through the brain when available, else echo honestly
     reply_text = ""
@@ -118,19 +123,29 @@ def voice_turn(audio_path: str, *, chat_key: str = "",
                     "heard": heard, "latency_s": round(time.time() - t0, 1)}
     if not (reply_text or "").strip():
         return {"ok": False, "reason": "brain produced no reply",
-                "heard": heard, "latency_s": round(time.time() - t0, 1)}
+                "heard": heard, "latency_s": round(time.time() - t0, 1),
+                "timings": timings}
+    timings["thought_s"] = round(time.time() - t0 - timings["heard_s"], 2)
 
     # 3. speak — short replies stay snappy; long ones still go through
+    voice_used = ""
     try:
         from .catalogue import default_catalogue
         cat = default_catalogue()
+        voice = cat.active_for_chat(chat_key)
+        voice_used = voice.name if voice else ""
         out = cat.speak(reply_text.strip(), chat_key=chat_key)
         audio_out = out.get("path", "") if isinstance(out, dict) else ""
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "reason": f"synthesis failed: {exc}",
                 "heard": heard, "reply_text": reply_text.strip(),
-                "latency_s": round(time.time() - t0, 1)}
+                "latency_s": round(time.time() - t0, 1),
+                "timings": timings}
+    timings["spoke_s"] = round(
+        time.time() - t0 - timings["heard_s"] - timings["thought_s"], 2)
     return {"ok": True, "heard": heard,
             "reply_text": reply_text.strip(),
             "audio_path": audio_out,
-            "latency_s": round(time.time() - t0, 1)}
+            "voice_used": voice_used,
+            "latency_s": round(time.time() - t0, 1),
+            "timings": timings}

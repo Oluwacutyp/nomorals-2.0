@@ -12,7 +12,9 @@ import os
 import re
 
 __all__ = ["MODEL_REGISTRY", "default_cache_dir", "fetch_model",
-           "fetch_piper_voice"]
+           "fetch_piper_voice", "fetch_kitten_model", "fetch_spark_model",
+           "fetch_zonos_model", "fetch_chatterbox_model",
+           "fetch_kokoro_model"]
 
 #: What's worth pulling, why, and under what license. ``hf_repo`` is the
 #: default; ``nm voice fetch --repo`` can point at any other repo
@@ -187,6 +189,54 @@ MODEL_REGISTRY = {
             "nari-labs/Dia-1.6B",
         ],
     },
+    "kitten": {
+        "hf_repo": "KittenML/kitten-tts-nano-0.1",
+        "license": "Apache-2.0",
+        "approx_size": "~25 MB (nano 15M); 40M/80M variants available",
+        "notes": (
+            "KittenTTS: the tiny-CPU tier — 15–80M param ONNX, 24kHz, "
+            "8 built-in voices, adjustable speed, CPU-only. pip install "
+            "kittentts; weights auto-download on first use. The 'kitten' "
+            "backend."
+        ),
+        "alt_repos": ["KittenML/kitten-tts-mini-0.1"],
+    },
+    "spark": {
+        "hf_repo": "SparkAudio/Spark-TTS-0.5B",
+        "license": "Apache-2.0",
+        "approx_size": "~1 GB",
+        "notes": (
+            "Spark-TTS 0.5B: fastest free zero-shot (~50x realtime), "
+            "controllable voice creation (gender/pitch/speed). No pip "
+            "package — weights go to the Spark-TTS checkout's "
+            "pretrained_models/Spark-TTS-0.5B (SPARK_MODEL_DIR). "
+            "The 'spark' backend."
+        ),
+        "alt_repos": [],
+    },
+    "zonos": {
+        "hf_repo": "Zyphra/Zonos-v0.1-hybrid",
+        "license": "Apache-2.0",
+        "approx_size": "~4 GB (hybrid); transformer variant larger",
+        "notes": (
+            "Zonos v0.1: the most controllable open TTS — 8-D emotion "
+            "vector, speaking-rate/pitch conditioning, 44.1kHz, zero-shot "
+            "cloning. Needs the Zyphra/Zonos checkout (no pip package). "
+            "Weights auto-download on first use. The 'zonos' backend."
+        ),
+        "alt_repos": ["Zyphra/Zonos-v0.1-transformer"],
+    },
+    "kokoro": {
+        "hf_repo": "hexgrad/Kokoro-82M",
+        "license": "Apache-2.0",
+        "approx_size": "~300 MB",
+        "notes": (
+            "Kokoro-82M: the lightest quality TTS — 82M params, 24kHz, "
+            "54 fixed voices, CPU-viable. pip install kokoro; weights "
+            "auto-download on first use. The 'kokoro' backend."
+        ),
+        "alt_repos": [],
+    },
     "qwen3-tts": {
         # No verified official HF repo id at the time of writing — the
         # field stays empty on purpose rather than guessing. Use --repo
@@ -340,3 +390,57 @@ def fetch_model(name: str, dest: str = "", repo: str = "",
     path = snapshot_download(repo_id=target_repo, revision=revision,
                              local_dir=target_dir)
     return path
+
+
+# ---------------------------------------------------------------------------
+# One-liner model fetchers (sweep) — weights land where backends look
+# ---------------------------------------------------------------------------
+
+
+def _snapshot(repo_id: str, dest: str) -> str:
+    try:
+        from huggingface_hub import snapshot_download
+    except ImportError as exc:
+        raise RuntimeError(
+            "huggingface_hub is not installed — pip install huggingface_hub"
+        ) from exc
+    os.makedirs(dest, exist_ok=True)
+    return snapshot_download(repo_id=repo_id, local_dir=dest)
+
+
+def fetch_kitten_model(model_id: str = "KittenML/kitten-tts-nano-0.1",
+                       dest: str = "") -> str:
+    """Download KittenTTS weights (default nano 15M, ~25MB)."""
+    return _snapshot(model_id, dest or default_cache_dir("kitten"))
+
+
+def fetch_spark_model(repo_id: str = "SparkAudio/Spark-TTS-0.5B",
+                      dest: str = "") -> str:
+    """Download Spark-TTS weights into the checkout's model dir.
+
+    Defaults to ``<SPARK_TTS_DIR>/pretrained_models/Spark-TTS-0.5B``
+    (where the 'spark' backend looks), else the fetch cache.
+    """
+    from .tts import _spark_repo_dir
+    default = os.path.join(_spark_repo_dir(), "pretrained_models",
+                           "Spark-TTS-0.5B") if _spark_repo_dir() else ""
+    return _snapshot(repo_id, dest or default
+                     or default_cache_dir("spark"))
+
+
+def fetch_zonos_model(repo_id: str = "Zyphra/Zonos-v0.1-hybrid",
+                      dest: str = "") -> str:
+    """Download Zonos weights (hybrid default; transformer is hungrier)."""
+    return _snapshot(repo_id, dest or default_cache_dir("zonos"))
+
+
+def fetch_chatterbox_model(repo_id: str = "ResembleAI/chatterbox",
+                           dest: str = "") -> str:
+    """Download Chatterbox weights (auto-download on first use anyway)."""
+    return _snapshot(repo_id, dest or default_cache_dir("chatterbox"))
+
+
+def fetch_kokoro_model(repo_id: str = "hexgrad/Kokoro-82M",
+                       dest: str = "") -> str:
+    """Download Kokoro-82M weights."""
+    return _snapshot(repo_id, dest or default_cache_dir("kokoro"))

@@ -40,6 +40,7 @@ without a key they're plain wav and the session says so loudly.
 from __future__ import annotations
 
 import math
+import os
 import queue
 import re
 import struct
@@ -173,6 +174,162 @@ class EnergyVAD:
     def reset(self) -> None:
         self._speech_run = 0
         self._silence_run = 0
+
+
+def _silero_model_path() -> str:
+    explicit = os.environ.get("SILERO_VAD_ONNX", "").strip()
+    if explicit and os.path.isfile(explicit):
+        return explicit
+    candidate = os.path.expanduser("~/.nomorals/models/silero_vad.onnx")
+    return candidate if os.path.isfile(candidate) else ""
+
+
+class SileroVAD:
+    """Silero VAD (ONNX) — the neural gate, ~1.8MB, <1ms/32ms frame on CPU.
+
+    Mined from the production pattern (Pipecat's SileroVADAnalyzer, the
+    vaani TRD): the ONNX build, not the torch distribution (~2.5GB for
+    a 1.8MB model). Protocol-compatible with :class:`EnergyVAD`
+    (``observe()``/``is_speech()``/``calibrate()``/``reset()``,
+    ``silence_chunks``) so it drops into the session loop unchanged.
+
+    Needs ``pip install onnxruntime`` and the model file at
+    ``~/.nomorals/models/silero_vad.onnx`` (or ``SILERO_VAD_ONNX``) —
+    export it from snakers4/silero-vad. Raises RuntimeError with the
+    recipe when either is missing; :func:`make_vad` falls back to
+    :class:`EnergyVAD` instead of raising.
+    """
+
+    #: Silero works on 512-sample (32ms) windows at 16kHz
+    WINDOW = 512
+
+    def __init__(self, *, threshold: float = 0.5,
+                 silence_ms: int = 800, min_speech_ms: int = 150,
+                 chunk_ms: int = 30) -> None:
+        try:
+            import onnxruntime as _ort
+        except ImportError as exc:
+            raise RuntimeError(
+                "SileroVAD needs: pip install onnxruntime") from exc
+        model_path = _silero_model_path()
+        if not model_path:
+            raise RuntimeError(
+                "SileroVAD needs the model file: export silero_vad.onnx "
+                "from snakers4/silero-vad to ~/.nomorals/models/ "
+                "(or set SILERO_VAD_ONNX)")
+        self._ort = _ort
+        self.session = _ort.InferenceSession(
+            model_path, providers=["CPUExecutionProvider"])
+        self.threshold = threshold
+        self.silence_chunks = max(1, int(silence_ms / chunk_ms))
+        self.min_speech_chunks = max(1, int(min_speech_ms / chunk_ms))
+        self._speech_run = 0
+        self._silence_run = 0
+        self._state: Any = None
+        self._reset_state()
+
+    def _reset_state(self) -> None:
+        # Silero v5 state: (2, batch, 128) float32; v4 similar.
+        # Discovered lazily from input shapes on first inference.
+        self._state = None
+
+    def _frame_prob(self, pcm: bytes) -> float:
+        import struct as _struct
+        n = len(pcm) // 2
+        if n == 0:
+            return 0.0
+        samples = _struct.unpack(f"<{n}h", pcm[:n * 2])
+        # window to 512 samples (pad/trim), int16 → float32 [-1, 1]
+        win = list(samples[:self.WINDOW])
+        win += [0] * (self.WINDOW - len(win))
+        floats = [v / 32768.0 for v in win]
+        try:
+            import numpy as _np
+            audio = _np.array([floats], dtype=_np.float32)
+        except ImportError:
+            return 0.0
+        inputs = {i.name: None for i in self.session.get_inputs()}
+        names = list(inputs)
+        feed: dict[str, Any] = {}
+        for name in names:
+            lname = name.lower()
+            if lname in ("input", "audio", "x"):
+                feed[name] = audio
+            elif lname == "sr":
+                try:
+                    import numpy as _np2
+                    feed[name] = _np2.array([16000], dtype=_np2.int64)
+                except ImportError:
+                    pass
+            elif "state" in lname:
+                if self._state is None:
+                    try:
+                        import numpy as _np3
+                        # (2, 1, 128) — the v4/v5 recurrent state
+                        self._state = _np3.zeros((2, 1, 128),
+                                                 dtype=_np3.float32)
+                    except ImportError:
+                        pass
+                feed[name] = self._state
+        try:
+            out = self.session.run(None, feed)
+        except Exception:
+            return 0.0
+        # first output is the speech probability; a state output may
+        # follow — keep it for the next frame.
+        prob = 0.0
+        try:
+            prob = float(out[0].reshape(-1)[0])
+        except Exception:
+            pass
+        for o, meta in zip(out, self.session.get_outputs()):
+            if "state" in meta.name.lower():
+                self._state = o
+                break
+        return prob
+
+    def is_speech(self, chunk: bytes) -> bool:
+        return self._frame_prob(chunk) >= self.threshold
+
+    def observe(self, chunk: bytes) -> str:
+        if self.is_speech(chunk):
+            self._speech_run += 1
+            self._silence_run = 0
+        else:
+            self._silence_run += 1
+            self._speech_run = 0
+        if self._speech_run >= self.min_speech_chunks:
+            return "speech"
+        if self._silence_run >= self.silence_chunks:
+            return "silence"
+        return "undecided"
+
+    def calibrate(self, chunks: Any) -> None:
+        """No-op: the neural gate needs no room calibration."""
+        self.reset()
+
+    def reset(self) -> None:
+        self._speech_run = 0
+        self._silence_run = 0
+        self._reset_state()
+
+
+def make_vad(kind: str = "auto", **kwargs: Any) -> Any:
+    """Build a VAD: "silero" (neural), "energy" (zero-dependency), or
+    "auto" (Silero when onnxruntime + model are present, else Energy).
+
+    Never raises for "auto" — the whole point is the graceful fallback.
+    """
+    kind = (kind or "auto").lower()
+    if kind == "energy":
+        return EnergyVAD(**kwargs)
+    if kind == "silero":
+        return SileroVAD(**kwargs)
+    try:
+        return SileroVAD(**kwargs)
+    except RuntimeError as exc:
+        _log.info("make_vad: silero unavailable (%s), using energy", exc)
+        return EnergyVAD(**kwargs)
 
 
 # ── wav helpers (utterance files for STT) ────────────────────────────────────
@@ -752,6 +909,49 @@ class SessionReport:
     end_reason: str = "completed"  # completed | no-consent | no-audio |
                                    # user-exit | interrupted | error
     error: str = ""
+    #: per turn: {"turn": n, "heard": str, "said": [sentences actually
+    #: played], "barged": bool}. The Pipecat lesson: history records what
+    #: was *played*, not what was generated.
+    spoken: list[dict[str, Any]] = field(default_factory=list)
+
+    def latency_stats(self) -> dict[str, float]:
+        lats = sorted(self.latencies_ms)
+        if not lats:
+            return {"p50": 0.0, "p95": 0.0, "count": 0}
+        def _pct(p: float) -> float:
+            i = min(len(lats) - 1, int(p * len(lats)))
+            return lats[i]
+        return {"p50": _pct(0.5), "p95": _pct(0.95),
+                "count": len(lats)}
+
+    def format(self) -> str:
+        """God-tier session card — the readable end of a voice call."""
+        stats = self.latency_stats()
+        bar = "─" * 46
+        lines = [
+            f"🎙 voice session {self.session_id}",
+            bar,
+            (f"  turns {self.turns}   barge-ins {self.barge_ins}   "
+             f"ended: {self.end_reason}"),
+            (f"  ear-to-ear latency  p50 {stats['p50']:.0f}ms  "
+             f"p95 {stats['p95']:.0f}ms  (n={stats['count']})"),
+        ]
+        if self.error:
+            lines.append(f"  ⚠ {self.error}")
+        for turn in self.spoken:
+            heard = (turn.get("heard") or "")[:70]
+            said = turn.get("said") or []
+            barged = "  ⏭ barged" if turn.get("barged") else ""
+            lines.append(f"  ┌ turn {turn.get('turn')}{barged}")
+            if heard:
+                lines.append(f"  │ you: {heard}")
+            for s in said[:4]:
+                lines.append(f"  │ her: {s[:80]}")
+            if len(said) > 4:
+                lines.append(f"  │ … +{len(said) - 4} more")
+            lines.append("  └")
+        lines.append(bar)
+        return "\n".join(lines)
 
 
 _END_WORDS = {"exit", "quit", "goodbye", "bye", "stop listening"}
@@ -787,6 +987,7 @@ class VoiceSession:
         keep_audio: bool = False,
         audio_key: bytes | None = None,
         speech_cap_secs: int = 60,
+        vad_kind: str = "auto",
     ) -> None:
         self.session_id = new_short_id()
         self.think = think            # transcript -> reply (normal pipeline)
@@ -802,6 +1003,9 @@ class VoiceSession:
         self.keep_audio = keep_audio
         self.audio_key = audio_key
         self.speech_cap_secs = speech_cap_secs
+        self.vad_kind = vad_kind
+        self._current_token: Any = None   # segment playing now (interrupt())
+        self._external_stop = False
         self.consent = ConsentStore(self.data_dir)
         self.stats = StatsStore(self.data_dir)
         self.state = "idle"
@@ -832,6 +1036,24 @@ class VoiceSession:
         if ask is None:
             return self.consent.consented(self.device_id)
         return self.consent.ensure(self.device_id, ask)
+
+    def interrupt(self) -> bool:
+        """Externally interrupt playback (UI stop button, owner gesture).
+
+        Stops the current segment immediately; the unspoken remainder is
+        discarded and the interruption becomes the next turn's input —
+        the same path as a voice barge-in, minus the mic audio. Returns
+        True when something was actually playing.
+        """
+        token, self._current_token = self._current_token, None
+        if token is None or self.speaker is None:
+            return False
+        try:
+            self.speaker.stop(token)
+        except Exception:  # noqa: BLE001 - stop is best-effort
+            pass
+        self._external_stop = True
+        return True
 
     # -- main loop -----------------------------------------------------
     def run(self, *, max_turns: int = 0,
@@ -864,7 +1086,12 @@ class VoiceSession:
         # VAD learns the real noise floor before the first utterance. Uses a
         # low percentile (not the peak) so talking during the first instant
         # doesn't deafen the session.
-        room_vad = EnergyVAD(silence_ms=self.silence_ms)
+        # Room calibration: the first half-second is assumed ambient, so the
+        # VAD learns the real noise floor before the first utterance. Uses a
+        # low percentile (not the peak) so talking during the first instant
+        # doesn't deafen the session. SileroVAD.calibrate is a no-op (the
+        # neural gate needs no room learning); EnergyVAD learns here.
+        room_vad = make_vad(self.vad_kind, silence_ms=self.silence_ms)
         energies = []
         for _ in range(16):  # ~480ms of room tone
             chunk = capture.listen_next()
@@ -914,8 +1141,17 @@ class VoiceSession:
                     _log.debug("deliver_text failed", exc_info=True)
 
                 self._set_state("speaking")
-                outcome = self._speak(plan, first_speech_ts, report)
+                outcome, played = self._speak(plan, first_speech_ts, report)
                 report.turns += 1
+                # What was ACTUALLY played — not what was generated. An
+                # interrupted sentence never enters history as complete
+                # (the Pipecat lesson: history must match the owner's ears).
+                report.spoken.append({
+                    "turn": report.turns,
+                    "heard": transcript,
+                    "said": played,
+                    "barged": outcome != "done",
+                })
                 if outcome == "barged":
                     report.barge_ins += 1
                     # the interruption audio is already captured in
@@ -997,8 +1233,12 @@ class VoiceSession:
 
     # -- speak (with barge-in) ------------------------------------------
     def _speak(self, plan: SpeakPlan, first_speech_ts: float,
-               report: SessionReport) -> str:
-        """Play the reply sentence by sentence. Returns 'done' | 'barged'.
+               report: SessionReport) -> tuple[str, list[str]]:
+        """Play the reply sentence by sentence.
+
+        Returns (outcome, played_sentences): 'done' | 'barged' |
+        'stopped' (external interrupt()). ``played_sentences`` is what
+        the owner actually heard — the honest history.
 
         TTS output over ~2 minutes is split into segments first — one giant
         voice note is awkward on every platform.
@@ -1006,10 +1246,12 @@ class VoiceSession:
         sentences = [s.strip() for s in
                      re.split(r"(?<=[.!?…])\s+", plan.spoken) if s.strip()]
         if not sentences:
-            return "done"
-        barge_vad = EnergyVAD(silence_ms=10_000, min_speech_ms=200)
+            return "done", []
+        barge_vad = make_vad(self.vad_kind, silence_ms=10_000,
+                             min_speech_ms=200)
         barge_prefix = bytearray()
         speech_started = False
+        played: list[str] = []
 
         for sentence in sentences:
             try:
@@ -1026,41 +1268,52 @@ class VoiceSession:
                     segment, sentence, barge_vad, barge_prefix,
                     first_speech_ts, report, speech_started)
                 speech_started = True
-                if outcome == "barged":
-                    return "barged"
-        return "done"
+                if outcome == "done":
+                    if sentence not in played:
+                        played.append(sentence)
+                else:
+                    return outcome, played
+        return "done", played
 
     def _play_segment(self, wav_path: str, sentence: str,
                       barge_vad: EnergyVAD,
                       barge_prefix: bytearray, first_speech_ts: float,
                       report: SessionReport, speech_started: bool) -> str:
-        """Play one wav segment; returns 'done' | 'barged'."""
+        """Play one wav segment; returns 'done' | 'barged' | 'stopped'."""
         if self.speaker is None:
             _log.info("voice (no speaker): %s", sentence[:120])
             if not speech_started:
                 self._record_latency(first_speech_ts, report)
             return "done"
         token = self.speaker.play(wav_path)
-        if not speech_started:
-            self._record_latency(first_speech_ts, report)
-        # mic stays hot: poll for the owner talking over us
-        while self.speaker.playing(token):
-            chunk = self._poll_mic()
-            if chunk is None:
-                break
-            if barge_vad.is_speech(chunk):
-                barge_prefix += chunk
-                # ~200ms of continuous speech = a real interruption
-                if len(barge_prefix) >= int(SAMPLE_RATE * 0.2
-                                           * SAMPLE_WIDTH):
-                    self.speaker.stop(token)
-                    _log.info("voice session %s barged in",
-                              self.session_id)
-                    self._pending_barge = bytes(barge_prefix)
-                    return "barged"
-            else:
-                barge_prefix.clear()
-        return "done"
+        self._current_token = token
+        try:
+            if not speech_started:
+                self._record_latency(first_speech_ts, report)
+            # mic stays hot: poll for the owner talking over us
+            while self.speaker.playing(token):
+                if self._external_stop:
+                    self._external_stop = False
+                    return "stopped"
+                chunk = self._poll_mic()
+                if chunk is None:
+                    break
+                if barge_vad.is_speech(chunk):
+                    barge_prefix += chunk
+                    # ~200ms of continuous speech = a real interruption
+                    if len(barge_prefix) >= int(SAMPLE_RATE * 0.2
+                                               * SAMPLE_WIDTH):
+                        self.speaker.stop(token)
+                        _log.info("voice session %s barged in",
+                                  self.session_id)
+                        self._pending_barge = bytes(barge_prefix)
+                        return "barged"
+                else:
+                    barge_prefix.clear()
+            return "done"
+        finally:
+            if self._current_token is token:
+                self._current_token = None
 
     def _poll_mic(self) -> bytes | None:
         """One short-timeout mic read during playback, via the capture

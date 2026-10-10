@@ -55,17 +55,27 @@ def _write_wav(path: str, samples: array, sr: int) -> None:
 def render_emotional(text: str, tts: Any, voice_name: str = "",
                      direction: str | Direction = "",
                      rvc_model: str = "",
-                     tiers: tuple = EMOTION_TIERS) -> dict[str, Any]:
+                     tiers: tuple = EMOTION_TIERS,
+                     intensity: int = 7) -> dict[str, Any]:
     """Render text with real emotion. Returns {"path", "tier", ...}.
 
     ``tts``: a UniversalTTS instance. ``direction``: "[said angrily]" or a
     parsed Direction. ``rvc_model``: RVC model name for the target voice
     (defaults to a model matching voice_name when present).
+    ``intensity`` 1–10: director intensity for the expressive render;
+    on the DSP tier it scales the shaping (parsed adverbs like "very"
+    feed the same scale).
     """
     if isinstance(direction, str):
         direction = parse_direction(direction)
     tag = direction.raw or ""
     last_error: Optional[Exception] = None
+    intensity = max(1, min(10, intensity))
+    # the DSP tier reads Direction.intensity (1–5). A parsed adverb
+    # ("very angry" → 4) wins; otherwise the caller's intensity maps
+    # onto the same scale so every tier pushes equally hard.
+    if isinstance(direction, Direction) and direction.intensity == 3:
+        direction.intensity = max(1, min(5, round(intensity / 2)))
 
     # Tier 1 — RVC neural transfer
     if "rvc" in tiers:
@@ -83,7 +93,7 @@ def render_emotional(text: str, tts: Any, voice_name: str = "",
             # *default* voice — identity comes from RVC, so the source
             # voice doesn't matter, the performance does.
             src = tts.perform(text, mood=direction.emotion or "neutral",
-                              intensity=7)
+                              intensity=intensity)
             src_path = src["path"]
             conv = rvc_bridge.convert(src_path, model)
             return {"ok": True, "path": conv["path"], "tier": "rvc",
@@ -98,7 +108,7 @@ def render_emotional(text: str, tts: Any, voice_name: str = "",
         try:
             native = tts.perform(text, voice_name=voice_name or None,
                                  mood=direction.emotion or "neutral",
-                                 intensity=7)
+                                 intensity=intensity)
             return {"ok": True, "path": native["path"], "tier": "native",
                     "backend": native.get("backend")}
         except Exception as exc:  # noqa: BLE001

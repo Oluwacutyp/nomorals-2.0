@@ -430,6 +430,43 @@ def _reply(language: str, key: str, **kw: Any) -> str:
 
 # ── staged transfers (the biometric gate + connector handoff point) ─────────
 
+
+def format_confirmation(stage: Any, style: str = "chat") -> str:
+    """Styled readback of a staged transfer — what gets spoken/shown.
+
+    ``style``: "chat" (compact one-liner for voice notes),
+    "card" (multi-line card with id + timestamp), "receipt" (ledger-style
+    lines). Works with StagedTransfer or a dict carrying the same fields.
+    """
+    get = (lambda k, d="": getattr(stage, k, stage.get(k, d))
+           if isinstance(stage, dict) else getattr(stage, k, d))
+    amt = format_naira(get("amount_kobo", 0) or 0)
+    who = get("recipient", "?") or "?"
+    note = get("note", "") or ""
+    sid = get("id", "") or ""
+    status = get("status", "") or ""
+    created = get("created", 0) or 0
+    when = time.strftime("%Y-%m-%d %H:%M", time.localtime(created)
+                         ) if created else "just now"
+    if style == "card":
+        lines = ["💸 TRANSFER READY", f"  amount    {amt}",
+                 f"  to        {who}", f"  status    {status or 'staged'}",
+                 f"  ref       {sid}"]
+        if note:
+            lines.append(f"  note      {note}")
+        lines.append(f"  staged at {when}")
+        lines.append("Say 'confirm' with a voice check to release it.")
+        return "\n".join(lines)
+    if style == "receipt":
+        return (f"RECEIPT {sid}\n{when}  {amt} → {who}\n"
+                f"status: {status or 'staged'}"
+                + (f"\nnote: {note}" if note else ""))
+    # chat — the voice-note readback
+    line = f"Ready to send {amt} to {who}."
+    if note:
+        line += f" Note: {note}."
+    return line + " Say 'confirm' and verify your voice to release it."
+
 @dataclass
 class StagedTransfer:
     """A voice-requested transfer. Money moves ONLY via the connector
@@ -613,8 +650,12 @@ def handle_voice_money(transcript: str, context: Any) -> str:
                 who = ("you" if intent.recipient.lower() == "me"
                        else intent.recipient)
                 _log.info("voice transfer %s biometric-confirmed", staged.id)
-                return _reply(lang, "transfer_staged",
-                              amt=format_naira(intent.amount_kobo), who=who)
+                readback = {"amount_kobo": staged.amount_kobo,
+                            "recipient": who, "note": staged.note,
+                            "id": staged.id, "status": staged.status,
+                            "created": staged.ts}
+                return format_confirmation(
+                    readback, style="card" if len(transcript) > 60 else "chat")
             _staging_for(context).mark(staged.id, "denied")
             _log.info("voice transfer %s denied at biometric gate", staged.id)
             return _reply(lang, "transfer_denied")

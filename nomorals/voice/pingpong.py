@@ -29,6 +29,7 @@ __all__ = [
     "transcribe_voice_media",
     "synthesize_voice_reply",
     "to_ogg",
+    "voice_note_info",
 ]
 
 _VOICE_KINDS = ("audio", "voice")
@@ -92,19 +93,33 @@ def _private_voice_reply(context: Any, text: str) -> str:
         return ""
 
 
-def synthesize_voice_reply(context: Any, text: str) -> str:
-    """TTS the reply text → path to an .ogg voice note.  Raises on failure."""
+def synthesize_voice_reply(context: Any, text: str,
+                           progress_cb: Any = None) -> str:
+    """TTS the reply text → path to an .ogg voice note.  Raises on failure.
+
+    ``progress_cb(stage)`` fires with "synthesizing" / "converting"
+    so chats can show a typing/voice indicator during the (slow) TTS.
+    """
+    def _progress(stage: str) -> None:
+        if progress_cb is not None:
+            try:
+                progress_cb(stage)
+            except Exception:  # noqa: BLE001 - progress never breaks
+                pass
+
     text = (text or "").strip()
     if not text:
         raise ValueError("nothing to synthesize")
     # keep voice notes short — cap at ~30s of speech
     text = text[:600]
+    _progress("synthesizing")
     # Private voice first: on workstation-class profiles, use Devon's own
     # cloned voice (XTTS v2) when a voice profile is registered.  Phone /
     # termux falls back to the cloud voice below — profile-gated, never
     # designed down.
     private_path = _private_voice_reply(context, text)
     if private_path:
+        _progress("converting")
         return to_ogg(private_path)
     # voice from settings (NM_AUDIO_TTS_VOICE); Nigerian English default
     # suits Devon better than edge-tts's flat default.
@@ -122,7 +137,27 @@ def synthesize_voice_reply(context: Any, text: str) -> str:
     path = value.get("path") if isinstance(value, dict) else str(value)
     if not path or not Path(str(path)).is_file():
         raise RuntimeError("TTS returned no audio file")
+    _progress("converting")
     return to_ogg(str(path))
+
+
+def voice_note_info(ogg_path: str) -> dict[str, Any]:
+    """Describe a voice note: duration, size, format. Never raises."""
+    p = Path(ogg_path)
+    info: dict[str, Any] = {
+        "path": str(p),
+        "exists": p.is_file(),
+        "duration_s": 0.0,
+        "size_kb": 0.0,
+    }
+    if not p.is_file():
+        return info
+    try:
+        info["size_kb"] = round(p.stat().st_size / 1024, 1)
+    except OSError:
+        pass
+    info["duration_s"] = round(ogg_duration(str(p)), 1)
+    return info
 
 
 def ogg_duration(ogg_path: str) -> float:

@@ -153,14 +153,34 @@ class LongFormSynthesizer:
         target = max(0.7, min(1.3, target))
         self._energy_hint += 0.3 * (target - self._energy_hint)
 
-    def synthesize(self, text: str, out_path: str = "") -> dict[str, Any]:
+    def synthesize(self, text: str, out_path: str = "",
+                   progress_cb: Any = None,
+                   resume_from: int = 0) -> dict[str, Any]:
+        """Render long text with chapter tracking.
+
+        ``progress_cb(done, total, chunk_text)`` fires per chunk (the
+        audiobook progress row). ``resume_from`` skips to a chapter
+        index (from a previous run's ``chapters``). Returns chapters:
+        ``[{"index", "text", "start_s", "end_s", "failed"}]``.
+        """
         chunks = split_sentences(text)
         if not chunks:
             raise ValueError("nothing to synthesize")
-        _log.info("longform: %d chunks", len(chunks))
+        resume_from = max(0, min(resume_from, len(chunks) - 1))
+        _log.info("longform: %d chunks (resume from %d)",
+                  len(chunks), resume_from)
         rendered: list[tuple[array, int]] = []
         failed: list[int] = []
+        chapters: list[dict[str, Any]] = []
+        total = len(chunks)
         for i, chunk in enumerate(chunks):
+            if i < resume_from:
+                continue
+            if progress_cb is not None:
+                try:
+                    progress_cb(i + 1, total, chunk[:80])
+                except Exception:  # noqa: BLE001 - progress never breaks
+                    pass
             samples, sr = self._render_chunk(chunk)
             problem = _is_degenerate(samples, sr)
             if problem:
@@ -176,15 +196,27 @@ class LongFormSynthesizer:
                     samples = array("h", [0] * int(sr * 0.5))
             self._adapt_hints(samples, sr)
             rendered.append((samples, sr))
+            chapters.append({"index": i, "text": chunk,
+                             "seconds": len(samples) / sr,
+                             "failed": i in failed})
+        if not rendered:
+            raise ValueError("nothing rendered (resume past the end?)")
         # Stitch with crossfades (resample guard: all chunks share the
         # engine's sample rate in practice; assert rather than guess)
         sr0 = rendered[0][1]
         out = array("h", rendered[0][0])
-        for samples, sr in rendered[1:]:
+        cursor = len(rendered[0][0]) / sr0
+        chapters[0]["start_s"] = 0.0
+        chapters[0]["end_s"] = round(cursor, 2)
+        for j, (samples, sr) in enumerate(rendered[1:], 1):
             if sr != sr0:
                 raise RuntimeError(
                     f"sample-rate drift between chunks ({sr0} vs {sr})")
             out = _crossfade(out, samples, sr0)
+            start = cursor
+            cursor = len(out) / sr0
+            chapters[j]["start_s"] = round(start, 2)
+            chapters[j]["end_s"] = round(cursor, 2)
         dest = out_path or tempfile.mktemp(prefix="longform_",
                                            suffix=".wav")
         with wave.open(dest, "wb") as w:
@@ -193,13 +225,15 @@ class LongFormSynthesizer:
             w.setframerate(sr0)
             w.writeframes(out.tobytes())
         return {"ok": True, "path": dest, "chunks": len(chunks),
+                "rendered": len(rendered),
                 "failed_chunks": failed, "seconds": len(out) / sr0,
-                "sample_rate": sr0}
+                "sample_rate": sr0, "chapters": chapters}
 
 
 def synthesize_long(text: str, tts: Any, voice_name: str = "",
                     mood: str = "neutral",
-                    out_path: str = "") -> dict[str, Any]:
+                    out_path: str = "",
+                    progress_cb: Any = None) -> dict[str, Any]:
     """One-call long-form synthesis."""
     return LongFormSynthesizer(tts, voice_name, mood).synthesize(
-        text, out_path)
+        text, out_path, progress_cb=progress_cb)

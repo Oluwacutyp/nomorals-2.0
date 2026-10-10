@@ -72,9 +72,12 @@ import os
 import re
 import shutil
 import struct
+import subprocess
 import sys
 import wave
+from array import array
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, List, Optional
 
 from .director import CANONICAL_BURSTS
@@ -741,20 +744,31 @@ def available_backends() -> list[str]:
     """Which backends are actually usable (in preference order).
 
     Quality-first among the fully-free licenses: Chatterbox (MIT,
-    blind-test winner vs ElevenLabs) → F5-TTS → OmniVoice → Qwen3-TTS →
-    Orpheus → Dia → XTTS → CosyVoice → Kokoro → Piper → Bark →
-    hf-endpoint (cloud, needs no local weights) → system (the OS's own
-    speech service: pure stdlib, zero pip packages, dead last).
-    CPU-only boxes land on Kokoro or Piper; GPU boxes land on
+    blind-test winner vs ElevenLabs) → F5-TTS → Spark-TTS (fastest free
+    zero-shot) → OmniVoice → Qwen3-TTS → Orpheus → Dia → Zonos (8-D
+    emotion vector) → XTTS → CosyVoice → Kokoro → Piper → KittenTTS
+    (tiny CPU) → Bark → hf-endpoint (cloud, needs no local weights) →
+    system (the OS's own speech service: pure stdlib, zero pip
+    packages, dead last).
+    CPU-only boxes land on Kokoro, Piper, or Kitten; GPU boxes land on
     Chatterbox; a bare box with espeak-ng/say still talks via system.
     """
     order = [("chatterbox", "chatterbox"), ("f5tts", "f5_tts"),
-             ("omnivoice", "omnivoice"), ("qwen3tts", "qwen_tts"),
-             ("orpheus", "orpheus_tts"), ("dia", "dia"), ("xtts", "TTS"),
+             ("spark", "spark"), ("omnivoice", "omnivoice"),
+             ("qwen3tts", "qwen_tts"),
+             ("orpheus", "orpheus_tts"), ("dia", "dia"), ("zonos", "zonos"),
+             ("xtts", "TTS"),
              ("cosyvoice", "cosyvoice"), ("kokoro", "kokoro"),
-             ("piper", "piper"), ("bark", "bark"),
+             ("piper", "piper"), ("kitten", "kittentts"), ("bark", "bark"),
              ("hf-endpoint", "huggingface_hub")]
-    found = [name for name, spec in order if _spec(spec)]
+
+    def _probed(name: str, spec: str) -> bool:
+        # spark has no pip package — probed by checkout presence
+        if name == "spark":
+            return _spark_available()
+        return _spec(spec)
+
+    found = [name for name, spec in order if _probed(name, spec)]
     if SystemTTSBackend.available():  # stdlib-only fallback, dead last
         found.append("system")
     return found
@@ -780,6 +794,8 @@ BACKEND_CAPABILITIES: dict[str, dict[str, Any]] = {
     "f5tts": {"quality": 5, "latency": 4, "streams": False,
               "needs": "gpu", "license": "CC-BY-NC (pretrained)",
               "clones": True},
+    "spark": {"quality": 4, "latency": 2, "streams": False,
+              "needs": "gpu", "license": "Apache-2.0", "clones": True},
     "omnivoice": {"quality": 5, "latency": 3, "streams": False,
                   "needs": "gpu", "license": "Apache-2.0", "clones": True},
     "qwen3tts": {"quality": 4, "latency": 3, "streams": False,
@@ -788,6 +804,9 @@ BACKEND_CAPABILITIES: dict[str, dict[str, Any]] = {
                 "needs": "gpu", "license": "Apache-2.0", "clones": True},
     "dia": {"quality": 5, "latency": 5, "streams": False,
             "needs": "gpu", "license": "Apache-2.0", "clones": True},
+    "zonos": {"quality": 5, "latency": 4, "streams": False,
+              "needs": "gpu", "license": "Apache-2.0", "clones": True,
+              "emotion_vector": True},
     "xtts": {"quality": 5, "latency": 3, "streams": False,
              "needs": "gpu", "license": "CPML (non-commercial)",
              "clones": True},
@@ -797,6 +816,8 @@ BACKEND_CAPABILITIES: dict[str, dict[str, Any]] = {
                "needs": "cpu", "license": "Apache-2.0", "clones": False},
     "piper": {"quality": 3, "latency": 1, "streams": False,
               "needs": "cpu", "license": "MIT", "clones": False},
+    "kitten": {"quality": 2, "latency": 1, "streams": False,
+               "needs": "cpu", "license": "Apache-2.0", "clones": False},
     "bark": {"quality": 3, "latency": 5, "streams": False,
              "needs": "cpu", "license": "Suno (custom)", "clones": False},
     "hf-endpoint": {"quality": 4, "latency": 4, "streams": False,
@@ -804,6 +825,9 @@ BACKEND_CAPABILITIES: dict[str, dict[str, Any]] = {
                     "clones": True},
     "system": {"quality": 1, "latency": 1, "streams": False,
                "needs": "os", "license": "system", "clones": False},
+    "diffsinger": {"quality": 4, "latency": 5, "streams": False,
+                   "needs": "cpu", "license": "varies by voicebank",
+                   "clones": False, "sings": True},
 }
 
 
@@ -1323,6 +1347,8 @@ class ChatterboxBackend:
     #: (chunk_size in tokens; metrics carry latency_to_first_chunk/RTF).
     supports_streaming = True
     sample_rate = 24000
+    #: per-call opts the engine may pass through to synthesize()
+    _supports_opts = ("exaggeration", "language")
 
     _VARIANTS = ("multilingual", "turbo", "nano")
 
@@ -1373,19 +1399,27 @@ class ChatterboxBackend:
         return code.replace("_", "-").split("-")[0].lower() or "en"
 
     def synthesize(self, text: str, voice: Optional[VoiceProfile],
-                   *, instruct: str = "") -> Any:
+                   *, instruct: str = "",
+                   exaggeration: float | None = None,
+                   language: str = "") -> Any:
         if voice is not None:
             voice.validate_for_cloning()
         ref = voice.reference_audio_path if voice else None
-        kwargs: dict[str, Any] = {"exaggeration": 0.5, "cfg_weight": 0.5}
-        out = self._generate(text, voice, ref, kwargs)
+        kwargs: dict[str, Any] = {
+            "exaggeration": 0.5 if exaggeration is None else max(
+                0.0, min(1.0, exaggeration)),
+            "cfg_weight": 0.5,
+        }
+        out = self._generate(text, voice, ref, kwargs,
+                             language_id=language or None)
         return self._as_floats(out)
 
     def _generate(self, text: str, voice: Optional[VoiceProfile],
-                  ref: Optional[str], kwargs: dict[str, Any]) -> Any:
+                  ref: Optional[str], kwargs: dict[str, Any],
+                  language_id: str | None = None) -> Any:
         if self.variant == "multilingual":
             return self.model.generate(
-                text, language_id=self._language_id(voice),
+                text, language_id=language_id or self._language_id(voice),
                 audio_prompt_path=ref, **kwargs)
         return self.model.generate(text, audio_prompt_path=ref, **kwargs)
 
@@ -1983,13 +2017,360 @@ class SystemTTSBackend:
             return fh.read()
 
 
+class KittenTTSBackend:
+    """KittenTTS (KittenML): the tiny-CPU tier, Apache-2.0.
+
+    15–80M params (25MB smallest), ONNX, CPU-only, 24kHz, 8 built-in
+    voices (bella, jasper, luna, bruno, rosie, hugo, kiki, leo),
+    adjustable ``speed``. This is the backend the module was missing:
+    genuinely usable on a bare box — phone, Termux, Raspberry Pi —
+    with zero GPU and a ~100ms startup.
+
+    ``pip install kittentts`` — weights auto-download from HuggingFace
+    (``KittenML/kitten-tts-nano-0.1``). ``KITTEN_MODEL`` overrides the
+    checkpoint, ``KITTEN_VOICE`` the default voice, ``KITTEN_SPEED``
+    the default rate.
+    """
+
+    name = "kitten"
+    supports_native_tags = False
+    supports_cloning = False  # fixed voice set, no zero-shot cloning
+    supports_streaming = False  # whole-utterance, but RTF << 1 on CPU
+    sample_rate = 24000
+    _supports_opts = ("speed",)
+
+    VOICES = ("bella", "jasper", "luna", "bruno", "rosie", "hugo",
+              "kiki", "leo")
+
+    def __init__(self, model: str = "", voice: str = "") -> None:
+        try:
+            from kittentts import KittenTTS
+        except ImportError as exc:
+            raise RuntimeError(
+                "kitten backend needs: pip install kittentts") from exc
+        self.model_id = (model or os.environ.get("KITTEN_MODEL", "")
+                         or "KittenML/kitten-tts-nano-0.1")
+        self.default_voice = (voice or os.environ.get("KITTEN_VOICE", "")
+                              or "bella").lower()
+        if self.default_voice not in self.VOICES:
+            raise ValueError(
+                f"unknown kitten voice {self.default_voice!r}; use one of "
+                f"{', '.join(self.VOICES)}")
+        try:
+            self.model = KittenTTS(self.model_id)
+        except Exception as exc:
+            raise RuntimeError(
+                f"kitten failed to load {self.model_id!r}: {exc}") from exc
+        try:
+            self.default_speed = float(
+                os.environ.get("KITTEN_SPEED", "1.0") or 1.0)
+        except ValueError:
+            self.default_speed = 1.0
+
+    def _voice_for(self, voice: Optional[VoiceProfile]) -> str:
+        v = ((voice.preset_id if voice and voice.preset_id else "")
+             or self.default_voice).lower()
+        return v if v in self.VOICES else self.default_voice
+
+    def synthesize(self, text: str, voice: Optional[VoiceProfile],
+                   *, instruct: str = "", speed: float = 0.0) -> Any:
+        rate = speed or self.default_speed
+        try:
+            import numpy as np
+        except ImportError:
+            np = None  # type: ignore[assignment]
+        out = self.model.generate(text, voice=self._voice_for(voice),
+                                  speed=rate)
+        if np is not None:
+            return np.asarray(out, dtype=np.float32).reshape(-1)
+        return [float(v) for v in out]
+
+
+def _spark_repo_dir() -> str:
+    """Locate a Spark-TTS checkout (no pip package exists upstream)."""
+    explicit = os.environ.get("SPARK_TTS_DIR", "").strip()
+    candidates = [explicit,
+                  os.path.expanduser("~/.nomorals/models/Spark-TTS")]
+    for c in candidates:
+        if c and os.path.isfile(os.path.join(c, "cli", "inference.py")):
+            return c
+    return ""
+
+
+def _spark_available() -> bool:
+    return bool(_spark_repo_dir())
+
+
+class SparkTTSBackend:
+    """Spark-TTS (SparkAudio): fastest free zero-shot, Apache-2.0.
+
+    0.5B LLM, ~50x realtime, zero-shot cloning from prompt
+    text + prompt audio, plus *controllable* voice creation
+    (``--gender``/``--pitch``/``--speed``: very_low…very_high).
+
+    No pip package upstream — clone once::
+
+        git clone https://github.com/SparkAudio/Spark-TTS.git \\
+            ~/.nomorals/models/Spark-TTS
+        # then inside it: pip install -r requirements.txt
+        # weights: SparkAudio/Spark-TTS-0.5B from HuggingFace
+
+    or point ``SPARK_TTS_DIR`` at the checkout and ``SPARK_MODEL_DIR``
+    at the weights. ``SPARK_DEVICE`` selects cuda index (default "0").
+    This backend shells to the repo's own ``cli.inference`` — the
+    supported interface — and surfaces its stderr honestly on failure.
+    """
+
+    name = "spark"
+    supports_native_tags = False
+    supports_cloning = True
+    supports_streaming = False
+    sample_rate = 16000
+    _supports_opts = ("speed",)
+
+    _SPEED_WORDS = {0.7: "very_low", 0.85: "low", 1.0: "medium",
+                    1.2: "high", 1.4: "very_high"}
+
+    def __init__(self, model_dir: str = "") -> None:
+        self.repo = _spark_repo_dir()
+        if not self.repo:
+            raise RuntimeError(
+                "spark backend needs the Spark-TTS checkout: "
+                "git clone https://github.com/SparkAudio/Spark-TTS.git "
+                "~/.nomorals/models/Spark-TTS (or set SPARK_TTS_DIR)")
+        self.model_dir = (model_dir
+                          or os.environ.get("SPARK_MODEL_DIR", "")
+                          or os.path.join(self.repo, "pretrained_models",
+                                          "Spark-TTS-0.5B"))
+        if not os.path.isdir(self.model_dir):
+            raise RuntimeError(
+                f"spark weights not found at {self.model_dir!r} — "
+                "snapshot_download(\"SparkAudio/Spark-TTS-0.5B\") there")
+        self.device = os.environ.get("SPARK_DEVICE", "0")
+
+    @staticmethod
+    def _speed_word(speed: float) -> str:
+        if speed <= 0:
+            return "medium"
+        best, best_d = "medium", 99.0
+        for k, w in SparkTTSBackend._SPEED_WORDS.items():
+            d = abs(k - speed)
+            if d < best_d:
+                best, best_d = w, d
+        return best
+
+    def synthesize(self, text: str, voice: Optional[VoiceProfile],
+                   *, instruct: str = "", speed: float = 0.0,
+                   gender: str = "", pitch: str = "") -> Any:
+        import tempfile
+        if voice is not None:
+            voice.validate_for_cloning()
+        ref = voice.reference_audio_path if voice else None
+        prompt_text = (voice.transcript if voice and voice.transcript
+                       else "")
+        tmp = tempfile.mkdtemp(prefix="spark_")
+        cmd = [sys.executable, "-m", "cli.inference",
+               "--text", text,
+               "--device", self.device,
+               "--save_dir", tmp,
+               "--model_dir", self.model_dir]
+        if ref:
+            cmd += ["--prompt_speech_path", ref]
+            if prompt_text:
+                cmd += ["--prompt_text", prompt_text]
+        else:
+            # voice creation mode: controllable virtual speaker
+            cmd += ["--gender", gender or os.environ.get(
+                "SPARK_GENDER", "female"),
+                    "--pitch", pitch or os.environ.get(
+                        "SPARK_PITCH", "medium"),
+                    "--speed", self._speed_word(speed)]
+        proc = subprocess.run(cmd, capture_output=True, text=True,
+                              timeout=600, cwd=self.repo)
+        wavs = sorted(Path(tmp).glob("*.wav"))
+        if proc.returncode != 0 or not wavs:
+            raise RuntimeError(
+                "spark inference failed: "
+                f"{(proc.stderr or proc.stdout or '')[:400]}")
+        import wave as _wave
+        with _wave.open(str(wavs[0]), "rb") as w:
+            sr = w.getframerate()
+            raw = w.readframes(w.getnframes())
+        self.sample_rate = sr
+        # float samples in [-1, 1] — the backend contract
+        return [v / 32768.0 for v in array("h", raw)]
+
+
+class ZonosBackend:
+    """Zonos v0.1 (Zyphra): the most *controllable* open TTS, Apache-2.0.
+
+    1.6B, 200k hours, 44.1kHz, zero-shot cloning from 10–30s — and an
+    **8-D emotion vector** (happiness, sadness, disgust, fear, surprise,
+    anger, other, neutral) plus speaking-rate / pitch / frequency
+    conditioning. The director's ``render_zonos`` maps canonical
+    emotions straight onto that vector — no other open backend takes
+    emotion this literally.
+
+    Install from source (no pip package upstream)::
+
+        git clone https://github.com/Zyphra/Zonos.git
+        # inside: uv sync  (or pip install -e .)
+
+    then ``import zonos`` must work. ``ZONOS_MODEL`` picks the
+    checkpoint (default ``Zyphra/Zonos-v0.1-hybrid``; the
+    ``-transformer`` variant is higher fidelity, hungrier).
+    """
+
+    name = "zonos"
+    supports_native_tags = True  # via [zonos-emo:{...}] control tags
+    supports_cloning = True
+    supports_streaming = False
+    sample_rate = 24000
+    _supports_opts = ("speed",)
+
+    #: canonical emotion → 8-D Zonos vector
+    #: (happiness, sadness, disgust, fear, surprise, anger, other, neutral)
+    EMOTION_VECTORS: dict[str, tuple] = {
+        "happy": (0.9, 0.05, 0.0, 0.0, 0.1, 0.0, 0.0, 0.1),
+        "excited": (0.7, 0.0, 0.0, 0.0, 0.5, 0.0, 0.0, 0.1),
+        "sad": (0.05, 0.9, 0.0, 0.0, 0.0, 0.0, 0.0, 0.1),
+        "angry": (0.0, 0.0, 0.1, 0.1, 0.0, 0.9, 0.0, 0.0),
+        "fearful": (0.0, 0.1, 0.0, 0.9, 0.1, 0.0, 0.0, 0.0),
+        "scared": (0.0, 0.1, 0.0, 0.9, 0.1, 0.0, 0.0, 0.0),
+        "disgusted": (0.0, 0.1, 0.9, 0.0, 0.0, 0.1, 0.0, 0.0),
+        "surprised": (0.2, 0.0, 0.0, 0.1, 0.9, 0.0, 0.0, 0.0),
+        "calm": (0.2, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.7),
+        "tender": (0.4, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.4),
+        "sarcastic": (0.1, 0.0, 0.1, 0.0, 0.0, 0.0, 0.6, 0.2),
+        "nervous": (0.0, 0.0, 0.0, 0.5, 0.0, 0.0, 0.3, 0.1),
+        "confident": (0.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.3),
+        "tired": (0.0, 0.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.4),
+        "neutral": (0.1, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.8),
+    }
+
+    _EMO_TAG_RE = re.compile(r"\[zonos-emo:(\{.*?\})\]")
+
+    def __init__(self, model_id: str = "") -> None:
+        try:
+            from zonos.model import Zonos
+        except ImportError as exc:
+            raise RuntimeError(
+                "zonos backend needs the Zonos checkout on the path: "
+                "git clone https://github.com/Zyphra/Zonos.git "
+                "then pip install -e . (or uv sync)") from exc
+        self.model_id = (model_id or os.environ.get("ZONOS_MODEL", "")
+                         or "Zyphra/Zonos-v0.1-hybrid")
+        try:
+            import torch
+            device = ("cuda" if torch.cuda.is_available() else "cpu")
+        except ImportError:
+            device = "cpu"
+        try:
+            self.model = Zonos.from_pretrained(self.model_id, device=device)
+            if device == "cuda":
+                self.model.bfloat16()
+        except Exception as exc:
+            raise RuntimeError(
+                f"zonos failed to load {self.model_id!r}: {exc}") from exc
+        self.device = device
+
+    def _speaker_embedding(self, voice: Optional[VoiceProfile]) -> Any:
+        if voice is None:
+            return None
+        voice.validate_for_cloning()
+        ref = voice.reference_audio_path
+        if not ref:
+            return None
+        import torch
+        import torchaudio
+        wav, sr = torchaudio.load(ref)
+        embed = getattr(self.model, "make_speaker_embedding",
+                        None) or getattr(self.model, "embed_spk_audio", None)
+        if embed is None:
+            raise RuntimeError("zonos model has no speaker-embedding method")
+        with torch.no_grad():
+            return embed(wav, sr)
+
+    @classmethod
+    def _extract_emotion(cls, text: str) -> tuple[str, list[float]]:
+        """Pull [zonos-emo:{...}] control tags out of the text.
+
+        Returns (clean_text, 8-D vector). Multiple tags merge (last
+        wins per key); absent tags → neutral.
+        """
+        vec = dict(zip(
+            ("happiness", "sadness", "disgust", "fear", "surprise",
+             "anger", "other", "neutral"),
+            cls.EMOTION_VECTORS["neutral"]))
+
+        def _merge(m: re.Match) -> str:
+            try:
+                import json as _json
+                data = _json.loads(m.group(1))
+                for k, v in data.items():
+                    if k in vec:
+                        vec[k] = max(0.0, min(1.0, float(v)))
+            except (ValueError, TypeError):
+                pass
+            return " "
+
+        clean = cls._EMO_TAG_RE.sub(_merge, text)
+        clean = re.sub(r"\s{2,}", " ", clean).strip()
+        return clean, [vec[k] for k in (
+            "happiness", "sadness", "disgust", "fear", "surprise",
+            "anger", "other", "neutral")]
+
+    def synthesize(self, text: str, voice: Optional[VoiceProfile],
+                   *, instruct: str = "", speed: float = 0.0) -> Any:
+        import torch
+        from zonos.conditioning import make_cond_dict
+        clean, emo_vec = self._extract_emotion(text)
+        if not clean.strip():
+            raise ValueError("nothing to synthesize")
+        speaker = self._speaker_embedding(voice)
+        cond_args: dict[str, Any] = {
+            "text": clean,
+            "language": "en-us",
+        }
+        if speaker is not None:
+            cond_args["speaker"] = speaker
+        # 8-D emotion vector — the Zonos-native control surface.
+        try:
+            cond_args["emotion"] = torch.tensor(
+                [emo_vec], dtype=torch.float32, device=self.device)
+            cond_dict = make_cond_dict(**cond_args)
+        except TypeError:
+            # older Zonos builds without emotion conditioning
+            cond_args.pop("emotion", None)
+            cond_dict = make_cond_dict(**cond_args)
+        if speed and abs(speed - 1.0) > 0.02:
+            try:
+                cond_dict = make_cond_dict(
+                    speaking_rate=15.0 * speed, **{
+                        k: v for k, v in cond_args.items()
+                        if k != "speaking_rate"})
+            except TypeError:
+                pass
+        conditioning = self.model.prepare_conditioning(cond_dict)
+        codes = self.model.generate(conditioning)
+        wavs = self.model.autoencoder.decode(codes).cpu()
+        native_sr = int(getattr(self.model.autoencoder, "sampling_rate",
+                                44100) or 44100)
+        floats = wavs[0].flatten().tolist()
+        if native_sr != self.sample_rate:
+            floats = _resample_linear(floats, native_sr, self.sample_rate)
+        return floats
+
+
 _BACKENDS = {"bark": BarkBackend, "xtts": XTTSBackend,
              "kokoro": KokoroBackend, "cosyvoice": CosyVoiceBackend,
              "dia": DiaBackend, "orpheus": OrpheusBackend,
              "hf-endpoint": HFEndpointBackend,
              "chatterbox": ChatterboxBackend, "piper": PiperBackend,
              "f5tts": F5TTSBackend, "omnivoice": OmniVoiceBackend,
-             "qwen3tts": Qwen3TTSBackend, "system": SystemTTSBackend}
+             "qwen3tts": Qwen3TTSBackend, "system": SystemTTSBackend,
+             "kitten": KittenTTSBackend, "spark": SparkTTSBackend,
+             "zonos": ZonosBackend}
 
 
 def _make_diffsinger():
@@ -2011,7 +2392,9 @@ _BACKEND_SPECS = {"bark": "bark", "xtts": "TTS", "kokoro": "kokoro",
                   "hf-endpoint": "huggingface_hub",
                   "chatterbox": "chatterbox", "piper": "piper",
                   "f5tts": "f5_tts", "omnivoice": "omnivoice",
-                  "qwen3tts": "qwen_tts", "system": None}
+                  "qwen3tts": "qwen_tts", "system": None,
+                  "kitten": "kittentts", "spark": None, "zonos": "zonos",
+                  "diffsinger": None}  # in-repo: probed via construction
 
 
 # ----------------------------------------------------
@@ -2195,13 +2578,16 @@ class UniversalTTS:
         raise RuntimeError(
             f"no TTS backend usable (tried: {tried}) — pip install one of: "
             "chatterbox-tts (best free cloning, MIT) | piper-tts "
-            "(phone/CPU, MIT) | kokoro (lightest, Apache-2.0) | "
+            "(phone/CPU, MIT) | kittentts (tiny CPU streaming, Apache-2.0) | "
+            "kokoro (lightest, Apache-2.0) | "
             "qwen-tts (0.6B expressive, Apache-2.0) | f5-tts | "
             "omnivoice (600+ langs, Apache-2.0) | TTS (XTTS v2, "
             "non-commercial) | cosyvoice (multilingual+paralinguistics, "
             "MIT) | orpheus-speech (Orpheus, Apache-2.0, GPU) | "
             "git+https://github.com/suno-ai/bark.git | "
-            "git+https://github.com/nari-labs/dia.git (GPU-only) — "
+            "git+https://github.com/nari-labs/dia.git (GPU-only) | "
+            "Spark-TTS checkout (fastest zero-shot, Apache-2.0) | "
+            "Zonos checkout (8-D emotion vector, Apache-2.0) — "
             "or install an OS speech service (espeak-ng) for the "
             "zero-dependency 'system' backend")
 
@@ -2219,6 +2605,21 @@ class UniversalTTS:
         if wanted == "system":
             if not SystemTTSBackend.available():
                 raise RuntimeError(SystemTTSBackend._MISSING)
+        elif wanted == "spark":
+            if not _spark_available():
+                raise RuntimeError(
+                    "TTS backend 'spark' is not installed on this machine "
+                    "— git clone https://github.com/SparkAudio/Spark-TTS.git "
+                    "~/.nomorals/models/Spark-TTS (or set SPARK_TTS_DIR)")
+        elif wanted == "diffsinger":
+            # in-repo backend: probe by construction — the constructor
+            # raises the honest recipe (voicebank / onnxruntime)
+            try:
+                from .singing import DiffSingerBackend
+                DiffSingerBackend()
+            except RuntimeError as exc:
+                raise RuntimeError(
+                    f"TTS backend 'diffsinger' is not usable: {exc}") from exc
         elif not _spec(_BACKEND_SPECS.get(wanted)):
             raise RuntimeError(
                 f"TTS backend {wanted!r} is not installed on this machine")
@@ -2276,12 +2677,14 @@ class UniversalTTS:
         from .director import (render_bark, render_chatterbox, render_cosyvoice,
                                render_dia, render_fish, render_for,
                                render_omnivoice, render_orpheus,
-                               render_plain)
+                               render_plain, render_zonos)
 
         name = getattr(backend, "name", "")
         if name == "bark":
             return self.tag_processor.to_bark_format(segments), ""
         canonical = self._segments_to_canonical(segments)
+        if name == "zonos":
+            return render_zonos(canonical), ""
         if name == "cosyvoice":
             return render_cosyvoice(canonical)
         if name == "dia":
@@ -2326,9 +2729,113 @@ class UniversalTTS:
                 self.tag_processor.to_plain_with_pauses(segments)
         return final_text, instruct, pause_points
 
+    @staticmethod
+    def _split_synth_opts(backend: Any, speed: float = 1.0,
+                          exaggeration: float | None = None,
+                          **extra: Any) -> tuple[dict[str, Any], float]:
+        """Split per-call opts into (native_opts, residual_speed).
+
+        Backends declare supported per-call opts in ``_supports_opts``
+        (kitten/spark/zonos take ``speed``; chatterbox takes
+        ``exaggeration`` and ``language``). Anything they can't do
+        natively comes back as ``residual_speed`` for the honest DSP
+        fallback (time_stretch) — the control always works, the tier is
+        just reported. Unsupported non-speed opts are dropped (never a
+        TypeError into a backend's synthesize).
+        """
+        supported = set(getattr(backend, "_supports_opts", ()))
+        opts: dict[str, Any] = {}
+        residual = 1.0
+        if speed and abs(speed - 1.0) > 0.02:
+            if "speed" in supported:
+                opts["speed"] = speed
+            else:
+                residual = speed
+        if exaggeration is not None and "exaggeration" in supported:
+            opts["exaggeration"] = exaggeration
+        for k, v in extra.items():
+            if v and k in supported:
+                opts[k] = v
+        return opts, residual
+
+    @staticmethod
+    def _apply_residual_speed(audio: Any, sample_rate: int,
+                              residual: float) -> Any:
+        if abs(residual - 1.0) < 0.02:
+            return audio
+        from .emotion_dsp import time_stretch
+        import array as _arr
+        arr = (audio if isinstance(audio, _arr.array)
+               else _arr.array(
+                   "h", [int(max(-32768, min(32767, v * 32767)))
+                         for v in audio]))
+        return time_stretch(arr, residual)
+
+    def backend_info(self, name: str = "") -> dict[str, Any]:
+        """One dict describing a backend: capabilities, license, install.
+
+        Merges :data:`BACKEND_CAPABILITIES` with live install probing
+        and audience eligibility — the single place UIs ask "what can
+        this backend do".
+        """
+        name = (name or self.backend_name).lower()
+        cap = dict(BACKEND_CAPABILITIES.get(name, {}))
+        installed = name in available_backends()
+        return {
+            "name": name,
+            "installed": installed,
+            "quality": cap.get("quality", 1),
+            "latency": cap.get("latency", 5),
+            "streams": cap.get("streams", False),
+            "needs": cap.get("needs", "?"),
+            "license": cap.get("license", "unknown"),
+            "clones": cap.get("clones", False),
+            "emotion_vector": cap.get("emotion_vector", False),
+            "public_ok": name not in self._NONCOMMERCIAL_BACKENDS,
+            "native_opts": list(getattr(
+                _BACKENDS.get(name), "_supports_opts", ()))
+            if name in _BACKENDS else [],
+        }
+
+    def list_backend_info(self) -> list[dict[str, Any]]:
+        """backend_info() for every registered backend, install order."""
+        return [self.backend_info(n) for n in _BACKENDS]
+
+    def speak_batch(self, texts: list[str],
+                    voice_name: Optional[str] = None, *,
+                    mood: str = "", mood_level: int = 5,
+                    speed: float = 1.0,
+                    exaggeration: float | None = None,
+                    language: str = "",
+                    max_workers: int = 4,
+                    audience: str | None = None) -> list[dict]:
+        """Synthesize many texts in parallel — chapters, dialogue turns.
+
+        One ``speak()`` dict per input, in order. Backends are loaded
+        once (first call wins the race); neural backends are usually
+        not thread-safe, so failures degrade per-item (``{"ok": False,
+        "reason": ...}``) instead of killing the batch.
+        """
+        from concurrent.futures import ThreadPoolExecutor
+
+        def _one(text: str) -> dict:
+            try:
+                return self.speak(text, voice_name, mood=mood,
+                                  mood_level=mood_level, speed=speed,
+                                  exaggeration=exaggeration,
+                                  language=language, audience=audience)
+            except Exception as exc:  # noqa: BLE001 - per-item degrade
+                return {"ok": False, "reason": str(exc), "text": text[:60]}
+
+        with ThreadPoolExecutor(max_workers=max(1, max_workers)) as ex:
+            return list(ex.map(_one, texts))
+
     def speak(self, tagged_text: str, voice_name: Optional[str] = None,
               out_path: str = "", mood: str = "", mood_level: int = 5,
-              audience: str | None = None) -> dict:
+              audience: str | None = None, *,
+              speed: float = 1.0,
+              exaggeration: float | None = None,
+              language: str = "") -> dict:
         """Synthesize `tagged_text` (emotion/pause tags allowed) to a WAV.
 
         ``audience`` overrides the engine's audience for this call:
@@ -2337,11 +2844,19 @@ class UniversalTTS:
         ``voice_name`` wins, else the audience default (``NM_VOICE_PRIVATE``
         / ``NM_VOICE_PUBLIC``); a non-commercial-cloned voice on the
         public audience is refused, structurally.
+
+        ``speed``: 0.5–2.0 playback rate — native on kitten/spark/zonos,
+        honest DSP time-stretch everywhere else. ``exaggeration``: 0–1
+        emotion exaggeration, native on Chatterbox only. ``language``:
+        BCP-47 hint (``en-NG``, ``yo``) — native on Chatterbox
+        multilingual (per-call ``language_id``), ignored elsewhere.
         """
         try:
             return self._speak_impl(tagged_text, voice_name=voice_name,
                                     out_path=out_path, mood=mood,
-                                    mood_level=mood_level, audience=audience)
+                                    mood_level=mood_level, audience=audience,
+                                    speed=speed, exaggeration=exaggeration,
+                                    language=language)
         except Exception:
             try:
                 from ..core.error_system import heartbeat
@@ -2352,7 +2867,10 @@ class UniversalTTS:
 
     def _speak_impl(self, tagged_text: str, voice_name: Optional[str] = None,
                     out_path: str = "", mood: str = "", mood_level: int = 5,
-                    audience: str | None = None) -> dict:
+                    audience: str | None = None, *,
+                    speed: float = 1.0,
+                    exaggeration: float | None = None,
+                    language: str = "") -> dict:
         aud = audience or self.audience
         text = mood_to_tagged_text(tagged_text, mood, mood_level) if mood \
             else tagged_text
@@ -2369,6 +2887,14 @@ class UniversalTTS:
                 self._seg_cache = SegmentCache()
             emotion_key = "|".join(
                 t for s in segments for t in s.tags)
+            # speed/exaggeration/language change the audio — they change
+            # the key
+            if abs(speed - 1.0) > 0.02:
+                emotion_key += f"|speed={speed}"
+            if exaggeration is not None:
+                emotion_key += f"|ex={exaggeration}"
+            if language:
+                emotion_key += f"|lang={language}"
             cache_key = SegmentCache.key(
                 final_text if False else text,
                 getattr(voice, "name", "") or "",
@@ -2397,9 +2923,15 @@ class UniversalTTS:
 
         final_text, instruct, pause_points = self._render_for_backend(
             backend, segments)
-        audio = backend.synthesize(final_text, voice, instruct=instruct)
+        synth_opts, residual_speed = self._split_synth_opts(
+            backend, speed=speed, exaggeration=exaggeration,
+            language=language)
+        audio = backend.synthesize(final_text, voice, instruct=instruct,
+                                   **synth_opts)
         audio = self._insert_pauses(audio, pause_points, final_text,
                                     sample_rate)
+        audio = self._apply_residual_speed(audio, sample_rate,
+                                           residual_speed)
 
         # Emotion DSP: for backends WITHOUT native tags, shape the
         # emotion in as post-processing (Step-Audio-EditX pattern).
@@ -2471,24 +3003,32 @@ class UniversalTTS:
             "sample_rate": sample_rate,
             "backend": backend.name,
             "segments": len(segments),
+            "native_opts": sorted(synth_opts),
+            "speed_dsp": abs(residual_speed - 1.0) > 0.02,
         }
 
     def _sentence_stream(self, backend: Any, text: str,
                          voice: Optional[VoiceProfile],
-                         instruct: str) -> Any:
+                         instruct: str,
+                         synth_opts: dict | None = None) -> Any:
         """One synthesize() per sentence — the universal streaming fallback.
 
         The production live-voice pattern: sentence TTS + ordered
         playback. First chunk lands after one sentence renders, not after
         the whole utterance.
         """
+        opts = synth_opts or {}
         for sentence in _split_sentences(text):
-            yield backend.synthesize(sentence, voice, instruct=instruct)
+            yield backend.synthesize(sentence, voice, instruct=instruct,
+                                     **opts)
 
     def speak_stream(self, tagged_text: str,
                      voice_name: Optional[str] = None, *,
                      mood: str = "", mood_level: int = 5,
-                     audience: str | None = None) -> Any:
+                     audience: str | None = None,
+                     speed: float = 1.0,
+                     exaggeration: float | None = None,
+                     language: str = "") -> Any:
         """Yield audio as it is generated — the live-voice path.
 
         Yields ``{"ok": True, "samples": [...], "sample_rate": int,
@@ -2498,6 +3038,10 @@ class UniversalTTS:
         sentence, yielded in order — first audio lands after the first
         sentence, not the whole reply). Pause splicing is skipped in
         streaming; sentence boundaries are the pauses.
+
+        ``speed``/``exaggeration`` apply natively where the backend
+        supports them (kitten/spark/zonos, chatterbox); residual speed
+        is NOT applied in streaming (chunks must stay aligned).
 
         NEVER RAISES: any failure yields exactly one ``{"ok": False,
         "reason": str, "backend": str}`` and stops, so the live loop can
@@ -2527,8 +3071,11 @@ class UniversalTTS:
                 stream = backend.synthesize_stream(final_text, voice,
                                                    instruct=instruct)
             else:
+                synth_opts, _residual = self._split_synth_opts(
+                    backend, speed=speed, exaggeration=exaggeration,
+                    language=language)
                 stream = self._sentence_stream(backend, final_text, voice,
-                                               instruct)
+                                               instruct, synth_opts)
             for samples in stream:
                 chunk_no += 1
                 if hasattr(samples, "tolist"):
@@ -2545,7 +3092,10 @@ class UniversalTTS:
     def perform(self, text: str, voice_name: Optional[str] = None,
                 out_path: str = "", *, mood: str = "neutral",
                 intensity: int = 3, seed: Optional[int] = None,
-                effect: Optional[str] = None) -> dict:
+                effect: Optional[str] = None,
+                speed: float = 1.0,
+                exaggeration: float | None = None,
+                language: str = "") -> dict:
         """Text in, human-sounding wav out.
 
         Runs the director (``nomorals/voice/director.py``) over ``text``
@@ -2574,7 +3124,7 @@ class UniversalTTS:
         from .director import (direct, render_bark, render_chatterbox,
                                render_cosyvoice, render_dia, render_fish,
                                render_for, render_omnivoice, render_orpheus,
-                               render_plain)
+                               render_plain, render_zonos)
 
         script = direct(text, mood=mood, intensity=intensity, seed=seed,
                         effect=effect)
@@ -2586,6 +3136,8 @@ class UniversalTTS:
         pause_points: list = []
         if backend.name == "cosyvoice":
             final_text, instruct = render_cosyvoice(script)
+        elif backend.name == "zonos":
+            final_text = render_zonos(script)
         elif backend.name == "bark":
             final_text = render_bark(script)
         elif backend.name == "dia":
@@ -2613,9 +3165,15 @@ class UniversalTTS:
             final_text, pause_points = render_plain(script,
                                                     speak_bursts=True)
 
-        audio = backend.synthesize(final_text, voice, instruct=instruct)
+        synth_opts, residual_speed = self._split_synth_opts(
+            backend, speed=speed, exaggeration=exaggeration,
+            language=language)
+        audio = backend.synthesize(final_text, voice, instruct=instruct,
+                                   **synth_opts)
         audio = self._insert_pauses(audio, pause_points, final_text,
                                     sample_rate)
+        audio = self._apply_residual_speed(audio, sample_rate,
+                                           residual_speed)
 
         path = out_path or os.path.join(
             self.voices.storage_dir, "..",

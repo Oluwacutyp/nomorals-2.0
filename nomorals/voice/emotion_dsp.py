@@ -126,3 +126,119 @@ def shape_for_direction(samples: array, sample_rate: int,
         energy=params["energy"],
         breathiness=breathiness,
     )
+
+
+def whisperize(samples: array, sample_rate: int,
+               intensity: float = 1.0) -> array:
+    """One-call whisper: breathiness + HF air + energy dip.
+
+    The delivery-verb shortcut — ``[whispers]`` on a tag-less backend
+    without hand-rolling the four knobs.
+    """
+    out = pitch_shift(samples, 0.5 * intensity, sample_rate)
+    out = add_breathiness(out, sample_rate,
+                          amount=min(0.3, 0.10 + 0.10 * intensity))
+    # energy dip LAST so the added air doesn't raise the peaks back up
+    out = apply_energy(out, max(0.3, 1.0 - 0.45 * intensity))
+    return out
+
+
+def tremolo(samples: array, sample_rate: int, rate_hz: float = 6.0,
+            depth: float = 0.4) -> array:
+    """Amplitude wobble — fear/nervousness, old-radio voices."""
+    if depth <= 0.0:
+        return samples
+    import math as _math
+    out = array("h")
+    for i, s in enumerate(samples):
+        mod = 1.0 - depth * 0.5 * (
+            1.0 + _math.sin(2 * _math.pi * rate_hz * i / sample_rate))
+        out.append(int(max(-32768, min(32767, s * mod))))
+    return out
+
+
+def vibrato_dsp(samples: array, sample_rate: int, rate_hz: float = 5.5,
+                depth_cents: float = 40.0) -> array:
+    """Pitch wobble via modulated resampling — the nervous/operatic edge.
+
+    Honest scope: a modulated delay-line vibrato, not a phase vocoder;
+    depth in cents, subtle is the point.
+    """
+    if depth_cents <= 0.0 or not samples:
+        return samples
+    import math as _math
+    n = len(samples)
+    depth_ratio = 2.0 ** (depth_cents / 1200.0) - 1.0
+    out = array("h")
+    for i in range(n):
+        lfo = _math.sin(2 * _math.pi * rate_hz * i / sample_rate)
+        # local resample position wobbles ±depth around i
+        src = i + lfo * depth_ratio * sample_rate / max(1.0, rate_hz) * 0.02
+        src = max(0.0, min(n - 1.001, src))
+        i0 = int(src)
+        frac = src - i0
+        i1 = min(i0 + 1, n - 1)
+        v = samples[i0] * (1 - frac) + samples[i1] * frac
+        out.append(int(max(-32768, min(32767, v))))
+    return out
+
+
+#: Delivery verbs → DSP recipes (nl_director's vocabulary, one call).
+_DELIVERY_RECIPES: dict[str, dict] = {
+    "whisper": {"fn": "whisperize", "intensity": 1.0},
+    "whispers": {"fn": "whisperize", "intensity": 1.0},
+    "whispering": {"fn": "whisperize", "intensity": 1.0},
+    "shout": {"energy": 1.45, "pitch_shift_st": 1.0, "rate_mult": 1.1},
+    "shouts": {"energy": 1.45, "pitch_shift_st": 1.0, "rate_mult": 1.1},
+    "shouting": {"energy": 1.45, "pitch_shift_st": 1.0, "rate_mult": 1.1},
+    "scream": {"energy": 1.6, "pitch_shift_st": 2.0, "rate_mult": 1.15,
+               "tremolo": 0.25},
+    "screams": {"energy": 1.6, "pitch_shift_st": 2.0, "rate_mult": 1.15,
+                "tremolo": 0.25},
+    "mutter": {"energy": 0.7, "pitch_shift_st": -1.0, "rate_mult": 0.9},
+    "mutters": {"energy": 0.7, "pitch_shift_st": -1.0, "rate_mult": 0.9},
+    "muttering": {"energy": 0.7, "pitch_shift_st": -1.0, "rate_mult": 0.9},
+    "chant": {"energy": 1.1, "rate_mult": 0.85, "tremolo": 0.15},
+    "sigh": {"energy": 0.75, "pitch_shift_st": -1.5, "rate_mult": 0.8,
+             "breathiness": 0.1},
+    "sighs": {"energy": 0.75, "pitch_shift_st": -1.5, "rate_mult": 0.8,
+              "breathiness": 0.1},
+    "cry": {"energy": 1.2, "pitch_shift_st": 1.5, "tremolo": 0.35,
+            "breathiness": 0.08},
+    "cries": {"energy": 1.2, "pitch_shift_st": 1.5, "tremolo": 0.35,
+              "breathiness": 0.08},
+    "crying": {"energy": 1.2, "pitch_shift_st": 1.5, "tremolo": 0.35,
+               "breathiness": 0.08},
+    "laugh": {"energy": 1.25, "pitch_shift_st": 2.0, "tremolo": 0.5},
+    "laughs": {"energy": 1.25, "pitch_shift_st": 2.0, "tremolo": 0.5},
+    "laughing": {"energy": 1.25, "pitch_shift_st": 2.0, "tremolo": 0.5},
+    "gasp": {"energy": 1.3, "pitch_shift_st": 2.5, "breathiness": 0.15},
+    "gasps": {"energy": 1.3, "pitch_shift_st": 2.5, "breathiness": 0.15},
+    "stammer": {"rate_mult": 0.85, "tremolo": 0.2},
+    "stammers": {"rate_mult": 0.85, "tremolo": 0.2},
+    "stammering": {"rate_mult": 0.85, "tremolo": 0.2},
+}
+
+
+def apply_delivery(samples: array, sample_rate: int,
+                   delivery: str) -> array:
+    """Apply a delivery-verb recipe (``whispers``, ``shouts``…).
+
+    Unknown verbs pass through untouched (never raises).
+    """
+    recipe = _DELIVERY_RECIPES.get((delivery or "").lower())
+    if not recipe:
+        return samples
+    if recipe.get("fn") == "whisperize":
+        return whisperize(samples, sample_rate,
+                          intensity=float(recipe.get("intensity", 1.0)))
+    out = shape_emotion(
+        samples, sample_rate,
+        pitch_shift_st=float(recipe.get("pitch_shift_st", 0.0)),
+        rate_mult=float(recipe.get("rate_mult", 1.0)),
+        energy=float(recipe.get("energy", 1.0)),
+        breathiness=float(recipe.get("breathiness", 0.0)),
+    )
+    if recipe.get("tremolo"):
+        out = tremolo(out, sample_rate, depth=float(recipe["tremolo"]))
+    return out

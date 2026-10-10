@@ -52,6 +52,11 @@ __all__ = [
     "available_stt_backends",
     "UniversalSTT",
     "make_session_stt",
+    "StreamingSTT",
+    "diarize",
+    "to_srt",
+    "to_vtt",
+    "format_transcript",
 ]
 
 
@@ -108,11 +113,25 @@ class FasterWhisperBackend:
                    **kwargs: Any) -> dict[str, Any]:
         segments, info = self.model.transcribe(
             audio_path, language=language or None,
-            vad_filter=True,
+            vad_filter=kwargs.pop("vad_filter", True),
+            vad_parameters=kwargs.pop(
+                "vad_parameters",
+                {"min_silence_duration_ms": 500}),
             condition_on_previous_text=False,
             **kwargs)
-        segs = [{"start": float(s.start), "end": float(s.end),
-                 "text": s.text.strip()} for s in segments]
+        want_words = bool(kwargs.get("word_timestamps", False))
+        segs = []
+        for s in segments:
+            seg: dict[str, Any] = {
+                "start": float(s.start), "end": float(s.end),
+                "text": s.text.strip()}
+            if want_words:
+                seg["words"] = [
+                    {"start": float(w.start), "end": float(w.end),
+                     "word": w.word, "prob": float(getattr(w, "probability",
+                                                           0.0) or 0.0)}
+                    for w in (s.words or [])]
+            segs.append(seg)
         text = " ".join(s["text"] for s in segs).strip()
         return {"text": text, "language": info.language or language,
                 "backend": self.name, "segments": segs}
@@ -339,15 +358,22 @@ class UniversalSTT:
         return available_stt_backends()[0] if available_stt_backends() \
             else ""
 
-    def transcribe(self, audio_path: str, language: str = "en") -> dict:
+    def transcribe(self, audio_path: str, language: str = "en",
+                   **kwargs: Any) -> dict:
         """Transcribe an audio file. Returns ``{"text", "language",
         "backend", "segments"}`` — never raises on empty audio, only on
-        genuinely broken input."""
+        genuinely broken input.
+
+        Extra kwargs pass through to the backend: faster-whisper honors
+        ``word_timestamps=True`` (per-word ``start``/``end``/``word``),
+        ``vad_filter`` and ``vad_parameters`` (Silero VAD tuning —
+        ``min_silence_duration_ms=500`` is the natural-cadence default).
+        """
         backend = self._load_backend()
         if not audio_path or not os.path.isfile(audio_path):
             raise FileNotFoundError(
                 f"audio file not found: {audio_path!r}")
-        return backend.transcribe(audio_path, language=language)
+        return backend.transcribe(audio_path, language=language, **kwargs)
 
 
 def make_session_stt(stt: Any, *,
@@ -372,3 +398,212 @@ def make_session_stt(stt: Any, *,
 
     _stt.supports_partial = False  # type: ignore[attr-defined]
     return _stt
+
+
+# ---------------------------------------------------------------------------
+# Transcript presentation + streaming + diarization (sweep additions)
+# ---------------------------------------------------------------------------
+
+
+def _srt_ts(seconds: float) -> str:
+    seconds = max(0.0, seconds)
+    h = int(seconds // 3600)
+    m = int((seconds % 3600) // 60)
+    s = int(seconds % 60)
+    ms = int(round((seconds - int(seconds)) * 1000))
+    return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
+
+
+def _vtt_ts(seconds: float) -> str:
+    return _srt_ts(seconds).replace(",", ".")
+
+
+def to_srt(segments: list[dict[str, Any]]) -> str:
+    """Segments → SubRip subtitles (the tts-audio-suite SRT pattern)."""
+    lines: list[str] = []
+    for i, seg in enumerate(segments or [], 1):
+        lines.append(str(i))
+        lines.append(f"{_srt_ts(seg.get('start', 0.0))} --> "
+                     f"{_srt_ts(seg.get('end', 0.0))}")
+        speaker = seg.get("speaker")
+        text = str(seg.get("text", "") or "").strip()
+        lines.append(f"{speaker}: {text}" if speaker else text)
+        lines.append("")
+    return "\n".join(lines).strip() + ("\n" if lines else "")
+
+
+def to_vtt(segments: list[dict[str, Any]]) -> str:
+    """Segments → WebVTT subtitles."""
+    lines = ["WEBVTT", ""]
+    for seg in segments or []:
+        lines.append(f"{_vtt_ts(seg.get('start', 0.0))} --> "
+                     f"{_vtt_ts(seg.get('end', 0.0))}")
+        speaker = seg.get("speaker")
+        text = str(seg.get("text", "") or "").strip()
+        lines.append(f"<v {speaker}>{text}" if speaker else text)
+        lines.append("")
+    return "\n".join(lines).strip() + "\n"
+
+
+def format_transcript(result: dict[str, Any],
+                      style: str = "text") -> str:
+    """Render a transcribe() result as text, SRT, VTT, or words.
+
+    - ``text``: the plain transcript.
+    - ``srt``/``vtt``: subtitle files from segments.
+    - ``words``: one word per line with timestamps (needs
+      ``word_timestamps=True`` at transcribe time).
+    - ``pretty``: timestamped lines, ``[00:01.2 → 00:03.4] hello``.
+    """
+    style = (style or "text").lower()
+    segments = result.get("segments", []) or []
+    if style == "srt":
+        return to_srt(segments)
+    if style == "vtt":
+        return to_vtt(segments)
+    if style == "words":
+        lines = []
+        for seg in segments:
+            for w in seg.get("words", []) or []:
+                lines.append(f"[{_vtt_ts(w.get('start', 0.0))}] "
+                             f"{w.get('word', '')}")
+        return "\n".join(lines)
+    if style == "pretty":
+        lines = []
+        for seg in segments:
+            spk = f"{seg['speaker']}: " if seg.get("speaker") else ""
+            lines.append(f"[{_vtt_ts(seg.get('start', 0.0))} → "
+                         f"{_vtt_ts(seg.get('end', 0.0))}] {spk}"
+                         f"{seg.get('text', '')}")
+        return "\n".join(lines)
+    return str(result.get("text", "") or "")
+
+
+class StreamingSTT:
+    """Incremental transcription for the live loop (RealtimeSTT pattern).
+
+    Feeds PCM chunks in, emits partial transcripts out. Backed by
+    faster-whisper: chunks accumulate until ``min_chunk_s`` of audio is
+    buffered, then one transcribe pass runs on the window. No extra
+    dependency — the stdlib + faster-whisper path the module already has.
+
+    Usage::
+
+        sstt = StreamingSTT(language="en")
+        for pcm in mic_chunks():          # bytes, int16 mono 16kHz
+            for partial in sstt.feed(pcm):
+                print("partial:", partial["text"])
+        final = sstt.flush()             # last window, finalized
+    """
+
+    def __init__(self, backend: str = "auto", language: str = "en",
+                 sample_rate: int = 16000,
+                 min_chunk_s: float = 1.0) -> None:
+        self.stt = UniversalSTT(backend=backend)
+        self.language = language
+        self.sample_rate = sample_rate
+        self.min_chunk_s = min_chunk_s
+        self._buf = bytearray()
+        self._finalized = ""
+        self._lock = None
+
+    def _need(self) -> int:
+        return int(self.sample_rate * 2 * self.min_chunk_s)
+
+    def feed(self, pcm: bytes) -> list[dict[str, Any]]:
+        """Feed int16 mono PCM bytes. Returns newly completed partials."""
+        if pcm:
+            self._buf.extend(pcm)
+        out: list[dict[str, Any]] = []
+        while len(self._buf) >= self._need():
+            window = bytes(self._buf[:self._need()])
+            del self._buf[:self._need()]
+            text = self._transcribe_window(window)
+            if text:
+                out.append({"text": text, "partial": True})
+        return out
+
+    def _transcribe_window(self, pcm: bytes) -> str:
+        import tempfile
+        import wave
+        path = ""
+        try:
+            with tempfile.NamedTemporaryFile(suffix=".wav",
+                                             delete=False) as fh:
+                path = fh.name
+            with wave.open(path, "wb") as w:
+                w.setnchannels(1)
+                w.setsampwidth(2)
+                w.setframerate(self.sample_rate)
+                w.writeframes(pcm)
+            res = self.stt.transcribe(path, language=self.language)
+            return str(res.get("text", "") or "").strip()
+        except Exception as exc:  # noqa: BLE001 - a bad window is skipped
+            _log.debug("streaming STT window failed: %s", exc)
+            return ""
+        finally:
+            try:
+                if path:
+                    os.remove(path)
+            except OSError:
+                pass
+
+    def flush(self) -> dict[str, Any]:
+        """Transcribe the remainder. Returns {"text", "partial": False}."""
+        text = self._transcribe_window(bytes(self._buf)) if self._buf \
+            else ""
+        self._buf.clear()
+        if text:
+            self._finalized = (self._finalized + " " + text).strip()
+        return {"text": self._finalized, "partial": False}
+
+
+def diarize(audio_path: str, *,
+            num_speakers: int = 0,
+            speaker_names: dict[str, str] | None = None,
+            hysteresis_ms: int = 500) -> dict[str, Any]:
+    """Who spoke when — optional pyannote pipeline, honest when absent.
+
+    Returns ``{"ok", "segments": [{"start", "end", "speaker"}]}``.
+    Speaker IDs are mapped to names server-side via ``speaker_names``
+    (``{"SPEAKER_00": "Ada"}``) — raw indices never leak to callers.
+    A ``hysteresis_ms`` debounce merges speaker flips shorter than the
+    window (the forasoft 2026 diarization guidance: one cough must not
+    re-attribute two words).
+
+    Needs ``pip install pyannote.audio`` + a HF token for the gated
+    diarization models; raises RuntimeError with the recipe otherwise.
+    """
+    try:
+        from pyannote.audio import Pipeline
+    except ImportError as exc:
+        raise RuntimeError(
+            "diarize needs: pip install pyannote.audio — plus a "
+            "HuggingFace token (HF_TOKEN) accepting the pyannote "
+            "speaker-diarization model terms") from exc
+    if not audio_path or not os.path.isfile(audio_path):
+        raise FileNotFoundError(f"audio file not found: {audio_path!r}")
+    pipeline = Pipeline.from_pretrained(
+        "pyannote/speaker-diarization-3.1")
+    kwargs: dict[str, Any] = {}
+    if num_speakers > 0:
+        kwargs["num_speakers"] = num_speakers
+    diarization = pipeline(audio_path, **kwargs)
+    names = speaker_names or {}
+    raw: list[dict[str, Any]] = []
+    for turn, _, speaker in diarization.itertracks(yield_label=True):
+        label = names.get(speaker, speaker)
+        raw.append({"start": float(turn.start), "end": float(turn.end),
+                    "speaker": label})
+    # hysteresis: merge same-speaker-adjacent flips shorter than window
+    merged: list[dict[str, Any]] = []
+    window = hysteresis_ms / 1000.0
+    for seg in raw:
+        if (merged and merged[-1]["speaker"] == seg["speaker"]
+                and seg["start"] - merged[-1]["end"] <= window):
+            merged[-1]["end"] = seg["end"]
+        else:
+            merged.append(dict(seg))
+    speakers = sorted({s["speaker"] for s in merged})
+    return {"ok": True, "segments": merged, "speakers": speakers,
+            "num_speakers": len(speakers)}

@@ -93,18 +93,31 @@ def describe_to_params(description: str) -> VoiceDesign:
     """Turn a natural-language voice description into shaping parameters.
 
     Pure function — no audio, no model. Multiple descriptors stack.
+    Intensity adverbs scale the match: "very deep" hits harder than
+    "deep", "slightly bright" barely tints.
     """
     design = VoiceDesign()
     text = (description or "").lower()
+    # intensity adverbs: multiplier applied to the NEXT descriptor match
     for pattern, deltas in _DESCRIPTORS:
-        if pattern.search(text):
+        for m in pattern.finditer(text):
+            # look back ~12 chars for an intensifier
+            window = text[max(0, m.start() - 12):m.start()]
+            mult = 1.0
+            if re.search(r"\b(very|extremely|super|really)\b", window):
+                mult = 1.6
+            elif re.search(r"\b(quite|fairly|pretty)\b", window):
+                mult = 1.25
+            elif re.search(r"\b(slightly|a bit|a little|somewhat)\b",
+                           window):
+                mult = 0.5
             design.matched.append(pattern.pattern)
-            design.pitch_semitones += deltas.get("pitch", 0.0)
-            # speed multiplies (geometric stacking)
+            design.pitch_semitones += deltas.get("pitch", 0.0) * mult
+            # speed multiplies (geometric stacking), scaled toward 1.0
             if "speed" in deltas:
-                design.speed *= deltas["speed"]
-            design.brightness += deltas.get("brightness", 0.0)
-            design.warmth += deltas.get("warmth", 0.0)
+                design.speed *= 1.0 + (deltas["speed"] - 1.0) * mult
+            design.brightness += deltas.get("brightness", 0.0) * mult
+            design.warmth += deltas.get("warmth", 0.0) * mult
     # clamp to sane ranges
     design.pitch_semitones = max(-12.0, min(12.0, design.pitch_semitones))
     design.speed = max(0.6, min(1.6, design.speed))
@@ -330,3 +343,72 @@ def morph_voices(name: str, voice_a: str, voice_b: str, *,
     return {"ok": True, "voice": voice.name,
             "shift_semitones": round(semitones, 2),
             "note": "pitch-interpolated morph — honest DSP, not neural VC"}
+
+
+def blend_voices(name: str, blends: list[tuple[str, float]], *,
+                 voices_dir: str = "") -> dict[str, Any]:
+    """Blend N catalogue voices by weight — the morph, generalized.
+
+    ``blends``: ``[("zara", 0.6), ("kilo", 0.3), ("narrator", 0.1)]``.
+    Weights are normalized. The highest-weight voice supplies the
+    reference audio; the target pitch is the weight-averaged mean f0 of
+    all voices. Honest DSP blend, documented as such.
+    """
+    from .catalogue import default_catalogue
+    from .tts import voice_print
+    if not blends:
+        return {"ok": False, "reason": "no voices to blend"}
+    cat = default_catalogue(voices_dir) if voices_dir else default_catalogue()
+    total = sum(max(0.0, w) for _, w in blends)
+    if total <= 0:
+        return {"ok": False, "reason": "weights sum to zero"}
+    norm = [(v, max(0.0, w) / total) for v, w in blends]
+
+    def _ref(vname: str) -> str:
+        try:
+            v = cat.get(vname)
+            if v is None:
+                return ""
+            prof = cat.library.get(v.profile or v.name)
+            return (getattr(prof, "sample_path", "") or
+                    getattr(prof, "path", "") or "")
+        except Exception:  # noqa: BLE001
+            return ""
+
+    f0s: list[tuple[str, float, float]] = []  # (name, f0, weight)
+    for vname, weight in norm:
+        ra = _ref(vname)
+        if not ra or not os.path.exists(ra):
+            return {"ok": False,
+                    "reason": f"{vname!r} has no reference audio"}
+        pa = voice_print(ra)
+        f0 = float((pa.get("features") or {}).get("mean_f0_hz", 0) or 0)
+        if f0 <= 20:
+            return {"ok": False,
+                    "reason": f"no pitch print for {vname!r}"}
+        f0s.append((vname, f0, weight))
+    # base = highest weight; target = weighted mean f0
+    f0s.sort(key=lambda t: -t[2])
+    base_name, base_f0, _ = f0s[0]
+    target_f0 = sum(f * w for _, f, w in f0s)
+    semitones = 12.0 * math.log2(target_f0 / base_f0)
+    design = VoiceDesign(
+        pitch_semitones=semitones,
+        matched=[f"blend({'+'.join(f'{v}:{w:.2f}' for v, w in norm)})"])
+    base_ref = _ref(base_name)
+    shaped_path = os.path.join(cat.voices_dir, f"blended_{name}.wav")
+    res = shape_voice(base_ref, shaped_path, design)
+    if not res.get("ok"):
+        return res
+    try:
+        voice = cat.clone(
+            name, shaped_path,
+            description="blend of " + ", ".join(
+                f"{v}@{w:.0%}" for v, w in norm))
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "reason": f"catalogue register failed: {exc}"}
+    return {"ok": True, "voice": voice.name,
+            "base": base_name,
+            "target_f0_hz": round(target_f0, 1),
+            "shift_semitones": round(semitones, 2),
+            "note": "pitch-interpolated blend — honest DSP, not neural VC"}

@@ -23,12 +23,15 @@ __all__ = [
     "mix_under",
     "apply_room",
     "Room",
+    "AmbienceScene",
+    "describe_scene",
 ]
 
 #: Ambience kinds the generator knows. nl_director's ambient patterns map here.
 AMBIENCES = (
     "rain", "heavy_rain", "wind", "thunder", "crowd", "applause",
     "room_tone", "phone_line", "traffic", "birds", "ocean", "fire",
+    "fireplace", "night", "rain_on_window", "cafe",
 )
 
 
@@ -196,6 +199,58 @@ def _simple(kind: str, sr: int, n: int, rng: random.Random) -> array:
     return _lowpass_1pole(_noise(rng, n, 0.2), 0.1)
 
 
+def _fireplace(sr: int, n: int, rng: random.Random) -> array:
+    # Fire crackle over a warm low room tone — the cozy bed.
+    fire, _ = generate_ambience("fire", n / sr, sr, seed=rng.randrange(99999))
+    tone, _ = generate_ambience("room_tone", n / sr, sr,
+                                seed=rng.randrange(99999))
+    out = array("h")
+    for f, t in zip(fire, tone):
+        out.append(int(max(-32768, min(32767, f * 0.8 + t * 1.4))))
+    return out
+
+
+def _night(sr: int, n: int, rng: random.Random) -> array:
+    # Crickets: rhythmic high chirp pulses + soft night wind.
+    out = array("h", [0] * n)
+    for _ in range(rng.randrange(4, 7)):  # a few cricket voices
+        f0 = rng.uniform(4200, 5200)
+        pulse_hz = rng.uniform(12, 20)
+        for i in range(n):
+            t = i / sr
+            # chirp trains: gated sine bursts
+            gate = 0.5 + 0.5 * math.sin(2 * math.pi * pulse_hz * t)
+            gate = gate ** 3
+            slow = 0.5 + 0.5 * math.sin(2 * math.pi * 0.11 * t + f0)
+            out[i] = int(max(-32768, min(
+                32767, out[i] + 900 * gate * slow
+                * math.sin(2 * math.pi * f0 * t))))
+    wind, _ = generate_ambience("wind", n / sr, sr, seed=rng.randrange(99999))
+    for i in range(n):
+        out[i] = int(max(-32768, min(32767, out[i] + wind[i] * 0.25)))
+    return out
+
+
+def _rain_on_window(sr: int, n: int, rng: random.Random) -> array:
+    # Close-mic rain: droplet-forward, less diffuse body than _rain.
+    rain, _ = generate_ambience("rain", n / sr, sr, seed=rng.randrange(99999))
+    out = array("h", rain)
+    drops = int(n / sr * 60)
+    for _ in range(drops):
+        pos = rng.randrange(n)
+        length = rng.randrange(int(sr * 0.008), int(sr * 0.03))
+        freq = rng.uniform(2500, 7000)
+        amp = rng.uniform(2500, 8000)
+        for i in range(length):
+            if pos + i >= n:
+                break
+            env = math.exp(-i / (length * 0.2))
+            out[pos + i] = int(max(-32768, min(
+                32767, out[pos + i]
+                + amp * env * math.sin(2 * math.pi * freq * i / sr))))
+    return _lowpass_1pole(out, 0.5)
+
+
 def generate_ambience(kind: str, duration_s: float,
                       sample_rate: int = 24000, seed: int = 7) -> tuple[array, int]:
     """Deterministic procedural ambience. (samples, sample_rate).
@@ -217,6 +272,12 @@ def generate_ambience(kind: str, duration_s: float,
         gen = _crowd(sample_rate, n, rng)
     elif kind == "applause":
         gen = _applause(sample_rate, n, rng)
+    elif kind == "fireplace":
+        gen = _fireplace(sample_rate, n, rng)
+    elif kind == "night":
+        gen = _night(sample_rate, n, rng)
+    elif kind == "rain_on_window":
+        gen = _rain_on_window(sample_rate, n, rng)
     else:
         gen = _simple(kind, sample_rate, n, rng)
     return gen, sample_rate
@@ -339,3 +400,117 @@ def with_ambience(voice: array, sample_rate: int, ambient_desc: str,
     if room:
         mixed = apply_room(mixed, sample_rate, room)
     return mixed
+
+
+# ---------------------------------------------------------------------------
+# Layered scenes — foley thinking: beds, not single noise sources
+# ---------------------------------------------------------------------------
+
+
+class AmbienceScene:
+    """A layered ambience scene: named beds + per-layer levels + fades.
+
+    scene = AmbienceScene([("rain", 0.7), ("thunder", 0.25)], seed=7)
+    samples, sr = scene.render(duration_s=30)
+    mixed = scene.mix_under_voice(voice_samples)
+
+    Layers render deterministically per seed; ``render`` caches per
+    (duration, rate) so re-renders are cheap.
+    """
+
+    def __init__(self, layers: list[tuple[str, float]] | None = None,
+                 seed: int = 7) -> None:
+        self.layers = [(k, max(0.0, min(1.5, lvl)))
+                       for k, lvl in (layers or [("room_tone", 0.4)])]
+        self.seed = seed
+        self._cache: dict[tuple[float, int], tuple[array, int]] = {}
+
+    def add(self, kind: str, level: float = 0.5) -> "AmbienceScene":
+        self.layers.append((kind, max(0.0, min(1.5, level))))
+        self._cache.clear()
+        return self
+
+    def describe(self) -> str:
+        return " + ".join(f"{k}@{lvl:.2f}" for k, lvl in self.layers)
+
+    def render(self, duration_s: float,
+               sample_rate: int = 24000) -> tuple[array, int]:
+        key = (round(duration_s, 2), sample_rate)
+        if key in self._cache:
+            return self._cache[key]
+        n = max(1, int(sample_rate * max(0.1, duration_s)))
+        out = array("h", [0] * n)
+        for i, (kind, level) in enumerate(self.layers):
+            bed, _ = generate_ambience(kind, duration_s, sample_rate,
+                                       seed=self.seed + i * 101)
+            m = len(bed)
+            for j in range(n):
+                out[j] = int(max(-32768, min(
+                    32767, out[j] + bed[j % m] * level)))
+        # gentle edge fades so loops don't click
+        fade = min(n // 10, sample_rate // 2)
+        for j in range(fade):
+            g = j / max(1, fade)
+            out[j] = int(out[j] * g)
+            out[n - 1 - j] = int(out[n - 1 - j] * g)
+        self._cache[key] = (out, sample_rate)
+        return out, sample_rate
+
+    def mix_under_voice(self, voice: array, sample_rate: int = 24000,
+                        master_level: float = 0.18,
+                        duck: bool = True) -> array:
+        """Render the scene to the voice length and duck-mix it under."""
+        dur = len(voice) / max(1, sample_rate)
+        bed, _ = self.render(dur, sample_rate)
+        # master_level scales the pre-mixed scene
+        scaled = array("h", [int(max(-32768, min(
+            32767, v * master_level / 0.18))) for v in bed])
+        return mix_under(voice, scaled, ambience_level=0.18, duck=duck)
+
+
+#: keyword → (ambience kind, level) for describe_scene()
+_SCENE_KEYWORDS: dict[str, tuple[str, float]] = {
+    "storm": ("heavy_rain", 0.8), "heavy rain": ("heavy_rain", 0.75),
+    "rain": ("rain", 0.7), "drizzle": ("rain", 0.45),
+    "window": ("rain_on_window", 0.6),
+    "thunder": ("thunder", 0.5), "lightning": ("thunder", 0.4),
+    "wind": ("wind", 0.6), "gale": ("wind", 0.85),
+    "cafe": ("crowd", 0.5), "coffee": ("crowd", 0.45),
+    "crowd": ("crowd", 0.6), "party": ("crowd", 0.7),
+    "murmur": ("crowd", 0.4), "restaurant": ("crowd", 0.55),
+    "applause": ("applause", 0.6), "clap": ("applause", 0.5),
+    "cheer": ("applause", 0.65),
+    "fire": ("fire", 0.5), "fireplace": ("fireplace", 0.65),
+    "campfire": ("fire", 0.6),
+    "night": ("night", 0.55), "cricket": ("night", 0.65),
+    "evening": ("night", 0.45),
+    "ocean": ("ocean", 0.6), "sea": ("ocean", 0.6), "beach": ("ocean", 0.5),
+    "waves": ("ocean", 0.55),
+    "bird": ("birds", 0.4), "morning": ("birds", 0.45),
+    "dawn": ("birds", 0.4),
+    "traffic": ("traffic", 0.5), "city": ("traffic", 0.4),
+    "street": ("traffic", 0.45),
+    "phone": ("phone_line", 0.3), "call": ("phone_line", 0.25),
+}
+
+
+def describe_scene(text: str, seed: int = 7) -> AmbienceScene:
+    """Words → layered scene: ``describe_scene("rainy cafe at night")``.
+
+    Keyword-matches beds (rain + crowd + night here) and returns an
+    :class:`AmbienceScene`. No match → gentle room_tone (never empty,
+    never raises).
+    """
+    desc = (text or "").lower()
+    layers: list[tuple[str, float]] = []
+    seen: set[str] = set()
+    # longest keywords first so "heavy rain" beats "rain"
+    for kw in sorted(_SCENE_KEYWORDS, key=len, reverse=True):
+        if kw in desc:
+            kind, level = _SCENE_KEYWORDS[kw]
+            if kind not in seen:
+                seen.add(kind)
+                layers.append((kind, level))
+    if not layers:
+        layers = [("room_tone", 0.4)]
+    return AmbienceScene(layers, seed=seed)

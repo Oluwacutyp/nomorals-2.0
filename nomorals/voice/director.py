@@ -85,13 +85,20 @@ __all__ = [
     "SegmentDirection",
     "direct",
     "render_bark",
+    "render_chatterbox",
     "render_cosyvoice",
     "render_dia",
     "render_fish",
     "render_for",
+    "render_kitten",
+    "render_omnivoice",
     "render_orpheus",
     "render_plain",
+    "render_spark",
+    "render_zonos",
     "strip_to_text",
+    "supported_backends",
+    "STYLE_PRESETS",
 ]
 
 # ---------------------------------------------------------------------------
@@ -1180,30 +1187,237 @@ def render_omnivoice(script: str | PerformanceScript) -> str:
 def render_for(backend: str,
                script: str | PerformanceScript) -> tuple[str, str | None]:
     """Render a script for a backend. Returns ``(text, extra)`` where
-    ``extra`` is the CosyVoice instruction or ``None``."""
+    ``extra`` is the CosyVoice instruction or ``None``.
+
+    Implemented at the bottom of this module, data-driven via
+    :data:`_RENDERERS` (kept there so the Zonos/Kitten/Spark renderers
+    it references are defined first).
+    """
+    return _render_for_registry(backend, script)
+
+
+# ---------------------------------------------------------------------------
+# Zonos / Kitten / Spark renderers (sweep: new backends need vocabularies)
+# ---------------------------------------------------------------------------
+
+#: Canonical emotion → Zonos 8-D emotion vector
+#: (happiness, sadness, disgust, fear, surprise, anger, other, neutral).
+#: Mirrors ``tts.ZonosBackend.EMOTION_VECTORS`` (kept here to avoid a
+#: tts→director import cycle).
+_ZONOS_VECTORS: dict[str, tuple] = {
+    "happy": (0.9, 0.05, 0.0, 0.0, 0.1, 0.0, 0.0, 0.1),
+    "excited": (0.7, 0.0, 0.0, 0.0, 0.5, 0.0, 0.0, 0.1),
+    "sad": (0.05, 0.9, 0.0, 0.0, 0.0, 0.0, 0.0, 0.1),
+    "angry": (0.0, 0.0, 0.1, 0.1, 0.0, 0.9, 0.0, 0.0),
+    "fearful": (0.0, 0.1, 0.0, 0.9, 0.1, 0.0, 0.0, 0.0),
+    "scared": (0.0, 0.1, 0.0, 0.9, 0.1, 0.0, 0.0, 0.0),
+    "terrified": (0.0, 0.1, 0.0, 0.95, 0.1, 0.0, 0.0, 0.0),
+    "panicked": (0.0, 0.1, 0.0, 0.9, 0.2, 0.0, 0.0, 0.0),
+    "disgusted": (0.0, 0.1, 0.9, 0.0, 0.0, 0.1, 0.0, 0.0),
+    "surprised": (0.2, 0.0, 0.0, 0.1, 0.9, 0.0, 0.0, 0.0),
+    "calm": (0.2, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.7),
+    "tender": (0.4, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.4),
+    "sarcastic": (0.1, 0.0, 0.1, 0.0, 0.0, 0.0, 0.6, 0.2),
+    "nervous": (0.0, 0.0, 0.0, 0.5, 0.0, 0.0, 0.3, 0.1),
+    "confident": (0.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.3),
+    "tired": (0.0, 0.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.4),
+    "ecstatic": (0.95, 0.0, 0.0, 0.0, 0.3, 0.0, 0.0, 0.0),
+    "hopeful": (0.6, 0.0, 0.0, 0.0, 0.1, 0.0, 0.0, 0.3),
+    "relieved": (0.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.4),
+    "amused": (0.6, 0.0, 0.0, 0.0, 0.1, 0.0, 0.1, 0.2),
+    "playful": (0.6, 0.0, 0.0, 0.0, 0.2, 0.0, 0.1, 0.1),
+    "proud": (0.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.1, 0.3),
+    "triumphant": (0.7, 0.0, 0.0, 0.0, 0.2, 0.0, 0.0, 0.1),
+    "smug": (0.3, 0.0, 0.1, 0.0, 0.0, 0.0, 0.5, 0.1),
+    "deadpan": (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.3, 0.7),
+    "bored": (0.0, 0.1, 0.0, 0.0, 0.0, 0.0, 0.2, 0.7),
+    "lonely": (0.0, 0.6, 0.0, 0.0, 0.0, 0.0, 0.0, 0.3),
+    "nostalgic": (0.3, 0.3, 0.0, 0.0, 0.0, 0.0, 0.0, 0.3),
+    "wistful": (0.2, 0.4, 0.0, 0.0, 0.0, 0.0, 0.0, 0.3),
+    "bitter": (0.0, 0.2, 0.2, 0.0, 0.0, 0.4, 0.1, 0.1),
+    "resigned": (0.0, 0.4, 0.0, 0.0, 0.0, 0.0, 0.0, 0.5),
+    "desperate": (0.0, 0.3, 0.0, 0.5, 0.0, 0.1, 0.0, 0.0),
+    "hysterical": (0.3, 0.0, 0.0, 0.4, 0.3, 0.0, 0.0, 0.0),
+    "jealous": (0.0, 0.1, 0.1, 0.0, 0.0, 0.5, 0.2, 0.1),
+    "envious": (0.0, 0.1, 0.1, 0.0, 0.0, 0.4, 0.2, 0.1),
+    "contemptuous": (0.0, 0.0, 0.3, 0.0, 0.0, 0.2, 0.4, 0.1),
+    "suspicious": (0.0, 0.0, 0.0, 0.2, 0.1, 0.0, 0.5, 0.2),
+    "skeptical": (0.0, 0.0, 0.0, 0.0, 0.1, 0.0, 0.5, 0.3),
+    "curious": (0.2, 0.0, 0.0, 0.0, 0.4, 0.0, 0.1, 0.2),
+    "thoughtful": (0.1, 0.0, 0.0, 0.0, 0.0, 0.0, 0.2, 0.6),
+    "reflective": (0.1, 0.1, 0.0, 0.0, 0.0, 0.0, 0.1, 0.6),
+    "hesitant": (0.0, 0.0, 0.0, 0.2, 0.0, 0.0, 0.3, 0.4),
+    "shy": (0.1, 0.0, 0.0, 0.2, 0.0, 0.0, 0.1, 0.5),
+    "guilty": (0.0, 0.4, 0.0, 0.1, 0.0, 0.0, 0.1, 0.3),
+    "remorseful": (0.0, 0.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.4),
+    "empathetic": (0.3, 0.1, 0.0, 0.0, 0.0, 0.0, 0.0, 0.5),
+    "reassuring": (0.4, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.5),
+    "eager": (0.5, 0.0, 0.0, 0.0, 0.3, 0.0, 0.0, 0.1),
+    "determined": (0.3, 0.0, 0.0, 0.0, 0.0, 0.1, 0.0, 0.5),
+    "annoyed": (0.0, 0.0, 0.1, 0.0, 0.0, 0.5, 0.1, 0.2),
+    "appalled": (0.0, 0.0, 0.4, 0.1, 0.2, 0.2, 0.0, 0.0),
+    "awkward": (0.0, 0.0, 0.0, 0.1, 0.1, 0.0, 0.4, 0.3),
+    "flustered": (0.0, 0.0, 0.0, 0.3, 0.2, 0.0, 0.2, 0.2),
+    "mischievously": (0.3, 0.0, 0.0, 0.0, 0.1, 0.0, 0.5, 0.1),
+}
+
+_ZONOS_DIM_NAMES = ("happiness", "sadness", "disgust", "fear", "surprise",
+                    "anger", "other", "neutral")
+
+
+def render_zonos(script: str | PerformanceScript) -> str:
+    """Canonical markup → Zonos control text.
+
+    Emotion tags become ``[zonos-emo:{...}]`` 8-D vector tags (the
+    ZonosBackend strips them into the emotion conditioning tensor —
+    the most literal emotion interface in open TTS). Bursts become
+    speakable onomatopoeia, pauses become ellipses, delivery tags
+    (whisper/shout) map to vector nudges.
+    """
+    import json as _json
+    s = _apply_beat(str(script))
+    s = _BURST_RE.sub(
+        lambda m: _ONOMATOPOEIA.get(m.group(1).lower(), ""), s)
+
+    def _emo(m: re.Match) -> str:
+        name = m.group(1).lower()
+        vec = _ZONOS_VECTORS.get(name)
+        if vec is None:
+            # delivery verbs: nudge the vector instead of dropping them
+            if name in ("whisper", "whispers", "whispering"):
+                vec = (0.05, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.9)
+            elif name in ("shout", "shouts", "shouting", "scream",
+                          "screams"):
+                vec = (0.1, 0.0, 0.0, 0.1, 0.1, 0.7, 0.0, 0.0)
+            else:
+                return ""
+        payload = _json.dumps(dict(zip(_ZONOS_DIM_NAMES, vec)),
+                              separators=(",", ":"))
+        return f" [zonos-emo:{payload}] "
+
+    s = _EMOTION_RE.sub(_emo, s)
+    s = _apply_stutter(s)
+    s = _RATE_RE.sub("", s)
+    s = _PAUSE_RE.sub("... ", s)
+    s = _STRONG_RE.sub(lambda m: m.group(1).upper(), s)
+    return re.sub(r"\s{2,}", " ", s).strip()
+
+
+def render_kitten(script: str | PerformanceScript) -> str:
+    """Canonical markup → KittenTTS text.
+
+    KittenTTS has no tag vocabulary (fixed voices, no paralinguistics):
+    bursts become speakable onomatopoeia, emotions are dropped (the
+    engine's emotion-DSP fallback shapes them post-synthesis), pauses
+    become commas/ellipses. Speed is a synthesize() kwarg, not markup.
+    """
+    text, _pauses = render_plain(script, speak_bursts=True)
+    # render_plain returns pause points; Kitten reads "..." naturally
+    return text
+
+
+def render_spark(script: str | PerformanceScript) -> str:
+    """Canonical markup → Spark-TTS text.
+
+    Spark-TTS takes no markup (control is via --gender/--pitch/--speed
+    CLI flags): clean speakable text, bursts as onomatopoeia, pauses as
+    ellipses. Stutters stay textual.
+    """
+    text, _pauses = render_plain(script, speak_bursts=True)
+    return text
+
+
+#: Renderer registry — data-driven, so new backends plug in without
+#: touching ``render_for``. Values are ``(render_fn, returns_extra)``.
+_RENDERERS: dict[str, tuple] = {
+    "fish": (render_fish, False),
+    "cosyvoice": (render_cosyvoice, True),
+    "bark": (render_bark, False),
+    "dia": (render_dia, False),
+    "orpheus": (render_orpheus, False),
+    "chatterbox": (render_chatterbox, False),
+    "omnivoice": (render_omnivoice, False),
+    "zonos": (render_zonos, False),
+    "kitten": (render_kitten, False),
+    "spark": (render_spark, False),
+}
+
+
+def supported_backends() -> list[str]:
+    """Backends with a dedicated director renderer."""
+    return sorted(_RENDERERS)
+
+
+def _render_qwen3tts(script: str | PerformanceScript) -> str:
+    # native [laugh]/[sigh]/[yawn]/[wow]/[giggle]/[scoff] +
+    # [emotion] switching — canonical markup is already its
+    # vocabulary. Pauses become ellipses: Qwen reads "[pause:350]"
+    # literally, while "..." reads as a natural beat.
+    s = _apply_beat(str(script))
+    s = _PAUSE_RE.sub("... ", s)
+    return re.sub(r"\s{2,}", " ", s).strip()
+
+
+_RENDERERS["qwen3tts"] = (_render_qwen3tts, False)
+
+
+def _render_for_registry(backend: str,
+                         script: str | PerformanceScript
+                         ) -> tuple[str, str | None]:
+    """Registry implementation of :func:`render_for` (defined up top).
+
+    Data-driven via :data:`_RENDERERS`; unknown backends fall back to
+    ``render_plain`` (speakable onomatopoeia + spliced pauses).
+    """
     backend = (backend or "auto").lower()
-    if backend == "fish":
-        return render_fish(script), None
-    if backend == "cosyvoice":
-        text, instruct = render_cosyvoice(script)
+    entry = _RENDERERS.get(backend)
+    if entry is None:
+        text, _pauses = render_plain(script)
+        return text, None
+    fn, returns_extra = entry
+    if returns_extra:
+        text, instruct = fn(script)
         return text, instruct
-    if backend == "bark":
-        return render_bark(script), None
-    if backend == "dia":
-        return render_dia(script), None
-    if backend == "orpheus":
-        return render_orpheus(script), None
-    if backend == "chatterbox":
-        return render_chatterbox(script), None
-    if backend == "omnivoice":
-        return render_omnivoice(script), None
-    if backend == "qwen3tts":
-        # native [laugh]/[sigh]/[yawn]/[wow]/[giggle]/[scoff] +
-        # [emotion] switching — canonical markup is already its
-        # vocabulary. Pauses become ellipses: Qwen reads "[pause:350]"
-        # literally, while "..." reads as a natural beat.
-        s = _apply_beat(str(script))
-        s = _PAUSE_RE.sub("... ", s)
-        return re.sub(r"\s{2,}", " ", s).strip(), None
-    text, _pauses = render_plain(script)
-    return text, None
+    return fn(script), None
+
+
+def render_for(backend: str,
+               script: str | PerformanceScript) -> tuple[str, str | None]:
+    """Render a script for a backend. Returns ``(text, extra)`` where
+    ``extra`` is the CosyVoice instruction or ``None``."""
+    return _render_for_registry(backend, script)
+
+
+# ---------------------------------------------------------------------------
+# House styles — one-word direction presets
+# ---------------------------------------------------------------------------
+
+#: Named house styles: preset → director kwargs. The one-liner the
+#: module lacked: ``perform(text, **STYLE_PRESETS["audiobook"])``.
+#: ``pace`` maps to a speed multiplier the engine understands.
+STYLE_PRESETS: dict[str, dict] = {
+    "audiobook": {"mood": "calm", "intensity": 4, "effect": None,
+                  "speed": 0.95,
+                  "blurb": "Warm narrator, unhurried, clear chapter energy"},
+    "podcast": {"mood": "confident", "intensity": 5, "effect": None,
+                "speed": 1.05,
+                "blurb": "Present, conversational, leans into the mic"},
+    "announcement": {"mood": "confident", "intensity": 7, "effect": None,
+                     "speed": 1.0,
+                     "blurb": "Projected, crisp, every word lands"},
+    "bedtime": {"mood": "tender", "intensity": 2, "effect": None,
+                "speed": 0.85,
+                "blurb": "Soft, slow, lights-out storytelling"},
+    "hype": {"mood": "excited", "intensity": 8, "effect": None,
+             "speed": 1.15,
+             "blurb": "High voltage — trailers, intros, game shows"},
+    "documentary": {"mood": "thoughtful", "intensity": 4, "effect": None,
+                    "speed": 0.95,
+                    "blurb": "Measured gravity, Attenborough-adjacent"},
+    "comedy": {"mood": "playful", "intensity": 6, "effect": None,
+               "speed": 1.1,
+               "blurb": "Timing-forward, lands the punchline"},
+    "horror": {"mood": "fearful", "intensity": 6, "effect": None,
+               "speed": 0.9,
+               "blurb": "Low dread, whispers when it counts"},
+}

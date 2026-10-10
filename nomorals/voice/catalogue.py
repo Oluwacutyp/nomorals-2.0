@@ -82,6 +82,7 @@ class VoiceCatalogue:
         self.voices: dict[str, CatalogueVoice] = {}
         self.active: str = ""
         self.chat_overrides: dict[str, str] = {}
+        self.usage: dict[str, int] = {}
         self._load()
 
     # -- persistence -------------------------------------------------
@@ -99,6 +100,8 @@ class VoiceCatalogue:
                        for v in raw.get("voices", []) if v.get("name")}
         self.active = raw.get("active", "") or ""
         self.chat_overrides = dict(raw.get("chat_overrides", {}) or {})
+        self.usage = {k: int(v) for k, v in
+                      (raw.get("usage", {}) or {}).items()}
 
     def _save(self) -> None:
         try:
@@ -106,7 +109,8 @@ class VoiceCatalogue:
                 json.dump({"voices": [v.to_dict()
                                        for v in self.voices.values()],
                            "active": self.active,
-                           "chat_overrides": self.chat_overrides},
+                           "chat_overrides": self.chat_overrides,
+                           "usage": self.usage},
                           fh, indent=2)
         except OSError as e:
             _log.warning("voice catalogue save failed (%s): %s", self._path(), e)
@@ -153,8 +157,86 @@ class VoiceCatalogue:
         return [{"name": v.name, "backend": v.backend,
                  "profile": v.profile, "description": v.description,
                  "tags": list(v.tags),
-                 "active": v.name == self.active}
+                 "active": v.name == self.active,
+                 "uses": self.usage.get(v.name, 0)}
                 for v in self.voices.values()]
+
+    def search(self, query: str = "", *, backend: str = "",
+               tag: str = "") -> list[dict[str, Any]]:
+        """Find voices by name/description/tags/backend (all case-insensitive).
+
+        Empty query matches everything — the filtered voice browser.
+        """
+        q = (query or "").lower().strip()
+        be = (backend or "").lower().strip()
+        tg = (tag or "").lower().strip()
+        out = []
+        for v in self.list():
+            hay = f"{v['name']} {v['description']} {' '.join(v['tags'])}".lower()
+            if q and q not in hay:
+                continue
+            if be and be != v["backend"].lower():
+                continue
+            if tg and tg not in [t.lower() for t in v["tags"]]:
+                continue
+            out.append(v)
+        return out
+
+    def rename(self, old: str, new: str) -> CatalogueVoice:
+        """Rename a catalogue voice, preserving active/chat/usage links."""
+        new = self._check_name(new)
+        if old not in self.voices:
+            raise KeyError(f"unknown voice {old!r}")
+        if new in self.voices and new != old:
+            raise ValueError(f"voice {new!r} already exists")
+        voice = self.voices.pop(old)
+        voice.name = new
+        self.voices[new] = voice
+        if self.active == old:
+            self.active = new
+        self.chat_overrides = {
+            k: (new if v == old else v)
+            for k, v in self.chat_overrides.items()}
+        if old in self.usage:
+            self.usage[new] = self.usage.pop(old)
+        self._save()
+        return voice
+
+    def stats(self) -> dict[str, Any]:
+        """Usage counters + catalogue shape."""
+        return {
+            "voices": len(self.voices),
+            "active": self.active,
+            "total_uses": sum(self.usage.values()),
+            "by_voice": dict(sorted(self.usage.items(),
+                                    key=lambda kv: kv[1], reverse=True)),
+            "chat_overrides": len(self.chat_overrides),
+        }
+
+    def format_table(self) -> str:
+        """God-tier voice list — the readable catalogue card."""
+        voices = self.list()
+        if not voices:
+            return "🎭 voice catalogue — empty. Clone one with /voice clone."
+        bar = "─" * 52
+        lines = ["🎭 voice catalogue", bar]
+        for v in sorted(voices, key=lambda v: -v["uses"]):
+            star = "★ " if v["active"] else "  "
+            tags = f" [{', '.join(v['tags'])}]" if v["tags"] else ""
+            desc = f" — {v['description'][:40]}" if v["description"] else ""
+            lines.append(f"{star}{v['name']}  ·  {v['backend']}"
+                         f"{tags}{desc}")
+            if v["uses"]:
+                lines.append(f"    └ {v['uses']} uses")
+        lines.append(bar)
+        lines.append(f"{len(voices)} voices · active: "
+                     f"{self.active or 'none'}")
+        return "\n".join(lines)
+
+    def _record_use(self, name: str) -> None:
+        if name in self.voices:
+            self.usage[name] = self.usage.get(name, 0) + 1
+            self._save()
 
     # -- runtime switching --------------------------------------------
 
@@ -207,7 +289,10 @@ class VoiceCatalogue:
         director performance. Returns the engine result dict.
         """
         profile_name, backend = self.resolve(chat_key)
+        voice = self.active_for_chat(chat_key)
         engine = UniversalTTS(backend=backend, voices_dir=self.voices_dir)
+        if voice is not None:
+            self._record_use(voice.name)
         if perform:
             return engine.perform(text, voice_name=profile_name or None,
                                   out_path=out_path, mood=mood,
@@ -229,6 +314,7 @@ class VoiceCatalogue:
             raise KeyError(f"unknown voice {voice_name!r}")
         engine = UniversalTTS(backend=voice.backend,
                               voices_dir=self.voices_dir)
+        self._record_use(voice.name)
         return engine.speak(text, voice_name=voice.profile or None,
                             out_path=out_path)
 

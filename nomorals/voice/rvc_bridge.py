@@ -42,6 +42,7 @@ __all__ = [
     "detect_rvc",
     "convert",
     "list_models",
+    "model_info",
 ]
 
 
@@ -112,6 +113,35 @@ def list_models(models_dir: str = "") -> list[RVCModel]:
             out.append(RVCModel(name=stem, pth=p,
                                 index=idx if os.path.exists(idx) else ""))
     return out
+
+
+def model_info(name: str, models_dir: str = "") -> dict[str, Any]:
+    """Describe one RVC model: files, sizes, sidecars, usability.
+
+    Never raises — returns ``{"ok": False, "reason"}`` when the model
+    isn't found or no RVC runtime is installed.
+    """
+    probe = detect_rvc()
+    models = list_models(models_dir)
+    model = next((m for m in models if m.name == name), None)
+    if model is None:
+        return {"ok": False, "reason": f"model {name!r} not found",
+                "known_models": [m.name for m in models]}
+    info: dict[str, Any] = {
+        "ok": True, "name": model.name, "pth": model.pth,
+        "rvc": probe,
+    }
+    try:
+        info["pth_size_mb"] = round(os.path.getsize(model.pth) / 1e6, 1)
+    except OSError:
+        info["pth_size_mb"] = 0.0
+    info["index"] = model.index
+    info["has_index"] = bool(model.index)
+    info["convertible"] = probe.get("ok", False)
+    if not probe.get("ok"):
+        info["note"] = ("model files present but no RVC runtime "
+                        f"({probe.get('reason', 'unavailable')})")
+    return info
 
 
 def _read_wav(path: str) -> tuple[array, int]:

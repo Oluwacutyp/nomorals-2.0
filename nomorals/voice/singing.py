@@ -40,6 +40,8 @@ __all__ = [
     "Note",
     "parse_melody",
     "midi_to_hz",
+    "humanize",
+    "export_midi",
     "DiffSingerBackend",
     "sing",
 ]
@@ -54,10 +56,22 @@ def SVS_DIR() -> str:
 
 @dataclass
 class Note:
-    """One sung syllable."""
+    """One sung syllable — now with OpenUtau-style expression curves.
+
+    - ``dynamics``: DYN — per-note loudness 0.0–1.0 (default 0.8).
+    - ``breathiness``: BREC — airy mix 0.0–1.0 (default 0.0).
+    - ``tension``: TENC — vocal tension 0.0–1.0 (default 0.5); raises
+      vibrato depth and edge when high.
+    - ``vibrato``: multiplier on the default vibrato depth (0 = straight
+      tone, 2 = operatic).
+    """
     midi: int            # MIDI note number (60 = middle C)
     duration_s: float    # how long the syllable lasts
     lyric: str = ""      # the sung text ("-" = sustain, "SP" = rest)
+    dynamics: float = 0.8
+    breathiness: float = 0.0
+    tension: float = 0.5
+    vibrato: float = 1.0
 
 
 def midi_to_hz(midi: int) -> float:
@@ -67,8 +81,11 @@ def midi_to_hz(midi: int) -> float:
 def parse_melody(text: str) -> list[Note]:
     """Parse "C4:0.5:hello D4:0.5:world" or "60:0.5:hello" into Notes.
 
-    Note names: C0..B8 with optional # (C#4). Duration in seconds.
+    Note names: C0..B8 with optional #/b (C#4, Bb3). Duration in seconds.
     Lyric "-" sustains the previous syllable; "SP"/"rest" is silence.
+    A 4th colon-field carries expression modifiers, comma-separated::
+
+        "E4:1.2:love:vib=1.4,dyn=0.9 bre=0.3 ten=0.7"
     """
     _NAMES = {"C": 0, "D": 2, "E": 4, "F": 5, "G": 7, "A": 9, "B": 11}
     notes: list[Note] = []
@@ -78,6 +95,15 @@ def parse_melody(text: str) -> list[Note]:
             continue
         pitch_s, dur_s = parts[0], parts[1]
         lyric = parts[2] if len(parts) > 2 else ""
+        mods: dict[str, float] = {}
+        if len(parts) > 3:
+            for kv in parts[3].split(","):
+                if "=" in kv:
+                    k, v = kv.split("=", 1)
+                    try:
+                        mods[k.strip().lower()] = float(v)
+                    except ValueError:
+                        pass
         try:
             dur = float(dur_s)
         except ValueError:
@@ -93,13 +119,30 @@ def parse_melody(text: str) -> list[Note]:
             if i < len(m) and m[i] == "#":
                 semi += 1
                 i += 1
+            elif i < len(m) and m[i] == "B":
+                semi -= 1
+                i += 1
             try:
                 octave = int(m[i:])
             except ValueError:
                 continue
             midi = (octave + 1) * 12 + semi
-        notes.append(Note(midi=midi, duration_s=max(0.05, dur),
-                          lyric=lyric))
+        def _mod(*names: str, default: float) -> float:
+            for nm in names:
+                if nm in mods:
+                    return mods[nm]
+            return default
+
+        notes.append(Note(
+            midi=midi, duration_s=max(0.05, dur), lyric=lyric,
+            dynamics=min(1.0, max(0.0, _mod("dyn", "dynamics",
+                                            default=0.8))),
+            breathiness=min(1.0, max(0.0, _mod("bre", "breath",
+                                               "breathiness", default=0.0))),
+            tension=min(1.0, max(0.0, _mod("ten", "tension",
+                                            default=0.5))),
+            vibrato=max(0.0, _mod("vib", "vibrato", default=1.0)),
+        ))
     return notes
 
 
@@ -122,7 +165,12 @@ def _simple_g2p(word: str) -> list[str]:
 def _f0_curve(notes: list[Note], sr: int, hop: int = 256,
               vibrato_rate: float = 5.5,
               vibrato_depth: float = 0.6) -> list[float]:
-    """Per-frame f0 with portamento between notes and vibrato on sustains."""
+    """Per-frame f0 with portamento between notes and vibrato on sustains.
+
+    Each note's ``vibrato`` scales the depth; ``tension`` deepens it
+    further (tense voices wobble more) — the PEXP/TENC idea from
+    OpenUtau's DiffSinger expression set, applied to our curve.
+    """
     f0: list[float] = []
     prev_hz: Optional[float] = None
     for n in notes:
@@ -135,6 +183,7 @@ def _f0_curve(notes: list[Note], sr: int, hop: int = 256,
         frames = max(1, int(n.duration_s * sr / hop))
         # Portamento: glide from previous note over first 15% of frames
         glide = max(1, int(frames * 0.15)) if prev_hz else 0
+        depth = vibrato_depth * n.vibrato * (0.7 + 0.6 * n.tension)
         for i in range(frames):
             if i < glide and prev_hz:
                 t = i / glide
@@ -142,12 +191,134 @@ def _f0_curve(notes: list[Note], sr: int, hop: int = 256,
             else:
                 base = hz
             # Vibrato on sustained notes (not the attack)
-            if i > frames * 0.25 and n.duration_s > 0.3:
+            if i > frames * 0.25 and n.duration_s > 0.3 and depth > 0.01:
                 vib = math.sin(2 * math.pi * vibrato_rate * i * hop / sr)
-                base *= 2.0 ** (vib * vibrato_depth / 12.0 / 2.0)
+                base *= 2.0 ** (vib * depth / 12.0 / 2.0)
             f0.append(base)
         prev_hz = hz
     return f0
+
+
+def humanize(notes: list[Note], seed: int = 0,
+             timing_ms: float = 12.0, pitch_cents: float = 8.0) -> list[Note]:
+    """Anti-robot pass: tiny timing + pitch jitter per note.
+
+    Deterministic per seed. Returns NEW notes (input untouched).
+    ``timing_ms`` jitters durations, ``pitch_cents`` detunes the f0
+    curve seed — enough to kill the machine-gun effect, not enough to
+    sound out of tune.
+    """
+    import random
+    rng = random.Random(seed or 1)
+    out: list[Note] = []
+    for n in notes:
+        jitter = rng.uniform(-timing_ms, timing_ms) / 1000.0
+        detune = rng.uniform(-pitch_cents, pitch_cents) / 100.0
+        out.append(Note(
+            midi=n.midi, lyric=n.lyric,
+            duration_s=max(0.05, n.duration_s + jitter),
+            dynamics=min(1.0, max(0.0,
+                                  n.dynamics + rng.uniform(-0.05, 0.05))),
+            breathiness=n.breathiness, tension=n.tension,
+            vibrato=n.vibrato * (1.0 + detune * 0.1),
+        ))
+    return out
+
+
+def _apply_expression(samples: array, notes: list[Note],
+                      sr: int) -> array:
+    """DYN/BREC per-note expression on rendered audio (post-stage).
+
+    Note boundaries come from durations (the render is sequential, so
+    spans line up). Dynamics = per-note gain; breathiness = per-note
+    airy noise mix. Honest DSP on the waveform — the neural
+    DiffSinger bank renders the notes, this shapes their delivery.
+    """
+    from .emotion_dsp import add_breathiness
+    out = array("h", samples)
+    pos = 0
+    for n in notes:
+        span = int(n.duration_s * sr)
+        end = min(len(out), pos + span)
+        if end <= pos:
+            pos = end
+            continue
+        if abs(n.dynamics - 0.8) > 0.01:
+            gain = n.dynamics / 0.8
+            for i in range(pos, end):
+                out[i] = int(max(-32768, min(32767, out[i] * gain)))
+        if n.breathiness > 0.01:
+            seg = array("h", out[pos:end])
+            seg = add_breathiness(seg, sr,
+                                  amount=min(0.3, n.breathiness * 0.25))
+            out[pos:end] = seg
+        pos = end
+    return out
+
+
+def export_midi(notes: list[Note], path: str = "",
+                tempo_bpm: float = 120.0) -> str:
+    """Notes → Standard MIDI File (type 0), lyrics as meta events.
+
+    Pure stdlib SMF writer — drop the result into any DAW. Rests become
+    gaps; "-" sustains extend the previous note.
+    """
+    import struct as _struct
+    tpq = 480
+    us_per_beat = int(60_000_000 / max(20.0, tempo_bpm))
+    timeline: list[tuple[int, int, bytes]] = []  # (tick, order, data)
+    order = 0
+
+    def _at(tick: int, data: bytes) -> None:
+        nonlocal order
+        timeline.append((tick, order, data))
+        order += 1
+
+    def _varlen(value: int) -> bytes:
+        out = bytearray([value & 0x7F])
+        value >>= 7
+        while value:
+            out.insert(0, (value & 0x7F) | 0x80)
+            value >>= 7
+        out[-1] &= 0x7F
+        return bytes(out)
+
+    _at(0, b"\xff\x51\x03" + _struct.pack(">I", us_per_beat)[1:])
+    tick = 0
+    last_off_idx = -1  # timeline index of the most recent note-off
+    for n in notes:
+        dur_ticks = max(1, int(n.duration_s * tempo_bpm / 60.0 * tpq))
+        if n.lyric.upper() in ("SP", "REST"):
+            tick += dur_ticks
+            last_off_idx = -1
+            continue
+        if n.lyric == "-" and last_off_idx >= 0:
+            # sustain: push the previous note's note-off later
+            t, o, data = timeline[last_off_idx]
+            timeline[last_off_idx] = (t + dur_ticks, o, data)
+            tick += dur_ticks
+            continue
+        vel = int(40 + 80 * max(0.0, min(1.0, n.dynamics)))
+        _at(tick, bytes([0x90, n.midi & 0x7F, vel]))
+        lyric = n.lyric.encode("utf-8", "replace")[:127]
+        _at(tick, b"\xff\x05" + _varlen(len(lyric)) + lyric)
+        _at(tick + dur_ticks, bytes([0x80, n.midi & 0x7F, 0x40]))
+        last_off_idx = len(timeline) - 1
+        tick += dur_ticks
+    _at(tick, b"\xff\x2f\x00")  # end of track
+    timeline.sort(key=lambda e: (e[0], e[1]))
+    events = bytearray()
+    abs_tick = 0
+    for t, _o, data in timeline:
+        events.extend(_varlen(max(0, t - abs_tick)))
+        events.extend(data)
+        abs_tick = max(abs_tick, t)
+    track = (b"MTrk" + _struct.pack(">I", len(events)) + bytes(events))
+    header = (b"MThd" + _struct.pack(">IHHH", 6, 0, 1, tpq))
+    dest = path or "melody.mid"
+    with open(dest, "wb") as fh:
+        fh.write(header + track)
+    return dest
 
 
 class DiffSingerBackend:
@@ -234,6 +405,8 @@ class DiffSingerBackend:
             raise RuntimeError("voicebank has no vocoder.onnx")
         wav_f = np.clip(wav_f.flatten(), -1.0, 1.0)
         samples = array("h", (wav_f * 32767).astype(np.int16).tolist())
+        # DYN/BREC per-note expression (post-stage on the render)
+        samples = _apply_expression(samples, notes, sr)
         import tempfile
         out = tempfile.mktemp(prefix="sing_", suffix=".wav")
         with wave.open(out, "wb") as w:

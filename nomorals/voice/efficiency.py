@@ -32,8 +32,10 @@ class SegmentCache:
     Value: (samples_array, sample_rate). Persisted to disk.
     """
 
-    def __init__(self, max_entries: int = 500):
+    def __init__(self, max_entries: int = 500, ttl_s: float = 0.0):
         self.max_entries = max_entries
+        #: disk entries older than ttl_s are treated as misses (0 = forever)
+        self.ttl_s = ttl_s
         self._mem: OrderedDict[str, tuple[array, int]] = OrderedDict()
         self.dir = os.path.join(_cache_dir(), "segments")
         os.makedirs(self.dir, exist_ok=True)
@@ -62,6 +64,18 @@ class SegmentCache:
         # Disk fallback
         path = self._disk_path(key)
         if os.path.exists(path):
+            if self.ttl_s > 0:
+                try:
+                    age = time.time() - os.path.getmtime(path)
+                except OSError:
+                    age = 0.0
+                if age > self.ttl_s:
+                    try:
+                        os.remove(path)
+                    except OSError:
+                        pass
+                    self.misses += 1
+                    return None
             try:
                 import wave
                 with wave.open(path, "rb") as f:
@@ -104,6 +118,74 @@ class SegmentCache:
             "misses": self.misses,
             "hit_rate": self.hits / total if total else 0.0,
             "mem_entries": len(self._mem),
+        }
+
+    def invalidate(self, prefix: str = "") -> int:
+        """Drop cached entries whose key starts with ``prefix``.
+
+        Empty prefix clears the in-memory tier only (disk stays — it is
+        content-addressed and cheap). Returns entries dropped.
+        """
+        if not prefix:
+            n = len(self._mem)
+            self._mem.clear()
+            return n
+        doomed = [k for k in self._mem if k.startswith(prefix)]
+        for k in doomed:
+            del self._mem[k]
+            try:
+                os.remove(self._disk_path(k))
+            except OSError:
+                pass
+        return len(doomed)
+
+    def clear(self) -> dict[str, int]:
+        """Drop everything: memory + disk. Returns counts."""
+        mem = len(self._mem)
+        self._mem.clear()
+        disk = 0
+        try:
+            for entry in os.listdir(self.dir):
+                if entry.endswith(".wav"):
+                    try:
+                        os.remove(os.path.join(self.dir, entry))
+                        disk += 1
+                    except OSError:
+                        pass
+        except OSError:
+            pass
+        return {"mem_cleared": mem, "disk_cleared": disk}
+
+    def warm(self, entries: list[tuple[str, "array", int]]) -> int:
+        """Preload (key, samples, sample_rate) triples into memory."""
+        n = 0
+        for key, samples, sr in entries:
+            self._mem[key] = (samples, sr)
+            self._mem.move_to_end(key)
+            n += 1
+        while len(self._mem) > self.max_entries:
+            self._mem.popitem(last=False)
+        return n
+
+    def size_report(self) -> dict:
+        """Memory entries + disk footprint."""
+        disk_files, disk_bytes = 0, 0
+        try:
+            for entry in os.listdir(self.dir):
+                if entry.endswith(".wav"):
+                    disk_files += 1
+                    try:
+                        disk_bytes += os.path.getsize(
+                            os.path.join(self.dir, entry))
+                    except OSError:
+                        pass
+        except OSError:
+            pass
+        return {
+            "mem_entries": len(self._mem),
+            "disk_files": disk_files,
+            "disk_bytes": disk_bytes,
+            "disk_mb": round(disk_bytes / 1048576, 2),
         }
 
 
@@ -178,6 +260,12 @@ RESOURCE_BUDGETS = {
                    "phone": False, "quantized": False},
     "piper": {"vram_gb": 0.0, "ram_gb": 0.3,
               "phone": True, "quantized": True},
+    "kitten": {"vram_gb": 0.0, "ram_gb": 0.3,
+               "phone": True, "quantized": True},
+    "spark": {"vram_gb": 2.0, "ram_gb": 2.0,
+              "phone": False, "quantized": False},
+    "zonos": {"vram_gb": 6.0, "ram_gb": 8.0,
+              "phone": False, "quantized": False},
     "kokoro": {"vram_gb": 0.5, "ram_gb": 0.5,
                "phone": True, "quantized": True},
     "dia": {"vram_gb": 6.2, "ram_gb": 8.0,
