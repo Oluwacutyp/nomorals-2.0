@@ -49,6 +49,7 @@ from urllib.parse import urlparse
 from ..core.errors import ToolError
 from ..core.logging_setup import get_logger
 from ..core.policy import Capability
+from ..storage.kv import KVStore
 
 _log = get_logger(__name__)
 
@@ -1749,11 +1750,10 @@ class ProxyRotationManager:
         if db is None:
             return default
         try:
-            row = db.query_one("SELECT value FROM kv_store WHERE key = ?",
-                               (_ROTATE_KV,))
-            if row:
+            data = KVStore(db).get(_ROTATE_KV)
+            if data:
                 merged = dict(default)
-                merged.update(json.loads(row["value"]))
+                merged.update(data)
                 merged.setdefault("usage", {})
                 merged.setdefault("cooldown", {})
                 merged.setdefault("stats", default["stats"])
@@ -1767,14 +1767,8 @@ class ProxyRotationManager:
         if db is None:
             return
         try:
-            with db.transaction():
-                db.execute(
-                    "INSERT INTO kv_store (key, value, kind, updated_at) "
-                    "VALUES (?, ?, 'json', ?) "
-                    "ON CONFLICT(key) DO UPDATE SET value = excluded.value, "
-                    "updated_at = excluded.updated_at",
-                    (_ROTATE_KV, json.dumps(self.state, default=str),
-                     time.time()))
+            KVStore(db).set_raw(_ROTATE_KV,
+                                json.dumps(self.state, default=str), "json")
         except Exception as exc:  # noqa: BLE001
             _log.warning("could not persist rotation state: %s", exc)
 

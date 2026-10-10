@@ -43,6 +43,7 @@ from typing import Any
 from ..core.errors import ToolError
 from ..core.logging_setup import get_logger
 from ..core.policy import Capability
+from ..storage.kv import KVStore
 
 _log = get_logger(__name__)
 
@@ -322,9 +323,7 @@ class SshSocksManager:
         if db is None:
             return default
         try:
-            row = db.query_one("SELECT value FROM kv_store WHERE key = ?",
-                               (key,))
-            return json.loads(row["value"]) if row else default
+            return KVStore(db).get(key, default=default)
         except Exception:  # noqa: BLE001
             return default
 
@@ -333,13 +332,7 @@ class SshSocksManager:
         if db is None:
             return
         try:
-            with db.transaction():
-                db.execute(
-                    "INSERT INTO kv_store (key, value, kind, updated_at) "
-                    "VALUES (?, ?, 'json', ?) "
-                    "ON CONFLICT(key) DO UPDATE SET value = excluded.value, "
-                    "updated_at = excluded.updated_at",
-                    (key, json.dumps(value, default=str), time.time()))
+            KVStore(db).set_raw(key, json.dumps(value, default=str), "json")
         except Exception as exc:  # noqa: BLE001 - best-effort persistence
             _log.warning("could not persist ssh socks state: %s", exc)
 

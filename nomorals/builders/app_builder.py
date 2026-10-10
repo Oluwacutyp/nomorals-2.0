@@ -50,6 +50,7 @@ from typing import Any, Callable
 from ..core.errors import ToolError
 from ..core.logging_setup import get_logger
 from ..core.policy import Capability
+from ..storage.kv import KVStore
 
 _log = get_logger(__name__)
 
@@ -1805,23 +1806,13 @@ class AppBuilder:
         db = getattr(self.context, "db", None)
         if db is None:
             return {}
-        row = db.query_one("SELECT value FROM kv_store WHERE key=?", (key,))
-        if not row:
-            return {}
-        try:
-            return json.loads(row["value"])
-        except (json.JSONDecodeError, TypeError):
-            return {}
+        return KVStore(db).get(key, default={})
 
     def _kv_save(self, key: str, value: Any) -> None:
         db = getattr(self.context, "db", None)
         if db is None:
             return
-        db.execute(
-            "INSERT INTO kv_store (key, value, kind, updated_at) "
-            "VALUES (?, ?, 'json', ?) ON CONFLICT(key) DO UPDATE SET "
-            "value=excluded.value, updated_at=excluded.updated_at",
-            (key, json.dumps(value, default=str), time.time()))
+        KVStore(db).set_raw(key, json.dumps(value, default=str), "json")
 
     def serve(self, name: str, *, port: int = 0,
               wait: float = 20.0) -> dict[str, Any]:

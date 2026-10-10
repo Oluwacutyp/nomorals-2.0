@@ -30,6 +30,7 @@ from ..core.http import (
 )
 from ..core.logging_setup import get_logger
 from ..core.policy import Capability
+from ..storage.kv import KVStore
 
 _log = get_logger(__name__)
 
@@ -73,9 +74,9 @@ class ProxyManager:
         db = getattr(context, "db", None)
         if db is not None:
             try:
-                row = db.query_one("SELECT value FROM kv_store WHERE key = ?", (_KV_KEY,))
-                if row:
-                    self._active = str(json.loads(row["value"]).get("proxy") or "")
+                data = KVStore(db).get(_KV_KEY)
+                if data:
+                    self._active = str(data.get("proxy") or "")
             except Exception:  # noqa: BLE001
                 pass
 
@@ -177,12 +178,7 @@ class ProxyManager:
         db = getattr(self.context, "db", None)
         if db is not None:
             try:
-                with db.transaction():
-                    db.execute(
-                        "INSERT INTO kv_store (key, value, kind, updated_at) VALUES (?, ?, 'json', ?) "
-                        "ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
-                        (_KV_KEY, json.dumps({"proxy": url}), time.time()),
-                    )
+                KVStore(db).set(_KV_KEY, {"proxy": url})
             except Exception:  # noqa: BLE001 - apply anyway; persistence is best-effort
                 _log.warning("could not persist proxy choice", exc_info=True)
         _log.info("outbound proxy set to %s", url or "direct")
