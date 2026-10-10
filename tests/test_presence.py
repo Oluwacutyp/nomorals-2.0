@@ -277,13 +277,14 @@ class _RecordingAdapter(ChatAdapter):
         while not self.stopped:
             time.sleep(0.01)
 
-    def typing(self, chat: ChatRef, seconds: float = 3.0) -> bool:
+    def typing(self, chat: ChatRef, seconds: float = 3.0, action: str = "typing") -> bool:
         # Record instead of blocking: the e2e test is about pacing shape,
         # not about actually waiting out the typing indicator.
         self.typing_durations.append(seconds)
         return True
 
-    def send(self, chat: ChatRef, text: str, *, reply_to: str = "") -> SendResult:
+    def send(self, chat: ChatRef, text: str, *, reply_to: str = "",
+             buttons: Any = None, parse_mode: str = "") -> SendResult:
         self.sent.append(text)
         return SendResult(ok=True, platform=self.name, message_id=f"m{len(self.sent)}")
 
@@ -326,6 +327,12 @@ class RuntimePresenceE2E(unittest.TestCase):
         self.gateway = ChatGateway({"local": self.adapter}, db=self.context.db)
         self.runtime = PartnerRuntime(self.context, gateway=self.gateway)
         self.chat = ChatRef(platform="local", chat_id="owner", kind=ChatKind.DM, peer="you")
+        from nomorals.agents.morning_briefing import _today_str
+        self.context.db.execute(
+            "INSERT OR REPLACE INTO briefings (id, date, sections_json, generated_at)"
+            " VALUES (?, ?, '[]', ?)",
+            ("test-seed", _today_str(self.context), time.time()),
+        )
 
     def tearDown(self) -> None:
         try:

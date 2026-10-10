@@ -92,7 +92,10 @@ VIDEO_ACTIONS = {"trim", "concat", "transcode", "extract_frames",
                  "extract_audio", "make_gif", "burn_subtitles",
                  "speed", "fade", "overlay_text",
                  "transition", "effect", "speed_ramp",
-                 "ducking", "mix_audio"}
+                 "ducking", "mix_audio",
+                 # sweep(media_edit) additions
+                 "loudnorm", "watermark", "rotate_video",
+                 "flip_video", "concat_normalized"}
 
 
 def _dispatch_video(action: dict[str, Any], src: Path,
@@ -167,6 +170,24 @@ def _dispatch_video(action: dict[str, Any], src: Path,
             from ..media_edit.images import MediaEditError
             raise MediaEditError("mix_audio needs an 'audio' file")
         return videos.mix_audio(src, _sandbox(context, audio), **kw)
+    # sweep(media_edit) new ops
+    if name == "loudnorm":
+        return videos.loudnorm(src, **kw)
+    if name == "watermark":
+        logo = kw.pop("logo", None)
+        if not logo:
+            from ..media_edit.images import MediaEditError
+            raise MediaEditError("watermark needs a 'logo' image file")
+        return videos.watermark(src, _sandbox(context, logo), **kw)
+    if name == "rotate_video":
+        angle = kw.pop("angle", 90)
+        return videos.rotate_video(src, angle, **kw)
+    if name == "flip_video":
+        return videos.flip_video(src, **kw)
+    if name == "concat_normalized":
+        sources = kw.pop("sources", None) or []
+        others = [str(_sandbox(context, s)) for s in sources]
+        return videos.concat_normalized([src] + others, **kw)
     raise AssertionError("unreachable")
 
 
