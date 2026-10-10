@@ -228,6 +228,46 @@ def _wan22_t2v_workflow(*, prompt: str, negative_prompt: str | None,
     return wf
 
 
+def _wan22_i2v_workflow(*, image_name: str, prompt: str,
+                        negative_prompt: str | None,
+                        width: int | None, height: int | None,
+                        num_frames: int, steps: int | None,
+                        seed: int | None, cfg: float | None,
+                        model_file: str | None,
+                        vae_file: str | None) -> dict[str, Any]:
+    """Parameterize the wan22_i2v template (image-to-video).
+
+    Same node discipline as the t2v path; the start frame is uploaded
+    first and referenced by the LoadImage node. A server that rejects
+    the Wan node types raises with _WAN_WORKFLOW_NOTE.
+    """
+    if num_frames < 1:
+        raise GenerativeEditError(
+            f"num_frames must be >= 1, got {num_frames}")
+    wf = _load_workflow("wan22_i2v")
+    if model_file:
+        _single(wf, "WanVideoModelLoader")["inputs"]["model"] = model_file
+    if vae_file:
+        _single(wf, "WanVideoVAELoader")["inputs"]["model"] = vae_file
+    _single(wf, "LoadImage")["inputs"]["image"] = image_name
+    enc = _single(wf, "WanVideoTextEncode")["inputs"]
+    enc["positive_prompt"] = prompt
+    enc["negative_prompt"] = negative_prompt or ""
+    w, h = int(width or 1280), int(height or 720)
+    node = _single(wf, "WanVideoImageEncode")["inputs"]
+    node["width"] = w
+    node["height"] = h
+    node["num_frames"] = int(num_frames)
+    sampler = _single(wf, "WanVideoSampler")["inputs"]
+    sampler["seed"] = int(seed) if seed is not None else _random_seed()
+    if steps:
+        sampler["steps"] = int(steps)
+    if cfg:
+        sampler["cfg"] = float(cfg)
+    sampler["num_frames"] = int(num_frames)
+    return wf
+
+
 # ---------------------------------------------------------------------------
 # backend
 # ---------------------------------------------------------------------------
@@ -594,6 +634,59 @@ class ComfyUIBackend(GenerativeBackend):
                         f"{exc}\n{_WAN_WORKFLOW_NOTE}") from exc
                 raise
             _log.info("comfy video prompt %s submitted", prompt_id)
+            entry = self._wait(prompt_id, progress_cb)
+            return self._download_videos(entry, out_dir)[0]
+        finally:
+            sem.release()
+
+    def img2video(self, image: Any, prompt: str, *, duration_s: int = 5,
+                  fps: int = 16, seed: int | None = None,
+                  negative_prompt: str | None = None,
+                  steps: int | None = None,
+                  cfg: float | None = None,
+                  width: int | None = None, height: int | None = None,
+                  model_file: str | None = None,
+                  vae_file: str | None = None,
+                  out_dir: str | Path | None = None,
+                  progress_cb: Callable[[float], None] | None = None
+                  ) -> Path:
+        """Image-to-video via the wan22_i2v workflow (Wan 2.2).
+
+        The start frame is uploaded to ComfyUI first, then animated by
+        the prompt. Returns the local mp4 path. Same GPU-lock and
+        node-error discipline as :meth:`generate_video`.
+        """
+        if not prompt or not prompt.strip():
+            raise GenerativeEditError("image-to-video needs a prompt")
+        duration_s = int(duration_s)
+        if duration_s < 1:
+            raise GenerativeEditError(
+                f"duration_s must be >= 1, got {duration_s}")
+        img_name = self._upload_image(
+            image, f"devon_i2v_{uuid.uuid4().hex}.png")
+        num_frames = max(1, duration_s * int(fps))
+        wf = _wan22_i2v_workflow(
+            image_name=img_name, prompt=prompt,
+            negative_prompt=negative_prompt,
+            width=width, height=height, num_frames=num_frames,
+            steps=steps, seed=seed, cfg=cfg,
+            model_file=model_file, vae_file=vae_file)
+        _log.info("comfy i2v %ds@%dfps (%d frames) image=%s prompt=%.60r",
+                  duration_s, fps, num_frames, img_name, prompt)
+        sem = self._sem
+        if not sem.acquire(timeout=self.queue_timeout_s):
+            raise GenerativeEditError(
+                "timed out waiting for the ComfyUI GPU lock after "
+                f"{self.queue_timeout_s:.0f}s — another generation is running")
+        try:
+            try:
+                prompt_id = self._submit(wf)
+            except GenerativeEditError as exc:
+                if "rejected the workflow" in str(exc):
+                    raise GenerativeEditError(
+                        f"{exc}\n{_WAN_WORKFLOW_NOTE}") from exc
+                raise
+            _log.info("comfy i2v prompt %s submitted", prompt_id)
             entry = self._wait(prompt_id, progress_cb)
             return self._download_videos(entry, out_dir)[0]
         finally:

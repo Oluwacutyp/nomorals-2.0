@@ -177,6 +177,43 @@ def upscale(img: Any, scale: float = 4.0, *,
     return Image.fromarray(out)
 
 
+#: Asset type → (model, why). The upscaler choice is asset-dependent:
+#: photos get the general GAN, anime/illustration gets the anime-tuned
+#: net, and documents/diagrams/screenshots get x2 (fidelity over
+#: invention — diffusion SR hallucinates text, so SUPIR is never routed
+#: here; call ``upscale(model="supir")`` explicitly for rescue jobs).
+ASSET_MODELS: dict[str, dict[str, str]] = {
+    "photo": {"model": "RealESRGAN_x4plus",
+              "why": "general x4 GAN — fast, geometry-preserving"},
+    "anime": {"model": "RealESRGAN_x4plus_anime_6B",
+              "why": "anime/illustration-tuned x4 (photo models smear "
+                     "flat art)"},
+    "document": {"model": "RealESRGAN_x2plus",
+                 "why": "x2 fidelity for text/diagrams — never invent "
+                        "detail in text"},
+}
+
+
+def upscale_auto(img: Any, *, kind: str = "photo",
+                 allow_fallback: bool = False) -> tuple[Any, dict[str, Any]]:
+    """Upscale with the right model for the asset type.
+
+    ``kind``: "photo" | "anime" | "document". Returns (image, info) where
+    info names the model chosen and why — so the choice is inspectable,
+    not magic.
+    """
+    kind = (kind or "photo").strip().lower()
+    if kind not in ASSET_MODELS:
+        raise UpscaleError(
+            f"unknown asset kind {kind!r}; use {sorted(ASSET_MODELS)}")
+    pick = ASSET_MODELS[kind]
+    info = MODELS[pick["model"]]
+    out = upscale(img, scale=float(info["scale"]), model=pick["model"],
+                  allow_fallback=allow_fallback)
+    return out, {"kind": kind, "model": pick["model"],
+                 "scale": info["scale"], "why": pick["why"]}
+
+
 def _supir(img: Any, scale: float) -> Any:
     """SUPIR rescue mode — workstation profile only, drives the SUPIR
     repo's own CLI.

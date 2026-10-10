@@ -259,6 +259,95 @@ def _run_latentsync(video: Path, audio: Path, out: Path) -> Path:
 
 
 # ---------------------------------------------------------------------------
+# Wav2Lip backend (lightweight alternative to LatentSync)
+# ---------------------------------------------------------------------------
+# Wav2Lip (Rudrabha/Wav2Lip, IIIT-H) is the strongest *lightweight* lip-sync
+# baseline: accurate sync at ~25 fps on CPU-class hardware, at the cost of a
+# static head (it repaints the mouth region onto the still video instead of
+# diffusing the whole frame). Pick it when the GPU can't run LatentSync.
+# License note: Wav2Lip's weights bar commercial use — the backend warns.
+
+WAV2LIP_SETUP = """Wav2Lip is not configured. Set it up:
+  git clone https://github.com/Rudrabha/Wav2Lip
+  cd Wav2Lip && pip install -r requirements.txt
+  # download checkpoints/wav2lip_gan.pth (see the Wav2Lip README)
+  export WAV2LIP_REPO=/path/to/Wav2Lip
+  # if the repo lives in its own venv:
+  export WAV2LIP_PYTHON=/path/to/Wav2Lip/.venv/bin/python"""
+WAV2LIP_CKPT = "checkpoints/wav2lip_gan.pth"
+
+
+def wav2lip_repo() -> Path:
+    """Resolve the Wav2Lip checkout. Raises NotConfigured when missing."""
+    raw = (os.environ.get("WAV2LIP_REPO") or "").strip()
+    if not raw:
+        raise NotConfigured(WAV2LIP_SETUP)
+    repo = Path(raw).expanduser()
+    script = repo / "inference.py"
+    if not script.exists():
+        raise NotConfigured(
+            f"WAV2LIP_REPO={repo} has no inference.py — "
+            "is it a real Wav2Lip checkout?\n" + WAV2LIP_SETUP)
+    return repo
+
+
+def wav2lip_python() -> str:
+    """Python interpreter to run the repo with (venv-aware)."""
+    return (os.environ.get("WAV2LIP_PYTHON") or "").strip() or sys.executable
+
+
+def wav2lip_available() -> tuple[bool, str]:
+    """(True, '') when Wav2Lip can render right now."""
+    try:
+        repo = wav2lip_repo()
+    except NotConfigured as exc:
+        return (False, str(exc).splitlines()[0])
+    ckpt = repo / WAV2LIP_CKPT
+    if not ckpt.exists():
+        return (False, f"Wav2Lip checkpoint missing at {ckpt}")
+    return (True, f"Wav2Lip ready at {repo}")
+
+
+def _run_wav2lip(video: Path, audio: Path, out: Path) -> Path:
+    """Drive Wav2Lip's documented inference CLI. Verifies the output."""
+    repo = wav2lip_repo()
+    ckpt = (os.environ.get("WAV2LIP_CKPT") or "").strip()
+    ckpt_path = Path(ckpt) if ckpt else repo / WAV2LIP_CKPT
+    if not ckpt_path.exists():
+        raise NotConfigured(
+            f"Wav2Lip checkpoint not found at {ckpt_path} — "
+            "download wav2lip_gan.pth into the repo's checkpoints/ "
+            "(see the Wav2Lip README).")
+    _log.warning("avatar: Wav2Lip weights are research-only (no commercial "
+                 "use) — prefer LatentSync for anything public")
+    cmd = [
+        wav2lip_python(), "inference.py",
+        "--checkpoint", str(ckpt_path),
+        "--face", str(video),
+        "--audio", str(audio),
+        "--outfile", str(out),
+    ]
+    _log.info("avatar: running Wav2Lip")
+    try:
+        proc = subprocess.run(
+            cmd, cwd=str(repo), capture_output=True, text=True,
+            timeout=3600)
+    except OSError as exc:
+        raise AvatarError(
+            f"could not start Wav2Lip ({wav2lip_python()}): {exc}"
+        ) from exc
+    if proc.returncode != 0:
+        tail = (proc.stderr or proc.stdout or "")[-1500:]
+        raise AvatarError(
+            f"Wav2Lip failed (exit {proc.returncode}):\n{tail}")
+    if not out.exists() or out.stat().st_size == 0:
+        raise AvatarError(
+            "Wav2Lip exited 0 but produced no video — "
+            "check the repo's logs above for face-detection failures")
+    return out
+
+
+# ---------------------------------------------------------------------------
 # public API
 # ---------------------------------------------------------------------------
 
@@ -270,12 +359,32 @@ def talking_head(photo: str | os.PathLike[str],
                  workdir: str | os.PathLike[str] | None = None) -> Path:
     """Photo + audio/text → talking-head mp4.
 
-    ``backend="latentsync"``: local LatentSync (zero per-minute cost).
+    ``backend="latentsync"``: local LatentSync (zero per-minute cost,
+    best quality).
+    ``backend="wav2lip"``: local Wav2Lip — lighter/faster, static head,
+    research-only license. Pick it when the GPU can't run LatentSync.
     ``backend="echomimic"``: EchoMimicV2 upgrade path — honest stub.
     ``backend="api"``: PrunaAI P-Video — honest stub.
     Returns the output mp4 Path. Never fakes a video.
     """
     backend = (backend or "latentsync").lower()
+    if backend == "wav2lip":
+        photo_p = Path(str(photo)).expanduser()
+        work = Path(workdir).expanduser() if workdir else Path(
+            tempfile.mkdtemp(prefix="avatar-"))
+        work.mkdir(parents=True, exist_ok=True)
+        _log.info("avatar: stage 1/3 — audio")
+        audio_path, _synth = _resolve_audio(audio_or_text, voice=voice,
+                                            workdir=work)
+        duration = _audio_duration_s(audio_path)
+        _log.info("avatar: stage 2/3 — still video (%.1fs)", duration)
+        still = _photo_to_video(photo_p, duration, work)
+        dest = Path(str(out_path)).expanduser() if out_path else \
+            work / f"talking-head-{int(time.time())}.mp4"
+        _log.info("avatar: stage 3/3 — Wav2Lip lip-sync")
+        result = _run_wav2lip(still, audio_path, dest)
+        _log.info("avatar: done → %s", result)
+        return result
     if backend == "echomimic":
         raise NotConfigured(
             "EchoMimicV2 is not wired yet (upgrade path for half-body "
@@ -294,7 +403,8 @@ def talking_head(photo: str | os.PathLike[str],
             "Then ask for the API backend to be implemented.")
     if backend != "latentsync":
         raise AvatarError(
-            f"unknown avatar backend {backend!r}; use latentsync|echomimic|api")
+            f"unknown avatar backend {backend!r}; "
+            "use latentsync|wav2lip|echomimic|api")
 
     photo_p = Path(str(photo)).expanduser()
     work = Path(workdir).expanduser() if workdir else Path(
@@ -318,9 +428,14 @@ def talking_head(photo: str | os.PathLike[str],
 def list_backends() -> list[dict[str, Any]]:
     """Introspection: what avatar backends exist and their state."""
     ok, reason = avatar_available()
+    wok, wreason = wav2lip_available()
     return [
         {"name": "latentsync", "kind": "local", "cost": "free",
          "available": ok, "note": reason or "ready"},
+        {"name": "wav2lip", "kind": "local", "cost": "free",
+         "available": wok,
+         "note": (wreason or "ready — lighter/faster, static head, "
+                  "research-only license")},
         {"name": "echomimic", "kind": "local", "cost": "free",
          "available": False,
          "note": "upgrade path (half-body) — not implemented"},

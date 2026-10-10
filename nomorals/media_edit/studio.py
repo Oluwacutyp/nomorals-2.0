@@ -356,6 +356,36 @@ FILTER_PRESETS: dict[str, dict[str, Any]] = {
         "temperature": 0.12, "lift": (0.06, 0.05, 0.04),
         "contrast": 0.88, "saturation": 0.95,
     },
+    # --- sweep additions: mined from viral creator looks ------------------
+    "cyberpunk": {
+        "shadows": ((64, 0, 128), 0.50),
+        "highlights": ((0, 255, 255), 0.35),
+        "temperature": -0.10, "saturation": 1.30, "contrast": 1.15,
+        "vignette": 0.30,
+    },
+    "moody": {
+        "lift": (-0.05, -0.05, -0.04), "contrast": 1.18,
+        "saturation": 0.72, "temperature": -0.06, "vignette": 0.45,
+        "grain": 5.0,
+    },
+    "pastel-pop": {
+        "lift": (0.10, 0.09, 0.10), "contrast": 0.92,
+        "saturation": 1.28, "vibrance": 0.25, "temperature": 0.06,
+    },
+    "street": {
+        "contrast": 1.22, "saturation": 0.88,
+        "shadows": ((20, 20, 40), 0.35),
+        "highlights": ((255, 220, 170), 0.25), "grain": 4.0,
+        "vignette": 0.25,
+    },
+    "clean-film": {
+        "lift": (0.04, 0.04, 0.04), "contrast": 0.95,
+        "saturation": 1.02, "temperature": 0.03, "grain": 2.5,
+    },
+    "anime-soft": {
+        "saturation": 1.35, "contrast": 1.05, "vibrance": 0.30,
+        "lift": (0.03, 0.03, 0.05), "temperature": 0.04,
+    },
 }
 
 _MULT_KEYS = {"saturation", "contrast"}
@@ -395,6 +425,42 @@ def op_filter(img: Any, preset: str, *, strength: float = 1.0) -> Any:
             f"unknown filter preset {preset!r}; choose from "
             f"{sorted(FILTER_PRESETS)}")
     return op_grade(img, **_scale_preset(FILTER_PRESETS[name], strength))
+
+
+def grade_video_lut(src: str | os.PathLike[str], cube: str | os.PathLike[str],
+                    *, strength: float = 1.0,
+                    out_dir: str | os.PathLike[str] | None = None,
+                    suffix: str = "graded",
+                    timeout: float = 600.0) -> dict[str, Any]:
+    """Grade a video with a professional ``.cube`` 3D LUT via ffmpeg.
+
+    Uses ``lut3d=interp=tetrahedral`` (the DaVinci-grade interpolation).
+    ``strength`` blends graded ↔ original with the ``mix`` filter so a
+    look can be dialed back like a LUT layer opacity in Premiere.
+    Returns the usual ``{"output": ...}`` dict.
+    """
+    from .videos import _out, run_ffmpeg, video_probe
+    src_p = Path(src)
+    cube_p = Path(cube)
+    if not src_p.exists():
+        raise MediaEditError(f"no such video: {src_p}")
+    if not cube_p.exists():
+        raise MediaEditError(f"no such .cube LUT: {cube_p}")
+    strength = max(0.0, min(1.0, float(strength)))
+    info = video_probe(src_p)
+    pix = (info.get("pix_fmt") or "yuv420p")
+    vf = (f"[0:v]format=rgb24,lut3d='{cube_p}':interp=tetrahedral,"
+          f"format={pix}[graded];"
+          f"[0:v]format={pix}[orig];"
+          f"[graded][orig]mix=inputs=2:duration=first:weights='{strength} 1'[v]")
+    out = _out(src_p, Path(out_dir) if out_dir else None, suffix, ".mp4")
+    args = ["-i", str(src_p), "-filter_complex", vf,
+            "-map", "[v]", "-map", "0:a?", "-c:a", "copy",
+            "-c:v", "libx264", "-crf", "18", "-preset", "medium",
+            str(out)]
+    run_ffmpeg(args, timeout=timeout)
+    return {"output": str(out), "lut": str(cube_p), "strength": strength,
+            "bytes": out.stat().st_size}
 
 
 def op_letterbox(img: Any, aspect: str = "21:9",
@@ -1676,10 +1742,55 @@ class EditStudio:
             lines.append(f"  ({len(self._undone)} undone)")
         return "\n".join(lines)
 
+    def report(self, theme: str = "rich") -> str:
+        """A presentation-grade session summary.
+
+        ``theme="rich"`` (default): emoji markers, boxed header, per-op
+        status glyphs — the summary you'd paste into chat. ``theme="plain"``:
+        the same content as :meth:`describe` without decoration.
+        """
+        theme = (theme or "rich").lower()
+        if theme not in ("rich", "plain"):
+            raise MediaEditError(
+                f"unknown report theme {theme!r}; use rich|plain")
+        if theme == "plain":
+            return self.describe()
+        kind = self._resolve_kind()
+        bar = "═" * 46
+        lines = [f"╔{bar}╗",
+                 f"║  🎬 {self.name[:36]:<36} ║",
+                 f"║  {kind:<10} · {len(self.ops):<3} ops"
+                 f" · {len(self._undone)} undone{' ' * 17}║",
+                 f"╚{bar}╝"]
+        if self.source:
+            lines.append(f"📁 source: {self.source}")
+        glyph = {"filter": "🎨", "grade": "🌈", "text_layer": "🔤",
+                 "composite": "🖼️", "meme": "😂", "collage": "🧩",
+                 "smart_crop": "✂️", "letterbox": "🎞️", "cube_lut": "🎛️"}
+        for i, op in enumerate(self.ops, 1):
+            g = glyph.get(op["op"], "⚙️")
+            params = ", ".join(f"{k}={v}" for k, v in op["params"].items())
+            label = op.get("label") or op["op"]
+            lines.append(f"  {g} {i}. {label}"
+                         + (f"  ({params})" if params else ""))
+        if self._undone:
+            lines.append(f"  ↩️  {len(self._undone)} op(s) undone — "
+                         "redo() to bring back")
+        return "\n".join(lines)
+
     # -- image conveniences ----------------------------------------------
     def filter(self, preset: str, strength: float = 1.0) -> "EditStudio":
         return self._push("filter", {"preset": preset, "strength": strength},
                           f"filter:{preset}")
+
+    def lut(self, cube: str | os.PathLike[str]) -> "EditStudio":
+        """Apply a professional ``.cube`` 3D LUT (photographer looks).
+
+        Chains the ``cube_lut`` op (trilinear, from :mod:`.cv_ops`) so the
+        LUT participates in undo/redo, save/load and batch like any op.
+        """
+        return self._push("cube_lut", {"lut": str(cube)},
+                          f"lut:{Path(cube).name}")
 
     def grade(self, **kwargs: Any) -> "EditStudio":
         return self._push("grade", kwargs, "grade")

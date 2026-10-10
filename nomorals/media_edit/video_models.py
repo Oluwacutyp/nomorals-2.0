@@ -146,6 +146,28 @@ VIDEO_MODELS: dict[str, dict[str, Any]] = {
         "setup": "set KLING_API_KEY (https://klingai.com)",
         "capabilities": ("video", "video_motion"),
     },
+    "ltx-2.3": {
+        # Local speed king + the only open model with native synchronized
+        # audio (22B DiT). Community license: free under $10M revenue.
+        # No ComfyUI template ships with Devon yet — the route carries
+        # workflow=None and setup text; bring your own LTX workflow JSON.
+        "license": "LTX-2 Community License (free <$10M revenue)",
+        "vram_gb": 24,
+        "speed": "fast",
+        "quality": 5,
+        "backend": "comfy",
+        "workflow": None,
+        "model_file": "ltx-2.3-22b-distilled.safetensors",
+        "vae_file": None,
+        "fps": 24,
+        "max_duration_s": 20,
+        "paid": False,
+        "key_env": (),
+        "setup": ("local LTX-2.3 needs a workstation + ComfyUI with the "
+                  "LTX nodes installed, and your own LTX workflow template "
+                  "(none ships with Devon yet)"),
+        "capabilities": ("video",),
+    },
 }
 
 INTENTS = ("video", "video_hero", "video_motion")
@@ -218,6 +240,10 @@ class VideoModelRouter:
       the free fallback → error.
     - ``motion``: Kling API (paid, needs a key) → local Wan 2.2 → error.
 
+    ``prefer="ltx"`` swaps the local pick to LTX-2.3 (faster, native
+    synchronized audio) when the workstation + ComfyUI path is up; the
+    route notes that no LTX workflow template ships yet.
+
     Profiles other than workstation never get the local path (no local
     GPU to speak of): termux/laptop go straight to configured APIs.
     Never fakes: raises :class:`VideoModelError` when nothing can serve.
@@ -250,7 +276,8 @@ class VideoModelRouter:
     # -- routing -------------------------------------------------------------
     def route(self, intent: str = "video", *,
               profile: str | None = None,
-              budget: str = "standard") -> VideoRoute:
+              budget: str = "standard",
+              prefer: str = "wan") -> VideoRoute:
         intent = (intent or "video").strip().lower()
         if intent not in INTENTS:
             raise VideoModelError(
@@ -259,25 +286,29 @@ class VideoModelRouter:
         if budget not in BUDGETS:
             raise VideoModelError(
                 f"unknown video budget {budget!r}; use {BUDGETS}")
+        prefer = (prefer or "wan").strip().lower()
+        if prefer not in ("wan", "ltx"):
+            raise VideoModelError(
+                f"unknown local preference {prefer!r}; use wan|ltx")
         profile = ((profile or get_profile_kind()) or "").strip().lower()
 
         local_ok = profile == "workstation" and _comfy_reachable()
 
-        # 1. local Wan 2.2 (free, Apache 2.0) — preferred for standard,
+        # 1. local open models (free) — preferred for standard,
         #    fallback for hero/motion when the paid key is missing.
         if local_ok:
-            wan = self._pick_wan()
+            local = self._pick_ltx() if prefer == "ltx" else self._pick_wan()
             if budget == "standard":
-                return wan
-            # hero/motion: paid API first, Wan as the honest free fallback.
+                return local
+            # hero/motion: paid API first, local as the honest free fallback.
             api_name = _BUDGET_API[budget]
             api = self.registry[api_name]
             if _api_configured(api):
                 return self._api_route(api_name, api, budget, profile,
                                        reason_suffix="key configured")
             _log.info("video route: %s not configured; falling back to %s",
-                      api_name, wan.model)
-            return wan
+                      api_name, local.model)
+            return local
 
         # 2. no local path — configured paid API by budget.
         api_name = _BUDGET_API[budget]
@@ -299,6 +330,21 @@ class VideoModelRouter:
         problems.append(f"{api_name}: {api['setup']}")
         raise VideoModelError(
             "no video model available — " + "; ".join(problems))
+
+    def _pick_ltx(self) -> VideoRoute:
+        """LTX-2.3 local route: fastest open model, native synced audio.
+
+        No ComfyUI template ships with Devon, so the route's workflow is
+        None and the reason says exactly what to bring. Never fakes a
+        renderable path.
+        """
+        m = self.registry["ltx-2.3"]
+        return VideoRoute(
+            backend="comfy", model="ltx-2.3", workflow=None, paid=False,
+            fps=m["fps"], max_duration_s=m["max_duration_s"],
+            reason=("ltx-2.3 via comfy (fast, native synchronized audio): "
+                    "no workflow template ships with Devon — supply your "
+                    "own LTX ComfyUI workflow JSON"))
 
     def _pick_wan(self) -> VideoRoute:
         """wan22-14b when VRAM allows, else wan22-5b. Unprobed VRAM

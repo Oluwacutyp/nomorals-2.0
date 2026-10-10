@@ -647,6 +647,158 @@ def effect(src: str | os.PathLike[str],
             "filter": vf, "bytes": out.stat().st_size}
 
 
+def loudnorm(src: str | os.PathLike[str], *,
+             target_i: float = -16.0, target_tp: float = -1.5,
+             target_lra: float = 11.0,
+             out_dir: str | os.PathLike[str] | None = None,
+             suffix: str = "loudnorm", ext: str = ".mp4",
+             timeout: float = FFMPEG_TIMEOUT,
+             progress_cb: Callable[[float], None] | None = None
+             ) -> dict[str, Any]:
+    """EBU R128 loudness normalization (the social-delivery standard).
+
+    Single-pass ``loudnorm`` to integrated ``target_i`` LUFS — the same
+    per-clip normalization pro pipelines run *before* mixing, so dialogue
+    from different sources lands at the same perceived volume. Video is
+    re-encoded (CRF 18); audio becomes 48 kHz AAC.
+    """
+    p = Path(src)
+    if not p.exists():
+        raise MediaEditError(f"no such video: {src}")
+    _check_size(p)
+    out = _out(p, Path(out_dir) if out_dir else None, suffix, ext)
+    info = video_probe(p)
+    af = (f"loudnorm=I={target_i}:TP={target_tp}:LRA={target_lra}")
+    run_ffmpeg(["-i", str(p), "-af", af,
+                "-c:v", "libx264", "-preset", "fast", "-crf", "18",
+                "-c:a", "aac", "-ar", "48000", "-b:a", "192k",
+                str(out)],
+               timeout=timeout, progress_cb=progress_cb,
+               duration=info.get("duration"))
+    return {"input": str(p), "output": str(out), "filter": af,
+            "target_lufs": target_i, "bytes": out.stat().st_size}
+
+
+def watermark(src: str | os.PathLike[str],
+              logo: str | os.PathLike[str], *,
+              position: str = "bottom-right",
+              opacity: float = 0.7, margin: int = 24,
+              scale: float | None = None,
+              out_dir: str | os.PathLike[str] | None = None,
+              suffix: str = "watermarked", ext: str = ".mp4",
+              timeout: float = FFMPEG_TIMEOUT,
+              progress_cb: Callable[[float], None] | None = None
+              ) -> dict[str, Any]:
+    """Burn a logo bug onto the video via the ``overlay`` filter.
+
+    ``position``: bottom-right | bottom-left | top-right | top-left |
+    center. ``scale`` resizes the logo to a fraction of the video width
+    (e.g. 0.15). Alpha in the logo PNG is honoured; ``opacity`` fades it.
+    """
+    p = Path(src)
+    logo_p = Path(logo)
+    if not p.exists():
+        raise MediaEditError(f"no such video: {src}")
+    if not logo_p.exists():
+        raise MediaEditError(f"no such logo: {logo}")
+    _check_size(p)
+    positions = {
+        "bottom-right": ("W-w-{m}", "H-h-{m}"),
+        "bottom-left": ("{m}", "H-h-{m}"),
+        "top-right": ("W-w-{m}", "{m}"),
+        "top-left": ("{m}", "{m}"),
+        "center": ("(W-w)/2", "(H-h)/2"),
+    }
+    if position not in positions:
+        raise MediaEditError(
+            f"unknown watermark position {position!r}; "
+            f"use {sorted(positions)}")
+    opacity = max(0.0, min(1.0, float(opacity)))
+    margin = max(0, int(margin))
+    x, y = (expr.format(m=margin) for expr in positions[position])
+    logo_chain = "[1:v]"
+    if scale is not None:
+        if not 0 < scale <= 1:
+            raise MediaEditError(
+                f"watermark scale must be in (0, 1], got {scale!r}")
+        logo_chain += f"scale=iw*{scale}:-2,"
+    logo_chain += (f"format=rgba,colorchannelmixer=aa={opacity}[logo];"
+                   f"[0:v][logo]overlay={x}:{y}:format=auto[v]")
+    out = _out(p, Path(out_dir) if out_dir else None, suffix, ext)
+    info = video_probe(p)
+    run_ffmpeg(["-i", str(p), "-i", str(logo_p),
+                "-filter_complex", logo_chain,
+                "-map", "[v]", "-map", "0:a?",
+                "-c:v", "libx264", "-preset", "fast", "-crf", "20",
+                "-c:a", "copy", str(out)],
+               timeout=timeout, progress_cb=progress_cb,
+               duration=info.get("duration"))
+    return {"input": str(p), "output": str(out), "logo": str(logo_p),
+            "position": position, "opacity": opacity,
+            "bytes": out.stat().st_size}
+
+
+def rotate_video(src: str | os.PathLike[str], angle: float, *,
+                 out_dir: str | os.PathLike[str] | None = None,
+                 suffix: str = "rotated", ext: str = ".mp4",
+                 timeout: float = FFMPEG_TIMEOUT,
+                 progress_cb: Callable[[float], None] | None = None
+                 ) -> dict[str, Any]:
+    """Rotate video by 90° steps (transpose filter, lossless-ish).
+
+    ``angle`` must be 90, 180 or 270 (use ``transpose`` semantics:
+    90 = clockwise). Anything else raises — arbitrary angles need a
+    full rotate filter with fill handling the caller should choose
+    explicitly.
+    """
+    p = Path(src)
+    if not p.exists():
+        raise MediaEditError(f"no such video: {src}")
+    _check_size(p)
+    vf = {90: "transpose=1", 180: "transpose=1,transpose=1",
+          270: "transpose=2"}.get(int(angle))
+    if vf is None:
+        raise MediaEditError(
+            f"rotate_video needs 90, 180 or 270 degrees, got {angle!r}")
+    out = _out(p, Path(out_dir) if out_dir else None, suffix, ext)
+    info = video_probe(p)
+    run_ffmpeg(["-i", str(p), "-vf", vf,
+                "-c:v", "libx264", "-preset", "fast", "-crf", "18",
+                "-c:a", "copy", str(out)],
+               timeout=timeout, progress_cb=progress_cb,
+               duration=info.get("duration"))
+    return {"input": str(p), "output": str(out), "angle": int(angle),
+            "bytes": out.stat().st_size}
+
+
+def flip_video(src: str | os.PathLike[str], *,
+               direction: str = "horizontal",
+               out_dir: str | os.PathLike[str] | None = None,
+               suffix: str = "flipped", ext: str = ".mp4",
+               timeout: float = FFMPEG_TIMEOUT,
+               progress_cb: Callable[[float], None] | None = None
+               ) -> dict[str, Any]:
+    """Mirror video horizontally or vertically (hflip/vflip)."""
+    p = Path(src)
+    if not p.exists():
+        raise MediaEditError(f"no such video: {src}")
+    _check_size(p)
+    vf = {"horizontal": "hflip", "vertical": "vflip"}.get(direction)
+    if vf is None:
+        raise MediaEditError(
+            f"unknown flip direction {direction!r}; "
+            "use horizontal|vertical")
+    out = _out(p, Path(out_dir) if out_dir else None, suffix, ext)
+    info = video_probe(p)
+    run_ffmpeg(["-i", str(p), "-vf", vf,
+                "-c:v", "libx264", "-preset", "fast", "-crf", "18",
+                "-c:a", "copy", str(out)],
+               timeout=timeout, progress_cb=progress_cb,
+               duration=info.get("duration"))
+    return {"input": str(p), "output": str(out), "direction": direction,
+            "bytes": out.stat().st_size}
+
+
 def speed_ramp(src: str | os.PathLike[str],
                segments: list[tuple[str | float, str | float, float]], *,
                out_dir: str | os.PathLike[str] | None = None,
@@ -858,6 +1010,51 @@ def concat(sources: list[str | os.PathLike[str]], *,
         os.unlink(list_file)
     return {"inputs": [str(p) for p in paths], "output": str(out),
             "mode": "concat-demuxer", "bytes": out.stat().st_size}
+
+
+def concat_normalized(sources: list[str | os.PathLike[str]], *,
+                      width: int = 1280, height: int = 720, fps: float = 30.0,
+                      target_lufs: float = -16.0,
+                      out_dir: str | os.PathLike[str] | None = None,
+                      suffix: str = "joined", ext: str = ".mp4",
+                      timeout: float = FFMPEG_TIMEOUT,
+                      progress_cb: Callable[[float], None] | None = None
+                      ) -> dict[str, Any]:
+    """Join clips of *different* sizes / loudness (re-encode, not -c copy).
+
+    Every input is first normalized — scaled/padded to ``width``x``height``,
+    constant ``fps``, and per-clip ``loudnorm`` to ``target_lufs`` — then
+    joined with the concat demuxer. This is the pro-pipeline discipline:
+    normalize per clip *before* the join, never a global gain after.
+    """
+    paths = [Path(s) for s in sources]
+    if len(paths) < 2:
+        raise MediaEditError("concat needs at least two sources")
+    for p in paths:
+        if not p.exists():
+            raise MediaEditError(f"no such video: {p}")
+        _check_size(p)
+    import tempfile as _tempfile
+    normed: list[str] = []
+    tmpdir = _tempfile.mkdtemp(prefix="concat_norm_")
+    try:
+        for i, p in enumerate(paths):
+            tmp = str(Path(tmpdir) / f"n{i}.mp4")
+            vf = (f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
+                  f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:black,"
+                  f"fps={fps},format=yuv420p")
+            af = (f"loudnorm=I={target_lufs}:TP=-1.5:LRA=11,"
+                  f"aformat=sample_rates=48000:channel_layouts=stereo")
+            run_ffmpeg(["-i", str(p), "-vf", vf, "-af", af,
+                        "-c:v", "libx264", "-preset", "fast", "-crf", "20",
+                        "-c:a", "aac", "-ar", "48000", tmp],
+                       timeout=timeout)
+            normed.append(tmp)
+        return concat(normed, out_dir=out_dir, suffix=suffix, ext=ext,
+                      timeout=timeout, progress_cb=progress_cb)
+    finally:
+        import shutil as _shutil
+        _shutil.rmtree(tmpdir, ignore_errors=True)
 
 
 _CONTAINER_DEFAULTS = {

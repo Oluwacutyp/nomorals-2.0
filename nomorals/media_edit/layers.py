@@ -498,6 +498,63 @@ class LayerStack:
             raise MediaEditError("layer name must be non-empty")
         self._get(lid).name = str(name)
 
+    def nudge(self, lid: str, dx: float = 0, dy: float = 0) -> None:
+        """Move a layer by a relative ``(dx, dy)`` offset in pixels."""
+        layer = self._get(lid)
+        pos = layer.position
+        if isinstance(pos, str):
+            raise MediaEditError(
+                "cannot nudge an anchored layer — move() it to an (x, y) "
+                "position first")
+        self.move(lid, pos[0] + dx, pos[1] + dy)
+
+    def scale_layer(self, lid: str, factor: float) -> None:
+        """Scale an image layer by ``factor`` (relative, > 0).
+
+        Composes with the layer's existing ``scale``/``width``/``size``
+        params: an explicit ``size`` is resized in place, otherwise the
+        ``scale`` multiplier is updated.
+        """
+        if not _is_number(factor) or factor <= 0:
+            raise MediaEditError(
+                f"scale factor must be a positive number, got {factor!r}")
+        layer = self._get(lid)
+        if layer.type != "image":
+            raise MediaEditError(
+                f"scale_layer needs an image layer, {lid!r} is "
+                f"{layer.type}")
+        p = layer.params
+        if p.get("size") is not None:
+            w, h = p["size"]
+            p["size"] = [max(1, int(w * factor)), max(1, int(h * factor))]
+        elif p.get("width") is not None:
+            p["width"] = max(1, int(p["width"] * factor))
+        else:
+            p["scale"] = float(p.get("scale", 1.0)) * float(factor)
+
+    def duplicate(self, lid: str, *, name: str | None = None,
+                  dx: float = 0, dy: float = 0) -> str:
+        """Copy a layer (params deep-copied, new id). ``dx``/``dy`` nudge
+        the copy so it doesn't sit exactly on top of the original."""
+        import copy as _copy
+        src = self._get(lid)
+        params = {k: _copy.deepcopy(v) for k, v in src.params.items()
+                  if k != "image"}
+        # in-memory images are copied, never shared by reference
+        if src.params.get("image") is not None:
+            params["image"] = src.params["image"].copy()
+        dup = Layer(self._new_id(), name or f"{src.name} copy", src.type,
+                    opacity=src.opacity, blend=src.blend,
+                    visible=src.visible, position=src.position,
+                    margin=src.margin, params=params)
+        self._layers.append(dup)
+        if dx or dy:
+            try:
+                self.nudge(dup.id, dx, dy)
+            except MediaEditError:
+                pass  # anchored layers stay anchored
+        return dup.id
+
     def remove(self, lid: str) -> dict[str, Any]:
         """Remove a layer; returns its info dict."""
         idx = self._index(lid)

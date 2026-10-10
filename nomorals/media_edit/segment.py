@@ -36,6 +36,15 @@ MODELS = {
     "isnet-general-use": {"size_mb": 170.0,
                           "profiles": ("laptop", "workstation"),
                           "note": "DIS high-resolution variant"},
+    "u2net_human_seg": {"size_mb": 176.0,
+                        "profiles": ("laptop", "workstation"),
+                        "note": "people — trained for human segmentation"},
+    "birefnet-portrait": {"size_mb": 800.0,
+                          "profiles": ("workstation",),
+                          "note": "portraits — best hair/edge detail"},
+    "isnet-anime": {"size_mb": 170.0,
+                    "profiles": ("laptop", "workstation"),
+                    "note": "anime/illustration line art"},
 }
 
 _SESSIONS: dict[str, Any] = {}

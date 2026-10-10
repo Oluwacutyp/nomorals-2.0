@@ -57,7 +57,10 @@ _HINTS = (
     "'remove the trash can' (need a configured generative backend); "
     "supported video intents: 'trim the first 30 seconds', 'trim 0:30-1:00', "
     "'extract the audio', 'make a gif', 'extract 5 thumbnails', "
-    "'convert to mp4', 'resize to 720p'"
+    "'convert to mp4', 'resize to 720p'; "
+    "more image intents: 'remove background', 'cartoonize', 'pencil sketch', "
+    "'upscale', 'duotone', 'round corners', 'gradient overlay', "
+    "'apply lut film.cube'"
 )
 
 
@@ -285,6 +288,35 @@ def _parse_image(text: str, raw: str | None = None) -> ParsedIntent | None:
                                   "position": "top", "size": 72,
                                   "color": "white", "stroke_width": 3,
                                   "shadow": True, "margin": 40}], f"title: {m.group(1)}"))
+    # 22. remove background → dedicated segmentation module
+    if re.search(r"remove (?:the )?background|cut ?out (?:the )?subject|"
+                 r"transparent background|make the background transparent", text):
+        hits.append(([{"op": "bg_remove_v2"}], "remove background (AI)"))
+    # 23. cartoonize / pencil sketch
+    if re.search(r"\bcartooni[sz]e\b|cartoon (?:effect|look|style)", text):
+        hits.append(([{"op": "cartoonize"}], "cartoonize"))
+    if re.search(r"pencil sketch|sketch (?:effect|look)", text):
+        hits.append(([{"op": "pencil_sketch"}], "pencil sketch"))
+    # 24. upscale / super-resolution
+    if re.search(r"\bupscale\b|super[ -]?resolution|increase resolution|"
+                 r"make it (?:hd|4k|sharper)", text):
+        hits.append(([{"op": "upscale_sr", "scale": 4.0}],
+                     "AI upscale 4x"))
+    # 25. duotone
+    if re.search(r"\bduotone\b|two[ -]?tone", text):
+        hits.append(([{"op": "duotone"}], "duotone grade"))
+    # 26. rounded corners
+    if re.search(r"round(?:ed)? corners", text):
+        hits.append(([{"op": "round_corners", "radius": 48}],
+                     "rounded corners"))
+    # 27. gradient overlay / scrim
+    if re.search(r"gradient overlay|fade to black|vignette scrim", text):
+        hits.append(([{"op": "gradient_overlay"}], "gradient overlay"))
+    # 28. apply a .cube LUT: "apply lut film.cube"
+    m = re.search(r"apply (?:the )?lut (\S+\.cube)", text)
+    if m:
+        hits.append(([{"op": "cube_lut", "lut": m.group(1).strip("'\"")}],
+                     f"apply LUT {m.group(1)}"))
     # -- generative (AI instruction) edits --------------------------------
     # These come AFTER every mechanical intent so "make it square",
     # "make a thumbnail", "add text ..." etc. never land here.
@@ -420,4 +452,44 @@ def parse_instruction(instruction: str, *,
 
 def describe_plan(intent: ParsedIntent) -> str:
     """Human-readable plan for --dry-run / chat confirmation."""
-    return intent.describe()
+    return format_plan(intent, theme="plain")
+
+
+def format_plan(intent: ParsedIntent, theme: str = "rich") -> str:
+    """Present a parsed intent as a readable plan.
+
+    ``theme="plain"``: the classic indented text (what ``describe_plan``
+    returns). ``theme="rich"``: emoji step markers and a boxed header —
+    the version you show the user in chat.
+    """
+    theme = (theme or "rich").lower()
+    if theme not in ("rich", "plain"):
+        raise AmbiguousInstructionError(
+            f"unknown plan theme {theme!r}; use rich|plain")
+    if theme == "plain":
+        return intent.describe()
+    bar = "─" * 44
+    lines = [f"┌{bar}┐",
+             f"│ 🗺️  plan ({intent.kind})",
+             f"│ {intent.summary[:40]:<40} │",
+             f"└{bar}┘"]
+    if intent.kind == "image":
+        glyph = {"crop": "✂️", "resize": "📐", "rotate": "🔄",
+                 "filter": "🎨", "grade": "🌈", "meme": "😂",
+                 "watermark": "©️", "upscale_sr": "🔍",
+                 "bg_remove_v2": "🪄", "cartoonize": "🖌️",
+                 "annotate_text": "🔤", "thumbnail": "🖼️"}
+        for i, op in enumerate(intent.ops, 1):
+            g = glyph.get(op.get("op", ""), "⚙️")
+            params = ", ".join(f"{k}={v}" for k, v in op.items()
+                               if k != "op")
+            lines.append(f"  {g} {i}. {op['op']}"
+                         + (f"  ·  {params}" if params else ""))
+    else:
+        a = intent.action
+        params = ", ".join(f"{k}={v}" for k, v in a.items()
+                           if k != "video_op")
+        lines.append(f"  🎬 1. {a.get('video_op')}"
+                     + (f"  ·  {params}" if params else "")
+                     + "  [background job]")
+    return "\n".join(lines)

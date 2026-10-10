@@ -319,6 +319,63 @@ def replace_text(img: Any, old_text: str, new_text: str, *,
     return out, meta
 
 
+def remove_text(img: Any, text: str, *,
+                inpaint_backend: str = "auto",
+                lang: str = "eng") -> tuple[Any, dict[str, Any]]:
+    """Erase the region matching ``text`` — no re-rendering.
+
+    Returns (cleaned_image, metadata). The privacy/redaction primitive:
+    detect → inpaint, and stop. Raises MediaEditError when nothing is
+    detected or nothing matches (the error lists what WAS detected).
+    """
+    if not text or not text.strip():
+        raise MediaEditError("remove_text needs the text to find")
+    regions = detect_text(img, lang=lang)
+    if not regions:
+        raise MediaEditError(
+            "no text detected in the image — nothing to remove")
+    region = _best_match(regions, text)
+    if region is None:
+        found = "; ".join(f"{r.text!r}" for r in regions[:8])
+        raise MediaEditError(
+            f"couldn't find {text!r} in the image. "
+            f"Detected text: {found}")
+    erased, used = _inpaint_region(img, region.box, backend=inpaint_backend)
+    meta = {
+        "removed": region.text,
+        "box": region.box,
+        "confidence": round(region.confidence, 1),
+        "inpaint_backend": used,
+    }
+    _log.info("edittext: removed %r (inpaint=%s)", meta["removed"], used)
+    return erased, meta
+
+
+def remove_all_text(img: Any, *, inpaint_backend: str = "auto",
+                    lang: str = "eng",
+                    min_confidence: float = 30.0) -> tuple[Any, dict[str, Any]]:
+    """Scrub every detected text region (watermark / PII cleanup).
+
+    Erases regions with OCR confidence ≥ ``min_confidence``, largest
+    first so overlapping inpaints stay stable. Returns (image, metadata
+    with per-region boxes).
+    """
+    regions = detect_text(img, lang=lang)
+    kept = [r for r in regions if r.confidence >= min_confidence]
+    out = img
+    erased_boxes: list[tuple[int, int, int, int]] = []
+    backends: list[str] = []
+    for region in sorted(kept, key=lambda r: (
+            -(r.box[2] - r.box[0]) * (r.box[3] - r.box[1]))):
+        out, used = _inpaint_region(out, region.box, backend=inpaint_backend)
+        erased_boxes.append(region.box)
+        backends.append(used)
+    meta = {"regions_erased": len(erased_boxes), "boxes": erased_boxes,
+            "inpaint_backends": sorted(set(backends))}
+    _log.info("edittext: scrubbed %d text region(s)", len(erased_boxes))
+    return out, meta
+
+
 def op_edittext(img: Any, old_text: str, new_text: str, **kwargs: Any) -> Any:
     """Chain op: text replacement in photos. Registered as ``edittext``.
 

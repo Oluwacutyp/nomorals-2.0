@@ -582,6 +582,96 @@ def op_meme(img: Any, *, top: str = "", bottom: str = "",
 
 
 # ---------------------------------------------------------------------------
+# duotone / rounded corners / gradient overlay
+# ---------------------------------------------------------------------------
+
+def op_duotone(img: Any, *, dark: str = "black",
+               light: str = "#f5c518") -> Any:
+    """Two-tone duotone grade (dark shadows → light highlights).
+
+    The Spotify-album-cover look: luminance is remapped between ``dark``
+    and ``light``. Pure Pillow, works on any image.
+    """
+    Image = _require_pillow()
+    from PIL import ImageColor
+    base = img.convert("L")
+    dr, dg, db = ImageColor.getrgb(dark)
+    lr, lg, lb = ImageColor.getrgb(light)
+    # PIL RGB point() wants 768 entries: 256 per channel (R block,
+    # G block, B block) — NOT interleaved.
+    lut: list[int] = []
+    for c0, c1 in ((dr, lr), (dg, lg), (db, lb)):
+        for i in range(256):
+            lut.append(round(c0 + (c1 - c0) * (i / 255.0)))
+    return base.convert("RGB").point(lut)
+
+
+def op_round_corners(img: Any, *, radius: int = 48) -> Any:
+    """Round the image corners → RGBA with transparent corners.
+
+    ``radius`` is clamped to half the smallest side. Handy for avatars,
+    cards and social crops.
+    """
+    Image = _require_pillow()
+    from PIL import ImageDraw
+    radius = max(0, int(radius))
+    w, h = img.size
+    radius = min(radius, w // 2, h // 2)
+    out = img.convert("RGBA")
+    mask = Image.new("L", (w, h), 0)
+    draw = ImageDraw.Draw(mask)
+    draw.rounded_rectangle([0, 0, w, h], radius=radius, fill=255)
+    out.putalpha(mask)
+    return out
+
+
+def op_gradient_overlay(img: Any, *, colors: list[str] | tuple[str, ...] = ("#00000000", "#000000cc"),
+                        direction: str = "vertical",
+                        opacity: float = 1.0) -> Any:
+    """Paint a multi-stop color gradient over the image (RGBA composite).
+
+    ``colors`` are CSS-style hex (alpha allowed: ``#rrggbbaa``);
+    ``direction`` is "vertical", "horizontal" or "diagonal". Used for
+    cinematic fades, text-legibility scrims and story backgrounds.
+    """
+    Image = _require_pillow()
+    from PIL import ImageColor
+    direction = (direction or "vertical").lower()
+    if direction not in ("vertical", "horizontal", "diagonal"):
+        raise MediaEditError(
+            f"unknown gradient direction {direction!r}; use "
+            "vertical|horizontal|diagonal")
+    if not isinstance(colors, (list, tuple)) or len(colors) < 2:
+        raise MediaEditError("gradient_overlay needs at least 2 colors")
+    stops = [ImageColor.getrgb(c) for c in colors]
+    stops = [s if len(s) == 4 else (*s, 255) for s in stops]
+    opacity = max(0.0, min(1.0, float(opacity)))
+    w, h = img.size
+    grad = Image.new("RGBA", (w, h))
+    px = grad.load()
+    n = len(stops) - 1
+    for y in range(h):
+        for x in range(w):
+            if direction == "vertical":
+                t = y / max(1, h - 1)
+            elif direction == "horizontal":
+                t = x / max(1, w - 1)
+            else:
+                t = (x + y) / max(1, w + h - 2)
+            seg = min(int(t * n), n - 1)
+            f = t * n - seg
+            c0, c1 = stops[seg], stops[seg + 1]
+            r = round(c0[0] + (c1[0] - c0[0]) * f)
+            g = round(c0[1] + (c1[1] - c0[1]) * f)
+            b = round(c0[2] + (c1[2] - c0[2]) * f)
+            a = round((c0[3] + (c1[3] - c0[3]) * f) * opacity)
+            px[x, y] = (r, g, b, a)
+    out = img.convert("RGBA")
+    out.alpha_composite(grad)
+    return out.convert("RGB") if img.mode == "RGB" else out
+
+
+# ---------------------------------------------------------------------------
 # op chain + file-level edit
 # ---------------------------------------------------------------------------
 
@@ -591,6 +681,7 @@ OP_ALLOWLIST = {
     "enhance", "thumbnail",
     "annotate_text", "annotate_shape",
     "stack", "grid", "meme",
+    "duotone", "round_corners", "gradient_overlay",
     "convert",
 }
 
@@ -608,6 +699,9 @@ _OP_FUNCS = {
     "stack": op_stack,
     "grid": op_grid,
     "meme": op_meme,
+    "duotone": op_duotone,
+    "round_corners": op_round_corners,
+    "gradient_overlay": op_gradient_overlay,
 }
 
 

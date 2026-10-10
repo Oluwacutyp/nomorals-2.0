@@ -163,6 +163,34 @@ _STYLES: dict[str, dict[str, Any]] = {
         "Shadow": 0, "Alignment": 2, "MarginL": 20, "MarginR": 20,
         "MarginV": 40,
     },
+    # Cyan-on-black neon glow — the cyberpunk/tech-creator look.
+    "neon": {
+        "Fontname": "Arial Black", "Fontsize": 66,
+        "PrimaryColour": "&H00FFFF00", "SecondaryColour": "&H000000FF",
+        "OutlineColour": "&H00000000", "BackColour": "&HC0000000",
+        "Bold": -1, "Italic": 0, "BorderStyle": 1, "Outline": 3,
+        "Shadow": 4, "Alignment": 2, "MarginL": 20, "MarginR": 20,
+        "MarginV": 60,
+    },
+    # Clean top-centre podcast look — stays out of the speaker's face.
+    "podcast": {
+        "Fontname": "Arial", "Fontsize": 52,
+        "PrimaryColour": "&H00FFFFFF", "SecondaryColour": "&H000000FF",
+        "OutlineColour": "&H80000000", "BackColour": "&H99000000",
+        "Bold": -1, "Italic": 0, "BorderStyle": 3, "Outline": 0,
+        "Shadow": 0, "Alignment": 8, "MarginL": 30, "MarginR": 30,
+        "MarginV": 40,
+    },
+    # MrBeast yellow + bounce: each caption pops in with a scale
+    # transform (needs animate="pop"; pairs with any style).
+    "beast-bounce": {
+        "Fontname": "Arial Black", "Fontsize": 74,
+        "PrimaryColour": "&H0000FFFF", "SecondaryColour": "&H000000FF",
+        "OutlineColour": "&H00000000", "BackColour": "&H80000000",
+        "Bold": -1, "Italic": 0, "BorderStyle": 1, "Outline": 5,
+        "Shadow": 3, "Alignment": 2, "MarginL": 20, "MarginR": 20,
+        "MarginV": 90,
+    },
 }
 
 _STYLE_FIELDS = (
@@ -220,11 +248,20 @@ def _event_text(event: list[Word], style: str) -> str:
 
 
 def words_to_ass(words: list[Word], *, style: str = "hormozi",
-                 title: str = "captioned") -> str:
-    """Word list → .ass subtitle script content."""
+                 title: str = "captioned",
+                 animate: str = "none") -> str:
+    """Word list → .ass subtitle script content.
+
+    ``animate="pop"`` adds a ``{\\t}`` scale-in transform to every event
+    (the TikTok/Submagic bounce); ``"none"`` is the static default.
+    """
     if style not in _STYLES:
         raise MediaEditError(
             f"unknown caption style {style!r}; use: {sorted(_STYLES)}")
+    animate = (animate or "none").lower()
+    if animate not in ("none", "pop"):
+        raise MediaEditError(
+            f"unknown caption animation {animate!r}; use none|pop")
     if not words:
         raise MediaEditError("no words to render — nothing to caption")
     st = _STYLES[style]
@@ -263,6 +300,10 @@ def words_to_ass(words: list[Word], *, style: str = "hormozi",
             end_t = min(end_t, events[i + 1][0].start - 0.05)
         end = _ass_ts(max(end_t, event[0].start + 0.2))
         text = _event_text(event, style)
+        if animate == "pop":
+            # scale-in bounce: 60% → 112% → settle at 100% over 240 ms
+            text = ("{\\t(0,120,\\fscx60\\fscy60)"
+                    "\\t(120,240,\\fscx112\\fscy112)}" + text)
         lines.append(
             f"Dialogue: 0,{start},{end},Caption,,0,0,0,,{text}")
     return "\n".join(lines) + "\n"

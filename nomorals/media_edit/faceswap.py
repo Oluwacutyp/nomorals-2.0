@@ -194,6 +194,49 @@ def swap_face(source_img: Any, target_img: Any, *,
     return Image.fromarray(swapped[:, :, ::-1])
 
 
+def swap_all_faces(source_img: Any, target_img: Any, *,
+                   restore: bool = True) -> Any:
+    """Swap the face from ``source_img`` onto EVERY face in ``target_img``.
+
+    Group photos: each detected target face gets the source identity,
+    largest first (stable ordering). One GFPGAN pass at the end keeps it
+    fast. → PIL RGB. Same fail-fast contract as :func:`swap_face`.
+    """
+    from .images import _require_pillow
+    Image = _require_pillow()
+    _gate_profile()
+    import numpy as np
+
+    src_faces = _faces(source_img)
+    tgt_faces = _faces(target_img)
+    src_face = _biggest(src_faces)
+    # largest first — deterministic order regardless of detector output
+    ordered = sorted(tgt_faces, key=lambda f: (
+        -(f.bbox[2] - f.bbox[0]) * (f.bbox[3] - f.bbox[1])))
+
+    swapper = _swapper()
+    canvas = np.asarray(target_img.convert("RGB"))[:, :, ::-1].copy()
+    for tgt_face in ordered:
+        try:
+            canvas = swapper.get(canvas, tgt_face, src_face, paste_back=True)
+        except Exception as exc:  # noqa: BLE001 - wrap with context
+            raise FaceSwapError(f"INSWapper failed: {exc}") from exc
+
+    if restore:
+        try:
+            restorer = _restorer()
+            _, _, restored = restorer.enhance(
+                canvas, has_aligned=False, only_center_face=False,
+                paste_back=True)
+            canvas = restored
+        except FaceSwapError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - restoration is best-effort
+            _log.warning("GFPGAN restoration failed (%s); returning the "
+                         "unrestored swap", exc)
+    return Image.fromarray(canvas[:, :, ::-1])
+
+
 def op_faceswap(img: Any, *, source: Any, restore: bool = True) -> Any:
     """Chain op: swap the face from ``source`` onto ``img``.
 

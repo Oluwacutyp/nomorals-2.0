@@ -85,7 +85,47 @@ STYLES: dict[str, str] = {
     "sketch": "pencil sketch, detailed linework, cross-hatching",
     "portrait": "professional portrait photography, 85mm lens, bokeh background",
     "product": "commercial product photography, studio lighting, clean background",
+    # --- sweep additions: mined creator looks --------------------------------
+    "noir-film": "film noir still, hard shadows, venetian blind lighting, "
+                 "high contrast black and white, 1940s cinema",
+    "ghibli": "studio ghibli style animation cel, lush painterly background, "
+              "soft warm light, whimsical detail",
+    "ukiyo-e": "ukiyo-e japanese woodblock print, flat colors, bold outlines, "
+               "wave and cloud motifs",
+    "double-exposure": "double exposure photography, silhouette filled with "
+                       "landscape, dreamy blend, fine art",
+    "isometric": "isometric 3d illustration, tiny diorama world, soft "
+                 "pastel palette, clean geometry",
+    "vaporwave": "vaporwave aesthetic, retro 80s sunset grid, chrome and "
+                 "neon, nostalgic surrealism",
+    "storybook": "children's storybook illustration, warm watercolor and ink, "
+                 "gentle whimsical characters, cozy lighting",
+    "blueprint": "architectural blueprint drawing, white linework on deep "
+                 "blue, technical schematic style",
 }
+
+
+def list_styles() -> list[str]:
+    """All available txt2img/img2img style preset names."""
+    return sorted(STYLES)
+
+
+#: Opt-in prompt polish (``enhance=True``): appended quality tags.
+QUALITY_TAGS = "highly detailed, sharp focus, professional composition"
+#: Opt-in negative prompt used when the caller passes none.
+DEFAULT_NEGATIVE = ("blurry, low quality, watermark, signature, text, "
+                    "deformed, disfigured, oversaturated")
+
+
+def enhance_prompt(prompt: str, *, quality_tags: bool = True) -> str:
+    """Polish a raw prompt: strip junk whitespace, append quality tags.
+
+    Pure string work — no model call. Idempotent (won't double-append).
+    """
+    p = " ".join(str(prompt or "").split())
+    if quality_tags and QUALITY_TAGS not in p:
+        p = f"{p}, {QUALITY_TAGS}" if p else QUALITY_TAGS
+    return p
 
 def _resolve_image_style(style: str) -> str:
     """Resolve an image style name with fuzzy matching. Never hard-fails
@@ -123,12 +163,16 @@ def _resolve_gen_params(prompt: str,
                         width: int | None = None,
                         height: int | None = None,
                         steps: int | None = None,
+                        enhance: bool = False,
                         ) -> tuple[str, int | None, int | None, int | None]:
     """Apply style/aspect/quality presets → (prompt, width, height, steps).
 
     Explicit width/height/steps always win over presets. Unknown preset
-    names fail fast.
+    names fail fast. ``enhance=True`` polishes the prompt with quality
+    tags (opt-in — default behavior is unchanged).
     """
+    if enhance:
+        prompt = enhance_prompt(prompt)
     if style is not None:
         style = _resolve_image_style(style)
         prompt = f"{prompt}, {STYLES[style]}"
@@ -1390,6 +1434,7 @@ def op_txt2img(prompt: str, *,
                style: str | None = None,
                aspect: str | None = None,
                quality: str | None = None,
+               enhance: bool = False,
                n: int = 1) -> Any:
     """Text-to-image as a chain op. Returns a single PIL image (n=1) or a
     list of PIL images (n>1).
@@ -1397,11 +1442,15 @@ def op_txt2img(prompt: str, *,
     ``style``: photorealistic|cinematic|anime|digital-art|oil-painting|
     watercolor|cyberpunk|3d-render|pixel-art|sketch|portrait|product.
     ``aspect``: 1:1|16:9|9:16|4:3|3:2|21:9. ``quality``: draft|standard|ultra.
+    ``enhance``: polish the prompt with quality tags + a default negative
+    prompt when none is given (opt-in).
     """
     be = get_backend(backend)
     prompt, width, height, steps = _resolve_gen_params(
         prompt, style=style, aspect=aspect, quality=quality,
-        width=width, height=height, steps=steps)
+        width=width, height=height, steps=steps, enhance=enhance)
+    if enhance and negative_prompt is None:
+        negative_prompt = DEFAULT_NEGATIVE
     images = be.generate(prompt, seed=seed, negative_prompt=negative_prompt,
                          steps=steps, guidance_scale=guidance_scale,
                          width=width, height=height, n=n)

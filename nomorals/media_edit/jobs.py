@@ -20,12 +20,16 @@ from .images import MediaEditError
 _log = get_logger(__name__)
 
 
+class _JobCancelled(Exception):
+    """Internal: the progress callback noticed a cancel request."""
+
+
 @dataclass
 class MediaJob:
     id: str
     kind: str  # "image" | "video"
     label: str
-    status: str = "queued"  # queued|running|done|failed
+    status: str = "queued"  # queued|running|done|failed|cancelled
     progress: float | None = None  # 0.0..1.0 while running
     input_ref: str = ""
     output_ref: str = ""
@@ -163,10 +167,67 @@ class JobManager:
         deadline = time.time() + timeout
         while time.time() < deadline:
             info = self.status(job_id)
-            if info["status"] in ("done", "failed"):
+            if info["status"] in ("done", "failed", "cancelled"):
                 return info
             time.sleep(0.25)
         raise MediaEditError(f"timed out waiting for job {job_id}")
+
+    def cancel(self, job_id: str) -> dict[str, Any]:
+        """Cancel a queued or running job.
+
+        Queued jobs are dropped before they start. Running jobs are
+        asked to stop at their next progress report (cooperative — a job
+        that never reports progress can't be interrupted mid-flight).
+        Returns the job's status dict.
+        """
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if job is None:
+                raise MediaEditError(f"unknown media job {job_id!r}")
+            if job.status == "queued":
+                if job_id in self._queue:
+                    self._queue.remove(job_id)
+                job.status = "cancelled"
+                job.finished_at = time.time()
+                _log.info("media job %s cancelled while queued", job_id)
+            elif job.status == "running":
+                job._cancel_requested = True  # worker notices at progress
+                _log.info("media job %s cancel requested (running)",
+                          job_id)
+            # done/failed/cancelled: no-op, still report
+            return job.as_dict()
+
+    def retry(self, job_id: str) -> str:
+        """Re-queue a failed/cancelled/done job with the same function.
+
+        Returns the (same) job id. The job goes back to "queued" with
+        progress/error cleared.
+        """
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if job is None:
+                raise MediaEditError(f"unknown media job {job_id!r}")
+            if job.status not in ("failed", "cancelled", "done"):
+                raise MediaEditError(
+                    f"can only retry a finished job, {job_id} is "
+                    f"{job.status}")
+            fn = getattr(job, "_fn", None)
+            if fn is None:
+                raise MediaEditError(
+                    f"job {job_id} has no function to retry")
+            job.status = "queued"
+            job.progress = None
+            job.error = ""
+            job.result = {}
+            job.output_ref = ""
+            job.started_at = None
+            job.finished_at = None
+            if hasattr(job, "_cancel_requested"):
+                delattr(job, "_cancel_requested")
+            self._queue.append(job_id)
+            self._cond.notify()
+            _log.info("media job %s retried", job_id)
+            return job_id
 
     # -- worker -------------------------------------------------------------
     def _run(self) -> None:
@@ -176,12 +237,23 @@ class JobManager:
                     self._cond.wait()
                 job_id = self._queue.pop(0)
                 job = self._jobs[job_id]
+                if getattr(job, "_cancel_requested", False):
+                    job.status = "cancelled"
+                    job.finished_at = time.time()
+                    continue
                 job.status = "running"
                 job.started_at = time.time()
+
+            def _progress(p: float, _job: MediaJob = job,
+                          _jid: str = job_id) -> None:
+                if getattr(_job, "_cancel_requested", False):
+                    raise _JobCancelled(f"job {_jid} cancelled")
+                self._set_progress(_jid, p)
+
             fn = getattr(job, "_fn", None)
             try:
                 assert fn is not None
-                result = fn(lambda p: self._set_progress(job_id, p))
+                result = fn(_progress)
                 with self._lock:
                     job.status = "done"
                     job.progress = 1.0
@@ -189,6 +261,11 @@ class JobManager:
                     job.output_ref = str((result or {}).get("output", ""))
                     job.finished_at = time.time()
                 _log.info("media job %s done: %s", job_id, job.output_ref)
+            except _JobCancelled:
+                _log.info("media job %s cancelled mid-run", job_id)
+                with self._lock:
+                    job.status = "cancelled"
+                    job.finished_at = time.time()
             except Exception as exc:  # noqa: BLE001 - job failure is data
                 _log.warning("media job %s failed: %s", job_id, exc)
                 with self._lock:

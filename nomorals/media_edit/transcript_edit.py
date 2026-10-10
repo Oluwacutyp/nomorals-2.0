@@ -493,3 +493,83 @@ def export_xml(words: Sequence[Word | dict[str, Any]],
 """
     out.write_text(xml, encoding="utf-8")
     return out
+
+
+def _vtt_ts(secs: float) -> str:
+    """WebVTT timestamp HH:MM:SS.mmm."""
+    if secs < 0:
+        secs = 0.0
+    h = int(secs // 3600)
+    m = int((secs % 3600) // 60)
+    s = int(secs % 60)
+    ms = int(round((secs - int(secs)) * 1000))
+    return f"{h:02d}:{m:02d}:{s:02d}.{ms:03d}"
+
+
+def export_vtt(words: Sequence[Word | dict[str, Any]],
+               video_path: str | os.PathLike[str], *,
+               out_path: str | os.PathLike[str] | None = None,
+               words_per_cue: int = 8) -> Path:
+    """Export a WebVTT sidecar (YouTube / players / <track> elements).
+
+    Words are grouped into cues of ``words_per_cue`` (or fewer at
+    sentence ends) so the file stays readable.
+    """
+    words = [w if isinstance(w, Word) else Word.from_dict(w) for w in words]
+    if not words:
+        raise MediaEditError("export_vtt needs transcript words")
+    src = Path(video_path)
+    out = Path(out_path) if out_path else src.with_suffix(".vtt")
+    cues: list[tuple[float, float, str]] = []
+    cur: list[Word] = []
+    for w in words:
+        cur.append(w)
+        if len(cur) >= words_per_cue or re.search(r"[.!?]$", w.text):
+            cues.append((cur[0].start, cur[-1].end,
+                         " ".join(x.text for x in cur)))
+            cur = []
+    if cur:
+        cues.append((cur[0].start, cur[-1].end,
+                     " ".join(x.text for x in cur)))
+    body = "\n\n".join(
+        f"{_vtt_ts(s)} --> {_vtt_ts(e)}\n{t}" for s, e, t in cues)
+    out.write_text("WEBVTT\n\n" + body + "\n", encoding="utf-8")
+    return out
+
+
+def auto_chapters(words: Sequence[Word | dict[str, Any]], *,
+                  min_gap_s: float = 3.0,
+                  max_chapter_s: float = 300.0) -> list[dict[str, Any]]:
+    """Split a transcript into chapters from its pause structure.
+
+    A new chapter starts after a silence ≥ ``min_gap_s`` or when the
+    current chapter exceeds ``max_chapter_s``. The title is the chapter's
+    first few words — a real, explainable heuristic (no fake topic
+    modeling). Returns ``[{start, end, title}]``.
+    """
+    words = [w if isinstance(w, Word) else Word.from_dict(w) for w in words]
+    if not words:
+        return []
+    chapters: list[dict[str, Any]] = []
+    cur: list[Word] = []
+    for w in words:
+        if cur:
+            gap = w.start - cur[-1].end
+            too_long = (w.end - cur[0].start) >= max_chapter_s
+            if gap >= min_gap_s or too_long:
+                chapters.append(_chapter_from(cur))
+                cur = []
+        cur.append(w)
+    if cur:
+        chapters.append(_chapter_from(cur))
+    return chapters
+
+
+def _chapter_from(words: list[Word]) -> dict[str, Any]:
+    title_words = [w.text for w in words[:7]]
+    title = " ".join(title_words).strip()
+    if len(words) > 7:
+        title += "…"
+    return {"start": round(words[0].start, 2),
+            "end": round(words[-1].end, 2),
+            "title": title or "chapter"}
