@@ -68,10 +68,20 @@ class RiskPolicy:
     max_risk_pct_per_trade: float = 1.0   # % of equity risked per trade
     max_open_positions: int = 3
     max_daily_loss_pct: float = 3.0       # kill switch on realized+unrealized
+    max_weekly_loss_pct: float = 7.0      # weekly kill switch
     require_stop_loss: bool = True        # market orders without SL are refused
     allowed_instruments: tuple[str, ...] = ()  # empty = any
     live_unlocked: bool = False           # live money needs an explicit unlock
     min_rr: float = 0.0                   # min reward:risk; 0 = unenforced
+    # Adaptive risk scaling (mined from real algo traders):
+    adapt_on_streaks: bool = True         # shrink/grow risk by win/loss streaks
+    streak_win_bonus_pct: float = 0.25    # +risk per win after streak_win_n
+    streak_win_n: int = 3                 # wins before bonus applies
+    streak_loss_cut_pct: float = 0.25     # −risk per loss after streak_loss_n
+    streak_loss_n: int = 2                # losses before cut applies
+    streak_risk_floor_pct: float = 0.5    # never go below this
+    streak_risk_cap_pct: float = 2.0      # never go above this
+    consec_loss_halt_n: int = 5           # halt after N consecutive losses
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -313,6 +323,19 @@ class TradingDesk:
         """Enforce the policy. Returns the sizing/RR facts. Raises DeskError."""
         p = self.policy
         instrument = (instrument or "").strip().upper()
+        # Manual kill switch — operator touched the HALT file.
+        if self.kill_switch_engaged():
+            raise DeskError(
+                "kill switch engaged (HALT file present) — remove it to resume")
+        # Consecutive-loss halt.
+        if p.consec_loss_halt_n > 0:
+            losses = self.streaks()["losses"]
+            if losses >= p.consec_loss_halt_n:
+                self._journal("kill", reason="consecutive loss halt",
+                              consec_losses=losses)
+                raise DeskError(
+                    f"{losses} consecutive losses — desk halted, review "
+                    "before resuming")
         if not instrument:
             raise DeskError("instrument is required")
         if side not in ("buy", "sell"):
@@ -367,6 +390,18 @@ class TradingDesk:
                 raise DeskError(
                     f"daily loss limit hit ({day_pnl:+.2f}) — desk is "
                     "killed for today")
+        # Weekly loss kill switch.
+        week_pnl = self.weekly_pnl()
+        try:
+            eq = self.equity()
+        except DeskError:
+            eq = 0.0
+        if eq > 0 and week_pnl <= -eq * p.max_weekly_loss_pct / 100:
+            self._journal("kill", reason="weekly loss limit",
+                          week_pnl=week_pnl)
+            raise DeskError(
+                f"weekly loss limit hit ({week_pnl:+.2f}) — desk is "
+                "killed for the week")
         return {"instrument": instrument, "side": side, "volume": volume}
 
     def daily_pnl(self) -> float | None:
@@ -398,6 +433,73 @@ class TradingDesk:
             except Exception:  # noqa: BLE001
                 pass
         return total if seen else 0.0
+
+    def weekly_pnl(self) -> float:
+        """Realized P&L over the trailing 7 days (account currency)."""
+        week_start = self._now() - 7 * 86400
+        total = 0.0
+        for rec in self.journal(limit=10000):
+            if rec.get("ts", 0) < week_start:
+                break
+            if rec.get("event") in ("paper_close", "live_close"):
+                try:
+                    total += float(rec.get("pnl") or 0)
+                except (TypeError, ValueError):
+                    continue
+        return total
+
+    def streaks(self) -> dict[str, int]:
+        """Current win/loss streaks from closed trades (most recent first).
+
+        Returns ``{"wins": n, "losses": n}`` — only one is non-zero
+        (the active streak); both zero when no closed trades yet.
+        """
+        wins = losses = 0
+        for rec in self.journal(limit=10000):
+            if rec.get("event") not in ("paper_close", "live_close"):
+                continue
+            try:
+                pnl = float(rec.get("pnl") or 0)
+            except (TypeError, ValueError):
+                continue
+            if pnl > 0:
+                if losses:
+                    break
+                wins += 1
+            elif pnl < 0:
+                if wins:
+                    break
+                losses += 1
+            # breakeven (pnl == 0) doesn't break either streak
+        return {"wins": wins, "losses": losses}
+
+    def effective_risk_pct(self) -> float:
+        """Risk % per trade after streak adaptation.
+
+        Win streak ≥ streak_win_n → +streak_win_bonus_pct (capped).
+        Loss streak ≥ streak_loss_n → −streak_loss_cut_pct (floored).
+        Returns the base when adaptation is disabled.
+        """
+        p = self.policy
+        base = p.max_risk_pct_per_trade
+        if not p.adapt_on_streaks:
+            return base
+        s = self.streaks()
+        risk = base
+        if s["wins"] >= p.streak_win_n:
+            risk += p.streak_win_bonus_pct
+        if s["losses"] >= p.streak_loss_n:
+            risk -= p.streak_loss_cut_pct * (s["losses"] - p.streak_loss_n + 1)
+        return max(p.streak_risk_floor_pct,
+                   min(p.streak_risk_cap_pct, risk))
+
+    def kill_switch_path(self) -> Path:
+        """Path of the HALT file — touch it to stop all trading immediately."""
+        return self.state_path.parent / "HALT"
+
+    def kill_switch_engaged(self) -> bool:
+        """True when the operator has engaged the manual kill switch."""
+        return self.kill_switch_path().exists()
 
     # ── paper trading ─────────────────────────────────────────────
 
