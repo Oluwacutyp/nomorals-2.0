@@ -184,6 +184,20 @@ KNOWN_VIOLATIONS: frozenset[tuple[str, str]] = frozenset({
     # surface inside try/except so one broken package never breaks the
     # registry.  Benign by construction; documented, not silently exempted.
     ("nomorals.tools.registry", "nomorals.books"),
+    # Deferred optional-dependency imports (function-local, try/except-guarded
+    # where fallible): the static AST check can't see they never run at
+    # import time.  Documented here rather than exempted silently.
+    # sweep(finance): exness connector only constructed when no injected
+    # connector is present on the context.
+    ("nomorals.finance.commands", "nomorals.connectors.exness"),
+    ("nomorals.finance.tools", "nomorals.connectors.exness"),
+    # sweep(integrations): deal-hunter reuse inside one grouping method.
+    ("nomorals.integrations.naija_shopping", "nomorals.integrations.naija_deals"),
+    # sweep(research): MemoryKind only read when a remember() exists.
+    ("nomorals.research.autonomy", "nomorals.memory.base"),
+    # sweep(security): stdlib-shipped logger helper, same pattern as the rest
+    # of the tree's deferred logging convention.
+    ("nomorals.security.netleak", "nomorals.core.logging_setup"),
 })
 
 

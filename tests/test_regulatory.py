@@ -35,7 +35,7 @@ def _item(**kw):
 
 
 def test_regulators_official_domains():
-    assert set(REGULATORS) == {"CBN", "SEC", "NDPA", "FIRS"}
+    assert set(REGULATORS) == {"CBN", "SEC", "NDPA", "FIRS", "CAC", "NCC", "SON"}
     assert REGULATORS["CBN"].site.startswith("https://")
     assert "ndpc" in REGULATORS["NDPA"].site.lower()
 

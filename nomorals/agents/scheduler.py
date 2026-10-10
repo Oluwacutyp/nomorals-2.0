@@ -352,8 +352,7 @@ def _parse_daily_spec(text: str) -> str:
     try:
         ZoneInfo(tz)
     except ZoneInfoNotFoundError:
-        _log.warning("scheduler: unknown timezone %r (tzdata missing?), using local", tz)
-        return hhmm
+        raise ValueError(f"unknown timezone {tz!r}; expected an IANA name like 'Africa/Lagos'")
     return f"{hhmm} {tz}"
 
 
