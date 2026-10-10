@@ -36,13 +36,20 @@ class BackgroundFact:
     tags: tuple[str, ...]
     kind: str = "life"  # work | place | routine | outdoor | food | social
     time_of_day: tuple[str, ...] = ()  # morning | afternoon | evening | night — for ambient picks
+    #: SillyTavern lorebook ``constant`` semantics: always injected when the
+    #: gate is open, not just when the topic matches. For the bedrock facts
+    #: (the dog, the cabin) that flavor everything.
+    constant: bool = False
 
     def to_dict(self) -> dict[str, Any]:
-        return {"id": self.id, "text": self.text, "tags": list(self.tags), "kind": self.kind}
+        return {"id": self.id, "text": self.text, "tags": list(self.tags),
+                "kind": self.kind, "constant": self.constant}
 
 
-def _f(id: str, text: str, tags: tuple[str, ...], kind: str = "life", tod: tuple[str, ...] = ()) -> BackgroundFact:
-    return BackgroundFact(id=id, text=text, tags=tags, kind=kind, time_of_day=tod)
+def _f(id: str, text: str, tags: tuple[str, ...], kind: str = "life", tod: tuple[str, ...] = (),
+       constant: bool = False) -> BackgroundFact:
+    return BackgroundFact(id=id, text=text, tags=tags, kind=kind, time_of_day=tod,
+                          constant=constant)
 
 
 #: Function words and filler that never unlock a fact on their own.
@@ -76,7 +83,7 @@ COLORADO_FACTS: tuple[BackgroundFact, ...] = (
     _f("work.cabin",
        "I work out of the cabin — desk by the window, coffee that's going cold again. "
        "Quiet is the whole point of living up here.",
-       ("work", "home", "cabin", "desk", "where are you"), "work"),
+       ("work", "home", "cabin", "desk", "where are you"), "work", constant=True),
     _f("work.miss",
        "I take about two weeks off in January. That's when the house gets re-caulked and "
        "I think about whether to pick up a bigger project next spring.",
@@ -144,7 +151,7 @@ COLORADO_FACTS: tuple[BackgroundFact, ...] = (
     _f("routine.dog",
        "The dog — a border collie mix named Juniper, everyone calls her Juni — is 60% of my "
        "walking and 100% of my hiking. She has one trick and the confidence of a border collie.",
-       ("dog", "pet", "juni", "animal"), "social"),
+       ("dog", "pet", "juni", "animal"), "social", constant=True),
     _f("routine.market",
        "Saturday mornings the farm stand comes to the town square. I get the peppers and the "
        "honey and stand there talking to the farmer about whether the corn is 'on yet'.",
@@ -174,13 +181,37 @@ COLORADO_FACTS: tuple[BackgroundFact, ...] = (
 
 
 class BackgroundPack:
-    """A set of facts plus a scoring selector."""
+    """A set of facts plus a scoring selector.
+
+    The pack tracks *usage recency*: a fact served recently is deprioritized
+    so she doesn't repeat the same life detail twice in a row. ``constant``
+    facts (lorebook semantics) are always eligible and listed first.
+    """
+
+    #: Selections within this many turns suppress a repeat of the same fact.
+    RECENCY_WINDOW = 4
 
     def __init__(self, facts: tuple[BackgroundFact, ...] | list[BackgroundFact]) -> None:
         self.facts: tuple[BackgroundFact, ...] = tuple(facts)
+        self._recent_ids: list[str] = []
+
+    def mark_used(self, facts: list[BackgroundFact] | list[str]) -> None:
+        """Record that these facts were surfaced (call after serving)."""
+        for f in facts:
+            fid = f if isinstance(f, str) else f.id
+            self._recent_ids.append(fid)
+        self._recent_ids = self._recent_ids[-self.RECENCY_WINDOW * 3:]
+
+    def constant_facts(self) -> list[BackgroundFact]:
+        """Bedrock facts — always injected when the gate is open."""
+        return [f for f in self.facts if f.constant]
 
     def select(self, text: str, *, limit: int = 3) -> list[BackgroundFact]:
-        """Facts unlocked by the current message, best-scoring first."""
+        """Facts unlocked by the current message, best-scoring first.
+
+        Recently-used facts are pushed behind fresh ones (never dropped —
+        a perfect tag match still wins, just not twice in a row).
+        """
         words = {w for w in _TOKEN.findall((text or "").lower()) if w not in _STOP}
         if not words:
             return []
@@ -194,8 +225,15 @@ class BackgroundPack:
                 continue
             # Longer, more specific matches are worth more than one-word hits.
             score = sum(len(w) for w in hits)
+            if fact.id in self._recent_ids:
+                score *= 0.3  # seen recently — let something fresher speak
             scored.append((score, fact))
-        scored.sort(key=lambda item: item[0], reverse=True)
+        # Ties break toward freshness: a recently-used fact with the same
+        # raw score sinks behind one that hasn't been served.
+        scored.sort(
+            key=lambda item: (item[0], item[1].id not in self._recent_ids),
+            reverse=True,
+        )
         return [f for _, f in scored[:limit]]
 
     def ambient(self, hour: float | None = None, *, limit: int = 2) -> list[BackgroundFact]:
@@ -240,12 +278,21 @@ class BackgroundSelector:
 
     def context(self, text: str, *, user_in_us: bool, romantic: bool, limit: int = 3) -> list[str]:
         """Prompt-ready lines about her life, or an empty list. Never more
-        than three lines, and only when the gate and the topic both match."""
+        than three lines, and only when the gate and the topic both match.
+
+        Constant (bedrock) facts lead; topic-matched facts follow. Served
+        facts are marked used so the next turn reaches for something fresh.
+        """
         if not self.applies(user_in_us=user_in_us, romantic=romantic):
             return []
-        facts = self.pack.select(text, limit=limit)
+        constant = [f for f in self.pack.constant_facts()
+                    if f.id not in self.pack._recent_ids][:1]
+        matched = [f for f in self.pack.select(text, limit=limit)
+                   if f not in constant][:limit]
+        facts = constant + matched
         if not facts:
             return []
+        self.pack.mark_used(facts)
         lines = ["Background you can use *if it comes up naturally* (never as a monologue):"]
         lines += [f"  - {f.text}" for f in facts]
         return lines
@@ -255,4 +302,22 @@ class BackgroundSelector:
         if not self.applies(user_in_us=user_in_us, romantic=romantic):
             return []
         facts = self.pack.ambient(limit=limit)
+        self.pack.mark_used(facts)
         return [f.text for f in facts]
+
+    def ambient_line(self, *, user_in_us: bool, romantic: bool,
+                     hour: float | None = None) -> str:
+        """One time-of-day ambient detail — her life, happening off-screen.
+
+        For proactive openers: "the thing she was just doing" grounds a
+        greeting in a lived day instead of a blank "hey".
+        """
+        if not self.applies(user_in_us=user_in_us, romantic=romantic):
+            return ""
+        facts = [f for f in self.pack.ambient(hour=hour, limit=6)
+                 if f.id not in self.pack._recent_ids]
+        if not facts:
+            return ""
+        pick = facts[0]
+        self.pack.mark_used([pick])
+        return pick.text

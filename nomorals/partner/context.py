@@ -25,7 +25,7 @@ from .mood import MoodEngine
 from .persona import Persona
 from .relationship import Relationship
 
-__all__ = ["PartnerContextBuilder", "PLATFORM_NOTES"]
+__all__ = ["PartnerContextBuilder", "PLATFORM_NOTES", "SHRINK_ORDER"]
 
 #: Per-platform surface notes. Kept short — the model is not a new hire.
 #: She is texting on every one of these surfaces — no platform gets document
@@ -36,6 +36,11 @@ PLATFORM_NOTES: dict[str, str] = {
     "discord": "This is Discord. You are still texting a person, not writing a document: plain words, no markdown lists, no bold or italic markup.",
     "local": "This is the local console. Plain text, no markdown — same voice as everywhere else; you're texting, not filing a report.",
 }
+
+#: Shrink priority when the token budget is tight: blocks earlier in this
+#: order are truncated first. Identity, mood, relationship, gate, platform
+#: and the output contract are never shrunk — they are who she is.
+SHRINK_ORDER: tuple[str, ...] = ("background", "continuity", "memory", "dialogue")
 
 
 class PartnerContextBuilder:
@@ -105,6 +110,28 @@ class PartnerContextBuilder:
     @staticmethod
     def _background_block(lines: Sequence[str]) -> str:
         return "\n".join(lines) if lines else ""
+
+    @staticmethod
+    def _dialogue_block(persona: Persona, mood_label: str) -> str:
+        """Few-shot voice demonstrations (SillyTavern ``mes_example``).
+
+        Examples transfer style better than trait adjectives (RoleLLM), so
+        this block is shrinkable but outranks background/continuity/memory
+        only in the sense that it shrinks *last*.
+        """
+        return persona.dialogue_block(mood_label=mood_label, limit=4)
+
+    @staticmethod
+    def _post_history_block(note: str) -> str:
+        """Trailing instruction, injected after everything else.
+
+        SillyTavern ``post_history_instructions`` semantics: the closest
+        block to generation has the highest salience, so per-turn overrides
+        (repair nudges, scene setters) go here, not in the persona block.
+        """
+        if not note or not note.strip():
+            return ""
+        return "Before you reply — this overrides everything above if it conflicts:\n" + note.strip()
 
     @staticmethod
     def _capabilities_block() -> str:
@@ -182,12 +209,21 @@ class PartnerContextBuilder:
         #: default — the static prompt renders byte-identical.
         dynamic_catchphrases: Sequence[str] = (),
         dynamic_pet_names: Sequence[str] = (),
+        #: Highest-salience trailing instruction (SillyTavern
+        #: ``post_history_instructions``): per-turn overrides that must win
+        #: over the persona block when they conflict.
+        post_history: str = "",
     ) -> Message:
         platform_note = PLATFORM_NOTES.get(platform, "")
         if extra_notes:
             platform_note = (platform_note + "\n" if platform_note else "") + "\n".join(
                 f"  - {note}" for note in extra_notes if note
             )
+        mood_label = ""
+        try:
+            mood_label = mood.current().label
+        except Exception:  # noqa: BLE001 - label is best-effort here
+            pass
         blocks: list[tuple[str, str]] = [
             # In restricted chats the persona's partner-identity paragraph is
             # swapped out too — "the person you're talking to" is NOT the
@@ -208,22 +244,29 @@ class PartnerContextBuilder:
             ("memory", self._memory_block(memories)),
             ("continuity", self._continuity_block(continuity_lines)),
             ("background", self._background_block(background_lines)),
+            ("dialogue", self._dialogue_block(persona, mood_label)),
             ("capabilities", self._capabilities_block()),
             ("platform", platform_note),
             ("output", self._output_contract(short_reply, max_chars)),
+            # Post-history: always last, highest salience, never shrunk.
+            ("post_history", self._post_history_block(post_history)),
         ]
         blocks = [(name, block) for name, block in blocks if block]
 
-        # Budget: identity/mood/relationship/output are protected; memory,
-        # continuity, and background shrink first when total exceeds budget.
-        shrinkable_names = {"memory", "continuity", "background"}
+        # Budget: identity/mood/relationship/gate/output/capabilities/
+        # platform/post_history are protected; the SHRINK_ORDER blocks are
+        # truncated in priority order when total exceeds budget.
+        shrinkable_names = set(SHRINK_ORDER)
         protected = [b for name, b in blocks if name not in shrinkable_names]
-        shrinkable = [b for name, b in blocks if name in shrinkable_names]
+        by_name = {name: block for name, block in blocks if name in shrinkable_names}
         protected_cost = sum(approx_token_count(b) for b in protected)
         remaining = max(0, self.total_budget - protected_cost)
-        keep: list[str] = []
+        shrunk: dict[str, str] = {}
         spent = 0
-        for block in shrinkable:
+        for name in SHRINK_ORDER:
+            block = by_name.get(name)
+            if not block:
+                continue
             cost = approx_token_count(block)
             if spent + cost > remaining:
                 # Truncate this block's lines until it fits.
@@ -234,16 +277,12 @@ class PartnerContextBuilder:
                 if not block.strip():
                     continue
                 cost = approx_token_count(block)
-            keep.append(block)
+            shrunk[name] = block
             spent += cost
         # Reassemble in original order.
-        ordered: list[str] = []
-        shrinkable_iter = iter(keep)
-        for name, block in blocks:
-            if name in shrinkable_names:
-                ordered.append(next(shrinkable_iter, ""))
-            else:
-                ordered.append(block)
+        ordered = [shrunk[name] if name in shrunk else block
+                   for name, block in blocks
+                   if name not in shrinkable_names or name in shrunk]
         text = "\n\n".join(b for b in ordered if b)
         return Message.system(text)
 

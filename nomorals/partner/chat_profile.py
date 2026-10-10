@@ -101,6 +101,26 @@ def get_profile(db: Any, chat_key: str) -> dict[str, Any]:
     return {}
 
 
+def _vibe_label(valence: float) -> str:
+    if valence >= 0.35:
+        return "warm"
+    if valence >= 0.12:
+        return "easy"
+    if valence <= -0.35:
+        return "tense"
+    if valence <= -0.12:
+        return "heavy"
+    return "neutral"
+
+
+def _activity_label(msgs_per_day: float) -> str:
+    if msgs_per_day < 2:
+        return "quiet lately"
+    if msgs_per_day < 12:
+        return "steady"
+    return "buzzing"
+
+
 def build_context_lines(profile: dict[str, Any]) -> list[str]:
     """Render the profile as prompt context lines for the brain."""
     if not profile:
@@ -119,6 +139,12 @@ def build_context_lines(profile: dict[str, Any]) -> list[str]:
     purpose = profile.get("purpose") or ""
     if purpose:
         parts.append(purpose)
+    vibe = profile.get("vibe_label") or ""
+    if vibe:
+        parts.append(f"the vibe here lately: {vibe}")
+    activity = profile.get("activity_label") or ""
+    if activity:
+        parts.append(f"pace: {activity}")
     owner_note = profile.get("owner_note") or ""
     if owner_note:
         parts.append(owner_note)
@@ -198,6 +224,28 @@ def refresh_profile(db: Any, chat_key: str, *, force: bool = False) -> dict[str,
                 pass
             if texts:
                 profile["topics"] = _mine_topics(texts)
+                # Vibe: mean valence of the recent window, via the affect
+                # scorer. Best-effort — a failed import leaves the old vibe.
+                try:
+                    from .affect import AffectScorer
+                    scorer = AffectScorer()
+                    valences = [scorer.score(t).valence for t in texts[:40]]
+                    if valences:
+                        mean_v = sum(valences) / len(valences)
+                        profile["vibe"] = round(mean_v, 3)
+                        profile["vibe_label"] = _vibe_label(mean_v)
+                except Exception:  # noqa: BLE001 - vibe is garnish, not load-bearing
+                    pass
+
+        # Activity rhythm: messages per day since first seen.
+        try:
+            first_seen = float(profile.get("first_seen") or time.time())
+            days = max(1.0 / 24.0, (time.time() - first_seen) / 86400.0)
+            mpd = total / days
+            profile["msgs_per_day"] = round(mpd, 2)
+            profile["activity_label"] = _activity_label(mpd)
+        except Exception:  # noqa: BLE001
+            pass
 
         profile["message_count"] = total
         db.execute(

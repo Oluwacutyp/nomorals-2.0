@@ -19,7 +19,7 @@ from typing import Any
 from ..core.ids import ulid_now
 from ..storage.db import Database
 
-__all__ = ["STAGES", "Relationship", "STAGE_ORDER"]
+__all__ = ["STAGES", "Relationship", "STAGE_ORDER", "ARC_AXES", "DEFAULT_AXES"]
 
 #: The arc. Stages advance on explicit milestones, regress on major trust
 #: failures — never automatically from message volume.
@@ -31,6 +31,29 @@ STAGES: tuple[str, ...] = (
     "established",
 )
 STAGE_ORDER = {stage: i for i, stage in enumerate(STAGES)}
+
+#: The relationship's divergent axes (Del Gesso's repair-centered framework:
+#: a relationship is not one affection meter). Each 0..100, moved by
+#: ``nudge_axis`` on meaningful events — never by message volume.
+ARC_AXES: tuple[str, ...] = (
+    "trust",                 # belief the partner is solid and honest
+    "warmth",                # felt closeness and tenderness day-to-day
+    "respect",               # regard for each other's autonomy and competence
+    "motive_intelligibility",# "i get why they do what they do"
+    "shared_reality",        # common ground: jokes, plans, a shared story
+)
+DEFAULT_AXES: dict[str, int] = {
+    "trust": 60, "warmth": 55, "respect": 60,
+    "motive_intelligibility": 50, "shared_reality": 45,
+}
+
+#: Reserved key inside the ``user_profile`` JSON column where the arc
+#: payload (axes, repair attempts, shared activities) is packed. The
+#: ``relationship`` table schema (migration 0008) is frozen and lives in
+#: another module — packing here keeps the schema boring while the arc
+#: stays persisted. Never collides with real profile predicates: keys
+#: starting with "__" are reserved.
+_ARC_KEY = "__arc__"
 
 
 @dataclass
@@ -45,6 +68,15 @@ class Relationship:
     fights: list[dict[str, Any]] = field(default_factory=list)
     user_profile: dict[str, Any] = field(default_factory=dict)
     updated_at: float = field(default_factory=time.time)
+    #: Divergent arc axes (see ARC_AXES). The mood engine owns *right now*;
+    #: these own *where the relationship stands* on each axis.
+    axes: dict[str, int] = field(default_factory=lambda: dict(DEFAULT_AXES))
+    #: Repair *attempts* — distinct from outcomes (repair-centered design).
+    #: An attempt is {"id","ts","text","kind","outcome": None|"landed"|"missed"}.
+    repair_attempts: list[dict[str, Any]] = field(default_factory=list)
+    #: Things done together — dates, games, projects, trips. Shared
+    #: experience is what advances a relationship (Replika's lesson).
+    shared_activities: list[dict[str, Any]] = field(default_factory=list)
 
     # ── stages ───────────────────────────────────────────────────────────────
     @property
@@ -112,6 +144,92 @@ class Relationship:
     def unresolved_fights(self) -> list[dict[str, Any]]:
         return [f for f in self.fights[-5:] if not f.get("repaired")]
 
+    # ── arc axes ─────────────────────────────────────────────────────────────
+    def nudge_axis(self, axis: str, delta: float, reason: str = "") -> int:
+        """Move one arc axis. Unknown axes raise — axes are a closed set."""
+        if axis not in ARC_AXES:
+            raise ValueError(f"unknown relationship axis: {axis!r}")
+        current = int(self.axes.get(axis, DEFAULT_AXES[axis]))
+        new = max(0, min(100, current + int(round(delta))))
+        self.axes[axis] = new
+        if reason:
+            self.add_milestone(f"{axis} {'+' if delta >= 0 else ''}{int(round(delta))}: {reason}",
+                               kind="axis", note=reason)
+        self.updated_at = time.time()
+        return new
+
+    def weakest_axis(self) -> str:
+        """The axis most in need of attention right now."""
+        return min(ARC_AXES, key=lambda a: int(self.axes.get(a, 50)))
+
+    # ── repair attempts vs outcomes ──────────────────────────────────────────
+    def record_repair_attempt(self, text: str, kind: str = "words") -> str:
+        """Someone tried to fix something. An attempt is not an outcome.
+
+        ``kind``: words | gesture | changed_behavior | time. The attempt
+        stays open (``outcome=None``) until ``record_repair_outcome`` lands
+        it — an unanswered attempt in the prompt reads as "you tried, it
+        didn't land yet", which is honest and very human.
+        """
+        entry = {
+            "id": ulid_now(), "ts": time.time(), "text": text,
+            "kind": kind, "outcome": None,
+        }
+        self.repair_attempts.append(entry)
+        if len(self.repair_attempts) > 50:
+            self.repair_attempts = self.repair_attempts[-50:]
+        self.updated_at = time.time()
+        return entry["id"]
+
+    def record_repair_outcome(self, attempt_id: str, landed: bool,
+                              note: str = "") -> bool:
+        """Close a repair attempt. Returns False when the id is unknown."""
+        for attempt in reversed(self.repair_attempts):
+            if attempt.get("id") == attempt_id:
+                attempt["outcome"] = "landed" if landed else "missed"
+                if note:
+                    attempt["outcome_note"] = note
+                if landed:
+                    self.nudge_axis("trust", 4, "repair landed")
+                    self.nudge_axis("warmth", 3, "repair landed")
+                else:
+                    self.nudge_axis("trust", -3, "repair missed")
+                self.updated_at = time.time()
+                return True
+        return False
+
+    def open_repair_attempts(self) -> list[dict[str, Any]]:
+        return [a for a in self.repair_attempts[-5:] if a.get("outcome") is None]
+
+    # ── shared life ──────────────────────────────────────────────────────────
+    def log_activity(self, text: str, kind: str = "moment") -> str:
+        """Something you two *did* together. Shared experience is the
+        relationship's fuel — this is the log of it."""
+        entry = {"id": ulid_now(), "ts": time.time(), "kind": kind, "text": text}
+        self.shared_activities.append(entry)
+        if len(self.shared_activities) > 100:
+            self.shared_activities = self.shared_activities[-100:]
+        self.nudge_axis("shared_reality", 2, text)
+        self.updated_at = time.time()
+        return entry["id"]
+
+    def recent_activities(self, limit: int = 3) -> list[dict[str, Any]]:
+        return self.shared_activities[-limit:]
+
+    def anniversaries(self) -> list[dict[str, str]]:
+        """Computed relationship anniversaries from milestones.
+
+        "Together since" = earliest milestone; stage changes are dated.
+        Pure — derived, never stored."""
+        if not self.milestones:
+            return []
+        first = min(self.milestones, key=lambda m: m.get("ts", 0))
+        out = [{"name": "together since", "when": _when(first.get("ts", 0))}]
+        for m in self.milestones:
+            if m.get("kind") == "stage" and m.get("text", "").startswith("now "):
+                out.append({"name": m["text"][4:], "when": _when(m.get("ts", 0))})
+        return out
+
     def recent_milestones(self, limit: int = 4) -> list[dict[str, Any]]:
         return self.milestones[-limit:]
 
@@ -144,12 +262,49 @@ class Relationship:
                 bits.append(f"{m.get('text', '')} ({_when(m.get('ts', 0))})")
             if bits:
                 lines.append("Moments you remember: " + "; ".join(bits) + ".")
-        profile_bits = [f"{k}: {v}" for k, v in list(self.user_profile.items())[:8]]
+        profile_bits = [f"{k}: {v}" for k, v in list(self.user_profile.items())[:8]
+                        if not str(k).startswith("__")]
         if profile_bits:
             lines.append("Things you know about them: " + "; ".join(profile_bits) + ".")
+        # Arc axes: where the relationship stands, per axis. Weak axes are
+        # named so she can lean into repair without narrating a spreadsheet.
+        weak = self.weakest_axis()
+        axes_bits = ", ".join(f"{a} {int(self.axes.get(a, 50))}" for a in ARC_AXES)
+        lines.append(f"Where you two stand ({axes_bits}) — {weak} needs the most care right now.")
+        open_repairs = self.open_repair_attempts()
+        if open_repairs:
+            latest = open_repairs[-1]
+            lines.append(
+                f"You tried to fix something ({latest.get('text', 'something')}) and it "
+                "hasn't landed yet. Don't pretend it did — but don't weaponize it either."
+            )
+        activities = self.recent_activities(2)
+        if activities:
+            bits = [f"{a.get('text', '')} ({_when(a.get('ts', 0))})" for a in activities]
+            lines.append("Things you've done together lately: " + "; ".join(bits) + ".")
         return "\n".join(lines)
 
     # ── persistence ─────────────────────────────────────────────────────────
+    def _pack_arc(self) -> dict[str, Any]:
+        """Pack axes/repairs/activities into the profile JSON under the
+        reserved ``__arc__`` key (schema-frozen table — see _ARC_KEY)."""
+        profile = {k: v for k, v in self.user_profile.items() if not str(k).startswith("__")}
+        profile[_ARC_KEY] = {
+            "axes": {a: int(self.axes.get(a, DEFAULT_AXES[a])) for a in ARC_AXES},
+            "repair_attempts": self.repair_attempts[-50:],
+            "shared_activities": self.shared_activities[-100:],
+        }
+        return profile
+
+    @classmethod
+    def _unpack_arc(cls, profile: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Split the reserved arc payload back out of a loaded profile."""
+        profile = dict(profile)
+        arc = profile.pop(_ARC_KEY, None)
+        if not isinstance(arc, dict):
+            arc = {}
+        return profile, arc
+
     def to_row(self) -> dict[str, Any]:
         return {
             "id": self.id,
@@ -158,7 +313,7 @@ class Relationship:
             "trust": int(self.trust),
             "milestones": json.dumps(self.milestones),
             "fights": json.dumps(self.fights),
-            "user_profile": json.dumps(self.user_profile),
+            "user_profile": json.dumps(self._pack_arc()),
             "updated_at": self.updated_at,
         }
 
@@ -167,6 +322,16 @@ class Relationship:
         row = db.query_one("SELECT * FROM relationship WHERE id = ?", (id,))
         if row is None:
             return cls(id=id)
+        profile, arc = cls._unpack_arc(_json_dict(row.get("user_profile")))
+        axes = dict(DEFAULT_AXES)
+        raw_axes = arc.get("axes") if isinstance(arc, dict) else None
+        if isinstance(raw_axes, dict):
+            for a in ARC_AXES:
+                if a in raw_axes:
+                    try:
+                        axes[a] = max(0, min(100, int(raw_axes[a])))
+                    except (TypeError, ValueError):
+                        pass
         return cls(
             id=row["id"],
             stage=row.get("stage", "getting_to_know") or "getting_to_know",
@@ -174,8 +339,11 @@ class Relationship:
             trust=int(row.get("trust") or 60),
             milestones=_json_list(row.get("milestones")),
             fights=_json_list(row.get("fights")),
-            user_profile=_json_dict(row.get("user_profile")),
+            user_profile=profile,
             updated_at=float(row.get("updated_at") or time.time()),
+            axes=axes,
+            repair_attempts=list(arc.get("repair_attempts") or []) if isinstance(arc, dict) else [],
+            shared_activities=list(arc.get("shared_activities") or []) if isinstance(arc, dict) else [],
         )
 
     def save(self, db: Database) -> None:

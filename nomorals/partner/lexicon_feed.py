@@ -152,11 +152,34 @@ _SEED_TERMS: dict[str, tuple[str, ...]] = {
 _SEED_THRESHOLD = 0.35
 
 
+def _ensure_usage_table(db: Any) -> None:
+    db.execute(
+        """CREATE TABLE IF NOT EXISTS lexicon_term_usage (
+            module TEXT NOT NULL,
+            category TEXT NOT NULL,
+            term TEXT NOT NULL,
+            uses INTEGER NOT NULL DEFAULT 0,
+            last_used REAL NOT NULL DEFAULT 0,
+            PRIMARY KEY (module, category, term)
+        )"""
+    )
+
+
 class LexiconFeed:
-    """Read side of the partner lexicon. Never raises on DB trouble."""
+    """Read side of the partner lexicon. Never raises on DB trouble.
+
+    Usage reinforcement: terms that visibly land in shipped replies
+    (see ``style.lexicon_hits``) should be reinforced; terms nobody ever
+    uses should decay. ``note_used`` records a surfacing; ``prune_stale``
+    retires dead weight. Use-it-or-lose-it, like every adaptive vocabulary
+    that actually works.
+    """
 
     def __init__(self, db: Any = None) -> None:
         self.db = db
+        #: In-memory usage counts for this process (ranking); the DB table
+        #: is the durable copy.
+        self._uses: dict[tuple[str, str], int] = {}
 
     @property
     def available(self) -> bool:
@@ -170,9 +193,120 @@ class LexiconFeed:
             return ()
         return dynamic_terms(self.db, LEXICON_MODULE, category, limit)
 
+    def terms_by_signal(self, category: str, limit: int = 20) -> tuple[str, ...]:
+        """Active terms ranked by score *and* observed usage.
+
+        A high-scored term nobody ever uses sinks; a used term rises. For
+        prompt blending where landing matters more than scorer opinion.
+        Never raises.
+        """
+        terms = list(self.terms(category, limit=limit * 2))
+        if not terms:
+            return ()
+        try:
+            uses = {t: self.usage(t, category) for t in terms}
+            peak = max(uses.values()) if uses else 0
+            ranked = sorted(
+                terms,
+                key=lambda t: (0.7 + 0.3 * (uses.get(t, 0) / peak if peak else 0)),
+                reverse=True,
+            )
+            return tuple(ranked[:limit])
+        except Exception:  # noqa: BLE001 - ranking garnish, never load-bearing
+            return tuple(terms[:limit])
+
     def has(self, category: str) -> bool:
         """True when at least one active term exists for the category."""
         return bool(self.terms(category, limit=1))
+
+    def note_used(self, term: str, category: str) -> None:
+        """Record that ``term`` visibly surfaced in a shipped reply.
+
+        Called by the responder via ``style.lexicon_hits`` counts. Never
+        raises — measurement must never break a reply.
+        """
+        term = (term or "").strip().lower()
+        category = (category or "").strip().lower()
+        if not term or not category:
+            return
+        key = (category, term)
+        self._uses[key] = self._uses.get(key, 0) + 1
+        if not self.available:
+            return
+        try:
+            import time as _time
+            _ensure_usage_table(self.db)
+            self.db.execute(
+                "INSERT INTO lexicon_term_usage (module, category, term, uses, last_used) "
+                "VALUES (?, ?, ?, 1, ?) "
+                "ON CONFLICT(module, category, term) DO UPDATE SET "
+                "uses = uses + 1, last_used = excluded.last_used",
+                (LEXICON_MODULE, category, term, _time.time()),
+            )
+        except Exception:  # noqa: BLE001
+            _log.debug("lexicon usage note failed", exc_info=True)
+
+    def usage(self, term: str, category: str) -> int:
+        """Observed surfacings of ``term`` (memory + durable). Never raises."""
+        term = (term or "").strip().lower()
+        category = (category or "").strip().lower()
+        mem = self._uses.get((category, term), 0)
+        if not self.available:
+            return mem
+        try:
+            _ensure_usage_table(self.db)
+            row = self.db.query_one(
+                "SELECT uses FROM lexicon_term_usage "
+                "WHERE module = ? AND category = ? AND term = ?",
+                (LEXICON_MODULE, category, term),
+            )
+            db_uses = int(row["uses"]) if row else 0
+            return max(mem, db_uses)
+        except Exception:  # noqa: BLE001
+            return mem
+
+    def prune_stale(self, *, max_age_days: float = 90.0,
+                    min_uses: int = 1) -> dict[str, Any]:
+        """Retire terms that never earned their keep.
+
+        An active term older than ``max_age_days`` with fewer than
+        ``min_uses`` observed surfacings is retired (never deleted — the
+        seed never re-adds retired terms). Returns
+        ``{"pruned": [...], "kept": n}``. Never raises.
+        """
+        report: dict[str, Any] = {"pruned": [], "kept": 0}
+        if not self.available:
+            report["reason"] = "no db"
+            return report
+        try:
+            import time as _time
+            from ..agents.research_lexicon import LexiconStore
+            from types import SimpleNamespace
+            _ensure_usage_table(self.db)
+            cutoff = _time.time() - max_age_days * 86400.0
+            rows = self.db.query(
+                "SELECT term, category, created_at FROM lexicon_terms "
+                "WHERE module = ? AND status = 'active' AND created_at < ?",
+                (LEXICON_MODULE, cutoff),
+            )
+            store = LexiconStore(SimpleNamespace(db=self.db))
+            for r in rows:
+                term = str(r["term"])
+                category = str(r["category"])
+                if self.usage(term, category) < min_uses:
+                    try:
+                        if store.retire(term, LEXICON_MODULE,
+                                        reason=f"stale: unused in {max_age_days:.0f}d"):
+                            report["pruned"].append(f"{category}:{term}")
+                    except Exception:  # noqa: BLE001 - one bad retire ≠ dead prune
+                        _log.debug("lexicon prune retire failed for %r", term,
+                                   exc_info=True)
+                else:
+                    report["kept"] += 1
+        except Exception as exc:  # noqa: BLE001 - pruning never breaks anything
+            _log.warning("lexicon prune failed: %s", exc)
+            report["reason"] = str(exc)
+        return report
 
     def status(self) -> dict[str, Any]:
         """Owner-inspectable snapshot: availability, version, per-category counts."""

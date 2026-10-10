@@ -26,7 +26,8 @@ chat kinds. Prompt injection can't reach it.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, field
 from typing import Any
 
 from ..core.policy import Capability
@@ -38,9 +39,13 @@ __all__ = [
     "CAPABILITY_MATRIX",
     "PUBLIC_CATEGORIES",
     "PRIVATE_CATEGORIES",
+    "DenialLog",
+    "DenialRecord",
     "SocialGrant",
+    "default_denial_log",
     "grant_for",
     "check_tool_call",
+    "recent_denials",
     "ACTOR_GROUP_ADMIN",
     "ADMIN_GROUP_TOOLS",
     "audit_matrix",
@@ -196,22 +201,102 @@ def grant_for(*, is_owner: bool, chat_kind: str = ChatKind.DM,
 
 
 def check_tool_call(
-    tool_name: str, *, grant: SocialGrant
+    tool_name: str, *, grant: SocialGrant, chat_kind: str = "",
+    audit: "DenialLog | None" = None,
 ) -> tuple[bool, str]:
     """Enforce the grant at the call boundary. Returns (allowed, reason).
 
     Called by the tool loop before executing any social-adjacent tool for
     a non-owner actor. The owner path never reaches here (full grant).
+
+    ``audit`` is an optional :class:`DenialLog`: denials are recorded there
+    so the owner can see probing attempts (policy-as-code always logs its
+    denied evaluations). Pure otherwise.
     """
     if grant.actor == ACTOR_OWNER:
         return True, "owner"
     allowed = grant.may_use_tools
     if "*" in allowed or tool_name in allowed:
         return True, f"public tool: {tool_name}"
-    return False, (
+    reason = (
         f"denied: {tool_name} is not available here "
         f"({grant.reason})"
     )
+    if audit is not None:
+        audit.record(actor=grant.actor, chat_kind=chat_kind or "?",
+                     tool_name=tool_name, reason=reason)
+    return False, reason
+
+
+@dataclass
+class DenialRecord:
+    """One denied tool-call evaluation: who tried what, where, when."""
+
+    ts: float
+    actor: str
+    chat_kind: str
+    tool_name: str
+    reason: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "ts": self.ts, "actor": self.actor, "chat_kind": self.chat_kind,
+            "tool_name": self.tool_name, "reason": self.reason,
+        }
+
+
+class DenialLog:
+    """In-memory ring buffer of denied social tool calls.
+
+    Probing attempts are the signal that someone is testing her boundaries —
+    the owner should be able to see them. Bounded (default 200 records);
+    oldest drops first. Thread-safe enough for the tool loop (append-only
+    under the GIL; reads copy).
+    """
+
+    def __init__(self, capacity: int = 200) -> None:
+        self.capacity = max(1, int(capacity))
+        self._records: list[DenialRecord] = []
+
+    def record(self, *, actor: str, chat_kind: str, tool_name: str,
+               reason: str, ts: float | None = None) -> DenialRecord:
+        rec = DenialRecord(
+            ts=ts if ts is not None else time.time(),
+            actor=actor, chat_kind=chat_kind,
+            tool_name=tool_name, reason=reason,
+        )
+        self._records.append(rec)
+        if len(self._records) > self.capacity:
+            self._records = self._records[-self.capacity:]
+        return rec
+
+    def recent(self, limit: int = 20) -> list[DenialRecord]:
+        """Newest first."""
+        return list(reversed(self._records[-max(1, limit):]))
+
+    def count_since(self, ts: float) -> int:
+        return sum(1 for r in self._records if r.ts >= ts)
+
+    def __len__(self) -> int:
+        return len(self._records)
+
+
+#: Process-wide default log. The runtime wires ``audit=`` into
+#: ``check_tool_call``; the owner inspects via ``recent_denials()``.
+_default_log: DenialLog | None = None
+
+
+def default_denial_log() -> DenialLog:
+    """The shared denial log (created on first use)."""
+    global _default_log
+    if _default_log is None:
+        _default_log = DenialLog()
+    return _default_log
+
+
+def recent_denials(limit: int = 20) -> list[dict[str, Any]]:
+    """Owner inspection: the newest denied tool calls, as plain dicts."""
+    return [r.to_dict() for r in default_denial_log().recent(limit)]
 
 
 def capabilities_for_grant(grant: SocialGrant) -> set[str]:

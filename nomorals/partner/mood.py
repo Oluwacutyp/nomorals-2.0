@@ -30,6 +30,8 @@ from ..storage.db import Database
 __all__ = [
     "DIMENSIONS",
     "MOOD_LABELS",
+    "MOOD_PAD",
+    "EmotionSpike",
     "MoodState",
     "MoodEvent",
     "MoodEngine",
@@ -114,6 +116,64 @@ class MoodEvent:
         self.intensity = max(0.0, min(1.0, float(self.intensity)))
 
 
+#: PAD (Pleasure-Arousal-Dominance) coordinates per mood label, -1..1.
+#: ALMA's common currency: the same label space expressed dimensionally, so
+#: the engine can reason about *how far* two moods are and which direction
+#: an event pushes. Values follow Mehrabian's PAD mappings for the
+#: corresponding emotion words.
+MOOD_PAD: dict[str, tuple[float, float, float]] = {
+    "happy":        (0.80,  0.30,  0.30),
+    "excited":      (0.90,  0.90,  0.40),
+    "affectionate": (0.85,  0.40,  0.10),
+    "playful":      (0.80,  0.70,  0.50),
+    "calm":         (0.40, -0.30,  0.20),
+    "tired":        (-0.10, -0.80, -0.30),
+    "annoyed":      (-0.50,  0.30,  0.20),
+    "irritated":    (-0.60,  0.50,  0.30),
+    "angry":        (-0.80,  0.90,  0.70),
+    "jealous":      (-0.60,  0.60, -0.20),
+    "needy":        (-0.40,  0.30, -0.60),
+    "vulnerable":   (-0.10,  0.10, -0.70),
+    "distant":      (-0.30, -0.40,  0.10),
+    "cold":         (-0.50, -0.20,  0.50),
+    "sad":          (-0.80, -0.50, -0.50),
+    "anxious":      (-0.60,  0.70, -0.50),
+    "proud":        (0.70,  0.40,  0.80),
+    "suspicious":   (-0.40,  0.40,  0.00),
+}
+
+
+@dataclass
+class EmotionSpike:
+    """A transient, ALMA-style *emotion* — distinct from the medium-term mood.
+
+    Moods drift over hours; emotions flare over minutes. A spike carries its
+    cause ("they complimented you") so the prompt can name it, Sims-moodlet
+    style, and it decays with its own short half-life instead of the mood's
+    8-hour one. Spikes color ``describe()`` and nudge congruency, but they
+    never relabel the mood directly — that stays the dimensions' job.
+    """
+
+    label: str          # e.g. "delighted", "stung", "touched", "rattled"
+    intensity: float    # 0..1 at creation
+    cause: str = ""     # human-readable, for the prompt
+    ts: float = field(default_factory=time.time)
+    half_life_s: float = 20 * 60.0
+
+    def strength(self, now: float | None = None) -> float:
+        """Current strength after exponential decay."""
+        now = time.time() if now is None else now
+        age = max(0.0, now - self.ts)
+        return self.intensity * math.exp(-math.log(2.0) * age / self.half_life_s)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "label": self.label, "intensity": self.intensity,
+            "cause": self.cause, "ts": self.ts,
+            "half_life_s": self.half_life_s,
+        }
+
+
 #: Event kind -> per-dimension deltas at intensity 1.0.
 #: Tuned so that a single strong event moves a dimension ~10-30 points and a
 #: sustained pattern (three events in an hour) can flip a mood label.
@@ -193,6 +253,10 @@ class MoodEngine:
         self._last_history_ts = 0.0
         self.open_fight: dict[str, Any] | None = None
         self.grudges: list[dict[str, Any]] = []
+        #: Transient emotion spikes (ALMA short-term layer). In-memory by
+        #: design: a 20-minute half-life means a restart legitimately clears
+        #: them — feelings this fast don't survive a reboot.
+        self.spikes: list[EmotionSpike] = []
 
     # ── persistence ─────────────────────────────────────────────────────────
     def _load(self) -> MoodState:
@@ -293,8 +357,161 @@ class MoodEngine:
         self._save(reason)
         return self._state
 
+    def valence(self) -> float:
+        """Current emotional valence, -1..1.
+
+        Warm dimensions minus cold ones. This is what mood-congruency reads:
+        positive valence dampens incoming negative events (WASABI rule).
+        """
+        v = self._state.values
+        warm = (v.get("happiness", 50) + v.get("affection", 50)
+                + v.get("trust", 50) + v.get("intimacy", 50)
+                + v.get("pride", 50) + v.get("energy", 50)) / 6.0
+        cold = (v.get("frustration", 50) + v.get("jealousy", 50)
+                + v.get("distance", 50) + v.get("insecurity", 50)) / 4.0
+        return max(-1.0, min(1.0, (warm - cold) / 50.0))
+
+    #: Dimensions where "up" is bad news. Everything else is "up is good".
+    _COLD_DIMS = frozenset({"frustration", "jealousy", "distance", "insecurity"})
+
+    def _congruency_scale(self, deltas: Mapping[str, float]) -> dict[str, float]:
+        """Scale event deltas by mood-congruency (WASABI/ALMA).
+
+        A negative impulse landing on a good mood mostly just dampens it —
+        it takes a *bad* mood to turn the same impulse into real damage.
+        Conversely, good news barely registers in a dark mood. Congruent
+        events (matching the mood) are amplified slightly.
+
+        "Negative impulse" is judged by emotional meaning, not delta sign:
+        frustration *rising* is a negative impulse even though the delta
+        is positive.
+        """
+        valence = self.valence()
+        out: dict[str, float] = {}
+        for dim, delta in deltas.items():
+            if delta == 0:
+                out[dim] = delta
+                continue
+            cold_up = dim in self._COLD_DIMS
+            # Is this delta emotionally negative?
+            negative_impulse = (delta > 0) if cold_up else (delta < 0)
+            if negative_impulse:
+                if valence > 0.3:
+                    scale = 0.6   # good mood absorbs the hit
+                elif valence < -0.3:
+                    scale = 1.25  # bad mood turns it into damage
+                else:
+                    scale = 1.0
+            else:  # positive impulse
+                if valence < -0.3:
+                    scale = 0.7   # dark mood barely lets good news in
+                elif valence > 0.3:
+                    scale = 1.1   # good mood compounds
+                else:
+                    scale = 1.0
+            out[dim] = delta * scale
+        return out
+
+    def spike(self, label: str, intensity: float = 0.6, cause: str = "",
+              half_life_s: float = 20 * 60.0) -> EmotionSpike:
+        """Register a transient emotion flare (ALMA short-term layer).
+
+        Unlike :meth:`note_event` this does NOT move the mood dimensions —
+        it colors them. A compliment while calm leaves a "touched" spike that
+        fades in ~20 minutes; the mood itself barely shifts. Strong spikes
+        (>= 0.8) also nudge the dimensions a little, because a real flare
+        leaves a mark.
+        """
+        label = (label or "moved").strip().lower()
+        intensity = max(0.0, min(1.0, float(intensity)))
+        sp = EmotionSpike(label=label, intensity=intensity, cause=cause,
+                          ts=self._now, half_life_s=max(60.0, float(half_life_s)))
+        self.spikes.append(sp)
+        self.spikes = self.spikes[-8:]  # keep the recent weather, not the climate
+        if intensity >= 0.8:
+            # A real flare leaves a mark on the medium-term mood too.
+            self.apply({"happiness": 4.0 * intensity, "affection": 3.0 * intensity},
+                       reason=f"spike:{label}")
+        return sp
+
+    def _prune_spikes(self) -> None:
+        self.spikes = [s for s in self.spikes if s.strength(self._now) >= 0.05]
+
+    def active_influences(self) -> list[dict[str, Any]]:
+        """Named, expiring influences — Sims-moodlet style.
+
+        What is *currently* coloring her: live emotion spikes (with remaining
+        strength), the open fight, and the freshest grudge. For the prompt
+        and for owner observability.
+        """
+        self._prune_spikes()
+        out: list[dict[str, Any]] = []
+        for sp in sorted(self.spikes, key=lambda s: s.strength(self._now),
+                         reverse=True):
+            out.append({
+                "kind": "spike", "label": sp.label,
+                "strength": round(sp.strength(self._now), 2),
+                "cause": sp.cause,
+            })
+        if self.open_fight:
+            out.append({"kind": "fight", "label": "open fight",
+                        "cause": self.open_fight.get("reason", "something")})
+        if self.grudges:
+            latest = self.grudges[-1]
+            out.append({"kind": "grudge", "label": "unresolved",
+                        "cause": latest.get("note", "something")})
+        return out
+
+    def pad_point(self) -> tuple[float, float, float]:
+        """Current position in PAD space.
+
+        Blends the current label's PAD coordinates (70%) with a
+        dimension-derived point (30%), ALMA-style: labels give the octant,
+        dimensions give the exact position inside it.
+        """
+        label_pad = MOOD_PAD.get(self._state.label, (0.0, 0.0, 0.0))
+        v = self._state.values
+        dim_p = ((v.get("happiness", 50) + v.get("affection", 50)
+                  + v.get("trust", 50)) / 3.0 - 50.0) / 50.0
+        dim_a = ((v.get("energy", 50) + v.get("frustration", 50)
+                  + v.get("jealousy", 50)) / 3.0 - 50.0) / 50.0
+        dim_d = ((v.get("pride", 50) + v.get("trust", 50)
+                  + (100.0 - v.get("insecurity", 50))) / 3.0 - 50.0) / 50.0
+        blended = tuple(
+            round(0.7 * lp + 0.3 * dp, 3)
+            for lp, dp in zip(label_pad, (dim_p, dim_a, dim_d))
+        )
+        return blended  # type: ignore[return-value]
+
+    def appraise(self, kind: str, intensity: float = 0.5, note: str = "") -> MoodState:
+        """Apply a named event the way *she* would appraise it right now.
+
+        WASABI/ALMA mood-congruency: the same event lands differently
+        depending on where she is emotionally. A negative impulse on a good
+        mood is dampened (it takes a bad mood to turn it into real damage);
+        good news barely registers in a dark mood; congruent events are
+        amplified slightly. Implemented as an intensity scaling *around*
+        :meth:`note_event`, so the funnel — and its exact math — stays the
+        single mutation path.
+        """
+        base = EVENT_TABLE.get(kind)
+        if not base:
+            return self._state
+        raw = {dim: delta * intensity for dim, delta in base.items()}
+        scaled = self._congruency_scale(raw)
+        ratios = [abs(s) / abs(r) for r, s in
+                  ((raw[d], scaled[d]) for d in raw) if r != 0]
+        factor = sum(ratios) / len(ratios) if ratios else 1.0
+        return self.note_event(kind, intensity * factor, note=note)
+
     def note_event(self, kind: str, intensity: float = 0.5, note: str = "") -> MoodState:
-        """Apply a named event from :data:`EVENT_TABLE`."""
+        """Apply a named event from :data:`EVENT_TABLE`.
+
+        Exact math: deltas × intensity, no appraisal. This is the one funnel —
+        every mutation flows through here. For mood-congruent appraisal (the
+        event landing differently depending on her current state), use
+        :meth:`appraise`.
+        """
         base = EVENT_TABLE.get(kind)
         if not base:
             return self._state
@@ -358,6 +575,7 @@ class MoodEngine:
         """
         if now is not None:
             self._now = now
+        self._prune_spikes()
         last = self._last_decay_ts if self._last_decay_ts is not None else self._now
         dt_hours = max(0.0, (self._now - last) / 3600.0)
         if dt_hours < 60.0 / 3600.0:
@@ -482,6 +700,7 @@ class MoodEngine:
         self._state = MoodState(values=dict(self.baselines), label="calm", updated_at=self._now)
         self.open_fight = None
         self.grudges = []
+        self.spikes = []
         self._save("reset")
         return self._state
 
@@ -522,6 +741,15 @@ class MoodEngine:
             bits.append("You're feeling good about yourself lately.")
         if v.get("happiness", 50) < 25:
             bits.append("Honestly? Not great. Don't fake being fine.")
+
+        self._prune_spikes()
+        if self.spikes:
+            top = max(self.spikes, key=lambda s: s.strength(self._now))
+            cause = f" ({top.cause})" if top.cause else ""
+            bits.append(
+                f"A recent flash of {top.label}{cause} is still coloring "
+                "how you take things — it's fresh, not your whole mood."
+            )
 
         all_grudges = grudges if grudges is not None else self.grudges
         if all_grudges:

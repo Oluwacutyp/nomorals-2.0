@@ -33,6 +33,9 @@ from ..core.text import approx_token_count
 __all__ = [
     "GuardVerdict",
     "IDENTITY_LEAK_PHRASES",
+    "VOICE_THEMES",
+    "apply_texting_voice",
+    "apply_voice_theme",
     "clamp_to_budget",
     "emoji_cap",
     "emoji_instruction",
@@ -538,3 +541,129 @@ def style_block(prompt_budget_tokens: int = 0) -> dict[str, Any]:
         "split_max_chars": 360,
         "approx_tokens": approx_token_count(" ".join(_ROBOTIC_PHRASES)),
     }
+
+
+# ── texting voice: the hard layer under the prompt's soft layer ───────────────
+
+#: Named texting-style presets. The persona's SpeechProfile is the base;
+#: a theme is a deliberate, named variation the owner can switch between
+#: (or the system can rotate by mood). Each theme only overrides the
+#: fields it names — everything else stays the owner's configuration.
+VOICE_THEMES: dict[str, dict[str, Any]] = {
+    "default": {},
+    "dry": {
+        "emoji_rate": 0.12, "lowercase_bias": 0.75, "short_reply_chance": 0.38,
+        "catchphrases": ("ok real", "ugh", "anyway", "sure"),
+    },
+    "soft": {
+        "emoji_rate": 0.55, "lowercase_bias": 0.25, "short_reply_chance": 0.12,
+        "pet_names": ("babe", "love", "hey you", "sweetheart"),
+    },
+    "feral": {
+        "emoji_rate": 0.6, "lowercase_bias": 0.85, "short_reply_chance": 0.3,
+        "catchphrases": ("okay but hear me out", "no bc why", "lmao no"),
+        "text_speak": {"I know": "i kno", "really": "fr", "good night": "gn",
+                       "see you": "see ya", "because": "bc", "though": "tho"},
+    },
+    "poetic": {
+        "emoji_rate": 0.22, "lowercase_bias": 0.15, "short_reply_chance": 0.08,
+        "catchphrases": ("listen", "here's the thing", "okay wait"),
+    },
+    "sharp": {
+        "emoji_rate": 0.08, "lowercase_bias": 0.6, "short_reply_chance": 0.45,
+        "catchphrases": ("k", "noted", "anyway"),
+    },
+}
+
+
+def apply_voice_theme(speech: Any, theme: str) -> Any:
+    """Return a copy of ``speech`` with a named voice theme applied.
+
+    Unknown theme names return the speech unchanged (never raise — a guard
+    path must not break a reply over a typo in a theme name).
+    """
+    try:
+        import dataclasses
+        overrides = VOICE_THEMES.get((theme or "default").lower())
+        if not overrides:
+            return speech
+        changes: dict[str, Any] = {}
+        for key, value in overrides.items():
+            if key in ("catchphrases", "pet_names") and isinstance(value, tuple):
+                changes[key] = value
+            elif key == "text_speak" and isinstance(value, dict):
+                merged = dict(getattr(speech, "text_speak", {}) or {})
+                merged.update(value)
+                changes[key] = merged
+            elif isinstance(value, (int, float)):
+                changes[key] = value
+        return dataclasses.replace(speech, **changes)
+    except Exception:  # noqa: BLE001 - theme application never breaks a reply
+        return speech
+
+
+def apply_texting_voice(
+    draft: str,
+    speech: Any,
+    mood_values: Mapping[str, float],
+    label: str = "",
+    rng: Any = None,
+) -> str:
+    """Apply the persona's texting profile as deterministic post-processing.
+
+    The prompt *asks* the model to text like her; this *makes* the output
+    text like her regardless of model:
+
+    * **lowercase runs** — with ``lowercase_bias`` probability (raised when
+      tired/annoyed/distant, lowered when excited) the draft goes lowercase,
+      the way thumbs actually type;
+    * **text-speak** — each configured substitution applies with small
+      probability, never all of them (a substitution in every message is a
+      costume);
+    * **tired punctuation** — low energy drifts sentence ends toward "…";
+    * **sharp punctuation** — high frustration strips exclamation marks
+      (she doesn't exclaim when she's mad, she goes flat).
+
+    Seeded RNG in, same text out. Never raises.
+    """
+    if not draft:
+        return draft
+    try:
+        import random as _random
+        rng = rng or _random
+        energy = float(mood_values.get("energy", 60))
+        frustration = float(mood_values.get("frustration", 10))
+        distance = float(mood_values.get("distance", 30))
+        out = draft
+
+        # Lowercase run.
+        bias = float(getattr(speech, "lowercase_bias", 0.0) or 0.0)
+        if label in {"tired", "annoyed", "distant", "cold", "irritated"}:
+            bias *= 1.3
+        elif label in {"excited", "playful"}:
+            bias *= 0.5
+        if bias > 0 and rng.random() < min(0.95, bias):
+            out = out.lower()
+
+        # Text-speak substitutions, each with its own small roll.
+        text_speak = getattr(speech, "text_speak", None) or {}
+        for full, short in text_speak.items():
+            if not full or not short:
+                continue
+            if rng.random() < 0.35:
+                out = re.sub(r"(?i)\b" + re.escape(full) + r"\b", short, out)
+
+        # Tired punctuation drift: trailing periods sag into ellipses.
+        if energy < 30 and rng.random() < 0.4:
+            out = re.sub(r"\.(?=\s*$)", "…", out)
+            out = re.sub(r"\!\s*$", "…", out)
+
+        # Sharp flatness: high frustration kills exclamation.
+        if frustration > 60:
+            out = out.replace("!", ".")
+
+        # Collapse the damage a substitution can leave behind.
+        out = re.sub(r"[ ]{2,}", " ", out).strip()
+        return out or draft
+    except Exception:  # noqa: BLE001 - a guard must never break a reply
+        return draft

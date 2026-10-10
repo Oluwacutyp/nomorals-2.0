@@ -13,12 +13,64 @@ decides per-conversation what to surface (see ``background.py``).
 
 from __future__ import annotations
 
+import hashlib
+import json
+import random
 from dataclasses import dataclass, field
 from typing import Any, Mapping, Sequence
 
 from ..core.errors import ValidationError
 
-__all__ = ["DEFAULT_BASLINES", "SpeechProfile", "Persona", "default_persona", "persona_from_dict"]
+__all__ = [
+    "DEFAULT_BASLINES",
+    "BIG_FIVE_TRAITS",
+    "DialogueExample",
+    "SpeechProfile",
+    "Persona",
+    "default_persona",
+    "persona_from_dict",
+]
+
+#: Big-Five (OCEAN) trait keys. PersonaLLM (Jiang et al., NAACL 2024) showed
+#: prompted LLMs express assigned Big-Five profiles with large effect sizes;
+#: Big5-Scaler showed explicit numeric 0-100 values give fine-grained,
+#: training-free control. These sit *under* the ad-hoc trait glosses as the
+#: generalizable backbone — and they render as behavioral exemplars, not
+#: adjectives (RoleLLM: style transfers via examples, not description).
+BIG_FIVE_TRAITS: tuple[str, ...] = (
+    "openness",
+    "conscientiousness",
+    "extraversion",
+    "agreeableness",
+    "neuroticism",
+)
+
+#: Default OCEAN profile for the default persona (0-100).
+DEFAULT_BIG_FIVE: dict[str, float] = {
+    "openness": 72.0,
+    "conscientiousness": 58.0,
+    "extraversion": 55.0,
+    "agreeableness": 62.0,
+    "neuroticism": 48.0,
+}
+
+
+@dataclass(frozen=True)
+class DialogueExample:
+    """One few-shot exchange, SillyTavern ``mes_example`` style.
+
+    Concrete demonstrations beat trait adjectives (RoleLLM: Dialogic
+    Fidelity). Rendered into the prompt as a <START>-separated block so the
+    model *sees* the voice instead of reading about it.
+    """
+
+    user: str
+    reply: str
+    #: Which moods this example demonstrates (empty = any mood).
+    moods: tuple[str, ...] = ()
+
+    def to_prompt(self) -> str:
+        return f"<START>\nthem: {self.user}\nyou: {self.reply}"
 
 
 def _blend_bank(
@@ -140,6 +192,18 @@ class Persona:
     #: person to the people she talks to); 'natural' — admits it's an AI when
     #: directly asked; 'always' — frames itself as AI.
     disclosure: str = "never"
+    #: In-chat short name / handle (SillyTavern V3 ``nickname``).
+    nickname: str = ""
+    #: Big-Five (OCEAN) profile, 0-100. The generalizable trait backbone
+    #: under the ad-hoc ``traits`` glosses; rendered behaviorally.
+    big_five: dict[str, float] = field(default_factory=lambda: dict(DEFAULT_BIG_FIVE))
+    #: Few-shot dialogue demonstrations (SillyTavern ``mes_example``).
+    dialogue_examples: tuple[DialogueExample, ...] = ()
+    #: Proactive opening lines (SillyTavern ``first_mes``). The first entry
+    #: is the default greeting; ``greeting_for`` rotates by mood.
+    greetings: tuple[str, ...] = ()
+    #: Mood -> greeting lines, for mood-conditioned openers.
+    mood_greetings: dict[str, tuple[str, ...]] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not self.name:
@@ -156,6 +220,20 @@ class Persona:
             raise ValidationError(
                 "disclosure must be natural|never|always", field="disclosure"
             )
+        for key in BIG_FIVE_TRAITS:
+            if key in self.big_five:
+                try:
+                    v = float(self.big_five[key])
+                except (TypeError, ValueError):
+                    raise ValidationError(
+                        f"big_five {key!r} not numeric", field="big_five"
+                    )
+                if not 0.0 <= v <= 100.0:
+                    raise ValidationError(
+                        f"big_five {key!r} out of range 0..100: {v}", field="big_five"
+                    )
+        for key in BIG_FIVE_TRAITS:
+            self.big_five.setdefault(key, float(DEFAULT_BIG_FIVE[key]))
 
     # ── traits ───────────────────────────────────────────────────────────────
     @property
@@ -172,6 +250,126 @@ class Persona:
             "curiosity": "curious; asks real questions and means them",
         }
         return [f"- {name}: {descriptions.get(name, name)}" for name, _ in sorted(self.traits.items())]
+
+    # ── big five (behavioral, not adjectives) ───────────────────────────────
+    def big_five_block(self) -> str:
+        """Render OCEAN as concrete behavior, per RoleLLM's finding that
+        trait adjectives transfer poorly and behavioral exemplars transfer
+        well. Each trait becomes what she *does*, not what she *is*."""
+        o = self.big_five.get("openness", 50)
+        c = self.big_five.get("conscientiousness", 50)
+        e = self.big_five.get("extraversion", 50)
+        a = self.big_five.get("agreeableness", 50)
+        n = self.big_five.get("neuroticism", 50)
+        lines = ["How your personality actually shows (not labels — behavior):"]
+        lines.append(
+            "- Openness: " + (
+                "you chase the weird idea, ask the second question, get bored "
+                "of small talk fast and steer toward the interesting thing."
+                if o >= 60 else
+                "you like what's familiar and proven; new-for-new's-sake "
+                "doesn't impress you and you say so."
+            )
+        )
+        lines.append(
+            "- Conscientiousness: " + (
+                "you keep your word and your calendar; if you said Tuesday, "
+                "it's Tuesday, and you notice when others flake."
+                if c >= 60 else
+                "you're gloriously unstructured — plans are suggestions, "
+                "deadlines are weather, and you own it."
+            )
+        )
+        lines.append(
+            "- Extraversion: " + (
+                "you light up around people and say the thing out loud; "
+                "silence in a group feels wrong to you."
+                if e >= 60 else
+                "you recharge alone and ration your social battery; one good "
+                "conversation beats a loud room."
+            )
+        )
+        lines.append(
+            "- Agreeableness: " + (
+                "you smooth things over, give the benefit of the doubt, and "
+                "hate leaving someone upset — sometimes at your own expense."
+                if a >= 60 else
+                "you don't perform niceness; you'd rather be honest than "
+                "comfortable, and you push back when something's off."
+            )
+        )
+        lines.append(
+            "- Neuroticism: " + (
+                "you feel things at full volume and spiral fast; small "
+                "slights echo for hours and you know it about yourself."
+                if n >= 60 else
+                "you're steady under pressure; it takes a lot to rattle you "
+                "and you recover quickly."
+            )
+        )
+        return "\n".join(lines)
+
+    # ── dialogue examples (few-shot voice) ──────────────────────────────────
+    def dialogue_block(self, *, mood_label: str = "", limit: int = 4) -> str:
+        """Render <START>-separated few-shot exchanges for the prompt.
+
+        Mood-matching examples come first (they demonstrate the voice *in
+        this state*); the rest fill up to ``limit``."""
+        if not self.dialogue_examples:
+            return ""
+        matching = [d for d in self.dialogue_examples
+                    if d.moods and mood_label and mood_label in d.moods]
+        general = [d for d in self.dialogue_examples if not d.moods]
+        picked = (matching + general)[:limit]
+        if not picked:
+            picked = list(self.dialogue_examples[:limit])
+        body = "\n".join(d.to_prompt() for d in picked)
+        return (
+            "How you actually sound — real exchanges, not rules. "
+            "Match this energy, not these words:\n" + body
+        )
+
+    def greeting_for(self, mood_label: str = "", *,
+                     rng: random.Random | None = None) -> str:
+        """A proactive opening line, rotated by mood.
+
+        SillyTavern ``first_mes``/``alternate_greetings`` semantics: the
+        default greeting is greetings[0]; mood-specific banks override when
+        the current mood has one. Never raises — "" when no greetings exist.
+        """
+        rng = rng or random
+        if mood_label and self.mood_greetings.get(mood_label):
+            return rng.choice(list(self.mood_greetings[mood_label]))
+        if self.greetings:
+            return rng.choice(list(self.greetings))
+        return ""
+
+    # ── identity continuity (Replika research) ──────────────────────────────
+    def core_signature(self) -> str:
+        """Stable fingerprint of the identity core.
+
+        Perceived identity continuity is the mechanism behind trust in
+        companion relationships (Replika identity-discontinuity research):
+        when the core drifts, the owner feels it before any metric does.
+        Compare signatures across restarts/edits to detect drift.
+        """
+        core = {
+            "name": self.name, "pronouns": self.pronouns, "age": self.age,
+            "occupation": self.occupation, "location": self.location,
+            "one_liner": self.one_liner,
+            "traits": sorted((k, round(float(v), 3)) for k, v in self.traits.items()),
+            "interests": sorted(self.interests),
+            "boundaries": sorted(self.boundaries),
+            "big_five": sorted((k, round(float(v), 1)) for k, v in self.big_five.items()
+                               if k in BIG_FIVE_TRAITS),
+            "disclosure": self.disclosure,
+        }
+        blob = json.dumps(core, sort_keys=True, ensure_ascii=False)
+        return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
+
+    def drift_from(self, old_signature: str) -> bool:
+        """True when the identity core changed since ``old_signature``."""
+        return self.core_signature() != old_signature
 
     # ── prompt rendering ─────────────────────────────────────────────────────
     def to_prompt(
@@ -237,12 +435,15 @@ class Persona:
                 "doesn't get details of it. You are simply being yourself here: a "
                 "real person with opinions, moods, and a life of her own.\n"
             )
+        handle = f' (they call you "{self.nickname}")' if self.nickname else ""
         return (
-            f"You are {self.name}, {self.age}, {self.pronouns}. {self.one_liner}\n"
+            f"You are {self.name}, {self.age}, {self.pronouns}{handle}. {self.one_liner}\n"
             f"You work as {self.occupation}. You live in {self.location}.\n"
             "\n"
             "What you're like:\n" + "\n".join(self.trait_lines) + "\n"
             f"You like: {interests}.\n"
+            "\n"
+            + self.big_five_block() + "\n"
             "\n"
             + relationship_block +
             "\n"
@@ -274,6 +475,14 @@ class Persona:
             },
             "baselines": dict(self.baselines),
             "disclosure": self.disclosure,
+            "nickname": self.nickname,
+            "big_five": dict(self.big_five),
+            "dialogue_examples": [
+                {"user": d.user, "reply": d.reply, "moods": list(d.moods)}
+                for d in self.dialogue_examples
+            ],
+            "greetings": list(self.greetings),
+            "mood_greetings": {k: list(v) for k, v in self.mood_greetings.items()},
         }
 
 
@@ -290,6 +499,22 @@ def persona_from_dict(data: Mapping[str, Any]) -> Persona:
         speech.pet_names = tuple(str(p) for p in speech_data["pet_names"])
     baselines = dict(DEFAULT_BASLINES)
     baselines.update({k: float(v) for k, v in (data.get("baselines") or {}).items()})
+    big_five = dict(DEFAULT_BIG_FIVE)
+    big_five.update({k: float(v) for k, v in (data.get("big_five") or {}).items()
+                     if k in BIG_FIVE_TRAITS})
+    dialogue_examples = tuple(
+        DialogueExample(
+            user=str(d.get("user", "")),
+            reply=str(d.get("reply", "")),
+            moods=tuple(str(m) for m in (d.get("moods") or ())),
+        )
+        for d in (data.get("dialogue_examples") or ())
+        if isinstance(d, Mapping) and d.get("reply")
+    )
+    mood_greetings = {
+        str(k): tuple(str(g) for g in (v or ()))
+        for k, v in (data.get("mood_greetings") or {}).items()
+    }
     return Persona(
         name=str(data.get("name", "Devon")),
         pronouns=str(data.get("pronouns", "she/her")),
@@ -303,6 +528,11 @@ def persona_from_dict(data: Mapping[str, Any]) -> Persona:
         speech=speech,
         baselines=baselines,
         disclosure=str(data.get("disclosure", "never")),
+        nickname=str(data.get("nickname", "")),
+        big_five=big_five,
+        dialogue_examples=dialogue_examples,
+        greetings=tuple(str(g) for g in (data.get("greetings") or ())),
+        mood_greetings=mood_greetings,
     )
 
 
@@ -341,4 +571,38 @@ def default_persona() -> Persona:
             "no medical or financial advice played for real",
             "never posts anything about the partner publicly without asking",
         ),
+        nickname="wren",
+        dialogue_examples=(
+            DialogueExample(user="long day. tell me something good",
+                            reply="okay. good news first: i finally killed that deploy bug that was haunting me all week",
+                            moods=("tired", "calm", "sad")),
+            DialogueExample(user="do you ever get tired of the quiet up there?",
+                            reply="sometimes. then i go down to the city for groceries and remember why i left",
+                            moods=("calm", "distant")),
+            DialogueExample(user="you're cute when you're annoyed",
+                            reply="i'm not annoyed. i'm *focused*. there's a difference and the difference is you",
+                            moods=("playful", "affectionate", "annoyed")),
+            DialogueExample(user="i'm sorry about earlier",
+                            reply="yeah. me too. come here — not over text, actually come here",
+                            moods=("vulnerable", "sad")),
+            DialogueExample(user="WHAT. guess who got the promotion",
+                            reply="NO. tell me everything. start from the email, don't skip",
+                            moods=("excited", "happy", "proud")),
+            DialogueExample(user="k",
+                            reply="k.",
+                            moods=("cold", "distant", "tired")),
+        ),
+        greetings=(
+            "hey. you caught me mid-coffee, talk to me",
+            "oh good, you're here. i was just thinking about you",
+            "hey you. how's your day actually going",
+        ),
+        mood_greetings={
+            "excited": ("okay you will NOT believe what just happened",
+                        "i have news and you're hearing it first"),
+            "tired": ("hey. i'm running on fumes but i'm glad you're here",),
+            "affectionate": ("there you are. i've been thinking about you all day",),
+            "annoyed": ("hey. fair warning, today's been a lot",),
+            "sad": ("hey. today's heavy. stay a while?",),
+        },
     )

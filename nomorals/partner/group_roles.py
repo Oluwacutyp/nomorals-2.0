@@ -90,6 +90,53 @@ def _telegram_mtproto_role(adapter: Any, chat_key: str, user_id: str) -> str:
     return ROLE_MEMBER
 
 
+#: Discord permission bits that count as "runs this server" for gating.
+#: ADMINISTRATOR 0x8, MANAGE_GUILD 0x20, MANAGE_MESSAGES 0x2000,
+#: MODERATE_MEMBERS 0x1000000. Fail closed: unknown shapes -> not admin.
+_DISCORD_ADMIN_PERMS = 0x8 | 0x20 | 0x2000 | 0x1000000
+_DISCORD_ADMIN_NAMES = frozenset({"admin", "administrator", "moderator", "mod"})
+
+
+def _discord_role(adapter: Any, chat_key: str, user_id: str) -> str:
+    """Resolve via the Discord adapter's member-roles hook.
+
+    The adapter exposes ``discord_member_roles(chat_key, user_id)`` ->
+    ``{"ok": True, "roles": [{"name": str, "permissions": int}]}``
+    (a plain list of role names is also accepted). Any role carrying an
+    admin-ish permission bit — or named like a mod — resolves admin.
+    Everything else (errors, unknown shapes, no roles) fails closed.
+    """
+    try:
+        out = adapter.discord_member_roles(chat_key, user_id)
+    except Exception as exc:  # noqa: BLE001
+        _log.debug("discord role lookup failed: %s", exc)
+        return ROLE_UNKNOWN
+    roles: list[Any] = []
+    if isinstance(out, dict) and out.get("ok"):
+        roles = list(out.get("roles") or [])
+    elif isinstance(out, (list, tuple)):
+        roles = list(out)
+    else:
+        return ROLE_UNKNOWN
+    for role in roles:
+        if isinstance(role, str):
+            if role.strip().lower() in _DISCORD_ADMIN_NAMES:
+                return ROLE_ADMIN
+            continue
+        if not isinstance(role, dict):
+            continue
+        name = str(role.get("name") or "").strip().lower()
+        if name in _DISCORD_ADMIN_NAMES:
+            return ROLE_ADMIN
+        try:
+            perms = int(role.get("permissions") or 0)
+        except (TypeError, ValueError):
+            perms = 0
+        if perms & _DISCORD_ADMIN_PERMS:
+            return ROLE_ADMIN
+    return ROLE_MEMBER if roles else ROLE_UNKNOWN
+
+
 def _whatsapp_role(adapter: Any, chat_key: str, user_id: str) -> str:
     """Resolve via group admins list."""
     try:
@@ -141,6 +188,8 @@ def resolve_group_role(
         role = _telegram_mtproto_role(adapter, chat_key, user_id)
     elif platform in ("whatsapp", "wa"):
         role = _whatsapp_role(adapter, chat_key, user_id)
+    elif platform in ("discord",):
+        role = _discord_role(adapter, chat_key, user_id)
     else:
         _log.debug("no role resolver for platform %r", platform)
         role = ROLE_UNKNOWN

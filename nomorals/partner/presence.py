@@ -22,11 +22,18 @@ from typing import Any, Mapping
 
 __all__ = [
     "Presence",
+    "TypingPlan",
     "decide_presence",
     "human_typing_seconds",
     "is_low_content",
+    "read_delay_seconds",
     "thinking_typing_seconds",
+    "typing_schedule",
 ]
+
+#: Telegram expires a sendChatAction after ~5s; adapters must refresh at
+#: this interval to hold the "typing…" indicator for a whole turn.
+TYPING_KEEPALIVE_S = 4.0
 
 #: A message that costs a human zero emotional processing: acknowledgment,
 #: laugh, filler. These — and only these — may be read and left unanswered.
@@ -134,6 +141,71 @@ def thinking_typing_seconds(
     duration = rng.uniform(1.0, 2.5) + min(4.0, chars / 150.0)
     duration *= rng.uniform(0.8, 1.2)
     return max(minimum, min(cap, duration))
+
+
+@dataclass(frozen=True)
+class TypingPlan:
+    """The typing-indicator plan for one outbound bubble.
+
+    ``ticks`` are the offsets (seconds from the bubble's start) at which the
+    adapter should re-send the typing action — Telegram lets one
+    ``sendChatAction`` live ~5s, so a 20s type needs ticks at 0/4/8/12/16.
+    ``duration`` is how long the indicator stays up before the bubble lands.
+    """
+
+    ticks: tuple[float, ...]
+    duration: float
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "ticks": [round(t, 1) for t in self.ticks],
+            "duration": round(self.duration, 1),
+        }
+
+
+def typing_schedule(
+    parts: list[str],
+    *,
+    mood: Mapping[str, float] | None = None,
+    rng: random.Random | None = None,
+    keepalive_s: float = TYPING_KEEPALIVE_S,
+) -> list[TypingPlan]:
+    """One TypingPlan per outbound bubble.
+
+    The adapter's job is mechanical: at each tick, re-send the platform's
+    typing action; when the duration elapses, send the bubble. Between
+    bubbles a person pauses — the plan bakes in a short inter-bubble gap
+    (it reads as "she sent that, now she's typing the next thought").
+    """
+    rng = rng or random
+    plans: list[TypingPlan] = []
+    for i, part in enumerate(parts):
+        duration = human_typing_seconds(part or "", mood=mood, rng=rng)
+        ticks: list[float] = []
+        t = 0.0
+        while t < duration:
+            ticks.append(round(t, 1))
+            t += keepalive_s
+        if i > 0:
+            # Inter-bubble beat: she read her own message, then kept going.
+            gap = rng.uniform(0.8, 2.5)
+            ticks = [round(x + gap, 1) for x in ticks]
+            duration += gap
+        plans.append(TypingPlan(ticks=tuple(ticks), duration=round(duration, 1)))
+    return plans
+
+
+def read_delay_seconds(text: str, *, rng: random.Random | None = None) -> float:
+    """How long before she even *reads* the message.
+
+    Nobody's thumb is on the phone the instant a message lands. Short
+    messages get glanced at in a second or two; a paragraph sits unread a
+    little longer. Pure, seeded, testable.
+    """
+    rng = rng or random
+    chars = len(text or "")
+    base = 0.8 + min(6.0, chars / 120.0)
+    return round(base * rng.uniform(0.7, 1.4), 1)
 
 
 def decide_presence(

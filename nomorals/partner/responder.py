@@ -26,6 +26,7 @@ from typing import Any, Callable, Mapping, Sequence
 from ..core.logging_setup import get_logger
 from ..llm.base import LLMResponse, Message, SamplingParams
 from ..memory.manager import MemoryManager
+from .affect import affect_to_events, score_affect
 from .background import BackgroundSelector
 from .context import PartnerContextBuilder, user_turn
 from .lexicon_feed import LexiconFeed
@@ -33,6 +34,7 @@ from .mood import MoodEngine, MoodEvent
 from .persona import Persona
 from .relationship import Relationship
 from .style import (
+    apply_texting_voice,
     clamp_to_budget,
     emoji_cap,
     emoji_instruction,
@@ -170,8 +172,17 @@ _SHORT_LOW_CONTENT = re.compile(r"^(ok|okay|cool|k|mhm|hmm+|lol|haha+|sure|fine|
 _WARM_SHORT = {"yeah", "yep", "yes", "yess", "yesss", "ok", "okay"}
 
 
-def detect_signals(text: str, *, previous_text: str = "") -> list[MoodEvent]:
-    """Read one message for emotional events. Deterministic and offline."""
+def detect_signals(text: str, *, previous_text: str = "",
+                   use_affect: bool = True) -> list[MoodEvent]:
+    """Read one message for emotional events. Deterministic and offline.
+
+    Two passes: the regex bank first (precision — hand-written, high
+    confidence), then the affect lexicon (recall — catches emotional
+    messages no pattern matches, e.g. "this week has been a lot"). The
+    affect pass is capped at low intensity and never duplicates a kind
+    the regex bank already produced; ``use_affect=False`` restores the
+    pure-regex behavior.
+    """
     if not text or not text.strip():
         return []
     events: list[MoodEvent] = []
@@ -191,8 +202,18 @@ def detect_signals(text: str, *, previous_text: str = "") -> list[MoodEvent]:
     if _SHORT_LOW_CONTENT.match(text.strip()):
         kind = "warm_response" if text.strip().rstrip(".!?").lower() in _WARM_SHORT else "cold_response"
         events.append(MoodEvent(kind=kind, intensity=0.5, note="short reply"))
-    if len(events) > 4:
-        events = events[:4]
+        seen_kinds.add(kind)
+    if use_affect and len(events) < 4:
+        # Second pass: the lexicon backstop. Whisper-quiet by design.
+        try:
+            reading = score_affect(text)
+            for event in affect_to_events(reading, skip_kinds=frozenset(seen_kinds)):
+                events.append(event)
+                seen_kinds.add(event.kind)
+        except Exception:  # noqa: BLE001 - the backstop never breaks detection
+            _log.debug("affect second pass failed", exc_info=True)
+    if len(events) > 6:
+        events = events[:6]
     return events
 
 
@@ -333,6 +354,10 @@ class ReplyBundle:
     #: prompt-blend count in ``lexicon_terms_used`` says what *influenced*
     #: the reply; this says what actually landed in her vocabulary.
     lexicon_terms_surfaced: int = 0
+    #: The inbound message's affect reading (dominant emotion, intensity,
+    #: valence) — what the second-pass lexicon heard. Observability for the
+    #: owner; the mood engine got the events separately.
+    affect: dict[str, Any] = field(default_factory=dict)
 
     @property
     def text(self) -> str:
@@ -353,6 +378,7 @@ class ReplyBundle:
             "echo_action": self.echo_action,
             "degraded": self.degraded,
             "degraded_note": self.degraded_note,
+            "affect": dict(self.affect),
         }
 
 
@@ -530,6 +556,7 @@ class PartnerResponder:
         dyn_catchphrases: tuple[str, ...] = ()
         dyn_pet_names: tuple[str, ...] = ()
         voice_terms: list[str] = []
+        voice_term_cats: dict[str, str] = {}
         if self.lexicon is not None:
             dyn_catchphrases = self.lexicon.terms("catchphrase", limit=6)
             dyn_pet_names = self.lexicon.terms("pet_name", limit=4)
@@ -539,15 +566,18 @@ class PartnerResponder:
             lexicon_terms_used = voice_used + len(dyn_catchphrases) + len(dyn_pet_names)
             # The terms that could visibly surface in the reply: everything
             # blended above, used by lexicon_hits on the final draft.
-            voice_terms = (
-                list(dyn_catchphrases)
-                + list(dyn_pet_names)
-                + list(self.lexicon.terms("opener", limit=5))
-                + list(self.lexicon.terms("transition", limit=4))
-                + list(self.lexicon.terms("acknowledgment", limit=4))
-                + list(self.lexicon.terms("mood_expression", limit=4))
-                + list(self.lexicon.terms(f"mood_expression:{label}", limit=4))
-            )
+            # ``voice_term_cats`` maps term -> category for usage
+            # reinforcement (note_used) on the terms that actually land.
+            for _term in dyn_catchphrases:
+                voice_term_cats.setdefault(_term, "catchphrase")
+            for _term in dyn_pet_names:
+                voice_term_cats.setdefault(_term, "pet_name")
+            for _cat, _lim in (("opener", 5), ("transition", 4),
+                               ("acknowledgment", 4), ("mood_expression", 4),
+                               (f"mood_expression:{label}", 4)):
+                for _term in self.lexicon.terms(_cat, limit=_lim):
+                    voice_term_cats.setdefault(_term, _cat)
+            voice_terms = list(voice_term_cats)
             if lexicon_fallback:
                 _log.debug(
                     "lexicon voice: no dynamic terms for %s — static bank in use",
@@ -768,6 +798,13 @@ class PartnerResponder:
             draft,
             cap=emoji_cap(self.persona.speech.emoji_rate, self.mood.current().values),
         )
+        # Hard-layer texting voice: the persona's own speech profile applied
+        # deterministically (lowercase runs, text-speak, tired/sharp
+        # punctuation) — the prompt asks, this enforces.
+        draft = apply_texting_voice(
+            draft, self.persona.speech, self.mood.current().values,
+            label, self.rng,
+        )
         draft = clamp_to_budget(draft, budget)
         if short and len(draft) > 32:
             # The model ignored the short burst; take the first sentence.
@@ -781,6 +818,22 @@ class PartnerResponder:
         # Second half of the dynamic-voice measurement: which of the
         # blended lexicon terms visibly surfaced in the shipped reply.
         surfaced = lexicon_hits(draft, voice_terms) if voice_terms else 0
+        # Usage reinforcement: terms that landed get their uses bumped, so
+        # future blends prefer vocabulary that actually works.
+        if surfaced and self.lexicon is not None:
+            try:
+                import re as _re
+                for _term, _cat in voice_term_cats.items():
+                    _t = (_term or "").strip()
+                    if _t and _re.search(r"(?i)\b" + _re.escape(_t) + r"\b", draft):
+                        self.lexicon.note_used(_term, _cat)
+            except Exception:  # noqa: BLE001 - measurement never breaks a reply
+                _log.debug("lexicon usage reinforcement failed", exc_info=True)
+        # Inbound affect readout for the bundle (observability).
+        try:
+            _affect = score_affect(user_text).to_dict()
+        except Exception:  # noqa: BLE001
+            _affect = {}
         return ReplyBundle(
             parts=parts,
             mood_events=[],
@@ -795,6 +848,7 @@ class PartnerResponder:
             echo_action=echo_action,
             degraded=degraded,
             degraded_note=degraded_note,
+            affect=_affect,
         )
 
     @property
@@ -881,6 +935,34 @@ class PartnerResponder:
         if used:
             _log.debug("lexicon fallback: dynamic line served (%r)", pick)
         return [pick], used
+
+    # ── proactive openers ────────────────────────────────────────────────────
+    def proactive_greeting(self, *, user_in_us: bool = False,
+                           romantic: bool = True) -> str:
+        """An opening line for starting a conversation, in her voice.
+
+        Mood-conditioned greeting rotation (SillyTavern ``first_mes`` /
+        ``alternate_greetings`` semantics) grounded in her off-screen life:
+        when the background gate is open, the greeting may carry one ambient
+        detail ("just got back from the ridge") so it never opens on a
+        blank "hey".
+        """
+        label = self.mood.current().label
+        greeting = self.persona.greeting_for(label, rng=self.rng)
+        ambient = ""
+        background = getattr(self, "background", None)
+        if background is not None:
+            try:
+                ambient = background.ambient_line(user_in_us=user_in_us,
+                                                  romantic=romantic)
+            except Exception:  # noqa: BLE001 - ambient is garnish
+                ambient = ""
+        if greeting:
+            return greeting
+        # No authored greetings: fall back to an ambient-grounded opener.
+        if ambient:
+            return ambient
+        return "hey"
 
     # ── convenience: recall shared memories for a message ───────────────────
     def recall(
