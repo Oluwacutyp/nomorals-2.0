@@ -4,23 +4,47 @@ Compression never silently drops load-bearing content: a section's ``keep``
 strings are carried verbatim, and whenever content is removed the section is
 marked ``truncated`` and the marker names what happened.  A section that
 "vanishes" is a bug; a section that says it was cut is information.
+
+Two summarization strategies ship with the module:
+
+* :func:`extractive_summary` — deterministic head/tail paragraph selection.
+* :func:`salient_extract` — salience-scored extractive summary: sentences are
+  scored by term rarity (TF-IDF style) plus information-density signals
+  (identifiers, numbers, code), the highest-utility sentences survive in
+  original order.
 """
 
 from __future__ import annotations
 
+import math
+import re
+from collections import Counter
 from typing import Callable
 
-from ..core.text import approx_token_count, truncate_to_tokens
-from .sections import Section
+from ..core.text import truncate_to_tokens
+from .sections import Section, token_count
 
 __all__ = [
     "compress_section",
     "summarize_then_truncate",
     "extractive_summary",
+    "salient_extract",
 ]
 
 #: A compressor callback: (text, max_tokens) -> condensed text.
 Summarizer = Callable[[str, int], str]
+
+_WORD_RE = re.compile(r"[A-Za-z][\w\-/.:]{1,}")
+_DENSE_RE = re.compile(r"[A-Za-z]*\d[\w\-/.:]*|[A-Z]{2,}|`[^`]+`")
+_STOPWORDS = frozenset(
+    "a an the and or but if then else for of to in on at as is are was were "
+    "be been being it its this that these those with from by we you he she "
+    "they them his her our your their will would can could should shall may "
+    "might do does did done have has had not no yes so such than too very "
+    "just also more most some any each other into over after before between "
+    "during under again once here there when where which who whom whose what "
+    "how why because while until".split()
+)
 
 
 def extractive_summary(text: str, max_tokens: int) -> str:
@@ -40,7 +64,7 @@ def extractive_summary(text: str, max_tokens: int) -> str:
     take_head = True
     while i <= j:
         para = paras[i] if take_head else paras[j]
-        cost = approx_token_count(para)
+        cost = token_count(para)
         if used + cost > max_tokens:
             omitted += 1
             if take_head:
@@ -56,11 +80,92 @@ def extractive_summary(text: str, max_tokens: int) -> str:
             tail.append(para)
             j -= 1
         take_head = not take_head
-    omitted_tokens = approx_token_count(text) - used
+    omitted_tokens = token_count(text) - used
     body = "\n\n".join(head + tail[::-1])
     if omitted:
         body += (
             f"\n\n[… {omitted} paragraph(s) omitted from the middle "
+            f"(~{omitted_tokens} tokens) …]"
+        )
+    return body
+
+
+def _sentences(text: str) -> list[str]:
+    """Split into sentences, keeping line-oriented entries (logs, lists) whole."""
+    out: list[str] = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        if re.match(r"^[-*•\d.)\]]", line) or len(line) < 220:
+            out.append(line)
+            continue
+        for part in re.split(r"(?<=[.!?])\s+", line):
+            part = part.strip()
+            if part:
+                out.append(part)
+    return out
+
+
+def salient_extract(text: str, max_tokens: int) -> str:
+    """Salience-scored extractive summary.
+
+    Every sentence is scored by ``tf * idf`` over the document plus a density
+    bonus for identifier/number/code tokens (the "facts per token" utility
+    score).  The highest-utility sentences fill the budget and are emitted in
+    original document order, so the summary reads like the source.
+    Deterministic — no model calls, no randomness.
+    """
+    sentences = _sentences(text)
+    if len(sentences) <= 2:
+        return text
+
+    tokenized = []
+    for sent in sentences:
+        words = [
+            w.lower() for w in _WORD_RE.findall(sent)
+            if w.lower() not in _STOPWORDS
+        ]
+        tokenized.append(words)
+
+    doc_count = len(tokenized)
+    df: Counter[str] = Counter()
+    for words in tokenized:
+        for word in set(words):
+            df[word] += 1
+    idf = {w: math.log((1 + doc_count) / (1 + c)) + 1.0 for w, c in df.items()}
+
+    scored: list[tuple[float, int, str, int]] = []
+    for idx, (sent, words) in enumerate(zip(sentences, tokenized)):
+        if not words:
+            continue
+        tf = Counter(words)
+        utility = sum(tf[w] * idf.get(w, 1.0) for w in tf)
+        utility /= math.sqrt(len(words))  # length-normalized
+        density_bonus = 1.0 + 0.5 * len(_DENSE_RE.findall(sent))
+        cost = token_count(sent)
+        scored.append((utility * density_bonus, idx, sent, cost))
+
+    if not scored:
+        return text
+
+    # Greedily take highest-utility sentences that fit, then restore order.
+    scored.sort(key=lambda s: s[0], reverse=True)
+    picked: list[tuple[float, int, str, int]] = []
+    used = 0
+    for score, idx, sent, cost in scored:
+        if used + cost > max_tokens and picked:
+            continue
+        picked.append((score, idx, sent, cost))
+        used += cost
+    picked.sort(key=lambda s: s[1])
+
+    omitted = len(sentences) - len(picked)
+    body = "\n".join(sent for _, _, sent, _ in picked)
+    if omitted:
+        omitted_tokens = token_count(text) - used
+        body += (
+            f"\n[… {omitted} lower-salience sentence(s) omitted "
             f"(~{omitted_tokens} tokens) …]"
         )
     return body
@@ -93,7 +198,7 @@ def summarize_then_truncate(
     (history: newest entries live at the end).  Returns (text, truncated);
     the truncation marker appears only when content was actually cut.
     """
-    original_tokens = approx_token_count(text)
+    original_tokens = token_count(text)
     if original_tokens <= max_tokens and not keep:
         return text, False
 
@@ -107,11 +212,11 @@ def summarize_then_truncate(
             body = body.replace(keep_str, "", 1)
     body = "\n".join(line for line in body.splitlines() if line.strip()).strip()
     keep_text = "\n".join(pinned)
-    keep_tokens = approx_token_count(keep_text)
+    keep_tokens = token_count(keep_text)
     room = max(0, max_tokens - keep_tokens)
 
     rest = body
-    if summarizer is not None and approx_token_count(rest) > 2 * max(1, room):
+    if summarizer is not None and token_count(rest) > 2 * max(1, room):
         rest = summarizer(rest, room)
 
     if keep_tail:
@@ -120,7 +225,7 @@ def summarize_then_truncate(
         kept: list[str] = []
         used = 0
         for line in reversed(lines):
-            cost = approx_token_count(line) + 1
+            cost = token_count(line) + 1
             if used + cost > room and kept:
                 break
             used += cost
