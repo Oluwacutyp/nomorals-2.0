@@ -4,13 +4,23 @@ The index stores documents in a small SQLite database (``:memory:`` by
 default) and ranks with the existing :class:`nomorals.storage.fts.FTSIndex`
 (SQLite FTS5 ``bm25()``) instead of duplicating ranking logic here.
 
-Result shape is unchanged: ``search()`` returns ``{doc_id, title, score,
-snippet}`` dicts, but ``score`` is now a BM25 float (higher is better)
-rather than an integer term-frequency count.  Snippets keep the old
-~120-character window around the first query-term hit.
+Query language (Meilisearch/Tantivy-inspired, FTS5-native):
 
-Persistence: :meth:`DocumentIndex.save` writes a version-2 SQLite file.
-:meth:`DocumentIndex.load` reads version-2 files and transparently
+* plain terms — ``london bridge`` (OR by default, ``operator="AND"``)
+* exact phrases — ``"london bridge"``
+* field filters — ``title:report`` (fields: ``title``, ``text``)
+* prefix search — ``operator``/``prefix=True`` turns ``lond`` into ``lond*``
+  (the portable typo-tolerance fallback)
+* weighted columns — ``weights={"title": 3.0}`` boosts title hits
+
+Result shape: ``search()`` returns ``{doc_id, title, score, snippet}``
+dicts; ``score`` is the FTS5 ``bm25()`` rank negated (higher is better).
+``highlight=True`` wraps matches in ``<mark>`` tags (FTS5 ``highlight()``);
+otherwise snippets keep the ~120-character window around the first hit.
+
+Persistence: :meth:`DocumentIndex.save` writes a version-3 SQLite file
+(version 2 adds the ``format`` column; version 3 is current).
+:meth:`DocumentIndex.load` reads version-2/3 files and transparently
 migrates legacy version-1 JSON indexes (written before the BM25 move) by
 rebuilding them on the new backend.
 
@@ -31,7 +41,7 @@ from ..core.errors import StorageError
 from ..core.events import Event, global_bus
 from ..core.logging_setup import get_logger
 from ..storage.db import Database
-from ..storage.fts import FTSIndex
+from ..storage.fts import FTSIndex, build_match_query, escape_fts
 from .errors import DocumentError
 from .model import Document, Section, full_text
 
@@ -44,7 +54,9 @@ _SNIPPET_RADIUS_BEFORE = 40
 _SNIPPET_RADIUS_AFTER = 80
 
 #: Persistence format written by :meth:`DocumentIndex.save`.
-_INDEX_VERSION = 2
+_INDEX_VERSION = 3
+#: Previous SQLite format (no ``format`` column); :meth:`load` still reads it.
+_PREVIOUS_SQLITE_VERSION = 2
 #: Legacy JSON format written before the BM25 migration; :meth:`load` rebuilds it.
 _LEGACY_JSON_VERSION = 1
 _SQLITE_MAGIC = b"SQLite format 3\x00"
@@ -52,6 +64,12 @@ _SQLITE_MAGIC = b"SQLite format 3\x00"
 _FTS_TABLE = "documents_fts"
 _META_TABLE = "documents_meta"
 _VERSION_TABLE = "index_meta"
+_VOCAB_TABLE = "documents_fts_vocab"
+
+#: Fields addressable by ``field:term`` filters.
+_SEARCH_FIELDS = ("title", "text")
+_FIELD_FILTER_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*):(.+)$")
+_QUERY_TOKEN_RE = re.compile(r'"([^"]*)"|(\S+)')
 
 
 def _emit(topic: str, data: dict[str, Any]) -> None:
@@ -92,8 +110,22 @@ def _ensure_schema(db: Database) -> None:
         f'CREATE TABLE IF NOT EXISTS "{_META_TABLE}" ('
         '"doc_id" TEXT PRIMARY KEY, '
         '"title" TEXT NOT NULL, '
-        '"text" TEXT NOT NULL)'
+        '"text" TEXT NOT NULL, '
+        '"format" TEXT NOT NULL DEFAULT \'\')'
     )
+    # v2 → v3 migration: documents indexed before the format column
+    # existed get it added in place.
+    try:
+        columns = {row["name"] for row in
+                   db.query(f'PRAGMA table_info("{_META_TABLE}")')}
+    except StorageError:
+        columns = set()
+    if "format" not in columns:
+        try:
+            db.execute(f'ALTER TABLE "{_META_TABLE}" ADD COLUMN '
+                       '"format" TEXT NOT NULL DEFAULT \'\'')
+        except StorageError:
+            pass  # raced with another _ensure_schema; column is there now
     db.execute(
         f'CREATE TABLE IF NOT EXISTS "{_VERSION_TABLE}" ('
         '"key" TEXT PRIMARY KEY, '
@@ -105,6 +137,15 @@ def _ensure_schema(db: Database) -> None:
         f'CREATE VIRTUAL TABLE IF NOT EXISTS "{_FTS_TABLE}" '
         'USING fts5("title", "text")'
     )
+    # Vocabulary table for suggest(): fts5vocab is a query-time view over
+    # the FTS index, safe to create even for pre-existing tables.
+    try:
+        db.execute(
+            f'CREATE VIRTUAL TABLE IF NOT EXISTS "{_VOCAB_TABLE}" '
+            f'USING fts5vocab("{_FTS_TABLE}", \'row\')'
+        )
+    except StorageError:
+        _log.debug("fts5vocab unavailable; suggest() will return []")
 
 
 class DocumentIndex:
@@ -153,7 +194,8 @@ class DocumentIndex:
         self.remove(doc.id)
         rowid = self._db.insert(
             _META_TABLE,
-            {"doc_id": doc.id, "title": doc.title, "text": text},
+            {"doc_id": doc.id, "title": doc.title, "text": text,
+             "format": doc.format or ""},
         )
         self._fts.put(rowid, [doc.title, text])
         _emit("document.indexed", {"doc_id": doc.id, "title": doc.title})
@@ -189,54 +231,212 @@ class DocumentIndex:
             snippet = snippet.rstrip() + "…"
         return " ".join(snippet.split())
 
-    def search(self, query: str, limit: int = 10) -> list[dict]:
+    @staticmethod
+    def _build_match(query: str, operator: str, prefix: bool) -> str:
+        """Compile the query language to an FTS5 MATCH expression.
+
+        Preserves ``"exact phrases"`` and ``field:term`` filters (fields:
+        title, text); plain terms are phrase-escaped; ``prefix=True``
+        appends ``*`` to each term.
+        """
+        joiner = " AND " if operator.upper() == "AND" else " OR "
+        parts: list[str] = []
+        for match in _QUERY_TOKEN_RE.finditer(query):
+            phrase, word = match.group(1), match.group(2)
+            if phrase is not None:
+                toks = _tokenize(phrase)
+                if toks:
+                    parts.append('"' + " ".join(toks) + '"')
+                continue
+            field_match = _FIELD_FILTER_RE.match(word or "")
+            if field_match and field_match.group(1) in _SEARCH_FIELDS:
+                field, raw = field_match.group(1), field_match.group(2)
+                toks = _tokenize(raw)
+                if not toks:
+                    continue
+                term = toks[0] if len(toks) == 1 else \
+                    '"' + " ".join(toks) + '"'
+                if prefix:
+                    term += "*"
+                parts.append("{%s} : %s" % (field, term))
+                continue
+            for tok in _tokenize(word or ""):
+                parts.append(escape_fts(tok) + ("*" if prefix else ""))
+        return joiner.join(parts)
+
+    def _run_match(self, match: str, limit: int,
+                   highlight: bool) -> list[tuple[int, float, str | None]]:
+        """Execute a raw MATCH expression → [(rowid, score, snippet)]."""
+        if highlight:
+            snip_sql = (f'highlight("{_FTS_TABLE}", 1, '
+                        f"'<mark>', '</mark>') AS snip")
+        else:
+            snip_sql = "NULL AS snip"
+        sql = (
+            f'SELECT rowid, bm25("{_FTS_TABLE}") AS rank, {snip_sql} '
+            f'FROM "{_FTS_TABLE}" WHERE "{_FTS_TABLE}" MATCH ? '
+            f"ORDER BY rank LIMIT ?"
+        )
+        try:
+            rows = self._db.query(sql, (match, limit))
+        except (sqlite3.OperationalError, StorageError) as exc:
+            raise DocumentError(f"bad search query: {exc}") from exc
+        return [(int(r["rowid"]), -float(r["rank"]), r["snip"]) for r in rows]
+
+    def search(self, query: str, limit: int = 10, *,
+               operator: str = "OR", prefix: bool = False,
+               highlight: bool = False,
+               weights: dict[str, float] | None = None,
+               explain: bool = False) -> list[dict]:
         """Search the index; each hit is {doc_id, title, score, snippet}.
 
         Score is the FTS5 ``bm25()`` rank (negated so higher is better) — a
-        float, not the old integer term-frequency count.  A document matches
-        when it contains any query term (OR semantics, as before); ties break
-        on doc id so ordering is deterministic.
+        float.  A document matches when it contains any query term (OR
+        semantics, as before); ties break on doc id so ordering is
+        deterministic.
+
+        Query language: ``"exact phrases"``, ``title:term`` / ``text:term``
+        field filters, ``operator="AND"`` for all-terms matching,
+        ``prefix=True`` for ``term*`` prefix matching (typo-tolerance
+        fallback), ``weights={"title": 3.0}`` to boost column hits,
+        ``highlight=True`` for ``<mark>``-wrapped FTS5 snippets, and
+        ``explain=True`` to attach the compiled MATCH expression to hits.
         """
         terms = _tokenize(query or "")
         if not terms:
             raise DocumentError("search query has no indexable terms")
         if limit <= 0:
             raise DocumentError(f"limit must be positive, got {limit}")
+        if operator.upper() not in ("AND", "OR"):
+            raise DocumentError(
+                f"operator must be AND or OR, got {operator!r}")
         if not self._fts.available:
             raise DocumentError(
                 "FTS backend became unavailable; refusing to return empty results"
             )
-        hits = self._fts.search(
-            " ".join(terms), limit=limit, prefix=False, operator="OR"
-        )
-        if not hits:
+        match = self._build_match(query, operator, prefix)
+        if not match:
+            raise DocumentError("search query has no indexable terms")
+        raw_hits = self._run_match(match, limit, highlight)
+        if not raw_hits:
             return []
         rows = {
             int(r["rowid"]): r
             for r in self._db.query(
-                f'SELECT rowid, "doc_id", "title", "text" FROM "{_META_TABLE}" '
-                f'WHERE "rowid" IN ({", ".join("?" * len(hits))})',
-                [h.rowid for h in hits],
+                f'SELECT rowid, "doc_id", "title", "text", "format" '
+                f'FROM "{_META_TABLE}" '
+                f'WHERE "rowid" IN ({", ".join("?" * len(raw_hits))})',
+                [rowid for rowid, _, _ in raw_hits],
             )
         }
         ordered = sorted(
-            (h for h in hits if h.rowid in rows),
-            key=lambda h: (-h.score, rows[h.rowid]["doc_id"]),
+            (h for h in raw_hits if h[0] in rows),
+            key=lambda h: (-h[1], rows[h[0]]["doc_id"]),
         )
         results = []
-        for hit in ordered:
-            record = rows[hit.rowid]
-            results.append({
+        for rowid, score, fts_snippet in ordered:
+            record = rows[rowid]
+            snippet = (fts_snippet if highlight and fts_snippet
+                       else self._snippet(record["text"], terms))
+            hit: dict[str, Any] = {
                 "doc_id": record["doc_id"],
                 "title": record["title"],
-                "score": float(hit.score),
-                "snippet": self._snippet(record["text"], terms),
-            })
+                "score": float(score),
+                "snippet": snippet,
+            }
+            if weights:
+                # Per-column bm25 weights are applied at query time; the
+                # score above already reflects the default weighting, so
+                # re-run weighted when requested.
+                hit["score"] = self._weighted_score(
+                    match, rowid, weights)
+                hit["score"] = float(hit["score"])
+            if explain:
+                hit["explain"] = {"match": match, "operator": operator.upper(),
+                                  "prefix": prefix}
+            results.append(hit)
+        if weights:
+            # Re-sort after weight adjustment (deterministic tie-break).
+            results.sort(key=lambda h: (-h["score"], h["doc_id"]))
         return results
+
+    def _weighted_score(self, match: str, rowid: int,
+                        weights: dict[str, float]) -> float:
+        """Re-score one hit with per-column bm25 weights."""
+        args = ", ".join(str(float(weights.get(c, 1.0)))
+                         for c in ("title", "text"))
+        sql = (f'SELECT bm25("{_FTS_TABLE}", {args}) AS rank '
+               f'FROM "{_FTS_TABLE}" WHERE rowid = ? '
+               f'AND "{_FTS_TABLE}" MATCH ?')
+        try:
+            row = self._db.query_one(sql, (rowid, match))
+        except (sqlite3.OperationalError, StorageError):
+            return 0.0
+        return -float(row["rank"]) if row else 0.0
+
+    def count(self, query: str, *, operator: str = "OR",
+              prefix: bool = False) -> int:
+        """Number of documents matching ``query`` (same query language as
+        :meth:`search`)."""
+        terms = _tokenize(query or "")
+        if not terms:
+            raise DocumentError("search query has no indexable terms")
+        match = self._build_match(query, operator, prefix)
+        if not match:
+            raise DocumentError("search query has no indexable terms")
+        try:
+            return int(self._db.scalar(
+                f'SELECT COUNT(*) FROM "{_FTS_TABLE}" '
+                f'WHERE "{_FTS_TABLE}" MATCH ?',
+                (match,), default=0))
+        except (sqlite3.OperationalError, StorageError) as exc:
+            raise DocumentError(f"bad search query: {exc}") from exc
+
+    def suggest(self, prefix: str, limit: int = 8) -> list[str]:
+        """Term completions for ``prefix`` from the FTS5 vocabulary
+        (search-as-you-type hook).  Returns [] when the prefix is too
+        short or the vocab table is unavailable — never raises."""
+        if limit <= 0:
+            raise DocumentError(f"limit must be positive, got {limit}")
+        clean = (prefix or "").strip().lower()
+        if len(clean) < 2:
+            return []
+        like = (clean.replace("\\", "\\\\").replace("%", "\\%")
+                .replace("_", "\\_"))
+        try:
+            rows = self._db.query(
+                f'SELECT DISTINCT term FROM "{_VOCAB_TABLE}" '
+                f"WHERE term LIKE ? ESCAPE '\\' ORDER BY term LIMIT ?",
+                (like + "%", limit))
+        except (sqlite3.OperationalError, StorageError):
+            return []
+        return [str(r["term"]) for r in rows]
+
+    def facet(self, field: str = "format") -> dict[str, int]:
+        """Count indexed documents per value of ``field`` (faceted-search
+        hook).  Currently ``field`` must be ``"format"``."""
+        if field != "format":
+            raise DocumentError(
+                f"cannot facet on {field!r}: only 'format' is facetable")
+        try:
+            rows = self._db.query(
+                f'SELECT "format", COUNT(*) AS n FROM "{_META_TABLE}" '
+                f'GROUP BY "format" ORDER BY n DESC')
+        except StorageError as exc:
+            raise DocumentError(f"facet failed: {exc}") from exc
+        return {str(r["format"]) or "(unknown)": int(r["n"]) for r in rows}
+
+    def stats(self) -> dict[str, Any]:
+        """Index statistics: document count, per-format facet, version."""
+        return {
+            "documents": len(self),
+            "formats": self.facet(),
+            "index_version": _INDEX_VERSION,
+        }
 
     # ── persistence ──────────────────────────────────────────────────────────
     def save(self, path: str | Path) -> Path:
-        """Persist the index as a version-2 SQLite file.
+        """Persist the index as a version-3 SQLite file.
 
         Replaces any existing file at ``path``.  Legacy version-1 JSON files
         are not written anymore — see :meth:`load` for the migration path.
@@ -269,7 +469,7 @@ class DocumentIndex:
             self._write_version(dest)
             fts = FTSIndex(dest, _FTS_TABLE, columns=["title", "text"])
             for row in self._db.query(
-                f'SELECT "doc_id", "title", "text" FROM "{_META_TABLE}"'
+                f'SELECT "doc_id", "title", "text", "format" FROM "{_META_TABLE}"'
             ):
                 rowid = dest.insert(
                     _META_TABLE,
@@ -277,6 +477,7 @@ class DocumentIndex:
                         "doc_id": row["doc_id"],
                         "title": row["title"],
                         "text": row["text"],
+                        "format": row.get("format", "") or "",
                     },
                 )
                 fts.put(rowid, [row["title"], row["text"]])
@@ -297,9 +498,10 @@ class DocumentIndex:
     def load(cls, path: str | Path) -> DocumentIndex:
         """Load an index saved with :meth:`save`.
 
-        Accepts version-2 SQLite files and transparently migrates legacy
-        version-1 JSON files (rebuilt on the BM25 backend).  The returned
-        index is always in-memory; call :meth:`save` to persist changes.
+        Accepts version-2/3 SQLite files (v2 gains empty ``format`` values)
+        and transparently migrates legacy version-1 JSON files (rebuilt on
+        the BM25 backend).  The returned index is always in-memory; call
+        :meth:`save` to persist changes.
         """
         file_path = Path(path)
         if not file_path.is_file():
@@ -340,22 +542,31 @@ class DocumentIndex:
             except StorageError as exc:
                 raise DocumentError(
                     f"cannot load index from {file_path}: {exc}") from exc
-            if str(version) != str(_INDEX_VERSION):
+            if str(version) not in (str(_INDEX_VERSION),
+                                    str(_PREVIOUS_SQLITE_VERSION)):
                 raise DocumentError(
                     f"unsupported document index version {version!r} in "
                     f"{file_path} (expected {_INDEX_VERSION})")
             try:
                 rows = source.query(
-                    f'SELECT "doc_id", "title", "text" FROM "{_META_TABLE}"'
+                    f'SELECT "doc_id", "title", "text", "format" '
+                    f'FROM "{_META_TABLE}"'
                 )
-            except StorageError as exc:
-                raise DocumentError(
-                    f"cannot load index from {file_path}: {exc}") from exc
+            except StorageError:
+                # Version-2 files have no format column.
+                try:
+                    rows = source.query(
+                        f'SELECT "doc_id", "title", "text" FROM "{_META_TABLE}"'
+                    )
+                except StorageError as exc:
+                    raise DocumentError(
+                        f"cannot load index from {file_path}: {exc}") from exc
         finally:
             source.close()
         index = cls()
         for row in rows:
-            doc = Document(id=str(row["doc_id"]), title=str(row["title"]))
+            doc = Document(id=str(row["doc_id"]), title=str(row["title"]),
+                           format=str(row.get("format", "") or ""))
             # Rebuild via add() so meta + FTS rows stay consistent; the stored
             # text is injected as a single section because only text persisted.
             doc.sections = [Section(level=1, heading="", text=str(row["text"]))]

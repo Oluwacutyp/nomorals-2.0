@@ -2,15 +2,19 @@
 
 Format detection order: file extension first, then magic bytes
 (PDF ``%PDF``, RTF ``{\\rtf``, ZIP ``PK`` for the OOXML/ODF/EPUB family
-with content sniffing), then the explicit ``mime`` hint, then a plain-text
-fallback.  Anything else raises :class:`DocumentError` — the engine never
-returns a silently-empty Document.
+with content sniffing, OLE ``D0 CF 11 E0`` for legacy Office), then the
+explicit ``mime`` hint, then a plain-text fallback.  Anything else raises
+:class:`DocumentError` — the engine never returns a silently-empty
+Document.
+
+Use :func:`detect_format` to sniff a format without parsing.
 """
 
 from __future__ import annotations
 
 import csv
 import io
+import json
 import re
 import zipfile
 from collections.abc import Callable
@@ -26,7 +30,7 @@ from .errors import DocumentError
 from .model import Document, Section, Table, new_document
 from .pdf_tables import extract_text_tables
 
-__all__ = ["parse_bytes", "parse_path"]
+__all__ = ["detect_format", "parse_bytes", "parse_path"]
 
 _log = get_logger(__name__)
 
@@ -41,11 +45,13 @@ def _emit(topic: str, data: dict[str, Any]) -> None:
 
 _PDF_MAGIC = b"%PDF"
 _ZIP_MAGIC = b"PK\x03\x04"
+_OLE_MAGIC = b"\xd0\xcf\x11\xe0"  # legacy Office compound document (.xls/.doc/.ppt)
 
 _EXTENSIONS = {
     ".pdf": "pdf",
     ".docx": "docx",
     ".xlsx": "xlsx",
+    ".xls": "xls",
     ".pptx": "pptx",
     ".html": "html",
     ".htm": "html",
@@ -58,18 +64,25 @@ _EXTENSIONS = {
     ".epub": "epub",
     ".odt": "odt",
     ".ods": "ods",
+    ".json": "json",
+    ".xml": "xml",
 }
 
 _MIMES = {
     "application/pdf": "pdf",
     "application/vnd.openxmlformats-officedocument.wordprocessingml.document": "docx",
     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": "xlsx",
+    "application/vnd.ms-excel": "xls",
     "application/vnd.openxmlformats-officedocument.presentationml.presentation": "pptx",
     "application/rtf": "rtf",
     "text/rtf": "rtf",
     "application/epub+zip": "epub",
     "application/vnd.oasis.opendocument.text": "odt",
     "application/vnd.oasis.opendocument.spreadsheet": "ods",
+    "application/json": "json",
+    "text/json": "json",
+    "application/xml": "xml",
+    "text/xml": "xml",
     "text/html": "html",
     "text/markdown": "markdown",
     "text/x-markdown": "markdown",
@@ -168,6 +181,14 @@ def _sniff(data: bytes, filename: str, mime: str) -> str:
         return "pdf"
     if data[:4] == _ZIP_MAGIC:
         return _sniff_zip(data)
+    if data[:4] == _OLE_MAGIC:
+        # Legacy OLE compound document — could be .xls, .doc, or .ppt.
+        # The container alone cannot tell them apart, so route by explicit
+        # extension only and fail fast with a useful message otherwise.
+        raise DocumentError(
+            "legacy OLE Office document (could be .xls, .doc, or .ppt): "
+            "pass filename= with the real extension so the right parser "
+            "is chosen")
     if data.lstrip()[:5] == b"{\\rtf":
         return "rtf"
     if mime:
@@ -178,6 +199,21 @@ def _sniff(data: bytes, filename: str, mime: str) -> str:
     text_start = data.lstrip()[:4096]
     if _HTML_START_RE.match(text_start.decode("utf-8", "replace")):
         return "html"
+    # Content sniffing for extension-less JSON/XML (markitdown parity):
+    # a bare '{"a": 1}' or '<root/>' with no filename should not become txt.
+    stripped = text_start.decode("utf-8", "replace").strip()
+    if stripped[:1] in ("{", "["):
+        try:
+            json.loads(stripped)
+            return "json"
+        except Exception:  # noqa: BLE001 - not JSON, keep sniffing
+            pass
+    if stripped[:1] == "<" and not stripped.startswith("</"):
+        try:
+            ET.fromstring(stripped)
+            return "xml"
+        except ET.ParseError:
+            pass
     try:
         decoded = data.decode("utf-8")
     except UnicodeDecodeError:
@@ -187,6 +223,17 @@ def _sniff(data: bytes, filename: str, mime: str) -> str:
     if "\x00" in decoded:
         raise DocumentError("unrecognized binary input: NUL bytes in text stream")
     return "txt"
+
+
+def detect_format(data: bytes, *, filename: str = "",
+                  mime: str = "") -> str:
+    """Return the format key for ``data`` without parsing it.
+
+    Same detection as :func:`parse_bytes` (extension → magic bytes →
+    MIME → text fallback).  Raises :class:`DocumentError` on empty or
+    unrecognized input.
+    """
+    return _sniff(data, filename, mime)
 
 
 # ── shared markdown sectioning ──────────────────────────────────────────────
@@ -226,6 +273,30 @@ def _parse_markdown_sections(text: str) -> list[Section]:
     flush()
     if not sections:
         raise DocumentError("markdown document has no content")
+    return sections
+
+
+_LIST_ITEM_RE = re.compile(r"^(?:[-*•]|\d+[.)])\s+\S")
+
+
+def _refine_kinds(sections: list[Section]) -> list[Section]:
+    """Tag sections whose body is uniformly lists, quotes, or code.
+
+    Parsers flatten structure to prose; this recovers the block kind so
+    renderers and chunkers can treat it properly (docling keeps
+    ListItem/CodeItem distinct for the same reason).
+    """
+    for section in sections:
+        lines = [ln for ln in section.text.split("\n") if ln.strip()]
+        if not lines or section.kind != "text":
+            continue
+        if all(_LIST_ITEM_RE.match(ln.strip()) for ln in lines):
+            section.kind = "list"
+        elif all(ln.strip().startswith(">") for ln in lines):
+            section.kind = "quote"
+        elif (len(lines) >= 1 and lines[0].strip().startswith("```")
+              and lines[-1].strip().startswith("```")):
+            section.kind = "code"
     return sections
 
 
@@ -341,13 +412,15 @@ def _parse_pdf(data: bytes, doc: Document) -> Document:
     # read_pdf_text joins pages with "\n\n" and never emits a blank line
     # inside a page, so splitting there recovers the page boundaries.
     pages = [p for p in text.split("\n\n") if p.strip()]
-    doc.sections = [Section(level=1, heading=f"Page {i + 1}", text=page)
+    doc.sections = [Section(level=1, heading=f"Page {i + 1}", text=page,
+                            page=i + 1)
                     for i, page in enumerate(pages)]
     # Recover whitespace-aligned tables from the page text (conservative:
     # only consistent columnar blocks become tables).
     for i, page in enumerate(pages):
         for table in extract_text_tables(page):
             table.name = f"Page {i + 1} {table.name}"
+            table.page = i + 1
             doc.tables.append(table)
     doc.metadata["pages"] = len(pages)
     if doc.tables:
@@ -363,6 +436,109 @@ def _parse_pdf(data: bytes, doc: Document) -> Document:
         if info.get(key):
             doc.metadata[key.lower()] = info[key]
     return doc
+
+
+_REL_NS = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}"
+_PKG_REL_NS = "{http://schemas.openxmlformats.org/package/2006/relationships}"
+_NUM_NS = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+
+
+def _docx_hyperlink_targets(data: bytes) -> dict[str, str]:
+    """Map ``rId`` → URL for ``w:hyperlink`` elements (best effort)."""
+    try:
+        with zipfile.ZipFile(io.BytesIO(data)) as archive:
+            raw = archive.read("word/_rels/document.xml.rels")
+        root = ET.fromstring(raw)
+    except Exception:  # noqa: BLE001 - links are a bonus, not a failure
+        return {}
+    targets: dict[str, str] = {}
+    for rel in root.iter(f"{_PKG_REL_NS}Relationship"):
+        rel_type = rel.get("Type", "")
+        if rel_type.endswith("/hyperlink"):
+            rid, target = rel.get("Id", ""), rel.get("Target", "")
+            if rid and target:
+                targets[rid] = target
+    return targets
+
+
+def _docx_list_kinds(data: bytes) -> dict[str, str]:
+    """Map ``w:numId`` → ``"bullet"`` or ``"decimal"`` via numbering.xml."""
+    try:
+        with zipfile.ZipFile(io.BytesIO(data)) as archive:
+            raw = archive.read("word/numbering.xml")
+        root = ET.fromstring(raw)
+    except Exception:  # noqa: BLE001 - lists degrade to bullets
+        return {}
+    abstract_fmt: dict[str, str] = {}
+    for abstract in root.iter(f"{_NUM_NS}abstractNum"):
+        aid = abstract.get(f"{_NUM_NS}abstractNumId", "")
+        fmt = "bullet"
+        for lvl in abstract.iter(f"{_NUM_NS}lvl"):
+            num_fmt = lvl.find(f"{_NUM_NS}numFmt")
+            if num_fmt is not None:
+                val = num_fmt.get(f"{_NUM_NS}val", "")
+                fmt = "decimal" if val == "decimal" else "bullet"
+                break
+        if aid:
+            abstract_fmt[aid] = fmt
+    kinds: dict[str, str] = {}
+    for num in root.iter(f"{_NUM_NS}num"):
+        num_id = num.get(f"{_NUM_NS}numId", "")
+        ref = num.find(f"{_NUM_NS}abstractNumId")
+        aid = ref.get(f"{_NUM_NS}val", "") if ref is not None else ""
+        if num_id:
+            kinds[num_id] = abstract_fmt.get(aid, "bullet")
+    return kinds
+
+
+def _docx_footnotes(data: bytes) -> list[tuple[str, str]]:
+    """(id, text) footnotes from ``word/footnotes.xml`` (best effort)."""
+    try:
+        with zipfile.ZipFile(io.BytesIO(data)) as archive:
+            raw = archive.read("word/footnotes.xml")
+        root = ET.fromstring(raw)
+    except Exception:  # noqa: BLE001 - footnotes are a bonus
+        return []
+    notes: list[tuple[str, str]] = []
+    for note in root.iter(f"{_NUM_NS}footnote"):
+        if note.get(f"{_NUM_NS}type", "") in (
+                "separator", "continuationSeparator", "continuationNotice"):
+            continue
+        fid = note.get(f"{_NUM_NS}id", "")
+        text = " ".join(
+            "".join(t.text or "" for t in p.iter(f"{_NUM_NS}t")).strip()
+            for p in note.iter(f"{_NUM_NS}p")).strip()
+        if fid and text:
+            notes.append((fid, text))
+    return notes
+
+
+def _para_num_id(child: Any, para: Any, word_ns: str) -> str:
+    """Numbering id for a docx paragraph: direct ``w:numPr`` first, then
+    the style chain (python-docx's List styles number via the style
+    definition, real Word files usually number directly)."""
+    p_pr = child.find(f"{word_ns}pPr")
+    if p_pr is not None:
+        num_pr = p_pr.find(f"{word_ns}numPr")
+        if num_pr is not None:
+            num_id = num_pr.find(f"{word_ns}numId")
+            if num_id is not None:
+                return num_id.get(f"{word_ns}val", "")
+    seen: set[int] = set()
+    style = getattr(para, "style", None)
+    while style is not None and id(style) not in seen:
+        seen.add(id(style))
+        element = getattr(style, "element", None)
+        if element is not None:
+            for num_pr in element.iter(f"{word_ns}numPr"):
+                num_id = num_pr.find(f"{word_ns}numId")
+                if num_id is not None:
+                    return num_id.get(f"{word_ns}val", "")
+        try:
+            style = style.base_style
+        except Exception:  # noqa: BLE001 - end of the style chain
+            break
+    return ""
 
 
 def _parse_docx(data: bytes, doc: Document) -> Document:
@@ -400,6 +576,10 @@ def _parse_docx(data: bytes, doc: Document) -> Document:
     current = Section(level=1, heading="", text="")
     body: list[str] = []
     table_count = 0
+    link_targets = _docx_hyperlink_targets(data)
+    list_kinds = _docx_list_kinds(data)
+    links: list[str] = []
+    list_counters: dict[str, int] = {}
 
     def flush_section() -> None:
         text_out = "\n".join(body).strip()
@@ -415,6 +595,22 @@ def _parse_docx(data: bytes, doc: Document) -> Document:
             if not text:
                 continue
             style = para.style.name if para.style is not None else ""
+            if style == "Title":
+                # A Title style beats the filename-stem placeholder.
+                stem = _stem(doc.source)
+                if not doc.title or doc.title == stem:
+                    doc.title = text
+                continue
+            if style == "Subtitle":
+                doc.metadata.setdefault("subtitle", text)
+                continue
+            # Hyperlinks: keep the visible text (already in para.text)
+            # and harvest the URLs into metadata.
+            for hyperlink in child.iter(f"{word_ns}hyperlink"):
+                rid = hyperlink.get(f"{_REL_NS}id", "")
+                target = link_targets.get(rid, "")
+                if target and target not in links:
+                    links.append(target)
             if style.startswith("Heading"):
                 flush_section()
                 try:
@@ -422,8 +618,20 @@ def _parse_docx(data: bytes, doc: Document) -> Document:
                 except (ValueError, IndexError):
                     level = 1
                 current = Section(level=min(max(level, 1), 6), heading=text, text="")
-            else:
-                body.append(text)
+                continue
+            # Lists: w:numPr (direct or via the style chain) or a List
+            # style → bullet/numbered marker.  markitdown preserves list
+            # structure; flat paragraphs lose it.
+            num_id = _para_num_id(child, para, word_ns)
+            is_list = bool(num_id) or style.startswith("List")
+            if is_list:
+                kind = list_kinds.get(num_id, "bullet")
+                if kind == "decimal":
+                    list_counters[num_id] = list_counters.get(num_id, 0) + 1
+                    text = f"{list_counters[num_id]}. {text}"
+                else:
+                    text = f"• {text}"
+            body.append(text)
         elif child.tag == f"{word_ns}tbl":
             table_count += 1
             dtable = DocxTable(child, oxml_doc)
@@ -435,9 +643,14 @@ def _parse_docx(data: bytes, doc: Document) -> Document:
             doc.tables.append(Table(name=name, headers=cells[0], rows=cells[1:]))
             body.append(f"[{name}: {len(cells) - 1} data rows]")
     flush_section()
+    if links:
+        doc.metadata["links"] = links
+    for fid, ftext in _docx_footnotes(data):
+        sections.append(Section(level=2, heading=f"Footnote [{fid}]",
+                                text=ftext, kind="footnote"))
     if not sections and not doc.tables:
         raise DocumentError(".docx contains no paragraphs or tables")
-    doc.sections = sections
+    doc.sections = _refine_kinds(sections)
     doc.metadata["tables"] = len(doc.tables)
     return doc
 
@@ -498,6 +711,11 @@ def _parse_xlsx(data: bytes, doc: Document) -> Document:
             level=1, heading=name,
             text=(f"Worksheet {name!r}: {len(rows)} data rows × "
                   f"{len(headers)} columns.")))
+        merged = getattr(sheet, "merged_cells", None)
+        merged_count = len(list(merged.ranges)) if merged is not None else 0
+        if merged_count:
+            doc.metadata.setdefault("merged_cells", 0)
+            doc.metadata["merged_cells"] += merged_count
     workbook.close()
     if not doc.tables:
         raise DocumentError(".xlsx workbook has no non-empty worksheets")
@@ -551,7 +769,7 @@ def _parse_pptx(data: bytes, doc: Document) -> Document:
             if not lines:
                 continue
             doc.sections.append(Section(level=1, heading=f"Slide {index}",
-                                        text="\n".join(lines)))
+                                        text="\n".join(lines), page=index))
     if not doc.sections:
         raise DocumentError(".pptx slides contain no text")
     doc.metadata["slides"] = len(doc.sections)
@@ -567,6 +785,20 @@ def _parse_html(data: bytes, doc: Document) -> Document:
     titles = root.find_all("title")
     if titles and titles[0].inner_text().strip():
         doc.title = titles[0].inner_text().strip()
+    # <head> metadata harvest: description/keywords/author + lang.
+    for meta in root.find_all("meta"):
+        name = (meta.attrs.get("name", "") or "").lower()
+        content = meta.attrs.get("content", "").strip()
+        if not content:
+            continue
+        if name in ("description", "keywords", "author", "creator",
+                    "subject"):
+            doc.metadata[name] = content
+    for html_node in root.find_all("html"):
+        lang = html_node.attrs.get("lang", "").strip()
+        if lang:
+            doc.metadata["language"] = lang
+            break
     # <head> is metadata: drop it so its text can't glue itself to the
     # first body heading (node_to_markdown strips inner block edges).
     for head in root.find_all("head"):
@@ -577,7 +809,7 @@ def _parse_html(data: bytes, doc: Document) -> Document:
     markdown = node_to_markdown(bodies[0] if bodies else root)
     if not markdown.strip():
         raise DocumentError("HTML document has no readable content")
-    doc.sections = _parse_markdown_sections(markdown)
+    doc.sections = _refine_kinds(_parse_markdown_sections(markdown))
     _promote_title(doc)
     for i, table_node in enumerate(root.find_all("table"), 1):
         grid: list[list[str]] = []
@@ -601,16 +833,22 @@ def _parse_markdown(data: bytes, doc: Document) -> Document:
         raise DocumentError(f"markdown is not valid UTF-8: {exc}") from exc
     if not text.strip():
         raise DocumentError("markdown document is empty")
-    doc.sections = _parse_markdown_sections(text)
+    doc.sections = _refine_kinds(_parse_markdown_sections(text))
     _promote_title(doc)
     return doc
 
 
 def _parse_delimited(data: bytes, doc: Document, delimiter: str, label: str) -> Document:
-    try:
-        text = data.decode("utf-8-sig")
-    except UnicodeDecodeError as exc:
-        raise DocumentError(f"{label} is not valid UTF-8: {exc}") from exc
+    # Encoding fallback chain: UTF-8 (with BOM) → Windows cp1252 →
+    # latin-1 (never fails).  Non-UTF-8 CSVs are common in the wild;
+    # dying on them is worse than a best-effort decode.
+    text = ""
+    for encoding in ("utf-8-sig", "cp1252", "latin-1"):
+        try:
+            text = data.decode(encoding)
+            break
+        except UnicodeDecodeError:
+            continue
     if not text.strip():
         raise DocumentError(f"{label} file is empty")
     if delimiter == ",":
@@ -644,6 +882,207 @@ def _parse_txt(data: bytes, doc: Document) -> Document:
     if not text.strip():
         raise DocumentError("text document is empty")
     doc.sections = [Section(level=1, heading="", text=text.strip())]
+    return doc
+
+
+# ── JSON / XML (stdlib) ───────────────────────────────────────────────────
+
+_JSON_MAX_DEPTH = 6
+
+
+def _json_walk(value: Any, heading: str, level: int, doc: Document,
+               depth: int) -> None:
+    """Recursively lower a JSON value into sections/tables."""
+    if depth > _JSON_MAX_DEPTH:
+        doc.sections.append(Section(level=min(level, 6), heading=heading,
+                                    text="[nested too deep — truncated]"))
+        return
+    level = min(max(level, 1), 6)
+    if isinstance(value, dict):
+        if not value:
+            return
+        # A dict of scalars becomes prose lines; anything richer recurses.
+        scalars = {k: v for k, v in value.items()
+                   if isinstance(v, (str, int, float, bool)) or v is None}
+        rest = {k: v for k, v in value.items() if k not in scalars}
+        body = "\n".join(f"{k}: {v}" for k, v in scalars.items()
+                         if v is not None and str(v).strip())
+        if body or not rest:
+            doc.sections.append(Section(level=level, heading=heading,
+                                        text=body))
+        for key, sub in rest.items():
+            _json_walk(sub, str(key), level + 1, doc, depth + 1)
+    elif isinstance(value, list):
+        if not value:
+            return
+        if all(isinstance(item, dict) for item in value):
+            keys: list[str] = []
+            for item in value:
+                for key in item:
+                    if key not in keys:
+                        keys.append(str(key))
+            rows = [[str(item.get(k, "")) for k in keys] for item in value]
+            doc.tables.append(Table(name=heading or f"Table {len(doc.tables) + 1}",
+                                    headers=keys, rows=rows))
+            doc.sections.append(Section(
+                level=level, heading=heading,
+                text=f"JSON array {heading!r}: {len(rows)} records × "
+                     f"{len(keys)} fields."))
+        elif all(isinstance(item, (str, int, float, bool)) or item is None
+                 for item in value):
+            items = [str(item) for item in value if item is not None]
+            doc.sections.append(Section(
+                level=level, heading=heading, kind="list",
+                text="\n".join(f"• {item}" for item in items)))
+        else:
+            for i, item in enumerate(value):
+                _json_walk(item, f"{heading} [{i + 1}]" if heading
+                           else f"[{i + 1}]", level, doc, depth + 1)
+    elif value is not None:
+        text = str(value).strip()
+        if text:
+            doc.sections.append(Section(level=level, heading=heading,
+                                        text=text))
+
+
+def _parse_json(data: bytes, doc: Document) -> Document:
+    try:
+        payload = json.loads(data.decode("utf-8-sig"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise DocumentError(f"invalid JSON: {exc}") from exc
+    before = (len(doc.sections), len(doc.tables))
+    if isinstance(payload, dict):
+        for key, value in payload.items():
+            _json_walk(value, str(key), 1, doc, 0)
+    elif isinstance(payload, list):
+        _json_walk(payload, _stem(doc.source) or "data", 1, doc, 0)
+    else:
+        _json_walk(payload, "", 1, doc, 0)
+    if (len(doc.sections), len(doc.tables)) == before:
+        raise DocumentError("JSON document has no readable content")
+    if doc.tables:
+        doc.metadata["tables"] = len(doc.tables)
+    return doc
+
+
+_XML_MAX_DEPTH = 6
+
+
+def _xml_text(elem: Any) -> str:
+    return "".join(elem.itertext()).strip()
+
+
+def _xml_walk(elem: Any, level: int, doc: Document, depth: int) -> None:
+    """One top-level XML element → section; nested elements → subsections."""
+    if depth > _XML_MAX_DEPTH:
+        return
+    level = min(max(level, 1), 6)
+    tag = _localname(elem.tag)
+    children = [c for c in elem if isinstance(c.tag, str)]
+    attr_lines = [f"@{k}: {v}" for k, v in elem.attrib.items()]
+    if not children:
+        body = "\n".join(attr_lines)
+        text = _xml_text(elem)
+        if text:
+            body = (body + "\n" + text).strip() if body else text
+        if body or attr_lines:
+            doc.sections.append(Section(level=level, heading=tag, text=body))
+        return
+    # Mixed element: its own direct text first, then child subsections.
+    direct = (elem.text or "").strip()
+    tails = " ".join((c.tail or "").strip() for c in children).strip()
+    own = " ".join(p for p in (direct, tails) if p)
+    if attr_lines:
+        own = ("\n".join(attr_lines) + ("\n" + own if own else "")).strip()
+    if own:
+        doc.sections.append(Section(level=level, heading=tag, text=own))
+    for child in children:
+        _xml_walk(child, level + 1, doc, depth + 1)
+
+
+def _parse_xml(data: bytes, doc: Document) -> Document:
+    try:
+        text = data.decode("utf-8-sig")
+    except UnicodeDecodeError as exc:
+        raise DocumentError(f"XML is not valid UTF-8: {exc}") from exc
+    if not text.strip():
+        raise DocumentError("XML document is empty")
+    try:
+        root = ET.fromstring(text)
+    except ET.ParseError as exc:
+        raise DocumentError(f"invalid XML: {exc}") from exc
+    doc.metadata["xml_root"] = _localname(root.tag)
+    if root.attrib:
+        doc.metadata["xml_attributes"] = dict(root.attrib)
+    for child in root:
+        if isinstance(child.tag, str):
+            _xml_walk(child, 1, doc, 0)
+    # A root with only direct text (no element children).
+    if not doc.sections:
+        body = _xml_text(root)
+        if body:
+            doc.sections.append(Section(level=1, heading=_localname(root.tag),
+                                        text=body))
+    if not doc.sections:
+        raise DocumentError("XML document has no readable content")
+    return doc
+
+
+def _xls_cell_text(cell: Any, datemode: int) -> str:
+    """Render an xlrd cell to string (dates → ISO, like _cell_text)."""
+    import datetime as _dt
+    ctype = cell.ctype
+    value = cell.value
+    if ctype == 0 or value == "":  # empty
+        return ""
+    if ctype == 2:  # number
+        if float(value).is_integer():
+            return str(int(value))
+        return str(value)
+    if ctype == 3:  # date
+        try:
+            import xlrd
+            dt = xlrd.xldate_as_datetime(value, datemode)
+            if isinstance(dt, _dt.datetime):
+                return dt.isoformat()
+            return str(dt)
+        except Exception:  # noqa: BLE001 - fall back to raw value
+            return str(value)
+    if ctype == 4:  # boolean
+        return "TRUE" if value else "FALSE"
+    return str(value).strip()
+
+
+def _parse_xls(data: bytes, doc: Document) -> Document:
+    try:
+        import xlrd
+    except ImportError as exc:
+        raise DocumentError(
+            "parsing .xls requires the optional 'xlrd' package "
+            "(pip install xlrd)") from exc
+    try:
+        book = xlrd.open_workbook(file_contents=data)
+    except Exception as exc:
+        raise DocumentError(f"invalid .xls file: {exc}") from exc
+    for sheet in book.sheets():
+        grid = [[_xls_cell_text(sheet.cell(r, c), book.datemode)
+                 for c in range(sheet.ncols)]
+                for r in range(sheet.nrows)]
+        grid = [row for row in grid if any(cell for cell in row)]
+        if not grid:
+            continue
+        width = max(len(row) for row in grid)
+        padded = [row + [""] * (width - len(row)) for row in grid]
+        headers, rows = padded[0], padded[1:]
+        name = sheet.name or f"Sheet {len(doc.tables) + 1}"
+        doc.tables.append(Table(name=name, headers=headers, rows=rows))
+        doc.sections.append(Section(
+            level=1, heading=name,
+            text=(f"Worksheet {name!r}: {len(rows)} data rows × "
+                  f"{len(headers)} columns.")))
+    if not doc.tables:
+        raise DocumentError(".xls workbook has no non-empty worksheets")
+    doc.metadata["sheets"] = [t.name for t in doc.tables]
     return doc
 
 
@@ -764,15 +1203,80 @@ def _rtf_to_text(data: bytes) -> str:
 
 
 def _parse_rtf(data: bytes, doc: Document) -> Document:
-    text = _rtf_to_text(data)
+    src = data.decode("latin-1", "replace")
+    tables, clean_src = _rtf_extract_tables(src)
+    doc.tables.extend(tables)
+    if tables:
+        doc.metadata["tables"] = len(tables)
+    text = _rtf_to_text(clean_src.encode("latin-1", "replace"))
     blocks = [b.strip() for b in re.split(r"\n{2,}|\r\n{2,}", text) if b.strip()]
     # Single-newline paragraphs collapse into blocks; stray lone lines that
     # look like headings are not promoted — RTF carries no heading info.
-    if not blocks:
+    if not blocks and not tables:
         raise DocumentError("RTF document contains no readable text")
     doc.sections = [Section(level=1, heading="", text=block)
                     for block in blocks]
     return doc
+
+
+# ── RTF tables (``\trowd … \cell … \row``) ─────────────────────────────────
+
+_RTF_ROW_RE = re.compile(r"\\trowd\b(.*?)\\row\b", re.DOTALL)
+_RTF_HEX_RE = re.compile(r"\\'[0-9a-fA-F]{2}")
+_RTF_UNI_RE = re.compile(r"\\u(-?\d+)")
+_RTF_CTRL_RE = re.compile(r"\\[a-z]+\d* ?")
+
+
+def _rtf_fragment_text(fragment: str) -> str:
+    """Best-effort plain text of an RTF cell fragment (controls stripped)."""
+    text = _RTF_HEX_RE.sub(
+        lambda m: chr(int(m.group(0)[2:], 16)), fragment)
+    text = _RTF_UNI_RE.sub(
+        lambda m: chr(int(m.group(1)) % 65536), text)
+    text = _RTF_CTRL_RE.sub(" ", text)
+    text = text.replace("{", " ").replace("}", " ")
+    text = text.replace("\\\\", "\\")
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _rtf_extract_tables(src: str) -> tuple[list[Table], str]:
+    """Recover ``\\trowd`` tables from RTF source.
+
+    Returns (tables, cleaned_source): consecutive ``\\trowd…\\row`` runs
+    become Tables (first row = header), and their spans are blanked from
+    the source so the prose pass doesn't duplicate them.
+    """
+    row_spans: list[tuple[int, int, list[str]]] = []
+    for match in _RTF_ROW_RE.finditer(src):
+        parts = re.split(r"\\cell\b", match.group(1))
+        cells = [_rtf_fragment_text(part) for part in parts]
+        while cells and not cells[-1]:
+            cells.pop()  # trailing row formatting after the last \cell
+        if cells and any(cells):
+            row_spans.append((match.start(), match.end(), cells))
+    grouped: list[list[list[str]]] = []
+    current: list[list[str]] = []
+    prev_end: int | None = None
+    for start, end, cells in row_spans:
+        if prev_end is not None and src[prev_end:start].strip():
+            if current:
+                grouped.append(current)
+                current = []
+        current.append(cells)
+        prev_end = end
+    if current:
+        grouped.append(current)
+    tables: list[Table] = []
+    for rows in grouped:
+        width = max(len(row) for row in rows)
+        grid = [row + [""] * (width - len(row)) for row in rows]
+        tables.append(Table(name=f"Table {len(tables) + 1}",
+                            headers=grid[0], rows=grid[1:],
+                            confidence=0.9))
+    clean = src
+    for start, end, _cells in reversed(row_spans):
+        clean = clean[:start] + "\n" + clean[end:]
+    return tables, clean
 
 
 # ── EPUB (stdlib-only zip + XML) ────────────────────────────────────────────
@@ -823,6 +1327,15 @@ def _parse_epub(data: bytes, doc: Document) -> Document:
         if (creator_node is not None and creator_node.text
                 and creator_node.text.strip()):
             doc.author = creator_node.text.strip()
+        lang_node = opf.find(f".//{_OPF_NS}metadata/{_DC_NS}language")
+        if (lang_node is not None and lang_node.text
+                and lang_node.text.strip()):
+            doc.metadata["language"] = lang_node.text.strip()
+        subjects = [n.text.strip() for n in
+                    opf.findall(f".//{_OPF_NS}metadata/{_DC_NS}subject")
+                    if n.text and n.text.strip()]
+        if subjects:
+            doc.metadata["subjects"] = subjects
         manifest = {item.get("id", ""): item.get("href", "")
                     for item in opf.iter(f"{_OPF_NS}item")}
         opf_dir = str(Path(opf_path).parent)
@@ -839,12 +1352,14 @@ def _parse_epub(data: bytes, doc: Document) -> Document:
         sections: list[Section] = []
         current = Section(level=1, heading="", text="")
         body: list[str] = []
+        chapter_no = 0
 
         def flush() -> None:
             text_out = "\n".join(body).strip()
             if current.heading or text_out:
                 sections.append(Section(level=current.level,
-                                        heading=current.heading, text=text_out))
+                                        heading=current.heading, text=text_out,
+                                        page=current.page))
             body.clear()
 
         def flush_table(table_elem: Any) -> None:
@@ -861,9 +1376,11 @@ def _parse_epub(data: bytes, doc: Document) -> Document:
             width = max(len(row) for row in grid)
             grid = [row + [""] * (width - len(row)) for row in grid]
             doc.tables.append(Table(name=f"Table {len(doc.tables) + 1}",
-                                    headers=grid[0], rows=grid[1:]))
+                                    headers=grid[0], rows=grid[1:],
+                                    page=chapter_no))
 
         for href in spine_hrefs:
+            chapter_no += 1
             try:
                 chapter = ET.fromstring(archive.read(href))
             except ET.ParseError as exc:
@@ -877,7 +1394,8 @@ def _parse_epub(data: bytes, doc: Document) -> Document:
                 if tag in _EPUB_HEADINGS:
                     flush()
                     current = Section(level=_EPUB_HEADINGS[tag],
-                                      heading=_xhtml_text(elem), text="")
+                                      heading=_xhtml_text(elem), text="",
+                                      page=chapter_no)
                 elif tag == "p":
                     text = _xhtml_text(elem)
                     if text:
@@ -1002,6 +1520,10 @@ def _parse_odt(data: bytes, doc: Document) -> Document:
             if (creator_node is not None and creator_node.text
                     and creator_node.text.strip()):
                 doc.author = creator_node.text.strip()
+            lang_node = meta_root.find(f".//{_ODT_DC}language")
+            if (lang_node is not None and lang_node.text
+                    and lang_node.text.strip()):
+                doc.metadata["language"] = lang_node.text.strip()
         except (KeyError, ET.ParseError):
             # meta.xml is optional metadata; a missing/corrupt one must
             # never fail the document parse.
@@ -1059,6 +1581,7 @@ _PARSERS: dict[str, Callable[..., Document]] = {
     "pdf": _parse_pdf,
     "docx": _parse_docx,
     "xlsx": _parse_xlsx,
+    "xls": _parse_xls,
     "pptx": _parse_pptx,
     "html": _parse_html,
     "markdown": _parse_markdown,
@@ -1067,6 +1590,8 @@ _PARSERS: dict[str, Callable[..., Document]] = {
     "epub": _parse_epub,
     "odt": _parse_odt,
     "ods": _parse_ods,
+    "json": _parse_json,
+    "xml": _parse_xml,
 }
 
 
