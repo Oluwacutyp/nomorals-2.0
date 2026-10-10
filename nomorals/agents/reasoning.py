@@ -40,6 +40,8 @@ from ..core.jsonutil import extract_json as _extract_json
 from ..core.logging_setup import get_logger
 from ..core.policy import Capability
 from ..llm.base import Message, SamplingParams
+from ..llm.brain import brain_for
+from ..storage.kv import KVStore
 
 _log = get_logger(__name__)
 
@@ -179,10 +181,10 @@ class ReasoningEngine:
                   "requested, follow it EXACTLY. No preamble, no apologies.")
         if self.system_note:
             system += f"\nContext: {self.system_note}"
-        response = self.context.router.chat(
+        response = brain_for(self.context).chat(
             [Message.system(system), Message.user(prompt)],
             SamplingParams(temperature=temperature, max_tokens=1400),
-        )
+        task_kind="reasoning")
         if not response.ok:
             raise ToolError(f"reasoning: {getattr(response, 'error', 'model error')}")
         text = (response.text or "").strip()
@@ -1026,24 +1028,11 @@ class ReasoningAgent:
             try:
                 db = getattr(self.context, "db", None)
                 if db is not None:
-                    row = db.query_one(
-                        "SELECT value FROM kv_store WHERE key=?",
-                        (self._MIDTASK_KEY,))
-                    journal: list[dict[str, Any]] = []
-                    if row:
-                        try:
-                            journal = json.loads(row["value"])
-                        except ValueError:
-                            journal = []
+                    kv = KVStore(db)
+                    journal: list[dict[str, Any]] = kv.get(self._MIDTASK_KEY, default=[])
                     journal.append({"ts": time.time(), **out})
                     journal = journal[-100:]
-                    db.execute(
-                        "INSERT INTO kv_store (key, value, updated_at) "
-                        "VALUES (?,?,?) "
-                        "ON CONFLICT(key) DO UPDATE SET "
-                        "value=excluded.value, updated_at=excluded.updated_at",
-                        (self._MIDTASK_KEY, json.dumps(journal),
-                         time.time()))
+                    kv.set(self._MIDTASK_KEY, journal)
             except Exception:  # noqa: BLE001 - journal is a bonus
                 pass
         # wave 82: an abort is evidence — after it is journaled, mine the
@@ -1062,11 +1051,8 @@ class ReasoningAgent:
             db = getattr(self.context, "db", None)
             if db is None:
                 return []
-            row = db.query_one("SELECT value FROM kv_store WHERE key=?",
-                               (self._MIDTASK_KEY,))
-            if not row:
-                return []
-            return json.loads(row["value"])[-max(1, limit):]
+            data = KVStore(db).get(self._MIDTASK_KEY, default=[])
+            return data[-max(1, limit):]
         except Exception:  # noqa: BLE001
             return []
 
@@ -1172,22 +1158,11 @@ class ReasoningAgent:
             db = getattr(self.context, "db", None)
             if db is None:
                 return
-            row = db.query_one("SELECT value FROM kv_store WHERE key=?",
-                               (key,))
-            journal: list[dict[str, Any]] = []
-            if row:
-                try:
-                    journal = json.loads(row["value"])
-                except ValueError:
-                    journal = []
+            kv = KVStore(db)
+            journal: list[dict[str, Any]] = kv.get(key, default=[])
             journal.append(entry)
             journal = journal[-bound:]
-            db.execute(
-                "INSERT INTO kv_store (key, value, updated_at) "
-                "VALUES (?,?,?) "
-                "ON CONFLICT(key) DO UPDATE SET "
-                "value=excluded.value, updated_at=excluded.updated_at",
-                (key, json.dumps(journal), time.time()))
+            kv.set(key, journal)
         except Exception:  # noqa: BLE001 - journals are a bonus
             pass
 
@@ -1198,11 +1173,7 @@ class ReasoningAgent:
             db = getattr(context, "db", None)
             if db is None:
                 return []
-            row = db.query_one("SELECT value FROM kv_store WHERE key=?",
-                               (key,))
-            if not row:
-                return []
-            data = json.loads(row["value"])
+            data = KVStore(db).get(key, default=[])
             return data[-max(1, limit):] if isinstance(data, list) else []
         except Exception:  # noqa: BLE001
             return []
