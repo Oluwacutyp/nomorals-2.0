@@ -62,6 +62,7 @@ class TradeIdea:
     warnings: list = field(default_factory=list)
     session_gate: dict = field(default_factory=dict)
     regime: str = ""
+    timeframe: str = ""            # e.g. "1h", "15m" — for lesson gating
     mtf_alignment: dict = field(default_factory=dict)
     smc_score: float = 0.0
     structure_bias: int = 0
@@ -272,6 +273,10 @@ def executor_check(idea: TradeIdea) -> dict:
     Returns ``{"ok": bool, "reason": str}``. This is the enforcement
     point of the boundary law — analysis stays in ta/, execution stays
     in finance/connectors.
+
+    Also consults the backtest lessons (``ta.lessons``): configs with
+    a "DO NOT TRADE" verdict from real backtest evidence are refused
+    here, not at the broker.
     """
     if not isinstance(idea, TradeIdea):
         return {"ok": False, "reason": "not a TradeIdea — refusing"}
@@ -287,4 +292,19 @@ def executor_check(idea: TradeIdea) -> dict:
     if idea.side < 0 and not (idea.invalidation > idea.entry):
         return {"ok": False,
                 "reason": "short invalidation below entry — refusing"}
+    # Backtest lesson gate: refuse configs proven to have no edge.
+    try:
+        from .lessons import check_lesson
+        lesson = check_lesson(getattr(idea, "symbol", "") or "",
+                              getattr(idea, "timeframe", "") or "")
+        if lesson["verdict"] == "DO NOT TRADE":
+            return {
+                "ok": False,
+                "reason": (
+                    f"backtest lesson {lesson['lesson_id']}: "
+                    f"{lesson['evidence']}"
+                ),
+            }
+    except Exception:
+        pass  # lesson gate is advisory, never a crash vector
     return {"ok": True, "reason": "idea well-formed"}
