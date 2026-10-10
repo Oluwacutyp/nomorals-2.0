@@ -500,3 +500,216 @@ def register(registry: Any) -> None:
     )
     def telegram_forum_topic(chat_key: str, title: str) -> dict[str, Any]:
         return _tg_admin(chat_key, "admin_forum_topic", title=title)
+
+    # ── telegram-bot (Bot API) group/channel admin ────────────────────
+    # Same operations as the MTProto tools above, but through Devon's own
+    # bot identity (@HerBot) instead of the owner's account. The bot can
+    # only act where it is an admin — admin_rights() is the honest check.
+
+    def _tgbot_admin(chat_key: str, method: str, **kwargs: Any) -> dict[str, Any]:
+        gw = _require_gateway()
+        platform, _, rest = chat_key.partition(":")
+        if platform != "telegram-bot":
+            return {"ok": False,
+                    "error": "bot admin tools need a telegram-bot: chat key"}
+        adapter = (gw._snapshot_adapters() or {}).get("telegram-bot")
+        if adapter is None:
+            return {"ok": False, "error": "telegram bot not connected"}
+        fn = getattr(adapter, method, None)
+        if fn is None:
+            return {"ok": False, "error": f"no {method} on telegram bot"}
+        chat = ChatRef(platform=platform, chat_id=rest)
+        try:
+            return fn(chat, **kwargs)
+        except Exception as exc:  # noqa: BLE001 - honest error
+            return {"ok": False, "error": str(exc)[:200]}
+
+    @registry.register(
+        "tgbot_admin_rights",
+        description=(
+            "Check the BOT's OWN admin rights in a group/channel. Call this "
+            "BEFORE any bot admin action — honest capability check."
+        ),
+        capability=Capability.SOCIAL_BULK,
+        parameters={
+            "type": "object",
+            "properties": {
+                "chat_key": {"type": "string",
+                             "description": "telegram-bot:<chat_id>"},
+            },
+            "required": ["chat_key"],
+        },
+    )
+    def tgbot_admin_rights(chat_key: str) -> dict[str, Any]:
+        return _tgbot_admin(chat_key, "admin_rights")
+
+    @registry.register(
+        "tgbot_pin",
+        description="Pin a message in a group/channel via the bot. Owner-only.",
+        capability=Capability.SOCIAL_BULK,
+        parameters={
+            "type": "object",
+            "properties": {
+                "chat_key": {"type": "string"},
+                "message_id": {"type": "string"},
+                "silent": {"type": "boolean", "default": True},
+            },
+            "required": ["chat_key", "message_id"],
+        },
+    )
+    def tgbot_pin(chat_key: str, message_id: str,
+                  silent: bool = True) -> dict[str, Any]:
+        return _tgbot_admin(chat_key, "admin_pin",
+                                        message_id=message_id, silent=silent)
+
+    @registry.register(
+        "tgbot_unpin",
+        description="Unpin the pinned message via the bot. Owner-only.",
+        capability=Capability.SOCIAL_BULK,
+        parameters={
+            "type": "object",
+            "properties": {"chat_key": {"type": "string"}},
+            "required": ["chat_key"],
+        },
+    )
+    def tgbot_unpin(chat_key: str) -> dict[str, Any]:
+        return _tgbot_admin(chat_key, "admin_unpin")
+
+    @registry.register(
+        "tgbot_ban",
+        description="Ban a user from a group/channel via the bot. Owner-only.",
+        capability=Capability.SOCIAL_BULK,
+        parameters={
+            "type": "object",
+            "properties": {
+                "chat_key": {"type": "string"},
+                "user_id": {"type": "string"},
+            },
+            "required": ["chat_key", "user_id"],
+        },
+    )
+    def tgbot_ban(chat_key: str, user_id: str) -> dict[str, Any]:
+        return _tgbot_admin(chat_key, "admin_ban", user_id=user_id)
+
+    @registry.register(
+        "tgbot_unban",
+        description="Unban a user via the bot. Owner-only.",
+        capability=Capability.SOCIAL_BULK,
+        parameters={
+            "type": "object",
+            "properties": {
+                "chat_key": {"type": "string"},
+                "user_id": {"type": "string"},
+            },
+            "required": ["chat_key", "user_id"],
+        },
+    )
+    def tgbot_unban(chat_key: str, user_id: str) -> dict[str, Any]:
+        return _tgbot_admin(chat_key, "admin_unban",
+                                        user_id=user_id)
+
+    @registry.register(
+        "tgbot_restrict",
+        description=(
+            "Restrict a member via the bot (mute). Pass permission keys to "
+            "ALLOW (can_send_messages etc.); everything else is denied. "
+            "Owner-only."
+        ),
+        capability=Capability.SOCIAL_BULK,
+        parameters={
+            "type": "object",
+            "properties": {
+                "chat_key": {"type": "string"},
+                "user_id": {"type": "string"},
+                "until": {"type": "integer",
+                          "description": "unix timestamp, 0 = forever"},
+            },
+            "required": ["chat_key", "user_id"],
+        },
+    )
+    def tgbot_restrict(chat_key: str, user_id: str,
+                       until: int = 0) -> dict[str, Any]:
+        return _tgbot_admin(chat_key, "admin_restrict",
+                                        user_id=user_id, until=until)
+
+    @registry.register(
+        "tgbot_promote",
+        description=(
+            "Promote a user to admin via the bot, with standard rights and "
+            "an optional custom title. Owner-only."
+        ),
+        capability=Capability.SOCIAL_BULK,
+        parameters={
+            "type": "object",
+            "properties": {
+                "chat_key": {"type": "string"},
+                "user_id": {"type": "string"},
+                "title": {"type": "string"},
+            },
+            "required": ["chat_key", "user_id"],
+        },
+    )
+    def tgbot_promote(chat_key: str, user_id: str,
+                      title: str = "") -> dict[str, Any]:
+        return _tgbot_admin(chat_key, "admin_promote",
+                                        user_id=user_id, title=title)
+
+    @registry.register(
+        "tgbot_demote",
+        description="Strip a user's admin rights via the bot. Owner-only.",
+        capability=Capability.SOCIAL_BULK,
+        parameters={
+            "type": "object",
+            "properties": {
+                "chat_key": {"type": "string"},
+                "user_id": {"type": "string"},
+            },
+            "required": ["chat_key", "user_id"],
+        },
+    )
+    def tgbot_demote(chat_key: str, user_id: str) -> dict[str, Any]:
+        return _tgbot_admin(chat_key, "admin_demote",
+                                        user_id=user_id)
+
+    @registry.register(
+        "tgbot_delete",
+        description="Delete a message via the bot. Owner-only.",
+        capability=Capability.SOCIAL_BULK,
+        parameters={
+            "type": "object",
+            "properties": {
+                "chat_key": {"type": "string"},
+                "message_id": {"type": "string"},
+            },
+            "required": ["chat_key", "message_id"],
+        },
+    )
+    def tgbot_delete(chat_key: str, message_id: str) -> dict[str, Any]:
+        return _tgbot_admin(chat_key, "admin_delete",
+                                        message_id=message_id)
+
+    @registry.register(
+        "tgbot_admins",
+        description="List a group/channel's admins via the bot.",
+        capability=Capability.SOCIAL_BULK,
+        parameters={
+            "type": "object",
+            "properties": {"chat_key": {"type": "string"}},
+            "required": ["chat_key"],
+        },
+    )
+    def tgbot_admins(chat_key: str) -> dict[str, Any]:
+        return _tgbot_admin(chat_key, "admin_administrators")
+
+    @registry.register(
+        "tgbot_invite_link",
+        description="Get a group's invite link via the bot. Owner-only.",
+        capability=Capability.SOCIAL_BULK,
+        parameters={
+            "type": "object",
+            "properties": {"chat_key": {"type": "string"}},
+            "required": ["chat_key"],
+        },
+    )
+    def tgbot_invite_link(chat_key: str) -> dict[str, Any]:
+        return _tgbot_admin(chat_key, "admin_invite_link")

@@ -1780,7 +1780,7 @@ class TelegramBotAdapter(ChatAdapter):
     """
 
     name = "telegram-bot"
-    supported_kinds = (ChatKind.DM, ChatKind.GROUP)
+    supported_kinds = (ChatKind.DM, ChatKind.GROUP, ChatKind.CHANNEL)
 
     #: Bot API text limit per message.
     MAX_TEXT = 4096
@@ -2322,6 +2322,164 @@ class TelegramBotAdapter(ChatAdapter):
             return sent
         except Exception:  # noqa: BLE001 - best-effort
             return sent
+
+    # ── group/channel administration (Bot API) ──────────────────────────
+    # The bot can only act where it is an admin with the right privilege.
+    # Every method returns {"ok": True, ...} or {"ok": False, "error": ...}
+    # with Telegram's honest reason. Call admin_rights() first — never
+    # assume the bot can act.
+
+    def _admin(self, method: str, chat: ChatRef, **params: Any) -> dict[str, Any]:
+        try:
+            result = self._api(method, chat_id=int(chat.chat_id), **params)
+            return {"ok": True, "result": result}
+        except Exception as exc:  # noqa: BLE001 - honest error, never a crash
+            return {"ok": False, "error": str(exc)[:200]}
+
+    def admin_rights(self, chat: ChatRef) -> dict[str, Any]:
+        """Our OWN admin rights in a group/channel. Honest capability check."""
+        if self._bot_id is None:
+            try:
+                self._bot_id = self._api("getMe").get("id")
+            except Exception as exc:  # noqa: BLE001
+                return {"ok": False, "error": str(exc)[:200]}
+        out = self._admin("getChatMember", chat, user_id=self._bot_id)
+        if not out["ok"]:
+            return out
+        member = out["result"] or {}
+        return {"ok": True, "status": member.get("status", ""),
+                "can_post_messages": bool(member.get("can_post_messages")),
+                "can_edit_messages": bool(member.get("can_edit_messages")),
+                "can_delete_messages": bool(member.get("can_delete_messages")),
+                "can_restrict_members": bool(member.get("can_restrict_members")),
+                "can_promote_members": bool(member.get("can_promote_members")),
+                "can_pin_messages": bool(member.get("can_pin_messages")),
+                "can_invite_users": bool(member.get("can_invite_users"))}
+
+    def admin_pin(self, chat: ChatRef, message_id: str,
+                 silent: bool = True) -> dict[str, Any]:
+        return self._admin("pinChatMessage", chat,
+                           message_id=int(message_id),
+                           disable_notification=bool(silent))
+
+    def admin_unpin(self, chat: ChatRef) -> dict[str, Any]:
+        return self._admin("unpinChatMessage", chat)
+
+    def admin_unpin_all(self, chat: ChatRef) -> dict[str, Any]:
+        return self._admin("unpinAllChatMessages", chat)
+
+    def admin_ban(self, chat: ChatRef, user_id: str) -> dict[str, Any]:
+        return self._admin("banChatMember", chat, user_id=int(user_id))
+
+    def admin_unban(self, chat: ChatRef, user_id: str) -> dict[str, Any]:
+        return self._admin("unbanChatMember", chat, user_id=int(user_id),
+                           only_if_banned=True)
+
+    def admin_restrict(self, chat: ChatRef, user_id: str, *,
+                       until: int = 0, **permissions: bool) -> dict[str, Any]:
+        """Restrict a member. Permissions are Bot API ChatPermissions keys
+        (can_send_messages, can_send_media_messages, …); omitted keys are
+        denied. ``until`` is a unix timestamp, 0 = forever."""
+        perms = {"can_send_messages": False,
+                 "can_send_audios": False,
+                 "can_send_documents": False,
+                 "can_send_photos": False,
+                 "can_send_videos": False,
+                 "can_send_video_notes": False,
+                 "can_send_voice_notes": False,
+                 "can_send_polls": False,
+                 "can_send_other_messages": False,
+                 "can_add_web_page_previews": False,
+                 "can_change_info": False,
+                 "can_invite_users": False,
+                 "can_pin_messages": False,
+                 "can_manage_topics": False}
+        perms.update({k: bool(v) for k, v in permissions.items()
+                      if k in perms})
+        params: dict[str, Any] = {"user_id": int(user_id),
+                                  "permissions": perms}
+        if until:
+            params["until_date"] = int(until)
+        return self._admin("restrictChatMember", chat, **params)
+
+    def admin_promote(self, chat: ChatRef, user_id: str,
+                      title: str = "") -> dict[str, Any]:
+        """Promote to admin with standard rights. ``title`` = custom title."""
+        params: dict[str, Any] = {
+            "user_id": int(user_id),
+            "can_change_info": True,
+            "can_delete_messages": True,
+            "can_invite_users": True,
+            "can_restrict_members": True,
+            "can_pin_messages": True,
+            "can_promote_members": False,
+            "can_manage_chat": True,
+            "can_manage_video_chats": False,
+            "can_manage_topics": True,
+        }
+        out = self._admin("promoteChatMember", chat, **params)
+        if out["ok"] and title.strip():
+            self._api("setChatAdministratorCustomTitle", chat_id=int(chat.chat_id),
+                      user_id=int(user_id), custom_title=title.strip()[:16])
+        return out
+
+    def admin_demote(self, chat: ChatRef, user_id: str) -> dict[str, Any]:
+        """Strip all admin rights (promoteChatMember with everything false)."""
+        return self._admin("promoteChatMember", chat, user_id=int(user_id),
+                           can_change_info=False, can_post_messages=False,
+                           can_edit_messages=False, can_delete_messages=False,
+                           can_invite_users=False, can_restrict_members=False,
+                           can_pin_messages=False, can_promote_members=False,
+                           can_manage_chat=False, can_manage_video_chats=False,
+                           can_manage_topics=False)
+
+    def admin_delete(self, chat: ChatRef, message_id: str) -> dict[str, Any]:
+        return self._admin("deleteMessage", chat,
+                           message_id=int(message_id))
+
+    def admin_member(self, chat: ChatRef, user_id: str) -> dict[str, Any]:
+        """One member's status/role in a group/channel."""
+        out = self._admin("getChatMember", chat, user_id=int(user_id))
+        if not out["ok"]:
+            return out
+        m = out["result"] or {}
+        return {"ok": True, "status": m.get("status", ""),
+                "user": (m.get("user") or {}).get("id", "")}
+
+    def admin_administrators(self, chat: ChatRef) -> dict[str, Any]:
+        """Full admin list with roles."""
+        out = self._admin("getChatAdministrators", chat)
+        if not out["ok"]:
+            return out
+        admins = []
+        for m in out["result"] or []:
+            u = m.get("user") or {}
+            admins.append({"id": u.get("id", ""),
+                           "name": u.get("first_name", ""),
+                           "status": m.get("status", ""),
+                           "title": m.get("custom_title", "")})
+        return {"ok": True, "administrators": admins}
+
+    def admin_member_count(self, chat: ChatRef) -> dict[str, Any]:
+        out = self._admin("getChatMemberCount", chat)
+        return {"ok": out["ok"], "count": out["result"] if out["ok"] else 0,
+                "error": out.get("error", "")}
+
+    def admin_set_title(self, chat: ChatRef, title: str) -> dict[str, Any]:
+        return self._admin("setChatTitle", chat, title=(title or "").strip())
+
+    def admin_set_description(self, chat: ChatRef,
+                              description: str) -> dict[str, Any]:
+        return self._admin("setChatDescription", chat,
+                           description=description or "")
+
+    def admin_invite_link(self, chat: ChatRef) -> dict[str, Any]:
+        out = self._admin("exportChatInviteLink", chat)
+        return {"ok": out["ok"], "invite": out["result"] if out["ok"] else "",
+                "error": out.get("error", "")}
+
+    def admin_leave(self, chat: ChatRef) -> dict[str, Any]:
+        return self._admin("leaveChat", chat)
 
     def health(self) -> dict[str, Any]:
         info = super().health()
