@@ -1660,6 +1660,30 @@ class TelegramAdapter(ChatAdapter):
         except Exception as exc:  # noqa: BLE001
             return {"ok": False, "error": f"rights check failed: {exc}"}
 
+    async def _member_role_coro(self, chat: ChatRef,
+                                user_id: str) -> dict[str, Any]:
+        """One member's participant type in a group/channel (MTProto)."""
+        from telethon.tl import functions
+        entity = await self._resolve(chat)
+        try:
+            user = await self._client.get_entity(int(user_id))
+        except Exception:
+            return {"ok": False, "error": "user not found"}
+        result = await self._client(functions.channels.GetParticipantRequest(
+            channel=entity, participant=user))
+        participant = getattr(result, "participant", None)
+        ptype = type(participant).__name__ if participant else ""
+        return {"ok": True, "participant_type": ptype}
+
+    def admin_member_mtproto(self, chat: ChatRef,
+                             user_id: str) -> dict[str, Any]:
+        """One member's role via MTProto (for group_roles resolution)."""
+        try:
+            return self._run_on_loop(
+                self._member_role_coro(chat, user_id), timeout=30.0)
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "error": f"member lookup failed: {exc}"}
+
     async def _restrict_coro(self, chat: ChatRef, user_id: str,
                              minutes: int = 60) -> None:
         from telethon.tl import functions

@@ -41,11 +41,47 @@ __all__ = [
     "SocialGrant",
     "grant_for",
     "check_tool_call",
+    "ACTOR_GROUP_ADMIN",
+    "ADMIN_GROUP_TOOLS",
     "audit_matrix",
 ]
 
 ACTOR_OWNER = "owner"
 ACTOR_OUTSIDER = "outsider"
+ACTOR_GROUP_ADMIN = "group_admin"
+
+#: Admin tools a group admin (non-owner) may invoke in groups where they
+#: hold admin status. These are the group-management spine tools — pin,
+#: ban, restrict, promote, group settings, invite links.
+ADMIN_GROUP_TOOLS: frozenset[str] = frozenset({
+    # Telegram bot admin tools
+    "tgbot_pin", "tgbot_unpin",
+    "tgbot_ban", "tgbot_unban",
+    "tgbot_restrict",
+    "tgbot_promote", "tgbot_demote",
+    "tgbot_delete",
+    "tgbot_invite_link",
+    # Telegram MTProto admin tools
+    "telegram_pin", "telegram_unpin",
+    "telegram_ban", "telegram_unban",
+    "telegram_promote", "telegram_demote",
+    "telegram_restrict",
+    "telegram_delete",
+    "telegram_invite_link",
+    # WhatsApp group admin tools
+    "whatsapp_group_create",
+    "whatsapp_group_members",
+    "whatsapp_group_rename",
+    "whatsapp_group_describe",
+    "whatsapp_group_settings",
+    "whatsapp_group_leave",
+    "whatsapp_group_invite",
+    "whatsapp_community_create",
+    "whatsapp_community_broadcast",
+    "whatsapp_community_link",
+    "whatsapp_channel_create",
+    "whatsapp_channel_post",
+})
 
 #: Tool categories and their visibility. PUBLIC categories are available to
 #: outsiders in groups (no gating). PRIVATE categories are owner-only,
@@ -108,8 +144,15 @@ class SocialGrant:
     reason: str = ""
 
 
-def grant_for(*, is_owner: bool, chat_kind: str = ChatKind.DM) -> SocialGrant:
-    """One grant per actor per surface. Pure — no I/O, fully testable."""
+def grant_for(*, is_owner: bool, chat_kind: str = ChatKind.DM,
+              group_role: str = "member") -> SocialGrant:
+    """One grant per actor per surface. Pure — no I/O, fully testable.
+
+    ``group_role`` is "admin" when the sender holds admin status in THIS
+    group (resolved via group_roles). Group admins get public tools plus
+    admin tools — but only in groups, and never owner-private categories
+    (memory, owner tools, DMs to others).
+    """
     if is_owner:
         return SocialGrant(
             actor=ACTOR_OWNER,
@@ -120,6 +163,17 @@ def grant_for(*, is_owner: bool, chat_kind: str = ChatKind.DM) -> SocialGrant:
             may_dm_others=True,
             may_access_memory=True,
             reason="owner: full capability",
+        )
+    if chat_kind == ChatKind.GROUP and group_role == "admin":
+        return SocialGrant(
+            actor=ACTOR_GROUP_ADMIN,
+            may_send=False,  # group admins don't send THROUGH her account
+            may_read_chats=False,
+            may_use_tools=PUBLIC_GROUP_TOOLS | ADMIN_GROUP_TOOLS,
+            may_admin=True,
+            may_dm_others=False,
+            may_access_memory=False,
+            reason="group admin: public + admin tools in this group",
         )
     if chat_kind == ChatKind.GROUP:
         return SocialGrant(

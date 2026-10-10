@@ -259,13 +259,39 @@ class ToolCallingLoop:
         # social-adjacent tools go through the grant check BEFORE the
         # registry. The registry's capability enforcement is the second
         # layer; this is the social-specific first layer.
+        #
+        # Group admins get admin tools in groups where they hold status:
+        # the sender's role is resolved per-group (cached 60s), and the
+        # grant reflects it. Owner bypass is unchanged.
         if actor != "owner" and call.name.startswith(
-            ("social_", "telegram_", "game_")
+            ("social_", "telegram_", "tgbot_", "whatsapp_", "game_")
         ):
             try:
                 from ..social_gate import check_tool_call, grant_for
-                chat_kind = (loop_ctx or {}).get("chat_kind", "dm")
-                grant = grant_for(is_owner=False, chat_kind=chat_kind)
+                from ..group_roles import resolve_group_role, ROLE_ADMIN
+                ctx = loop_ctx or {}
+                chat_kind = ctx.get("chat_kind", "dm")
+                group_role = "member"
+                # Only resolve roles for group chats — DMs don't have roles
+                if chat_kind == "group":
+                    platform = ctx.get("platform", "")
+                    chat_key = ctx.get("chat_key", "")
+                    sender_id = ctx.get("sender_id", "")
+                    if platform and chat_key and sender_id:
+                        try:
+                            from ...tools.social import get_gateway
+                            gateway = get_gateway()
+                            adapter = None
+                            if gateway is not None:
+                                adapters = getattr(gateway, "adapters", {})
+                                adapter = adapters.get(platform)
+                            if adapter is not None:
+                                group_role = resolve_group_role(
+                                    platform, adapter, chat_key, sender_id)
+                        except Exception:
+                            pass  # fail closed → member
+                grant = grant_for(is_owner=False, chat_kind=chat_kind,
+                                  group_role=group_role)
                 allowed, reason = check_tool_call(call.name, grant=grant)
                 if not allowed:
                     return f"[denied] {reason}"

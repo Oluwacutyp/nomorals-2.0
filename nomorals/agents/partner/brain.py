@@ -324,6 +324,7 @@ class PartnerBrain:
             "chat_kind": str(getattr(chat, "kind", "")),
             "is_owner": is_owner,
             "gate_mode": gate_mode,
+            "sender_id": str(getattr(message, "sender_id", "") or ""),
         }
         result = loop.run(
             message.text or "",
