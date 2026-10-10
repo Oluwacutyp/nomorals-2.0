@@ -332,6 +332,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "music": (0, None),      # /music <topic> [style] | styles | song [slug] | bed | full | voices
     "distribute": (0, 1),   # /distribute [song.wav] | legal
     "play": (0, None),       # /play <paths…> | status | queue | pause | …
+    "download": (1, None),   # /download <url> [audio] — any-URL media downloader
     "video": (0, None),      # /video <query> | download <url> | platforms
     "caption": (0, 1),       # /caption [style] — burn AI subtitles into a video (attach or path)
     "vision": (0, None),     # /vision [question] — analyze an image (attach or path/URL)
@@ -1740,6 +1741,14 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
               "usage": "/play <song title> | /play <title> by <artist> | /play <url> | /play pick <token> <n> | status | queue | pause | resume | stop | next | prev | seek <s> | volume <n> | remove <n> | clear",
               "example": "/play lifestyle (YA MAN) by ayo maff",
               "related": "/music (make the thing to play) · nm play on the console"},
+    "download": {"what": "any-URL media downloader: paste a link, get the file. "
+                         "YouTube, TikTok, Instagram, X/Twitter, SoundCloud, "
+                         "direct mp3/mp4 links — yt-dlp handles 1000+ sites, "
+                         "with proxy and browser fallback stages. The file is "
+                         "sent to this chat.",
+                 "usage": "/download <url> [audio]",
+                 "example": "/download https://youtube.com/watch?v=... audio",
+                 "related": "/play (play/queue audio) · /video download (video search download)"},
     "video": {"what": "VideoFinder: finds videos across the open web — "
                       "multi-engine search, ranked by video-URL confidence + "
                       "relevance, enriched with oEmbed (author/thumbnail) and "

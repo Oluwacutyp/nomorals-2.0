@@ -707,6 +707,61 @@ class RuntimeMediaMixin:
             return f"Spotify couldn't play {query[:80]!r}: {exc}"
         return self._fmt_started(res, engine)
 
+    def _control_download(self, tail: str, chat_key: str = "") -> str:
+        """/download <url> [audio] — download any media URL and send it here.
+
+        Like @Anyurldownloader_bot: paste a link, get the file.  YouTube,
+        TikTok, Instagram, X/Twitter, SoundCloud, direct MP3/MP4 links —
+        yt-dlp handles 1000+ sites as the universal extractor, with the
+        proxy-lab and browser stages as fallback when direct fails.
+
+        /download <url>          → best quality video (or whatever the URL is)
+        /download <url> audio    → audio only (mp3)
+        """
+        from ...media.downloader import MediaDownloader
+
+        tail = (tail or "").strip()
+        if not tail:
+            return ("usage: /download <url> [audio]\n"
+                    "paste any media URL — YouTube, TikTok, Instagram, X, "
+                    "SoundCloud, direct mp3/mp4 links, 1000+ sites via yt-dlp.")
+        words = tail.split()
+        audio_only = any(w.lower() in ("audio", "--audio", "-a") for w in words)
+        url = " ".join(w for w in words
+                       if w.lower() not in ("audio", "--audio", "-a")).strip()
+        if not url:
+            return "usage: /download <url> [audio]"
+        if not url.lower().startswith(("http://", "https://")):
+            return (f"that doesn't look like a URL: {url[:80]!r}\n"
+                    "paste the full link starting with https://")
+
+        chat = self._ref_from_key(chat_key) if chat_key else None
+        downloader = MediaDownloader(self.context)
+        report = downloader.download(url, audio_only=audio_only)
+        if not report.ok:
+            lines = [f"couldn't download {url[:80]}:"]
+            for stage in report.stages:
+                err = stage.error or "failed"
+                lines.append(f"  {stage.stage}: {err[:120]}")
+            if report.hint:
+                lines.append(f"hint: {report.hint}")
+            return "\n".join(lines)
+
+        path = report.path
+        title = report.title or "download"
+        emoji = "🎵" if audio_only else "🎬"
+        if chat is not None:
+            try:
+                self.gateway.send_file(
+                    chat.platform, f"{chat.platform}:{chat.chat_id}",
+                    path, caption=f"{emoji} {title}"[:1024])
+                return (f"{emoji} downloaded “{title}” "
+                        f"({report.size_bytes // 1024}KB) — sent to this chat.")
+            except Exception as exc:  # noqa: BLE001
+                return (f"downloaded “{title}” to {path} "
+                        f"but couldn't send it: {exc}")
+        return f"{emoji} downloaded: {path}"
+
     def _play_send_in_chat(self, engine: Any, item: dict[str, Any],
                            out: str, chat: Any) -> str:
         """Chat path for /play: download the track, send it as a file.
