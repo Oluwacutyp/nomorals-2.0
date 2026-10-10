@@ -70,22 +70,27 @@ class ChainReport:
     consistency: dict = field(default_factory=dict)  # boundary scores
 
     def summary(self) -> str:
-        lines = [
-            f"🎬 chained film → {self.final_path}",
-            f"   {len(self.scenes)} scenes "
-            f"({self.neural_scenes} neural, {self.motion_scenes} motion-graphics)",
-        ]
+        from ..style import theme as _theme
+        th = _theme()
+        lines = [th.banner("Chained Film",
+                           f"{len(self.scenes)} scenes · "
+                           f"{self.neural_scenes} neural / "
+                           f"{self.motion_scenes} motion-graphics")]
         for s in self.scenes:
-            lines.append(f"   {s.index + 1}. [{s.engine}] {s.prompt[:64]}")
+            lines.append(f"  [{s.index + 1}] [{s.engine}] "
+                         f"{s.prompt[:64]}")
         bnds = (self.consistency or {}).get("boundaries") or []
-        for b in bnds:
-            if "score_after" in b:
-                lines.append(
-                    f"   boundary {b['a'] + 1}→{b['b'] + 1}: "
-                    f"consistency {b['score_before']:.2f} → "
-                    f"{b['score_after']:.2f}")
+        if bnds:
+            lines.append(th.section("Boundary consistency"))
+            for b in bnds:
+                if "score_after" in b:
+                    lines.append(
+                        f"  {b['a'] + 1}→{b['b'] + 1}: "
+                        f"{th.bar(b['score_before'])} → "
+                        f"{th.bar(b['score_after'])}")
         if self.note:
-            lines.append(f"   note: {self.note}")
+            lines.append(th.status_line(None, "note", self.note))
+        lines.append(th.status_line(True, "film ready", self.final_path))
         return "\n".join(lines)
 
 
@@ -107,7 +112,9 @@ def chain_scenes(scenes: Sequence[dict[str, Any] | str],
                  seed: int = 100,
                  size: tuple[int, int] | None = None,
                  fps: float | None = None,
-                 consistency: bool = True) -> ChainReport:
+                 consistency: bool = True,
+                 carry_seed: bool = True,
+                 carry_reference: bool = True) -> ChainReport:
     """Assemble a multi-scene film. Returns a :class:`ChainReport`.
 
     Each scene: ``{"prompt", "mode": "t2v"|"i2v"|"image"|"text",
@@ -116,9 +123,24 @@ def chain_scenes(scenes: Sequence[dict[str, Any] | str],
     ``consistency``: grade each clip's opening frames toward the
     previous clip's closing frame so cuts don't pop (color + structure
     matched on the boundary frames; skipped honestly without ffmpeg).
+    ``carry_seed``: derive each scene's seed from the master seed +
+    scene index via SHA-256 (reproducible, prompt-order stable).
+    ``carry_reference``: feed scene N's last frame as scene N+1's
+    start image (i2v) so neural scenes don't drift apart.
     """
     if not scenes:
         raise VideogenError("no scenes — nothing to chain")
+    import hashlib
+
+    def _scene_seed(i: int, prompt: str, override: Any) -> int:
+        if override is not None:
+            return int(override)
+        if carry_seed:
+            h = hashlib.sha256(
+                f"{seed}:{i}:{prompt}".encode()).hexdigest()
+            return int(h[:8], 16)
+        return seed + i * 17
+
     suffix = STYLE_SUFFIXES.get(style, STYLE_SUFFIXES["cinematic"])
     cap = neural_capability(prefer="auto" if backend == "auto" else backend)
     use_neural = cap.available and backend != "motion"
@@ -139,12 +161,35 @@ def chain_scenes(scenes: Sequence[dict[str, Any] | str],
         prompt = str(spec.get("prompt", "")).strip()
         mode = str(spec.get("mode", "t2v")).lower()
         dur = float(spec.get("duration_s", 5.0))
-        sseed = int(spec.get("seed", seed + i * 17))
+        sseed = _scene_seed(i, prompt, spec.get("seed"))
         full_prompt = f"{prompt}, {suffix}" if suffix and mode in ("t2v", "i2v") else prompt
 
         if use_neural and mode in ("t2v", "i2v"):
-            path = gen.generate(full_prompt, mode=mode,
-                                image=spec.get("image"),
+            ref_image = spec.get("image")
+            ref_mode = mode
+            # reference carryover: scene N+1 starts from scene N's last
+            # frame so chained neural scenes don't drift apart.
+            if (carry_reference and mode == "t2v" and not ref_image
+                    and results and i > 0):
+                try:
+                    import tempfile
+                    from ...media_edit.videos import extract_frames
+                    from ..motion_studio._core import probe_duration as _pd
+                    prev_dur = _pd(results[-1].path)
+                    tmpd = tempfile.mkdtemp(prefix="chain-ref-")
+                    fr = extract_frames(
+                        results[-1].path, out_dir=tmpd,
+                        timestamps=[max(0.0, prev_dur - 0.1)])
+                    frames = fr.get("frames") or []
+                    if frames:
+                        ref_image = frames[-1]
+                        ref_mode = "i2v"
+                        note = (note + "; " if note else "") + \
+                            f"scene {i}: reference carried from scene {i - 1}"
+                except Exception as exc:  # noqa: BLE001 — chain goes on
+                    _log.info("chain: reference carryover skipped: %s", exc)
+            path = gen.generate(full_prompt, mode=ref_mode,
+                                image=ref_image,
                                 duration_s=dur, seed=sseed)
             results.append(SceneResult(i, path, gen.name, prompt))
             neural_n += 1

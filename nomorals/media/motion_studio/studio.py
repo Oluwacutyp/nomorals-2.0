@@ -40,6 +40,7 @@ __all__ = [
     "make_music_visualizer",
     "make_slideshow",
     "make_trailer",
+    "quick_montage",
     "FORMATS",
 ]
 
@@ -203,4 +204,84 @@ def make_trailer(clips: Sequence[str | os.PathLike],
     path = _finish(path, out, grade_preset=grade_preset, format=format)
     record_ledger({"kind": "studio.trailer", "path": path,
                    "clips": len(clips), "format": format})
+    return path
+
+
+def quick_montage(clips: Sequence[str | os.PathLike],
+                  audio: str | os.PathLike,
+                  out: str | os.PathLike | None = None, *,
+                  beats_per_clip: int = 8,
+                  transition: str = "crossfade",
+                  transition_duration: float = 0.4,
+                  grade_preset: str = "cinematic",
+                  format: str = "9:16",
+                  size: tuple[int, int] | None = None,
+                  fps: float | None = None,
+                  seed: int = 0) -> str:
+    """Beat-cut montage: the missing "make me a montage" verb.
+
+    Detects the audio's beat grid, then cuts each clip to
+    ``beats_per_clip`` beats (cycling clips when the song outlasts
+    them), joined with crossfades on the beat. Falls back to even
+    2.5 s cuts when beat detection is unavailable — honestly noted
+    in the ledger.
+    """
+    if not clips:
+        raise MotionStudioError("no clips — nothing to montage")
+    for c in clips:
+        _need(c, "clip")
+    audio_p = _need(audio, "audio")
+    beat_times: list[float] = []
+    beat_note = ""
+    try:
+        from ..contentops.beats import detect_beats
+        info = detect_beats(audio_p)
+        beat_times = [float(t) for t in (info.times or [])]
+        beat_note = f"{len(beat_times)} beats @ {info.bpm:.0f} BPM"
+    except Exception as exc:  # noqa: BLE001
+        beat_note = f"beat detection unavailable ({exc}) — even cuts"
+    song_len = probe_duration(audio_p) or 60.0
+    timeline: list[Segment] = []
+    t = 0.0
+    ci = 0
+    import random as _random
+    rng = _random.Random(seed)
+    clip_list = [str(c) for c in clips]
+    rng.shuffle(clip_list)
+    if beat_times:
+        # cut every Nth beat
+        marks = beat_times[::max(1, beats_per_clip)]
+        bounds = [0.0] + [m for m in marks if m > 0.5] + [song_len]
+        for a, b in zip(bounds, bounds[1:]):
+            if b - a < 0.4:
+                continue
+            src = clip_list[ci % len(clip_list)]
+            ci += 1
+            # random in-point so cycling clips don't repeat frames
+            dur_src = probe_duration(src) or (b - a + 1.0)
+            start_at = rng.uniform(0, max(0.0, dur_src - (b - a))) \
+                if dur_src > (b - a) else 0.0
+            timeline.append(Segment(
+                kind="video", src=src, duration=b - a,
+                start=start_at, transition=transition,
+                transition_duration=transition_duration))
+            t = b
+            if t >= song_len:
+                break
+    else:
+        per = 2.5
+        n = max(1, int(song_len / per))
+        for i in range(n):
+            src = clip_list[i % len(clip_list)]
+            timeline.append(Segment(
+                kind="video", src=src, duration=per,
+                transition=transition,
+                transition_duration=transition_duration))
+    if not timeline:
+        raise MotionStudioError("montage came out empty — check the audio")
+    path = assemble(timeline, None, audio=audio_p, size=size, fps=fps)
+    path = _finish(path, out, grade_preset=grade_preset, format=format)
+    record_ledger({"kind": "studio.quick_montage", "path": path,
+                   "clips": len(clips), "beats": beat_note,
+                   "format": format})
     return path

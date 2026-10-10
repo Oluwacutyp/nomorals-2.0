@@ -27,6 +27,10 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageEnhance, ImageFilter
 
 
+class CameraError(RuntimeError):
+    """A camera program that can't be realized as asked."""
+
+
 # ── Perlin noise (1D, for camera paths) ──────────────────────────────
 def _fade(t: float) -> float:
     return t * t * t * (t * (t * 6 - 15) + 10)
@@ -159,6 +163,85 @@ class CameraProgram:
 
     def describe(self) -> str:
         return ", then ".join(_describe_move(m) for m in self.moves)
+
+    def to_ffmpeg(self, duration_s: float, fps: float = 24.0,
+                  W: int = 1920, H: int = 1080,
+                  overscan: float = 1.15) -> str:
+        """Export the program as a real ffmpeg video filter chain.
+
+        Each move becomes a time-windowed ``crop`` (position or window
+        size animated with ``t`` expressions, ``enable='between(...)'``)
+        over an overscaned upscale — so the program actually renders
+        instead of living only as a plan. 2D post limits, documented:
+        dolly == zoom (crop window shrinks), truck == lateral crop move.
+        ``handheld`` has no static-filter equivalent and raises an
+        honest error (use :func:`apply_camera_shake` for that).
+        ``static`` moves contribute nothing (empty segment).
+        """
+        if self.empty:
+            return ""
+        for m in self.moves:
+            if m.verb == "handheld":
+                raise CameraError(
+                    "handheld has no static ffmpeg equivalent — "
+                    "use apply_camera_shake() for Perlin handheld")
+        n = len(self.moves)
+        seg = max(0.1, float(duration_s) / n)
+        ov = max(1.05, float(overscan))
+        parts = [f"scale=iw*{ov:.3f}:ih*{ov:.3f}"]
+        for i, m in enumerate(self.moves):
+            t0 = i * seg
+            t1 = min(duration_s, (i + 1) * seg)
+            f = self._move_crop(m, t0, t1)
+            if f:
+                parts.append(f)
+        parts.append(f"scale={W}:{H}:flags=lanczos")
+        return ",".join(parts)
+
+    @staticmethod
+    def _move_crop(m: CameraMove, t0: float, t1: float) -> str:
+        """One move → one time-windowed crop filter (or '' for static)."""
+        en = f"between(t,{t0:.2f},{t1:.2f})"
+        dur = max(0.01, t1 - t0)
+        p = f"((t-{t0:.2f})/{dur:.2f})"  # 0→1 progress in the segment
+        amt = max(0.05, min(1.0, m.amount))
+        spd = {"slow": 0.6, "normal": 1.0, "fast": 1.6}.get(m.speed, 1.0)
+        k = amt * spd
+        W = "iw"  # post-overscan frame
+        # window size: full except zoom/dolly
+        if m.verb in ("zoom", "dolly"):
+            zin = m.direction != "out"
+            z0, z1 = (1.0, 1.0 - 0.25 * k) if zin else (1.0 - 0.25 * k, 1.0)
+            w = f"{W}*{z0}+({W}*{z1}-{W}*{z0})*{p}"
+            h = w.replace("iw", "ih")
+            x = f"({W}-{w})/2"
+            y = f"(ih-{h})/2"
+        elif m.verb in ("pan", "truck"):
+            dx = 0.18 * k
+            sign = -1 if m.direction == "left" else 1
+            w, h = f"{W}/1.0", "ih/1.0"
+            x = f"({W}-{w})/2+{sign}*{dx}*{W}*{p}"
+            y = f"(ih-{h})/2"
+        elif m.verb in ("tilt", "crane"):
+            dy = 0.14 * k
+            sign = -1 if m.direction == "up" else 1
+            w, h = f"{W}/1.0", "ih/1.0"
+            x = f"({W}-{w})/2"
+            y = f"(ih-{h})/2+{sign}*{dy}*ih*{p}"
+        elif m.verb == "orbit":
+            # gentle arc: lateral + slight zoom breathing
+            w, h = f"{W}*0.92", "ih*0.92"
+            x = f"({W}-{w})/2+0.06*{W}*sin(2*PI*{p})"
+            y = f"(ih-{h})/2"
+        elif m.verb == "roll":
+            # true roll needs rotate; approximate with a slow push
+            w, h = f"{W}*0.95", "ih*0.95"
+            x = f"({W}-{w})/2"
+            y = f"(ih-{h})/2"
+        else:  # static / unknown — no filter
+            return ""
+        return (f"crop=w='{w}':h='{h}':x='{x}':y='{y}'"
+                f":enable='{en}'")
 
 
 def _describe_move(m: CameraMove) -> str:

@@ -135,12 +135,44 @@ class RunResult:
     artifacts: dict = field(default_factory=dict)  # dotted name → path
     final_path: str | None = None
     error: StageError | None = None
+    #: auditable decision trail (openmontage pattern): every provider/
+    #: fallback/quality choice appended as {"at", "decision", "reason"}.
+    decision_trail: list = field(default_factory=list)
+    #: post-render self-review checks (name → {ok, detail}).
+    review: list = field(default_factory=list)
 
     def to_dict(self) -> dict:
         """JSON-safe."""
         d = asdict(self)
         d["error"] = self.error.to_dict() if self.error else None
         return d
+
+    def trail(self, decision: str, reason: str = "") -> None:
+        """Append an auditable decision-trail entry. Never raises."""
+        try:
+            from datetime import datetime, timezone
+            self.decision_trail.append({
+                "at": datetime.now(timezone.utc).isoformat(),
+                "decision": str(decision), "reason": str(reason)})
+        except Exception:  # noqa: BLE001
+            pass
+
+    def review_text(self) -> str:
+        """God-tier post-render review summary."""
+        from ..style import theme as _theme
+        th = _theme()
+        lines = [th.banner("Post-render Review",
+                           "self-review — garbage never gets presented")]
+        for c in self.review:
+            lines.append("  " + th.status_line(
+                c.get("ok"), c.get("name", "?"), c.get("detail", "")))
+        ok = all(c.get("ok") for c in self.review) if self.review else None
+        lines.append(th.status_line(
+            ok, "overall",
+            "passed — safe to publish" if ok else
+            "FAILED — fix before publishing" if ok is False else
+            "no checks ran"))
+        return "\n".join(lines)
 
 
 # ── Job model & store ──────────────────────────────────────────────────
@@ -731,6 +763,102 @@ class ShortPipeline:
         tmp = run_dir / "manifest.json.tmp"
         tmp.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
         tmp.replace(run_dir / "manifest.json")
+
+    # ── quality gates (openmontage pattern) ──────────────────────────
+    def preflight(self, job: Job) -> dict:
+        """Pre-compose validation BEFORE any render spend.
+
+        Checks: niche plugin resolves, ffmpeg present, runs root
+        writable, TTS/studio/edit contracts load. Returns
+        {"ok", "checks": [...]} — never raises. A failed preflight
+        means ``run()`` would fail expensively; fix first.
+        """
+        checks: list[dict] = []
+
+        def _check(name: str, ok: bool, detail: str = "") -> None:
+            checks.append({"name": name, "ok": bool(ok), "detail": detail})
+
+        try:
+            niche = self._get_niche(job.niche)
+            _check("niche", niche is not None,
+                   getattr(niche, "name", job.niche))
+        except Exception as exc:  # noqa: BLE001
+            _check("niche", False, f"unresolvable: {exc}")
+        from shutil import which
+        ff = which("ffmpeg")
+        _check("ffmpeg", bool(ff), ff or "not on PATH")
+        try:
+            probe = self.runs_root / ".preflight_write"
+            probe.write_text("ok", encoding="utf-8")
+            probe.unlink()
+            _check("runs_root", True, str(self.runs_root))
+        except Exception as exc:  # noqa: BLE001
+            _check("runs_root", False, str(exc))
+        for dep, loader in (("tts", lambda: self._tts),
+                            ("studio", lambda: self._studio),
+                            ("edit", lambda: self._edit)):
+            try:
+                loader()
+                _check(dep, True, "contract loads")
+            except Exception as exc:  # noqa: BLE001
+                _check(dep, False, f"{exc}")
+        ok = all(c["ok"] for c in checks)
+        return {"ok": ok, "checks": checks,
+                "job_id": job.id, "niche": job.niche}
+
+    def self_review(self, result: RunResult,
+                    expect_vertical: bool = True) -> RunResult:
+        """Mandatory post-render self-review (openmontage pattern).
+
+        ffprobe assertions on the finished file: exists + non-empty,
+        H.264/yuv420p, vertical 1080×1920 when ``expect_vertical``,
+        duration > 0, has an audio stream. Results land on
+        ``result.review``; ``result.ok`` is ANDed with the review so a
+        failed review can never be presented as success. Never raises.
+        """
+        checks: list[dict] = []
+
+        def _check(name: str, ok: bool, detail: str = "") -> None:
+            checks.append({"name": name, "ok": bool(ok), "detail": detail})
+
+        p = Path(result.final_path or "")
+        _check("exists", p.is_file() and p.stat().st_size > 0,
+               f"{p.stat().st_size / 1e6:.1f} MB" if p.is_file()
+               else "missing/empty")
+        if p.is_file() and p.stat().st_size > 0:
+            try:
+                from ...media_edit.videos import video_probe
+                probe = video_probe(str(p))
+                streams = probe.get("streams", []) \
+                    if isinstance(probe, dict) else []
+                v = next((s for s in streams
+                          if s.get("codec_type") == "video"), {})
+                a = next((s for s in streams
+                          if s.get("codec_type") == "audio"), None)
+                _check("video_codec",
+                       str(v.get("codec_name", "")) in
+                       ("h264", "hevc", "av1", "vp9"),
+                       f"{v.get('codec_name')}/{v.get('pix_fmt')}")
+                w, h = int(v.get("width", 0) or 0), \
+                    int(v.get("height", 0) or 0)
+                if expect_vertical:
+                    _check("vertical", w == 1080 and h == 1920,
+                           f"{w}x{h}")
+                else:
+                    _check("dimensions", w > 0 and h > 0, f"{w}x{h}")
+                dur = float(v.get("duration", 0) or 0)
+                _check("duration", dur > 0, f"{dur:.1f}s")
+                _check("audio", a is not None,
+                       str(a.get("codec_name", "")) if a else "no audio")
+            except Exception as exc:  # noqa: BLE001
+                _check("ffprobe", False, f"unavailable: {exc}")
+        result.review = checks
+        passed = all(c["ok"] for c in checks)
+        result.ok = bool(result.ok and passed)
+        result.trail("self_review",
+                     "passed — safe to publish" if passed
+                     else "FAILED — not publishable")
+        return result
 
     def _ctx(self, job: Job, run_dir: Path, manifest: dict) -> dict:
         return {"job": job, "run_dir": run_dir, "manifest": manifest,

@@ -162,6 +162,47 @@ def _phrases(words: list[Word], per_line: int) -> list[list[Word]]:
     return phrases
 
 
+#: Safe-area insets per format: (top, bottom) as fraction of height.
+#: Keeps type clear of platform UI (progress bars, captions, notches).
+SAFE_AREAS: dict[str, tuple[float, float]] = {
+    "9:16": (0.10, 0.16),   # reels/tiktok: caption + progress bar zones
+    "16:9": (0.06, 0.10),   # youtube: title + progress bar
+    "1:1": (0.08, 0.12),    # feed square: UI chrome top/bottom
+}
+
+
+def safe_area(format: str) -> tuple[float, float]:
+    """(top, bottom) safe insets for a format. Never raises."""
+    return SAFE_AREAS.get(str(format), (0.08, 0.12))
+
+
+def emphasis_words(words: list[Word]) -> set[int]:
+    """Auto-detect emphasis words (the hook words that deserve the pop).
+
+    Heuristic, deterministic: ALL-CAPS words, words ending in ``!``,
+    and words repeated 3+ times across the lyric (the hook) — the same
+    words a human editor would punch. Returns word indices.
+    """
+    out: set[int] = set()
+    counts: dict[str, int] = {}
+    for w in words:
+        key = w.text.strip(" ,.!?…—\"'").lower()
+        if key:
+            counts[key] = counts.get(key, 0) + 1
+    for i, w in enumerate(words):
+        t = w.text.strip()
+        if not t:
+            continue
+        core = t.strip(" ,.!?…—\"'")
+        if core.isupper() and len(core) > 1:
+            out.add(i)
+        elif t.endswith("!"):
+            out.add(i)
+        elif counts.get(core.lower(), 0) >= 3:
+            out.add(i)
+    return out
+
+
 # ---------------------------------------------------------------------------
 # backgrounds
 # ---------------------------------------------------------------------------
@@ -249,6 +290,12 @@ class _LyricRenderer:
         self.phrases = _phrases(words, int(preset["line_words"]))
         self.anim = str(preset["animation"])
         self.stroke = int(preset["stroke"])
+        #: emphasis word indices — the hook words that pop harder
+        self.emphasis = emphasis_words(words)
+        #: safe-area insets guessed from aspect (vertical/horizontal/square)
+        ar = (w / h) if h else 1.0
+        fmt = "9:16" if ar < 0.8 else ("16:9" if ar > 1.2 else "1:1")
+        self.safe_top, self.safe_bottom = safe_area(fmt)
         # phrase index per word
         self.word_phrase = {}
         for pi, ph in enumerate(self.phrases):
@@ -299,6 +346,14 @@ class _LyricRenderer:
                 scale = 1.0
                 alpha = int(30 + 225 * e)
                 dy = 0
+            # emphasis words (the hook) pop 15% bigger when active
+            try:
+                wi = self.words.index(word)
+            except ValueError:
+                wi = -1
+            if state == "active" and wi in self.emphasis:
+                scale = scale * 1.15 + 0.05
+                alpha = min(255, alpha + 30)
         size = max(10, int(self.font_size * scale))
         fnt = find_font(size) if scale != 1.0 or state == "active" else font
         tw, th = text_size(d, word.text, fnt)
@@ -342,12 +397,15 @@ class _LyricRenderer:
         pi = self._phrase_at(t)
         phrases = self.phrases
         # layout: previous (dimmed, small, top) / current (center) / next (faint, bottom)
+        # current slot is clamped into the format's safe area (platform UI)
+        cur_yrel = min(max(0.47, self.safe_top + 0.12),
+                       1.0 - self.safe_bottom - 0.12)
         slots = []
         if pi > 0:
-            slots.append((pi - 1, 0.28, 0.62))
-        slots.append((pi, 0.47, 1.0))
+            slots.append((pi - 1, max(0.16, self.safe_top + 0.06), 0.62))
+        slots.append((pi, cur_yrel, 1.0))
         if pi + 1 < len(phrases):
-            slots.append((pi + 1, 0.70, 0.55))
+            slots.append((pi + 1, min(0.82, 1.0 - self.safe_bottom), 0.55))
         for pidx, yrel, wscale in slots:
             ph = phrases[pidx]
             slot_size = int(self.font_size * wscale)

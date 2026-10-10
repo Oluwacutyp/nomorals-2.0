@@ -135,6 +135,105 @@ class MediaHub:
     def download_media(self, url: str, *, audio_only: bool = False) -> dict[str, Any]:
         return self.video.download(url, audio_only=audio_only)
 
+    # ── sweep verbs: the new cross-module one-calls ───────────────────────
+    def highlight_reel(self, src: str, *, target_s: float = 60.0,
+                       **kw: Any) -> dict[str, Any]:
+        """Detect excitement events in ``src`` and assemble a budgeted
+        highlight reel plan (with a styled report)."""
+        from .scene_intel.score import assemble_highlight_reel, reel_report
+        reel = assemble_highlight_reel(src, target_s=target_s, **kw)
+        out = reel.to_dict()
+        out["report"] = reel_report(reel)
+        return out
+
+    def montage(self, clips: list[str], audio: str, *,
+                out: str | None = None, **kw: Any) -> dict[str, Any]:
+        """Beat-cut montage from ``clips`` over ``audio``."""
+        from .motion_studio.studio import quick_montage
+        path = quick_montage(clips, audio, out=out, **kw)
+        return {"output": path, "clips": len(clips), "audio": audio}
+
+    def harmonic_journey(self, tracks: list[dict[str, Any]], *,
+                         curve: str = "late_peak", seed: int | None = None,
+                         quality_floor: float = 0.0) -> dict[str, Any]:
+        """Order track dicts (title/bpm/key/mode/energy/…) along an
+        energy curve with harmonic sanity — returns the styled set plan
+        plus the ordered tracks and any quality-floor drops."""
+        from .dj_engine import (TrackAnalysis, plan_energy_arc, arc_report,
+                                camelot_code)
+        analyses = []
+        for t in tracks:
+            a = TrackAnalysis(
+                title=str(t.get("title", "")), bpm=t.get("bpm"),
+                key=str(t.get("key", "")), mode=str(t.get("mode", "")),
+                energy=float(t.get("energy", 0.5)),
+                duration_s=float(t.get("duration_s", 180.0)),
+                path=str(t.get("path", "")))
+            a.camelot = camelot_code(a.key, a.mode)
+            analyses.append(a)
+        ordered = plan_energy_arc(analyses, seed=seed, curve=curve,
+                                  quality_floor=quality_floor)
+        dropped = getattr(plan_energy_arc, "last_dropped", [])
+        return {"report": arc_report(ordered, curve=curve),
+                "ordered": [t.to_dict() for t in ordered],
+                "dropped": [t.to_dict() for t in dropped],
+                "curve": curve}
+
+    def dj_journey_map(self, from_key: str, to_key: str) -> dict[str, Any]:
+        """Shortest harmonic path between two Camelot codes (or key names)
+        for routing a set between distant keys."""
+        from .dj_engine import (harmonic_path, path_harmonic_score,
+                                camelot_code)
+        from .style import journey_map as _jm
+
+        def _code(k: str) -> str:
+            k = (k or "").strip()
+            if len(k) >= 2 and k[-1].upper() in ("A", "B") \
+                    and k[:-1].isdigit():
+                return k.upper()
+            # try "Am" / "C major" style
+            m = __import__("re").match(r"^([A-G][#b]?)\s*(m|min)?",
+                                       k, __import__("re").I)
+            if m:
+                return camelot_code(m.group(1),
+                                    "minor" if m.group(2) else "major")
+            return k.upper()
+
+        a, b = _code(from_key), _code(to_key)
+        path = harmonic_path(a, b)
+        return {"from": a, "to": b, "path": path,
+                "smoothness": path_harmonic_score(path),
+                "map": _jm(path)}
+
+    def refine_image(self, prompt: str, *, checkpoint: str = "",
+                     strength: float = 0.45, upscale: float = 0.0,
+                     seed: int | None = None, **kw: Any) -> dict[str, Any]:
+        """One-call artist chain: text-to-image → img2img refine →
+        optional upscale. Needs torch + a native checkpoint."""
+        from .imggen.pipeline import (PipelineConfig,
+                                      load_native_checkpoint)
+        cfg = PipelineConfig(seed=seed, **kw)
+        pipe = load_native_checkpoint(checkpoint) if checkpoint else None
+        if pipe is None:
+            from .imggen.pipeline import list_native_checkpoints
+            ckpts = list_native_checkpoints()
+            if not ckpts:
+                return {"ok": False,
+                        "error": "no native checkpoints on disk — "
+                                 "train one with imggen/train.py first"}
+            pipe = load_native_checkpoint(ckpts[0]["path"])
+        res = pipe.chain(prompt, cfg, refine_strength=strength,
+                         upscale=upscale)
+        out_p = kw.get("out", "")
+        final_path = ""
+        if out_p:
+            res["final"].save(out_p)
+            final_path = str(out_p)
+        return {"ok": True, "prompt": prompt, "seed": cfg.seed,
+                "stages": [s["stage"] for s in res["stages"]],
+                "final_path": final_path,
+                "n_stages": len(res["stages"])}
+
     # ── the run() orchestrator: one call, whole pipeline ──────────────────
     def run(self, mode: str = "song", *, topic: str = "", query: str = "",
             style: str = "pop", platform: str = "", seed: int | None = None,

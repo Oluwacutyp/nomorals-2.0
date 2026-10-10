@@ -68,6 +68,7 @@ class Segment:
     transition_duration: float = 0.6
     move: str = "auto"             # kenburns move for image segments
     preset: str = "bold_statement"  # typography preset for text segments
+    start: float = 0.0             # in-point: seconds into the source clip
 
 
 def _as_segment(spec: dict[str, Any] | Segment) -> Segment:
@@ -80,18 +81,25 @@ def _as_segment(spec: dict[str, Any] | Segment) -> Segment:
 
 
 def _normalize_video(src: str, duration: float, size: tuple[int, int],
-                     fps: float, tmp: Path) -> Path:
-    """Scale/pad + trim/loop a video segment to the timeline canvas."""
-    out = tmp / f"seg-{abs(hash(src + str(duration))) % 10**8}.mp4"
+                     fps: float, tmp: Path, start: float = 0.0) -> Path:
+    """Scale/pad + trim/loop a video segment to the timeline canvas.
+
+    ``start`` is the in-point (seconds into the source) — used by
+    beat-cut montages so cycling clips don't repeat the same frames.
+    """
+    out = tmp / f"seg-{abs(hash(src + str(duration) + str(start))) % 10**8}.mp4"
     if out.exists():
         return out
     vf = (f"scale={size[0]}:{size[1]}:force_original_aspect_ratio=increase,"
           f"crop={size[0]}:{size[1]},setsar=1,fps={fps:.2f}")
     # loop short inputs up to duration, trim long ones
-    args = ["-y", "-stream_loop", "8", "-i", src,
-            "-vf", vf, "-t", f"{duration:.3f}",
-            "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
-            "-an", str(out)]
+    args = ["-y"]
+    if start > 0:
+        args += ["-ss", f"{start:.3f}"]
+    args += ["-stream_loop", "8", "-i", src,
+             "-vf", vf, "-t", f"{duration:.3f}",
+             "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+             "-an", str(out)]
     try:
         run_ffmpeg(args, timeout=600.0)
     except Exception as exc:  # noqa: BLE001
@@ -112,7 +120,8 @@ def normalize_segment(seg: Segment, *, size: tuple[int, int] | None = None,
     if seg.kind == "video":
         if not seg.src or not Path(seg.src).exists():
             raise MotionStudioError(f"segment video not found: {seg.src!r}")
-        return str(_normalize_video(seg.src, seg.duration, size, fps, tmp))
+        return str(_normalize_video(seg.src, seg.duration, size, fps, tmp,
+                                    start=seg.start))
     if seg.kind == "image":
         if not seg.src or not Path(seg.src).exists():
             raise MotionStudioError(f"segment image not found: {seg.src!r}")

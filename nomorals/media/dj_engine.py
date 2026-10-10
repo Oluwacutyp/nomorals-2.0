@@ -55,6 +55,7 @@ __all__ = [
     "path_harmonic_score",
     "tempo_compatible",
     "sync_ratio",
+    "sync_mult",
     "plan_transition",
     "plan_energy_arc",
     "energy_curve",
@@ -481,11 +482,23 @@ def sync_ratio(out_trk: TrackAnalysis, in_trk: TrackAnalysis,
     Returns None when no 1×/2×/0.5× ratio lands within ±8% — the
     caller must NOT claim a sync then (honest degradation).
     """
+    mult = sync_mult(out_trk, in_trk, max_ratio)
+    if mult is None or not out_trk.bpm or not in_trk.bpm:
+        return None
+    return out_trk.bpm / (in_trk.bpm * mult)
+
+
+def sync_mult(out_trk: TrackAnalysis, in_trk: TrackAnalysis,
+              max_ratio: float = 0.08) -> float | None:
+    """Which tempo multiple (1.0, 2.0, 0.5) syncs `in_trk` to `out_trk`.
+
+    None = no multiple lands within range. Deterministic.
+    """
     if not out_trk.bpm or not in_trk.bpm:
         return None
     for mult in (1.0, 2.0, 0.5):
         if abs(in_trk.bpm * mult - out_trk.bpm) / out_trk.bpm <= max_ratio:
-            return out_trk.bpm / (in_trk.bpm * mult)
+            return mult
     return None
 
 
@@ -520,7 +533,8 @@ def plan_transition(out_trk: TrackAnalysis, in_trk: TrackAnalysis) -> Transition
         blend_beats = 16
         total_beats = int((out_trk.duration_s * out_trk.bpm) / 60.0)
         start_beat = max(0, (total_beats - blend_beats) // 4 * 4)
-        half = " (half/double-time)" if abs(ratio - 1.0) > 0.5 else ""
+        mult = sync_mult(out_trk, in_trk)
+        half = " (half/double-time)" if mult not in (None, 1.0) else ""
         return TransitionPlan(
             kind="blend", blend_beats=blend_beats, sync_ratio=ratio,
             start_beat=start_beat,

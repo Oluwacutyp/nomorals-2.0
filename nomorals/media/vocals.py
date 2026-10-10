@@ -42,6 +42,8 @@ __all__ = [
     "select_voice",
     "probe_diffsinger",
     "probe_rvc",
+    "pick_backend",
+    "VOCAL_BACKENDS",
     "VocalChain",
     "RVCVoiceRegistry",
     "DEFAULT_VOICE_REGISTRY",
@@ -208,6 +210,57 @@ def probe_rvc(profile: str = "") -> ProbeResult:
         available=False, profile=prof,
         reason="RVC isn't installed here.",
         detail=INSTALL_RVC)
+
+
+#: Scored vocal-backend selection (openmontage provider-selector pattern).
+#: Each backend: (quality 0..1, latency 0..1 where 1 = fastest).
+#: Score = availability_gate × (0.6 × quality + 0.4 × latency).
+#: Local-first, honest reasons — never a silent fallback.
+VOCAL_BACKENDS: tuple[tuple[str, float, float], ...] = (
+    ("diffsinger", 1.0, 0.3),    # best quality, heavy
+    ("vocal_lite", 0.55, 1.0),   # offline preview, instant
+)
+
+
+def pick_backend(purpose: str = "sing", profile: str = "",
+                 prefer: str = "auto") -> dict:
+    """Pick the vocal backend by scored selection. Never raises.
+
+    Returns {"backend", "score", "available", "reason", "trail"} where
+    trail is the auditable per-backend scoring. ``prefer`` can force a
+    backend name — if it's unavailable the result says so honestly
+    instead of silently substituting.
+    """
+    trail: list[dict] = []
+    probes = {"diffsinger": probe_diffsinger(profile),
+              "vocal_lite": ProbeResult(available=True, profile=profile or
+                                        _detect_profile_kind(),
+                                        detail="stdlib preview, always here")}
+    for name, quality, latency in VOCAL_BACKENDS:
+        probe = probes[name]
+        score = round((0.6 * quality + 0.4 * latency)
+                      if probe.available else 0.0, 3)
+        trail.append({"backend": name, "available": probe.available,
+                      "quality": quality, "latency": latency,
+                      "score": score,
+                      "reason": "" if probe.available else probe.reason})
+    if prefer and prefer != "auto":
+        entry = next((t for t in trail if t["backend"] == prefer), None)
+        if entry is None:
+            return {"backend": "", "score": 0.0, "available": False,
+                    "reason": f"unknown vocal backend {prefer!r}",
+                    "trail": trail}
+        return {"backend": prefer, "score": entry["score"],
+                "available": entry["available"],
+                "reason": entry["reason"] or f"preferred by caller",
+                "trail": trail}
+    ranked = sorted(trail, key=lambda t: -t["score"])
+    best = ranked[0]
+    return {"backend": best["backend"], "score": best["score"],
+            "available": best["available"],
+            "reason": best["reason"] or
+            f"scored {best['score']:.2f} (quality+latency)",
+            "trail": trail}
 
 
 def _read_wav(path: str) -> tuple[Any, int, int]:

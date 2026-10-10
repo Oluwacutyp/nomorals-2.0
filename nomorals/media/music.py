@@ -868,7 +868,6 @@ class Section:
 
 
 @dataclass
-@dataclass
 class SongDNA:
     """The song's identity, decided BEFORE any section is written.
 
@@ -925,6 +924,7 @@ def score_memorability(hook_line: str, rhyme_group: tuple[str, ...]) -> float:
     return round(max(0.0, min(1.0, score)), 3)
 
 
+@dataclass
 class Song:
     title: str
     style: str

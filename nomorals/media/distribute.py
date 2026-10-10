@@ -144,6 +144,53 @@ class ReleasePacket:
     def platform_display(self) -> list[str]:
         return [PLATFORM_NAMES.get(p, p) for p in self.platforms]
 
+    def master_targets(self) -> dict[str, dict[str, float]]:
+        """Per-platform loudness targets for the master.
+
+        Streaming services normalize to ~−14 LUFS integrated; clubs/
+        DJ promos want hotter (−8). Returns platform → {"lufs",
+        "true_peak_db"} so the mastering step can aim per destination
+        instead of shipping one master everywhere.
+        """
+        out: dict[str, dict[str, float]] = {}
+        for p in self.platforms:
+            spec = PLATFORM_MASTER.get(p, PLATFORM_MASTER["default"])
+            out[p] = dict(spec)
+        return out
+
+    def master_plan_text(self) -> str:
+        """God-tier mastering plan: one target row per platform."""
+        from .style import theme as _theme
+        th = _theme()
+        lines = [th.banner("Mastering Plan", self.title)]
+        for plat, spec in self.master_targets().items():
+            name = PLATFORM_NAMES.get(plat, plat)
+            lines.append(
+                f"  {th.bullet} {name:12s} "
+                f"{spec['lufs']:+.0f} LUFS integrated, "
+                f"true peak {spec['true_peak_db']:+.1f} dB")
+        lines.append(th.status_line(
+            True, "targets set",
+            "master to the HOTTEST target, let services turn down"))
+        return "\n".join(lines)
+
+
+#: Per-platform mastering targets (integrated LUFS, true peak dBTP).
+#: Streaming normalizes everything down to its target — mastering
+#: hotter just gets turned down; mastering quieter stays quiet.
+PLATFORM_MASTER: dict[str, dict[str, float]] = {
+    "spotify": {"lufs": -14.0, "true_peak_db": -1.0},
+    "apple": {"lufs": -16.0, "true_peak_db": -1.0},
+    "youtube": {"lufs": -14.0, "true_peak_db": -1.0},
+    "tiktok": {"lufs": -14.0, "true_peak_db": -1.0},
+    "instagram": {"lufs": -14.0, "true_peak_db": -1.0},
+    "audiomack": {"lufs": -14.0, "true_peak_db": -1.0},
+    "boomplay": {"lufs": -14.0, "true_peak_db": -1.0},
+    "club": {"lufs": -8.0, "true_peak_db": -0.3},
+    "dj_promo": {"lufs": -9.0, "true_peak_db": -0.5},
+    "default": {"lufs": -14.0, "true_peak_db": -1.0},
+}
+
 
 def cover_art_spec(title: str, artist: str) -> str:
     """What the cover art needs — a spec the artist approves, not AI slop."""

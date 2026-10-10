@@ -528,3 +528,224 @@ def write_wav(path: str, parts: dict[str, list], tempo: float,
     with open(path, "wb") as f:
         f.write(data)
     return path
+
+
+# ── voice / patch / bus layer (synth8 + kengine pattern) ──────────────────────
+#
+# The render functions above are the offline path. This layer adds the
+# instrument abstraction the gold has: a Patch is a named sound, a Voice
+# is one triggered note on that patch, and the SynthBus is the
+# polyphonic manager — voices → one-pole lowpass → feedback delay send
+# → master. Pure stdlib (array), Termux-safe.
+
+from dataclasses import dataclass, field as _dc_field
+
+
+@dataclass
+class Patch:
+    """A named synth sound: harmonic recipe + envelope + filter + FX."""
+    name: str = "keys"
+    harmonics: tuple[float, ...] = (1.0, 0.35, 0.15, 0.05)
+    attack: float = 0.01
+    decay: float = 0.08
+    sustain: float = 0.7
+    release: float = 0.15
+    cutoff: float = 8000.0     # one-pole lowpass Hz (20000 = wide open)
+    resonance: float = 0.0     # 0..1 — pre-filter drive
+    delay_send: float = 0.0    # 0..1 — feedback delay send amount
+    delay_time: float = 0.375  # seconds (dotted-eighth at 120bpm)
+    velocity: float = 96.0
+
+    def to_dict(self) -> dict:
+        return {"name": self.name, "harmonics": list(self.harmonics),
+                "attack": self.attack, "decay": self.decay,
+                "sustain": self.sustain, "release": self.release,
+                "cutoff": self.cutoff, "resonance": self.resonance,
+                "delay_send": self.delay_send,
+                "delay_time": self.delay_time,
+                "velocity": self.velocity}
+
+
+#: Factory presets — the working palette (kengine-style patch list).
+PATCHES: dict[str, Patch] = {
+    "bass": Patch("bass", harmonics=(1.0, 0.5, 0.2, 0.08),
+                  attack=0.005, decay=0.05, sustain=0.85, release=0.08,
+                  cutoff=900.0, resonance=0.25, velocity=100.0),
+    "sub": Patch("sub", harmonics=(1.0, 0.12),
+                 attack=0.005, decay=0.02, sustain=1.0, release=0.05,
+                 cutoff=300.0, velocity=104.0),
+    "lead": Patch("lead", harmonics=(1.0, 0.6, 0.35, 0.18, 0.08),
+                  attack=0.01, decay=0.12, sustain=0.75, release=0.2,
+                  cutoff=6500.0, resonance=0.15,
+                  delay_send=0.25, velocity=96.0),
+    "pluck": Patch("pluck", harmonics=(1.0, 0.45, 0.22, 0.1),
+                   attack=0.003, decay=0.18, sustain=0.25, release=0.12,
+                   cutoff=4200.0, resonance=0.3,
+                   delay_send=0.18, velocity=92.0),
+    "pad": Patch("pad", harmonics=(1.0, 0.5, 0.3, 0.18, 0.1, 0.05),
+                 attack=0.4, decay=0.6, sustain=0.85, release=0.8,
+                 cutoff=2800.0, velocity=80.0),
+    "stab": Patch("stab", harmonics=(1.0, 0.55, 0.3, 0.12),
+                  attack=0.004, decay=0.09, sustain=0.4, release=0.06,
+                  cutoff=5200.0, resonance=0.2, velocity=98.0),
+    "keys": Patch("keys", harmonics=(1.0, 0.35, 0.15, 0.05),
+                  attack=0.01, decay=0.08, sustain=0.7, release=0.15,
+                  cutoff=8000.0, velocity=90.0),
+}
+
+
+class Voice:
+    """One triggered note on a Patch (synth8 voice pattern).
+
+    ``note_on`` renders the attack/decay/sustain body; ``note_off``
+    appends the release tail. Voices are cheap — the bus pools them.
+    """
+
+    def __init__(self, patch: Patch, midi_note: int,
+                 velocity: float | None = None,
+                 dur_beats: float = 1.0, tempo: float = 120.0) -> None:
+        self.patch = patch
+        self.midi_note = int(midi_note)
+        self.velocity = float(patch.velocity if velocity is None
+                              else velocity)
+        self.dur_beats = float(dur_beats)
+        self.tempo = float(tempo)
+        self.released = False
+
+    @property
+    def dur_s(self) -> float:
+        return self.dur_beats * 60.0 / max(1.0, self.tempo)
+
+    def render(self, tail_beats: float = 0.5) -> array:
+        """Render body + release tail. Never raises."""
+        try:
+            p = self.patch
+            freq = midi_to_freq(max(0, min(127, self.midi_note)))
+            n = max(1, int(self.dur_s * SAMPLE_RATE))
+            body = _render_tone(freq, n, self.velocity, p.harmonics,
+                                p.attack, p.decay, p.sustain, 0.01)
+            tail_n = max(1, int(tail_beats * 60.0 / max(1.0, self.tempo)
+                                * SAMPLE_RATE))
+            tail = _render_tone(freq, tail_n, self.velocity * 0.6,
+                                p.harmonics, 0.005, p.release, 0.0, 0.01)
+            out = array("d", [0.0]) * (len(body) + len(tail))
+            for i, v in enumerate(body):
+                out[i] += v
+            # crossfade the tail in over the last 10% of the body
+            xf = max(1, len(body) // 10)
+            for i, v in enumerate(tail):
+                j = len(body) - xf + i
+                if 0 <= j < len(out):
+                    w = min(1.0, i / max(1, xf))
+                    out[j] = out[j] * (1 - w) + (out[j] + v) * w \
+                        if j >= len(body) else out[j] + v * w
+                elif j < len(out):
+                    out[j] += v
+            return out
+        except Exception:  # noqa: BLE001 — a voice never kills the bus
+            return array("d", [0.0])
+
+
+def _one_pole_lowpass(buf: array, cutoff: float) -> array:
+    """One-pole lowpass (kengine SVF-lite). cutoff<=0 or >=20000 = bypass."""
+    if cutoff <= 0 or cutoff >= 20000 or not buf:
+        return buf
+    import math as _m
+    rc = 1.0 / (2.0 * _m.pi * cutoff)
+    dt = 1.0 / SAMPLE_RATE
+    alpha = dt / (rc + dt)
+    out = array("d", [0.0]) * len(buf)
+    y = 0.0
+    for i, x in enumerate(buf):
+        y += alpha * (x - y)
+        out[i] = y
+    return out
+
+
+class SynthBus:
+    """Polyphonic voice manager: voices → filter → delay send → master.
+
+    ``play_notes([(midi, start_beat, dur_beats, velocity), ...])``
+    renders a full part on one patch. ``play_chord`` stacks a chord as
+    one event. The bus is the per-part counterpart to ``mix_tracks``
+    (which mixes whole parts together).
+    """
+
+    def __init__(self, patch: Patch | str = "keys",
+                 tempo: float = 120.0, master: float = 0.9) -> None:
+        self.patch = (PATCHES[patch] if isinstance(patch, str)
+                      else patch)
+        self.tempo = float(tempo)
+        self.master = float(master)
+        self._delay_line: array = array("d")
+
+    def _apply_bus_fx(self, buf: array) -> array:
+        p = self.patch
+        # filter stage
+        buf = _one_pole_lowpass(buf, p.cutoff)
+        # resonance = pre-filter drive (simple tanh-ish saturation)
+        if p.resonance > 0 and buf:
+            import math as _m
+            drive = 1.0 + p.resonance * 2.0
+            buf = array("d", (_m.tanh(v * drive) / _m.tanh(drive)
+                              for v in buf))
+        # feedback delay send
+        if p.delay_send > 0 and buf:
+            d_n = max(1, int(p.delay_time * SAMPLE_RATE))
+            wet = array("d", [0.0]) * len(buf)
+            for i in range(len(buf)):
+                echo = wet[i - d_n] * 0.35 if i >= d_n else 0.0
+                wet[i] = buf[i] * p.delay_send + echo
+            buf = array("d", (a + b for a, b in zip(buf, wet)))
+        if self.master != 1.0:
+            buf = array("d", (v * self.master for v in buf))
+        return buf
+
+    def play_notes(self, notes: list[tuple],
+                   patch: Patch | str | None = None) -> array:
+        """Render [(midi, start_beat, dur_beats[, velocity]), ...].
+
+        Never raises — bad entries are skipped honestly.
+        """
+        p = (PATCHES[patch] if isinstance(patch, str)
+             else (patch or self.patch))
+        beat_s = 60.0 / max(1.0, self.tempo)
+        events: list[tuple[int, array]] = []
+        total = 0
+        for entry in notes:
+            try:
+                midi = int(entry[0])
+                start = float(entry[1])
+                dur = float(entry[2]) if len(entry) > 2 else 1.0
+                vel = float(entry[3]) if len(entry) > 3 else p.velocity
+            except Exception:  # noqa: BLE001 — skip bad entries
+                continue
+            v = Voice(p, midi, velocity=vel, dur_beats=dur,
+                      tempo=self.tempo)
+            sig = v.render()
+            at = int(start * beat_s * SAMPLE_RATE)
+            events.append((at, sig))
+            total = max(total, at + len(sig))
+        out = array("d", [0.0]) * max(1, total)
+        for at, sig in events:
+            for i, s in enumerate(sig):
+                if at + i < len(out):
+                    out[at + i] += s
+        # gentle peak normalize to the bus
+        peak = max((abs(v) for v in out), default=0.0)
+        if peak > 1.0:
+            out = array("d", (v / peak for v in out))
+        return self._apply_bus_fx(out)
+
+    def play_chord(self, midi_notes: list[int], start_beat: float = 0.0,
+                   dur_beats: float = 4.0,
+                   velocity: float | None = None) -> array:
+        """One chord event: all notes start together."""
+        notes = [(m, start_beat, dur_beats,
+                  self.patch.velocity if velocity is None else velocity)
+                 for m in midi_notes]
+        return self.play_notes(notes)
+
+
+__all__ = ["render_wav", "write_wav", "mix_tracks",
+           "Patch", "PATCHES", "Voice", "SynthBus", "midi_to_freq"]
