@@ -217,12 +217,10 @@ class ProjectManager:
              p.created_at, p.updated_at, p.finished_at or 0.0,
              p.task_kind, p.artifact, p.verify_cmd),
         )
-        self.db.execute(
-            "INSERT OR REPLACE INTO kv_store (key, value, kind, updated_at) "
-            "VALUES (?,?, 'json', ?)",
-            (_KV_PREFIX + p.id,
-             json.dumps([s.to_dict() for s in p.steps], default=str),
-             time.time()),
+        KVStore(self.db).set_raw(
+            _KV_PREFIX + p.id,
+            json.dumps([s.to_dict() for s in p.steps], default=str),
+            "json",
         )
 
     def _load(self, project_id: str) -> Project | None:
