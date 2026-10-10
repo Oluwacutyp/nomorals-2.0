@@ -26,18 +26,54 @@ fully offline-testable.
 
 from __future__ import annotations
 
-from .batches import Candidate, DailyBatchStore, curate_daily
-from .questionnaire import DealBreaker, Question, Questionnaire
-from .stable import MatchResult, stable_match, verify_stable
+from .batches import (
+    Candidate,
+    DailyBatchStore,
+    curate_daily,
+    explain_pick,
+    mmr_rerank,
+)
+from .questionnaire import (
+    IMPORTANCE_WEIGHTS,
+    SECTIONS,
+    DealBreaker,
+    Question,
+    Questionnaire,
+)
+from .stable import (
+    CapacityMatchResult,
+    MatchResult,
+    RoommateResult,
+    optimal_assignment,
+    roommate_match,
+    serial_dictatorship,
+    stable_match,
+    stable_match_capacities,
+    top_trading_cycles,
+    verify_roommate_stable,
+    verify_stable,
+)
 
 __all__ = [
     "Candidate",
     "DailyBatchStore",
     "curate_daily",
+    "explain_pick",
+    "mmr_rerank",
+    "IMPORTANCE_WEIGHTS",
+    "SECTIONS",
     "DealBreaker",
     "Question",
     "Questionnaire",
+    "CapacityMatchResult",
     "MatchResult",
+    "RoommateResult",
+    "optimal_assignment",
+    "roommate_match",
+    "serial_dictatorship",
     "stable_match",
+    "stable_match_capacities",
+    "top_trading_cycles",
+    "verify_roommate_stable",
     "verify_stable",
 ]
