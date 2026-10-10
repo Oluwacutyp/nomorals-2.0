@@ -322,6 +322,47 @@ class IdentityStore:
                     break
         return suggestions
 
+    def merge(self, keep_id: str, absorb_id: str, *,
+              signal: str = "owner-confirmed") -> bool:
+        """Owner-confirmed merge: fold ``absorb_id``'s identities into
+        ``keep_id``. The audit trail records WHY. The inverse of
+        :meth:`unlink` — together they make identity mistakes reversible
+        in both directions."""
+        if keep_id == absorb_id:
+            return False
+        keep = self._people.get(keep_id)
+        absorb = self._people.get(absorb_id)
+        if keep is None or absorb is None:
+            return False
+        for ident in absorb.identities:
+            if not keep.has_platform(ident.platform, ident.platform_id):
+                keep.identities.append(ident)
+            self._by_platform[(ident.platform, ident.platform_id)] = keep_id
+            keep.links[f"{ident.platform}:{ident.platform_id}"] = {
+                "signal": f"merged from {absorb_id}: {signal}",
+                "confidence": CONF_HIGH,
+                "ts": time.time(),
+            }
+        if not keep.display_name and absorb.display_name:
+            keep.display_name = absorb.display_name
+        if absorb.is_owner:
+            keep.is_owner = True
+        del self._people[absorb_id]
+        self._save()
+        _log.info("identity: merged %s into %s (%s)", absorb_id, keep_id, signal)
+        return True
+
+    def all_platforms(self, person_id: str) -> list[str]:
+        """Every platform a person is known on. Empty when unknown."""
+        person = self._people.get(person_id)
+        if person is None:
+            return []
+        seen: list[str] = []
+        for ident in person.identities:
+            if ident.platform and ident.platform not in seen:
+                seen.append(ident.platform)
+        return seen
+
     def unlink(self, person_id: str, platform: str, platform_id: str) -> bool:
         """Split a wrong merge. The identity becomes its own person."""
         person = self._people.get(person_id)

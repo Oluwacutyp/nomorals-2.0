@@ -167,6 +167,68 @@ def buttons_for_text(text: str) -> Keyboard | None:
     return None
 
 
+# ── generic keyboard builders ─────────────────────────────────────────────
+# Button rules (verified against Bot API 10.2 practice): labels are
+# verb + object and unique within a keyboard; 1-2 buttons per row for
+# sentence-length labels; destructive actions last and isolated;
+# callback_data is namespaced screen:action:id with IDs, never labels —
+# existing messages in users' chats must keep working after a redesign.
+
+
+def nav_row(*items: tuple[str, str]) -> list[Button]:
+    """One navigation row, identical on every screen (rule: nav last)."""
+    row: list[Button] = []
+    for label, data in items:
+        check_callback_data(data)
+        row.append((label, data))
+    return row
+
+
+def paginate(page: int,
+             total_pages: int,
+             prefix: str,
+             *,
+             labels: tuple[str, str] = ("‹ Prev", "Next ›")) -> Keyboard:
+    """Prev/next pagination keyboard with index-embedded callbacks.
+
+    ``prefix`` namespaces the payload: ``f"{prefix}:page:{n}"`` — an index,
+    not a label, so it stays under the 64-byte budget and survives label
+    redesigns (the Aura index-embedding pattern). No buttons when there's
+    only one page.
+    """
+    if total_pages <= 1:
+        return []
+    page = max(0, min(total_pages - 1, page))
+    row: list[Button] = []
+    if page > 0:
+        data = f"{prefix}:page:{page - 1}"
+        check_callback_data(data)
+        row.append((labels[0], data))
+    indicator = f"{page + 1}/{total_pages}"
+    if page < total_pages - 1:
+        data = f"{prefix}:page:{page + 1}"
+        check_callback_data(data)
+        row.append((indicator, f"{prefix}:noop"))
+        row.append((labels[1], data))
+    else:
+        row.append((indicator, f"{prefix}:noop"))
+    return [row]
+
+
+def confirm_keyboard(action: str,
+                     item_id: str = "",
+                     *,
+                     confirm_label: str = "✅ Confirm",
+                     cancel_label: str = "❌ Cancel") -> Keyboard:
+    """Destructive-action confirm/cancel. Destructive goes last, isolated —
+    and the callback carries the item ID, never the item label."""
+    confirm_data = f"{action}:confirm:{item_id}".rstrip(":")
+    cancel_data = f"{action}:cancel:{item_id}".rstrip(":")
+    check_callback_data(confirm_data)
+    check_callback_data(cancel_data)
+    return [[(cancel_label, cancel_data), (confirm_label, confirm_data)]]
+
+
 # ── inline queries ────────────────────────────────────────────────────
 
 def _article(article_id: str, title: str, description: str,

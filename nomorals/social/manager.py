@@ -27,7 +27,10 @@ from ..core.ids import new_id
 from ..core.logging_setup import get_logger
 from ..core.policy import Capability
 from ..storage.repository import Repository
-from .base import Account, PlatformAdapter, PostResult, PostStatus, SocialError
+from .base import (
+    Account, PlatformAdapter, PostResult, PostStatus, SocialError,
+    classify_http_error, RETRYABLE_ERRORS,
+)
 
 __all__ = ["SocialManager", "PublishOutcome"]
 
@@ -306,8 +309,16 @@ class SocialManager:
         content: str,
         media_paths: Sequence[str],
         reply_to: str,
+        *,
+        post_row_id: str | None = None,
     ) -> PostResult:
-        """Post to one account, recording the attempt either way."""
+        """Post to one account, recording the attempt either way.
+
+        ``post_row_id`` reuses an existing queue row (retries, scheduled
+        posts) instead of recording a duplicate row per attempt.
+        """
+        from .base import ERROR_QUOTA, ERROR_UNKNOWN, ERROR_VALIDATION
+
         adapter = self.adapters.get(account.platform)
         if adapter is None:
             return PostResult(
@@ -323,14 +334,19 @@ class SocialManager:
             return PostResult(
                 platform=account.platform, ok=False,
                 error=f"rate limited: {wait:.0f}s until the next post is allowed",
+                error_code=ERROR_QUOTA,
             )
 
-        row = self._record_post(account, content, media_paths, reply_to)
+        row_id = post_row_id
+        if row_id is None:
+            row_id = self._record_post(account, content, media_paths, reply_to)["id"]
         try:
             adapter.validate(content)
         except ValidationError as exc:
-            self._update_post(row["id"], PostStatus.FAILED, error=exc.message)
-            return PostResult(platform=account.platform, ok=False, error=exc.message)
+            self._update_post(row_id, PostStatus.FAILED, error=exc.message,
+                              error_code=ERROR_VALIDATION)
+            return PostResult(platform=account.platform, ok=False,
+                              error=exc.message, error_code=ERROR_VALIDATION)
 
         started = time.perf_counter()
         try:
@@ -339,15 +355,23 @@ class SocialManager:
             )
         except Exception as exc:  # noqa: BLE001 - a platform error is a result
             result = PostResult(
-                platform=account.platform, ok=False, error=f"{type(exc).__name__}: {exc}"
+                platform=account.platform, ok=False,
+                error=f"{type(exc).__name__}: {exc}",
+                error_code=classify_http_error(
+                    getattr(exc, "status_code", 0) or 0, str(exc)),
             )
         result.seconds = time.perf_counter() - started
+        # Adapters written before error codes existed return the default;
+        # classify from the HTTP status so retry logic has something real.
+        if not result.ok and result.status_code and result.error_code == ERROR_UNKNOWN:
+            result.error_code = classify_http_error(result.status_code, result.error)
 
         self._update_post(
-            row["id"],
+            row_id,
             PostStatus.POSTED if result.ok else PostStatus.FAILED,
             external_id=result.external_id,
             error=result.error,
+            error_code=result.error_code if not result.ok else "",
             metrics=result.metrics,
             posted_at=self._clock() if result.ok else None,
         )
@@ -437,9 +461,129 @@ class SocialManager:
             result = self._publish_one(
                 account, row["content"], json.loads(row.get("media_paths") or "[]"),
                 row.get("reply_to") or "",
+                post_row_id=row["id"],
             )
             results.append(result)
         return results
+
+    def retry_failed(
+        self, *, limit: int = 25, max_attempts: int = 3
+    ) -> list[PostResult]:
+        """Retry failed posts that are actually worth retrying.
+
+        Permanent failures (auth, policy, validation) are skipped — retrying
+        those blindly is how accounts get flagged. Transient, quota, and
+        media failures retry with the row's own attempt counter as the
+        backoff discipline (``max_attempts`` caps total tries).
+        """
+        results: list[PostResult] = []
+        rows = self.db.query(
+            "SELECT * FROM social_posts WHERE status = 'failed' "
+            "ORDER BY created_at DESC LIMIT ?",
+            (limit,),
+        )
+        for row in rows:
+            row = dict(row)
+            attempts = int(row.get("attempts") or 0)
+            if attempts >= max_attempts:
+                continue
+            code = self._row_error_code(row)
+            if code and code not in RETRYABLE_ERRORS:
+                _log.info("not retrying %s: permanent failure (%s)",
+                          row["id"], code)
+                continue
+            account_row = self.accounts.get(row["account_id"])
+            if account_row is None:
+                self._update_post(row["id"], PostStatus.FAILED,
+                                  error="account no longer connected")
+                continue
+            account = Account.from_row(account_row)
+            self.posts.update(row["id"], {"attempts": attempts + 1})
+            self._update_post(row["id"], PostStatus.POSTING)
+            results.append(self._publish_one(
+                account, row["content"],
+                json.loads(row.get("media_paths") or "[]"),
+                row.get("reply_to") or "",
+                post_row_id=row["id"],
+            ))
+        return results
+
+    def _row_error_code(self, row: dict[str, Any]) -> str:
+        """Read the structured error code stored in the row's metadata."""
+        try:
+            meta = row.get("metadata") or {}
+            if isinstance(meta, str):
+                meta = json.loads(meta or "{}")
+            return str(meta.get("error_code") or "")
+        except Exception:  # noqa: BLE001
+            return ""
+
+    def preview(
+        self,
+        content: str,
+        *,
+        platforms: Sequence[str] | None = None,
+        account_handles: dict[str, str] | None = None,
+        llm_fn: Any = None,
+    ) -> dict[str, Any]:
+        """Dry-run: what each platform would receive, with zero network.
+
+        Returns per-platform adapted text, character counts against real
+        budgets, and active/credential flags. The answer to "what will this
+        look like out there?" before anything is posted.
+        """
+        from .tone import _profile, adapt_tone
+
+        targets = self._resolve_targets(platforms, account_handles)
+        items = []
+        for account in targets:
+            profile = _profile(account.platform)
+            adapted = adapt_tone(content, account.platform, llm_fn=llm_fn)
+            items.append({
+                "platform": account.platform,
+                "handle": account.handle,
+                "active": account.active,
+                "has_credentials": bool(account.resolve_token()),
+                "adapted": adapted,
+                "chars": len(adapted),
+                "max_chars": profile.max_chars,
+                "over_budget": len(adapted) > profile.max_chars,
+            })
+        return {"content": content, "platforms": items}
+
+    def account_health(self) -> list[dict[str, Any]]:
+        """Credential/token health sweep across every connected account.
+
+        Connections fail quietly (password changed, grant revoked) and the
+        first sign is usually a dead scheduled campaign. This runs each
+        adapter's cheap ``health()`` check so the operator sees the rot
+        before it costs a post.
+        """
+        report: list[dict[str, Any]] = []
+        for account in self.list_accounts(active_only=False):
+            entry: dict[str, Any] = {
+                "platform": account.platform,
+                "handle": account.handle,
+                "active": account.active,
+                "healthy": False,
+                "error": "",
+                "posts_today": self.posts_today(account),
+                "daily_ceiling": account.posts_per_day,
+            }
+            adapter = self.adapters.get(account.platform)
+            if adapter is None:
+                entry["error"] = "no adapter registered"
+            elif not account.active:
+                entry["error"] = "account inactive"
+            else:
+                try:
+                    entry["healthy"] = bool(adapter.health(account))
+                    if not entry["healthy"]:
+                        entry["error"] = "health check failed (token may be dead)"
+                except Exception as exc:  # noqa: BLE001 - health is a result
+                    entry["error"] = f"{type(exc).__name__}: {exc}"
+            report.append(entry)
+        return report
 
     def history(self, *, platform: str = "", status: str = "", limit: int = 50) -> list[dict[str, Any]]:
         # Repository.find() turns every kwarg into a WHERE clause, so passing
@@ -479,6 +623,23 @@ class SocialManager:
         changes = {"status": status, **fields}
         if fields.get("posted_at") is None:
             changes.pop("posted_at", None)
+        # Structured error codes ride in the JSON metadata column — no
+        # migration needed, and retry logic can read them from history.
+        # There is no error_code SQL column, so pop it after merging.
+        error_code = changes.pop("error_code", "")
+        if error_code:
+            try:
+                row = self.posts.get(post_id) or {}
+                meta = row.get("metadata") or {}
+                if isinstance(meta, str):
+                    import json as _json
+
+                    meta = _json.loads(meta or "{}")
+                meta = dict(meta)
+                meta["error_code"] = error_code
+                changes["metadata"] = meta
+            except Exception:  # noqa: BLE001 - metadata is best-effort
+                pass
         self.posts.update(post_id, changes)
 
     def _check_capability(self, capability: str, actor: str, *, confirmation: str = "") -> None:

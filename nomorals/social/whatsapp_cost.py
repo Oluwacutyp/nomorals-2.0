@@ -40,11 +40,13 @@ __all__ = [
     "RATE_SERVICE_KOBO",
     "RATE_MARKETING_KOBO",
     "CATEGORIES",
+    "RATE_CARD_2026",
     "CostTracker",
     "CostAwareSender",
     "CampaignEstimate",
     "worth_it",
     "naira",
+    "rate_card_text",
 ]
 
 # ── rates (Meta Nigeria, Oct 1 2026 billing) ──────────────────────────────
@@ -58,6 +60,57 @@ CATEGORIES = ("service", "marketing")
 
 #: Warn the owner when a budget is this fraction consumed (soft warning).
 BUDGET_WARN_FRACTION = 0.8
+
+#: Meta's 2026 WhatsApp rate card (USD per message/conversation, Nigeria —
+#: source: Africa 2026 BSP rate guides). Meta moved India to per-MESSAGE
+#: billing in July 2025; conversation-based pricing holds elsewhere.
+#: Marketing needs explicit opt-in + pre-approved templates. Service
+#: (customer-initiated, replied within 24h) carries a 1,000/month free
+#: allowance per number. The single biggest cost lever is operational:
+#: maximize each opened 24h window instead of opening new ones.
+RATE_CARD_2026: dict[str, dict[str, object]] = {
+    "marketing": {
+        "usd": 0.058, "initiated_by": "business",
+        "use": "promotions, offers, cart recovery, re-engagement",
+        "template_required": True,
+    },
+    "utility": {
+        "usd": 0.016, "initiated_by": "business",
+        "use": "order confirmations, shipping updates, appointment reminders",
+        "template_required": True,
+    },
+    "authentication": {
+        "usd": 0.020, "initiated_by": "business",
+        "use": "OTPs, login verification, 2FA",
+        "template_required": True,
+    },
+    "service": {
+        "usd": 0.010, "initiated_by": "customer",
+        "use": "customer-initiated support — replies within the 24h window",
+        "template_required": False,
+        "free_allowance": "1,000 conversations/number/month",
+    },
+}
+
+
+def rate_card_text() -> str:
+    """Owner-facing explanation of the 2026 WhatsApp rate card.
+
+    Never raises. The numbers that matter: marketing costs ~6× a service
+    reply, and service conversations are free within the allowance — so
+    the cheapest message is the one the customer started.
+    """
+    lines = ["💬 WhatsApp rate card (Meta 2026, Nigeria, USD):", ""]
+    for cat, info in RATE_CARD_2026.items():
+        tmpl = "template required" if info.get("template_required") else "no template needed"
+        lines.append(
+            f"• {cat}: ${float(info['usd']):.3f} — {info['use']} ({tmpl})")
+    lines += [
+        "",
+        "Rule of thumb: a marketing blast costs ~6× a service reply. "
+        "Get the customer to message first and the 24h window is nearly free.",
+    ]
+    return "\n".join(lines)
 
 
 def naira(kobo: int) -> str:
@@ -172,6 +225,37 @@ class CostTracker:
     def spent_week(self, *, client: str = "default") -> int:
         """Kobo spent in the rolling 7 days. Never raises."""
         return self.spent_since(self._now() - 7 * 86400, client=client)
+
+    def project_monthly(self, *, client: str = "default") -> dict[str, object]:
+        """Project this month's spend from the current run-rate.
+
+        Takes kobo spent in the last 7 days, annualizes to 30 days, and
+        compares against the weekly budget (×4.33). Returns
+        {"spent_7d_kobo", "projected_30d_kobo", "budget_monthly_kobo",
+        "on_track"} — "on_track" is False when the projection blows the
+        budget. Never raises.
+        """
+        try:
+            spent_7d = self.spent_week(client=client)
+            projected = int(spent_7d / 7 * 30)
+            budget = self.get_budget(client)
+            budget_monthly = int((budget or {}).get("amount_kobo") or 0) * 433 // 100
+            on_track = (not budget_monthly) or projected <= budget_monthly
+            return {
+                "spent_7d_kobo": spent_7d,
+                "projected_30d_kobo": projected,
+                "budget_monthly_kobo": budget_monthly,
+                "on_track": on_track,
+                "summary": (
+                    f"on pace for {naira(projected)}/month"
+                    + ("" if on_track else
+                       f" — OVER the {naira(budget_monthly)}/month budget")
+                ),
+            }
+        except Exception:  # noqa: BLE001
+            return {"spent_7d_kobo": 0, "projected_30d_kobo": 0,
+                    "budget_monthly_kobo": 0, "on_track": True,
+                    "summary": "projection unavailable"}
 
     def message_count(self, *, client: str = "default") -> int:
         """Messages sent in the rolling 7 days. Never raises."""

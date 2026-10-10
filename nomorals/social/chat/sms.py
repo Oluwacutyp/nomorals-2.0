@@ -52,6 +52,9 @@ __all__ = [
     "sms_allows",
     "sms_enabled",
     "split_sms",
+    "sms_encoding",
+    "sms_segments",
+    "normalize_gsm7",
     "verify_twilio_signature",
 ]
 
@@ -104,15 +107,99 @@ def sms_enabled(settings: Any) -> bool:
     return enabled and bool(number)
 
 
+# ── real segment math ─────────────────────────────────────────────────────
+# Segmentation is NOT a character count. One character outside the GSM-7
+# alphabet forces the WHOLE message into UCS-2 and cuts the per-part
+# budget: GSM-7 = 160 chars (153 concatenated), UCS-2 = 70 (67
+# concatenated). A curly quote pasted from a word processor can triple
+# the billed segments — this is where SMS money quietly leaks.
+
+#: GSM-7 basic + extension characters (the billable-safe alphabet).
+_GSM7 = frozenset(
+    "@£$¥èéùìòÇ\nØø\rÅåΔ_ΦΓΛΩΠΨΣΘΞ\x1bÆæßÉ !\"#¤%&'()*+,-./"
+    "0123456789:;<=>?¡ABCDEFGHIJKLMNOPQRSTUVWXYZÄÖÑÜ§"
+    "¿abcdefghijklmnopqrstuvwxyzäöñüà"
+    "^{}\\[~]|€"
+)
+
+#: Surgical substitutions that stay in GSM-7 — hand-written, never NFD.
+#: NFD de-accenting would rewrite ñ→n (turning "año" into a vulgarity)
+#: and strip diacritics that are already free (é, ñ, ü cost nothing).
+#: Emoji have no ASCII equivalent and are left alone deliberately.
+_GSM7_SUBSTITUTIONS: dict[str, str] = {
+    "á": "a", "í": "i", "ó": "o", "ú": "u",
+    "Á": "A", "Í": "I", "Ó": "O", "Ú": "U",
+    "ç": "c", "Ç": "C",
+    "“": '"', "”": '"', "‘": "'", "’": "'",
+    "–": "-", "—": "-", "…": "...",
+}
+
+
+def sms_encoding(text: str) -> str:
+    """``"gsm7"`` or ``"ucs2"`` for ``text``. Pure, testable."""
+    try:
+        for ch in str(text or ""):
+            if ch not in _GSM7:
+                return "ucs2"
+        return "gsm7"
+    except Exception:  # noqa: BLE001
+        return "ucs2"
+
+
+def sms_segments(text: str) -> dict[str, object]:
+    """Real segment math for ``text``: encoding, per-part budget, count.
+
+    Returns ``{"encoding", "per_part", "count", "chars"}`` — the numbers
+    the carrier bills on, not a character count.
+    """
+    text = str(text or "")
+    encoding = sms_encoding(text)
+    single, concat = (160, 153) if encoding == "gsm7" else (70, 67)
+    chars = len(text)
+    if chars <= single:
+        count = 1
+    else:
+        count = -(-chars // concat)  # ceil division
+    return {"encoding": encoding, "per_part": concat, "count": count,
+            "chars": chars}
+
+
+def normalize_gsm7(text: str) -> tuple[str, list[str]]:
+    """Replace non-GSM-7 chars that have safe ASCII equivalents.
+
+    Returns ``(normalized_text, substituted_chars)`` so the caller can say
+    what changed (and what it saved). Emoji and ñ/é/ü/è are never touched.
+    """
+    try:
+        out: list[str] = []
+        changed: list[str] = []
+        for ch in str(text or ""):
+            if ch in _GSM7:
+                out.append(ch)
+            elif ch in _GSM7_SUBSTITUTIONS:
+                out.append(_GSM7_SUBSTITUTIONS[ch])
+                if ch not in changed:
+                    changed.append(ch)
+            else:
+                out.append(ch)  # no safe equivalent — keep, pay the segment
+        return "".join(out), changed
+    except Exception:  # noqa: BLE001
+        return str(text or ""), []
+
+
 def split_sms(text: str) -> list[str]:
-    """Split ``text`` into numbered SMS segments, each ≤160 chars.
+    """Split ``text`` into numbered SMS segments on the REAL budget.
 
     A single segment goes out unnumbered. Multi-part messages are split on
-    word boundaries at ≤147 chars of content, then prefixed ``(i/n)``.
-    Never silently truncates — callers send every segment.
+    word boundaries at the encoding-correct content budget (153 for GSM-7,
+    67 for UCS-2), then prefixed ``(i/n)``. Never silently truncates —
+    callers send every segment.
     """
     text = text or ""
-    if len(text) <= SMS_SEGMENT_CHARS:
+    info = sms_segments(text)
+    single = 160 if info["encoding"] == "gsm7" else 70
+    concat = int(info["per_part"])
+    if len(text) <= single:
         return [text]
     words = text.split()
     chunks: list[str] = []
@@ -120,14 +207,14 @@ def split_sms(text: str) -> list[str]:
     current_len = 0
     for word in words:
         # A single pathological word longer than the budget: hard-split it.
-        while len(word) > SMS_CONCAT_CHARS:
+        while len(word) > concat:
             if current:
                 chunks.append(" ".join(current))
                 current, current_len = [], 0
-            chunks.append(word[:SMS_CONCAT_CHARS])
-            word = word[SMS_CONCAT_CHARS:]
+            chunks.append(word[:concat])
+            word = word[concat:]
         extra = len(word) + (1 if current else 0)
-        if current_len + extra > SMS_CONCAT_CHARS:
+        if current_len + extra > concat:
             chunks.append(" ".join(current))
             current, current_len = [word], len(word)
         else:

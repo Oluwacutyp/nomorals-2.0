@@ -20,11 +20,31 @@ from typing import Any
 
 from ..core.errors import NoMoralsError, ValidationError
 
-__all__ = ["SocialError", "PostResult", "Account", "PlatformAdapter", "PostStatus"]
+__all__ = [
+    "SocialError", "PostResult", "Account", "PlatformAdapter", "PostStatus",
+    "ERROR_AUTH", "ERROR_VALIDATION", "ERROR_POLICY", "ERROR_MEDIA",
+    "ERROR_QUOTA", "ERROR_TRANSIENT", "ERROR_UNKNOWN", "RETRYABLE_ERRORS",
+    "classify_http_error",
+]
 
 
 class SocialError(NoMoralsError):
     """A platform rejected us, or we refused to ask it."""
+
+
+#: Structured error codes for :class:`PostResult.error_code`. Categorized so
+#: the scheduler can decide what is retryable: auth/policy/validation are
+#: permanent (never retry indefinitely), transient/quota are retriable.
+ERROR_AUTH = "auth"             # bad/expired credentials — re-auth, don't retry
+ERROR_VALIDATION = "validation"  # content the platform cannot accept
+ERROR_POLICY = "policy"        # platform policy / moderation rejection
+ERROR_MEDIA = "media"          # media upload/processing failure
+ERROR_QUOTA = "quota"          # rate limit / daily cap hit — retry later
+ERROR_TRANSIENT = "transient"  # network hiccup, 5xx — safe to retry
+ERROR_UNKNOWN = "unknown"
+
+#: Error codes that are worth retrying with backoff.
+RETRYABLE_ERRORS = frozenset({ERROR_QUOTA, ERROR_TRANSIENT, ERROR_MEDIA})
 
 
 class PostStatus:
@@ -47,20 +67,60 @@ class PostResult:
     external_id: str = ""
     url: str = ""
     error: str = ""
+    error_code: str = ERROR_UNKNOWN
     status_code: int = 0
     seconds: float = 0.0
     metrics: dict[str, Any] = field(default_factory=dict)
     rate_limit_remaining: int | None = None
     rate_limit_reset: float | None = None
 
+    @property
+    def retryable(self) -> bool:
+        """True when a retry with backoff has a chance of working.
+
+        Permanent failures (auth, validation, policy) are NOT retryable —
+        retrying those indefinitely is how accounts get flagged.
+        """
+        return not self.ok and self.error_code in RETRYABLE_ERRORS
+
+    def with_error(self, error: str, code: str = ERROR_UNKNOWN) -> "PostResult":
+        """Fluent setter: attach a categorized error to a failure result."""
+        self.ok = False
+        self.error = error
+        self.error_code = code
+        return self
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "platform": self.platform, "ok": self.ok, "external_id": self.external_id,
-            "url": self.url, "error": self.error, "status_code": self.status_code,
+            "url": self.url, "error": self.error, "error_code": self.error_code,
+            "retryable": self.retryable, "status_code": self.status_code,
             "seconds": round(self.seconds, 3), "metrics": self.metrics,
             "rate_limit_remaining": self.rate_limit_remaining,
             "rate_limit_reset": self.rate_limit_reset,
         }
+
+
+def classify_http_error(status_code: int, text: str = "") -> str:
+    """Map an HTTP failure to a structured error code. Pure, testable."""
+    body = (text or "").lower()
+    if status_code in (401, 403):
+        if any(k in body for k in ("rate", "limit", "quota", "too many")):
+            return ERROR_QUOTA
+        return ERROR_AUTH
+    if status_code == 429:
+        return ERROR_QUOTA
+    if status_code in (400, 404, 410, 413, 422):
+        if any(k in body for k in ("media", "image", "video", "upload", "processing")):
+            return ERROR_MEDIA
+        if any(k in body for k in ("policy", "moderation", "violat", "spam", "banned")):
+            return ERROR_POLICY
+        return ERROR_VALIDATION
+    if status_code >= 500:
+        return ERROR_TRANSIENT
+    if status_code and status_code >= 400:
+        return ERROR_UNKNOWN
+    return ERROR_TRANSIENT  # no status: network-level failure
 
 
 @dataclass

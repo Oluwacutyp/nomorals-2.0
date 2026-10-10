@@ -226,6 +226,21 @@ class RelationshipTracker:
             self._rels.values(), key=lambda r: r.closeness, reverse=True
         )[:limit]
 
+    def target_cadence_days(self, rel: ContactRelationship) -> int:
+        """How often this contact deserves a touch, from closeness.
+
+        Personal-CRM practice: close contacts ~monthly, mentors/strong ties
+        every couple of weeks, weak ties quarterly. The score decides, not
+        a manual label.
+        """
+        if rel.closeness >= 0.7:
+            return 14
+        if rel.closeness >= 0.4:
+            return 30
+        if rel.closeness >= 0.15:
+            return 90
+        return 180
+
     def needs_reconnect(self, days: int = 30) -> list[ContactRelationship]:
         """Close contacts gone quiet — candidates for proactive outreach."""
         cutoff = time.time() - days * 86400
@@ -235,3 +250,42 @@ class RelationshipTracker:
             if r.closeness >= 0.4
             and max(r.last_inbound, r.last_outbound) < cutoff
         ]
+
+    def due_for_reconnect(self) -> list[tuple[ContactRelationship, int]]:
+        """Contacts past their OWN target cadence: (relationship, days_quiet).
+
+        Stronger than the flat ``needs_reconnect``: a close friend is due
+        after 14 quiet days, a weak tie after 180. Sorted most-overdue
+        first — this is the morning "who should I message" list.
+        """
+        now = time.time()
+        due: list[tuple[ContactRelationship, int, float]] = []
+        for rel in self._rels.values():
+            last = max(rel.last_inbound, rel.last_outbound, rel.first_seen)
+            days_quiet = (now - last) / 86400
+            target = self.target_cadence_days(rel)
+            if days_quiet >= target and rel.closeness >= 0.15:
+                overdue_ratio = days_quiet / target
+                due.append((rel, int(days_quiet), overdue_ratio))
+        due.sort(key=lambda t: t[2], reverse=True)
+        return [(rel, days) for rel, days, _ in due]
+
+    def reconnect_prompt(self, rel: ContactRelationship, days_quiet: int) -> str:
+        """A brain-ready outreach line: who, how long, last topic, warmth.
+
+        Never a template message TO the person — context FOR the brain so
+        "how did the interview go?" lands instead of "hey stranger".
+        """
+        name = rel.display_name or "them"
+        bits = [f"{name} — {days_quiet}d quiet (cadence: {rel.cadence()})"]
+        if rel.last_topic:
+            bits.append(f"last talked about: {rel.last_topic}")
+        if rel.warmth >= 0.7:
+            bits.append("warm history — lead with affection")
+        elif rel.warmth <= 0.3:
+            bits.append("cooler history — keep it light, no pressure")
+        for note in rel.notes[-2:]:
+            bits.append(f"remember: {note}")
+        if days_quiet > 120 and rel.closeness > 0.4:
+            bits.append("dormant-close: warmth, not awkwardness")
+        return " · ".join(bits)

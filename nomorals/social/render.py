@@ -20,6 +20,7 @@ __all__ = [
     "render_community",
     "render_channel",
     "render_group_list",
+    "render_metrics_card",
 ]
 
 
@@ -294,3 +295,74 @@ def render_group_list(groups: list[dict[str, Any]],
         return "\n".join(lines)
     except Exception:  # noqa: BLE001
         return f"{len(groups or [])} groups"
+
+
+def render_metrics_card(metrics: dict[str, object],
+                        platform: str = "telegram",
+                        *,
+                        title: str = "Post performance",
+                        trend: list[float] | None = None) -> str | dict[str, object]:
+    """An engagement report card for a post: metrics + trend sparkline.
+
+    ``metrics`` is the adapter's engagement dict (likes, reposts, replies,
+    …). Never raises — worst case returns a plain fallback.
+    """
+    p = _plat(platform)
+    try:
+        from .chat.style import sparkline
+
+        order = ("impressions", "views", "likes", "favorites", "favourites",
+                 "reposts", "reblogs", "quotes", "replies", "comments",
+                 "shares", "bookmarks", "engagement")
+        fields: list[tuple[str, str]] = []
+        for key in order:
+            val = metrics.get(key)
+            if isinstance(val, (int, float)) and val:
+                label = key.replace("favourites", "likes").replace("reblogs", "reposts")
+                fields.append((label.capitalize(), _fmt_num(val)))
+
+        total = sum(
+            float(metrics.get(k) or 0) for k in order
+            if isinstance(metrics.get(k), (int, float))
+        )
+        line = sparkline(trend or [])
+
+        if p == "discord":
+            return {
+                "title": f"📊 {title}",
+                "fields": [
+                    {"name": label, "value": val, "inline": True}
+                    for label, val in fields[:12]
+                ] + ([{"name": "Trend", "value": line, "inline": False}]
+                     if line else []),
+            }
+        if p == "whatsapp":
+            lines = [f"📊 *{title}*"]
+            lines.extend(f"• {label}: *{val}*" for label, val in fields)
+            if line:
+                lines.append(f"\ntrend: {line}")
+            lines.append(f"\ntotal engagement: *{_fmt_num(total)}*")
+            return "\n".join(lines)
+
+        lines = [f"📊 <b>{html.escape(title)}</b>"]
+        lines.extend(f"• {html.escape(label)}: <b>{html.escape(val)}</b>"
+                     for label, val in fields)
+        if line:
+            lines.append(f"\ntrend: <code>{line}</code>")
+        lines.append(f"\ntotal engagement: <b>{_fmt_num(total)}</b>")
+        return "\n".join(lines)
+    except Exception:  # noqa: BLE001 — never break the chat on rendering
+        return f"{title}: {metrics}"
+
+
+def _fmt_num(val: float) -> str:
+    """1_234_000 → 1.2M. Never raises."""
+    try:
+        v = float(val)
+        if v >= 1_000_000:
+            return f"{v / 1_000_000:.1f}M".rstrip("0").rstrip(".")
+        if v >= 1_000:
+            return f"{v / 1_000:.1f}k".rstrip("0").rstrip(".")
+        return str(int(v)) if v == int(v) else f"{v:.1f}"
+    except Exception:  # noqa: BLE001
+        return str(val)

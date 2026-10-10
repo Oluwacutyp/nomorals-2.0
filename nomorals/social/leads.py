@@ -50,6 +50,45 @@ class CommentTrigger:
     followup_template: str = ""
     active: bool = True
     created_at: float = 0.0
+    # ManyChat-pattern extensions (loaded from trigger_meta — see below).
+    public_reply: str = ""  # public comment reply ("Sent, check your DMs")
+    qualifier: str = ""     # exactly one qualifying question after delivery
+
+
+#: Keywords people type anyway — they fire on ordinary comments and flood
+#: the funnel with false positives (ManyChat playbook rule).
+_GENERIC_KEYWORDS = frozenset({
+    "yes", "info", "link", "ok", "hi", "hey", "dm", "me", "please",
+    "interested", "details", "price", "how",
+})
+
+
+def keyword_quality(keyword: str) -> dict[str, object]:
+    """Grade a trigger keyword per the ManyChat keyword rules.
+
+    Good: one short specific word nobody types by accident ("VAULT",
+    "PLAN"). Bad: generic words ("info", "link"), emoji (spam filters
+    dislike them in replies, reads as bait), multi-word phrases people
+    embed in sentences. Returns {"grade", "warnings"} — grade is
+    "good" | "risky" | "bad".
+    """
+    kw = (keyword or "").strip()
+    warnings: list[str] = []
+    if not kw:
+        return {"grade": "bad", "warnings": ["keyword is empty"]}
+    words = kw.split()
+    if len(words) > 2:
+        warnings.append("multi-word keywords fire inside ordinary sentences — use one word")
+    if kw.lower() in _GENERIC_KEYWORDS:
+        warnings.append(f"'{kw}' is typed in ordinary comments — expect false positives")
+    if any(ord(c) > 0x2500 for c in kw):
+        warnings.append("emoji/symbol keywords read as bait and trip spam filters")
+    if len(kw) > 12:
+        warnings.append("long keywords get misspelled — keep it short")
+    if any(c in kw for c in ".,!?;:"):
+        warnings.append("punctuation in keywords is fragile — plain word only")
+    grade = "good" if not warnings else ("bad" if len(warnings) > 1 else "risky")
+    return {"grade": grade, "warnings": warnings}
 
 
 @dataclass
@@ -107,6 +146,13 @@ class LeadStore:
                 """CREATE TABLE IF NOT EXISTS lead_comments
                    (platform TEXT, post_id TEXT, commenter TEXT,
                     contact TEXT, text TEXT, ts REAL)"""
+            )
+            # Side table for trigger extensions (public_reply, qualifier)
+            # — the lead_triggers schema stays frozen for compat.
+            self._db.execute(
+                """CREATE TABLE IF NOT EXISTS trigger_meta
+                   (trigger_id TEXT, key TEXT, value TEXT,
+                    PRIMARY KEY (trigger_id, key))"""
             )
             self._db.commit()
         except Exception:  # noqa: BLE001
@@ -297,13 +343,97 @@ class LeadStore:
             return False
 
     # — rows —
-    @staticmethod
-    def _row_trigger(r: sqlite3.Row) -> CommentTrigger:
-        return CommentTrigger(
+    def _row_trigger(self, r: sqlite3.Row) -> CommentTrigger:
+        trig = CommentTrigger(
             trigger_id=r["trigger_id"], platform=r["platform"], post_id=r["post_id"],
             keyword=r["keyword"], dm_template=r["dm_template"] or "",
             followup_template=r["followup_template"] or "",
             active=bool(r["active"]), created_at=float(r["created_at"] or 0))
+        trig.public_reply = self.get_trigger_meta(trig.trigger_id, "public_reply")
+        trig.qualifier = self.get_trigger_meta(trig.trigger_id, "qualifier")
+        return trig
+
+    def set_trigger_meta(self, trigger_id: str, key: str, value: str) -> bool:
+        """Store a trigger extension (public_reply, qualifier)."""
+        try:
+            if self._db is None or not trigger_id or not key:
+                return False
+            self._db.execute(
+                "INSERT OR REPLACE INTO trigger_meta VALUES (?,?,?)",
+                (trigger_id, key, value or ""))
+            self._db.commit()
+            return True
+        except Exception:  # noqa: BLE001
+            return False
+
+    def get_trigger_meta(self, trigger_id: str, key: str) -> str:
+        try:
+            if self._db is None or not trigger_id or not key:
+                return ""
+            row = self._db.execute(
+                "SELECT value FROM trigger_meta WHERE trigger_id = ? AND key = ?",
+                (trigger_id, key)).fetchone()
+            return str(row["value"] or "") if row else ""
+        except Exception:  # noqa: BLE001
+            return ""
+
+    def set_public_reply(self, trigger_id: str, template: str) -> bool:
+        """The public comment reply posted alongside the DM.
+
+        ManyChat's highest-ROI setting: some DMs never arrive, so the
+        public reply ("Sent — check your DMs 👀") tells the commenter to
+        look AND boosts the post in the algorithm. Template supports
+        {name} and {keyword}.
+        """
+        if template and "{name}" not in template and "check your dm" not in template.lower():
+            _log.debug("public reply for %s has no {name} or DM pointer", trigger_id)
+        return self.set_trigger_meta(trigger_id, "public_reply", template or "")
+
+    def set_qualifier(self, trigger_id: str, question: str) -> bool:
+        """Exactly ONE qualifying question, asked after the delivery DM.
+
+        The playbook: delivery message → one question ("Are you training
+        right now, or getting back into it?") → intent answers route to
+        the lead form. Anything longer is a survey and people leave.
+        """
+        return self.set_trigger_meta(trigger_id, "qualifier", (question or "").strip())
+
+    def funnel_stats(self, trigger_id: str) -> dict[str, object]:
+        """Per-trigger conversion funnel: comments → DMs → lead statuses.
+
+        Answers "is this trigger pulling its weight?" with real numbers.
+        """
+        try:
+            if self._db is None:
+                return {}
+            trig = self.get_trigger(trigger_id)
+            if trig is None:
+                return {}
+            comments = self._db.execute(
+                "SELECT COUNT(DISTINCT commenter) AS n FROM lead_comments "
+                "WHERE platform = ? AND post_id = ?",
+                (trig.platform, trig.post_id)).fetchone()
+            dmed = self._db.execute(
+                "SELECT COUNT(*) AS n FROM comment_seen WHERE trigger_id = ?",
+                (trigger_id,)).fetchone()
+            statuses = self._db.execute(
+                "SELECT status, COUNT(*) AS n FROM leads "
+                "WHERE source_post = ? GROUP BY status",
+                (trig.post_id,)).fetchall()
+            by_status = {r["status"]: int(r["n"]) for r in statuses}
+            n_comments = int(comments["n"] or 0)
+            n_dmed = int(dmed["n"] or 0)
+            return {
+                "trigger_id": trigger_id, "keyword": trig.keyword,
+                "comments": n_comments, "dmed": n_dmed,
+                "dm_rate": round(n_dmed / n_comments, 3) if n_comments else 0.0,
+                "leads_by_status": by_status,
+                "converted": by_status.get("converted", 0),
+                "qualifier": trig.qualifier,
+                "public_reply": bool(trig.public_reply),
+            }
+        except Exception:  # noqa: BLE001
+            return {}
 
     @staticmethod
     def _row_lead(r: sqlite3.Row) -> Lead:
@@ -414,9 +544,28 @@ def handle_comment(store: LeadStore, ev: CommentEvent, *,
                             "whatsapp" if ev.platform == "whatsapp" else "smtp")
                     except Exception:  # noqa: BLE001
                         pass
-            results.append({"trigger_id": trig.trigger_id, "dmed": sent,
-                            "lead_id": lead.lead_id,
-                            "reason": ("sent" if sent else "blocked" + cost_note)})
+            # The public reply rides back to the caller (the adapter posts
+            # it as a comment reply): "Sent — check your DMs" both fixes
+            # undelivered DMs and feeds the algorithm. Supports
+            # {name} and {keyword}.
+            public = ""
+            if trig.public_reply:
+                public = (trig.public_reply
+                          .replace("{name}", lead.name or "there")
+                          .replace("{keyword}", trig.keyword))
+            result: dict[str, object] = {
+                "trigger_id": trig.trigger_id, "dmed": sent,
+                "lead_id": lead.lead_id,
+                "reason": ("sent" if sent else "blocked" + cost_note),
+            }
+            if public:
+                result["public_reply"] = public
+            if sent and trig.qualifier:
+                # Exactly one qualifying question after the delivery DM —
+                # the caller appends it; longer flows are surveys.
+                result["qualifier"] = trig.qualifier.replace(
+                    "{name}", lead.name or "there")
+            results.append(result)
         return results
     except Exception:  # noqa: BLE001
         return results

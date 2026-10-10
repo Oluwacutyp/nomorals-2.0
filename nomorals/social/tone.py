@@ -18,7 +18,10 @@ from ..core.logging_setup import get_logger
 from .adapters.postiz import Adapter as PostizAdapter
 from .base import Account, PostResult
 
-__all__ = ["PLATFORM_PROFILES", "PlatformProfile", "adapt_tone", "Publisher"]
+__all__ = [
+    "PLATFORM_PROFILES", "PlatformProfile", "adapt_tone", "Publisher",
+    "hook_check", "split_thread",
+]
 
 _log = get_logger(__name__)
 
@@ -30,37 +33,54 @@ class PlatformProfile:
     max_chars: int
     hashtags: str  # "keep" | "trim" | "strip"
     style: str     # short human description used by the LLM path
+    hook_len: int = 140  # chars visible before the fold ("see more")
+    cta_style: str = "question"  # "question" | "link" | "none"
 
 
 #: Conservative real-world limits. Postiz enforces the true ones; these keep
-#: the rule-based fallback honest.
+#: the rule-based fallback honest. ``hook_len`` is what the reader sees
+#: before the fold — the hook must land inside it (LinkedIn truncates at
+#: ~210 chars on mobile before "see more").
 PLATFORM_PROFILES: dict[str, PlatformProfile] = {
     "x": PlatformProfile("x", 280, "keep",
-                         "punchy, direct, one sharp idea, no corporate fluff"),
+                         "punchy, direct, one sharp idea, no corporate fluff",
+                         hook_len=120, cta_style="question"),
     "twitter": PlatformProfile("x", 280, "keep",
-                               "punchy, direct, one sharp idea, no corporate fluff"),
+                               "punchy, direct, one sharp idea, no corporate fluff",
+                               hook_len=120, cta_style="question"),
     "threads": PlatformProfile("threads", 500, "keep",
-                               "casual, conversational, lowercase-friendly"),
+                               "casual, conversational, lowercase-friendly",
+                               hook_len=140, cta_style="question"),
     "linkedin": PlatformProfile("linkedin", 3000, "strip",
-                                "formal, professional, clear paragraphs, no slang"),
+                                "formal, professional, clear paragraphs, no slang",
+                                hook_len=210, cta_style="question"),
     "instagram": PlatformProfile("instagram", 2200, "keep",
-                                 "visual-first caption, line breaks, emojis welcome"),
+                                 "visual-first caption, line breaks, emojis welcome",
+                                 hook_len=125, cta_style="question"),
     "facebook": PlatformProfile("facebook", 2000, "trim",
-                                "warm, conversational, community tone"),
+                                "warm, conversational, community tone",
+                                hook_len=150, cta_style="question"),
     "bluesky": PlatformProfile("bluesky", 300, "keep",
-                               "witty, internet-native, concise"),
+                               "witty, internet-native, concise",
+                               hook_len=130, cta_style="question"),
     "mastodon": PlatformProfile("mastodon", 500, "keep",
-                                "thoughtful, unhurried, no growth-hacking voice"),
+                                "thoughtful, unhurried, no growth-hacking voice",
+                                hook_len=160, cta_style="none"),
     "tiktok": PlatformProfile("tiktok", 150, "keep",
-                              "hook-first caption, casual, trend-aware"),
+                              "hook-first caption, casual, trend-aware",
+                              hook_len=80, cta_style="none"),
     "youtube": PlatformProfile("youtube", 5000, "trim",
-                               "clear description, timestamps welcome, SEO-aware"),
+                               "clear description, timestamps welcome, SEO-aware",
+                               hook_len=150, cta_style="link"),
     "discord": PlatformProfile("discord", 2000, "strip",
-                               "plain, direct, announcement-style"),
+                               "plain, direct, announcement-style",
+                               hook_len=200, cta_style="none"),
     "telegram": PlatformProfile("telegram", 4096, "strip",
-                                "plain, direct, announcement-style"),
+                                "plain, direct, announcement-style",
+                                hook_len=200, cta_style="none"),
     "pinterest": PlatformProfile("pinterest", 500, "keep",
-                                 "descriptive, keyword-rich, helpful"),
+                                 "descriptive, keyword-rich, helpful",
+                                 hook_len=100, cta_style="link"),
 }
 
 
@@ -68,6 +88,108 @@ def _profile(platform: str) -> PlatformProfile:
     key = (platform or "").strip().lower()
     return PLATFORM_PROFILES.get(key, PlatformProfile(key or "generic", 2000, "trim",
                                                       "clear and natural"))
+
+
+def hook_check(text: str, platform: str) -> str | None:
+    """Warn when the hook dies below the fold. Returns None when fine.
+
+    The fold: LinkedIn truncates ~210 chars on mobile before "see more".
+    If the first line doesn't create a reason to expand, the rest of the
+    post is invisible — this flags drafts where the payoff starts too late.
+    """
+    profile = _profile(platform)
+    text = (text or "").strip()
+    if not text:
+        return None
+    hook_zone = text[: profile.hook_len]
+    first_line = text.split("\n", 1)[0].strip()
+    if len(first_line) < 20:
+        return (f"weak hook for {profile.name}: the first line is only "
+                f"{len(first_line)} chars — nothing to stop the scroll")
+    # The reveal/claim lands after the fold while the hook zone is filler.
+    if len(first_line) > profile.hook_len and not any(
+        tok in first_line.lower() for tok in ("?", ":", "!")
+    ):
+        return (f"hook for {profile.name} runs {len(first_line)} chars before "
+                f"any punctuation — the fold ({profile.hook_len} chars) "
+                f"hides the payoff")
+    _filler = re.compile(
+        r"^(excited to|thrilled to|happy to|proud to|just wanted to|"
+        r"i've been thinking|in today's|in this post)",
+        re.IGNORECASE,
+    )
+    if _filler.match(hook_zone):
+        return (f"throat-clearing in the hook zone for {profile.name} — "
+                f"the first {profile.hook_len} chars decide whether anyone "
+                f"expands")
+    return None
+
+
+def _grapheme_len(text: str) -> int:
+    """Best-effort grapheme count (emoji clusters count as ~1)."""
+    import unicodedata
+
+    count = 0
+    for ch in text:
+        # Zero-width joiners and combining marks continue the cluster.
+        if ch in ("\u200d", "\ufe0f") or unicodedata.combining(ch):
+            continue
+        count += 1
+    return count
+
+
+def split_thread(text: str, platform: str, *, numbered: bool = True) -> list[str]:
+    """Split long text into thread-safe posts for ``platform``.
+
+    Like atproto.dart's token-aware ``split()``: never cuts a handle,
+    link, or #tag in half, and every chunk respects BOTH the platform's
+    grapheme limit and its byte budget. Chunks are numbered ``(1/n)`` so
+    a reader can follow the thread even when numbering survives posting.
+    """
+    profile = _profile(platform)
+    limit = profile.max_chars
+    text = (text or "").strip()
+    if not text:
+        return [""]
+    if len(text) <= limit and _grapheme_len(text) <= limit:
+        return [text]
+
+    # Never cut inside a token (URL, @mention, #tag).
+    words: list[str] = []
+    for word in text.split(" "):
+        # A pathological single word longer than the whole limit gets
+        # hard-split — nothing else can carry it.
+        while len(word) > limit:
+            words.append(word[:limit])
+            word = word[limit:]
+        words.append(word)
+    tokens: list[str] = []
+    buf: list[str] = []
+    for word in words:
+        buf.append(word)
+        if len(" ".join(buf)) > limit:
+            tokens.append(" ".join(buf[:-1]))
+            buf = [buf[-1]]
+    if buf:
+        tokens.append(" ".join(buf))
+    # Merge tiny tokens so one long word doesn't produce stub posts.
+    chunks: list[str] = []
+    cur = ""
+    for tok in tokens:
+        piece = f"{cur} {tok}".strip() if cur else tok
+        if _grapheme_len(piece) <= limit and len(piece.encode("utf-8")) <= 3000:
+            cur = piece
+        else:
+            if cur:
+                chunks.append(cur)
+            cur = tok
+    if cur:
+        chunks.append(cur)
+    chunks = [c for c in chunks if c] or [text[:limit]]
+    if numbered and len(chunks) > 1:
+        n = len(chunks)
+        chunks = [f"({i + 1}/{n}) {c}" for i, c in enumerate(chunks)]
+    return chunks
 
 
 def adapt_tone(

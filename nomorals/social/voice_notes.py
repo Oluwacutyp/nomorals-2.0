@@ -184,6 +184,38 @@ class VoiceNoteStore:
             _log.debug("voice_notes: insert failed", exc_info=True)
             return None
 
+    def stats(self, chat_id: str = "") -> dict[str, object]:
+        """Voice-note activity: counts, languages, transcript coverage.
+
+        Never raises. Powers the "how much voice is this community"
+        answer without dumping every note.
+        """
+        try:
+            if self._db is None:
+                return {}
+            where = "WHERE chat_id = ?" if chat_id else ""
+            params: tuple = (chat_id,) if chat_id else ()
+            total = self._db.execute(
+                f"SELECT COUNT(*) AS n FROM voice_notes {where}", params).fetchone()
+            with_text = self._db.execute(
+                f"SELECT COUNT(*) AS n FROM voice_notes {where}"
+                + (" AND " if where else " WHERE ")
+                + "transcript != ''",
+                params).fetchone()
+            langs = self._db.execute(
+                f"SELECT language, COUNT(*) AS n FROM voice_notes {where} "
+                f"GROUP BY language ORDER BY n DESC LIMIT 8", params).fetchall()
+            n_total = int(total["n"] or 0)
+            n_text = int(with_text["n"] or 0)
+            return {
+                "total": n_total,
+                "transcribed": n_text,
+                "transcript_coverage": round(n_text / n_total, 2) if n_total else 0.0,
+                "languages": {r["language"]: int(r["n"]) for r in langs},
+            }
+        except Exception:  # noqa: BLE001
+            return {}
+
     def get(self, note_id: str) -> VoiceNote | None:
         """One note by id. None when missing/down."""
         if self._db is None:

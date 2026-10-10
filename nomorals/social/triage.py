@@ -43,6 +43,25 @@ TIER_IMPORTANT = "important"
 TIER_ROUTINE = "routine"
 TIER_NOISE = "noise"
 
+#: Quiet hours: important messages wait for morning; critical still buzzes.
+#: The owner is in Nigeria (WAT) while the phone runs America/Denver — the
+#: scheduler passes the owner's local time; defaults are WAT evening.
+QUIET_START_HOUR = 22
+QUIET_END_HOUR = 7
+
+
+def in_quiet_hours(now: float | None = None,
+                   *,
+                   start: int = QUIET_START_HOUR,
+                   end: int = QUIET_END_HOUR) -> bool:
+    """True when the owner's local time is inside quiet hours. Pure."""
+    import datetime
+
+    hour = datetime.datetime.fromtimestamp(now or time.time()).hour
+    if start <= end:
+        return start <= hour < end
+    return hour >= start or hour < end
+
 #: Structural urgency signals — message SHAPE, not a keyword dictionary.
 #: A time ("by 5pm", "tomorrow"), a question aimed at the owner, an
 #: @mention, or a reply to the owner's own message.
@@ -81,6 +100,7 @@ def triage_message(
     mentioned: bool = False,
     reply_to_owner: bool = False,
     now: float | None = None,
+    respect_quiet_hours: bool = True,
 ) -> TriageScore:
     """Score one inbound message. Pure function — testable, no I/O.
 
@@ -132,17 +152,21 @@ def triage_message(
     score = max(0.0, min(1.0, score))
 
     # ── tiers ────────────────────────────────────────────────────
+    # Critical always buzzes — a family emergency at 3am is the whole
+    # point of critical. Important buzzes during the day and waits for
+    # morning in quiet hours ("don't buzz at 3am").
     if score >= 0.75:
         tier, buzz = TIER_CRITICAL, True
     elif score >= 0.45:
-        tier, buzz = TIER_IMPORTANT, False
+        tier = TIER_IMPORTANT
+        buzz = not (respect_quiet_hours and in_quiet_hours(now))
+        if not buzz:
+            reasons.append("held for morning (quiet hours)")
     elif score >= 0.20:
         tier, buzz = TIER_ROUTINE, False
     else:
         tier, buzz = TIER_NOISE, False
 
-    # Owner messages about genuinely urgent things buzz even at night.
-    # Everything else respects quiet hours via the scheduler, not here.
     return TriageScore(tier=tier, score=score, reasons=reasons, buzz=buzz)
 
 
@@ -181,3 +205,57 @@ class TriageLog:
             "by_tier": by_tier,
             "needs_attention": important[:20],
         }
+
+    def escalate(self,
+                 *,
+                 unanswered_hours: float = 6.0,
+                 escalated: set[str] | None = None) -> list[dict[str, Any]]:
+        """Important+ messages that went unanswered past the window.
+
+        This is the docstring's promise made real: unanswered important
+        messages escalate (returned for the morning digest / a buzz);
+        noise decays on its own. ``escalated`` is the caller's seen-set —
+        already-escalated entries are not returned twice. Mutates the
+        passed set in place.
+        """
+        cutoff = time.time() - unanswered_hours * 3600
+        escalated = escalated if escalated is not None else set()
+        out: list[dict[str, Any]] = []
+        for e in self._entries:
+            if e["tier"] not in (TIER_CRITICAL, TIER_IMPORTANT):
+                continue
+            key = f"{e['chat_key']}:{e['ts']:.0f}"
+            if e["ts"] < cutoff and key not in escalated:
+                escalated.add(key)
+                out.append(e)
+        return out
+
+
+def render_digest(digest: dict[str, Any], *, platform: str = "telegram") -> str:
+    """Render a triage digest as a styled morning message. Never raises."""
+    try:
+        from .chat.style import section, stat_line, quote
+
+        by_tier = digest.get("by_tier", {})
+        lines = [
+            section("🔔", f"message digest — last {digest.get('window_hours', 24):.0f}h"),
+            "",
+            stat_line("Total", str(digest.get("total", 0))),
+        ]
+        for tier, icon in ((TIER_CRITICAL, "🚨"), (TIER_IMPORTANT, "⚠️"),
+                           (TIER_ROUTINE, "💬"), (TIER_NOISE, "🔇")):
+            n = by_tier.get(tier, 0)
+            if n:
+                lines.append(f"{icon} {tier}: {n}")
+        needs = digest.get("needs_attention", [])
+        if needs:
+            lines += ["", section("👀", "needs your attention")]
+            for e in needs[:10]:
+                sender = e.get("sender") or e.get("chat_key", "?")
+                lines.append(f"• {sender} — {e.get('tier')} "
+                             f"({float(e.get('score', 0)):.0%})")
+        else:
+            lines += ["", "nothing needs you. enjoy the quiet 🤫"]
+        return "\n".join(lines)
+    except Exception:  # noqa: BLE001
+        return f"triage digest: {digest.get('total', 0)} messages"

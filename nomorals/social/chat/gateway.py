@@ -528,6 +528,58 @@ class ChatGateway:
         with self._lock_for(chat):
             return _do()
 
+    def broadcast(
+        self,
+        platform: str,
+        chats: list[ChatRef | str],
+        text: str,
+        *,
+        buttons: list[list[tuple[str, str]]] | None = None,
+        parse_mode: str = "",
+        pace_seconds: float = 1.0,
+        stop_on: int = 3,
+    ) -> dict[str, object]:
+        """One message to many chats, with per-chat failure isolation.
+
+        Broadcasts are where accounts get rate-limited into oblivion:
+        ``pace_seconds`` spaces the sends (Telegram groups: 20 msg/min —
+        keep it ≥3.0 there), and after ``stop_on`` consecutive failures the
+        broadcast aborts rather than hammering a dead adapter. Each chat
+        is its own result — one dead chat never kills the rest.
+
+        Returns ``{"sent", "failed", "aborted", "results"}``.
+        """
+        results: list[dict[str, object]] = []
+        sent = failed = 0
+        aborted = False
+        consecutive_failures = 0
+        for chat in chats or []:
+            if consecutive_failures >= stop_on:
+                aborted = True
+                _log.warning("broadcast aborted after %d consecutive failures",
+                             consecutive_failures)
+                break
+            try:
+                result = self.send(platform, chat, text, buttons=buttons,
+                                   parse_mode=parse_mode)
+            except Exception as exc:  # noqa: BLE001 - one chat, not all
+                result = SendResult(ok=False, platform=platform,
+                                    error=f"{type(exc).__name__}: {exc}")
+            ref = chat if isinstance(chat, ChatRef) else ChatRef.parse(str(chat))
+            results.append({"chat": ref.key, "ok": result.ok,
+                            "error": result.error or ""})
+            if result.ok:
+                sent += 1
+                consecutive_failures = 0
+            else:
+                failed += 1
+                consecutive_failures += 1
+            if pace_seconds > 0:
+                time.sleep(pace_seconds)
+        self._bump("broadcast_sends", sent)
+        return {"sent": sent, "failed": failed, "aborted": aborted,
+                "results": results}
+
     def typing(self, platform: str, chat: ChatRef | str, seconds: float = 3.0,
              action: str = "typing") -> bool:
         chat = chat if isinstance(chat, ChatRef) else ChatRef.parse(str(chat))

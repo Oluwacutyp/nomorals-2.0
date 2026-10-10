@@ -143,6 +143,43 @@ class Profile:
     voice_intro: VoiceIntro | None = None
     created_at: float = 0.0
 
+    def completeness(self) -> dict[str, object]:
+        """How finished this profile is: 0-100 score + per-part breakdown.
+
+        Parts: display name, prompt answers (vs the surface's prompt list),
+        a voice intro, and at least one element. The score drives the
+        onboarding brain — it knows exactly what's missing instead of
+        asking "is your profile done?" into the void.
+        """
+        parts: dict[str, float] = {}
+        parts["display_name"] = 1.0 if (self.display_name or "").strip() else 0.0
+        total_prompts = len(PROMPTS.get(self.surface, PROMPTS["gig"]))
+        answered = sum(1 for v in (self.prompts or {}).values() if (v or "").strip())
+        parts["prompts"] = min(1.0, answered / max(1, total_prompts))
+        parts["voice_intro"] = 1.0 if self.voice_intro is not None else 0.0
+        parts["elements"] = min(1.0, len(self.elements or []) / 3.0)
+        weights = {"display_name": 0.15, "prompts": 0.45,
+                   "voice_intro": 0.15, "elements": 0.25}
+        score = round(sum(parts[p] * weights[p] for p in parts) * 100)
+        return {"score": score,
+                "parts": {p: round(v * 100) for p, v in parts.items()},
+                "done": score >= 90}
+
+    def missing_for_complete(self) -> list[str]:
+        """Plain-language checklist of what's missing. Empty when done."""
+        missing: list[str] = []
+        if not (self.display_name or "").strip():
+            missing.append("add a display name")
+        total_prompts = len(PROMPTS.get(self.surface, PROMPTS["gig"]))
+        answered = sum(1 for v in (self.prompts or {}).values() if (v or "").strip())
+        if answered < total_prompts:
+            missing.append(f"answer {total_prompts - answered} more prompt(s)")
+        if self.voice_intro is None:
+            missing.append("record a 30-second voice intro")
+        if len(self.elements or []) < 3:
+            missing.append(f"add {3 - len(self.elements or [])} more profile element(s)")
+        return missing
+
 
 # ── store ───────────────────────────────────────────────────────────────
 

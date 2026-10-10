@@ -32,6 +32,9 @@ __all__ = [
     "weekly_content",
     "install_weekly_content_job",
     "FALLBACK_WINDOWS",
+    "CONTENT_MIX",
+    "classify_pillar",
+    "mix_report",
 ]
 
 #: Fallback posting windows (dow 0=Mon, hour 24h) used only when there is
@@ -65,6 +68,7 @@ class PipelineDraft:
     scheduled_for: float = 0.0  # unix ts, 0 = unscheduled
     draft_id: str = ""
     weak: bool = False  # flagged, never silently dropped
+    pillar: str = ""  # content-mix pillar: educate|proof|engage|promo
 
 
 @dataclass
@@ -315,6 +319,94 @@ def _generate_drafts(
     return drafts[:max_drafts]
 
 
+# ── 3b. content mix ─────────────────────────────────────────────────────────
+# A calendar tells you WHEN to post; the mix tells you WHAT KIND. Industry
+# practice (5:3:2 rule; Ava Morgan's 40/25/20/15): a batch that is 7 promo
+# posts in a row quietly tanks reach and trust. The pipeline tags every
+# draft with a pillar and reports the balance — the owner sees the skew
+# before anything is scheduled.
+
+#: Pillars → target share of a batch.
+CONTENT_MIX: dict[str, dict[str, object]] = {
+    "educate": {"share": 0.40, "label": "Educational",
+                "desc": "how-tos, tips, explainers that solve a real problem"},
+    "proof": {"share": 0.25, "label": "Proof & trust",
+              "desc": "wins, testimonials, behind-the-scenes process"},
+    "engage": {"share": 0.20, "label": "Engagement",
+               "desc": "questions, polls, opinions that invite conversation"},
+    "promo": {"share": 0.15, "label": "Promotional",
+              "desc": "direct offers or product mentions"},
+}
+
+_PILLAR_SIGNALS: dict[str, tuple[str, ...]] = {
+    "educate": ("how to", "how i", "tutorial", "guide", "tips", "tip:",
+                "step", "learn", "explains", "here's how", "mistake to avoid"),
+    "proof": ("shipped", "won", "result", "testimonial", "case study",
+              "behind the scenes", "we built", "just launched", "milestone"),
+    "engage": ("what's your", "what is your", "thoughts?", "agree?",
+               "poll", "unpopular opinion", "hot take", "drop it below",
+               "be honest"),
+    "promo": ("buy", "discount", "sale", "offer ends", "link in bio",
+              "sign up", "get started", "free trial", "pricing", "% off"),
+}
+
+
+def classify_pillar(text: str) -> str:
+    """Heuristic pillar tag for a draft. Documented as heuristic, not truth.
+
+    Signal-count per pillar; ties break educate > engage > proof > promo
+    (audience-first ordering). Pure, testable.
+    """
+    low = (text or "").lower()
+    if not low.strip():
+        return "engage"
+    scores = {p: sum(1 for s in sigs if s in low)
+              for p, sigs in _PILLAR_SIGNALS.items()}
+    best = max(scores.values())
+    if best == 0:
+        # Questions engage; statements without signals default to educate.
+        return "engage" if "?" in low else "educate"
+    for pillar in ("educate", "engage", "proof", "promo"):
+        if scores[pillar] == best:
+            return pillar
+    return "educate"
+
+
+def mix_report(drafts: Sequence[PipelineDraft]) -> dict[str, Any]:
+    """Pillar balance of a batch vs the target mix.
+
+    Returns ``{"counts", "shares", "targets", "starved", "overfed",
+    "verdict"}`` — ``starved`` pillars are below half their target share
+    and should get the next drafts; ``overfed`` are 1.5× over theirs.
+    """
+    drafts = list(drafts or [])
+    counts = {p: 0 for p in CONTENT_MIX}
+    for d in drafts:
+        pillar = getattr(d, "pillar", "") or classify_pillar(d.content)
+        d.pillar = pillar  # stamp it for the queue metadata
+        counts[pillar] = counts.get(pillar, 0) + 1
+    n = max(1, len(drafts))
+    shares = {p: counts[p] / n for p in CONTENT_MIX}
+    targets = {p: float(CONTENT_MIX[p]["share"]) for p in CONTENT_MIX}
+    starved = [p for p in CONTENT_MIX
+               if shares[p] < 0.5 * targets[p] and len(drafts) >= 4]
+    overfed = [p for p in CONTENT_MIX
+               if shares[p] > 1.5 * targets[p] and counts[p] >= 2]
+    if starved:
+        verdict = ("batch is starved on "
+                   + ", ".join(str(CONTENT_MIX[p]["label"]) for p in starved)
+                   + " — add drafts there before scheduling")
+    elif overfed:
+        verdict = ("batch is heavy on "
+                   + ", ".join(str(CONTENT_MIX[p]["label"]) for p in overfed)
+                   + " — consider swapping one out")
+    else:
+        verdict = "batch mix looks balanced"
+    return {"counts": counts, "shares": {p: round(s, 2) for p, s in shares.items()},
+            "targets": targets, "starved": starved, "overfed": overfed,
+            "verdict": verdict}
+
+
 # ── 4. the pipeline ─────────────────────────────────────────────────────────
 
 
@@ -400,6 +492,10 @@ def weekly_content(
         windows, windows_from_data = optimal_windows(
             _NullDB(), n=max(len(scored), 1))
 
+    # Content-mix balance: tag pillars, report the skew, stamp metadata.
+    mix = mix_report(scored)
+    _log.info("weekly content mix for %s: %s", niche, mix["verdict"])
+
     # Queue for review + schedule at the windows (round-robin).
     q = queue or DraftQueue()
     for i, d in enumerate(scored):
@@ -411,6 +507,7 @@ def weekly_content(
                 metadata={"niche": niche, "virality": round(d.virality, 1),
                           "grade": d.virality_grade,
                           "finding_url": d.finding_url,
+                          "pillar": d.pillar or classify_pillar(d.content),
                           "pipeline": "weekly_content"})
             q.propose(draft.id)  # → pending_review: Devon asks, never auto-posts
             d.draft_id = draft.id
@@ -490,6 +587,10 @@ def _batch_message(
         + ("(from your engagement data)" if from_data
            else "(fallback windows — no engagement data yet)")
         + ". Say the word and I'll post one, or tap a draft to review.")
+    mix = mix_report(drafts)
+    pillar_bits = ", ".join(
+        f"{p}: {mix['counts'][p]}" for p in ("educate", "proof", "engage", "promo"))
+    lines.append(f"\n📊 content mix — {pillar_bits}. {mix['verdict']}.")
     return "\n".join(lines)
 
 

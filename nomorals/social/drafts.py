@@ -40,6 +40,10 @@ __all__ = [
     "propose_post",
     "parse_post_time",
     "EXPLICIT_POST_PATTERNS",
+    "review_card",
+    "render_review_batch",
+    "add_variant",
+    "review_buttons",
 ]
 
 # ── statuses ────────────────────────────────────────────────────────────────
@@ -305,6 +309,127 @@ def propose_post(draft: Draft) -> tuple[str, list[tuple[str, str]]]:
     return text, buttons
 
 
+# ── review presentation ─────────────────────────────────────────────────────
+# God-tier review UX: styled cards with virality + hook type (not raw
+# previews), a morning "N drafts need review" batch digest, and A/B hook
+# variants stored in metadata (no schema change).
+
+
+def review_buttons(draft: Draft) -> list[tuple[str, str]]:
+    """The standing-question buttons for a draft. Callback data is
+    namespaced ``draft:<action>:<id>`` for the chat layer."""
+    return [
+        ("📮 Post now", f"draft:post:{draft.id}"),
+        ("⏰ Schedule", f"draft:schedule:{draft.id}"),
+        ("🧪 Variants", f"draft:variants:{draft.id}"),
+        ("✏️ Edit", f"draft:edit:{draft.id}"),
+        ("🗑 Discard", f"draft:discard:{draft.id}"),
+    ]
+
+
+def review_card(draft: Draft, *, platform: str = "telegram") -> str:
+    """A styled review card: preview + virality + hook type + pillar.
+
+    This is what the owner actually reads in the morning — a plain
+    preview buries the decision signal (is it strong? what's the hook?).
+    Never raises.
+    """
+    try:
+        from .chat.style import section, stat_line, quote
+        from .voice import hook_type, virality_score
+
+        preview = draft.content[:280] + ("…" if len(draft.content) > 280 else "")
+        platforms = ", ".join(draft.platforms) or "default platforms"
+        vs = virality_score(draft.content, platform=draft.platforms[0]
+                            if draft.platforms else "x")
+        hook = hook_type(draft.content)
+        pillar = (draft.metadata or {}).get("pillar", "")
+        variants = (draft.metadata or {}).get("variants", [])
+
+        lines = [
+            section("📝", f"draft review — {platforms}"),
+            "",
+            quote(preview),
+            "",
+            stat_line("Virality", f"{vs.score:.0f}/100", vs.grade),
+            stat_line("Hook", hook.replace("_", " ")),
+        ]
+        if pillar:
+            lines.append(stat_line("Pillar", str(pillar)))
+        if variants:
+            lines.append(stat_line("Variants", f"{len(variants)} A/B hooks"))
+        if draft.scheduled_time:
+            when = datetime.fromtimestamp(draft.scheduled_time).strftime("%a %H:%M")
+            lines.append(stat_line("Scheduled", when))
+        if vs.score < 40 and vs.reasons:
+            lines += ["", f"⚠️ {vs.reasons[0]}"]
+        lines += ["", "Post directly, or send it back for review?"]
+        return "\n".join(lines)
+    except Exception:  # noqa: BLE001
+        return propose_post(draft)[0]
+
+
+def render_review_batch(drafts: list[Draft], *, platform: str = "telegram") -> str:
+    """The morning digest: "3 drafts need review" with one line each.
+
+    Each line carries the decision signal — virality, hook, pillar — so
+    the owner can approve the strong ones without opening every card.
+    Never raises.
+    """
+    try:
+        from .chat.style import section
+        from .voice import hook_type, virality_score
+
+        drafts = list(drafts or [])
+        if not drafts:
+            return "📝 no drafts waiting for review."
+        lines = [section("📝", f"{len(drafts)} draft{'s' if len(drafts) != 1 else ''} need review"), ""]
+        for i, d in enumerate(drafts, 1):
+            try:
+                vs = virality_score(d.content, platform=d.platforms[0]
+                                    if d.platforms else "x")
+                hook = hook_type(d.content).replace("_", " ")
+            except Exception:  # noqa: BLE001
+                vs = None
+                hook = "?"
+            preview = d.content[:70].replace("\n", " ")
+            if len(d.content) > 70:
+                preview += "…"
+            score = f"{vs.score:.0f}" if vs else "?"
+            lines.append(f"{i}. [{score}/100 · {hook}] {preview}")
+        lines += ["", "tap a draft to review it, or say \"post them all\"."]
+        return "\n".join(lines)
+    except Exception:  # noqa: BLE001
+        return f"{len(drafts or [])} drafts need review."
+
+
+def add_variant(queue: DraftQueue, draft_id: str, hook_text: str) -> Draft:
+    """Store an A/B hook variant on a draft (in metadata — no schema change).
+
+    ``hook_text`` is an alternative FIRST LINE; the body stays the draft's.
+    The review UI shows variants so the owner picks the strongest hook.
+    """
+    import json as _json
+
+    draft = queue.get(draft_id)
+    if draft is None:
+        raise KeyError(f"unknown draft {draft_id!r}")
+    hook_text = (hook_text or "").strip()
+    if not hook_text:
+        raise ValueError("variant hook text is empty")
+    meta = dict(draft.metadata or {})
+    variants = list(meta.get("variants") or [])
+    if hook_text not in variants:
+        variants.append(hook_text)
+        meta["variants"] = variants
+        queue._db.execute(
+            "UPDATE social_drafts SET metadata = ? WHERE id = ?",
+            (_json.dumps(meta), draft_id))
+        queue._db.commit()
+        draft.metadata = meta
+    return draft
+
+
 # ── the override: execute without reconfirming ────────────────────────────────
 
 def execute_post(
@@ -431,4 +556,21 @@ def handle_draft_callback(
         return "draft discarded."
     if action == "edit":
         return f"send me the revised text for this draft:\n\n{draft.content[:200]}"
+    if action == "variants":
+        from .voice import suggest_hook_upgrades
+        variants = (draft.metadata or {}).get("variants") or []
+        if not variants:
+            for sug in suggest_hook_upgrades(draft.content):
+                try:
+                    add_variant(queue, draft_id, sug["text"].split("\n")[0])
+                except Exception:  # noqa: BLE001
+                    pass
+            variants = (queue.get(draft_id).metadata or {}).get("variants") or []
+        lines = ["🧪 hook variants — pick the strongest first line:", ""]
+        for i, v in enumerate(variants[:5], 1):
+            first = v.split("\n")[0][:120]
+            lines.append(f"{i}. {first}")
+        lines.append("")
+        lines.append('reply "use variant 2" to swap the hook in.')
+        return "\n".join(lines)
     return ""

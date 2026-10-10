@@ -47,6 +47,8 @@ __all__ = [
     "install_evergreen_job",
     "AutoPlug",
     "voice_profile_path",
+    "hook_type",
+    "suggest_hook_upgrades",
 ]
 
 _log = get_logger(__name__)
@@ -332,6 +334,149 @@ _CTA_WORDS = frozenset(
 )
 
 
+# ── 2a. hook archetypes ─────────────────────────────────────────────────────
+# From the 12,045-Threads-posts scrape (2026, real engagement data) and the
+# rondoflow hook playbook. Question openers score 0.45× pooled at scale —
+# they're the classic advice the data doesn't back. Declarative reveals
+# ("This is…"), colon set-ups, and contrarian openers lift the most.
+
+#: Hook lift per archetype, from the scrape's pooled-lift table.
+_HOOK_LIFT: dict[str, float] = {
+    "reveal": 10,          # "This is…", "Here's…" — 1.46× pooled
+    "colon_setup": 8,      # first line ends with ":" — 1.29× pooled
+    "contrarian": 8,       # "Everyone says X. They're wrong." — 1.34×
+    "announcement": 6,     # "Breaking…", "Just…" — 1.33×
+    "pattern_interrupt": 7,  # prediction-error openings — dopamine
+    "curiosity": 6,        # curiosity gap, teases the payoff
+    "list": 5,             # "7 things that…" — the listicle
+    "story": 3,            # "3 years ago I was…" — below median pooled
+    "command": -3,         # imperative — 0.71× pooled
+    "question": -6,        # 0.45× pooled at scale; fine within a strong voice
+    "none": 0,
+}
+
+_CONTRARIAN = re.compile(
+    r"^(everyone|most people|nobody|no one|stop|never|always|delete|"
+    r"unpopular opinion|hot take)",
+    re.IGNORECASE,
+)
+_REVEAL = re.compile(
+    r"^(this is|here'?s the|the truth about|i found|nobody talks about|"
+    r"the real (secret|reason|story))",
+    re.IGNORECASE,
+)
+_STORY = re.compile(
+    r"^(\d+\s+(years?|months?|days?)\s+ago|i (almost|used to|remember|was))",
+    re.IGNORECASE,
+)
+_LIST = re.compile(r"^\d+\s+", re.IGNORECASE)
+_LIST_WORDS = frozenset(
+    "things ways lessons mistakes tools rules reasons secrets hacks tips".split()
+)
+_ANNOUNCE = re.compile(
+    r"^(breaking|just|new|announcing|launching|we (just|finally))",
+    re.IGNORECASE,
+)
+_QUESTION = re.compile(
+    r"^(want to|what if|ever wonder|why does|how does|can you|did you know)",
+    re.IGNORECASE,
+)
+_COMMAND = re.compile(
+    r"^(do|try|read|watch|listen|click|download|join|grab|start)\b",
+    re.IGNORECASE,
+)
+_CURIOSITY = re.compile(
+    r"\b(secret|nobody tells you|no one tells you|the truth|what happens|"
+    r"here'?s why)\b",
+    re.IGNORECASE,
+)
+
+
+def hook_type(text: str) -> str:
+    """Classify a draft's hook archetype. Pure, testable.
+
+    Archetypes: reveal, colon_setup, contrarian, pattern_interrupt,
+    curiosity, list, story, announcement, question, command, none.
+    """
+    t = (text or "").strip()
+    if not t:
+        return "none"
+    first_line = t.split("\n", 1)[0].strip()
+    low = first_line.lower()
+
+    if _CONTRARIAN.match(first_line):
+        # "Everyone says X" is only contrarian with an explicit challenge
+        # to the consensus; "stop doing X, do this instead" is a pattern
+        # interrupt (an alternative offered, not a consensus attacked).
+        if re.search(r"\b(wrong|myth|lie|actually|disagree|overrated)\b", low):
+            return "contrarian"
+        return "pattern_interrupt"
+    if _REVEAL.match(first_line):
+        return "reveal"
+    if _LIST.match(first_line) and _LIST_WORDS & set(_words(first_line)):
+        return "list"
+    if _STORY.match(first_line):
+        return "story"
+    if first_line.rstrip().endswith(":"):
+        return "colon_setup"
+    if _ANNOUNCE.match(first_line):
+        return "announcement"
+    # A question opener is a question even when it also teases a secret —
+    # the data's 0.45× pooled lift applies to the question form.
+    if first_line.endswith("?") or _QUESTION.match(first_line):
+        return "question"
+    if _CURIOSITY.search(first_line):
+        return "curiosity"
+    if _COMMAND.match(first_line):
+        return "command"
+    return "none"
+
+
+def _hook_topic(first_line: str) -> str:
+    """Rough topic phrase from a first line: longest significant word."""
+    words = [w.strip(".,!?;:\"'()[]") for w in first_line.split()]
+    words = [w for w in words if w and w.lower() not in _STOPWORDS and len(w) > 3]
+    return max(words, key=len) if words else "this"
+
+
+def suggest_hook_upgrades(draft: str, n: int = 3) -> list[dict[str, str]]:
+    """Propose alternative first lines in proven hook archetypes.
+
+    Rule-based rewrites of the draft's OWN first line — the claim stays the
+    draft's, only the hook framing changes. Returns
+    ``[{"archetype": ..., "text": ...}]`` with the full post text each time.
+    Honest templates, not an LLM pretending.
+    """
+    text = (draft or "").strip()
+    if not text:
+        return []
+    first, _, rest = text.partition("\n")
+    first, rest = first.strip(), rest.strip()
+    if not first:
+        return []
+    topic = _hook_topic(first)
+    body = f"\n\n{rest}" if rest else ""
+    current = hook_type(text)
+
+    templates: list[tuple[str, str]] = [
+        ("reveal", f"This is the {topic} story nobody tells you:{body}"),
+        ("contrarian", f"Everyone gets {topic} wrong. Here's why:{body}"),
+        ("curiosity", f"The {topic} secret that changes everything:{body}"),
+        ("colon_setup", f"What I learned about {topic}:{body}"),
+        ("list", f"The {topic} rules I wish I knew earlier:{body}"),
+    ]
+    out: list[dict[str, str]] = []
+    for archetype, new_text in templates:
+        if archetype == current:
+            continue  # don't suggest the hook it already has
+        if new_text == text:
+            continue
+        out.append({"archetype": archetype, "text": new_text})
+        if len(out) >= n:
+            break
+    return out
+
+
 @dataclass
 class ViralityScore:
     """0-100 grade for a draft, with the reasons that built it."""
@@ -379,14 +524,23 @@ def virality_score(
     first8 = " ".join(words[:8])
     low = text.lower()
 
-    # Hook: the first 8 words decide the scroll.
-    if _HOOK_OPENERS.match(text):
-        add(12, "strong hook opening")
+    # Hook: the first line decides the scroll. Archetypes are weighted by
+    # the 12k-Threads scrape's pooled-lift table — question hooks, the
+    # classic advice, score 0.45× at scale, so they cost points here.
+    archetype = hook_type(text)
+    lift = _HOOK_LIFT.get(archetype, 0)
+    if lift > 0:
+        add(lift, f"{archetype.replace('_', ' ')} hook")
+    elif lift < 0:
+        add(lift, f"{archetype} hook underperforms at scale")
     if any(c in low[:60] for c in _CLICHE_OPENERS):
         add(-10, "cliché opener")
+    first_line = text.split("\n", 1)[0].strip()
+    if 0 < len(first_line) <= 80:
+        add(6, "first line under 80 chars — payoff named fast")
     if re.match(r"^\d+", text):
         add(6, "opens with a number/stat")
-    if "?" in text[:120]:
+    if "?" in text[:120] and archetype != "question":
         add(5, "early question pulls readers in")
 
     # Question / CTA: posts that invite response outperform.

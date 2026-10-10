@@ -39,6 +39,7 @@ __all__ = [
     "to_whatsapp", "to_telegram", "to_plain", "to_markdown",
     "chunk_text",
     "strip_html",
+    "escape_markdown_v2", "link", "code_block", "mention",
 ]
 
 TELEGRAM = "telegram"
@@ -179,6 +180,75 @@ def format_for_platform(text: str, platform: str) -> str:
         return to_telegram(text)
     except Exception:  # noqa: BLE001
         return str(text or "")
+
+
+# MarkdownV2's reserved set — every one must be escaped with a backslash.
+# HTML parse_mode is preferred (escape surface is just <>&), but when a
+# caller needs MarkdownV2, this is the correct escape. Never raises.
+_MD_V2_SPECIAL = re.compile(r"([_*\[\]()~`>#+\-=|{}.!])")
+
+
+def escape_markdown_v2(text: str) -> str:
+    """Escape text for Telegram's MarkdownV2 parse mode.
+
+    Forgetting this is the #1 silent-failure trap in Telegram bots — an
+    unescaped ``_`` or ``[`` makes the whole message fail to parse.
+    Prefer HTML (``to_telegram``) for new code; use this for legacy
+    MarkdownV2 surfaces.
+    """
+    try:
+        return _MD_V2_SPECIAL.sub(r"\\\1", str(text or ""))
+    except Exception:  # noqa: BLE001
+        return str(text or "")
+
+
+def link(label: str, url: str, platform: str = TELEGRAM) -> str:
+    """A clickable link in the platform's native syntax. Never raises."""
+    try:
+        label, url = str(label or ""), str(url or "")
+        p = (platform or TELEGRAM).strip().lower()
+        if p == WHATSAPP:
+            return f"{label}: {url}"  # WhatsApp auto-links bare URLs
+        if p == SMS:
+            return f"{label}: {url}"
+        if p in (WEB, DISCORD):
+            return f"[{label}]({url})"
+        return f'<a href="{_html.escape(url, quote=True)}">{_html.escape(label)}</a>'
+    except Exception:  # noqa: BLE001
+        return str(label or "")
+
+
+def code_block(text: str, language: str = "", platform: str = TELEGRAM) -> str:
+    """A fenced code block in the platform's native syntax. Never raises."""
+    try:
+        body = str(text or "")
+        p = (platform or TELEGRAM).strip().lower()
+        if p == TELEGRAM:
+            lang = f' class="language-{_html.escape(language)}"' if language else ""
+            return f"<pre><code{lang}>{_html.escape(body)}</code></pre>"
+        if p == WHATSAPP:
+            return f"```{body}```"
+        if p == SMS:
+            return body
+        fence = f"```{language}" if language else "```"
+        return f"{fence}\n{body}\n```"
+    except Exception:  # noqa: BLE001
+        return str(text or "")
+
+
+def mention(name: str, user_id: str = "", platform: str = TELEGRAM) -> str:
+    """An @mention that actually pings on the platform. Never raises."""
+    try:
+        name = str(name or "")
+        uid = str(user_id or "")
+        p = (platform or TELEGRAM).strip().lower()
+        if p == TELEGRAM and uid:
+            return f'<a href="tg://user?id={_html.escape(uid, quote=True)}">{_html.escape(name)}</a>'
+        if p == DISCORD and uid:
+            return f"<@{uid}>"
+        return f"@{name.lstrip('@')}" if name else ""
+    except Exception:  # noqa: BLE001
+        return str(name or "")
 
 
 def chunk_text(text: str, limit: int = 3000) -> list[str]:

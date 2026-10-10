@@ -23,7 +23,12 @@ from __future__ import annotations
 
 import html
 
-__all__ = ["section", "cmd", "cta", "bar", "bold", "escape"]
+__all__ = [
+    "section", "cmd", "cta", "bar", "bold", "escape",
+    "THEMES", "set_theme", "current_theme", "header", "quote", "kv",
+    "stat_line", "card", "table", "sparkline", "tag",
+    "render_menu", "menu_section", "menu_item", "menu_divider",
+]
 
 
 def escape(text: str) -> str:
@@ -56,6 +61,168 @@ def bar(frac: float, width: int = 10) -> str:
     frac = max(0.0, min(1.0, float(frac)))
     filled = int(round(frac * width))
     return f"<code>{'█' * filled}{'░' * (width - filled)}</code> {int(frac * 100)}%"
+
+
+# ── output themes ───────────────────────────────────────────────────────────
+# How loud the output is. "rich" (default) is the full Devon voice; "minimal"
+# drops emoji for dense dashboards; "terminal" is pure monospace/ASCII for
+# logs and SMS; "plain" strips everything for screen readers / a11y.
+
+THEMES: dict[str, dict[str, object]] = {
+    "rich": {"emoji": True, "box": True, "markup": True},
+    "minimal": {"emoji": False, "box": False, "markup": True},
+    "terminal": {"emoji": False, "box": False, "markup": False},
+    "plain": {"emoji": False, "box": False, "markup": False},
+}
+
+_theme: str = "rich"
+
+
+def set_theme(name: str) -> str:
+    """Switch the output theme. Returns the previous theme."""
+    global _theme
+    prev = _theme
+    _theme = name if name in THEMES else "rich"
+    return prev
+
+
+def current_theme() -> str:
+    return _theme
+
+
+def _theme_cfg() -> dict[str, object]:
+    return THEMES.get(_theme, THEMES["rich"])
+
+
+def _markup(text: str, tag_name: str) -> str:
+    cfg = _theme_cfg()
+    if not cfg.get("markup"):
+        return text
+    if _theme in ("terminal",):
+        return text
+    if tag_name == "b":
+        return f"<b>{text}</b>"
+    if tag_name == "i":
+        return f"<i>{text}</i>"
+    if tag_name == "code":
+        return f"<code>{text}</code>"
+    return text
+
+
+def tag(text: str, label: str) -> str:
+    """A labeled pill: `● LIVE` / theme-aware."""
+    cfg = _theme_cfg()
+    dot = "●" if cfg.get("emoji") else "["
+    close = "" if cfg.get("emoji") else "]"
+    return f"{_markup(f'{dot} {escape(label.upper())}{close}', 'b')}"
+
+
+def header(title: str, subtitle: str = "") -> str:
+    """A big title card: one job per screen, first line states the point."""
+    cfg = _theme_cfg()
+    lines = [f"{'✨ ' if cfg.get('emoji') else ''}{_markup(escape(title.upper()), 'b')}"]
+    if subtitle:
+        lines.append(_markup(escape(subtitle), "i"))
+    if cfg.get("box"):
+        lines.append("━━━━━━━━━━━━━━━")
+    return "\n".join(lines)
+
+
+def quote(text: str) -> str:
+    """A blockquote. Never raises."""
+    try:
+        lines = [l for l in str(text or "").splitlines()]
+        return "\n".join(f"▍ {l}" if l.strip() else "▍" for l in lines)
+    except Exception:  # noqa: BLE001
+        return str(text or "")
+
+
+def kv(pairs: list[tuple[str, str]], *, indent: int = 2) -> str:
+    """Aligned key/value block: `Likes      1.2k`. Never raises."""
+    try:
+        rows = [(str(k), str(v)) for k, v in (pairs or [])]
+        if not rows:
+            return ""
+        width = max(len(k) for k, _ in rows)
+        pad = " " * indent
+        return "\n".join(f"{pad}{_markup(k.ljust(width), 'b')}  {v}" for k, v in rows)
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def stat_line(label: str, value: str, delta: str = "") -> str:
+    """One metric line: `📈 Engagement  12.4%  ▲2.1`. Never raises."""
+    cfg = _theme_cfg()
+    icon = "📈 " if cfg.get("emoji") else ""
+    parts = [f"{icon}{_markup(escape(label), 'b')}  {escape(value)}"]
+    if delta:
+        parts.append(f"({escape(delta)})")
+    return " ".join(parts)
+
+
+_SPARK = "▁▂▃▄▅▆▇█"
+
+
+def sparkline(values: list[float]) -> str:
+    """Unicode trend sparkline: `[3, 7, 2, 9] → ▂▆▁█`. Never raises."""
+    try:
+        vals = [float(v) for v in (values or [])]
+        if not vals:
+            return ""
+        lo, hi = min(vals), max(vals)
+        if hi == lo:
+            return _SPARK[3] * len(vals)
+        return "".join(
+            _SPARK[min(7, int((v - lo) / (hi - lo) * 8))] for v in vals
+        )
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def card(title: str, fields: list[tuple[str, str]], *,
+         footer: str = "") -> str:
+    """A structured info card: title + aligned fields + optional footer.
+
+    Platform-agnostic structure — run through ``format_for_platform()``
+    for WhatsApp/SMS, or send as-is for Telegram HTML.
+    """
+    lines = [header(title), ""]
+    body = kv(fields)
+    if body:
+        lines.append(body)
+    if footer:
+        cfg = _theme_cfg()
+        lines += ["", f"{'💡 ' if cfg.get('emoji') else ''}{_markup(escape(footer), 'i')}"]
+    return "\n".join(lines).rstrip()
+
+
+def table(headers: list[str], rows: list[list[str]]) -> str:
+    """Aligned monospace table. Tables flatten to `Header: value` lines
+    when the content is too wide for a chat bubble — this keeps the
+    readable middle ground. Never raises."""
+    try:
+        heads = [str(h) for h in (headers or [])]
+        data = [[str(c) for c in r] for r in (rows or [])]
+        if not heads:
+            return ""
+        widths = [len(h) for h in heads]
+        for row in data:
+            for i, cell in enumerate(row[: len(widths)]):
+                widths[i] = max(widths[i], len(cell))
+        lines = ["<code>"]
+        lines.append("  ".join(h.ljust(w) for h, w in zip(heads, widths)))
+        lines.append("  ".join("─" * w for w in widths))
+        for row in data:
+            cells = list(row) + [""] * (len(widths) - len(row))
+            lines.append("  ".join(c.ljust(w) for c, w in zip(cells, widths)))
+        lines.append("</code>")
+        if not _theme_cfg().get("markup"):
+            return "\n".join(
+                l.replace("<code>", "").replace("</code>", "") for l in lines
+            )
+        return "\n".join(lines)
+    except Exception:  # noqa: BLE001
+        return ""
 
 
 # ── platform-aware menus ─────────────────────────────────────────────────────
