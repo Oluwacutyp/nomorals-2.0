@@ -52,8 +52,81 @@ _log = get_logger(__name__)
 
 __all__ = [
     "FictionWriter", "GenreEngine", "StoryState", "Arc", "ChapterBrief",
-    "ENGINES", "engine_for",
+    "ENGINES", "engine_for", "BeatSheet", "SAVE_THE_CAT_BEATS",
 ]
+
+
+# ── beat sheets (Save the Cat, novel-adapted) ─────────────────────────────────
+#
+# Mined from Blake Snyder's 15-beat structure (novel adaptation via Jessica
+# Brody): each beat lands at a % of the whole book.  Genre engines consult
+# the beat sheet so chapters serve the arc, not just the brief.
+
+
+#: (beat name, position as % of book, what it does)
+SAVE_THE_CAT_BEATS: tuple[tuple[str, float, str], ...] = (
+    ("Opening Image", 0.5, "snapshot of the hero's before-world; tone in one image"),
+    ("Theme Stated", 5.0, "the story's lesson hinted, often by a side character"),
+    ("Setup", 5.0, "hero, world, flaw, stakes — what's missing from their life"),
+    ("Catalyst", 10.0, "the disruption; life can never go back"),
+    ("Debate", 15.0, "resist, doubt, refuse — pressure mounts"),
+    ("Break into Two", 20.0, "the choice; hero enters the new world"),
+    ("B Story", 22.0, "the relationship/thread that carries the theme"),
+    ("Fun and Games", 35.0, "promise of the premise, explored at full tilt"),
+    ("Midpoint", 50.0, "false victory or false defeat — the game changes"),
+    ("Bad Guys Close In", 62.0, "pressure from outside AND the hero's flaw"),
+    ("All Is Lost", 75.0, "the lowest point; something precious is lost"),
+    ("Dark Night of the Soul", 78.0, "grief, then the lesson finally lands"),
+    ("Break into Three", 82.0, "want vs need resolved; the new plan"),
+    ("Finale", 90.0, "the hero proves the change — want sacrificed for need"),
+    ("Final Image", 99.5, "mirror of the opening: the after-world"),
+)
+
+
+class BeatSheet:
+    """Maps the 15 beats onto chapter numbers for any book length."""
+
+    def __init__(self, n_chapters: int,
+                 beats: tuple = SAVE_THE_CAT_BEATS) -> None:
+        self.n_chapters = max(1, int(n_chapters))
+        self.beats = beats
+
+    def beat_for(self, chapter_no: int) -> dict[str, Any]:
+        """The dominant beat for a chapter: nearest beat at/below its %."""
+        pct = 100.0 * chapter_no / self.n_chapters
+        current = self.beats[0]
+        for beat in self.beats:
+            if beat[1] <= pct:
+                current = beat
+            else:
+                break
+        nxt = None
+        for beat in self.beats:
+            if beat[1] > pct:
+                nxt = beat
+                break
+        return {
+            "chapter": chapter_no,
+            "position_pct": round(pct, 1),
+            "beat": current[0],
+            "beat_pct": current[1],
+            "note": current[2],
+            "next_beat": nxt[0] if nxt else None,
+            "next_beat_chapter": (round(nxt[1] / 100 * self.n_chapters)
+                                  if nxt else None),
+        }
+
+    def full(self) -> list[dict[str, Any]]:
+        """Every beat with its chapter number."""
+        out = []
+        for name, pct, note in self.beats:
+            ch = max(1, min(self.n_chapters, round(pct / 100 * self.n_chapters)))
+            out.append({"beat": name, "position_pct": pct,
+                        "chapter": ch, "note": note})
+        return out
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"n_chapters": self.n_chapters, "beats": self.full()}
 
 
 # ── data ─────────────────────────────────────────────────────────────────────
@@ -184,11 +257,88 @@ class GenreEngine(ABC):
                 brief: ChapterBrief) -> None: ...
 
     # -- shared helpers ---------------------------------------------------------
+    def voice(self) -> dict[str, str]:
+        """POV/tense/tone directive for this genre. Engines override."""
+        return {"pov": "third limited", "tense": "past",
+                "tone": "cinematic, interiority-rich",
+                "dialogue": "subtext over exposition"}
+
+    def beat_note(self, chapter_no: int, n_chapters: int) -> str:
+        """Genre-flavored instruction for the chapter's Save-the-Cat beat."""
+        sheet = BeatSheet(n_chapters)
+        b = sheet.beat_for(chapter_no)
+        return (f"Story beat: {b['beat']} — {b['note']}. "
+                f"Serve it in {self.name} terms.")
+
+    def scene_beats(self, brief: "ChapterBrief", n: int = 4) -> list[str]:
+        """Split a chapter brief into Sudowrite-style scene beats.
+
+        Beats are step-by-step instructions the prose pass follows in
+        order — the atomic unit of the Story Engine pipeline.
+        """
+        scenes: list[str] = []
+        must = list(brief.must_happen)
+        per = max(1, (len(must) + n - 1) // n)
+        for i in range(n):
+            chunk = must[i * per:(i + 1) * per]
+            if i == 0:
+                scenes.append(
+                    "OPEN in the middle of motion — no throat-clearing. "
+                    + (f"Establish: {chunk[0]}" if chunk
+                       else "Drop us into the scene's pressure."))
+            elif i == n - 1:
+                scenes.append(
+                    "CLOSE on a hook — a reversal, a revelation, or a "
+                    "threat. " + (f"Land: {chunk[-1]}" if chunk else ""))
+            else:
+                scenes.append(
+                    "ESCALATE: raise the cost of the scene's want. "
+                    + ("; ".join(chunk) if chunk else "Complicate the plan."))
+        if brief.plant:
+            scenes.insert(-1, "PLANT quietly: " +
+                          "; ".join(brief.plant[:2]) +
+                          " (no lampshade, no payoff yet)")
+        if brief.tension_target:
+            scenes.append(f"DIAL the tension to ~{brief.tension_target:.0f}/10 "
+                          f"by the final line.")
+        return scenes[:n + 2]
+
     def _cast(self, premise: str, n: int,
               roles: list[str]) -> list[dict[str, Any]]:
+        """Cast with the five-point psychological core (Truby/Weiland).
+
+        Want vs Need in tension = the arc.  The wound is specific and
+        dateable; the lie is the false premise drawn from it; the ghost
+        is the wound's sensory shorthand that resurfaces under pressure.
+        """
         names = self._names(n)
+        wants = ["to be seen as worthy", "to escape a debt",
+                 "to protect someone fragile", "to prove them all wrong",
+                 "to find the one who vanished", "to earn forgiveness",
+                 "to seize what was stolen", "to belong somewhere"]
+        needs = ["to trust another person", "to accept what can't be fixed",
+                 "to stop running", "to forgive themselves",
+                 "to ask for help", "to let go of control"]
+        wounds = ["betrayed by a mentor at fifteen",
+                  "watched their home burn while they hid",
+                  "were blamed for a sibling's death",
+                  "were abandoned at the city gates as a child",
+                  "trusted the wrong person and paid in blood",
+                  "failed the one test that mattered"]
+        lies = ["strength means needing no one",
+                "the past can be outrun",
+                "love is a liability",
+                "they are already broken beyond repair",
+                "control keeps everyone safe"]
+        ghosts = ["the smell of smoke", "a door closing too softly",
+                  "their own name said with disappointment",
+                  "cold water on the wrists", "a laugh that stops too fast"]
         cast = []
         for i, role in enumerate(roles[:n]):
+            want = self.rng.choice(wants)
+            need = self.rng.choice(needs)
+            wound = self.rng.choice(wounds)
+            lie = self.rng.choice(lies)
             cast.append({
                 "name": names[i], "role": role,
                 "trait": self.rng.choice([
@@ -196,6 +346,14 @@ class GenreEngine(ABC):
                     "methodical", "charismatic", "haunted", "wry",
                     "fiercely loyal", "ambitious", "patient",
                 ]),
+                "want": want,
+                "need": need,
+                "wound": wound,
+                "lie": lie,
+                "ghost": self.rng.choice(ghosts),
+                "arc": (f"must trade the want ({want}) for the need "
+                        f"({need}); the lie ({lie}) breaks at the "
+                        f"darkest hour"),
                 "secret": "",
             })
         return cast
@@ -858,6 +1016,153 @@ class RomanceEngine(GenreEngine):
             state.ledger["dark_night_done"] = True
 
 
+class XianxiaEngine(GenreEngine):
+    """Cultivation/xianxia webnovel engine.
+
+    Mechanics: a cultivation ladder (realms with minor/major stages — power
+    is a ledger, never vibes), face (reputation ledger: slights must be
+    answered, humiliations remembered), karmic ledgers (debts, favors,
+    grudges with named holders), bottleneck chapters (breakthroughs cost
+    something real), and a young-master/rival/elder/mentor cast web.
+    Validation: no realm-skipping without a priced breakthrough; face
+    slights must be answered within 3 chapters or the slight festers.
+    """
+
+    name = "xianxia"
+
+    _REALMS = [
+        "Qi Condensation", "Foundation Establishment", "Golden Core",
+        "Nascent Soul", "Spirit Severing", "Dao Seeking",
+    ]
+    _STAGES = ["early", "middle", "late", "peak"]
+
+    def voice(self) -> dict[str, str]:
+        return {"pov": "third limited", "tense": "past",
+                "tone": "grandiose yet grounded; daoist aphorism sparingly",
+                "dialogue": "formal address by seniority; oaths carry weight"}
+
+    def _realm(self, n: int) -> str:
+        return f"{self._REALMS[min(n, len(self._REALMS) - 1)]}"
+
+    def plan_arcs(self, premise: str, state: StoryState) -> list[Arc]:
+        cast = self._cast(premise, 5, ["protagonist", "rival", "mentor",
+                                       "young master", "elder"])
+        state.characters = cast
+        state.ledger["cultivation"] = {"realm_idx": 0, "stage_idx": 0}
+        state.ledger["face"] = {c["name"]: 0 for c in cast}
+        state.ledger["debts"] = []   # {"holder", "kind", "summary"}
+        state.ledger["slights"] = []  # {"by", "chapter", "answered"}
+        prot, rival = cast[0]["name"], cast[1]["name"]
+        return [
+            Arc(name="Humble Roots",
+                goal=f"{prot} endures humiliation and finds their path",
+                chapters_planned=4,
+                beats=["the slight that starts it all",
+                       "a hidden legacy surfaces",
+                       "first breakthrough — paid in full",
+                       f"{rival}'s shadow lengthens"],
+                threads_to_close=["t1"]),
+            Arc(name="Rising Storm",
+                goal=f"{prot} repays debts and collects on slights",
+                chapters_planned=6,
+                beats=["the tournament/selection",
+                       "an old debt comes due",
+                       "bottleneck: the price of the next realm",
+                       "face answered, publicly"],
+                threads_to_close=["t2"]),
+            Arc(name="Heaven's Trial",
+                goal="the sect's rot exposed; the dao questioned",
+                chapters_planned=6,
+                beats=["the elder's secret",
+                       "betrayal from inside",
+                       "breakthrough under tribulation",
+                       "a new horizon beyond the sect"],
+                threads_to_close=["t3"]),
+        ]
+
+    def chapter_brief(self, state: StoryState, arc: Arc,
+                      chapter_no: int) -> ChapterBrief:
+        cult = state.ledger.get("cultivation", {"realm_idx": 0,
+                                                "stage_idx": 0})
+        realm = self._realm(cult["realm_idx"])
+        stage = self._STAGES[cult["stage_idx"] % 4]
+        beat = arc.beats[(chapter_no - 1) % len(arc.beats)]
+        must = [f"advance beat: {beat}",
+                f"cultivation check: {realm} ({stage}) — power shown, "
+                f"never told in abstractions"]
+        plant: list[str] = []
+        # every ~4th chapter is a breakthrough chapter with a real price
+        breakthrough = (chapter_no % 4 == 0)
+        if breakthrough:
+            price = self.rng.choice([
+                "a treasured artifact burns out",
+                "an old wound reopens",
+                "a debt is called in mid-tribulation",
+                "a friend pays part of the price",
+            ])
+            must.append(f"BREAKTHROUGH chapter: {realm} {stage} → next "
+                        f"stage. The price: {price}. No free ascensions.")
+        # unanswered slights fester
+        for s in state.ledger.get("slights", []):
+            if not s.get("answered") and chapter_no - s["chapter"] >= 3:
+                must.append(f"a festering slight demands answer: "
+                            f"{s['by']} humiliated the protagonist in "
+                            f"ch.{s['chapter']} — answer it or escalate it")
+                break
+        # face: rivals probe
+        if chapter_no % 3 == 0:
+            rival = next((c["name"] for c in state.characters
+                          if c["role"] == "rival"), "the rival")
+            plant.append(f"{rival} probes for weakness in public")
+        return ChapterBrief(
+            chapter_no=chapter_no, arc_name=arc.name,
+            must_happen=must, plant=plant,
+            threads_advanced=["t1", "t2"][:1 + (chapter_no % 2)],
+            pov_notes=("third limited, past tense; cultivation described "
+                       "through the body's senses — meridians, breath, "
+                       "weight — never game numbers"),
+            target_words=1500,
+            tension_target=6.0 + (2.0 if breakthrough else 0.0),
+            extra={"realm": realm, "stage": stage,
+                   "breakthrough": breakthrough})
+
+    def validate(self, text: str, state: StoryState,
+                 brief: ChapterBrief) -> list[str]:
+        problems: list[str] = []
+        low = text.lower()
+        # realm-skip guard: new realm names must not appear before earned
+        cult = state.ledger.get("cultivation", {"realm_idx": 0,
+                                                "stage_idx": 0})
+        for r in self._REALMS[cult["realm_idx"] + 1:]:
+            if r.lower() in low:
+                problems.append(
+                    f"unearned realm '{r}' appears in prose before the "
+                    f"breakthrough is written")
+                break
+        if brief.extra.get("breakthrough"):
+            if not re.search(r"\b(break ?through|tribulation|ascen)",
+                             low):
+                problems.append("breakthrough chapter lacks the breakthrough")
+        return problems
+
+    def advance(self, state: StoryState, text: str,
+                brief: ChapterBrief) -> None:
+        cult = state.ledger.setdefault("cultivation",
+                                       {"realm_idx": 0, "stage_idx": 0})
+        if brief.extra.get("breakthrough"):
+            cult["stage_idx"] += 1
+            if cult["stage_idx"] >= 4:
+                cult["stage_idx"] = 0
+                cult["realm_idx"] = min(cult["realm_idx"] + 1,
+                                        len(self._REALMS) - 1)
+        # record slights mentioned in the brief as owed answers
+        for m in brief.must_happen:
+            if "slight" in m.lower() and "humiliated" in m.lower():
+                state.ledger.setdefault("slights", []).append(
+                    {"by": "a rival", "chapter": brief.chapter_no,
+                     "answered": False})
+
+
 ENGINES: dict[str, type[GenreEngine]] = {
     "mystery": MysteryEngine,
     "thriller": ThrillerEngine,
@@ -866,6 +1171,8 @@ ENGINES: dict[str, type[GenreEngine]] = {
     "scifi": SciFiEngine,
     "fantasy": FantasyEngine,
     "romance": RomanceEngine,
+    "xianxia": XianxiaEngine,
+    "cultivation": XianxiaEngine,
 }
 
 
@@ -1032,6 +1339,16 @@ class FictionWriter:
             brief.wisdom_motifs = list(state.style["wisdom_motifs"])[:3]
         if direction:
             brief.must_happen.append(f"owner direction: {direction}")
+        # Save-the-Cat beat + scene beats + voice: the Story Engine layer
+        total = state.total_planned or (chapter_no + 8)
+        brief.extra["beat_note"] = engine.beat_note(chapter_no, total)
+        brief.extra["scene_beats"] = engine.scene_beats(brief)
+        voice = engine.voice()
+        if voice.get("tone"):
+            brief.pov_notes = (
+                (brief.pov_notes + " " if brief.pov_notes else "") +
+                f"[Voice: {voice.get('pov', '')}, {voice.get('tense', '')}; "
+                f"tone: {voice['tone']}]")
 
         text = self._model_chapter(state, engine, brief)
         if not text:
@@ -1062,6 +1379,8 @@ class FictionWriter:
         return {"number": chapter_no, "arc": arc.name,
                 "words": count_words(text),
                 "validation_notes": problems,
+                "beat": brief.extra.get("beat_note", ""),
+                "scene_beats": brief.extra.get("scene_beats", []),
                 "path": path.as_posix(), "text": text}
 
     def _maybe_roll_arc(self, state: StoryState, engine: GenreEngine,
@@ -1148,6 +1467,12 @@ class FictionWriter:
             motifs = ("Thematic texture to weave in subtly (never preach, "
                       "never name the source):\n- " +
                       "\n- ".join(brief.wisdom_motifs))
+        scene_beats = ""
+        if brief.extra.get("scene_beats"):
+            scene_beats = ("Scene beats (follow in order):\n" +
+                           "\n".join(f"{i+1}. {b}" for i, b in
+                                     enumerate(brief.extra["scene_beats"])))
+        beat_note = brief.extra.get("beat_note", "")
         user = (
             f"Story: {state.title} ({state.genre}, {state.mode}).\n"
             f"Premise: {state.premise}\n\n"
@@ -1159,6 +1484,8 @@ class FictionWriter:
             + ("Seed these elements naturally:\n- " +
                "\n- ".join(brief.plant) + "\n" if brief.plant else "")
             + f"Voice: {brief.pov_notes}\n"
+            + (f"{beat_note}\n" if beat_note else "")
+            + (scene_beats + "\n" if scene_beats else "")
             + (motifs + "\n" if motifs else "")
             + (f"PREVIOUS CHAPTER TAIL:\n{prev_tail}\n\n" if prev_tail else "")
             + f"Write ~{brief.target_words} words of complete, vivid prose — "

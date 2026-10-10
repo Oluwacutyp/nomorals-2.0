@@ -2,11 +2,32 @@
 
     book_create  topic → research notes + real outline (resumable on disk)
     book_write   write the next chapter (or all unwritten) of a book
-    book_build   compile manuscript.md + real PDF (TOC, chapter breaks)
+    book_build   compile manuscript.md + PDF/EPUB/HTML (formats=pdf,epub,html)
+    book_build_epub / book_build_html  single-format builders
+    book_card    pretty status card (rich|plain|minimal themes)
     book_send    deliver the PDF to a live chat platform
     book_run     the whole pipeline: create → write → build → send
     book_status  progress of one book
     book_list    everything on disk
+
+    Fiction:
+    fiction_start / fiction_write / fiction_status / fiction_list
+    fiction_beats  Save-the-Cat beat sheet for a story
+
+    Story bible & continuation:
+    bible_build / bible_build_text / bible_show
+    story_lorebook       lorebook injection preview (keyed entries)
+    story_continue       continue a story (takes=N for alternate takes)
+
+    Branches:
+    branch_fork / branch_write / branch_list / branch_merge
+    branch_tree / branch_choice / branch_diff
+
+    Serial publishing:
+    publish_start / publish_release / publish_status
+    publish_follow / publish_feedback / publish_feedback_summary
+    publish_launch_plan / publish_retention / publish_buffer
+    publish_author_note
 
     Library (the owner's existing books):
     library_ingest    add a book file (.txt/.md/.pdf/.epub/.docx/.html)
@@ -18,6 +39,28 @@
     library_shelf     collections: create/delete/add/remove/list/show
     library_tag       tag a book, list tags, find books by tag
     library_rate      1–5 star rating per book
+    library_stats     reading sessions, WPM, streaks (KOReader-style)
+    library_export    export bookmarks+notes (markdown/json/text)
+    library_session   start/end a reading session
+    library_series    series set/get/list
+    library_currently_reading → via library_stats per-book table
+
+    Reader (webnovel shelf):
+    story_search / story_follow / story_unfollow / story_following
+    story_read / story_next / story_prev / story_sync / story_progress
+    story_bookmark / story_download
+    reader_updates    new-chapter report across followed stories
+    reader_highlight  highlights add/list/remove/export
+    reader_catch_up   read all unread cached chapters in order
+    reader_stats      per-story reading stats
+
+    Collab:
+    collab_scene / collab_critique / character_sheet
+    collab_stylecheck        sentence-level style diagnostics
+    collab_critique_persona  editor|line|beta|brutal critique
+
+    Writing primitives:
+    write_expand / write_describe / write_rewrite
 """
 
 from __future__ import annotations
@@ -94,16 +137,21 @@ def register(registry: Any) -> None:
     @registry.register(
         "book_build",
         description=(
-            "Compile a written book into manuscript.md + a real PDF (title, "
-            "table of contents with true page numbers, each chapter on a fresh "
-            "page). Returns the PDF path."
+            "Compile a written book into manuscript.md + real book files: "
+            "PDF (title, TOC with true page numbers, chapters on fresh "
+            "pages), EPUB3, and/or single-file HTML. Returns the paths."
         ),
         capability=Capability.FS_WRITE,
         parameters={"slug": "str — the book slug",
-                    "page_size": "str (optional, A4) — A4 | Letter"},
+                    "page_size": "str (optional, A4) — A4 | Letter",
+                    "formats": "str (optional, 'pdf') — comma-separated: "
+                               "pdf,epub,html"},
     )
-    def book_build(slug: str, *, page_size: str = "A4") -> dict[str, Any]:
-        return forge().build(slug, page_size=page_size)
+    def book_build(slug: str, *, page_size: str = "A4",
+                   formats: str = "pdf") -> dict[str, Any]:
+        fmts = tuple(f.strip() for f in formats.split(",") if f.strip())
+        return forge().build(slug, page_size=page_size,
+                             formats=fmts or ("pdf",))
 
     @registry.register(
         "book_send",
@@ -427,14 +475,16 @@ def register(registry: Any) -> None:
             "n": "int (optional, 1) — how many chapters to write",
             "words": "int (optional, 1500) — target words per chapter",
             "direction": "str (optional) — a story direction for ch.1",
+            "takes": "int (optional, 1) — alternate takes per chapter; "
+                     "best-scored take becomes the live chapter",
         },
     )
     def story_continue(slug: str, *, n: int = 1, words: int = 1500,
-                       direction: str = "") -> dict[str, Any]:
+                       direction: str = "", takes: int = 1) -> dict[str, Any]:
         from .continuation import StoryContinuer
 
         return StoryContinuer(context).continue_story(
-            slug, n=n, words=words, direction=direction)
+            slug, n=n, words=words, direction=direction, takes=takes)
 
     # ── FictionWriter ───────────────────────────────────────────────────
     def _fiction() -> Any:
@@ -957,3 +1007,525 @@ def register(registry: Any) -> None:
     def publish_feedback_summary(story_slug: str) -> dict[str, Any]:
         from .publish import SerialPublication
         return SerialPublication(story_slug).feedback_summary()
+
+    # ── sweep additions: lorebook, beats, epub, stats, branches, publish ──
+
+    @registry.register(
+        "book_build_epub",
+        description=(
+            "Build the book as a valid EPUB3 ebook (stdlib-only builder: "
+            "title page, cover, TOC, Dublin Core metadata, styled chapters)."
+        ),
+        capability=Capability.FS_WRITE,
+        parameters={
+            "slug": "str",
+            "cover": "str (optional) — path to cover image",
+        },
+    )
+    def book_build_epub(slug: str, *, cover: str = "") -> dict[str, Any]:
+        return forge().build_epub(slug, cover=cover)
+
+    @registry.register(
+        "book_build_html",
+        description=(
+            "Build the book as a single styled HTML file — great for phone "
+            "reading and sharing."
+        ),
+        capability=Capability.FS_WRITE,
+        parameters={
+            "slug": "str",
+            "theme": "str (optional, light|dark)",
+        },
+    )
+    def book_build_html(slug: str, *, theme: str = "light") -> dict[str, Any]:
+        return forge().build_html(slug, theme=theme)
+
+    @registry.register(
+        "book_card",
+        description=(
+            "Render a book as a pretty status card (progress bar, word "
+            "count, chapters). Themes: rich | plain | minimal."
+        ),
+        capability=Capability.FS_READ,
+        parameters={
+            "slug": "str",
+            "theme": "str (optional, rich)",
+        },
+    )
+    def book_card(slug: str, *, theme: str = "rich") -> dict[str, Any]:
+        from .styles import render_book_card
+        status = book_status(slug)
+        status["card"] = render_book_card(status, theme=theme)
+        return status
+
+    @registry.register(
+        "story_lorebook",
+        description=(
+            "Show the story bible's lorebook injection for the latest text: "
+            "which keyed entries would fire (NovelAI-style keyed memory)."
+        ),
+        capability=Capability.FS_READ,
+        parameters={
+            "slug": "str — story slug",
+            "recent_text": "str — recent story text to scan for keys",
+            "max_chars": "int (optional, 2500)",
+        },
+    )
+    def story_lorebook(slug: str, recent_text: str = "",
+                       max_chars: int = 2500) -> dict[str, Any]:
+        bible = _bibles().load(slug)
+        if bible is None:
+            return {"ok": False, "reason": f"no bible for {slug!r}"}
+        injection = bible.inject(recent_text, max_chars=max_chars)
+        return {"ok": True, "slug": slug,
+                "entries": len(getattr(bible, "lore", []) or []),
+                "injection": injection,
+                "flags": bible.consistency_check()}
+
+    @registry.register(
+        "fiction_beats",
+        description=(
+            "The Save-the-Cat beat sheet for a story: 15 beats mapped to "
+            "chapter numbers, with genre-flavored instructions per chapter."
+        ),
+        capability=Capability.FS_READ,
+        parameters={
+            "slug": "str — fiction story slug",
+        },
+    )
+    def fiction_beats(slug: str) -> dict[str, Any]:
+        from .fiction import BeatSheet, engine_for
+        from .styles import render_beat_sheet
+        state = _fiction().load(slug)
+        engine = engine_for(state.genre)
+        sheet = BeatSheet(state.total_planned or state.chapters_written or 12)
+        beats = sheet.full()
+        for b in beats:
+            try:
+                b["genre_note"] = engine.beat_note(b["chapter"],
+                                                  sheet.n_chapters)
+            except Exception:  # noqa: BLE001
+                b["genre_note"] = ""
+        return {"ok": True, "slug": slug, "genre": state.genre,
+                "beats": beats,
+                "rendered": render_beat_sheet(beats)}
+
+    @registry.register(
+        "branch_tree",
+        description=(
+            "The story as a tree: canon trunk, branch limbs, choice nodes "
+            "with picks. Rendered as ASCII art."
+        ),
+        capability=Capability.FS_READ,
+        parameters={"story_slug": "str"},
+    )
+    def branch_tree(story_slug: str) -> dict[str, Any]:
+        from .branches import tree
+        from .styles import render_tree
+        t = tree(story_slug)
+        return {"ok": True, "tree": t, "rendered": render_tree(t)}
+
+    @registry.register(
+        "branch_choice",
+        description=(
+            "Add an interactive choice node to a branch (Ink-style weave), "
+            "or record the reader's pick: action=add|decide|list."
+        ),
+        capability=Capability.FS_WRITE,
+        parameters={
+            "story_slug": "str", "branch": "str",
+            "action": "str — add | decide | list",
+            "after_chapter": "int (optional, for add)",
+            "prompt": "str (optional, for add)",
+            "options": "str (optional, for add — comma-separated)",
+            "choice_id": "int (optional, for decide)",
+            "pick": "str (optional, for decide)",
+        },
+    )
+    def branch_choice(story_slug: str, branch: str, action: str,
+                      after_chapter: int = 0, prompt: str = "",
+                      options: str = "", choice_id: int = 0,
+                      pick: str = "") -> dict[str, Any]:
+        from .branches import StoryBranch
+        b = StoryBranch(story_slug, branch)
+        if action == "add":
+            return b.add_choice(after_chapter, prompt,
+                                [o for o in options.split(",") if o.strip()])
+        if action == "decide":
+            return b.decide(choice_id, pick)
+        return {"ok": True, "choices": b.list_choices()}
+
+    @registry.register(
+        "branch_diff",
+        description=(
+            "Chapter-by-chapter divergence of a branch vs canon "
+            "(text overlap, first divergence point)."
+        ),
+        capability=Capability.FS_READ,
+        parameters={"story_slug": "str", "branch": "str"},
+    )
+    def branch_diff(story_slug: str, branch: str) -> dict[str, Any]:
+        from .branches import StoryBranch
+        return StoryBranch(story_slug, branch).diff()
+
+    @registry.register(
+        "publish_launch_plan",
+        description=(
+            "Royal Road launch plan: day-one bulk chapters, then the "
+            "cadence; backlog buffer health included."
+        ),
+        capability=Capability.FS_READ,
+        parameters={
+            "story_slug": "str",
+            "day_one": "int (optional, 10)",
+        },
+    )
+    def publish_launch_plan(story_slug: str,
+                            day_one: int = 10) -> dict[str, Any]:
+        from .publish import SerialPublication
+        pub = SerialPublication(story_slug)
+        plan = pub.launch_plan(day_one=day_one)
+        plan["buffer"] = pub.buffer_status()
+        return plan
+
+    @registry.register(
+        "publish_retention",
+        description=(
+            "Per-chapter reader retention curve from feedback: which "
+            "chapter lost readers (rendered as bars)."
+        ),
+        capability=Capability.FS_READ,
+        parameters={"story_slug": "str"},
+    )
+    def publish_retention(story_slug: str) -> dict[str, Any]:
+        from .publish import SerialPublication
+        from .styles import render_retention
+        rc = SerialPublication(story_slug).retention_curve()
+        if rc.get("ok"):
+            rc["rendered"] = render_retention(rc["curve"])
+        return rc
+
+    @registry.register(
+        "publish_buffer",
+        description=(
+            "Backlog buffer health: chapters written ahead of releases. "
+            "Under 2 = the streak is one bad week from dying."
+        ),
+        capability=Capability.FS_READ,
+        parameters={"story_slug": "str"},
+    )
+    def publish_buffer(story_slug: str) -> dict[str, Any]:
+        from .publish import SerialPublication
+        return SerialPublication(story_slug).buffer_status()
+
+    @registry.register(
+        "publish_author_note",
+        description="Attach an author's note to a released chapter.",
+        capability=Capability.FS_WRITE,
+        parameters={
+            "story_slug": "str", "chapter": "int", "note": "str",
+        },
+    )
+    def publish_author_note(story_slug: str, chapter: int,
+                            note: str) -> dict[str, Any]:
+        from .publish import SerialPublication
+        return SerialPublication(story_slug).set_author_note(chapter, note)
+
+    @registry.register(
+        "library_stats",
+        description=(
+            "Reading statistics: sessions, minutes, WPM, streak, per-book "
+            "table. KOReader-style."
+        ),
+        capability=Capability.FS_READ,
+        parameters={"slug": "str (optional) — one book, or all"},
+    )
+    def library_stats(slug: str = "") -> dict[str, Any]:
+        from .styles import render_stats_table
+        stats = _library().stats(slug)
+        stats["rendered"] = render_stats_table(stats)
+        return stats
+
+    @registry.register(
+        "library_export",
+        description=(
+            "Export bookmarks + notes as markdown/json/text "
+            "(KOReader-style annotation export)."
+        ),
+        capability=Capability.FS_READ,
+        parameters={
+            "slug": "str (optional) — one book, or all",
+            "format": "str (optional, markdown|json|text)",
+        },
+    )
+    def library_export(slug: str = "",
+                       format: str = "markdown") -> dict[str, Any]:
+        return _library().export_annotations(slug, format=format)
+
+    @registry.register(
+        "library_session",
+        description=(
+            "Track a reading session: action=start|end. End reports "
+            "duration, chapters, words, WPM."
+        ),
+        capability=Capability.FS_WRITE,
+        parameters={
+            "action": "str — start | end",
+            "slug": "str (for start)",
+            "session_id": "int (for end)",
+            "chapters": "int (optional, for end)",
+            "words": "int (optional, for end)",
+        },
+    )
+    def library_session(action: str, slug: str = "", session_id: int = 0,
+                        chapters: int = 0, words: int = 0) -> dict[str, Any]:
+        lib = _library()
+        if action == "start":
+            return lib.start_session(slug)
+        return lib.end_session(session_id, chapters=chapters, words=words)
+
+    @registry.register(
+        "library_series",
+        description="Series management: set a book's series/index or list series.",
+        capability=Capability.FS_WRITE,
+        parameters={
+            "action": "str — set | list | get",
+            "slug": "str (optional)", "series": "str (optional)",
+            "index": "float (optional)",
+        },
+    )
+    def library_series(action: str, slug: str = "", series: str = "",
+                       index: float = 0) -> dict[str, Any]:
+        lib = _library()
+        if action == "set":
+            return lib.set_series(slug, series, index)
+        if action == "get":
+            return lib.get_series(slug)
+        return {"series": lib.list_series()}
+
+    @registry.register(
+        "reader_updates",
+        description=(
+            "Check followed stories for new chapters (FanFicFare-style "
+            "new-chapter report)."
+        ),
+        capability=Capability.NET_OUT,
+        parameters={"slug": "str (optional) — one story, or all"},
+    )
+    def reader_updates(slug: str = "") -> dict[str, Any]:
+        return _reader().check_updates(slug)
+
+    @registry.register(
+        "reader_highlight",
+        description=(
+            "Highlight a passage in a followed story chapter "
+            "(action=add|list|remove|export)."
+        ),
+        capability=Capability.FS_WRITE,
+        parameters={
+            "action": "str — add | list | remove | export",
+            "slug": "str (optional)", "chapter": "int (optional)",
+            "quote": "str (optional, for add)",
+            "note": "str (optional, for add)",
+            "color": "str (optional, yellow|green|blue|pink|orange)",
+            "highlight_id": "int (optional, for remove)",
+            "format": "str (optional, for export)",
+        },
+    )
+    def reader_highlight(action: str, slug: str = "", chapter: int = 0,
+                         quote: str = "", note: str = "",
+                         color: str = "yellow", highlight_id: int = 0,
+                         format: str = "markdown") -> dict[str, Any]:
+        rdr = _reader()
+        if action == "add":
+            return rdr.add_highlight(slug, chapter, quote, note, color)
+        if action == "remove":
+            return rdr.remove_highlight(slug, highlight_id)
+        if action == "export":
+            return rdr.export_highlights(slug, format)
+        return {"highlights": rdr.list_highlights(slug)}
+
+    @registry.register(
+        "reader_catch_up",
+        description="Read every unread cached chapter in order.",
+        capability=Capability.FS_READ,
+        parameters={
+            "slug": "str",
+            "limit": "int (optional, 10)",
+        },
+    )
+    def reader_catch_up(slug: str, limit: int = 10) -> dict[str, Any]:
+        return _reader().catch_up(slug, limit=limit)
+
+    @registry.register(
+        "reader_stats",
+        description="Reading stats for followed stories.",
+        capability=Capability.FS_READ,
+        parameters={"slug": "str (optional)"},
+    )
+    def reader_stats(slug: str = "") -> dict[str, Any]:
+        return _reader().reading_stats(slug)
+
+    @registry.register(
+        "collab_stylecheck",
+        description=(
+            "Sentence-level style diagnostics: filter words, crutch "
+            "phrases, overused words, rhythm, dialogue tags, AI-tells "
+            "(Novelcrafter Smart-Highlighting style, no model needed)."
+        ),
+        capability=Capability.FS_READ,
+        parameters={"text": "str — the prose to scan"},
+    )
+    def collab_stylecheck(text: str) -> dict[str, Any]:
+        from .collab import StyleAnalyzer
+        return StyleAnalyzer().analyze(text)
+
+    @registry.register(
+        "character_sheet",
+        description=(
+            "Build/show a character sheet: want/need/wound/lie/ghost + "
+            "voice profile (speech tics, vocab, rhythm). Cast it into a "
+            "collab session for voice-locked scene writing."
+        ),
+        capability=Capability.FS_WRITE,
+        parameters={
+            "action": "str — make | show | voice_check",
+            "story_slug": "str",
+            "name": "str (optional)",
+            "role": "str (optional)",
+            "want": "str (optional)", "need": "str (optional)",
+            "wound": "str (optional)", "lie": "str (optional)",
+            "ghost": "str (optional)",
+            "speech_tics": "str (optional, comma-separated)",
+            "vocab_band": "str (optional)", "rhythm": "str (optional)",
+            "dialogue": "str (optional, for voice_check)",
+        },
+    )
+    def character_sheet(action: str, story_slug: str, name: str = "",
+                        role: str = "supporting", want: str = "",
+                        need: str = "", wound: str = "", lie: str = "",
+                        ghost: str = "", speech_tics: str = "",
+                        vocab_band: str = "", rhythm: str = "",
+                        dialogue: str = "") -> dict[str, Any]:
+        from .collab import CharacterSheet, CollaborativeSession
+        import json as _json
+        from pathlib import Path as _Path
+        sess = CollaborativeSession(story_slug, context)
+        sheet_path = (_Path.home() / "workspace" / "devon" / "books_data" /
+                      story_slug / "character_sheets.json")
+        sheets: dict[str, Any] = {}
+        if sheet_path.exists():
+            try:
+                sheets = _json.loads(sheet_path.read_text())
+            except Exception:  # noqa: BLE001
+                sheets = {}
+        if action == "make":
+            sheet = CharacterSheet(
+                name=name, role=role, want=want, need=need, wound=wound,
+                lie=lie, ghost=ghost,
+                speech_tics=[t.strip() for t in speech_tics.split(",")
+                             if t.strip()],
+                vocab_band=vocab_band, rhythm=rhythm)
+            sess.cast_character(sheet)
+            sheets[name] = sheet.to_dict()
+            sheet_path.parent.mkdir(parents=True, exist_ok=True)
+            sheet_path.write_text(_json.dumps(sheets, indent=2,
+                                             ensure_ascii=False))
+            return {"ok": True, "sheet": sheet.to_dict(),
+                    "persona": sheet.persona_block()}
+        if action == "voice_check":
+            d = sheets.get(name)
+            if not d:
+                return {"ok": False, "reason": f"no sheet for {name!r}"}
+            return {"ok": True,
+                    **CharacterSheet.from_dict(d).voice_check(dialogue)}
+        d = sheets.get(name)
+        if action == "show" and d:
+            return {"ok": True, "sheet": d}
+        return {"ok": True, "sheets": list(sheets)}
+
+    @registry.register(
+        "collab_critique_persona",
+        description=(
+            "Critique prose with a persona: editor (structure) | line "
+            "(prose) | beta (reader feel) | brutal (no mercy)."
+        ),
+        capability=Capability.FS_READ,
+        parameters={
+            "text": "str — the draft",
+            "persona": "str (optional, editor|line|beta|brutal)",
+            "brief": "str (optional)",
+        },
+    )
+    def collab_critique_persona(text: str, persona: str = "editor",
+                                brief: str = "") -> dict[str, Any]:
+        return _collab().critique(text, {"summary": brief},
+                                  persona=persona)
+
+    @registry.register(
+        "write_expand",
+        description="Expand a beat/passage into a fuller scene (Sudowrite Expand).",
+        capability=Capability.FS_READ,
+        parameters={
+            "text": "str — the passage",
+            "target_words": "int (optional, 300)",
+            "direction": "str (optional)",
+        },
+    )
+    def write_expand(text: str, target_words: int = 300,
+                     direction: str = "") -> dict[str, Any]:
+        from .write import expand
+        out = expand(text, context, target_words=target_words,
+                     direction=direction)
+        return {"ok": True, "text": out, "words": len(out.split())}
+
+    @registry.register(
+        "write_describe",
+        description="Sensory description of a subject (Sudowrite Describe).",
+        capability=Capability.FS_READ,
+        parameters={
+            "subject": "str",
+            "mood": "str (optional)",
+        },
+    )
+    def write_describe(subject: str, mood: str = "") -> dict[str, Any]:
+        from .write import describe
+        out = describe(subject, context, mood=mood)
+        return {"ok": True, "text": out, "words": len(out.split())}
+
+    @registry.register(
+        "write_rewrite",
+        description="Directed rewrite of a passage (Sudowrite Rewrite).",
+        capability=Capability.FS_READ,
+        parameters={
+            "text": "str — the passage",
+            "instruction": "str — e.g. 'tighter', 'more lyrical'",
+        },
+    )
+    def write_rewrite(text: str, instruction: str = "") -> dict[str, Any]:
+        from .write import rewrite
+        out = rewrite(text, instruction, context)
+        return {"ok": True, "text": out, "words": len(out.split())}
+
+    @registry.register(
+        "story_download",
+        description=(
+            "Download a whole webnovel: metadata + chapter list + every "
+            "chapter, with resume (skip_urls) and per-chapter progress."
+        ),
+        capability=Capability.NET_OUT,
+        parameters={
+            "url": "str — novel URL",
+            "limit": "int (optional, 0 = all)",
+        },
+    )
+    def story_download(url: str, limit: int = 0) -> dict[str, Any]:
+        from .sources import adapter_for_url, normalize_url
+        adapter = adapter_for_url(url)
+        dl = adapter.download_story(url, limit=limit)
+        return {"ok": True, "source": adapter.name,
+                "title": dl["meta"]["title"],
+                "total": dl["total"],
+                "fetched": len(dl["chapters"]),
+                "failed": dl["failed"],
+                "words": sum(len(t.split()) for t in dl["chapter_texts"])}

@@ -66,13 +66,55 @@ __all__ = [
     "SourceAdapter", "SourceError", "SourceBlocked",
     "FreeWebNovelAdapter", "NovelFullAdapter", "RoyalRoadAdapter",
     "PandaNovelAdapter", "GenericAdapter",
-    "ADAPTERS", "adapter_for_url", "search_all",
+    "ADAPTERS", "adapter_for_url", "search_all", "normalize_url",
 ]
 
 _BROWSER_UA = (
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
 )
+
+#: rotated user-agents (FanFicFare's fingerprint-variety idea)
+_BROWSER_UAS = (
+    _BROWSER_UA,
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 "
+    "(KHTML, like Gecko) Version/17.4 Safari/605.1.15",
+    "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36",
+)
+
+#: query params stripped by normalize_url (tracking junk)
+_TRACKING_PARAMS = frozenset({
+    "utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content",
+    "fbclid", "gclid", "msclkid", "ref", "referrer",
+})
+
+
+def normalize_url(url: str) -> str:
+    """Canonicalize a story/chapter URL (FanFicFare-style normalization).
+
+    Lowercases the host, strips tracking params, drops the fragment and
+    trailing slash so the same chapter always maps to the same key —
+    the basis of download resume.
+    """
+    try:
+        p = urllib.parse.urlparse((url or "").strip())
+    except Exception:  # noqa: BLE001
+        return (url or "").strip()
+    host = (p.hostname or "").lower()
+    if not host:
+        return (url or "").strip()
+    qs = urllib.parse.parse_qsl(p.query, keep_blank_values=True)
+    qs = [(k, v) for k, v in qs if k.lower() not in _TRACKING_PARAMS]
+    path = p.path.rstrip("/") or "/"
+    netloc = host
+    if p.port:
+        netloc = f"{host}:{p.port}"
+    return urllib.parse.urlunparse(
+        (p.scheme or "https", netloc, path,
+         "", urllib.parse.urlencode(qs), ""))
 
 #: markers that mean "you are looking at a bot wall, not content"
 _BLOCK_MARKERS = (
@@ -174,11 +216,34 @@ class Fetcher:
     isolated the way a browser profile would keep them.
     """
 
-    def __init__(self, *, session_dir: str = "", timeout: float = 30.0) -> None:
+    def __init__(self, *, session_dir: str = "", timeout: float = 30.0,
+                 rate_limit: float = 1.0) -> None:
         self.timeout = timeout
         self.session_dir = session_dir
+        #: minimum seconds between requests to the same host
+        #: (FanFicFare's SleepDecorator idea — don't hammer archives)
+        self.rate_limit = max(0.0, rate_limit)
         self._jars: dict[str, http.cookiejar.CookieJar] = {}
         self._browser_sessions: dict[str, Any] = {}
+        self._last_fetch: dict[str, float] = {}
+        self._ua_index = 0
+
+    def polite_wait(self, url: str) -> None:
+        """Sleep until ``rate_limit`` seconds passed since the last fetch
+        to this host.  Call between chapter fetches."""
+        if self.rate_limit <= 0:
+            return
+        host = (urllib.parse.urlparse(url).hostname or "").lower()
+        last = self._last_fetch.get(host, 0.0)
+        wait = self.rate_limit - (time.time() - last)
+        if wait > 0:
+            time.sleep(wait)
+        self._last_fetch[host] = time.time()
+
+    def _next_ua(self) -> str:
+        ua = _BROWSER_UAS[self._ua_index % len(_BROWSER_UAS)]
+        self._ua_index += 1
+        return ua
 
     # -- tier 1: plain HTTP ---------------------------------------------------
     def _jar(self, url: str) -> http.cookiejar.CookieJar:
@@ -200,6 +265,7 @@ class Fetcher:
         last: Exception | None = None
         for attempt in range(max(1, retries + 1)):
             try:
+                self.polite_wait(url)
                 return self._http_get_once(url, referer=referer)
             except SourceBlocked:
                 raise
@@ -220,7 +286,7 @@ class Fetcher:
             urllib.request.ProxyHandler(),
         )
         headers = {
-            "User-Agent": _BROWSER_UA,
+            "User-Agent": self._next_ua(),
             "Accept": ("text/html,application/xhtml+xml,application/xml;"
                        "q=0.9,*/*;q=0.8"),
             "Accept-Language": "en-US,en;q=0.9",
@@ -415,6 +481,83 @@ class SourceAdapter(ABC):
         """Deterministic chapter URL when the pattern is fully
         predictable (freewebnovel); "" when it isn't (needs the list)."""
         return ""
+
+    # -- whole-story download -------------------------------------------------
+    def download_story(self, url: str, *,
+                       limit: int = 0,
+                       skip_urls: list[str] | None = None,
+                       on_chapter: Any = None) -> dict[str, Any]:
+        """Metadata + chapter list + full chapter fetch in one call.
+
+        ``skip_urls`` = normalized chapter URLs already on disk (resume).
+        ``on_chapter(done, total, chapter)`` fires per fetched chapter.
+        Failures are per-chapter and recorded, never fatal.
+        """
+        url = normalize_url(url)
+        meta = self.novel(url)
+        listing = self.chapter_list(url, limit=limit)
+        total = len(listing)
+        seen = {normalize_url(u) for u in (skip_urls or [])}
+        chapters: list[Chapter] = []
+        failed: list[dict[str, Any]] = []
+        for i, (num, title, curl) in enumerate(listing):
+            curl = normalize_url(curl)
+            if curl in seen:
+                continue
+            try:
+                ch = self.fetch_chapter(curl)
+            except SourceError as exc:
+                failed.append({"number": num, "url": curl,
+                               "reason": str(exc)[:160]})
+                _log.warning("%s ch%s fetch failed: %s", self.name, num, exc)
+                continue
+            ch.number = num
+            if title:
+                ch.title = title
+            ch.source = self.name
+            chapters.append(ch)
+            seen.add(curl)
+            if on_chapter:
+                try:
+                    on_chapter(i + 1, total, ch)
+                except Exception:  # noqa: BLE001
+                    pass
+        return {"meta": meta.to_dict(), "total": total,
+                "chapters": [c.to_dict() | {"url": normalize_url(c.url)}
+                             for c in chapters],
+                "chapter_texts": [c.text for c in chapters],
+                "failed": failed}
+
+    def download_cover(self, meta: StoryMeta, dest_dir: str | Path) -> str:
+        """Fetch the cover image to ``dest_dir``.  Returns the path or ""."""
+        if not meta.cover_url:
+            return ""
+        dest = Path(dest_dir)
+        dest.mkdir(parents=True, exist_ok=True)
+        suffix = (urllib.parse.urlparse(meta.cover_url).path.rsplit(".", 1)[-1]
+                  if "." in urllib.parse.urlparse(meta.cover_url).path else "jpg")
+        suffix = "".join(c for c in suffix.lower() if c.isalnum())[:4] or "jpg"
+        path = dest / f"cover.{suffix}"
+        if path.exists() and path.stat().st_size > 1024:
+            return str(path)
+        try:
+            final, html = self.fetcher.http_get(meta.cover_url,
+                                                referer=meta.url)
+            # http_get returns decoded text — re-fetch raw for binary
+            import urllib.request as _req
+            req = _req.Request(meta.cover_url,
+                               headers={"User-Agent": _BROWSER_UA,
+                                        "Referer": meta.url})
+            with _req.urlopen(req, timeout=self.fetcher.timeout) as resp:
+                data = resp.read(10_000_000)
+        except Exception as exc:  # noqa: BLE001
+            _log.warning("cover download failed: %s", exc)
+            return ""
+        if len(data) < 1024 or not data.startswith(
+                (b"\xff\xd8", b"\x89PNG", b"GIF8", b"RIFF")):
+            return ""
+        path.write_bytes(data)
+        return str(path)
 
 
 # ── freewebnovel.com ─────────────────────────────────────────────────────────

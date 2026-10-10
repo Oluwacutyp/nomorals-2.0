@@ -61,6 +61,13 @@ class Chapter:
     text: str = ""
     status: str = STATUS_PLAN
     words: int = 0
+    #: per-chapter word goal (soft guide, never a quota).  Falls back to
+    #: ``Book.target_words`` when 0.
+    word_target: int = 0
+    #: alternate versions of this chapter ("takes", AI-Dungeon style).
+    #: each take is {"label": str, "text": str, "words": int, "created": ts}.
+    #: The live take is ``text``; the others are kept for the author to pick.
+    takes: list[dict[str, Any]] = field(default_factory=list)
     #: which coverage item this chapter addresses (organic books).  The
     #: seed chapters use "__intro__" / "__foundations__"; the closing arc
     #: uses "__synthesis__" / "__mastery__".  Lets the continuation
@@ -74,6 +81,26 @@ class Chapter:
         self.status = STATUS_WRITTEN
         self.words = count_words(self.text)
 
+    def add_take(self, text: str, label: str = "") -> dict[str, Any]:
+        """Store an alternate version of this chapter. Returns the take."""
+        take = {
+            "label": label or f"take-{len(self.takes) + 1}",
+            "text": text,
+            "words": count_words(text),
+            "created": time.time(),
+        }
+        self.takes.append(take)
+        return take
+
+    def use_take(self, label: str) -> bool:
+        """Promote a stored take to the live chapter text."""
+        for take in self.takes:
+            if take.get("label") == label:
+                self.text = str(take.get("text", ""))
+                self.words = count_words(self.text)
+                return True
+        return False
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "number": self.number,
@@ -83,6 +110,8 @@ class Chapter:
             "status": self.status,
             "words": self.words,
             "coverage": self.coverage,
+            "word_target": self.word_target,
+            "takes": [dict(t) for t in self.takes],
         }
 
     @classmethod
@@ -95,6 +124,8 @@ class Chapter:
             status=str(d.get("status", STATUS_PLAN)),
             words=int(d.get("words", 0)),
             coverage=str(d.get("coverage", "")),
+            word_target=int(d.get("word_target", 0)),
+            takes=[dict(t) for t in d.get("takes", [])],
         )
 
 
@@ -107,6 +138,12 @@ class Book:
     author: str = ""
     genre: str = ""
     description: str = ""
+    #: EPUB/Kindle metadata
+    language: str = "en"
+    series: str = ""
+    series_index: float = 0.0
+    #: path (or URL) to cover art used by the EPUB/HTML builders
+    cover_image: str = ""
     chapters: list[Chapter] = field(default_factory=list)
     target_words: int = 1200  # per chapter — a soft guide, never a quota
     status: str = STATUS_PLAN
@@ -138,6 +175,26 @@ class Book:
     @property
     def chapters_written(self) -> int:
         return sum(1 for c in self.chapters if c.status == STATUS_WRITTEN)
+
+    @property
+    def progress_pct(self) -> float:
+        """% of chapters written (0-100)."""
+        if not self.chapters:
+            return 0.0
+        return round(100.0 * self.chapters_written / len(self.chapters), 1)
+
+    @property
+    def reading_minutes(self) -> int:
+        """Estimated reading time at ~200 wpm."""
+        return max(1, round(self.total_words / 200)) if self.total_words else 0
+
+    def words_remaining(self) -> int:
+        """Rough words left if every unwritten chapter hits its target."""
+        total = 0
+        for c in self.chapters:
+            if c.status != STATUS_WRITTEN:
+                total += c.word_target or self.target_words
+        return total
 
     @property
     def complete(self) -> bool:
@@ -176,6 +233,10 @@ class Book:
             "author": self.author,
             "genre": self.genre,
             "description": self.description,
+            "language": self.language,
+            "series": self.series,
+            "series_index": self.series_index,
+            "cover_image": self.cover_image,
             "chapters": [c.to_dict() for c in self.chapters],
             "target_words": self.target_words,
             "status": self.status,
@@ -197,6 +258,10 @@ class Book:
             author=str(d.get("author", "")),
             genre=str(d.get("genre", "")),
             description=str(d.get("description", "")),
+            language=str(d.get("language", "en")),
+            series=str(d.get("series", "")),
+            series_index=float(d.get("series_index", 0.0) or 0.0),
+            cover_image=str(d.get("cover_image", "")),
             chapters=[Chapter.from_dict(c) for c in d.get("chapters", [])],
             target_words=int(d.get("target_words", 1200)),
             status=str(d.get("status", STATUS_PLAN)),

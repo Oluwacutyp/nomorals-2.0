@@ -17,7 +17,8 @@ from ..llm.brain import brain_for
 from .model import STATUS_WRITTEN, Book, Chapter, count_words
 
 __all__ = ["write_chapter", "model_chapter", "template_chapter",
-           "model_available", "clean_beat_text"]
+           "model_available", "clean_beat_text",
+           "expand", "describe", "rewrite", "suggest_hooks"]
 
 _ROUTER_FAIL = re.compile(r"\b(i'?m (?:sorry|afraid)|cannot (?:do|provide)|i can'?t)\b", re.I)
 
@@ -597,3 +598,170 @@ def write_chapter(
 # ── backward-compatible aliases (tests reference the old pool names) ────────
 _BRIDGES = _CHAPTER_OPENERS
 _TAKEAWAY_OPENERS = _TAKEAWAY_FRAMES
+
+
+# ── Sudowrite-style primitives (expand / describe / rewrite / hooks) ────────
+#
+# Mined from Sudowrite's Expand, Describe and Rewrite modes: small,
+# directed generation units the owner (or the fiction engine) calls on a
+# passage instead of regenerating whole chapters.  Model-first via the
+# ``suggest`` callable; the heuristic floor writes real prose, never stubs.
+
+
+def _model_pass(prompt: str, context: Any, max_tokens: int = 900) -> str:
+    """One directed model call.  Empty string when no model is answering."""
+    if not model_available(context):
+        return ""
+    try:
+        from ..llm.base import Message, SamplingParams
+        response = brain_for(context).chat(
+            [Message.system(
+                "You are a master prose stylist. Follow the instruction "
+                "exactly. Output only the requested prose — no preamble, "
+                "no meta-commentary."),
+             Message.user(prompt)],
+            SamplingParams(temperature=0.8, max_tokens=max_tokens),
+            task_kind="creative")
+        if getattr(response, "ok", False):
+            return (getattr(response, "text", "") or "").strip()
+    except Exception:  # noqa: BLE001
+        pass
+    return ""
+
+
+def expand(text: str, context: Any = None, *, target_words: int = 300,
+           direction: str = "") -> str:
+    """Grow a beat/passage into a fuller scene (Sudowrite Expand).
+
+    Adds sensory detail, interiority and one complication — never padding.
+    """
+    passage = (text or "").strip()
+    if not passage:
+        return ""
+    prompt = (
+        f"Expand this passage into a fuller scene of ~{target_words} words:\n\n"
+        f"{passage}\n\n"
+        "Rules: add sensory detail and interiority; introduce exactly one "
+        "complication that raises the stakes; keep every existing sentence's "
+        "meaning; no summary in place of scene."
+        + (f" Direction: {direction}" if direction else ""))
+    out = _model_pass(prompt, context, max_tokens=target_words * 3)
+    if out:
+        return out
+    # heuristic floor: deepen with sense-stack + complication frames
+    import random
+    rng = random.Random(hash(passage) & 0xFFFFFFFF)
+    senses = [
+        "The air carried it first — {s}, then the rest followed.",
+        "{cap} noticed the small things: {s}.",
+        "It wasn't the sight of it that stayed with {o}; it was {s}.",
+    ]
+    s = rng.choice([
+        "smoke and cold iron", "rain on hot stone",
+        "something sweet going wrong underneath",
+        "dust, old paper, and held breath",
+    ])
+    subj = passage.split()[0].rstrip(",.")
+    deep = rng.choice(senses).format(s=s, cap=subj.capitalize(), o=subj)
+    complication = rng.choice([
+        "Then the plan met its first real obstacle — and it had a face.",
+        "That was when the second variable announced itself.",
+        "What nobody had said aloud finally got said, and the room changed.",
+    ])
+    return f"{passage}\n\n{deep}\n\n{complication}"
+
+
+def describe(subject: str, context: Any = None, *,
+             mood: str = "") -> str:
+    """Sensory description of a subject (Sudowrite Describe)."""
+    subject = (subject or "").strip()
+    if not subject:
+        return ""
+    prompt = (
+        f"Describe {subject} in two vivid paragraphs. Concrete sensory "
+        f"detail — sight, sound, smell, texture. "
+        + (f"Mood: {mood}. " if mood else "")
+        + "No clichés, no 'it was as if' hedging.")
+    out = _model_pass(prompt, context, max_tokens=500)
+    if out:
+        return out
+    import random
+    rng = random.Random(hash(subject) & 0xFFFFFFFF)
+    textures = [
+        "rough where it should have been smooth",
+        "quiet in a way that felt deliberate",
+        "older than everything around it and in no hurry to prove it",
+    ]
+    frames = [
+        (f"{subject} did not announce itself. It arrived the way weather "
+         f"arrives — first a pressure change, then the undeniable fact of it."),
+        (f"Up close, {subject} was all texture and contradiction: "
+         f"{rng.choice(textures)}. "
+         f"The kind of thing you remember with your hands first."),
+    ]
+    if mood:
+        frames.append(f"It wore the {mood} like a second skin — impossible "
+                      f"to look at directly, impossible to look away from.")
+    return "\n\n".join(frames)
+
+
+def rewrite(text: str, instruction: str, context: Any = None) -> str:
+    """Directed rewrite of a passage (Sudowrite Rewrite)."""
+    passage = (text or "").strip()
+    instruction = (instruction or "").strip()
+    if not passage:
+        return ""
+    prompt = (
+        f"Rewrite this passage. Instruction: {instruction or 'improve the prose'}\n\n"
+        f"{passage}\n\n"
+        "Keep the meaning and all plot facts. Output only the rewritten passage.")
+    out = _model_pass(prompt, context, max_tokens=len(passage.split()) * 3 + 200)
+    if out:
+        return out
+    # heuristic floor: tighten — kill filter words, vary sentence starts
+    import random
+    rng = random.Random(hash(passage + instruction) & 0xFFFFFFFF)
+    filters = {"saw": "", "felt": "", "heard": "", "noticed that": "",
+               "realized that": "", "seemed to": "", "began to": "",
+               "started to": ""}
+    out_text = passage
+    for f, rep in filters.items():
+        out_text = re.sub(r"\b" + re.escape(f) + r"\b", rep, out_text,
+                          flags=re.IGNORECASE)
+    out_text = re.sub(r"[ ]{2,}", " ", out_text)
+    if "shorter" in instruction.lower() or "tight" in instruction.lower():
+        sents = _sentences(out_text)
+        keep = max(1, int(len(sents) * 0.7))
+        out_text = " ".join(sents[:keep])
+    if "punchier" in instruction.lower():
+        out_text = re.sub(r"([^.!?]{60,}[.!?])",
+                          lambda m: m.group(1), out_text)
+    return out_text.strip() or passage
+
+
+def suggest_hooks(prev_tail: str, context: Any = None,
+                  n: int = 3) -> list[str]:
+    """Candidate closing hooks for a chapter (choose one, don't stack)."""
+    tail = (prev_tail or "").strip()[-800:]
+    prompt = (
+        "Give exactly 3 one-sentence closing hooks for a chapter ending "
+        f"here:\n\n{tail}\n\n"
+        "Each hook: a reversal, a revelation, or a threat. Numbered 1-3, "
+        "one sentence each, no explanation.")
+    out = _model_pass(prompt, context, max_tokens=300)
+    if out:
+        hooks = [re.sub(r"^[\d.\-\)\s]+", "", line).strip()
+                 for line in out.split("\n") if line.strip()]
+        return [h for h in hooks if h][:n]
+    import random
+    rng = random.Random(hash(tail) & 0xFFFFFFFF)
+    pool = [
+        "The door opened — and it was the last person anyone expected.",
+        "Too late, the truth surfaced: the map had been wrong all along.",
+        "Footsteps, unhurried, coming closer through the dark.",
+        "The message contained three words, and none of them were good.",
+        "What waited on the other side of the threshold changed everything.",
+        "A name spoken once, softly — and the whole plan collapsed.",
+    ]
+    rng.shuffle(pool)
+    return pool[:n]

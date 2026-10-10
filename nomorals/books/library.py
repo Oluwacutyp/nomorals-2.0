@@ -283,6 +283,15 @@ class Library:
         con.execute(
             "CREATE TABLE IF NOT EXISTS ratings ("
             " slug TEXT PRIMARY KEY, stars INTEGER, rated_at REAL)")
+        # ── reading statistics (KOReader-style sessions + streaks) ──
+        con.execute(
+            "CREATE TABLE IF NOT EXISTS reading_sessions ("
+            " id INTEGER PRIMARY KEY AUTOINCREMENT, slug TEXT, "
+            " started_at REAL, ended_at REAL, seconds REAL, "
+            " chapters INTEGER DEFAULT 0, words INTEGER DEFAULT 0)")
+        con.execute(
+            "CREATE TABLE IF NOT EXISTS book_series ("
+            " slug TEXT PRIMARY KEY, series TEXT, series_index REAL)")
         row = con.execute(
             "SELECT value FROM meta WHERE key = 'fts5'").fetchone()
         if row is None:
@@ -1057,3 +1066,238 @@ class Library:
         finally:
             con.close()
         return int(row[0]) if row else 0
+
+    # ── reading statistics ────────────────────────────────────────────
+    #
+    # Mined from KOReader's statistics plugin: a row per reading session
+    # (not a timer you start/stop manually — the session is the unit),
+    # from which WPM, totals, calendar days and streaks derive.
+
+    def start_session(self, slug: str) -> dict[str, Any]:
+        """Open a reading session. Returns the session id."""
+        self.load(slug)
+        con, _ = self._connect()
+        try:
+            cur = con.execute(
+                "INSERT INTO reading_sessions(slug, started_at) "
+                "VALUES (?, ?)", (slug, time.time()))
+            con.commit()
+            sid = cur.lastrowid
+        finally:
+            con.close()
+        return {"session_id": sid, "slug": slug}
+
+    def end_session(self, session_id: int, *, chapters: int = 0,
+                    words: int = 0) -> dict[str, Any]:
+        """Close a reading session, recording duration + throughput."""
+        con, _ = self._connect()
+        try:
+            row = con.execute(
+                "SELECT slug, started_at FROM reading_sessions WHERE id = ?",
+                (session_id,)).fetchone()
+            if row is None:
+                raise LibraryError(f"no session {session_id}")
+            now = time.time()
+            seconds = max(0.0, now - float(row[1]))
+            con.execute(
+                "UPDATE reading_sessions SET ended_at = ?, seconds = ?, "
+                "chapters = ?, words = ? WHERE id = ?",
+                (now, seconds, int(chapters), int(words), session_id))
+            con.commit()
+        finally:
+            con.close()
+        wpm = round(words / (seconds / 60), 1) if seconds > 5 and words else 0
+        return {"session_id": session_id, "slug": row[0],
+                "seconds": round(seconds, 1), "chapters": chapters,
+                "words": words, "wpm": wpm}
+
+    def stats(self, slug: str = "") -> dict[str, Any]:
+        """Reading stats: sessions, minutes, WPM, streak, per-book table."""
+        con, _ = self._connect()
+        try:
+            filt = "WHERE slug = ?" if slug else ""
+            args: tuple = (slug,) if slug else ()
+            if slug:
+                self.load(slug)
+            row = con.execute(
+                f"SELECT COUNT(*), COALESCE(SUM(seconds),0), "
+                f"COALESCE(SUM(words),0), COALESCE(SUM(chapters),0) "
+                f"FROM reading_sessions {filt}", args).fetchone()
+            sessions, seconds, words, chapters = row
+            per_book = con.execute(
+                "SELECT slug, COUNT(*), COALESCE(SUM(seconds),0), "
+                "COALESCE(SUM(words),0) FROM reading_sessions "
+                "GROUP BY slug ORDER BY SUM(seconds) DESC LIMIT 20").fetchall()
+        finally:
+            con.close()
+        minutes = round(seconds / 60, 1)
+        wpm = round(words / minutes, 1) if minutes > 0 else 0
+        return {
+            "slug": slug or "all",
+            "sessions": sessions,
+            "minutes": minutes,
+            "words_read": words,
+            "chapters_read": chapters,
+            "wpm": wpm,
+            "streak_days": self.reading_streak(),
+            "per_book": [
+                {"slug": s, "sessions": n, "minutes": round(sec / 60, 1),
+                 "words": w}
+                for s, n, sec, w in per_book],
+        }
+
+    def reading_streak(self) -> int:
+        """Consecutive days (ending today/yesterday) with a session."""
+        con, _ = self._connect()
+        try:
+            rows = con.execute(
+                "SELECT DISTINCT date(started_at, 'unixepoch', 'localtime') "
+                "FROM reading_sessions ORDER BY 1 DESC").fetchall()
+        finally:
+            con.close()
+        days = [r[0] for r in rows]
+        if not days:
+            return 0
+        import datetime as _dt
+        today = _dt.date.today()
+        # streak may start yesterday (haven't read yet today)
+        cursor = today
+        if days[0] != today.isoformat():
+            if days[0] != (today - _dt.timedelta(days=1)).isoformat():
+                return 0
+            cursor = today - _dt.timedelta(days=1)
+        streak = 0
+        for d in days:
+            if d == cursor.isoformat():
+                streak += 1
+                cursor -= _dt.timedelta(days=1)
+            else:
+                break
+        return streak
+
+    def currently_reading(self, days: int = 7) -> list[dict[str, Any]]:
+        """Books with a session (or progress update) in the last ``days``."""
+        cutoff = time.time() - days * 86400
+        con, _ = self._connect()
+        try:
+            rows = con.execute(
+                "SELECT DISTINCT slug FROM reading_sessions "
+                "WHERE started_at > ? "
+                "UNION SELECT DISTINCT slug FROM reading_progress "
+                "WHERE updated_at > ?", (cutoff, cutoff)).fetchall()
+        finally:
+            con.close()
+        out = []
+        for (slug,) in rows:
+            try:
+                meta = self.load(slug)
+                prog = self.get_progress(slug)
+                out.append({"slug": slug, "title": meta.get("title", slug),
+                            "chapter": prog.get("chapter", 0),
+                            "percent": prog.get("percent", 0)})
+            except LibraryError:
+                continue
+        return out
+
+    # ── series ────────────────────────────────────────────────────────
+    def set_series(self, slug: str, series: str,
+                   index: float = 0) -> dict[str, Any]:
+        self.load(slug)
+        con, _ = self._connect()
+        try:
+            con.execute(
+                "INSERT OR REPLACE INTO book_series(slug, series, series_index)"
+                " VALUES (?,?,?)", (slug, series.strip(), float(index)))
+            con.commit()
+        finally:
+            con.close()
+        return {"slug": slug, "series": series.strip(), "index": float(index)}
+
+    def get_series(self, slug: str) -> dict[str, Any]:
+        con, _ = self._connect()
+        try:
+            row = con.execute(
+                "SELECT series, series_index FROM book_series WHERE slug = ?",
+                (slug,)).fetchone()
+        finally:
+            con.close()
+        if not row:
+            return {"slug": slug, "series": "", "index": 0}
+        return {"slug": slug, "series": row[0], "index": row[1]}
+
+    def list_series(self) -> list[dict[str, Any]]:
+        con, _ = self._connect()
+        try:
+            rows = con.execute(
+                "SELECT series, slug, series_index FROM book_series "
+                "ORDER BY series, series_index").fetchall()
+        finally:
+            con.close()
+        series: dict[str, list[dict[str, Any]]] = {}
+        for name, slug, idx in rows:
+            series.setdefault(name, []).append({"slug": slug, "index": idx})
+        return [{"series": name, "books": books}
+                for name, books in series.items()]
+
+    # ── annotation export ─────────────────────────────────────────────
+    def export_annotations(self, slug: str = "",
+                           format: str = "markdown") -> dict[str, Any]:
+        """Export bookmarks + notes KOReader-style (md / json / text)."""
+        fmt = (format or "markdown").lower()
+        if fmt not in ("markdown", "json", "text"):
+            raise LibraryError(f"format must be markdown|json|text, got {format!r}")
+        con, _ = self._connect()
+        try:
+            filt = "WHERE b.slug = ?" if slug else ""
+            args: tuple = (slug,) if slug else ()
+            marks = con.execute(
+                f"SELECT b.slug, b.chapter, b.offset_chars, b.label, b.created_at "
+                f"FROM bookmarks b {filt} ORDER BY b.slug, b.chapter",
+                args).fetchall()
+            notes = con.execute(
+                f"SELECT slug, chapter, offset_chars, quote, note, created_at "
+                f"FROM annotations {('WHERE slug = ?') if slug else ''} "
+                f"ORDER BY slug, chapter", args).fetchall()
+        finally:
+            con.close()
+        if fmt == "json":
+            import json as _json
+            payload = {
+                "bookmarks": [
+                    {"slug": s, "chapter": c, "offset": o, "label": l}
+                    for s, c, o, l, _ in marks],
+                "notes": [
+                    {"slug": s, "chapter": c, "offset": o,
+                     "quote": q, "note": n}
+                    for s, c, o, q, n, _ in notes],
+            }
+            return {"format": "json", "text": _json.dumps(payload, indent=2,
+                                                         ensure_ascii=False)}
+        lines: list[str] = []
+        # regroup by slug for headers
+        by_slug: dict[str, list[tuple]] = {}
+        for m in marks:
+            by_slug.setdefault(m[0], []).append(("bookmark",) + m[1:])
+        for n in notes:
+            by_slug.setdefault(n[0], []).append(("note",) + n[1:])
+        for s in sorted(by_slug):
+            try:
+                title = self.load(s).get("title", s)
+            except LibraryError:
+                title = s
+            lines.append(f"# {title}" if fmt == "markdown" else f"== {title} ==")
+            for kind, chapter, offset, *rest in sorted(
+                    by_slug[s], key=lambda x: (x[1], x[2])):
+                if kind == "bookmark":
+                    label = rest[0] or "bookmark"
+                    lines.append(
+                        f"- 🔖 ch.{chapter} — {label}" if fmt == "markdown"
+                        else f"* [ch.{chapter}] {label}")
+                else:
+                    quote, note = rest[0], rest[1]
+                    if fmt == "markdown":
+                        lines.append(f"- 📝 ch.{chapter}: “{quote}” — {note}")
+                    else:
+                        lines.append(f"* [ch.{chapter}] \"{quote}\" — {note}")
+            lines.append("")
+        return {"format": fmt, "text": "\n".join(lines).strip()}

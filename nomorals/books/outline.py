@@ -18,7 +18,8 @@ from .model import Book, Chapter
 
 __all__ = ["make_outline", "template_outline", "key_terms",
            "seed_outline", "assess_continuation", "coverage_map",
-           "MAX_ORGANIC_CHAPTERS", "MAX_ORGANIC_WORDS"]
+           "MAX_ORGANIC_CHAPTERS", "MAX_ORGANIC_WORDS",
+           "beat_sheet_outline", "three_act_map"]
 
 #: Safety backstops for organic books — high enough to never constrain a
 #: legitimate book, only to stop a runaway (model glitch, pathological
@@ -300,6 +301,60 @@ def make_outline(book: Book, *, n_chapters: int, context: Any = None) -> list[Ch
     book.chapters = chapters
     book.status = "planned"
     book.touch()
+    return chapters
+
+
+# ── beat-sheet outlines (Save the Cat, novel-adapted) ───────────────────────
+#
+# Mined from Blake Snyder's 15-beat structure (see fiction.BeatSheet):
+# chapters are annotated with the story beat they serve, so the fiction
+# writer's chapter_brief can steer by arc position, not just local beats.
+
+
+def three_act_map(n_chapters: int) -> dict[str, tuple[int, int]]:
+    """STC-aligned act boundaries: I (setup→break into two), II (fun and
+    games→dark night), III (break into three→final image)."""
+    n = max(3, int(n_chapters))
+    a1 = max(1, round(n * 0.20))
+    a2 = max(a1 + 1, round(n * 0.80))
+    return {"act_1": (1, a1), "act_2": (a1 + 1, a2), "act_3": (a2 + 1, n)}
+
+
+def beat_sheet_outline(book: Book, *, n_chapters: int,
+                       genre: str = "") -> list[Chapter]:
+    """Chapters annotated with Save-the-Cat beats for a fiction book.
+
+    Each chapter gets ``coverage`` = the beat name and a beat instruction
+    in its beats list.  Genre flavor comes from the engine's
+    :meth:`beat_note`.  Beats sharing a chapter merge (Brody's
+    multi-scene beats); skipped chapters inherit their position's beat.
+    """
+    from .fiction import BeatSheet, engine_for
+    n = max(3, int(n_chapters))
+    sheet = BeatSheet(n)
+    engine = engine_for(genre or "fantasy")
+    grouped: dict[int, list[dict[str, Any]]] = {}
+    for entry in sheet.full():
+        grouped.setdefault(entry["chapter"], []).append(entry)
+    chapters: list[Chapter] = []
+    for ch_no in range(1, n + 1):
+        entries = grouped.get(ch_no)
+        if entries:
+            names = [e["beat"] for e in entries]
+            notes = [e["note"] for e in entries]
+            coverage = f"__beat__:{names[-1]}"
+        else:
+            beat = sheet.beat_for(ch_no)
+            names, notes = [beat["beat"]], [beat["note"]]
+            coverage = f"__beat__:{beat['beat']}"
+        title = " / ".join(names)
+        beats = list(notes)
+        try:
+            beats.append(engine.beat_note(ch_no, n))
+        except Exception:  # noqa: BLE001
+            pass
+        chapters.append(Chapter(number=ch_no, title=title, beats=beats,
+                                coverage=coverage))
     return chapters
 
 

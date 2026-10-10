@@ -36,7 +36,115 @@ _log = get_logger(__name__)
 __all__ = [
     "StoryBible", "BibleCharacter", "PlotThread",
     "BibleBuilder", "build_bible",
+    "LorebookEntry", "Progression",
 ]
+
+
+# ── lorebook (NovelAI-style keyed entries) ────────────────────────────────────
+#
+# The bible is the full record; the LOREBOOK is the working memory injected
+# into generation prompts.  Mined from NovelAI's lorebook + AI Dungeon's
+# story cards + 1667's facts:
+# - an entry surfaces only when one of its keys appears in recent text
+#   (or when it is always_on / enabled);
+# - keys are case-insensitive, ``/regex/`` for regex, ``a & b`` = AND;
+# - chain activation: an active entry's text can trigger other entries;
+# - always_on facts are trimmed by budget (stale always-on steers wrong).
+
+
+_LORE_KINDS = ("character", "location", "item", "concept", "rule",
+               "faction", "event", "style")
+
+
+def _key_matches(key: str, text: str) -> bool:
+    """One lorebook key against text.
+
+    ``/regex/`` → regex (case-sensitive).  ``a & b`` → all parts must
+    match.  Otherwise case-insensitive whole-word match.
+    """
+    key = key.strip()
+    if not key:
+        return False
+    if "&" in key and not (key.startswith("/") and key.endswith("/")):
+        return all(_key_matches(part, text) for part in key.split("&"))
+    if len(key) >= 2 and key.startswith("/") and key.endswith("/"):
+        try:
+            return re.search(key[1:-1], text) is not None
+        except re.error:
+            return False
+    return re.search(r"\b" + re.escape(key) + r"\b", text,
+                     flags=re.IGNORECASE) is not None
+
+
+@dataclass
+class LorebookEntry:
+    """A NovelAI-style keyed lore entry: injected only when relevant."""
+    name: str
+    text: str = ""
+    kind: str = "concept"          # character|location|item|concept|rule|…
+    keys: list[str] = field(default_factory=list)
+    aliases: list[str] = field(default_factory=list)
+    always_on: bool = False
+    enabled: bool = True
+    hidden: bool = False          # concealed from readers, not the model
+    order: int = 100              # injection order (lower = earlier)
+
+    def __post_init__(self) -> None:
+        if self.kind not in _LORE_KINDS:
+            self.kind = "concept"
+
+    def matches(self, text: str) -> bool:
+        if not self.enabled or not text:
+            return False
+        hay = text
+        forms = [self.name, *self.aliases]
+        if any(_key_matches(f, hay) for f in forms):
+            return True
+        return any(_key_matches(k, hay) for k in self.keys)
+
+    def render(self) -> str:
+        label = self.name if not self.hidden else "⟦hidden⟧"
+        return f"[{self.kind}] {label}: {self.text}".strip()
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> "LorebookEntry":
+        return cls(
+            name=str(d.get("name", "")),
+            text=str(d.get("text", "")),
+            kind=str(d.get("kind", "concept")),
+            keys=[str(k) for k in d.get("keys", [])],
+            aliases=[str(a) for a in d.get("aliases", [])],
+            always_on=bool(d.get("always_on", False)),
+            enabled=bool(d.get("enabled", True)),
+            hidden=bool(d.get("hidden", False)),
+            order=int(d.get("order", 100)),
+        )
+
+
+@dataclass
+class Progression:
+    """A timeline-tracked detail change (Novelcrafter Progressions).
+
+    Outdated lore is overwritten by newer progressions, keeping the bible
+    accurate to the current story moment instead of the first draft.
+    """
+    name: str
+    detail: str
+    chapter: int = 0
+    recorded_at: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> "Progression":
+        return cls(name=str(d.get("name", "")),
+                   detail=str(d.get("detail", "")),
+                   chapter=int(d.get("chapter", 0)),
+                   recorded_at=str(d.get("recorded_at", "")))
 
 
 # ── data ─────────────────────────────────────────────────────────────────────
@@ -83,6 +191,10 @@ class StoryBible:
     arc_summary: str = ""
     chapters_digested: int = 0
     built_at: str = ""
+    #: NovelAI-style keyed entries (working memory for generation)
+    lore: list[LorebookEntry] = field(default_factory=list)
+    #: timeline-tracked detail changes (Novelcrafter Progressions)
+    progressions: list[Progression] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         d = asdict(self)
@@ -92,6 +204,8 @@ class StoryBible:
     def from_dict(cls, d: dict[str, Any]) -> "StoryBible":
         chars = [BibleCharacter(**c) for c in d.get("characters", [])]
         threads = [PlotThread(**t) for t in d.get("threads", [])]
+        lore = [LorebookEntry.from_dict(e) for e in d.get("lore", [])]
+        progs = [Progression.from_dict(p) for p in d.get("progressions", [])]
         return cls(
             story_slug=d.get("story_slug", ""), title=d.get("title", ""),
             pov=d.get("pov", "third"), tense=d.get("tense", "past"),
@@ -100,7 +214,7 @@ class StoryBible:
             world_rules=list(d.get("world_rules", [])),
             arc_summary=d.get("arc_summary", ""),
             chapters_digested=int(d.get("chapters_digested", 0)),
-            built_at=d.get("built_at", ""))
+            built_at=d.get("built_at", ""), lore=lore, progressions=progs)
 
     def character(self, name: str) -> BibleCharacter | None:
         low = name.lower()
@@ -135,6 +249,146 @@ class StoryBible:
         if self.arc_summary:
             lines.append("So far: " + self.arc_summary[:800])
         return "\n".join(lines)
+
+    # ── lorebook ──────────────────────────────────────────────────────
+    def _lore(self) -> list["LorebookEntry"]:
+        return list(getattr(self, "lore", []) or [])
+
+    def inject(self, recent_text: str, max_chars: int = 2500,
+               scan_chars: int = 4000) -> str:
+        """Assemble the keyed lorebook injection for a generation prompt.
+
+        AI-Dungeon canonical order: always-on facts first, then entries
+        whose keys appear in the recent text (chain activation included),
+        trimmed to ``max_chars``.  Returns the prompt-ready block (empty
+        string when nothing qualifies).
+        """
+        entries = [e for e in self._lore() if e.enabled]
+        if not entries:
+            return ""
+        window = (recent_text or "")[-scan_chars:]
+        active: list[LorebookEntry] = []
+        seen: set[str] = set()
+
+        def _fire(e: LorebookEntry) -> None:
+            if e.name in seen:
+                return
+            seen.add(e.name)
+            active.append(e)
+
+        # pass 1: always-on
+        for e in entries:
+            if e.always_on:
+                _fire(e)
+        # pass 2: keyed scan with TRUE chain activation — the text of an
+        # active entry can trigger other entries (NovelAI/1667 behavior)
+        frontier = [e.text for e in active]
+        for _ in range(3):
+            progressed = False
+            scan_texts = [window] + frontier
+            for e in entries:
+                if e.name in seen:
+                    continue
+                if any(e.matches(t) for t in scan_texts):
+                    _fire(e)
+                    frontier.append(e.text)
+                    progressed = True
+            if not progressed:
+                break
+        if not active:
+            return ""
+        lines = ["LORE:"]
+        budget = max_chars
+        for e in sorted(active, key=lambda x: x.order):
+            chunk = e.render()
+            if len(chunk) > budget:
+                chunk = chunk[:budget].rsplit(" ", 1)[0] + "…"
+            lines.append(chunk)
+            budget -= len(chunk)
+            if budget <= 200:
+                break
+        return "\n".join(lines).strip()
+
+    def mention_index(self, chapters: list[tuple[int, str, str]]) -> dict[str, list[int]]:
+        """Novelcrafter-style global mapping: name → chapter numbers.
+
+        Uses characters + lorebook entries (with aliases) as the index
+        vocabulary.
+        """
+        vocab: dict[str, str] = {}  # surface form → canonical name
+        for c in self.characters:
+            vocab[c.name.lower()] = c.name
+        for e in self._lore():
+            vocab[e.name.lower()] = e.name
+            for a in e.aliases:
+                vocab[a.lower()] = e.name
+        index: dict[str, set[int]] = {}
+        for n, _t, text in chapters:
+            low = text.lower()
+            for surface, canon in vocab.items():
+                if re.search(r"\b" + re.escape(surface) + r"\b", low):
+                    index.setdefault(canon, set()).add(n)
+        return {k: sorted(v) for k, v in index.items()}
+
+    def add_progression(self, name: str, detail: str,
+                        chapter: int = 0) -> "Progression":
+        """Record a timeline-tracked detail change (Novelcrafter Progressions)."""
+        progs = getattr(self, "progressions", None)
+        if progs is None:
+            self.progressions = progs = []
+        p = Progression(name=name, detail=detail, chapter=chapter,
+                        recorded_at=datetime.now(timezone.utc).isoformat(
+                            timespec="seconds"))
+        progs.append(p)
+        return p
+
+    def progressions_for(self, name: str) -> list["Progression"]:
+        return [p for p in (getattr(self, "progressions", []) or [])
+                if p.name.lower() == name.lower()]
+
+    def consistency_check(self) -> list[str]:
+        """Flag bible rot: always-on bloat, keyless entries, stale threads."""
+        flags: list[str] = []
+        entries = self._lore()
+        always = [e for e in entries if e.always_on and e.enabled]
+        if len(always) > 8:
+            flags.append(f"always-on bloat: {len(always)} entries always "
+                         "injected — trim to the essentials or the model "
+                         "will steer off them")
+        for e in entries:
+            if e.enabled and not e.always_on and not e.keys:
+                flags.append(f"entry {e.name!r} is enabled but has no keys "
+                             "and is not always-on — it will never fire")
+        for t in self.threads:
+            if t.status == "open" and t.heat <= 0 and t.last_seen:
+                flags.append(f"thread {t.id} open but cold "
+                             f"(last seen ch.{t.last_seen}) — resolve or heat it")
+        return flags
+
+    def export_lorebook(self) -> dict[str, Any]:
+        """Portable lorebook (NovelAI-style import/export)."""
+        return {
+            "story": self.story_slug,
+            "title": self.title,
+            "exported_at": datetime.now(timezone.utc).isoformat(
+                timespec="seconds"),
+            "entries": [e.to_dict() for e in self._lore()],
+        }
+
+    def import_lorebook(self, data: dict[str, Any]) -> int:
+        """Merge an exported lorebook. Returns entries added."""
+        lore = getattr(self, "lore", None)
+        if lore is None:
+            self.lore = lore = []
+        have = {e.name.lower() for e in lore}
+        added = 0
+        for d in data.get("entries", []):
+            e = LorebookEntry.from_dict(d)
+            if e.name.lower() not in have:
+                lore.append(e)
+                have.add(e.name.lower())
+                added += 1
+        return added
 
 
 # ── heuristic floor ──────────────────────────────────────────────────────────
@@ -525,6 +779,7 @@ class BibleBuilder:
                                      len(chapters))
         else:
             bible = self._from_heuristics(story_slug, title, chapters)
+        self._sync_lorebook(bible)
         self.save(bible)
         return bible
 
@@ -569,8 +824,51 @@ class BibleBuilder:
         bible.chapters_digested = max(
             bible.chapters_digested,
             max(n for n, _, _ in new_chapters))
+        self._sync_lorebook(bible)
         self.save(bible)
         return bible
+
+    def _sync_lorebook(self, bible: StoryBible) -> None:
+        """Derive/refresh keyed lorebook entries from the bible body.
+
+        Characters become ``kind=character`` entries keyed by name +
+        aliases (first/last name split); world rules become
+        ``kind=rule`` always_on entries (capped — see consistency_check).
+        """
+        if not hasattr(bible, "lore") or bible.lore is None:
+            bible.lore = []
+        have = {e.name.lower() for e in bible.lore}
+        order = 100 + len(bible.lore)
+        for c in bible.characters:
+            if c.name.lower() in have:
+                continue
+            aliases = []
+            parts = c.name.split()
+            if len(parts) > 1:
+                aliases = [p for p in (parts[0], parts[-1]) if len(p) > 2]
+            keys = [k for k in [c.name, *aliases]]
+            text_bits = [c.description]
+            if c.traits:
+                text_bits.append("Traits: " + ", ".join(c.traits))
+            if c.relationships:
+                text_bits.append("Bonds: " + "; ".join(c.relationships[:4]))
+            bible.lore.append(LorebookEntry(
+                name=c.name, kind="character",
+                text=" ".join(b for b in text_bits if b)[:600],
+                keys=keys, aliases=aliases,
+                always_on=(c.role == "protagonist"), order=order))
+            order += 1
+            have.add(c.name.lower())
+        # rules: always_on but ONLY the first few (trimmed by budget)
+        rule_entries = [e for e in bible.lore if e.kind == "rule"]
+        for i, rule in enumerate(bible.world_rules[:6]):
+            key = f"rule:{rule[:40]}"
+            if key.lower() in {e.name.lower() for e in bible.lore}:
+                continue
+            bible.lore.append(LorebookEntry(
+                name=key, kind="rule", text=rule[:300],
+                keys=[w for w in rule.split()[:4] if len(w) > 4][:3],
+                always_on=True, order=10 + i))
 
     # -- construction ---------------------------------------------------------
     def _from_model(self, story_slug: str, title: str,

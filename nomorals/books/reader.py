@@ -436,3 +436,180 @@ class StoryReader:
         path.write_text(json.dumps(kept, indent=2, ensure_ascii=False),
                         encoding="utf-8")
         return {"slug": slug, "removed": mark_id}
+
+
+# ── updates, highlights, stats ─────────────────────────────────────────────
+#
+# Mined from FanFicFare (mark_new_chapters: only-new-chapter updates) and
+# KOReader (highlights with colors + notes, exportable; reading stats).
+
+
+_HIGHLIGHT_COLORS = ("yellow", "green", "blue", "pink", "orange")
+
+
+def _highlights_path(self: "StoryReader", slug: str) -> Path:
+    return self.story_dir(slug) / "highlights.json"
+
+
+def add_highlight(self: "StoryReader", slug: str, chapter: int,
+                  quote: str, note: str = "",
+                  color: str = "yellow") -> dict[str, Any]:
+    """KOReader-style highlight on a chapter passage."""
+    self._load(slug)  # validates the story exists
+    quote = (quote or "").strip()
+    if not quote:
+        raise ReaderError("highlight needs quoted text")
+    color = color if color in _HIGHLIGHT_COLORS else "yellow"
+    path = _highlights_path(self, slug)
+    marks = self._read_json_list(path)
+    hid = max([m.get("id", 0) for m in marks] + [0]) + 1
+    mark = {"id": hid, "chapter": chapter, "quote": quote[:2000],
+            "note": (note or "").strip()[:2000], "color": color,
+            "at": _now()}
+    marks.append(mark)
+    path.write_text(json.dumps(marks, indent=2, ensure_ascii=False),
+                    encoding="utf-8")
+    return {"slug": slug, "highlight": mark}
+
+
+def list_highlights(self: "StoryReader",
+                    slug: str = "") -> list[dict[str, Any]]:
+    if slug:
+        return [{"slug": slug, **m}
+                for m in self._read_json_list(_highlights_path(self, slug))]
+    out: list[dict[str, Any]] = []
+    for meta_path in sorted(self.reader_dir().glob("*/story.json")):
+        s = meta_path.parent.name
+        out.extend({"slug": s, **m}
+                   for m in self._read_json_list(_highlights_path(self, s)))
+    return out
+
+
+def remove_highlight(self: "StoryReader", slug: str,
+                     highlight_id: int) -> dict[str, Any]:
+    path = _highlights_path(self, slug)
+    marks = self._read_json_list(path)
+    kept = [m for m in marks if m.get("id") != highlight_id]
+    if len(kept) == len(marks):
+        raise ReaderError(f"no highlight #{highlight_id} on {slug!r}")
+    path.write_text(json.dumps(kept, indent=2, ensure_ascii=False),
+                    encoding="utf-8")
+    return {"slug": slug, "removed": highlight_id}
+
+
+def export_highlights(self: "StoryReader", slug: str = "",
+                      format: str = "markdown") -> dict[str, Any]:
+    """Export highlights + notes (KOReader-style export)."""
+    fmt = (format or "markdown").lower()
+    if fmt not in ("markdown", "json", "text"):
+        raise ReaderError(f"format must be markdown|json|text, got {format!r}")
+    marks = list_highlights(self, slug)
+    if fmt == "json":
+        return {"format": "json",
+                "text": json.dumps(marks, indent=2, ensure_ascii=False)}
+    by_story: dict[str, list[dict[str, Any]]] = {}
+    for m in marks:
+        by_story.setdefault(m["slug"], []).append(m)
+    lines: list[str] = []
+    for s in sorted(by_story):
+        try:
+            title = self._load(s).title
+        except ReaderError:
+            title = s
+        lines.append(f"# {title}" if fmt == "markdown" else f"== {title} ==")
+        for m in sorted(by_story[s], key=lambda x: (x["chapter"], x["id"])):
+            note = f" — {m['note']}" if m.get("note") else ""
+            if fmt == "markdown":
+                lines.append(f"- ch.{m['chapter']} [{m['color']}] "
+                             f"“{m['quote']}”{note}")
+            else:
+                lines.append(f"* [ch.{m['chapter']}] \"{m['quote']}\"{note}")
+        lines.append("")
+    return {"format": fmt, "text": "\n".join(lines).strip()}
+
+
+def check_updates(self: "StoryReader",
+                  slug: str = "") -> dict[str, Any]:
+    """Compare cached chapters against the live chapter list.
+
+    FanFicFare's mark_new_chapters idea: report exactly which chapters
+    are new since the last sync, per story.
+    """
+    targets = [self._load(slug)] if slug else [
+        self._load(p.parent.name)
+        for p in sorted(self.reader_dir().glob("*/story.json"))]
+    report: list[dict[str, Any]] = []
+    for story in targets:
+        cached = {int(p.stem) for p in
+                  (self.story_dir(story.slug) / "chapters").glob("*.md")
+                  if p.stem.isdigit()}
+        new: list[int] = []
+        live_total = story.total_chapters
+        try:
+            adapter = self._adapter(story.url)
+            listing = adapter.chapter_list(
+                story.url, limit=self._profile()["list_limit"])
+            live_total = len(listing) or live_total
+            new = [n for n, _t, _u in listing if n not in cached]
+        except SourceError as exc:
+            report.append({"slug": story.slug, "title": story.title,
+                           "ok": False, "reason": str(exc)[:160]})
+            continue
+        report.append({"slug": story.slug, "title": story.title, "ok": True,
+                       "cached": len(cached), "live_total": live_total,
+                       "new_chapters": sorted(new)[:50],
+                       "new_count": len(new)})
+    return {"updates": report}
+
+
+def catch_up(self: "StoryReader", slug: str,
+             limit: int = 10) -> dict[str, Any]:
+    """Read every unread cached chapter in order, advancing progress."""
+    story = self._load(slug)
+    cached = sorted(
+        int(p.stem) for p in
+        (self.story_dir(slug) / "chapters").glob("*.md")
+        if p.stem.isdigit())
+    unread = [n for n in cached if n > (story.current_chapter or 0)][:limit]
+    read: list[dict[str, Any]] = []
+    for n in unread:
+        r = self.read(slug, chapter=n)
+        read.append({"chapter": r["chapter"], "title": r["chapter_title"],
+                     "words": r["words"]})
+    return {"slug": slug, "title": story.title, "read": read,
+            "remaining": max(0, len(cached) - (story.current_chapter or 0)
+                             - len(read))}
+
+
+def reading_stats(self: "StoryReader",
+                  slug: str = "") -> dict[str, Any]:
+    """Per-story reading stats: progress %, unread, highlights, streak."""
+    targets = [self._load(slug)] if slug else [
+        self._load(p.parent.name)
+        for p in sorted(self.reader_dir().glob("*/story.json"))]
+    stories = []
+    for story in targets:
+        cached = sum(1 for _ in
+                     (self.story_dir(story.slug) / "chapters").glob("*.md"))
+        total = story.total_chapters or cached
+        pct = round(100.0 * (story.current_chapter or 0) / total, 1) if total else 0
+        stories.append({
+            "slug": story.slug, "title": story.title,
+            "chapter": story.current_chapter, "cached": cached,
+            "total_chapters": total, "percent": pct,
+            "unread_cached": max(0, cached - (story.current_chapter or 0)),
+            "highlights": len(list_highlights(self, story.slug)),
+            "bookmarks": len(self.list_bookmarks(story.slug)),
+            "last_read_at": story.last_read_at,
+        })
+    return {"stories": stories}
+
+
+# bind the new methods onto StoryReader (keeps the class body untouched)
+StoryReader.add_highlight = add_highlight
+StoryReader.list_highlights = list_highlights
+StoryReader.remove_highlight = remove_highlight
+StoryReader.export_highlights = export_highlights
+StoryReader.check_updates = check_updates
+StoryReader.catch_up = catch_up
+StoryReader.reading_stats = reading_stats

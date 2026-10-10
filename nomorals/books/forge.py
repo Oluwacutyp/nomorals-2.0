@@ -27,7 +27,7 @@ from . import write as write_mod
 
 _log = get_logger(__name__)
 
-__all__ = ["BookForge"]
+__all__ = ["BookForge", "md_to_xhtml", "epub_bytes", "html_book"]
 
 _NOTES_CAP = 16000
 
@@ -626,8 +626,9 @@ class BookForge:
         }
 
     # ── stage 3: build ─────────────────────────────────────────────────────
-    def build(self, slug: str, *, page_size: str = "A4") -> dict[str, Any]:
-        """Compile manuscript.md + <slug>.pdf (real book layout)."""
+    def build(self, slug: str, *, page_size: str = "A4",
+              formats: tuple[str, ...] = ("pdf",)) -> dict[str, Any]:
+        """Compile manuscript.md + real book files (PDF / EPUB / HTML)."""
         book = self.load(slug)
         unwritten = book.chapters_written
         if unwritten == 0:
@@ -636,33 +637,71 @@ class BookForge:
         d = self.book_dir(slug)
         (d / "manuscript.md").write_text(manuscript, encoding="utf-8")
 
-        from ..core.pdf import render_pdf
-
-        data = render_pdf(
-            manuscript,
-            title=book.display_title,
-            page_size=page_size,
-            headings=True,
-            chapter_break=True,
-            toc=True,
-        )
-        pdf_path = d / f"{slug}.pdf"
-        pdf_path.write_bytes(data)
-        # page count: count page objects in the finished file
-        n_pages = data.count(b"/Type /Page ") + data.count(b"/Type /Page\n")
-        book.status = STATUS_BUILT
-        self.save(book)
-        _log.info("book built: %s (%d bytes pdf, ~%d pages)", slug, len(data), n_pages)
-        return {
+        result: dict[str, Any] = {
             "slug": slug,
-            "pdf": str(pdf_path),
             "manuscript": str(d / "manuscript.md"),
-            "pdf_bytes": len(data),
-            "pages": n_pages,
             "words": book.total_words,
             "chapters_written": book.chapters_written,
             "total_chapters": len(book.chapters),
         }
+        want = {f.lower() for f in formats} or {"pdf"}
+        if "pdf" in want:
+            from ..core.pdf import render_pdf
+
+            data = render_pdf(
+                manuscript,
+                title=book.display_title,
+                page_size=page_size,
+                headings=True,
+                chapter_break=True,
+                toc=True,
+            )
+            pdf_path = d / f"{slug}.pdf"
+            pdf_path.write_bytes(data)
+            # page count: count page objects in the finished file
+            n_pages = data.count(b"/Type /Page ") + data.count(b"/Type /Page\\n")
+            result.update({"pdf": str(pdf_path), "pdf_bytes": len(data),
+                           "pages": n_pages})
+        if "epub" in want:
+            epub_data = epub_bytes(book)
+            epub_path = d / f"{slug}.epub"
+            epub_path.write_bytes(epub_data)
+            result.update({"epub": str(epub_path),
+                           "epub_bytes": len(epub_data)})
+        if "html" in want:
+            html_data = html_book(book)
+            html_path = d / f"{slug}.html"
+            html_path.write_text(html_data, encoding="utf-8")
+            result.update({"html": str(html_path),
+                           "html_bytes": len(html_data.encode('utf-8'))})
+        book.status = STATUS_BUILT
+        self.save(book)
+        _log.info("book built: %s (%s)", slug,
+                  ", ".join(f"{k}={v}" for k, v in result.items()
+                            if k.endswith(("_bytes", "pages"))))
+        return result
+
+    def build_epub(self, slug: str, *, cover: str = "") -> dict[str, Any]:
+        """Build just the EPUB (stdlib-only, valid EPUB3)."""
+        book = self.load(slug)
+        d = self.book_dir(slug)
+        data = epub_bytes(book, cover_path=cover)
+        path = d / f"{slug}.epub"
+        path.write_bytes(data)
+        return {"slug": slug, "epub": str(path), "epub_bytes": len(data),
+                "words": book.total_words,
+                "chapters_written": book.chapters_written}
+
+    def build_html(self, slug: str, *, theme: str = "light") -> dict[str, Any]:
+        """Build just the single-file HTML book."""
+        book = self.load(slug)
+        d = self.book_dir(slug)
+        html = html_book(book, theme=theme)
+        path = d / f"{slug}.html"
+        path.write_text(html, encoding="utf-8")
+        return {"slug": slug, "html": str(path),
+                "html_bytes": len(html.encode("utf-8")),
+                "words": book.total_words}
 
     # ── stage 4: send ("send when done") ──────────────────────────────────
     def send(self, slug: str, platform: str, chat_id: str, *, caption: str = "") -> dict[str, Any]:
@@ -727,5 +766,322 @@ class BookForge:
 
 def _dumps(obj: Any) -> str:
     import json
-
     return json.dumps(obj, indent=2, ensure_ascii=False)
+
+
+# ── EPUB + HTML builders (stdlib-only) ──────────────────────────────────────
+#
+# Mined from EbookLib's EpubBook model (metadata → manifest → spine → NCX/Nav)
+# and Deckle's markdown→EPUB flow.  EPUB is a ZIP with a fixed skeleton, so a
+# valid EPUB3 needs nothing but ``zipfile`` — no dependency, which beats
+# requiring ebooklib on the phone.
+
+
+def _esc(text: str) -> str:
+    return (text.replace("&", "&amp;").replace("<", "&lt;")
+            .replace(">", "&gt;").replace('"', "&quot;"))
+
+
+def _inline_md(text: str) -> str:
+    """Bold/italic/code spans → XHTML."""
+    text = _esc(text)
+    text = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", text)
+    text = re.sub(r"(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)", r"<em>\1</em>", text)
+    text = re.sub(r"`(.+?)`", r"<code>\1</code>", text)
+    return text
+
+
+def md_to_xhtml(md: str, title: str = "") -> str:
+    """Small markdown subset → XHTML body fragment."""
+    paras: list[str] = []
+    buf: list[str] = []
+    list_tag = ""  # "ul" | "ol" | ""
+
+    def close_list() -> None:
+        nonlocal list_tag
+        if list_tag:
+            paras.append(f"</{list_tag}>")
+            list_tag = ""
+
+    def flush() -> None:
+        close_list()
+        if buf:
+            paras.append("<p>" + " ".join(_inline_md(l) for l in buf) + "</p>")
+            buf.clear()
+
+    for raw in (md or "").split("\n"):
+        line = raw.rstrip()
+        stripped = line.strip()
+        if not stripped:
+            flush()
+            continue
+        if stripped.startswith("### "):
+            flush()
+            paras.append(f"<h3>{_inline_md(stripped[4:])}</h3>")
+        elif stripped.startswith("## "):
+            flush()
+            paras.append(f"<h2>{_inline_md(stripped[3:])}</h2>")
+        elif stripped.startswith("# "):
+            flush()
+            paras.append(f"<h1>{_inline_md(stripped[2:])}</h1>")
+        elif re.match(r"^[-*]\s+", stripped):
+            if buf:
+                flush()
+            if list_tag != "ul":
+                close_list()
+                paras.append("<ul>")
+                list_tag = "ul"
+            paras.append(f"<li>{_inline_md(re.sub(r'^[-*]\\s+', '', stripped))}</li>")
+        elif re.match(r"^\d+[.)]\s+", stripped):
+            if buf:
+                flush()
+            if list_tag != "ol":
+                close_list()
+                paras.append("<ol>")
+                list_tag = "ol"
+            paras.append(f"<li>{_inline_md(re.sub(r'^\\d+[.)]\\s+', '', stripped))}</li>")
+        elif stripped.startswith(">"):
+            flush()
+            paras.append(f"<blockquote>{_inline_md(stripped.lstrip('> '))}</blockquote>")
+        elif stripped == "---":
+            flush()
+            paras.append("<hr/>")
+        else:
+            if list_tag:
+                close_list()
+            buf.append(stripped)
+    flush()
+    body = "\n".join(paras)
+    head = f"<title>{_esc(title)}</title>" if title else ""
+    return (f'<?xml version="1.0" encoding="utf-8"?>\n'
+            f'<!DOCTYPE html>\n<html xmlns="http://www.w3.org/1999/xhtml">\n'
+            f"<head>{head}"
+            f'<link rel="stylesheet" type="text/css" href="style.css"/>'
+            f"</head>\n<body>\n{body}\n</body>\n</html>")
+
+
+_EPUB_CSS = """body { font-family: Georgia, serif; line-height: 1.6; margin: 5%; }
+h1 { text-align: center; margin-top: 20%; font-size: 1.8em; }
+h2 { margin-top: 2em; font-size: 1.4em; }
+h3 { margin-top: 1.5em; font-size: 1.2em; }
+p { text-indent: 1.2em; margin: 0 0 0.6em 0; text-align: justify; }
+h1 + p, h2 + p, h3 + p { text-indent: 0; }
+blockquote { margin: 1em 2em; font-style: italic; }
+.title-page { text-align: center; margin-top: 30%; }
+.book-title { font-size: 2.2em; font-weight: bold; }
+.book-author { margin-top: 1.5em; font-size: 1.2em; }
+"""
+
+
+def epub_bytes(book: Book, *, cover_path: str = "") -> bytes:
+    """Build a valid EPUB3 for ``book``.  Stdlib only (zipfile)."""
+    import io
+    import uuid
+    import zipfile
+    from datetime import datetime, timezone
+
+    written = [c for c in book.chapters
+               if c.status == STATUS_WRITTEN and c.text.strip()]
+    if not written:
+        raise BookError(f"book {book.slug!r} has no written chapters yet")
+
+    uid = f"urn:uuid:{uuid.uuid4()}"
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    author = book.author or "Devon"
+    lang = book.language or "en"
+
+    files: list[tuple[str, bytes, bool]] = []  # (name, data, compress)
+
+    def xhtml(name: str, body: str) -> None:
+        files.append((f"OEBPS/{name}", body.encode("utf-8"), True))
+
+    # title page
+    title_body = (
+        f'<div class="title-page">\n'
+        f'<div class="book-title">{_esc(book.display_title)}</div>\n'
+        + (f'<div class="book-author">{_esc(book.author)}</div>\n' if book.author else "")
+        + (f"<p><em>{_esc(book.subtitle)}</em></p>\n" if book.subtitle else "")
+        + "</div>")
+    xhtml("title.xhtml",
+          f'<?xml version="1.0" encoding="utf-8"?>\n<!DOCTYPE html>\n'
+          f'<html xmlns="http://www.w3.org/1999/xhtml"><head>'
+          f"<title>{_esc(book.display_title)}</title>"
+          f'<link rel="stylesheet" type="text/css" href="style.css"/>'
+          f"</head><body>\n{title_body}\n</body></html>")
+
+    # cover page (optional image)
+    cover_item = ""
+    cover_id = ""
+    cpath = Path(cover_path or book.cover_image or "")
+    if cpath.is_file():
+        suffix = cpath.suffix.lower()
+        mime = {"jpg": "image/jpeg", "jpeg": "image/jpeg",
+                "png": "image/png", "gif": "image/gif",
+                "webp": "image/webp"}.get(suffix.lstrip("."), "image/jpeg")
+        cover_id = "cover-img"
+        files.append((f"OEBPS/images/cover{suffix}",
+                      cpath.read_bytes(), True))
+        xhtml("cover.xhtml",
+              f'<?xml version="1.0" encoding="utf-8"?>\n<!DOCTYPE html>\n'
+              f'<html xmlns="http://www.w3.org/1999/xhtml"><head>'
+              f"<title>Cover</title></head><body>"
+              f'<div style="text-align:center">'
+              f'<img src="images/cover{suffix}" alt="Cover" '
+              f'style="max-width:100%"/></div></body></html>')
+        cover_item = (f'<item id="{cover_id}" href="images/cover{suffix}" '
+                      f'media-type="{mime}" properties="cover-image"/>')
+
+    # chapters
+    ch_names: list[str] = []
+    for c in written:
+        name = f"ch{c.number:03d}.xhtml"
+        ch_names.append(name)
+        body_md = f"# {c.title or f'Chapter {c.number}'}\n\n{c.text.strip()}"
+        xhtml(name, md_to_xhtml(body_md, c.title or f"Chapter {c.number}"))
+
+    manifest_items = [
+        '<item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/>',
+        '<item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" '
+        'properties="nav"/>',
+        '<item id="css" href="style.css" media-type="text/css"/>',
+        '<item id="title" href="title.xhtml" media-type="application/xhtml+xml"/>',
+    ]
+    if cover_id:
+        manifest_items.append(
+            '<item id="cover" href="cover.xhtml" '
+            'media-type="application/xhtml+xml"/>')
+        manifest_items.append(cover_item)
+    spine_ids = ["title"] + ([ "cover"] if cover_id else [])
+    for i, name in enumerate(ch_names):
+        cid = f"ch{i + 1}"
+        manifest_items.append(
+            f'<item id="{cid}" href="{name}" '
+            f'media-type="application/xhtml+xml"/>')
+        spine_ids.append(cid)
+
+    meta_extra = ""
+    if book.series:
+        meta_extra = (
+            f'<meta property="belongs-to-collection">{_esc(book.series)}</meta>'
+            f'<meta property="group-position">{book.series_index}</meta>')
+    opf = (
+        f'<?xml version="1.0" encoding="utf-8"?>\n'
+        f'<package xmlns="http://www.idpf.org/2007/opf" version="3.0" '
+        f'unique-identifier="uid">\n<metadata '
+        f'xmlns:dc="http://purl.org/dc/elements/1.1/">\n'
+        f'<dc:identifier id="uid">{_esc(uid)}</dc:identifier>\n'
+        f"<dc:title>{_esc(book.display_title)}</dc:title>\n"
+        + (f"<dc:creator>{_esc(author)}</dc:creator>\n")
+        + (f"<dc:description>{_esc(book.description[:500])}</dc:description>\n"
+           if book.description else "")
+        + (f"<dc:subject>{_esc(book.genre)}</dc:subject>\n" if book.genre else "")
+        + f"<dc:language>{_esc(lang)}</dc:language>\n"
+        f"<dc:date>{now}</dc:date>\n"
+        f'<meta property="dcterms:modified">{now}</meta>\n'
+        f"{meta_extra}</metadata>\n<manifest>\n"
+        + "\n".join(manifest_items)
+        + "\n</manifest>\n<spine>\n"
+        + "\n".join(f'<itemref idref="{sid}"/>' for sid in spine_ids)
+        + "\n</spine>\n</package>")
+    files.append(("OEBPS/content.opf", opf.encode("utf-8"), True))
+
+    # NCX (EPUB2 compat)
+    nav_points = []
+    for i, c in enumerate(written):
+        nav_points.append(
+            f'<navPoint id="np{i + 1}" playOrder="{i + 2}">'
+            f"<navLabel><text>{_esc(c.title or f'Chapter {c.number}')}</text>"
+            f"</navLabel>"
+            f'<content src="{ch_names[i]}"/></navPoint>')
+    ncx = (
+        f'<?xml version="1.0" encoding="utf-8"?>\n'
+        f'<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1">\n'
+        f"<head>"
+        f'<meta name="dtb:uid" content="{_esc(uid)}"/>'
+        f'<meta name="dtb:depth" content="1"/>'
+        f'<meta name="dtb:totalPageCount" content="0"/>'
+        f'<meta name="dtb:maxPageNumber" content="0"/></head>\n'
+        f'<docTitle><text>{_esc(book.display_title)}</text></docTitle>\n'
+        f"<navMap>\n" + "\n".join(nav_points) + "\n</navMap>\n</ncx>")
+    files.append(("OEBPS/toc.ncx", ncx.encode("utf-8"), True))
+
+    # EPUB3 nav
+    nav_items = "".join(
+        f'<li><a href="{n}">{_esc(c.title or f"Chapter {c.number}")}</a></li>\n'
+        for n, c in zip(ch_names, written))
+    nav = (
+        f'<?xml version="1.0" encoding="utf-8"?>\n<!DOCTYPE html>\n'
+        f'<html xmlns="http://www.w3.org/1999/xhtml" '
+        f'xmlns:epub="http://www.idpf.org/2007/ops">\n<head>'
+        f"<title>Contents</title></head>\n<body>\n"
+        f'<nav epub:type="toc"><h1>Contents</h1>\n<ol>\n{nav_items}</ol>\n'
+        f"</nav>\n</body>\n</html>")
+    files.append(("OEBPS/nav.xhtml", nav.encode("utf-8"), True))
+    files.append(("OEBPS/style.css", _EPUB_CSS.encode("utf-8"), True))
+
+    container = (
+        '<?xml version="1.0" encoding="utf-8"?>\n'
+        '<container version="1.0" '
+        'xmlns="urn:oasis:names:tc:opendocument:xmlns:container">\n'
+        "<rootfiles>\n"
+        '<rootfile full-path="OEBPS/content.opf" '
+        'media-type="application/oebps-package+xml"/>\n'
+        "</rootfiles>\n</container>")
+    files.append(("META-INF/container.xml", container.encode("utf-8"), True))
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        # mimetype MUST be first and uncompressed
+        zf.writestr("mimetype", "application/epub+zip",
+                    compress_type=zipfile.ZIP_STORED)
+        for name, data, _ in files:
+            zf.writestr(name, data, compress_type=zipfile.ZIP_DEFLATED)
+    return buf.getvalue()
+
+
+def html_book(book: Book, *, theme: str = "light") -> str:
+    """Single-file styled HTML book — great for phone reading and sharing."""
+    written = [c for c in book.chapters
+               if c.status == STATUS_WRITTEN and c.text.strip()]
+    if not written:
+        raise BookError(f"book {book.slug!r} has no written chapters yet")
+    dark = theme == "dark"
+    bg, fg = ("#1a1a2e", "#e8e8e8") if dark else ("#fdfbf7", "#222222")
+    css = (
+        f"body {{ font-family: Georgia, serif; line-height: 1.7; "
+        f"max-width: 42em; margin: 0 auto; padding: 2em 1.2em; "
+        f"background: {bg}; color: {fg}; }}\n"
+        f"h1 {{ text-align: center; margin: 1.5em 0 0.3em; }}\n"
+        f".cover {{ text-align: center; padding: 18vh 0; }}\n"
+        f".cover .t {{ font-size: 2.4em; font-weight: bold; }}\n"
+        f".cover .a {{ margin-top: 1em; font-size: 1.2em; opacity: .8; }}\n"
+        f".toc a {{ color: inherit; text-decoration: none; }}\n"
+        f".toc li {{ margin: .3em 0; }}\n"
+        f".chapter {{ page-break-before: always; margin-top: 3em; }}\n"
+        f"p {{ text-align: justify; }}\n")
+    toc = "".join(
+        f'<li><a href="#ch{c.number}">{_esc(c.title or f"Chapter {c.number}")}'
+        f"</a></li>\n" for c in written)
+    body = [
+        f'<div class="cover"><div class="t">{_esc(book.display_title)}</div>',
+    ]
+    if book.subtitle:
+        body.append(f"<p><em>{_esc(book.subtitle)}</em></p>")
+    if book.author:
+        body.append(f'<div class="a">{_esc(book.author)}</div>')
+    body.append("</div>")
+    body.append(f'<div class="toc"><h2>Contents</h2><ol>\n{toc}</ol></div>')
+    for c in written:
+        frag = md_to_xhtml(f"# {c.title or f'Chapter {c.number}'}\n\n"
+                           f"{c.text.strip()}")
+        # strip the xml/head wrapper, keep the body content
+        inner = frag.split("<body>", 1)[1].rsplit("</body>", 1)[0]
+        # drop the per-chapter stylesheet link already in head
+        body.append(f'<div class="chapter" id="ch{c.number}">\n{inner}\n</div>')
+    return (
+        f"<!DOCTYPE html>\n<html lang=\"{_esc(book.language or 'en')}\">\n"
+        f"<head><meta charset=\"utf-8\"/>\n"
+        f"<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"/>\n"
+        f"<title>{_esc(book.display_title)}</title>\n"
+        f"<style>\n{css}</style></head>\n<body>\n"
+        + "\n".join(body) + "\n</body>\n</html>")
