@@ -219,7 +219,7 @@ class NewStrategyFrameTests(unittest.TestCase):
         names = st.list_strategies()
         for n in self.NAMES:
             self.assertIn(n, names)
-        self.assertEqual(len(names), 9)
+        self.assertEqual(len(names), 16)
         with self.assertRaises(KeyError):
             st.get_strategy("no_such_strategy")
         self.assertEqual(st.get_strategy("ICHIMOKU-TREND").name,
@@ -369,7 +369,7 @@ class SarReversalTests(unittest.TestCase):
     def test_runs_in_zoo(self):
         df = ta_data.make_synthetic(500, seed=12)
         frames = st.run_zoo(st.list_strategies(), df)
-        self.assertEqual(len(frames), 9)
+        self.assertEqual(len(frames), 16)
         ranked = st.rank_strategies(frames, df["close"])
         self.assertIn("score", ranked.columns)
 
@@ -426,7 +426,7 @@ class _FakeCoinbase:
 class FeedsTests(unittest.TestCase):
     def test_unknown_source(self):
         with self.assertRaises(ValueError):
-            feeds.fetch_ohlcv("kraken", "BTCUSDT")
+            feeds.fetch_ohlcv("nonexistent_exchange", "BTCUSDT")
 
     def test_needs_vault_or_connector(self):
         with self.assertRaises(ValueError):

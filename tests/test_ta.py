@@ -172,11 +172,15 @@ class StrategyTests(unittest.TestCase):
     def test_registry_and_unknown(self):
         names = st.list_strategies()
         self.assertEqual(names, ["bollinger_squeeze", "breakout",
-                                "ichimoku_trend", "mean_reversion", "momentum",
-                                "rsi_divergence", "sar_reversal",
+                                "connors_rsi2", "heikin_ashi_trend",
+                                "ichimoku_trend", "keltner_breakout",
+                                "macd_cross", "mean_reversion", "momentum",
+                                "pattern_confluence", "rsi_divergence",
+                                "sar_reversal", "stoch_cross", "supertrend",
                                 "trend_follow", "vwap_bounce"])
         self.assertEqual(st.list_strategies("trend"),
-                         ["ichimoku_trend", "sar_reversal", "trend_follow"])
+                         ["heikin_ashi_trend", "ichimoku_trend",
+                          "sar_reversal", "supertrend", "trend_follow"])
         with self.assertRaises(KeyError):
             st.get_strategy("nope")
 
@@ -329,7 +333,7 @@ class PipelineTests(unittest.TestCase):
         self.assertTrue(-1.0 <= res["bias"] <= 1.0)
         self.assertTrue(0.0 <= res["agreement"] <= 1.0)
         self.assertIn(res["position_now"], (-1.0, 0.0, 1.0))
-        self.assertEqual(res["n_strategies"], 9)
+        self.assertEqual(res["n_strategies"], 16)
         self.assertEqual(res["bars"], 600)
 
     def test_analyze_deterministic(self):
