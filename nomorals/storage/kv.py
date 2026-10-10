@@ -70,10 +70,11 @@ class KVStore:
         now_fn: Callable[[], float] | None = None,
     ) -> None:
         self._db = db
+        # Nested namespaces (``a:b``) are allowed: ``namespaced()`` builds them
+        # and every operation keys off the full ``<ns>:`` prefix, so nesting
+        # stays unambiguous for prefix scans and deletes.
         self._ns = namespace.strip().strip(_SEP)
         self._now = now_fn or now
-        if _SEP in self._ns:
-            raise ValueError(f"namespace may not contain {_SEP!r}: {self._ns!r}")
 
     # ── scoping ──────────────────────────────────────────────────────────────
     @property
@@ -97,6 +98,10 @@ class KVStore:
 
     def _prefix(self) -> str:
         return f"{self._ns}{_SEP}" if self._ns else ""
+
+    def _scoped(self, prefix: str) -> str:
+        """Namespace-scoped key or prefix; empty ``prefix`` = whole namespace."""
+        return self._full(prefix) if prefix else self._prefix()
 
     # ── reads ────────────────────────────────────────────────────────────────
     def _live_clause(self, alias: str = "") -> str:
@@ -271,7 +276,7 @@ class KVStore:
 
     def delete_prefix(self, prefix: str) -> int:
         """Delete every key under ``<ns>:<prefix>``. Returns rows removed."""
-        like = self._full(prefix) + "%"
+        like = self._scoped(prefix) + "%"
         return self._db.delete(self.TABLE, "key LIKE ? ESCAPE '\\'", (like,))
 
     def clear_namespace(self) -> int:
@@ -383,7 +388,7 @@ class KVStore:
     def keys(self, prefix: str = "", limit: int = 1000) -> list[str]:
         """Live keys under this namespace starting with ``prefix`` (unprefixed)."""
         limit = min(max(1, limit), _MAX_SCAN)
-        like = self._full(prefix) + "%"
+        like = self._scoped(prefix) + "%"
         rows = self._db.query(
             f"SELECT key FROM {self.TABLE} WHERE key LIKE ? ESCAPE '\\' "
             f"AND {self._live_clause()} ORDER BY key LIMIT ?",
@@ -395,7 +400,7 @@ class KVStore:
     def scan(self, prefix: str = "", limit: int = 1000) -> list[tuple[str, Any]]:
         """``(key, decoded value)`` pairs under this namespace (unprefixed keys)."""
         limit = min(max(1, limit), _MAX_SCAN)
-        like = self._full(prefix) + "%"
+        like = self._scoped(prefix) + "%"
         rows = self._db.query(
             f"SELECT key, value FROM {self.TABLE} WHERE key LIKE ? ESCAPE '\\' "
             f"AND {self._live_clause()} ORDER BY key LIMIT ?",
@@ -412,7 +417,7 @@ class KVStore:
         return out
 
     def count(self, prefix: str = "") -> int:
-        like = self._full(prefix) + "%"
+        like = self._scoped(prefix) + "%"
         return int(
             self._db.scalar(
                 f"SELECT COUNT(*) FROM {self.TABLE} "
