@@ -341,3 +341,108 @@ class CitationManager:
                 "quotes": quotes_by_source.get(sid, []),
             })
         return trail
+
+
+# ── corroboration & conflict detection ────────────────────────────────
+#
+# The deep-research best-practice rule: a key finding should be confirmed
+# by at least two *independent* sources (different domains), and when
+# sources on the same topic assert different figures the conflict must
+# be surfaced, not averaged away. Both are heuristic and offline —
+# documented, never claimed as proof.
+
+@dataclass
+class Conflict:
+    """Two sources on the same topic asserting different figures."""
+
+    topic: str
+    value_a: str
+    url_a: str
+    value_b: str
+    url_b: str
+
+
+def _finding_text(finding: Any) -> str:
+    return " ".join(str(getattr(finding, k, "") or "")
+                    for k in ("title", "snippet", "detail"))
+
+
+def _finding_domain(finding: Any) -> str:
+    from urllib.parse import urlparse
+    try:
+        return urlparse(
+            str(getattr(finding, "url", "") or "")).netloc.lower().lstrip("www.")
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def _topic_overlap(a: str, b: str) -> float:
+    wa = set(_content_words(a))
+    wb = set(_content_words(b))
+    if not wa or not wb:
+        return 0.0
+    return len(wa & wb) / max(len(wa), len(wb))
+
+
+def _topic_key(text: str) -> str:
+    from collections import Counter
+    return " ".join(w for w, _ in
+                    Counter(_content_words(text)).most_common(4))
+
+
+def corroboration_map(findings: list[Any]) -> dict[int, list[int]]:
+    """For each finding index, the indices of *independent* corroborators.
+
+    A corroborator covers the same topic (content-word overlap ≥ 0.5)
+    from a *different* domain — the ≥2-independent-sources rule, measured
+    rather than assumed. Never raises.
+    """
+    findings = list(findings or [])
+    texts = [_finding_text(f) for f in findings]
+    domains = [_finding_domain(f) for f in findings]
+    out: dict[int, list[int]] = {}
+    for i in range(len(findings)):
+        partners = []
+        for j in range(len(findings)):
+            if i == j:
+                continue
+            if not domains[i] or domains[i] == domains[j]:
+                continue
+            if _topic_overlap(texts[i], texts[j]) >= 0.5:
+                partners.append(j)
+        out[i] = partners
+    return out
+
+
+def find_conflicts(findings: list[Any]) -> list[Conflict]:
+    """Find same-topic / different-figure disagreements across domains.
+
+    A conflict is: topic overlap ≥ 0.5, different domains, both sources
+    state numbers, and the number sets are disjoint (e.g. one says
+    "$50" and another says "$200" about the same fee). Heuristic and
+    offline — it flags candidates for the report, it does not adjudicate
+    them. Never raises.
+    """
+    findings = list(findings or [])
+    texts = [_finding_text(f) for f in findings]
+    domains = [_finding_domain(f) for f in findings]
+    out: list[Conflict] = []
+    for i in range(len(findings)):
+        for j in range(i + 1, len(findings)):
+            if not domains[i] or domains[i] == domains[j]:
+                continue
+            if _topic_overlap(texts[i], texts[j]) < 0.5:
+                continue
+            nums_i = {n.replace(",", "")
+                      for n in _NUMBER.findall(texts[i])}
+            nums_j = {n.replace(",", "")
+                      for n in _NUMBER.findall(texts[j])}
+            if nums_i and nums_j and nums_i.isdisjoint(nums_j):
+                out.append(Conflict(
+                    topic=_topic_key(texts[i] + " " + texts[j]) or "(topic)",
+                    value_a=", ".join(sorted(nums_i)[:3]),
+                    url_a=str(getattr(findings[i], "url", "")),
+                    value_b=", ".join(sorted(nums_j)[:3]),
+                    url_b=str(getattr(findings[j], "url", "")),
+                ))
+    return out

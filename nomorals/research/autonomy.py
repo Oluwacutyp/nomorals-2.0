@@ -71,10 +71,21 @@ def ensure_schema(db: Any) -> None:
             context TEXT NOT NULL DEFAULT '',
             ts REAL NOT NULL,
             status TEXT NOT NULL DEFAULT 'open',
-            resolved_ts REAL NOT NULL DEFAULT 0
+            resolved_ts REAL NOT NULL DEFAULT 0,
+            priority REAL NOT NULL DEFAULT 0,
+            attempts INTEGER NOT NULL DEFAULT 0
         )
         """
     )
+    # Migrations for DBs created before priority/attempts existed.
+    for ddl in (
+        "ALTER TABLE knowledge_gaps ADD COLUMN priority REAL NOT NULL DEFAULT 0",
+        "ALTER TABLE knowledge_gaps ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0",
+    ):
+        try:
+            db.execute(ddl)
+        except Exception:  # noqa: BLE001 - column already there
+            pass
     db.execute(
         """
         CREATE TABLE IF NOT EXISTS source_quality (
@@ -169,20 +180,61 @@ class ResearchOrgan:
 
     # ── knowledge gaps ───────────────────────────────────────────────
 
+    @staticmethod
+    def _gap_priority(question: str, context: str = "") -> float:
+        """Priority score for a knowledge gap (qwen_ai_scientist pattern).
+
+        Gaps with more substance, time sensitivity, and context get worked
+        first. Heuristic and documented: content-word count, time-anchor
+        bonus, context bonus. Capped at 1.0.
+        """
+        import re as _re
+        stop = frozenset(
+            "a an the and or but if then else when at by for with about into "
+            "of as it its this that these those is are was were be been have "
+            "has had do does did what why how which who whom whose can could "
+            "should would will shall may might must tell me my i you your we "
+            "us s t".split())
+        words = [w for w in _re.findall(r"[a-z0-9]+", question.lower())
+                 if w not in stop and len(w) > 1]
+        score = min(0.5, 0.05 * len(words))
+        time_anchors = frozenset(
+            "today yesterday week month year recent latest current now "
+            "upcoming soon deadline new just 2024 2025 2026 2027 2028".split())
+        if set(words) & time_anchors:
+            score += 0.3
+        if (context or "").strip():
+            score += 0.2
+        return round(min(1.0, score), 3)
+
+    @staticmethod
+    def _gap_overlap(a: str, b: str) -> float:
+        import re as _re
+        wa = set(_re.findall(r"[a-z0-9]{3,}", a.lower()))
+        wb = set(_re.findall(r"[a-z0-9]{3,}", b.lower()))
+        if not wa or not wb:
+            return 0.0
+        return len(wa & wb) / max(len(wa), len(wb))
+
     def note_gap(self, question: str, context: str = "") -> int:
         question = (question or "").strip()
         if not question:
             raise ValueError("gap needs a question")
-        # De-dupe: don't re-open an identical open gap.
+        # De-dupe: exact match first, then fuzzy (same question asked in
+        # different words must not open a second gap).
         row = self.db.query_one(
             "SELECT id FROM knowledge_gaps WHERE question = ? AND status = 'open'",
             (question,))
         if row:
             return int(row["id"])
+        for existing in self.open_gaps(limit=50):
+            if self._gap_overlap(question, existing["question"]) >= 0.6:
+                return int(existing["id"])
         cur = self.db.execute(
-            "INSERT INTO knowledge_gaps (question, context, ts, status)"
-            " VALUES (?, ?, ?, 'open')",
-            (question, context or "", time.time()))
+            "INSERT INTO knowledge_gaps (question, context, ts, status, priority)"
+            " VALUES (?, ?, ?, 'open', ?)",
+            (question, context or "", time.time(),
+             self._gap_priority(question, context)))
         try:
             return int(cur.lastrowid or 0)
         except Exception:  # noqa: BLE001
@@ -190,9 +242,30 @@ class ResearchOrgan:
 
     def open_gaps(self, limit: int = 20) -> list[dict[str, Any]]:
         rows = self.db.query(
-            "SELECT id, question, context, ts FROM knowledge_gaps"
-            " WHERE status = 'open' ORDER BY ts ASC LIMIT ?", (limit,))
+            "SELECT id, question, context, ts, priority, attempts"
+            " FROM knowledge_gaps"
+            " WHERE status = 'open' ORDER BY priority DESC, ts ASC LIMIT ?",
+            (limit,))
         return [dict(r) for r in (rows or [])]
+
+    def gap_stats(self) -> dict[str, Any]:
+        """Observability for the gap loop: counts by status + top gaps."""
+        out: dict[str, Any] = {"open": 0, "resolved": 0, "stalled": 0,
+                               "top_open": []}
+        try:
+            rows = self.db.query(
+                "SELECT status, COUNT(*) AS n FROM knowledge_gaps GROUP BY status")
+            for r in rows or []:
+                if r["status"] in out:
+                    out[r["status"]] = int(r["n"])
+            out["top_open"] = [
+                {"id": g["id"], "question": g["question"][:100],
+                 "priority": g.get("priority", 0),
+                 "attempts": g.get("attempts", 0)}
+                for g in self.open_gaps(limit=5)]
+        except Exception:  # noqa: BLE001 - stats never break the organ
+            pass
+        return out
 
     # ── source quality (learned, not hardcoded) ──────────────────────
 
@@ -355,6 +428,9 @@ class ResearchOrgan:
                 "snippet": getattr(finding, "snippet", ""),
             })
 
+    #: a gap that fails this many research attempts stops being retried.
+    _MAX_GAP_ATTEMPTS = 3
+
     def _work_gaps(self, report: OrganTickReport) -> None:
         from .pipeline import research_deep, _router_llm_fn
         gaps = self.open_gaps(limit=3)  # conservative: 3 per tick max
@@ -363,19 +439,27 @@ class ResearchOrgan:
         rctx = self._rctx()
         llm_fn = _router_llm_fn(getattr(self.context, "router", None))
         for gap in gaps:
+            attempts = int(gap.get("attempts", 0) or 0) + 1
             try:
                 deep = research_deep(
                     gap["question"], rctx, llm_fn=llm_fn, max_queries=4)
                 answered = bool((deep.synthesis or "").strip())
+                status = ("resolved" if answered
+                          else "stalled" if attempts >= self._MAX_GAP_ATTEMPTS
+                          else "open")
                 self.db.execute(
-                    "UPDATE knowledge_gaps SET status = ?, resolved_ts = ?"
-                    " WHERE id = ?",
-                    ("resolved" if answered else "stalled",
-                     time.time(), gap["id"]))
+                    "UPDATE knowledge_gaps SET status = ?, resolved_ts = ?,"
+                    " attempts = ? WHERE id = ?",
+                    (status, time.time() if answered else 0,
+                     attempts, gap["id"]))
                 if answered:
                     report.gaps_resolved += 1
-                    # The answer goes back to the brain as an event so it
-                    # can actually use it instead of the gap rotting in a table.
+                    # INTEGRATE (MAIL loop): the answer is stored back as
+                    # learned knowledge, not just emitted — the gap
+                    # genuinely closes instead of rotting in a table.
+                    self._integrate_gap_answer(gap, deep)
+                    # The answer also goes back to the brain as an event so
+                    # it can act on it immediately.
                     _bus.emit(self.db, "research", "brain", "gap.answered", {
                         "question": gap["question"],
                         "synthesis": deep.synthesis[:2000],
@@ -385,5 +469,35 @@ class ResearchOrgan:
                     })
                     report.events_emitted += 1
             except Exception as exc:  # noqa: BLE001
+                self.db.execute(
+                    "UPDATE knowledge_gaps SET attempts = ?,"
+                    " status = CASE WHEN ? >= ? THEN 'stalled' ELSE status END"
+                    " WHERE id = ?",
+                    (attempts, attempts, self._MAX_GAP_ATTEMPTS, gap["id"]))
                 _log.warning("gap research failed for %s: %s",
                              gap["question"][:60], exc)
+
+    def _integrate_gap_answer(self, gap: dict[str, Any], deep: Any) -> None:
+        """Store a resolved gap's answer in memory as a learned fact."""
+        memory = getattr(self.context, "memory", None)
+        if memory is None:
+            return
+        remember = getattr(memory, "remember", None)
+        if not callable(remember):
+            return
+        try:
+            from ..memory.base import MemoryKind
+            kind = MemoryKind.FACT
+        except Exception:  # noqa: BLE001
+            kind = "fact"
+        try:
+            remember(
+                f"Research answer — {gap['question']}\n"
+                f"{(deep.synthesis or '')[:1500]}",
+                kind=kind, importance=0.7, source="research-organ",
+                tags="research,gap",
+                metadata={"gap_id": gap["id"],
+                          "learnings": list(
+                              getattr(deep, "learnings", []) or [])[:5]})
+        except Exception as exc:  # noqa: BLE001 - integrate is best-effort
+            _log.debug("gap memory integrate failed (%s)", exc)

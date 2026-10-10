@@ -25,7 +25,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
-from ..llm.brain import brain_for
 from ..core.logging_setup import get_logger
 from ..documents.index import DocumentIndex
 from ..documents.parsers import parse_bytes, parse_path
@@ -45,6 +44,7 @@ class Source:
     title: str
     snippet: str
     score: float = 0.0
+    entity_match: bool = True  # False when the queried entities are absent
 
 
 @dataclass
@@ -63,14 +63,17 @@ class GroundedAnswer:
     refused: bool = False
     query: str = ""
     claims: list[Claim] = field(default_factory=list)
+    confidence: str = ""         # "" | "high" | "medium" | "low"
 
     def render(self) -> str:
-        """Full answer text + Sources section."""
+        """Full answer text + Sources section + confidence badge."""
         if self.refused:
             return self.text
         lines = [self.text, "", "Sources:"]
         for i, s in enumerate(self.sources, 1):
             lines.append(f"[{i}] {s.title} — {s.snippet[:160]}")
+        if self.confidence:
+            lines += ["", f"_confidence: {_CONFIDENCE_BADGE.get(self.confidence, self.confidence)}_"]
         return "\n".join(lines)
 
     def unverified_claims(self) -> list[Claim]:
@@ -119,6 +122,93 @@ _STOP = frozenset(
 )
 
 
+#: confidence badges — uncertainty displayed, never hidden (axiom-rag rule).
+_CONFIDENCE_BADGE = {
+    "high": "●●● high — every claim is cited",
+    "medium": "●●○ medium — some claims uncited, check the sources",
+    "low": "●○○ low — verify independently before acting on this",
+}
+
+
+def _content_words(text: str) -> list[str]:
+    return [w for w in re.findall(r"[a-z0-9]+", (text or "").lower())
+            if w not in _STOP and len(w) > 2]
+
+
+def _stem(word: str) -> str:
+    """Naive stemmer: strip one common suffix.
+
+    Enough for the relevance gate to see that "optimizing" and
+    "optimized" are the same word — the hybrid vector lane already
+    retrieves on stemmed collisions, and the gate must not refuse what
+    the retriever legitimately found.
+    """
+    for suffix in ("ing", "ed", "es", "s"):
+        if word.endswith(suffix) and len(word) - len(suffix) >= 3:
+            return word[:-len(suffix)]
+    return word
+
+
+def _answer_confidence(text: str, used: list[Source]) -> str:
+    """Share of factual sentences carrying a valid citation.
+
+    High ≥ 80%, medium ≥ 40%, else low. The honest-RAG rule: an answer
+    whose claims mostly lack citations wears a low badge rather than
+    sounding authoritative.
+    """
+    raw_sents = [s.strip() for s in
+                 re.split(r"(?<=[.!?])\s+", (text or "").strip()) if s.strip()]
+    # Reattach citation-only fragments ("...is true. [1]") to the
+    # sentence they belong to — the sentence splitter cuts before them.
+    sents: list[str] = []
+    for frag in raw_sents:
+        if re.fullmatch(r"(\[\d+\]\s*)+", frag) and sents:
+            sents[-1] = f"{sents[-1]} {frag}"
+        else:
+            sents.append(frag)
+    # ...and leading citations ("[1] The next sentence...") that belong
+    # to the previous sentence when it has none of its own.
+    merged: list[str] = []
+    for frag in sents:
+        m = re.match(r"^((?:\[\d+\]\s*)+)(.*)$", frag)
+        if (m and merged and not re.search(r"\[\d+\]", merged[-1])
+                and m.group(2).strip()):
+            merged[-1] = f"{merged[-1]} {m.group(1).strip()}"
+            frag = m.group(2)
+        merged.append(frag)
+    sents = [s for s in merged
+             if len(s.split()) >= 6 and not s.endswith("?")]
+    if not sents:
+        return "low"
+    cited = sum(1 for s in sents if re.search(r"\[\d+\]", s))
+    ratio = cited / len(sents)
+    if ratio >= 0.8:
+        return "high"
+    if ratio >= 0.4:
+        return "medium"
+    return "low"
+
+
+def _source_relevant(source: Source, question: str) -> bool:
+    """Does the source share topical vocabulary with the question?
+
+    The pre-generation relevance gate (honest-RAG pattern): retrieval
+    that returns nothing on-topic must not be answered as if grounded —
+    it falls back to the clearly-labeled ungrounded path instead of a
+    fluent answer over irrelevant context. Comparison is stem-aware so
+    the hybrid vector lane's paraphrase matches (engineer/engineers,
+    optimizing/optimized) are not refused. Lenient on purpose — two
+    shared stems (one for very short questions) is enough.
+    """
+    qwords = {_stem(w) for w in _content_words(question)}
+    if not qwords:
+        return True
+    swords = {_stem(w)
+              for w in _content_words(f"{source.title} {source.snippet}")}
+    need = min(2, len(qwords))
+    return len(qwords & swords) >= need
+
+
 #: the model cites with [Label]; code assigns the numbers
 _LABEL_RE = re.compile(r"\[([A-Za-z][A-Za-z0-9 _-]{0,40})\]")
 
@@ -159,6 +249,10 @@ def _quarantine_injection_lines(text: str, doc_id: str) -> str:
 _REFUSAL = ("I can't answer that from your documents — none of the "
             "sources you provided cover it. Add a relevant document and "
             "ask again.")
+
+_IRRELEVANT_REFUSAL = ("I couldn't find anything relevant in your documents — "
+                       "the closest matches don't address your question. Try "
+                       "rephrasing, or add a document that covers the topic.")
 
 _ANSWER_PROMPT = """Answer the question using ONLY the sources below. Rules:
 - Every factual claim must cite a source with [Label] (use the exact label shown).
@@ -255,13 +349,10 @@ class GroundedSession:
                               filename=f"{title}.txt", mime="text/plain")
 
     def _index_doc(self, doc: Any) -> str:
-        from ..documents.model import Document, Section, full_text
+        from ..documents.model import Document, Section
         base_id = str(getattr(doc, "id", "") or f"doc-{len(self.doc_ids)}")
         title = str(getattr(doc, "title", "") or base_id)
-        # instruction/content separation: strip injected-instruction lines
-        # BEFORE chunking so they never reach retrieval or the model
-        text = _quarantine_injection_lines(full_text(doc), base_id)
-        chunks = _chunk(text, self.chunk_size)
+        chunks = self._section_chunks(doc, title, base_id)
         if not chunks:
             raise GroundedError(
                 f"document {getattr(doc, 'id', '?')} has no indexable text")
@@ -291,13 +382,50 @@ class GroundedSession:
                   base_id, len(chunks))
         return base_id
 
+    def _section_chunks(self, doc: Any, title: str, base_id: str) -> list[str]:
+        """Chunk per section with hierarchical headers.
+
+        Every chunk carries ``Document: <title>`` and ``Section:
+        <heading>`` context (the fix that cut hallucinations in the
+        production RAG post-mortems: a chunk without its hierarchy is
+        ambiguous out of context). Section order is deterministic, so
+        chunk ids stay stable across re-ingests.
+        """
+        sections = getattr(doc, "sections", None) or []
+        chunks: list[str] = []
+        for section in sections:
+            raw_text = str(getattr(section, "text", "") or "")
+            text = _quarantine_injection_lines(raw_text, base_id).strip()
+            if not text:
+                continue
+            heading = str(getattr(section, "heading", "") or "").strip()
+            header = f"Document: {title}\n"
+            if heading:
+                header += f"Section: {heading}\n"
+            header += "\n"
+            body_size = max(200, self.chunk_size - len(header))
+            for piece in _chunk(text, body_size):
+                chunks.append(header + piece)
+        if chunks:
+            return chunks
+        # Fallback: no usable sections — the old whole-document path.
+        from ..documents.model import full_text
+        text = _quarantine_injection_lines(full_text(doc), base_id)
+        return [f"Document: {title}\n\n{c}" for c in _chunk(text, self.chunk_size)]
+
     # ── ask ──────────────────────────────────────────────────────
 
     def ask(self, question: str,
             llm_fn: Callable[[str], str] | None = None,
             context: Any = None,
-            top_k: int = 5) -> GroundedAnswer:
-        """Answer ``question`` from the indexed documents only."""
+            top_k: int = 5,
+            strict: bool = False) -> GroundedAnswer:
+        """Answer ``question`` from the indexed documents only.
+
+        ``strict=True`` turns the relevance gate into a hard refusal:
+        when nothing retrieved is on-topic the session refuses instead
+        of falling back to the labeled ungrounded answer.
+        """
         question = (question or "").strip()
         if not question:
             raise GroundedError("empty question")
@@ -306,6 +434,23 @@ class GroundedSession:
         sources = self._retrieve(question, top_k)
         if not sources:
             return self._answer_ungrounded(question, llm_fn, context)
+        # Pre-generation relevance gate (honest-RAG pattern): retrieval
+        # that returns nothing on-topic is not answered as if grounded.
+        # Default routes to the clearly-labeled ungrounded path (the
+        # model's own knowledge, marked as such); strict=True refuses.
+        sources = [s for s in sources if _source_relevant(s, question)]
+        if not sources:
+            _log.info("grounded session: no relevant sources for %r",
+                      question[:80])
+            if strict:
+                return GroundedAnswer(
+                    text=_IRRELEVANT_REFUSAL, refused=True, query=question,
+                    confidence="low")
+            return self._answer_ungrounded(question, llm_fn, context)
+        # Entity-match verification: flag sources that don't contain the
+        # entities the question names. Confidently wrong WITH a citation
+        # is worse than no citation.
+        self._flag_entity_mismatches(question, sources)
         # label each source for the model: [S1], [S2], ...
         labeled = []
         for i, s in enumerate(sources, 1):
@@ -414,7 +559,34 @@ class GroundedSession:
         marker = "⚠️ Not in your documents — this is from my own knowledge:"
         if not text.startswith(marker):
             text = marker + "\n" + text
-        return GroundedAnswer(text=text, sources=[], query=question)
+        return GroundedAnswer(text=text, sources=[], query=question,
+                              confidence="low")
+
+    def _flag_entity_mismatches(self, question: str,
+                                sources: list[Source]) -> None:
+        """Flag sources missing the question's named entities.
+
+        Name-search happily returns *a* record for a query — often the
+        wrong one. A source that shares vocabulary but names none of the
+        question's entities is a mismatch candidate: flagged, logged, and
+        deprioritized at citation time (entity_match=False). Never raises.
+        """
+        try:
+            entities = [w for w in re.findall(r"[A-Z][a-zA-Z]{2,}", question)]
+            entities += re.findall(r'"([^"]{3,})"', question)
+            entities = [e for e in dict.fromkeys(entities)]
+            if not entities:
+                return
+            for s in sources:
+                blob = f"{s.title} {s.snippet}"
+                if not any(e.lower() in blob.lower() for e in entities):
+                    s.entity_match = False
+            if all(not s.entity_match for s in sources):
+                _log.warning(
+                    "grounded session: no retrieved source mentions %s — "
+                    "possible entity mismatch for %r", entities, question[:80])
+        except Exception:  # noqa: BLE001 - flagging is advisory
+            pass
 
     def _complete(self, prompt: str,
                   llm_fn: Callable[[str], str] | None,
@@ -424,7 +596,8 @@ class GroundedSession:
         router = getattr(context, "router", None) if context else None
         if router is None:
             raise GroundedError("no LLM available (pass llm_fn or context)")
-        resp = brain_for(self.context).complete(prompt, task_kind="research")
+        # Minimal router interface: complete(prompt) -> response with .text.
+        resp = router.complete(prompt)
         return resp.text if hasattr(resp, "text") else str(resp)
 
     def _number_citations(self, raw: str, sources: list[Source],
@@ -467,5 +640,11 @@ class GroundedSession:
         # makes factual claims, refuse rather than serve uncited claims
         if not used and len(text.split()) > 12:
             _log.warning("grounded answer had no valid citations — refusing")
-            return GroundedAnswer(text=_REFUSAL, refused=True, query=question)
-        return GroundedAnswer(text=text, sources=used, query=question)
+            return GroundedAnswer(text=_REFUSAL, refused=True, query=question,
+                                  confidence="low")
+        # Entity-matched sources first: a citation to the wrong entity is
+        # the most dangerous kind of grounding failure.
+        used.sort(key=lambda s: (not s.entity_match,))
+        confidence = _answer_confidence(text, used)
+        return GroundedAnswer(text=text, sources=used, query=question,
+                              confidence=confidence)

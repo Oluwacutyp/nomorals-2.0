@@ -52,6 +52,7 @@ class _Bound:
     db: Database
     last_used: float
     docs: list[dict[str, str]] = field(default_factory=list)  # doc_id/title/filename
+    qa: list[dict[str, Any]] = field(default_factory=list)  # ts/question/answer
 
 
 class GroundedSessionStore:
@@ -192,6 +193,77 @@ class GroundedSessionStore:
                 return []
             return [{"doc_id": d["doc_id"], "title": d["title"]} for d in bound.docs]
 
+    # ── Q&A log & export ─────────────────────────────────────────────
+
+    def log_qa(self, chat_key: str, question: str, answer: str) -> None:
+        """Append a question/answer pair to the session's thread log.
+
+        Powers :meth:`export_thread` — the session's grounded Q&A as
+        portable markdown. Best-effort persistence; never raises.
+        """
+        key = str(chat_key)
+        with self._lock:
+            bound = self._sessions.get(key)
+            if bound is None:
+                return
+            bound.qa.append({
+                "ts": time.time(),
+                "question": (question or "")[:500],
+                "answer": (answer or "")[:8000],
+            })
+            # Keep the log bounded — a chat thread, not an archive.
+            bound.qa = bound.qa[-100:]
+            bound.last_used = time.time()
+            self._persist_locked(bound)
+
+    def export_thread(self, chat_key: str) -> str:
+        """The session's Q&A thread as markdown (docs + questions + answers).
+
+        Returns "" when the session has no logged Q&A.
+        """
+        key = str(chat_key)
+        with self._lock:
+            bound = self._sessions.get(key)
+            if bound is None or self._expired(bound.last_used):
+                if bound is not None:
+                    self._drop_locked(key)
+                return ""
+            qa = list(bound.qa)
+            docs = list(bound.docs)
+        if not qa:
+            return ""
+        lines = ["# Grounded Q&A thread", ""]
+        if docs:
+            lines += ["## Documents",
+                      "".join(f"- {d['title']}\n" for d in docs), ""]
+        for i, entry in enumerate(qa, 1):
+            lines += [f"## Q{i}: {entry['question']}", "",
+                      str(entry["answer"]), ""]
+        return "\n".join(lines).strip()
+
+    def session_stats(self, chat_key: str) -> dict[str, Any]:
+        """Observability for one chat's grounded session."""
+        key = str(chat_key)
+        with self._lock:
+            bound = self._sessions.get(key)
+            if bound is None or self._expired(bound.last_used):
+                if bound is not None:
+                    self._drop_locked(key)
+                return {"active": False}
+            try:
+                size = sum(p.stat().st_size for p in bound.dir.rglob("*")
+                           if p.is_file())
+            except OSError:
+                size = -1
+            return {
+                "active": True,
+                "docs": len(bound.docs),
+                "qa_logged": len(bound.qa),
+                "chunks": len(getattr(bound.session, "doc_ids", [])),
+                "idle_s": round(time.time() - bound.last_used, 1),
+                "dir_bytes": size,
+            }
+
     # ── internals ────────────────────────────────────────────────────
 
     def _session_dir(self, key: str) -> Path:
@@ -257,6 +329,9 @@ class GroundedSessionStore:
             bound.docs.append({"doc_id": doc_id,
                                "title": str(doc.get("title", fpath.name)),
                                "filename": fpath.name})
+        # Restore the Q&A thread log (bounded, like log_qa keeps it).
+        bound.qa = [dict(e) for e in (state.get("qa") or [])
+                    if isinstance(e, dict)][-100:]
 
     def _drop_locked(self, key: str) -> None:
         bound = self._sessions.pop(key, None)
@@ -268,7 +343,8 @@ class GroundedSessionStore:
         shutil.rmtree(self._session_dir(key), ignore_errors=True)
 
     def _persist_locked(self, bound: _Bound) -> None:
-        state = {"last_used": bound.last_used, "docs": bound.docs}
+        state = {"last_used": bound.last_used, "docs": bound.docs,
+                 "qa": bound.qa}
         tmp = bound.dir / (_SESSION_JSON + ".tmp")
         try:
             tmp.write_text(json.dumps(state), encoding="utf-8")

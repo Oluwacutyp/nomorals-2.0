@@ -17,7 +17,6 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
-from ..llm.brain import brain_for
 from ..core.logging_setup import get_logger
 
 _log = get_logger(__name__)
@@ -47,13 +46,35 @@ class ResearchBudget:
     searching, synthesize with what you have), never a reason to raise.
     """
 
-    def __init__(self, budget_usd: float) -> None:
+    def __init__(self, budget_usd: float,
+                 deadline_s: float | None = None) -> None:
         if budget_usd < 0:
             raise ValueError(f"budget must be >= 0, got {budget_usd}")
         self._budget = round(float(budget_usd), 9)
         self._spent = 0.0
         self.exhausted = False
         self._lock = threading.Lock()
+        # Optional wall-clock cap: a run that spends forever researching a
+        # question is as broken as one that spends infinite money.
+        self._deadline = (time.time() + float(deadline_s)
+                          if deadline_s is not None else None)
+
+    def time_exceeded(self) -> bool:
+        """True when the wall-clock deadline (if any) has passed."""
+        with self._lock:
+            if self._deadline is None:
+                return False
+            if time.time() >= self._deadline:
+                self.exhausted = True
+                return True
+            return False
+
+    @property
+    def time_left_s(self) -> float | None:
+        with self._lock:
+            if self._deadline is None:
+                return None
+            return max(0.0, self._deadline - time.time())
 
     def charge(self, op: str, amount: float | None = None) -> bool:
         """Debit one operation. False when it would exceed the budget."""
@@ -216,6 +237,7 @@ class ResearchJob:
     fetch_top: int | None = None  # None → profile default
     enabled: bool = True
     budget_usd: float | None = None  # None → unlimited (today's behavior)
+    digest: bool = False  # True → worthy findings batched into one digest
 
     def __post_init__(self) -> None:
         from ..core.profiles import profile_value
@@ -293,6 +315,20 @@ _ACTION_RE = re.compile(
     re.IGNORECASE,
 )
 
+#: independence signals (beyondseo reputation-rubric pattern): a press
+#: release or sponsored placement is not an independent editorial source.
+_PRESS_RE = re.compile(
+    r"\b(press release|sponsored( content)?|paid partnership|advertorial|"
+    r"promoted content|advertisement)\b",
+    re.IGNORECASE,
+)
+#: primary-source signals: docs, official publications, code, studies.
+_PRIMARY_RE = re.compile(
+    r"\b(official|documentation|white ?paper|peer[- ]reviewed|"
+    r"published study|changelog|api reference)\b",
+    re.IGNORECASE,
+)
+
 
 # ── run ──────────────────────────────────────────────────────────────────────
 
@@ -356,6 +392,58 @@ def _research_workers(n_calls: int) -> int:
     except Exception:  # noqa: BLE001 - profile detection never breaks research
         pass
     return max(1, min(max(0, n_calls), workers))
+
+
+def _learned_domain_score(db: Any, url: str) -> float | None:
+    """Rolling worth-rate for a URL's domain, learned from evidence.
+
+    Reads the ``source_quality`` table (written by the research organ on
+    every assessment). Returns None when the table is missing or the
+    domain is unseen — unseen domains are never penalized, only
+    evidence-demonstrated noise is. Never raises.
+    """
+    try:
+        from urllib.parse import urlparse
+        domain = urlparse(url).netloc.lower().lstrip("www.")
+        if not domain:
+            return None
+        row = db.query_one(
+            "SELECT runs, worth_runs FROM source_quality WHERE domain = ?",
+            (domain,))
+        if not row or not row["runs"]:
+            return None
+        return float(row["worth_runs"]) / float(row["runs"])
+    except Exception:  # noqa: BLE001 - learned ranking is advisory
+        return None
+
+
+def _rerank_by_learned_quality(findings: list[ResearchFinding],
+                               db: Any) -> list[ResearchFinding]:
+    """Demote findings from evidence-demonstrated weak domains.
+
+    Domains with a learned worth-rate below 0.25 over ≥3 runs go last;
+    everything else keeps its relative order. Never filters — a weak
+    domain can still deliver a worthy finding, it just doesn't get the
+    depth-fetch slots first. Stable sort, so equal scores keep position.
+    """
+    def sort_key(f: ResearchFinding) -> tuple[int, float]:
+        score = _learned_domain_score(db, f.url)
+        weak = (score is not None and score < 0.25
+                and _domain_runs(db, f.url) >= 3)
+        return (1 if weak else 0, -(score or 0.0))
+
+    return sorted(findings, key=sort_key)
+
+
+def _domain_runs(db: Any, url: str) -> int:
+    try:
+        from urllib.parse import urlparse
+        domain = urlparse(url).netloc.lower().lstrip("www.")
+        row = db.query_one(
+            "SELECT runs FROM source_quality WHERE domain = ?", (domain,))
+        return int(row["runs"]) if row else 0
+    except Exception:  # noqa: BLE001
+        return 0
 
 
 def _dispatch_calls(registry: Any, calls: list[tuple[str, dict[str, Any]]],
@@ -454,6 +542,10 @@ def run_job(job: ResearchJob, rctx: ResearchContext,
             )
     if not any_ok:
         raise RuntimeError(f"research job {job.id!r}: all web_search calls failed")
+    # Learned quality: domains that have consistently produced noise get
+    # demoted (evidence-based, never a hardcoded blocklist). Rerank before
+    # the depth pass so the fetch slots go to the best sources first.
+    findings = _rerank_by_learned_quality(findings, rctx.db)
     # Depth pass: fetch full text for the top N so assessment sees more than a snippet.
     from ..core.profiles import profile_value
     _detail_chars = int(profile_value("detail_chars", 2000))
@@ -600,6 +692,16 @@ def assess_worth(finding: ResearchFinding, rctx: ResearchContext) -> Assessment:
         score += 0.15
         reasons.append("actionable")
 
+    # 6. Independence: earned-media evidence outranks placed content.
+    # A press release or sponsored placement about the topic is not an
+    # independent source — discount it; primary sources get a small bonus.
+    if _PRESS_RE.search(text):
+        score -= 0.15
+        reasons.append("placed/press content — independence discount")
+    elif _PRIMARY_RE.search(text) or "github.com" in finding.url.lower():
+        score += 0.05
+        reasons.append("primary-source signals")
+
     worth = score >= rctx.worth_threshold
     reasons.append(f"score {score:.2f} vs threshold {rctx.worth_threshold:.2f}")
     return Assessment(worth, score, reasons)
@@ -617,6 +719,29 @@ def _owner_chats(rctx: ResearchContext) -> list[Any]:
     return chats
 
 
+def _send_to_chats(rctx: ResearchContext,
+                   text: str) -> tuple[list[str], list[str]]:
+    """Send ``text`` to every owner chat. Returns (sent, failures)."""
+    sent: list[str] = []
+    failures: list[str] = []
+    for chat_key in _owner_chats(rctx):
+        try:
+            from ..social.chat.gateway import ChatRef  # local import: layering
+        except Exception:  # noqa: BLE001
+            ChatRef = None  # type: ignore[assignment]
+        if ChatRef is not None:
+            ref = ChatRef.parse(str(chat_key))
+            platform = ref.platform
+        else:
+            platform = str(chat_key).split(":", 1)[0]
+        result = rctx.gateway.send(platform, chat_key, text)
+        if result.ok:
+            sent.append(str(chat_key))
+        else:
+            failures.append(f"{chat_key}: {result.error}")
+    return sent, failures
+
+
 def _deliveries_today(db: Any) -> int:
     day_start = time.time() - 86400.0
     return int(
@@ -629,16 +754,125 @@ def _deliveries_today(db: Any) -> int:
     )
 
 
-def format_finding(finding: ResearchFinding, assessment: Assessment) -> str:
+#: delivery themes for format_finding. "classic" is the historical output;
+#: "card" is the rich default for new callers; "brief" is TL;DR-first;
+#: "verbose" is the full audit-style card.
+_FINDING_STYLES = ("classic", "card", "brief", "verbose")
+
+
+def _score_bar(score: float, width: int = 10) -> str:
+    filled = max(0, min(width, int(round(score * width))))
+    return "▰" * filled + "▱" * (width - filled)
+
+
+def format_finding(finding: ResearchFinding, assessment: Assessment,
+                   style: str = "classic") -> str:
+    """Render a finding for delivery. Styles:
+
+    - ``classic`` — the historical plain template (default, unchanged).
+    - ``card`` — rich markdown card: headline, why-it-matters, score bar,
+      URL. The god-tier default for chat delivery.
+    - ``brief`` — TL;DR-first: one line + URL, for tight digests.
+    - ``verbose`` — full audit card: snippet excerpt, every reason, domain
+      quality note, score breakdown.
+    """
+    from ..core.profiles import profile_value
+    limit = int(profile_value("summary_chars", 900))
     why = next(
         (r for r in assessment.reasons if r not in ("fresh", "actionable")
          and not r.startswith("score")),
         "matched your interests",
     )
+    if style == "brief":
+        return f"🔍 {finding.title}\n{why}\n{finding.url}"[:limit]
+    if style == "card":
+        tags = " ".join(f"#{t}" for t in ("fresh", "actionable")
+                        if t in assessment.reasons)
+        lines = [
+            f"🔍 *{finding.title}*",
+            "",
+            f"_{why}_",
+            "",
+            f"{_score_bar(assessment.score)} `{assessment.score:.0%}`"
+            + (f"  {tags}" if tags else ""),
+            "",
+            finding.url,
+        ]
+        return "\n".join(lines)[:limit]
+    if style == "verbose":
+        snippet = re.sub(r"\s+", " ", finding.snippet).strip()
+        if len(snippet) > 240:
+            snippet = snippet[:240].rstrip() + "…"
+        lines = [
+            f"🔍 {finding.title}",
+            "",
+            f"Why: {why}",
+            f"Excerpt: {snippet}" if snippet else "Excerpt: (none)",
+            "",
+            "Signals:",
+        ]
+        lines += [f"  • {r}" for r in assessment.reasons]
+        lines += ["", f"Score: {assessment.score:.2f}  {finding.url}"]
+        return "\n".join(lines)[: limit * 2]
+    if style != "classic":
+        raise ValueError(f"unknown finding style {style!r}; "
+                         f"expected one of {_FINDING_STYLES}")
     lines = [f"🔍 {finding.title}", "", why, "", finding.url]
     text = "\n".join(lines)
+    return text[:limit]
+
+
+def deliver_digest(pairs: list[tuple[ResearchFinding, Assessment]],
+                   rctx: ResearchContext,
+                   style: str = "card",
+                   title: str | None = None) -> list[str]:
+    """Batch several worthy findings into ONE delivered message.
+
+    The scheduled path delivers per-finding; a watch that surfaces five
+    worthy items should not send five interruptions. Every finding still
+    gets its own ``research_deliveries`` row (never re-sent), and the
+    daily cap applies to the whole digest. Raises on unworthy findings,
+    missing gateway/chats, or a blown cap — fail-fast like ``deliver``.
+    Returns the chat keys it was sent to.
+    """
+    pairs = list(pairs or [])
+    if not pairs:
+        raise ValueError("deliver_digest needs at least one finding")
+    for finding, assessment in pairs:
+        if not assessment.worth:
+            raise ValueError(
+                f"deliver_digest: unworthy finding {finding.url[:60]!r}")
+    remaining = rctx.daily_delivery_cap - _deliveries_today(rctx.db)
+    if len(pairs) > remaining:
+        raise RuntimeError(
+            f"research deliver_digest: daily cap ({rctx.daily_delivery_cap}) "
+            f"reached")
     from ..core.profiles import profile_value
-    return text[:int(profile_value("summary_chars", 900))]
+    limit = int(profile_value("summary_chars", 900)) * max(1, len(pairs))
+    head = title or "🔍 Research digest"
+    parts = [head, ""]
+    for i, (finding, assessment) in enumerate(pairs, 1):
+        body = format_finding(finding, assessment, style=style)
+        parts.append(f"— {i} —\n{body}")
+    text = "\n\n".join(parts)[:limit]
+    sent, failures = _send_to_chats(rctx, text)
+    if not sent:
+        raise RuntimeError(
+            f"research deliver_digest failed everywhere: {failures}")
+    if failures:
+        _log.warning("research partial digest failure: %s", failures)
+    now = time.time()
+    for finding, assessment in pairs:
+        rctx.db.execute(
+            "INSERT OR REPLACE INTO research_deliveries"
+            " (url_hash, job_id, title, delivered_at, score, channel)"
+            " VALUES (?, ?, ?, ?, ?, ?)",
+            (_url_hash(finding.url), finding.job_id, finding.title[:200],
+             now, assessment.score, ",".join(sent)),
+        )
+    _log.info("research digest: %d finding(s) to %d chat(s)",
+              len(pairs), len(sent))
+    return sent
 
 
 def deliver(
@@ -657,23 +891,7 @@ def deliver(
             f"research deliver: daily cap ({rctx.daily_delivery_cap}) reached"
         )
     text = format_finding(finding, assessment)
-    sent: list[str] = []
-    failures: list[str] = []
-    for chat_key in _owner_chats(rctx):
-        try:
-            from ..social.chat.gateway import ChatRef  # local import: layering
-        except Exception:  # noqa: BLE001
-            ChatRef = None  # type: ignore[assignment]
-        if ChatRef is not None:
-            ref = ChatRef.parse(str(chat_key))
-            platform = ref.platform
-        else:
-            platform = str(chat_key).split(":", 1)[0]
-        result = rctx.gateway.send(platform, chat_key, text)
-        if result.ok:
-            sent.append(str(chat_key))
-        else:
-            failures.append(f"{chat_key}: {result.error}")
+    sent, failures = _send_to_chats(rctx, text)
     if not sent:
         raise RuntimeError(f"research deliver failed everywhere: {failures}")
     if failures:
@@ -719,6 +937,7 @@ def execute_job(job: ResearchJob, rctx: ResearchContext,
     report = JobReport(job_id=job.id, findings=0, delivered=0, skipped=0)
     findings = run_job(job, rctx, progress=progress, budget=budget)
     report.findings = len(findings)
+    digest_pairs: list[tuple[ResearchFinding, Assessment]] = []
     for finding in findings:
         _emit_progress(progress, "assess", finding.url)
         try:
@@ -733,12 +952,24 @@ def execute_job(job: ResearchJob, rctx: ResearchContext,
                 "research skip %r: %s", finding.title[:60], "; ".join(assessment.reasons)
             )
             continue
+        if job.digest:
+            # Digest mode: batch every worthy finding into one message.
+            digest_pairs.append((finding, assessment))
+            continue
         try:
             deliver(finding, assessment, rctx)
             report.delivered += 1
         except Exception as exc:  # noqa: BLE001 - deliver failure is real, record it
             report.errors.append(f"deliver {finding.url[:60]}: {exc}")
             report.skipped += 1
+    if digest_pairs:
+        _emit_progress(progress, "deliver", f"digest of {len(digest_pairs)}")
+        try:
+            deliver_digest(digest_pairs, rctx, title=f"🔍 {job.topic}")
+            report.delivered += len(digest_pairs)
+        except Exception as exc:  # noqa: BLE001 - digest failure is real
+            report.errors.append(f"deliver_digest: {exc}")
+            report.skipped += len(digest_pairs)
     return report
 
 
@@ -843,6 +1074,13 @@ def _resolve_label(label: str,
 
 def _verify_cited_sentences(raw: str,
                             findings: list[ResearchFinding]) -> str:
+    """Back-compat wrapper — see ``_verify_cited_sentences_stats``."""
+    text, _, _ = _verify_cited_sentences_stats(raw, findings)
+    return text
+
+
+def _verify_cited_sentences_stats(
+        raw: str, findings: list[ResearchFinding]) -> tuple[str, int, int]:
     """Strip sentences whose citations don't verify against the sources.
 
     Closes the loop on citations: a valid-looking ``[S<n>]`` marker is
@@ -851,14 +1089,17 @@ def _verify_cited_sentences(raw: str,
     with no citation markers are left alone (uncited prose, not smuggled
     claims). Sentences citing unknown labels are stripped too. Never
     raises; on any internal error the text passes through unchanged.
+
+    Returns ``(cleaned_text, sentences_checked, sentences_stripped)``.
     """
     try:
         from .citations import sentence_supported
     except Exception:  # noqa: BLE001 - verification is advisory
-        return raw
+        return raw, 0, 0
     try:
         texts = [(f.snippet or "") + "\n" + (f.detail or "") for f in findings]
         kept: list[str] = []
+        checked = stripped = 0
         for sent in re.split(r"(?<=[.!?])\s+", (raw or "").strip()):
             if not sent.strip():
                 continue
@@ -866,9 +1107,11 @@ def _verify_cited_sentences(raw: str,
             if not labels:
                 kept.append(sent)
                 continue
+            checked += 1
             idxs = {i for lab in labels
                     if (i := _resolve_label(lab, findings)) is not None}
             if not idxs:
+                stripped += 1
                 _log.debug("synthesize: stripped sentence with unverifiable "
                            "citation labels: %r", sent[:80])
                 continue
@@ -876,12 +1119,13 @@ def _verify_cited_sentences(raw: str,
             if any(sentence_supported(body, texts[i]) for i in idxs):
                 kept.append(sent)
             else:
+                stripped += 1
                 _log.info("synthesize: stripped sentence whose citation did "
                           "not verify: %r", sent[:100])
-        return " ".join(kept)
+        return " ".join(kept), checked, stripped
     except Exception as exc:  # noqa: BLE001 - never break synthesis
         _log.debug("synthesize: citation verification failed (%s)", exc)
-        return raw
+        return raw, 0, 0
 
 
 def _map_citations(raw: str,
@@ -943,12 +1187,32 @@ def synthesize(question: str, findings: list[ResearchFinding],
     Fallback (no LLM, LLM failure, or no valid citations): extractive brief.
     Returns ``SYNTHESIS_EMPTY`` when there is nothing to synthesize.
     """
+    text, _ = synthesize_with_stats(question, findings, llm_fn)
+    return text
+
+
+def synthesize_with_stats(question: str, findings: list[ResearchFinding],
+                          llm_fn: Any = None
+                          ) -> tuple[str, dict[str, Any]]:
+    """``synthesize`` plus the evidence-verification audit.
+
+    Returns ``(text, stats)`` where stats carries
+    ``sentences_checked``, ``sentences_stripped``, ``sources_cited`` and
+    ``corroborated_sources`` (sources confirmed by ≥2 independent
+    domains — the cross-validation rule from the deep-research
+    best-practices literature).
+    """
     question = (question or "").strip()
     if not question:
         raise ValueError("synthesize needs a non-empty question")
     findings = [f for f in (findings or []) if f is not None]
     if not findings:
-        return SYNTHESIS_EMPTY
+        return SYNTHESIS_EMPTY, {"sentences_checked": 0,
+                                 "sentences_stripped": 0,
+                                 "sources_cited": 0,
+                                 "corroborated_sources": 0}
+    stats: dict[str, Any] = {"sentences_checked": 0, "sentences_stripped": 0,
+                             "sources_cited": 0, "corroborated_sources": 0}
     if llm_fn is not None:
         try:
             numbered = "\n\n".join(
@@ -958,18 +1222,51 @@ def synthesize(question: str, findings: list[ResearchFinding],
             raw = (llm_fn(_SYNTH_PROMPT.format(question=question,
                                                numbered=numbered)) or "").strip()
             if SYNTHESIS_EMPTY in raw.upper():
-                return SYNTHESIS_EMPTY
+                return SYNTHESIS_EMPTY, stats
             # Claim-level check: strip sentences whose citations don't
             # verify against the source texts before deterministic mapping.
-            raw = _verify_cited_sentences(raw, findings)
+            raw, checked, stripped = _verify_cited_sentences_stats(
+                raw, findings)
+            stats["sentences_checked"] = checked
+            stats["sentences_stripped"] = stripped
             text, used = _map_citations(raw, findings)
             if used:
-                return _render_synthesis(text, used)
+                stats["sources_cited"] = len(used)
+                stats["corroborated_sources"] = _corroborated_count(
+                    findings, used)
+                return _render_synthesis(text, used), stats
             _log.debug("synthesize: no valid citations survived, "
                        "falling back to extractive brief")
         except Exception as exc:  # noqa: BLE001 - extractive always works
             _log.debug("synthesize LLM failed (%s), extractive fallback", exc)
-    return _extractive_brief(question, findings)
+    text = _extractive_brief(question, findings)
+    stats["sources_cited"] = len(findings)
+    stats["corroborated_sources"] = _corroborated_count(findings, findings)
+    return text, stats
+
+
+def _corroborated_count(findings: list[ResearchFinding],
+                        used: list[ResearchFinding]) -> int:
+    """How many used sources are corroborated by ≥2 independent domains.
+
+    Independent corroboration is the deep-research best-practice rule:
+    a key finding should be confirmed by at least two sources that don't
+    share a publisher. Counts sources whose topic cluster (content-word
+    overlap) contains findings from at least two distinct domains.
+    """
+    try:
+        from .citations import corroboration_map
+        corrob = corroboration_map(findings)
+        used_urls = {f.url for f in used}
+        n = 0
+        for f in used:
+            idx = next((i for i, x in enumerate(findings)
+                        if x.url == f.url), None)
+            if idx is not None and corrob.get(idx):
+                n += 1
+        return n
+    except Exception:  # noqa: BLE001 - corroboration is advisory
+        return 0
 
 
 _CLARIFY_PROMPT = """You are scoping a research question before any searching happens.
@@ -1065,6 +1362,55 @@ class DeepReport:
     spent_usd: float = 0.0
     budget_exhausted: bool = False
     citations: list[dict] = field(default_factory=list)  # audit trail
+    learnings: list[str] = field(default_factory=list)
+    running_summary: str = ""
+    verification: dict[str, Any] = field(default_factory=dict)
+    conflicts: list[dict] = field(default_factory=list)
+    depth: int = 3
+
+    def to_markdown(self) -> str:
+        """Structured report: TL;DR → learnings → synthesis → evidence.
+
+        The export shape the open deep-research tools converge on: an
+        executive summary up front, then the full cited brief, then the
+        audit trail. ``verification`` and ``conflicts`` make the
+        evidence quality visible instead of implied.
+        """
+        tldr = ""
+        if self.learnings:
+            tldr = "\n".join(f"- {ln}" for ln in self.learnings[:8])
+        elif self.synthesis and self.synthesis != SYNTHESIS_EMPTY:
+            first = self.synthesis.split("\n\n")[0].strip()
+            tldr = first[:600]
+        lines = [f"# Research: {self.question}", ""]
+        lines += ["## TL;DR", "", tldr or "_No findings._", ""]
+        if self.running_summary:
+            lines += ["## Working summary", "", self.running_summary, ""]
+        lines += ["## Brief", "",
+                  self.synthesis or "_No synthesis produced._", ""]
+        if self.conflicts:
+            lines += ["## ⚠️ Conflicting sources", ""]
+            for c in self.conflicts:
+                lines.append(
+                    f"- {c.get('topic', 'conflict')}: "
+                    f"{c.get('value_a', '?')} ({c.get('url_a', '')}) vs "
+                    f"{c.get('value_b', '?')} ({c.get('url_b', '')})")
+            lines.append("")
+        v = self.verification or {}
+        if v:
+            lines += ["## Evidence check", "",
+                      f"- sentences citation-checked: "
+                      f"{v.get('sentences_checked', 0)}",
+                      f"- sentences stripped (unverifiable): "
+                      f"{v.get('sentences_stripped', 0)}",
+                      f"- sources cited: {v.get('sources_cited', 0)}",
+                      f"- corroborated by ≥2 independent domains: "
+                      f"{v.get('corroborated_sources', 0)}", ""]
+        lines += [f"_Depth {self.depth} · {len(self.findings)} findings · "
+                  f"${self.spent_usd:.4f} spent"
+                  + (" · budget exhausted" if self.budget_exhausted else "")
+                  + "_"]
+        return "\n".join(lines)
 
 
 def _citation_audit_trail(findings: list[ResearchFinding]) -> list[dict]:
@@ -1092,7 +1438,9 @@ def _citation_audit_trail(findings: list[ResearchFinding]) -> list[dict]:
 def _router_llm_fn(router: Any) -> Any:
     """Adapt an LLM router to the ``prompt -> text`` shape, or None.
 
-    The full ``LLMResponse`` is stashed on ``llm_fn.last_response`` so the
+    Uses the minimal router interface — ``complete(prompt)`` returning a
+    response with ``.text`` — so strict fakes and the full LLMRouter both
+    work. The full response is stashed on ``llm_fn.last_response`` so the
     budget wrapper can true-up the flat planning estimate against the
     router-metered cost (build-map #18).
     """
@@ -1100,12 +1448,31 @@ def _router_llm_fn(router: Any) -> Any:
         return None
 
     def llm_fn(prompt: str) -> str:
-        resp = brain_for(self.context).complete(prompt, task_kind="research")
+        resp = router.complete(prompt)
         llm_fn.last_response = resp
         return resp.text if hasattr(resp, "text") else str(resp)
 
     llm_fn.last_response = None
     return llm_fn
+
+
+def _conflict_dicts(findings: list[ResearchFinding]) -> list[dict]:
+    """Heuristic conflict detection for a deep-research run.
+
+    Uses ``citations.find_conflicts`` (same topic, different numbers from
+    different domains) and flattens to plain dicts for ``DeepReport``.
+    Never raises — conflicts are advisory, the run is not.
+    """
+    try:
+        from .citations import find_conflicts
+        return [
+            {"topic": c.topic, "value_a": c.value_a, "url_a": c.url_a,
+             "value_b": c.value_b, "url_b": c.url_b}
+            for c in find_conflicts(findings)
+        ]
+    except Exception as exc:  # noqa: BLE001
+        _log.debug("research_deep: conflict detection failed (%s)", exc)
+        return []
 
 
 #: max refinement iterations in research_deep (initial pass + follow-ups).
@@ -1157,10 +1524,120 @@ def _reasoning_pass(question: str, findings: list[ResearchFinding],
         return []
 
 
+_REFINE_LEARN_PROMPT = """You are distilling research findings into durable learnings.
+
+QUESTION: {question}
+
+FINDINGS:
+{numbered}
+
+Reply with exactly two sections:
+
+LEARNINGS:
+- one crisp factual learning per bullet, each ending with its [S<n>] citation
+  (only learnings the findings actually support — no outside knowledge)
+
+FOLLOW-UPS:
+- one follow-up search query per bullet for real gaps, contradictions, or
+  missing angles
+- or the single line NONE when the findings fully answer the question
+"""
+
+
+@dataclass
+class Refinement:
+    """One reasoning pass: distilled learnings + follow-up directions."""
+
+    learnings: list[str] = field(default_factory=list)
+    follow_ups: list[str] = field(default_factory=list)
+    done: bool = False
+
+
+def _refinement_pass(question: str, findings: list[ResearchFinding],
+                     llm_fn: Any = None) -> Refinement:
+    """One combined reasoning pass (Open Deep Research pattern).
+
+    Unlike ``_reasoning_pass`` (queries only), this also distills
+    **learnings** — compressed facts with citations — so later iterations
+    build on insight instead of re-reading raw snippets. Offline
+    fallback: learnings from the top finding titles, no follow-ups.
+    Never raises.
+    """
+    if not findings:
+        return Refinement(done=True)
+    if llm_fn is None:
+        learnings = [f"{f.title} [S{i}]"
+                     for i, f in enumerate(findings[:8], 1) if f.title]
+        return Refinement(learnings=learnings, done=True)
+    try:
+        numbered = "\n\n".join(
+            f"[S{i}] {f.title}\n{re.sub(r'\\s+', ' ', f.snippet).strip()[:400]}"
+            for i, f in enumerate(findings[:20], 1)
+        )
+        raw = (llm_fn(_REFINE_LEARN_PROMPT.format(
+            question=question, numbered=numbered)) or "").strip()
+        learnings: list[str] = []
+        follow_ups: list[str] = []
+        section = None
+        for line in raw.splitlines():
+            s = line.strip()
+            up = s.upper().rstrip(":")
+            if up == "LEARNINGS":
+                section = "learnings"
+                continue
+            if up == "FOLLOW-UPS":
+                section = "follow_ups"
+                continue
+            s = s.lstrip("-•*").strip()
+            s = re.sub(r"^\\d+[.)]\\s*", "", s).strip()
+            if not s or len(s) < 8:
+                continue
+            if section == "learnings":
+                learnings.append(s)
+            elif section == "follow_ups":
+                if s.upper().startswith("NONE") or "DONE" in s.upper():
+                    continue
+                follow_ups.append(s)
+        return Refinement(learnings=learnings[:10], follow_ups=follow_ups[:3],
+                          done=not follow_ups)
+    except Exception as exc:  # noqa: BLE001 - refinement is advisory
+        _log.debug("refinement pass failed (%s)", exc)
+        return Refinement(done=True)
+
+
+def _update_working_summary(summary: str, learnings: list[str],
+                            llm_fn: Any = None) -> str:
+    """Fold new learnings into the running summary (IterDRAG pattern).
+
+    The working summary is the compressed memory of everything the run
+    has learned so far — later refinement passes read this instead of
+    the full finding list. LLM path compresses; template path appends
+    and caps. Never raises.
+    """
+    if not learnings:
+        return summary
+    addition = "\n".join(f"- {ln}" for ln in learnings)
+    merged = f"{summary}\n{addition}".strip() if summary else addition
+    if llm_fn is not None:
+        try:
+            prompt = ("Compress these research notes into a tight running "
+                      "summary (<= 1200 chars). Keep every distinct fact and "
+                      "its [S<n>] citation.\n\nNOTES:\n" + merged[:6000])
+            compressed = (llm_fn(prompt) or "").strip()
+            if compressed:
+                return compressed[:2000]
+        except Exception as exc:  # noqa: BLE001
+            _log.debug("working summary compress failed (%s)", exc)
+    # Template fallback: append, keep the tail — newest insight survives.
+    return merged[-4000:]
+
+
 def research_deep(question: str, rctx: ResearchContext, *,
                   llm_fn: Any = None, progress: Any = None,
                   max_queries: int = 6,
-                  budget_usd: float | None = None) -> DeepReport:
+                  budget_usd: float | None = None,
+                  depth: int = 3,
+                  time_budget_s: float | None = None) -> DeepReport:
     """One-shot deep research: clarify → decompose → concurrent search →
     refine → synthesize.
 
@@ -1168,18 +1645,21 @@ def research_deep(question: str, rctx: ResearchContext, *,
     ``needs_clarification=True`` and the clarifying questions — the run is
     never burned on a vague query.
 
-    After the initial search, a reasoning pass reviews the findings for
-    gaps and contradictions, generating follow-up queries. This repeats
-    up to ``_MAX_REFINEMENTS`` times (or until the findings are sufficient
-    or the budget is exhausted) — the iterative loop that separates deep
-    research from single-pass search.
+    After the initial search, a reasoning pass distills **learnings** and
+    reviews the findings for gaps and contradictions, generating follow-up
+    queries. This repeats for ``depth - 1`` refinement rounds (Open Deep
+    Research pattern, hard-capped by ``_MAX_REFINEMENTS``) — the iterative
+    loop that separates deep research from single-pass search. Each round
+    folds its learnings into a **running summary** (IterDRAG pattern) so
+    later rounds reason over compressed insight, not raw snippets.
 
-    ``budget_usd`` caps total spend: the question is clarified first, then
-    ``max_queries`` is cut so the planned searches fit the remaining
-    budget (each LLM phase charges ``llm_call``, each search charges
-    ``web_search``, each depth fetch charges ``web_fetch``). When the
-    budget runs out mid-run the run stops issuing calls and synthesizes
-    from whatever findings exist — exhaustion never raises.
+    ``budget_usd`` caps total spend and ``time_budget_s`` caps wall-clock
+    time: the question is clarified first, then ``max_queries`` is cut so
+    the planned searches fit the remaining budget (each LLM phase charges
+    ``llm_call``, each search charges ``web_search``, each depth fetch
+    charges ``web_fetch``). When either budget runs out mid-run the run
+    stops issuing calls and synthesizes from whatever findings exist —
+    exhaustion never raises.
 
     Raises ``ValueError`` on an empty question; ``RuntimeError`` when
     every search fails (via ``run_job``).
@@ -1187,12 +1667,15 @@ def research_deep(question: str, rctx: ResearchContext, *,
     question = (question or "").strip()
     if not question:
         raise ValueError("research_deep needs a non-empty question")
-    budget = ResearchBudget(budget_usd) if budget_usd is not None else None
+    depth = max(1, min(int(depth or 3), _MAX_REFINEMENTS))
+    budget = (ResearchBudget(budget_usd, deadline_s=time_budget_s)
+              if budget_usd is not None else None)
 
     def _report(**kw: Any) -> DeepReport:
         return DeepReport(
             spent_usd=budget.spent_usd() if budget else 0.0,
             budget_exhausted=budget.exhausted if budget else False,
+            depth=depth,
             **kw,
         )
 
@@ -1218,24 +1701,30 @@ def research_deep(question: str, rctx: ResearchContext, *,
     job_id = f"deep-{hashlib.sha256(question.encode()).hexdigest()[:12]}"
     job = ResearchJob(id=job_id, topic=question, queries=sub_queries)
     findings = run_job(job, rctx, progress=progress, budget=budget)
-    # Iterative refinement: reasoning pass → follow-up queries → more search.
-    # This is what separates deep research from single-pass search.
+    # Iterative refinement: learnings + follow-up directions → more search.
     all_queries = list(sub_queries)
-    for iteration in range(_MAX_REFINEMENTS - 1):
-        if budget is not None and budget.exhausted:
+    all_learnings: list[str] = []
+    working_summary = ""
+    refinement = _refinement_pass(question, findings, llm_fn=bllm)
+    all_learnings.extend(refinement.learnings)
+    working_summary = _update_working_summary(
+        working_summary, refinement.learnings, llm_fn=bllm)
+    for iteration in range(depth - 1):
+        if budget is not None and (budget.exhausted or budget.time_exceeded()):
             _log.info("research_deep: budget exhausted, stopping refinement")
             break
-        follow_ups = _reasoning_pass(question, findings, llm_fn=bllm)
-        if not follow_ups:
+        _emit_progress(progress, "refine",
+                       f"iteration {iteration + 2}: "
+                       f"{len(refinement.learnings)} learning(s)")
+        if refinement.done or not refinement.follow_ups:
             _log.info("research_deep: findings sufficient after %d iteration(s)",
                       iteration + 1)
             break
         _log.info("research_deep: refinement %d, %d follow-up quer(ies)",
-                  iteration + 2, len(follow_ups))
-        _emit_progress(progress, "refine", f"iteration {iteration + 2}")
-        all_queries.extend(follow_ups)
+                  iteration + 2, len(refinement.follow_ups))
+        all_queries.extend(refinement.follow_ups)
         follow_job = ResearchJob(id=f"{job_id}-r{iteration + 1}",
-                                topic=question, queries=follow_ups)
+                                topic=question, queries=refinement.follow_ups)
         new_findings = run_job(follow_job, rctx, progress=progress,
                                budget=budget)
         # Deduplicate by URL against existing findings
@@ -1244,12 +1733,20 @@ def research_deep(question: str, rctx: ResearchContext, *,
             if f.url not in seen:
                 seen.add(f.url)
                 findings.append(f)
-    synthesis = synthesize(question, findings, llm_fn=bllm)
+        refinement = _refinement_pass(question, findings, llm_fn=bllm)
+        all_learnings.extend(refinement.learnings)
+        working_summary = _update_working_summary(
+            working_summary, refinement.learnings, llm_fn=bllm)
+    synthesis, verification = synthesize_with_stats(question, findings,
+                                                    llm_fn=bllm)
+    conflicts = _conflict_dicts(findings)
     citations = _citation_audit_trail(findings)
     return _report(question=question, sub_queries=all_queries,
                    findings=findings, synthesis=synthesis,
                    clarifications=[], needs_clarification=False,
-                   citations=citations)
+                   citations=citations, learnings=all_learnings,
+                   running_summary=working_summary,
+                   verification=verification, conflicts=conflicts)
 
 
 # ── tool registration ──────────────────────────────────────────────────────
@@ -1280,10 +1777,20 @@ def register(registry: Any) -> None:
             "budget_usd": "float (optional) — spend cap in USD; the run stops "
                           "issuing calls when exhausted and synthesizes from "
                           "what it has",
+            "depth": "int (optional) — refinement rounds, 1-3, default 3. "
+                     "Each round distills learnings and chases follow-up "
+                     "directions; 1 = single pass, no refinement",
+            "time_budget_s": "float (optional) — wall-clock cap in seconds",
+            "style": "str (optional) — report style: 'brief' (synthesis + "
+                     "sources) or 'full' (markdown report with TL;DR, "
+                     "learnings, evidence check); default 'brief'",
         },
     )
     def research_deep_tool(question: str, max_queries: int = 6,
                            budget_usd: float | None = None,
+                           depth: int = 3,
+                           time_budget_s: float | None = None,
+                           style: str = "brief",
                            **_: Any) -> dict[str, Any]:
         rctx = ResearchContext(
             db=getattr(context, "db", None),
@@ -1296,13 +1803,23 @@ def register(registry: Any) -> None:
             llm_fn=_router_llm_fn(getattr(context, "router", None)),
             max_queries=int(max_queries or 6),
             budget_usd=budget_usd,
+            depth=int(depth or 3),
+            time_budget_s=time_budget_s,
         )
+        synthesis = (report.to_markdown() if str(style).lower() == "full"
+                     else report.synthesis)
         return {
             "question": report.question,
             "needs_clarification": report.needs_clarification,
             "clarifications": report.clarifications,
             "sub_queries": report.sub_queries,
-            "synthesis": report.synthesis,
+            "synthesis": synthesis,
+            "style": style,
+            "learnings": report.learnings,
+            "running_summary": report.running_summary,
+            "verification": report.verification,
+            "conflicts": report.conflicts,
+            "depth": report.depth,
             "spent_usd": report.spent_usd,
             "budget_exhausted": report.budget_exhausted,
             "citations": report.citations,
