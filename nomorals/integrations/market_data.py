@@ -598,11 +598,22 @@ def quote(symbol: str, market: str = "crypto") -> dict[str, Any]:
                     d = _json(
                         "https://api.binance.com/api/v3/ticker/24hr",
                         {"symbol": sym["binance"]})
+                    bid = float(d["bidPrice"]) if d.get("bidPrice") else None
+                    ask = float(d["askPrice"]) if d.get("askPrice") else None
+                    hi = float(d["highPrice"]) if d.get("highPrice") else None
+                    lo = float(d["lowPrice"]) if d.get("lowPrice") else None
+                    spread_bps = ((ask - bid) / float(d["lastPrice"])
+                                  * 10000) if bid and ask else None
                     return {"symbol": disp,
                             "price": float(d["lastPrice"]),
                             "change_pct_24h": float(
                                 d.get("priceChangePercent") or 0),
                             "currency": sym["quote"] or "USDT",
+                            "bid": bid, "ask": ask,
+                            "high": hi, "low": lo,
+                            "spread_bps": spread_bps,
+                            "volume": float(d.get("quoteVolume") or 0)
+                            or None,
                             "source": "binance"}
                 coin = _CG_MAP.get(sym["base"], sym["base"].lower())
                 d = _json(
@@ -702,3 +713,392 @@ def source_status() -> dict[str, Any]:
     return {"keyless": list(SOURCES),
             "keyed": keyed,
             "default_chains": _DEFAULT_CHAINS}
+
+
+# ── TTL cache ─────────────────────────────────────────────────────────
+# Every public quote/OHLCV call is cached: 15s for quotes, 60s for
+# OHLCV. Same symbol twice in a briefing = one network call.
+_CACHE: dict[tuple, tuple[float, Any]] = {}
+_CACHE_LOCK = __import__("threading").Lock()
+_QUOTE_TTL = 15.0
+_OHLCV_TTL = 60.0
+
+
+def _cached(key: tuple, ttl: float, loader: Callable[[], Any]) -> Any:
+    now = time.time()
+    with _CACHE_LOCK:
+        hit = _CACHE.get(key)
+        if hit and now - hit[0] < ttl:
+            return hit[1]
+    value = loader()
+    with _CACHE_LOCK:
+        _CACHE[key] = (now, value)
+        if len(_CACHE) > 512:  # bounded
+            oldest = min(_CACHE, key=lambda k: _CACHE[k][0])
+            del _CACHE[oldest]
+    return value
+
+
+def clear_cache() -> None:
+    """Drop all cached market data."""
+    with _CACHE_LOCK:
+        _CACHE.clear()
+
+
+# ── ccxt unified adapter (optional, graceful) ──────────────────────────
+# ccxt is THE standard: 100+ exchanges, one method shape. Used when
+# installed; everything below falls back to the keyless fetchers.
+_CCXT_EXCHANGES = ("binance", "kraken", "coinbase", "bybit", "okx",
+                   "bitget", "gate")
+_ccxt_markets: dict[str, Any] = {}
+
+
+def _ccxt() -> Any:
+    """Import ccxt or raise MarketDataError with the install recipe."""
+    try:
+        import ccxt  # type: ignore[import]
+        return ccxt
+    except ImportError as exc:
+        raise MarketDataError(
+            "ccxt not installed (pip install ccxt) — "
+            "falling back to keyless fetchers") from exc
+
+
+def ccxt_available() -> bool:
+    try:
+        _ccxt()
+        return True
+    except MarketDataError:
+        return False
+
+
+def _ccxt_exchange(exchange: str = "binance") -> Any:
+    """One cached ccxt exchange instance w/ rate limiting on."""
+    ccxt = _ccxt()
+    key = (exchange or "binance").lower()
+    if key not in _ccxt_markets:
+        cls = getattr(ccxt, key, None)
+        if cls is None:
+            raise MarketDataError(f"ccxt has no exchange {key!r}")
+        ex = cls({"enableRateLimit": True})
+        _ccxt_markets[key] = ex
+    return _ccxt_markets[key]
+
+
+def ccxt_ohlcv(symbol: str, timeframe: str = "1h", bars: int = 500,
+               exchange: str = "binance") -> Any:
+    """Unified OHLCV via ccxt (paginates with `since` past one page)."""
+    ex = _ccxt_exchange(exchange)
+    market = ex.market(symbol) if "/" in symbol else None
+    sym = symbol if market else symbol
+    rows: list[list] = []
+    since = None
+    page_limit = 1000
+    while len(rows) < bars:
+        batch = ex.fetch_ohlcv(sym, timeframe=timeframe,
+                               since=since, limit=page_limit)
+        if not batch:
+            break
+        # drop the overlapping first candle when paginating
+        if rows and batch[0][0] <= rows[-1][0]:
+            batch = [b for b in batch if b[0] > rows[-1][0]]
+        if not batch:
+            break
+        rows.extend(batch)
+        since = batch[-1][0] + 1
+        if len(batch) < page_limit:
+            break
+    rows = rows[-bars:]
+    return _frame(rows, ["timestamp", "open", "high", "low", "close",
+                         "volume"])
+
+
+def ccxt_quote(symbol: str, exchange: str = "binance") -> dict[str, Any]:
+    """Unified ticker via ccxt: bid/ask/high/low/volume included."""
+    ex = _ccxt_exchange(exchange)
+    t = ex.fetch_ticker(symbol)
+    return {"symbol": symbol.upper(),
+            "price": t.get("last"),
+            "bid": t.get("bid"), "ask": t.get("ask"),
+            "high": t.get("high"), "low": t.get("low"),
+            "volume": t.get("quoteVolume") or t.get("baseVolume"),
+            "change_pct_24h": t.get("percentage"),
+            "currency": symbol.split("/")[-1] if "/" in symbol else "",
+            "source": f"ccxt:{exchange}"}
+
+
+def ccxt_order_book(symbol: str, depth: int = 20,
+                    exchange: str = "binance") -> dict[str, Any]:
+    """Order book + spread — the honest execution-cost view."""
+    ex = _ccxt_exchange(exchange)
+    book = ex.fetch_order_book(symbol, limit=depth)
+    bids = book.get("bids") or []
+    asks = book.get("asks") or []
+    best_bid = bids[0][0] if bids else None
+    best_ask = asks[0][0] if asks else None
+    spread = (best_ask - best_bid) if best_bid and best_ask else None
+    mid = (best_bid + best_ask) / 2 if best_bid and best_ask else None
+    return {"symbol": symbol.upper(), "bids": bids, "asks": asks,
+            "best_bid": best_bid, "best_ask": best_ask,
+            "spread": spread,
+            "spread_bps": (spread / mid * 10000) if spread and mid else None,
+            "timestamp": book.get("timestamp"),
+            "source": f"ccxt:{exchange}"}
+
+
+def ccxt_trades(symbol: str, limit: int = 50,
+                exchange: str = "binance") -> list[dict[str, Any]]:
+    """Recent trade tape via ccxt."""
+    ex = _ccxt_exchange(exchange)
+    out = []
+    for tr in ex.fetch_trades(symbol, limit=limit) or []:
+        out.append({"price": tr.get("price"), "amount": tr.get("amount"),
+                    "side": tr.get("side"),
+                    "timestamp": tr.get("timestamp")})
+    return out
+
+
+# ── keyless order book / trades (binance public) ──────────────────────
+
+def order_book(symbol: str, market: str = "crypto",
+               depth: int = 20) -> dict[str, Any]:
+    """Best bid/ask + spread. ccxt when available, else Binance public."""
+    if market == "crypto":
+        if ccxt_available():
+            sym = normalize_symbol(symbol, market)
+            ccxt_sym = f"{sym['base']}/{sym['quote'] or 'USDT'}"
+            return ccxt_order_book(ccxt_sym, depth=depth)
+        sym = normalize_symbol(symbol, market)
+        d = _json("https://api.binance.com/api/v3/depth",
+                  {"symbol": sym["binance"], "limit": min(depth, 100)})
+        bids = [[float(p), float(q)] for p, q in d.get("bids", [])]
+        asks = [[float(p), float(q)] for p, q in d.get("asks", [])]
+        best_bid = bids[0][0] if bids else None
+        best_ask = asks[0][0] if asks else None
+        spread = (best_ask - best_bid) if best_bid and best_ask else None
+        mid = (best_bid + best_ask) / 2 if best_bid and best_ask else None
+        return {"symbol": symbol.upper(), "bids": bids, "asks": asks,
+                "best_bid": best_bid, "best_ask": best_ask, "spread": spread,
+                "spread_bps": (spread / mid * 10000)
+                if spread and mid else None,
+                "source": "binance"}
+    raise MarketDataError(f"order_book not supported for {market!r}")
+
+
+def batch_quotes(symbols: list[str],
+                 market: str = "crypto") -> list[dict[str, Any]]:
+    """Quotes for many symbols; each failure degrades to None-safe skip."""
+    out = []
+    for sym in symbols or []:
+        try:
+            out.append(quote(sym, market=market))
+        except MarketDataError as exc:
+            _log.debug("batch quote failed for %s: %s", sym, exc)
+    return out
+
+
+async def stream_quotes(symbols: list[str], market: str = "crypto",
+                        interval: float = 5.0):
+    """Async generator of quote snapshots.
+
+    ccxt.pro ``watch_ticker`` when installed (push, no REST burn);
+    otherwise REST-poll ``quote()`` every ``interval`` seconds.
+    """
+    try:
+        import ccxt.pro as ccxtpro  # type: ignore[import]
+        have_pro = True
+    except ImportError:
+        have_pro = False
+    if have_pro and market == "crypto":
+        ex = ccxtpro.binance({"enableRateLimit": True})
+        try:
+            while True:
+                ticks = await ex.watch_tickers(symbols)
+                for sym in symbols:
+                    t = ticks.get(sym) or {}
+                    yield {"symbol": sym.upper(), "price": t.get("last"),
+                           "bid": t.get("bid"), "ask": t.get("ask"),
+                           "change_pct_24h": t.get("percentage"),
+                           "source": "ccxt.pro:binance",
+                           "ts": time.time()}
+        finally:
+            await ex.close()
+        return
+    # REST poll fallback
+    while True:
+        for q in batch_quotes(symbols, market=market):
+            yield dict(q, ts=time.time())
+        import asyncio
+        await asyncio.sleep(max(1.0, interval))
+
+
+# ── indicators (stdlib, pandas-optional) ─────────────────────────────
+
+def _closes(bars: Any) -> list[float]:
+    """Extract close prices from a DataFrame, list-of-lists, or
+    list-of-dicts."""
+    try:
+        import pandas as pd  # type: ignore[import]
+        if isinstance(bars, pd.DataFrame):
+            col = "close" if "close" in bars.columns else bars.columns[4]
+            return [float(x) for x in bars[col].tolist()]
+    except ImportError:
+        pass
+    out = []
+    for row in bars or []:
+        if isinstance(row, dict):
+            out.append(float(row.get("close", 0)))
+        elif isinstance(row, (list, tuple)) and len(row) > 4:
+            out.append(float(row[4]))
+        else:
+            out.append(float(row))
+    return out
+
+
+def _ema(values: list[float], period: int) -> list[float | None]:
+    out: list[float | None] = [None] * len(values)
+    if len(values) < period or period < 1:
+        return out
+    k = 2 / (period + 1)
+    ema = sum(values[:period]) / period
+    out[period - 1] = ema
+    for i in range(period, len(values)):
+        ema = values[i] * k + ema * (1 - k)
+        out[i] = ema
+    return out
+
+
+def indicators(bars: Any, *,
+               rsi_period: int = 14, ema_fast: int = 12, ema_slow: int = 26,
+               macd_signal: int = 9, bb_period: int = 20,
+               atr_period: int = 14) -> dict[str, Any]:
+    """RSI / EMA / MACD / Bollinger / ATR — pure stdlib.
+
+    Accepts a DataFrame, list-of-lists [ts,o,h,l,c,v], or list-of-dicts.
+    Returns latest values + full series. No numpy needed.
+    """
+    closes = _closes(bars)
+    n = len(closes)
+    if n < 2:
+        raise MarketDataError("not enough bars for indicators")
+    # highs/lows for ATR
+    highs, lows = [], []
+    try:
+        import pandas as pd  # type: ignore[import]
+        if isinstance(bars, pd.DataFrame):
+            highs = [float(x) for x in bars["high"].tolist()]
+            lows = [float(x) for x in bars["low"].tolist()]
+    except ImportError:
+        pass
+    if not highs:
+        for row in bars or []:
+            if isinstance(row, (list, tuple)) and len(row) > 4:
+                highs.append(float(row[2])); lows.append(float(row[3]))
+            else:
+                highs.append(closes[min(len(closes) - 1, len(highs))])
+                lows.append(highs[-1])
+
+    # RSI (Wilder)
+    rsi: list[float | None] = [None] * n
+    if n > rsi_period:
+        gains, losses = [], []
+        for i in range(1, n):
+            d = closes[i] - closes[i - 1]
+            gains.append(max(d, 0)); losses.append(max(-d, 0))
+        ag = sum(gains[:rsi_period]) / rsi_period
+        al = sum(losses[:rsi_period]) / rsi_period
+        rsi[rsi_period] = 100 - 100 / (1 + ag / al) if al else 100.0
+        for i in range(rsi_period + 1, n):
+            ag = (ag * (rsi_period - 1) + gains[i - 1]) / rsi_period
+            al = (al * (rsi_period - 1) + losses[i - 1]) / rsi_period
+            rsi[i] = 100 - 100 / (1 + ag / al) if al else 100.0
+
+    ef, es = _ema(closes, ema_fast), _ema(closes, ema_slow)
+    macd_line = [(a - b) if a is not None and b is not None else None
+                 for a, b in zip(ef, es)]
+    macd_vals = [x for x in macd_line if x is not None]
+    sig = _ema(macd_vals, macd_signal) if macd_vals else []
+    signal_line: list[float | None] = [None] * n
+    hist: list[float | None] = [None] * n
+    j = 0
+    for i, m in enumerate(macd_line):
+        if m is not None and j < len(sig) and sig[j] is not None:
+            signal_line[i] = sig[j]
+            hist[i] = m - sig[j]  # type: ignore[operator]
+            j += 1
+        elif m is not None:
+            j += 1
+
+    # Bollinger
+    bb_up: list[float | None] = [None] * n
+    bb_dn: list[float | None] = [None] * n
+    bb_mid: list[float | None] = [None] * n
+    for i in range(bb_period - 1, n):
+        w = closes[i - bb_period + 1:i + 1]
+        mu = sum(w) / bb_period
+        sd = (sum((x - mu) ** 2 for x in w) / bb_period) ** 0.5
+        bb_mid[i] = mu; bb_up[i] = mu + 2 * sd; bb_dn[i] = mu - 2 * sd
+
+    # ATR (Wilder)
+    atr: list[float | None] = [None] * n
+    if n > atr_period:
+        trs = []
+        for i in range(1, n):
+            trs.append(max(highs[i] - lows[i],
+                           abs(highs[i] - closes[i - 1]),
+                           abs(lows[i] - closes[i - 1])))
+        a = sum(trs[:atr_period]) / atr_period
+        atr[atr_period] = a
+        for i in range(atr_period + 1, n):
+            a = (a * (atr_period - 1) + trs[i - 1]) / atr_period
+            atr[i] = a
+
+    def _last(s: list) -> Any:
+        for x in reversed(s):
+            if x is not None:
+                return round(float(x), 6)
+        return None
+
+    return {
+        "rsi": _last(rsi), "rsi_series": rsi,
+        "ema_fast": _last(ef), "ema_slow": _last(es),
+        "macd": _last(macd_line), "macd_signal": _last(signal_line),
+        "macd_hist": _last(hist),
+        "bb_upper": _last(bb_up), "bb_mid": _last(bb_mid),
+        "bb_lower": _last(bb_dn),
+        "atr": _last(atr),
+        "n_bars": n,
+    }
+
+
+# ── god-tier quote card ──────────────────────────────────────────────
+
+def format_quote(q: dict[str, Any]) -> str:
+    """📈 BTC/USDT — $67,432.10 (+2.4% 24h) · bid/ask · H/L · via binance."""
+    sym = q.get("symbol", "?")
+    price = q.get("price")
+    chg = q.get("change_pct_24h")
+    cur = q.get("currency", "")
+    if price is None:
+        return f"📈 {sym} — _no quote_"
+    arrow = "🟢" if (chg or 0) >= 0 else "🔴"
+    chg_s = f"{chg:+.2f}%" if isinstance(chg, (int, float)) else "n/a"
+    lines = [f"{arrow} **{sym}** — {price:,.4f} {cur} ({chg_s} 24h)"]
+    bid, ask = q.get("bid"), q.get("ask")
+    if bid and ask:
+        lines.append(f"bid {bid:,.4f} / ask {ask:,.4f}")
+        spread = q.get("spread_bps")
+        if spread:
+            lines.append(f"spread {spread:.1f} bps")
+    hi, lo = q.get("high"), q.get("low")
+    if hi and lo:
+        lines.append(f"24h H {hi:,.4f} / L {lo:,.4f}")
+    lines.append(f"_via {q.get('source', '?')}_")
+    return "\n".join(lines)
+
+
+__all__ += [
+    "ccxt_available", "ccxt_ohlcv", "ccxt_quote", "ccxt_order_book",
+    "ccxt_trades", "order_book", "batch_quotes", "stream_quotes",
+    "indicators", "format_quote", "clear_cache",
+]

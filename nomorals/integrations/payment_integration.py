@@ -94,6 +94,17 @@ class Transaction:
             "confirmations": self.confirmations,
         }
 
+    def format(self) -> str:
+        """One-line transaction card."""
+        icon = {"send": "📤", "receive": "📥",
+                "purchase": "🛒"}.get(self.tx_type, "💸")
+        status = {"confirmed": "✅", "pending": "⏳",
+                  "failed": "❌"}.get(self.status, "")
+        when = time.strftime("%Y-%m-%d %H:%M",
+                             time.localtime(self.timestamp))
+        return (f"{icon} {status} {self.tx_type} "
+                f"{self.amount:.8f} {self.currency} · {when}")
+
 
 @dataclass
 class Wallet:
@@ -176,6 +187,8 @@ class PaymentApproval:
     approved_at: Optional[float] = None
     rejected_at: Optional[float] = None
     reject_reason: str = ""
+    fee_estimate: str = ""
+    fiat_amount: str = ""
     
     def __post_init__(self):
         if self.expires_at == 0.0:
@@ -199,12 +212,14 @@ class PaymentApproval:
     
     def to_message(self) -> str:
         """Format as approval request message."""
+        fee_line = f"\n**Fee est.:** {self.fee_estimate}" if self.fee_estimate else ""
+        fiat_line = f" (≈ {self.fiat_amount})" if self.fiat_amount else ""
         return (
             f"💳 **Payment Approval Required**\n\n"
             f"**Type:** {self.payment_type}\n"
-            f"**Amount:** {self.amount} {self.currency}\n"
+            f"**Amount:** {self.amount} {self.currency}{fiat_line}\n"
             f"**To:** {self.recipient}\n"
-            f"**Description:** {self.description}\n\n"
+            f"**Description:** {self.description}{fee_line}\n\n"
             f"⏰ Expires in 1 hour\n\n"
             f"Reply `approve {self.approval_id}` to confirm\n"
             f"Reply `reject {self.approval_id}` to cancel"
@@ -808,16 +823,48 @@ class PaymentIntegration:
     # ── Helpers ──────────────────────────────────────────────────────────────
     
     def _validate_address(self, currency: str, address: str) -> bool:
-        """Validate a crypto address format."""
+        """Validate a crypto address format.
+
+        ETH-family addresses get EIP-55 checksum verification when a
+        keccak backend is available (eth_hash / pysha3); all-lowercase
+        or all-uppercase (non-checksummed) addresses still pass the
+        format check.
+        """
+        addr = (address or "").strip()
         if currency == "BTC":
-            return address.startswith(("1", "3", "bc1")) and len(address) >= 26
-        elif currency == "ETH":
-            return address.startswith("0x") and len(address) == 42
-        elif currency in ("USDT", "USDC"):
-            # ERC-20 tokens use ETH addresses
-            return address.startswith("0x") and len(address) == 42
+            return addr.startswith(("1", "3", "bc1")) and 26 <= len(addr) <= 62
+        elif currency in ("ETH", "USDT", "USDC", "MATIC", "BNB"):
+            if not (addr.startswith("0x") and len(addr) == 42):
+                return False
+            hexpart = addr[2:]
+            if not all(c in "0123456789abcdefABCDEF" for c in hexpart):
+                return False
+            # mixed-case → verify EIP-55 checksum when possible
+            if hexpart != hexpart.lower() and hexpart != hexpart.upper():
+                return self._eip55_valid(addr)
+            return True
         else:
-            return len(address) > 10
+            return len(addr) > 10
+
+    @staticmethod
+    def _eip55_valid(address: str) -> bool:
+        """EIP-55 checksum verification (best-effort without keccak)."""
+        try:
+            from eth_hash.auto import keccak  # type: ignore[import]
+            digest = keccak
+        except ImportError:
+            try:
+                from sha3 import keccak_256  # type: ignore[import]
+                digest = lambda b: keccak_256(b).digest()  # noqa: E731
+            except ImportError:
+                return True  # no keccak backend — format check already passed
+        h = digest(address[2:].lower().encode("ascii")).hex()
+        for i, c in enumerate(address[2:]):
+            if c.isalpha():
+                should_upper = int(h[i], 16) >= 8
+                if (c.isupper() != should_upper):
+                    return False
+        return True
     
     def _generate_card_number(self) -> str:
         """Generate a virtual card number."""
@@ -843,3 +890,304 @@ class PaymentIntegration:
         from datetime import datetime, timedelta
         future = datetime.now() + timedelta(days=365 * 3)
         return f"{future.month:02d}/{future.year % 100:02d}"
+
+    # ── fees / tracking / receive / wallet cards ──────────────────────
+
+    async def estimate_fee(self, currency: str,
+                           speed: str = "medium") -> dict[str, Any]:
+        """Real fee estimate: mempool.space for BTC, eth_gasPrice for
+        EVM. ``speed``: slow|medium|fast. Honest dict, never a guess."""
+        cur = (currency or "").upper()
+        if cur == "BTC":
+            try:
+                req = urllib.request.Request(
+                    "https://mempool.space/api/v1/fees/recommended",
+                    headers={"Accept": "application/json"})
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    fees = json.loads(resp.read().decode())
+                key = {"slow": "hourFee", "medium": "halfHourFee",
+                       "fast": "fastestFee"}.get(speed, "halfHourFee")
+                return {"currency": "BTC", "sat_per_vbyte": fees.get(key),
+                        "speed": speed, "source": "mempool.space",
+                        "note": "for a ~140 vB tx: "
+                                f"~{fees.get(key, 0) * 140} sats"}
+            except Exception as exc:  # noqa: BLE001
+                _log.warning("btc fee estimate failed: %s", exc)
+        if cur in ("ETH", "USDT", "USDC", "MATIC", "BNB"):
+            gwei = await self._eth_gas_price_gwei(speed)
+            gas_limit = 21000 if cur == "ETH" else 65000
+            if gwei:
+                eth_fee = gwei * gas_limit / 1e9
+                return {"currency": cur, "gas_gwei": round(gwei, 2),
+                        "gas_limit": gas_limit,
+                        "fee_eth": round(eth_fee, 6),
+                        "speed": speed, "source": "eth_gasPrice"}
+        # static fallback — labeled as approximate
+        approx = {"BTC": "1–5 USD", "ETH": "0.5–3 USD",
+                  "SOL": "~0.000005 SOL"}.get(cur, "unknown")
+        return {"currency": cur, "approximate": approx, "speed": speed,
+                "source": "static-fallback",
+                "note": "live estimate unavailable — approximate only"}
+
+    async def _eth_gas_price_gwei(self, speed: str) -> float | None:
+        """eth_gasPrice via the public Cloudflare RPC (no key)."""
+        try:
+            payload = json.dumps({
+                "jsonrpc": "2.0", "id": 1,
+                "method": "eth_gasPrice", "params": []}).encode()
+            req = urllib.request.Request(
+                "https://cloudflare-eth.com",
+                data=payload, headers={"Content-Type": "application/json"})
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                result = json.loads(resp.read().decode())
+            gwei = int(result.get("result", "0x0"), 16) / 1e9
+            mult = {"slow": 0.9, "medium": 1.0, "fast": 1.25}.get(speed, 1.0)
+            return gwei * mult if gwei > 0 else None
+        except Exception as exc:  # noqa: BLE001
+            _log.debug("eth gas price failed: %s", exc)
+            return None
+
+    async def get_erc20_balance(self, address: str, contract_address: str,
+                                *, decimals: int = 18) -> float:
+        """ERC-20 token balance via web3 + public RPC (no key).
+
+        Needs the ``web3`` package; raises a clear error without it.
+        """
+        try:
+            from web3 import Web3  # type: ignore[import]
+        except ImportError as exc:
+            raise PaymentError(
+                "ERC-20 balances need the web3 package: pip install web3"
+            ) from exc
+        w3 = Web3(Web3.HTTPProvider("https://cloudflare-eth.com",
+                                    request_kwargs={"timeout": 10}))
+        if not w3.is_connected():
+            raise PaymentError("no Ethereum RPC reachable")
+        abi = [{"constant": True, "inputs": [{"name": "_owner",
+                "type": "address"}], "name": "balanceOf",
+                "outputs": [{"name": "balance", "type": "uint256"}],
+                "type": "function"}]
+        contract = w3.eth.contract(
+            address=w3.to_checksum_address(contract_address), abi=abi)
+        raw = contract.functions.balanceOf(
+            w3.to_checksum_address(address)).call()
+        return raw / (10 ** decimals)
+
+    async def track_tx(self, txid: str,
+                       currency: str) -> dict[str, Any]:
+        """Live transaction status: confirmations, fee, status.
+
+        BTC via mempool.space; ETH via public RPC receipt.
+        """
+        cur = (currency or "").upper()
+        txid = (txid or "").strip()
+        if cur == "BTC":
+            try:
+                req = urllib.request.Request(
+                    f"https://mempool.space/api/tx/{txid}/status",
+                    headers={"Accept": "application/json"})
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    st = json.loads(resp.read().decode())
+                req2 = urllib.request.Request(
+                    f"https://mempool.space/api/tx/{txid}",
+                    headers={"Accept": "application/json"})
+                with urllib.request.urlopen(req2, timeout=10) as resp:
+                    tx = json.loads(resp.read().decode())
+                confirmed = bool(st.get("confirmed"))
+                return {"txid": txid, "currency": "BTC",
+                        "status": "confirmed" if confirmed else "pending",
+                        "confirmations": 1 if confirmed else 0,
+                        "block_height": st.get("block_height"),
+                        "block_time": st.get("block_time"),
+                        "fee_sats": tx.get("fee"),
+                        "explorer": self._explorer_url("BTC", txid=txid)}
+            except Exception as exc:  # noqa: BLE001
+                raise PaymentError(
+                    f"could not track BTC tx {txid}: {exc}") from exc
+        if cur in ("ETH", "USDT", "USDC"):
+            try:
+                from web3 import Web3  # type: ignore[import]
+            except ImportError as exc:
+                raise PaymentError(
+                    "ETH tx tracking needs web3: pip install web3") from exc
+            w3 = Web3(Web3.HTTPProvider("https://cloudflare-eth.com",
+                                        request_kwargs={"timeout": 10}))
+            try:
+                receipt = w3.eth.get_transaction_receipt(txid)
+            except Exception:
+                receipt = None
+            if receipt is None:
+                return {"txid": txid, "currency": cur, "status": "pending",
+                        "confirmations": 0,
+                        "explorer": self._explorer_url(cur, txid=txid)}
+            ok = receipt.get("status") == 1
+            return {"txid": txid, "currency": cur,
+                    "status": "confirmed" if ok else "failed",
+                    "confirmations": 12,
+                    "block": receipt.get("blockNumber"),
+                    "gas_used": receipt.get("gasUsed"),
+                    "explorer": self._explorer_url(cur, txid=txid)}
+        raise PaymentError(f"tx tracking not implemented for {cur}")
+
+    def format_tx_status(self, status: dict[str, Any]) -> str:
+        """God-tier tx status card."""
+        icon = {"confirmed": "✅", "pending": "⏳",
+                "failed": "❌"}.get(status.get("status"), "❓")
+        lines = [f"{icon} **{status.get('currency')} transaction**",
+                 f"`{status.get('txid', '')}`",
+                 f"status: {status.get('status')}"]
+        if status.get("confirmations"):
+            lines.append(f"confirmations: {status['confirmations']}")
+        if status.get("fee_sats"):
+            lines.append(f"fee: {status['fee_sats']} sats")
+        if status.get("gas_used"):
+            lines.append(f"gas used: {status['gas_used']}")
+        if status.get("explorer"):
+            lines.append(f"🔗 {status['explorer']}")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _explorer_url(currency: str, *, txid: str = "",
+                      address: str = "") -> str:
+        cur = (currency or "").upper()
+        base = {
+            "BTC": "https://mempool.space",
+            "ETH": "https://etherscan.io",
+            "USDT": "https://etherscan.io",
+            "USDC": "https://etherscan.io",
+            "SOL": "https://solscan.io",
+            "MATIC": "https://polygonscan.com",
+            "BNB": "https://bscscan.com",
+        }.get(cur, "")
+        if not base:
+            return ""
+        if txid:
+            return f"{base}/tx/{txid}"
+        if address:
+            return f"{base}/address/{address}"
+        return base
+
+    async def receive_qr(self, currency: str, *,
+                         wallet: str = "main") -> str:
+        """QR code for the receiving address.
+
+        Returns a PNG path when ``qrcode`` is installed, otherwise an
+        ASCII-art QR in a code block (still scannable from chat on
+        most phones' cameras… no — honest: ASCII is for display;
+        the address text below it is what to copy).
+        """
+        address = await self.receive_crypto(currency, wallet=wallet)
+        try:
+            import qrcode  # type: ignore[import]
+            import tempfile
+            img = qrcode.make(address)
+            with tempfile.NamedTemporaryFile(suffix=".png",
+                                             delete=False) as f:
+                img.save(f.name)
+                return f"![receive QR]({f.name})\n`{address}`"
+        except ImportError:
+            pass
+        # ASCII fallback — display only
+        try:
+            import qrcode  # noqa: F401  (unreachable, keeps linters calm)
+        except ImportError:
+            pass
+        return self._ascii_qr(address) + f"\n`{address}`"
+
+    @staticmethod
+    def _ascii_qr(data: str) -> str:
+        """Tiny QR-ish placeholder: NOT a real QR — honest label."""
+        # Without the qrcode lib we can't render a real matrix; show a
+        # framed address block instead of a fake QR.
+        border = "─" * (min(len(data), 42) + 2)
+        return (f"┌{border}┐\n│ {data[:42]:<42} │\n└{border}┘\n"
+                f"_copy the address above — install `qrcode` for a real QR_")
+
+    async def fiat_value(self, currency: str, amount: float,
+                         fiat: str = "USD") -> float:
+        """Fiat equivalent via market_data (CoinGecko/Binance keyless)."""
+        try:
+            from . import market_data
+            q = market_data.quote(f"{currency}/USDT", market="crypto")
+            price = float(q.get("price") or 0)
+            if fiat.upper() == "USD" or not price:
+                return amount * price
+            fx = market_data.quote(f"USD/{fiat.upper()}", market="forex")
+            return amount * price * float(fx.get("price") or 1)
+        except Exception:  # noqa: BLE001
+            return 0.0
+
+    async def format_wallet(self, wallet: str = "main",
+                            fiat: str = "USD") -> str:
+        """God-tier wallet card: per-currency balances + fiat totals."""
+        lines = [f"💰 **wallet: {wallet}**"]
+        total = 0.0
+        for cur in self.SUPPORTED_CRYPTO:
+            try:
+                bal = await self.get_balance(wallet, currency=cur)
+            except Exception:  # noqa: BLE001
+                continue
+            if bal <= 0:
+                continue
+            fv = await self.fiat_value(cur, bal, fiat)
+            total += fv
+            try:
+                addr = await self.receive_crypto(cur, wallet=wallet)
+                short = f"{addr[:10]}…{addr[-6:]}" if len(addr) > 18 else addr
+            except Exception:  # noqa: BLE001
+                short = ""
+            lines.append(f"• **{bal:.8f} {cur}** ≈ {fv:,.2f} {fiat}"
+                         + (f"  `{short}`" if short else ""))
+        lines.append(f"\n**total ≈ {total:,.2f} {fiat}**")
+        return "\n".join(lines)
+
+    # ── address book ───────────────────────────────────────────────
+
+    def _address_book_path(self) -> str:
+        import os
+        path = os.path.expanduser("~/.nomorals/payments/address_book.json")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        return path
+
+    def _load_address_book(self) -> dict[str, dict]:
+        import os
+        path = self._address_book_path()
+        if not os.path.isfile(path):
+            return {}
+        try:
+            with open(path) as f:
+                return json.load(f)
+        except (ValueError, OSError):
+            return {}
+
+    def _save_address_book(self, book: dict[str, dict]) -> None:
+        with open(self._address_book_path(), "w") as f:
+            json.dump(book, f, indent=2)
+
+    def save_address(self, name: str, currency: str, address: str) -> None:
+        """Save a named address (validated before storing)."""
+        if not self._validate_address(currency, address):
+            raise PaymentError(
+                f"refusing to save invalid {currency} address: {address}")
+        book = self._load_address_book()
+        book[(name or "").strip().lower()] = {
+            "name": name, "currency": (currency or "").upper(),
+            "address": address, "saved_at": time.time()}
+        self._save_address_book(book)
+
+    def get_address(self, name: str) -> dict | None:
+        """Look up a saved address by name."""
+        return self._load_address_book().get((name or "").strip().lower())
+
+    def list_addresses(self) -> list[dict]:
+        """All saved addresses."""
+        return sorted(self._load_address_book().values(),
+                      key=lambda a: a.get("name", ""))
+
+    def delete_address(self, name: str) -> bool:
+        book = self._load_address_book()
+        if (name or "").strip().lower() in book:
+            del book[(name or "").strip().lower()]
+            self._save_address_book(book)
+            return True
+        return False

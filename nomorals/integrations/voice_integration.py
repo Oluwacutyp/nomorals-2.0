@@ -82,7 +82,21 @@ class TTSEngine:
     def __init__(self, engine: str = "edge-tts") -> None:
         self.engine = engine
         self._voices: dict[str, str] = {}
-    
+
+    # Curated voice catalog: style → voice id per engine family.
+    VOICE_CATALOG: dict[str, dict[str, str]] = {
+        "default": {"label": "Aria — warm, general", "edge": "en-US-AriaNeural"},
+        "male": {"label": "Guy — masculine, steady", "edge": "en-US-GuyNeural"},
+        "female": {"label": "Aria — female, warm", "edge": "en-US-AriaNeural"},
+        "british": {"label": "Sonia — British English", "edge": "en-GB-SoniaNeural"},
+        "nigerian": {"label": "Ezinne — Nigerian English", "edge": "en-NG-EzinneNeural"},
+        "deep": {"label": "Davis — deep narrator", "edge": "en-US-DavisNeural"},
+        "cheerful": {"label": "Jenny — bright, upbeat", "edge": "en-US-JennyNeural"},
+        "calm": {"label": "Ana — soft, calm", "edge": "en-US-AnaNeural"},
+        "news": {"label": "Christopher — newsreader", "edge": "en-US-ChristopherNeural"},
+        "assistant": {"label": "Ava — crisp assistant", "edge": "en-US-AvaNeural"},
+    }
+
     async def synthesize(
         self,
         text: str,
@@ -91,6 +105,7 @@ class TTSEngine:
         output_path: str | None = None,
         rate: str = "+0%",
         volume: str = "+0%",
+        pitch: str = "+0Hz",
     ) -> str:
         """Convert text to speech.
         
@@ -100,6 +115,7 @@ class TTSEngine:
             output_path: Output file path (auto-generated if None)
             rate: Speech rate adjustment (e.g., "+20%", "-10%")
             volume: Volume adjustment
+            pitch: Pitch adjustment (e.g., "+10Hz", "-5Hz")
             
         Returns:
             Path to generated audio file
@@ -109,13 +125,127 @@ class TTSEngine:
                 output_path = f.name
         
         if self.engine == "edge-tts":
-            return await self._tts_edge(text, voice, output_path, rate, volume)
+            return await self._tts_edge(text, voice, output_path, rate,
+                                        volume, pitch)
         elif self.engine == "gtts":
             return await self._tts_gtts(text, voice, output_path)
         elif self.engine == "elevenlabs":
-            return await self._tts_elevenlabs(text, voice, output_path)
+            return await self._tts_elevenlabs(text, voice, output_path,
+                                              rate=rate)
         else:
             raise ValueError(f"Unknown TTS engine: {self.engine}")
+
+    async def synthesize_stream(self, text: str, *,
+                                voice: str = "default",
+                                rate: str = "+0%", volume: str = "+0%",
+                                pitch: str = "+0Hz"):
+        """Async generator of MP3 audio chunks (edge-tts streaming).
+
+        Yields ``bytes`` as they arrive — play the first chunk while
+        the rest synthesizes. Long texts are chunked sentence-aware.
+        """
+        if self.engine != "edge-tts":
+            # non-streaming engines: synthesize whole, yield once
+            path = await self.synthesize(text, voice=voice, rate=rate,
+                                         volume=volume, pitch=pitch)
+            with open(path, "rb") as f:
+                yield f.read()
+            return
+        try:
+            import edge_tts
+        except ImportError as exc:
+            raise RuntimeError("edge-tts not installed") from exc
+        selected = self._resolve_voice(voice)
+        for chunk in self._chunk_text(text):
+            communicate = edge_tts.Communicate(
+                chunk, selected, rate=rate, volume=volume, pitch=pitch)
+            async for part in communicate.stream():
+                if part["type"] == "audio" and part.get("data"):
+                    yield part["data"]
+
+    async def synthesize_long(self, text: str, *,
+                              voice: str = "default",
+                              output_path: str | None = None,
+                              rate: str = "+0%", volume: str = "+0%",
+                              pitch: str = "+0Hz",
+                              on_progress: Any = None) -> str:
+        """Long-form synthesis: sentence-aware chunking under edge-tts's
+        ~2000-char limit, chunks concatenated to one MP3."""
+        if output_path is None:
+            with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as f:
+                output_path = f.name
+        chunks = self._chunk_text(text)
+        with open(output_path, "wb") as out:
+            for i, part in enumerate(chunks):
+                data = b"".join(
+                    [c async for c in self.synthesize_stream(
+                        part, voice=voice, rate=rate, volume=volume,
+                        pitch=pitch)])
+                out.write(data)
+                if on_progress is not None:
+                    try:
+                        on_progress(i + 1, len(chunks))
+                    except Exception:  # noqa: BLE001
+                        pass
+        return output_path
+
+    @staticmethod
+    def _chunk_text(text: str, limit: int = 1800) -> list[str]:
+        """Split on sentence boundaries under ``limit`` chars."""
+        import re as _re
+        sentences = _re.split(r"(?<=[.!?])\s+", (text or "").strip())
+        chunks, cur = [], ""
+        for s in sentences:
+            if len(cur) + len(s) + 1 <= limit:
+                cur = (cur + " " + s).strip()
+            else:
+                if cur:
+                    chunks.append(cur)
+                # a single monster sentence: hard-split on commas
+                while len(s) > limit:
+                    cut = s.rfind(",", 0, limit)
+                    cut = cut if cut > 0 else limit
+                    chunks.append(s[:cut].strip())
+                    s = s[cut:].strip()
+                cur = s
+        if cur:
+            chunks.append(cur)
+        return chunks or [text]
+
+    def _resolve_voice(self, voice: str) -> str:
+        entry = self.VOICE_CATALOG.get(voice or "default", {})
+        return entry.get("edge", voice or "en-US-AriaNeural")
+
+    def pick_voice(self, *, style: str = "", language: str = "",
+                   gender: str = "") -> str:
+        """Pick a voice id by style/language/gender hints.
+
+        ``style`` matches catalog keys or labels; ``language`` matches
+        e.g. "en-NG"; ``gender`` matches "male"/"female" in labels.
+        Falls back to "default" — never raises.
+        """
+        want = (style or "").lower()
+        if want in self.VOICE_CATALOG:
+            return want
+        for key, entry in self.VOICE_CATALOG.items():
+            label = entry.get("label", "").lower()
+            vid = entry.get("edge", "")
+            if want and want in label:
+                return key
+            if language and language.lower() in vid.lower():
+                return key
+            if gender and gender.lower() in label:
+                return key
+        return "default"
+
+    def format_voices(self) -> str:
+        """God-tier voice browser for chat."""
+        lines = ["🎙️ **voices** (edge-tts, free)"]
+        for key, entry in self.VOICE_CATALOG.items():
+            lines.append(f"• `{key}` — {entry['label']} "
+                         f"({entry['edge']})")
+        lines.append("\n_use `pick_voice(style=...)` or pass a voice key_")
+        return "\n".join(lines)
     
     async def _tts_edge(
         self,
@@ -124,35 +254,26 @@ class TTSEngine:
         output_path: str,
         rate: str,
         volume: str,
+        pitch: str = "+0Hz",
     ) -> str:
         """Use Microsoft Edge TTS (free, high quality)."""
         try:
             import edge_tts
-            
-            # Default voices by language/style
-            voice_map = {
-                "default": "en-US-AriaNeural",
-                "male": "en-US-GuyNeural",
-                "female": "en-US-AriaNeural",
-                "british": "en-GB-SoniaNeural",
-                "nigerian": "en-NG-EzinneNeural",
-                "deep": "en-US-DavisNeural",
-                "cheerful": "en-US-JennyNeural",
-            }
-            
-            selected_voice = voice_map.get(voice, voice)
-            
+
+            selected_voice = self._resolve_voice(voice)
+
             communicate = edge_tts.Communicate(
                 text,
                 selected_voice,
                 rate=rate,
                 volume=volume,
+                pitch=pitch,
             )
-            
+
             await communicate.save(output_path)
             _log.info(f"Generated voice message: {output_path}")
             return output_path
-            
+
         except ImportError:
             _log.warning("edge-tts not installed, falling back to gtts")
             return await self._tts_gtts(text, voice, output_path)
@@ -180,19 +301,61 @@ class TTSEngine:
         text: str,
         voice: str,
         output_path: str,
+        *,
+        rate: str = "+0%",
+        api_key: str = "",
     ) -> str:
-        """Use ElevenLabs API (premium quality, requires API key)."""
-        # This would require an API key stored in credentials
-        _log.warning("ElevenLabs TTS not implemented yet")
-        return await self._tts_edge(text, voice, output_path, "+0%", "+0%")
-    
+        """Use ElevenLabs API (premium quality, requires API key).
+
+        Real implementation: POST /v1/text-to-speech/{voice_id} with
+        the ElevenLabs voice id. ``voice`` may be a voice id or a
+        friendly alias ("rachel", "adam"…).
+        """
+        key = api_key or getattr(self, "_elevenlabs_key", "") or ""
+        if not key:
+            _log.warning("ElevenLabs needs an API key — falling back to "
+                         "edge-tts (set TTSEngine._elevenlabs_key)")
+            return await self._tts_edge(text, voice, output_path, rate,
+                                        "+0%", "+0Hz")
+        voice_ids = {
+            "rachel": "21m00Tcm4TlvDq8ikWAM",
+            "adam": "pNInz6obpgDQGcFmaJgB",
+            "sam": "yoZ06aMxZJJ28mfd3POQ",
+            "bella": "EXAVITQu4vr4xnSDxMaL",
+        }
+        voice_id = voice_ids.get((voice or "").lower(), voice)
+        if not voice_id or voice_id == "default":
+            voice_id = voice_ids["rachel"]
+        payload = json.dumps({
+            "text": text,
+            "model_id": "eleven_multilingual_v2",
+            "voice_settings": {"stability": 0.5, "similarity_boost": 0.75},
+        }).encode()
+        req = urllib.request.Request(
+            f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}",
+            data=payload,
+            headers={"xi-api-key": key, "Content-Type": "application/json",
+                     "Accept": "audio/mpeg"})
+        try:
+            import asyncio
+            loop = asyncio.get_running_loop()
+
+            def _do() -> None:
+                with urllib.request.urlopen(req, timeout=60) as resp:
+                    with open(output_path, "wb") as f:
+                        f.write(resp.read())
+
+            await loop.run_in_executor(None, _do)
+            _log.info("ElevenLabs TTS saved: %s", output_path)
+            return output_path
+        except Exception as e:
+            _log.error(f"ElevenLabs TTS failed: {e}")
+            raise
+
     def list_voices(self) -> list[str]:
-        """List available voices."""
+        """List available voice keys."""
         if self.engine == "edge-tts":
-            return [
-                "default", "male", "female", "british",
-                "nigerian", "deep", "cheerful",
-            ]
+            return list(self.VOICE_CATALOG)
         return ["default"]
 
 

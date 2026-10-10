@@ -132,6 +132,13 @@ class MQTTBridge:
         clock: Callable[[], float] | None = None,
         trigger_engine: Any | None = None,
         client_factory: Callable[[], Any] | None = None,
+        tls: bool = False,
+        tls_ca_certs: str | None = None,
+        tls_certfile: str | None = None,
+        tls_keyfile: str | None = None,
+        tls_insecure: bool = False,
+        birth_topic: str | None = None,
+        lwt_topic: str | None = None,
     ) -> None:
         self._host = host or DEFAULT_HOST
         self._port = int(port or DEFAULT_PORT)
@@ -145,6 +152,16 @@ class MQTTBridge:
         self._trigger_engine = trigger_engine
         #: () -> paho-like client; injectable so tests never need a broker.
         self._client_factory = client_factory
+        # TLS passthrough → paho tls_set().
+        self._tls = tls
+        self._tls_ca_certs = tls_ca_certs
+        self._tls_certfile = tls_certfile
+        self._tls_keyfile = tls_keyfile
+        self._tls_insecure = tls_insecure
+        # Birth / last-will topics. Defaults announce on the Z2M bridge
+        # state topic so Home Assistant sees Devon come and go.
+        self._birth_topic = birth_topic or f"{self._prefix}/bridge/devon/state"
+        self._lwt_topic = lwt_topic or self._birth_topic
 
         self._subs: dict[int, tuple[str, Callable]] = {}
         self._next_sub_id = 0
@@ -154,6 +171,12 @@ class MQTTBridge:
         self._availability: dict[str, str] = {}
         #: entity_id -> unix time when its trigger cooldown expires
         self._cooldown_until: dict[str, float] = {}
+        # — observability —
+        self._started_at = self._clock()
+        self._reconnect_count = 0
+        self._msgs_in = 0
+        self._msgs_out = 0
+        self._last_msg_at: float | None = None
 
         self._client: Any | None = None
         self._running = False
@@ -234,10 +257,76 @@ class MQTTBridge:
             payload = json.dumps(payload)
         try:
             client.publish(topic, payload, qos=qos, retain=retain)
+            self._msgs_out += 1
             return True
         except Exception:  # noqa: BLE001 - broker hiccup, not fatal
             _log.debug("mqtt publish failed", exc_info=True)
             return False
+
+    def stats(self) -> dict[str, Any]:
+        """Observability: uptime, reconnects, message counters."""
+        return {
+            "connected": self._connected,
+            "running": self._running,
+            "uptime_s": round(self._clock() - self._started_at, 1),
+            "reconnect_count": self._reconnect_count,
+            "msgs_in": self._msgs_in,
+            "msgs_out": self._msgs_out,
+            "devices_tracked": len(self._state_cache),
+            "subscriptions": len(self._subs),
+            "last_msg_at": self._last_msg_at,
+        }
+
+    def publish_discovery(self, device: str, component: str, *,
+                          name: str = "", device_class: str = "",
+                          unit: str = "", retain: bool = True) -> bool:
+        """Publish a Home Assistant MQTT discovery payload for a
+        Devon-originated virtual device (retained, so HA picks it up
+        on (re)connect).
+
+        ``component`` is e.g. ``"sensor"``, ``"switch"``, ``"light"``.
+        """
+        eid = _entity_id(device, prefix=self._prefix)
+        discovery_topic = (f"homeassistant/{component}/{eid}/config")
+        payload: dict[str, Any] = {
+            "name": name or device,
+            "unique_id": f"devon_{eid}",
+            "state_topic": state_topic(device, prefix=self._prefix),
+            "device": {"identifiers": [f"devon_{eid}"],
+                       "name": name or device,
+                       "manufacturer": "Devon"},
+        }
+        if device_class:
+            payload["device_class"] = device_class
+        if unit:
+            payload["unit_of_measurement"] = unit
+        if component in ("switch", "light"):
+            payload["command_topic"] = set_topic(device, prefix=self._prefix)
+            payload["payload_on"] = "ON"
+            payload["payload_off"] = "OFF"
+        return self.publish(discovery_topic, payload, retain=retain, qos=1)
+
+    def wait_for_state(self, device: str, state: Any, *,
+                       timeout: float = 10.0,
+                       poll_interval: float = 0.2) -> bool:
+        """Block until a device's cached state equals ``state`` (echo
+        confirmation after a command). Returns False on timeout."""
+        want = str(state)
+        deadline = self._clock() + max(0.1, timeout)
+        while self._clock() < deadline:
+            cached = self._state_cache.get(str(device), {})
+            if str(cached.get("state")) == want:
+                return True
+            time.sleep(poll_interval)
+        return False
+
+    def set_state_wait(self, device: str, state: Any, *,
+                       timeout: float = 10.0) -> bool:
+        """Command a device and wait for the state echo — honest
+        confirmation instead of fire-and-forget."""
+        if not self.set_state(device, state):
+            return False
+        return self.wait_for_state(device, state, timeout=timeout)
 
     # ── device commands (Zigbee2MQTT grammar) ────────────────────────
 
@@ -293,13 +382,17 @@ class MQTTBridge:
             if rc == 0:
                 self._connected = True
                 self._backoff_s = _BACKOFF_START
+                self._reconnect_count += 1
                 _log.info("MQTT connected to %s:%d", self._host, self._port)
                 try:
                     client.subscribe(f"{self._prefix}/#")
                     for topic, _cb in self._subs.values():
                         client.subscribe(topic)
+                    # Birth message: retained "online" clears the LWT.
+                    client.publish(self._birth_topic, "online",
+                                   qos=1, retain=True)
                 except Exception:  # noqa: BLE001
-                    _log.debug("mqtt resubscribe failed", exc_info=True)
+                    _log.debug("mqtt resubscribe/birth failed", exc_info=True)
             else:
                 _log.warning("MQTT broker refused connection (rc=%s)", rc)
 
@@ -343,15 +436,34 @@ class MQTTBridge:
 
     def _make_client(self) -> Any:
         if self._client_factory is not None:
-            return self._client_factory()
-        import paho.mqtt.client as _paho
-        client = _paho.Client(client_id=self._client_id,
-                             callback_api_version=_paho.CallbackAPIVersion.VERSION2)
+            client = self._client_factory()
+        else:
+            import paho.mqtt.client as _paho
+            client = _paho.Client(client_id=self._client_id,
+                                  callback_api_version=_paho.CallbackAPIVersion.VERSION2)
         if self._username:
             client.username_pw_set(self._username, self._password)
+        # Last will: broker publishes "offline" if we die ungracefully.
+        # Applies to factory-provided clients too — the will belongs to
+        # this bridge session, not to how the client was constructed.
+        try:
+            client.will_set(self._lwt_topic, "offline", qos=1, retain=True)
+        except Exception:  # noqa: BLE001 - will is best-effort
+            _log.debug("mqtt will_set failed", exc_info=True)
+        if self._tls:
+            try:
+                client.tls_set(ca_certs=self._tls_ca_certs,
+                               certfile=self._tls_certfile,
+                               keyfile=self._tls_keyfile)
+                if self._tls_insecure:
+                    client.tls_insecure_set(True)
+            except Exception:  # noqa: BLE001 - TLS misconfig shouldn't
+                _log.warning("mqtt TLS setup failed", exc_info=True)
         return client
 
     def _handle_message(self, topic: str, raw: Any) -> None:
+        self._msgs_in += 1
+        self._last_msg_at = self._clock()
         prefix = self._prefix + "/"
         if not topic.startswith(prefix):
             self._dispatch_raw(topic, raw)

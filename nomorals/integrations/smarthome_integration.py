@@ -72,6 +72,13 @@ class Device:
             "available": self.available,
         }
 
+    @property
+    def state_text(self) -> str:
+        """The HA state string ('on'/'off'/…), '' when unknown."""
+        if isinstance(self.state, dict):
+            return str(self.state.get("state", ""))
+        return ""
+
 
 @dataclass
 class DeviceState:
@@ -205,6 +212,8 @@ class SmartHomeIntegration:
         color: str | None = None,
         color_temp: int | None = None,
         transition: float = 0.5,
+        effect: str | None = None,
+        hs_color: tuple[float, float] | None = None,
     ) -> bool:
         """Control a light.
         
@@ -215,6 +224,8 @@ class SmartHomeIntegration:
             color: Hex color (e.g., "#FF6B35")
             color_temp: Color temperature in Kelvin
             transition: Transition time in seconds
+            effect: Light effect (e.g. "colorloop" — device dependent)
+            hs_color: (hue 0-360, saturation 0-100) tuple
             
         Returns:
             True if successful
@@ -223,19 +234,181 @@ class SmartHomeIntegration:
         
         if backend == "homeassistant":
             return await self._set_light_ha(
-                device_id_or_name, on, brightness, color, color_temp, transition
+                device_id_or_name, on, brightness, color, color_temp,
+                transition, effect, hs_color,
             )
         else:
             _log.warning("No smart home backend available")
             return False
     
-    async def turn_on(self, device_id_or_name: str) -> bool:
-        """Turn on a device."""
+    async def turn_on(self, device_id_or_name: str | list[str]) -> bool:
+        """Turn on a device (or a list of devices — one bulk call)."""
+        if isinstance(device_id_or_name, list):
+            return await self._bulk("light", "turn_on", device_id_or_name)
         return await self.set_light(device_id_or_name, on=True)
-    
-    async def turn_off(self, device_id_or_name: str) -> bool:
-        """Turn off a device."""
+
+    async def turn_off(self, device_id_or_name: str | list[str]) -> bool:
+        """Turn off a device (or a list of devices — one bulk call)."""
+        if isinstance(device_id_or_name, list):
+            return await self._bulk("light", "turn_off", device_id_or_name)
         return await self.set_light(device_id_or_name, on=False)
+
+    async def toggle(self, device_id_or_name: str) -> bool:
+        """Toggle a device (homeassistant.toggle works on any domain)."""
+        backend = self._detect_backend()
+        if backend != "homeassistant":
+            _log.warning("No smart home backend available")
+            return False
+        entity_id = await self._resolve_entity_id(device_id_or_name)
+        await self._ha_request("POST", "services/homeassistant/toggle",
+                               {"entity_id": entity_id})
+        return True
+
+    async def _bulk(self, domain: str, service: str,
+                    devices: list[str]) -> bool:
+        """One service call, many entity_ids (HA best practice)."""
+        backend = self._detect_backend()
+        if backend != "homeassistant":
+            return False
+        entity_ids = [await self._resolve_entity_id(d) for d in devices]
+        await self._ha_request("POST", f"services/{domain}/{service}",
+                               {"entity_id": entity_ids})
+        return True
+
+    # ── advanced HA: services w/ response, templates, areas, scenes ──
+
+    async def call_service(self, domain: str, service: str, *,
+                           entity_id: str | list[str] | None = None,
+                           data: dict[str, Any] | None = None,
+                           return_response: bool = False) -> Any:
+        """Raw service call. ``return_response=True`` asks HA for the
+        service's response data (e.g. weather.get_forecasts)."""
+        backend = self._detect_backend()
+        if backend != "homeassistant":
+            raise RuntimeError("No smart home backend available")
+        payload: dict[str, Any] = dict(data or {})
+        if entity_id:
+            payload["entity_id"] = entity_id
+        endpoint = f"services/{domain}/{service}"
+        if return_response:
+            endpoint += "?return_response=true"
+        return await self._ha_request("POST", endpoint, payload)
+
+    async def render_template(self, template: str) -> str:
+        """Server-side Jinja rendering via /api/template.
+
+        Lets HA do the work: ``{{ states('sensor.temp') }}``,
+        ``{{ now().strftime('%H:%M') }}``, etc.
+        """
+        backend = self._detect_backend()
+        if backend != "homeassistant":
+            raise RuntimeError("No smart home backend available")
+        result = await self._ha_request("POST", "template",
+                                        {"template": template})
+        if isinstance(result, dict):
+            return str(result.get("rendered", result))
+        return str(result)
+
+    async def list_areas(self) -> list[dict[str, Any]]:
+        """Areas (rooms) with their device counts.
+
+        Tries the area registry; falls back to grouping devices by
+        their ``room`` attribute when the registry is unreachable.
+        """
+        backend = self._detect_backend()
+        if backend != "homeassistant":
+            return []
+        try:
+            areas = await self._ha_request("GET", "config/area_registry/list")
+            devices = await self._ha_request("GET",
+                                             "config/device_registry/list")
+            counts: dict[str, int] = {}
+            for d in devices or []:
+                aid = (d or {}).get("area_id")
+                if aid:
+                    counts[aid] = counts.get(aid, 0) + 1
+            return [{"area_id": a.get("area_id"), "name": a.get("name"),
+                     "devices": counts.get(a.get("area_id"), 0)}
+                    for a in (areas or [])]
+        except Exception:  # noqa: BLE001 - fall back to room attrs
+            _log.debug("area registry unavailable, grouping by room",
+                       exc_info=True)
+        devices = await self.list_devices()
+        rooms: dict[str, int] = {}
+        for d in devices:
+            rooms[d.room or "unassigned"] = rooms.get(d.room or
+                                                      "unassigned", 0) + 1
+        return [{"area_id": r, "name": r, "devices": n}
+                for r, n in sorted(rooms.items())]
+
+    async def devices_in_area(self, area: str) -> list[Device]:
+        """Devices in one area/room (matches area name or room attr)."""
+        devices = await self.list_devices()
+        want = (area or "").strip().lower()
+        return [d for d in devices
+                if (d.room or "").lower() == want
+                or want in (d.name or "").lower()]
+
+    async def capture_scene(self, scene_id: str,
+                            entity_ids: list[str]) -> bool:
+        """Snapshot current states into a scene (scene.create).
+
+        ``scene_id`` like ``"movie_night"``; entities' live states
+        become the scene. Activate later with activate_scene().
+        """
+        backend = self._detect_backend()
+        if backend != "homeassistant":
+            return False
+        resolved = [await self._resolve_entity_id(e) for e in entity_ids]
+        await self._ha_request(
+            "POST", "services/scene/create",
+            {"scene_id": scene_id, "snapshot_entities": resolved})
+        return True
+
+    async def snapshot_camera(self, device_id_or_name: str,
+                              filename: str) -> str:
+        """Grab a still from a camera entity → ``filename``."""
+        backend = self._detect_backend()
+        if backend != "homeassistant":
+            raise RuntimeError("No smart home backend available")
+        entity_id = await self._resolve_entity_id(device_id_or_name,
+                                                  domain="camera")
+        await self._ha_request("POST", "services/camera/snapshot",
+                               {"entity_id": entity_id,
+                                "filename": filename})
+        return filename
+
+    async def browse_media(self, entity_id_or_name: str, *,
+                           media_content_type: str = "",
+                           media_content_id: str = "") -> Any:
+        """Browse a media_player's library (media_player.browse_media)."""
+        entity_id = await self._resolve_entity_id(device_id_or_name,
+                                                  domain="media_player")
+        return await self.call_service(
+            "media_player", "browse_media", entity_id=entity_id,
+            data={"media_content_type": media_content_type,
+                  "media_content_id": media_content_id},
+            return_response=True)
+
+    def format_devices(self, devices: list[Device]) -> str:
+        """God-tier room-by-room device rendering with status emoji."""
+        if not devices:
+            return "🏠 **devices**\n_no devices found._"
+        rooms: dict[str, list[Device]] = {}
+        for d in devices:
+            rooms.setdefault(d.room or "unassigned", []).append(d)
+        state_icon = {"on": "🟢", "off": "⚪", "open": "🚪", "closed": "🔒",
+                      "locked": "🔒", "unlocked": "🔓", "home": "🏠",
+                      "away": "🚶", "unavailable": "📡"}
+        lines = [f"🏠 **devices** ({len(devices)})"]
+        for room in sorted(rooms):
+            lines.append(f"\n**{room}**")
+            for d in sorted(rooms[room], key=lambda x: x.name):
+                state = d.state_text or "?"
+                icon = state_icon.get(state, "•")
+                avail = "" if d.available else " 📡 _unavailable_"
+                lines.append(f"  {icon} {d.name} — {state}{avail}")
+        return "\n".join(lines)
     
     # ── Thermostat Control ───────────────────────────────────────────────────
     
@@ -322,6 +495,7 @@ class SmartHomeIntegration:
         actions: list[dict[str, Any]],
         *,
         conditions: list[dict[str, Any]] | None = None,
+        mode: str = "single",
     ) -> str:
         """Create a new automation.
         
@@ -330,6 +504,9 @@ class SmartHomeIntegration:
             trigger: Trigger configuration
             actions: List of actions to execute
             conditions: Optional conditions
+            mode: single | restart | queued | parallel (HA best practice:
+                restart for motion lights, queued for locks, parallel for
+                independent per-entity actions)
             
         Returns:
             Automation ID
@@ -337,7 +514,7 @@ class SmartHomeIntegration:
         backend = self._detect_backend()
         
         if backend == "homeassistant":
-            return await self._create_automation_ha(name, trigger, actions, conditions)
+            return await self._create_automation_ha(name, trigger, actions, conditions, mode)
         else:
             raise RuntimeError("No smart home backend available")
     
@@ -465,7 +642,8 @@ class SmartHomeIntegration:
                     name=state.get("attributes", {}).get("friendly_name", entity_id),
                     device_type=dev_type,
                     room=ha_room,
-                    state=state.get("attributes", {}),
+                    state={"state": state.get("state"),
+                           **state.get("attributes", {})},
                     capabilities=self._get_capabilities(domain),
                     available=state.get("state") != "unavailable",
                 )
@@ -525,6 +703,8 @@ class SmartHomeIntegration:
         color: str | None,
         color_temp: int | None,
         transition: float,
+        effect: str | None = None,
+        hs_color: tuple[float, float] | None = None,
     ) -> bool:
         """Control light via Home Assistant."""
         entity_id = await self._resolve_entity_id(device_id_or_name)
@@ -545,8 +725,12 @@ class SmartHomeIntegration:
             color = color.lstrip("#")
             r, g, b = int(color[0:2], 16), int(color[2:4], 16), int(color[4:6], 16)
             data["rgb_color"] = [r, g, b]
+        if hs_color is not None:
+            data["hs_color"] = [float(hs_color[0]), float(hs_color[1])]
         if color_temp is not None:
             data["color_temp_kelvin"] = color_temp
+        if effect is not None:
+            data["effect"] = effect
         if transition > 0:
             data["transition"] = transition
         
@@ -613,6 +797,7 @@ class SmartHomeIntegration:
         trigger: dict[str, Any],
         actions: list[dict[str, Any]],
         conditions: list[dict[str, Any]] | None,
+        mode: str = "single",
     ) -> str:
         """Create automation via Home Assistant."""
         automation_id = f"automation.{name.lower().replace(' ', '_')}"
@@ -621,6 +806,7 @@ class SmartHomeIntegration:
             "alias": name,
             "trigger": trigger,
             "action": actions,
+            "mode": mode,
         }
         
         if conditions:
@@ -799,6 +985,14 @@ class _Subscription:
 
 
 @dataclass
+class _TriggerSubscription:
+    """A server-side subscribe_trigger registration."""
+    msg_id: int
+    trigger: dict[str, Any]
+    callback: Callable[[dict[str, Any]], None] | None
+
+
+@dataclass
 class ProactiveAlert:
     """One situation worth surfacing: situation + solution in one breath."""
 
@@ -847,6 +1041,8 @@ class HAWebSocket:
         self._connect_factory = connect_factory
         self._subs: dict[int, _Subscription] = {}
         self._next_sub_id = 0
+        #: subscribe_trigger registrations, keyed by websocket msg id
+        self._trigger_subs: dict[int, _TriggerSubscription] = {}
         #: entity_id -> {"state", "attributes", "last_changed"}
         self._state_cache: dict[str, dict[str, Any]] = {}
         #: entity_id -> unix time when its subscription cooldown expires
@@ -945,6 +1141,7 @@ class HAWebSocket:
             try:
                 await self._send_command({"type": "subscribe_events",
                                           "event_type": "state_changed"})
+                await self._resubscribe_triggers()
                 states = await self._send_command({"type": "get_states"})
                 self._ingest_snapshot(states or [])
                 _log.info("HA websocket live (%d entities tracked)",
@@ -1042,6 +1239,15 @@ class HAWebSocket:
                     fut.set_exception(HAWebSocketError(
                         err.get("message", "command failed")))
         elif mtype == "event":
+            # subscribe_trigger events carry the subscription id — route
+            # them to trigger callbacks, not the state_changed path.
+            trig = self._trigger_subs.get(msg.get("id"))
+            if trig is not None and trig.callback is not None:
+                try:
+                    trig.callback(msg.get("event") or {})
+                except Exception:  # noqa: BLE001
+                    _log.exception("HA websocket trigger callback failed")
+                return
             event = msg.get("event") or {}
             if event.get("event_type") == "state_changed":
                 try:
@@ -1125,6 +1331,65 @@ class HAWebSocket:
     def unsubscribe(self, sub_id: int) -> bool:
         """Remove a subscription.  Returns True when it existed."""
         return self._subs.pop(sub_id, None) is not None
+
+    async def subscribe_trigger(
+        self,
+        trigger: dict[str, Any],
+        callback: Callable[[dict[str, Any]], None] | None = None,
+    ) -> int:
+        """Server-side trigger subscription (PREFERRED over streaming all
+        state_changed and filtering client-side).
+
+        ``trigger`` is a HA trigger dict, e.g.
+        ``{"platform": "state", "entity_id": "binary_sensor.motion",
+        "to": "on"}`` or ``{"platform": "numeric_state",
+        "entity_id": "sensor.temp", "above": 28}`` or
+        ``{"platform": "time_pattern", "minutes": "/5"}``.
+        ``callback(event)`` receives the trigger's event payload.
+        Re-registered automatically on reconnect.
+
+        Returns a trigger subscription id for :meth:`unsubscribe_trigger`.
+        """
+        self._msg_id += 1
+        mid = self._msg_id
+        self._trigger_subs[mid] = _TriggerSubscription(
+            msg_id=mid, trigger=dict(trigger), callback=callback)
+        if self.connected:
+            try:
+                await _ws_send_text(
+                    self._writer,  # type: ignore[arg-type]
+                    json.dumps({"id": mid, "type": "subscribe_trigger",
+                                "trigger": trigger}))
+            except Exception:  # noqa: BLE001 - re-sent on reconnect
+                _log.debug("trigger subscribe send failed", exc_info=True)
+        return mid
+
+    def unsubscribe_trigger(self, sub_id: int) -> bool:
+        """Remove a trigger subscription. Returns True when it existed."""
+        sub = self._trigger_subs.pop(sub_id, None)
+        if sub is None:
+            return False
+        if self.connected:
+            try:
+                coro = _ws_send_text(
+                    self._writer,  # type: ignore[arg-type]
+                    json.dumps({"id": sub_id, "type": "unsubscribe_events",
+                                "subscription": sub_id}))
+                asyncio.ensure_future(coro)
+            except Exception:  # noqa: BLE001
+                pass
+        return True
+
+    async def _resubscribe_triggers(self) -> None:
+        """Re-send subscribe_trigger registrations after reconnect."""
+        for sub in list(self._trigger_subs.values()):
+            try:
+                await _ws_send_text(
+                    self._writer,  # type: ignore[arg-type]
+                    json.dumps({"id": sub.msg_id, "type": "subscribe_trigger",
+                                "trigger": sub.trigger}))
+            except Exception:  # noqa: BLE001
+                _log.debug("trigger resubscribe failed", exc_info=True)
 
     # ── state + proactive ────────────────────────────────────────────
 

@@ -393,12 +393,25 @@ class Steal:
             "savings_vs_median": self.savings_vs_median,
         }
     
-    def to_message(self) -> str:
+    def to_message(self, *, show_usd: bool = False,
+                   fx_rate: float = 0.0) -> str:
+        badge = ("🟢 GOD-TIER" if self.steal_score >= 85 else
+                 "🟡 HOT" if self.steal_score >= 70 else "🟠 DECENT")
+        fx = ""
+        if show_usd and fx_rate:
+            fx = f" (≈ ${self.current_price / fx_rate:,.2f})"
+        cross = ""
+        if self.cross_site_best and self.cross_site_best < self.current_price:
+            cross = (f"\n🏷️ cross-site best: ₦{self.cross_site_best:,.0f} "
+                     f"({self.savings_vs_cross_site:.0f}% cheaper elsewhere!)")
+        elif self.cross_site_best:
+            cross = "\n🏆 cheapest across all sites"
         return (
-            f"🔥 **STEAL DETECTED** (Score: {self.steal_score:.0f}/100)\n\n"
+            f"🔥 **STEAL** {badge} `{self.steal_score:.0f}/100`\n\n"
             f"**{self.title[:60]}**\n"
-            f"💰 ₦{self.current_price:,.0f}\n"
-            f"📊 30-day median: ₦{self.median_30d:,.0f} ({self.savings_vs_median:.0f}% below)\n"
+            f"💰 ₦{self.current_price:,.0f}{fx}\n"
+            f"📊 30-day median ₦{self.median_30d:,.0f} "
+            f"({self.savings_vs_median:.0f}% below){cross}\n"
             f"🏪 {self.site}\n"
             f"🔗 {self.product_url}"
         )
@@ -818,7 +831,7 @@ class NaijaShoppingEngine:
             ORDER BY steal_score DESC
             LIMIT ?
         """, (threshold, time.time() - (7 * 24 * 3600), limit))
-        
+
         return [
             Steal(
                 product_url=r["product_url"],
@@ -834,6 +847,40 @@ class NaijaShoppingEngine:
             )
             for r in rows
         ]
+
+    async def format_steal_digest(self, *, threshold: float = 70,
+                                  limit: int = 10,
+                                  show_usd: bool = False) -> str:
+        """God-tier steals briefing: ranked cards with cross-site flags."""
+        steals = await self.get_steals(threshold=threshold, limit=limit)
+        if not steals:
+            return ("💸 **steals**\n_nothing above the bar right now — "
+                    "I'll keep watching._")
+        fx = get_fx_rate("USD", "NGN") if show_usd else 0.0
+        lines = [f"💸 **steals** ({len(steals)} @ ≥{threshold:.0f})"]
+        for i, s in enumerate(steals, 1):
+            lines.append(f"\n**{i}.** " + s.to_message(
+                show_usd=show_usd, fx_rate=fx).replace("\n", "\n    "))
+        return "\n".join(lines)
+
+    def match_cross_site(self, snapshots: list["PriceSnapshot"]
+                         ) -> list[dict[str, Any]]:
+        """Group snapshots that are the SAME product on different sites.
+
+        Reuses the deal-hunter's word-order-invariant title matching.
+        """
+        from .naija_deals import NaijaDealHunter, Deal
+        deals = [Deal(deal_id=s.product_url, title=s.title, vendor=s.site,
+                      current_price=s.price, original_price=s.price,
+                      discount_percent=0.0, url=s.product_url,
+                      deal_score=0.0)
+                 for s in snapshots]
+        groups = NaijaDealHunter.match_products(deals)
+        return [{"title": g["title"],
+                 "sites": [(d.vendor, d.current_price) for d in g["deals"]],
+                 "best_site": g["best"].vendor if g["best"] else "",
+                 "best_price": g["best"].current_price if g["best"] else 0}
+                for g in groups]
     
     # ── Watchlists ───────────────────────────────────────────────────────────
     

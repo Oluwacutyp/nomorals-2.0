@@ -130,7 +130,11 @@ class Deal:
     expires_at: Optional[float] = None
     in_stock: bool = True
     discovered_at: float = field(default_factory=time.time)
-    
+    # — sweep upgrades —
+    is_lowest_90d: bool = False   # cheapest in 90-day history curve
+    coupons: list[str] = field(default_factory=list)
+    usd_price: float = 0.0        # FX secondary display
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "deal_id": self.deal_id,
@@ -143,16 +147,41 @@ class Deal:
             "deal_score": self.deal_score,
             "is_flash_sale": self.is_flash_sale,
             "in_stock": self.in_stock,
+            "is_lowest_90d": self.is_lowest_90d,
+            "coupons": self.coupons,
         }
-    
-    def to_message(self) -> str:
-        """Format as user-friendly message."""
-        flash = "⚡ FLASH SALE " if self.is_flash_sale else ""
+
+    def _score_badge(self) -> str:
+        if self.deal_score >= 85:
+            return "🟢 GOD-TIER"
+        if self.deal_score >= 70:
+            return "🟡 HOT"
+        if self.deal_score >= 50:
+            return "🟠 DECENT"
+        return "⚪ MEH"
+
+    def to_message(self, *, show_usd: bool = False) -> str:
+        """God-tier deal card: score badge, was→now, lowest-ever flag,
+        coupon line, vendor trust, stock."""
+        flash = "⚡ **FLASH SALE** " if self.is_flash_sale else ""
+        vendor_info = VENDORS.get(self.vendor, {})
+        trust = vendor_info.get("trust_score", 0)
+        trust_s = f" · trust {trust:.0%}" if trust else ""
+        stock = "" if self.in_stock else "\n⚠️ _out of stock — price only_"
+        lowest = "\n📉 **lowest in 90 days**" if self.is_lowest_90d else ""
+        coupon = ""
+        if self.coupons:
+            coupon = "\n🎟️ coupons: " + ", ".join(self.coupons[:3])
+        fx = ""
+        if show_usd and self.usd_price:
+            fx = f" (≈ ${self.usd_price:,.2f})"
         return (
             f"{flash}🔥 **{self.title}**\n"
-            f"💰 ₦{self.current_price:,.0f} ~~₦{self.original_price:,.0f}~~ "
-            f"({self.discount_percent:.0f}% off)\n"
-            f"🏪 {self.vendor} | Score: {self.deal_score:.0f}/100\n"
+            f"{self._score_badge()}  `{self.deal_score:.0f}/100`\n"
+            f"💰 ₦{self.current_price:,.0f}{fx} "
+            f"~~₦{self.original_price:,.0f}~~ "
+            f"**−{self.discount_percent:.0f}%**{lowest}{coupon}\n"
+            f"🏪 {self.vendor}{trust_s}{stock}\n"
             f"🔗 {self.url}"
         )
 
@@ -277,6 +306,18 @@ class NaijaDealHunter:
                     PRIMARY KEY (product_url, timestamp)
                 )
             """)
+
+            # sweep: stock + coupon tracking on the history curve
+            for _ddl in (
+                "ALTER TABLE price_history ADD COLUMN in_stock INTEGER"
+                " NOT NULL DEFAULT 1",
+                "ALTER TABLE price_history ADD COLUMN coupon TEXT"
+                " NOT NULL DEFAULT ''",
+            ):
+                try:
+                    self.db.execute(_ddl)
+                except Exception:  # noqa: BLE001 - column already there
+                    pass
             
             self.db.execute("""
                 CREATE INDEX IF NOT EXISTS idx_deals_score
@@ -646,7 +687,16 @@ class NaijaDealHunter:
         return None
     
     async def _get_price(self, url: str, vendor: str) -> float:
-        """Get current price from a product URL."""
+        """Get current price from a product URL.
+
+        Also sniffs stock status + promo codes and records them on the
+        price-history curve (see :meth:`get_price_detail`).
+        """
+        detail = await self.get_price_detail(url, vendor)
+        return detail["price"]
+
+    async def get_price_detail(self, url: str, vendor: str) -> dict[str, Any]:
+        """Price + stock + coupons from a product page."""
         try:
             req = urllib.request.Request(
                 url,
@@ -655,34 +705,68 @@ class NaijaDealHunter:
                     "Accept": "text/html",
                 },
             )
-            
+
             with urllib.request.urlopen(req, timeout=15) as response:
                 html = response.read().decode("utf-8", errors="ignore")
-            
+
             # Extract price
+            price = 0.0
             price_patterns = [
                 r'data-price="(\d[\d,]*)"',
                 r'₦\s*([\d,]+)',
                 r'"price":"([\d.]+)"',
             ]
-            
+
             for pattern in price_patterns:
                 match = re.search(pattern, html)
                 if match:
                     price = float(match.group(1).replace(",", ""))
-                    
-                    # Record in history
-                    with self.db.transaction():
-                        self.db.execute("""
-                            INSERT OR REPLACE INTO price_history (product_url, vendor, price, timestamp)
-                            VALUES (?, ?, ?, ?)
-                        """, (url, vendor, price, time.time()))
-                    
-                    return price
+                    break
+
+            # Stock sniffing
+            html_l = html.lower()
+            out_phrases = ("out of stock", "sold out", "currently unavailable",
+                           "no longer available")
+            in_stock = not any(p in html_l for p in out_phrases)
+
+            # Coupon / promo-code sniffing
+            coupons = sorted(set(
+                m.group(1).upper()
+                for m in re.finditer(
+                    r"(?:coupon|promo(?:tion)?(?:al)?|voucher|discount)\s*"
+                    r"(?:code)?\s*[:\-]?\s*([A-Z0-9]{4,16})",
+                    html, re.IGNORECASE)))
+
+            if price:
+                # Record in history (with stock + coupon context)
+                with self.db.transaction():
+                    self.db.execute("""
+                        INSERT OR REPLACE INTO price_history
+                        (product_url, vendor, price, timestamp, in_stock,
+                         coupon)
+                        VALUES (?, ?, ?, ?, ?, ?)
+                    """, (url, vendor, price, time.time(),
+                          int(in_stock), ",".join(coupons[:3])))
+
+            return {"price": price, "in_stock": in_stock,
+                    "coupons": coupons,
+                    "is_lowest_90d": self._is_lowest_90d(url, price)
+                    if price else False}
         except Exception as e:
             _log.warning(f"Failed to get price: {e}")
-        
-        return 0.0
+
+        return {"price": 0.0, "in_stock": True, "coupons": [],
+                "is_lowest_90d": False}
+
+    def _is_lowest_90d(self, product_url: str, price: float) -> bool:
+        """True when ``price`` beats every point on the 90-day curve."""
+        rows = self.db.query("""
+            SELECT MIN(price) AS m FROM price_history
+            WHERE product_url = ? AND timestamp > ?
+        """, (product_url, time.time() - 90 * 86400))
+        if not rows or rows[0]["m"] is None:
+            return False
+        return price <= float(rows[0]["m"])
     
     def _store_deal(self, deal: Deal) -> None:
         """Store a deal in the database."""
@@ -736,21 +820,89 @@ class NaijaDealHunter:
     
     async def get_deal_summary(self) -> str:
         """Generate a summary of current deals."""
-        top = await self.get_top_deals(limit=5)
-        
+        return await self.format_digest(limit=5)
+
+    async def format_digest(self, *, limit: int = 10, category: str = "",
+                            show_usd: bool = False) -> str:
+        """God-tier daily deals briefing: ranked cards, not a flat list."""
+        top = await self.get_top_deals(limit=limit, category=category)
+
         if not top:
-            return "No deals found right now. Try searching for a specific product!"
-        
-        lines = ["🇳🇬 **Top Naija Deals Right Now:**\n"]
-        
+            return ("🇳🇬 **naija deals**\n_no deals on the board right now — "
+                    "try a search and I'll hunt._")
+
+        # enrich with 90-day-low flags + FX
+        fx = self._fx_rate()
+        for deal in top:
+            deal.is_lowest_90d = self._is_lowest_90d(deal.url,
+                                                     deal.current_price)
+            if fx:
+                deal.usd_price = deal.current_price / fx
+
+        lines = [f"🇳🇬 **top naija deals** ({len(top)})"]
         for i, deal in enumerate(top, 1):
-            flash = "⚡" if deal.is_flash_sale else "🔥"
-            lines.append(
-                f"{i}. {flash} **{deal.title[:50]}**\n"
-                f"   ₦{deal.current_price:,.0f} ~~₦{deal.original_price:,.0f}~~ "
-                f"(-{deal.discount_percent:.0f}%) at {deal.vendor}"
-            )
-        
+            lines.append(f"\n**{i}.** " + deal.to_message(
+                show_usd=show_usd).replace("\n", "\n    "))
+        return "\n".join(lines)
+
+    def _fx_rate(self) -> float:
+        """USD→NGN for the FX toggle (cached 1h, best-effort)."""
+        now = time.time()
+        if now - getattr(self, "_fx_at", 0) < 3600 and getattr(
+                self, "_fx", 0):
+            return self._fx
+        try:
+            req = urllib.request.Request(
+                "https://api.frankfurter.dev/v2/rate/USD/NGN",
+                headers={"Accept": "application/json"})
+            with urllib.request.urlopen(req, timeout=8) as resp:
+                self._fx = float(json.loads(resp.read().decode())["rate"])
+                self._fx_at = now
+                return self._fx
+        except Exception:  # noqa: BLE001
+            return getattr(self, "_fx", 0.0)
+
+    @staticmethod
+    def match_products(deals: list[Deal]) -> list[dict[str, Any]]:
+        """Group deals that are the SAME product on different vendors.
+
+        Word-order-invariant title matching → one product, all vendor
+        prices side-by-side. Shared with the shopping engine.
+        """
+        groups: dict[str, dict[str, Any]] = {}
+        for deal in deals:
+            key = " ".join(sorted(
+                re.sub(r"[^a-z0-9]+", " ",
+                       (deal.title or "").lower()).split()))
+            if not key:
+                continue
+            g = groups.setdefault(key, {"title": deal.title, "deals": []})
+            g["deals"].append(deal)
+        out = []
+        for g in groups.values():
+            ranked = sorted(g["deals"], key=lambda d: d.current_price)
+            out.append({"title": g["title"], "deals": ranked,
+                        "best": ranked[0] if ranked else None,
+                        "vendors": len(ranked)})
+        out.sort(key=lambda g: (g["best"].deal_score
+                                if g["best"] else 0), reverse=True)
+        return out
+
+    @staticmethod
+    def format_matches(groups: list[dict[str, Any]],
+                       *, limit: int = 5) -> str:
+        """Side-by-side vendor prices for matched products."""
+        if not groups:
+            return "_no cross-vendor matches._"
+        lines = ["🔁 **same product, every vendor**"]
+        for g in groups[:limit]:
+            lines.append(f"\n**{g['title'][:60]}**")
+            for d in g["deals"]:
+                lines.append(f"  • ₦{d.current_price:,.0f} — {d.vendor} "
+                             f"(`{d.deal_score:.0f}`)")
+            if g["best"]:
+                lines.append(f"  🏆 best: {g['best'].vendor} @ "
+                             f"₦{g['best'].current_price:,.0f}")
         return "\n".join(lines)
 
 

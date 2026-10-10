@@ -41,21 +41,28 @@ class RoutineStarter:
     # device
     entity_id: str = ""
     to_state: str = ""      # "on" | "off" | "open" | "closed" | "home" | "not_home"
+    for_min: int = 0        # "when no motion for 5 min" → for: 5 minutes
     # presence
     presence: str = ""      # "leave" | "arrive"
 
 
 @dataclass
 class RoutineCondition:
-    kind: str  # "dark" | "light" | "weekdays" | "weekends" | "home" | "away"
+    kind: str  # "dark" | "light" | "weekdays" | "weekends" | "home" |
+               # "away" | "numeric"
     raw: str = ""
+    # numeric conditions ("only if {sensor} above/below {n}")
+    entity_id: str = ""
+    above: float | None = None
+    below: float | None = None
 
 
 @dataclass
 class RoutineAction:
-    entity_id: str = ""     # "" for notify actions
+    entity_id: str = ""     # "" for notify / delay actions
     service: str = ""       # "turn_on" | "turn_off" | "lock" | "unlock" |
-                            # "set_temperature" | "notify" | "activate_scene"
+                            # "set_temperature" | "notify" | "activate_scene" |
+                            # "delay" | "wait_for"
     params: dict[str, Any] = field(default_factory=dict)
     raw: str = ""
 
@@ -87,6 +94,7 @@ class Routine:
     conditions: list[RoutineCondition]
     actions: list[RoutineAction]
     ha_automation_id: str = ""
+    mode: str = "single"  # single | restart | queued | parallel
 
 
 class RoutineBuildError(RuntimeError):
@@ -226,6 +234,38 @@ _DEVICE_STATE_RE = re.compile(
     r"\bwhen\s+(?:the\s+|my\s+)?(.+?)\s+"
     r"(opens?|closes?|turns?\s+on|turns?\s+off|is\s+opened|is\s+closed)\b",
     re.IGNORECASE)
+# "when no motion for 5 min", "when the door stays open for 10 minutes"
+_FOR_RE = re.compile(
+    r"\bfor\s+(\d+)\s*(min|mins|minutes?|hours?|hrs?|seconds?|secs?)\b",
+    re.IGNORECASE)
+# "when no motion for 5 min" — absence as a trigger (binary_sensor → off)
+_NO_STATE_RE = re.compile(
+    r"\bwhen\s+no\s+(?:the\s+|my\s+)?(.+?)\s+for\s+"
+    r"(\d+)\s*(min|mins|minutes?|hours?|hrs?|seconds?|secs?)\b",
+    re.IGNORECASE)
+# "then wait 5 minutes", "wait 10 min", "turn off after 10 minutes"
+_DELAY_RE = re.compile(
+    r"\b(?:then\s+)?wait\s+(\d+)\s*(min|mins|minutes?|hours?|hrs?|seconds?|secs?)\b",
+    re.IGNORECASE)
+_AFTER_RE = re.compile(
+    r"\b(.+?)\s+after\s+(\d+)\s*(min|mins|minutes?|hours?|hrs?|seconds?|secs?)\b",
+    re.IGNORECASE)
+# "only if {sensor} above 28", "only when humidity below 60"
+_NUMERIC_COND_RE = re.compile(
+    r"\bonly\s+(?:if|when)\s+(?:the\s+|my\s+)?(.+?)\s+"
+    r"(above|below|over|under|greater\s+than|less\s+than)\s+"
+    r"(\d+(?:\.\d+)?)\b",
+    re.IGNORECASE)
+
+
+def _to_minutes(n: str, unit: str) -> int:
+    n = int(n)
+    u = unit.lower()
+    if u.startswith("hour") or u.startswith("hr"):
+        return n * 60
+    if u.startswith("sec"):
+        return max(1, n // 60)
+    return n
 
 
 def _parse_time(text: str) -> tuple[str | None, str]:
@@ -265,10 +305,14 @@ def build_routine(
     devices: list[dict[str, Any]] | None = None,
     aliases: dict[str, str] | None = None,
     memory: Any = None,
+    llm_parse: Any = None,
 ) -> RoutineDraft:
     """Parse natural language into a RoutineDraft. Never raises.
 
     When nothing parses, the draft has needs_clarification=True.
+    ``llm_parse`` is an optional callable ``(text) -> dict`` used as a
+    fallback when the regex grammar fails — the brain understands
+    intent, the grammar stays the fast path. Never required.
     """
     draft = RoutineDraft(id=uuid.uuid4().hex[:8], raw=nl_text or "")
     text = (nl_text or "").strip()
@@ -289,6 +333,21 @@ def build_routine(
         if m:
             draft.conditions.append(RoutineCondition(kind=kind, raw=m.group(0)))
             text = text[:m.start()] + text[m.end():]
+    # numeric conditions: "only if temp above 28"
+    for m in _NUMERIC_COND_RE.finditer(text):
+        entity = resolve_entity(m.group(1), devices, aliases)
+        word = m.group(2).lower()
+        value = float(m.group(3))
+        if entity:
+            draft.conditions.append(RoutineCondition(
+                kind="numeric", raw=m.group(0), entity_id=entity,
+                above=value if word in ("above", "over", "greater than")
+                else None,
+                below=value if word in ("below", "under", "less than")
+                else None))
+        else:
+            draft.unresolved.append(m.group(1).strip())
+    text = _NUMERIC_COND_RE.sub(" ", text)
 
     # ── starter ──
     starter_found = False
@@ -315,37 +374,61 @@ def build_routine(
             text = text[:pres_m.start()] + text[pres_m.end():]
             starter_found = True
         else:
-            dev_m = _DEVICE_STATE_RE.search(text)
-            if dev_m:
-                entity = resolve_entity(dev_m.group(1), devices, aliases)
-                state_word = dev_m.group(2).lower()
-                to_state = ("open" if "open" in state_word else
-                            "closed" if "clos" in state_word else
-                            "on" if "on" in state_word else "off")
+            no_m = _NO_STATE_RE.search(text)
+            if no_m:
+                entity = resolve_entity(no_m.group(1), devices, aliases)
+                for_min = _to_minutes(no_m.group(2), no_m.group(3))
                 if entity:
+                    # absence trigger: the binary sensor sits at "off"
+                    # for the whole duration
                     draft.starter = RoutineStarter(
-                        kind="device", entity_id=entity, to_state=to_state)
+                        kind="device", entity_id=entity, to_state="off",
+                        for_min=for_min)
                     starter_found = True
                 else:
-                    draft.unresolved.append(dev_m.group(1).strip())
-                text = text[:dev_m.start()] + text[dev_m.end():]
+                    draft.unresolved.append(no_m.group(1).strip())
+                text = text[:no_m.start()] + text[no_m.end():]
             else:
-                at, rest = _parse_time(text)
-                if at:
-                    draft.starter = RoutineStarter(kind="time", at=at)
-                    # re-check day words after time removal
-                    if re.search(r"\bweekdays?\b", nl_text, re.IGNORECASE):
-                        draft.starter.days = "weekdays"
-                    elif re.search(r"\bweekends?\b", nl_text, re.IGNORECASE):
-                        draft.starter.days = "weekends"
-                    text = rest
-                    starter_found = True
+                dev_m = _DEVICE_STATE_RE.search(text)
+                if dev_m:
+                    entity = resolve_entity(dev_m.group(1), devices, aliases)
+                    state_word = dev_m.group(2).lower()
+                    to_state = ("open" if "open" in state_word else
+                                "closed" if "clos" in state_word else
+                                "on" if "on" in state_word else "off")
+                    # "when the door stays open for 10 min" → for-duration
+                    for_min = 0
+                    for_m = _FOR_RE.search(text)
+                    if for_m:
+                        for_min = _to_minutes(for_m.group(1), for_m.group(2))
+                    if entity:
+                        draft.starter = RoutineStarter(
+                            kind="device", entity_id=entity, to_state=to_state,
+                            for_min=for_min)
+                        starter_found = True
+                    else:
+                        draft.unresolved.append(dev_m.group(1).strip())
+                    text = text[:dev_m.start()] + text[dev_m.end():]
+                    text = _FOR_RE.sub(" ", text)
+                else:
+                    at, rest = _parse_time(text)
+                    if at:
+                        draft.starter = RoutineStarter(kind="time", at=at)
+                        # re-check day words after time removal
+                        if re.search(r"\bweekdays?\b", nl_text, re.IGNORECASE):
+                            draft.starter.days = "weekdays"
+                        elif re.search(r"\bweekends?\b", nl_text, re.IGNORECASE):
+                            draft.starter.days = "weekends"
+                        text = rest
+                        starter_found = True
 
     text = text.strip(" ,")
+    # brain fallback for unparseable action chunks (pluggable, never
+    # required) — attached BEFORE parsing so _llm_try can see it.
+    draft._llm_parse = llm_parse  # type: ignore[attr-defined]
     # ── actions ──
     for chunk in _split_actions(text):
-        action = _parse_action(chunk, devices, aliases, draft)
-        if action:
+        for action in _parse_action(chunk, devices, aliases, draft):
             draft.actions.append(action)
 
     if not starter_found and not draft.actions:
@@ -366,7 +449,79 @@ def build_routine(
     return draft
 
 
+# Split pattern keeps delay clauses as captured groups (odd indices)
+# so spoken order is preserved: "wait 5 min then turn on X".
+_DELAY_SPLIT_RE = re.compile(
+    r"(\b(?:then\s+)?wait\s+\d+\s*"
+    r"(?:min|mins|minutes?|hours?|hrs?|seconds?|secs?)\b)",
+    re.IGNORECASE)
+
+
 def _parse_action(
+    chunk: str,
+    devices: list[dict[str, Any]],
+    aliases: dict[str, str],
+    draft: RoutineDraft,
+) -> list[RoutineAction]:
+    """Parse one action chunk → ordered list of actions.
+
+    Delay clauses are split positionally so spoken order is kept:
+    "turn on X then wait 10 min" → [turn_on, delay];
+    "wait 5 min then turn on X" → [delay, turn_on].
+    """
+    out: list[RoutineAction] = []
+    for i, part in enumerate(_DELAY_SPLIT_RE.split(chunk)):
+        part = part.strip(" ,")
+        if not part:
+            continue
+        if i % 2 == 1:  # a delay clause
+            m = _DELAY_RE.search(part)
+            if m:
+                out.append(RoutineAction(
+                    service="delay",
+                    params={"minutes": _to_minutes(m.group(1), m.group(2))},
+                    raw=part))
+            continue
+        # "turn off the lights after 10 minutes" → action + delay
+        m = _AFTER_RE.search(part)
+        if m:
+            inner = _parse_action_inner(m.group(1).strip(), devices,
+                                       aliases, draft)
+            if inner is not None:
+                out.append(inner)
+                mins = _to_minutes(m.group(2), m.group(3))
+                out.append(RoutineAction(
+                    service="delay", params={"minutes": mins},
+                    raw=f"wait {mins} min"))
+            continue
+        inner = _parse_action_inner(part, devices, aliases, draft)
+        if inner is not None:
+            out.append(inner)
+    return out
+
+
+def _llm_try(
+    chunk: str,
+    devices: list[dict[str, Any]],
+    draft: RoutineDraft,
+) -> RoutineAction | None:
+    """LLM fallback hook: the brain's last chance before 'unresolved'."""
+    draft_llm = getattr(draft, "_llm_parse", None)
+    if draft_llm is None:
+        return None
+    try:
+        parsed = draft_llm(chunk, devices) or {}
+        if parsed.get("entity_id") and parsed.get("service"):
+            return RoutineAction(entity_id=parsed["entity_id"],
+                                 service=parsed["service"],
+                                 params=parsed.get("params", {}),
+                                 raw=chunk)
+    except Exception:  # noqa: BLE001 - LLM fallback never breaks parsing
+        _log.debug("llm_parse fallback failed", exc_info=True)
+    return None
+
+
+def _parse_action_inner(
     chunk: str,
     devices: list[dict[str, Any]],
     aliases: dict[str, str],
@@ -379,16 +534,16 @@ def _parse_action(
             return RoutineAction(entity_id=entity,
                                  service=f"turn_{m.group(1).lower()}",
                                  raw=chunk)
-        draft.unresolved.append(m.group(2).strip())
-        return None
+        return _llm_try(chunk, devices, draft) or _mark_unresolved(
+            draft, m.group(2))
     m = _LOCK_RE.match(chunk + " ")
     if m:
         entity = resolve_entity(m.group(2), devices, aliases)
         if entity:
             return RoutineAction(entity_id=entity,
                                  service=m.group(1).lower(), raw=chunk)
-        draft.unresolved.append(m.group(2).strip())
-        return None
+        return _llm_try(chunk, devices, draft) or _mark_unresolved(
+            draft, m.group(2))
     m = _TEMP_RE.search(chunk)
     if m:
         entity = resolve_entity(m.group(1), devices, aliases)
@@ -396,8 +551,8 @@ def _parse_action(
             return RoutineAction(entity_id=entity, service="set_temperature",
                                  params={"temperature": float(m.group(2))},
                                  raw=chunk)
-        draft.unresolved.append(m.group(1).strip())
-        return None
+        return _llm_try(chunk, devices, draft) or _mark_unresolved(
+            draft, m.group(1))
     m = _NOTIFY_RE.search(chunk)
     if m:
         msg = m.group(1).strip()
@@ -407,13 +562,23 @@ def _parse_action(
     m = _SCENE_RE.search(chunk)
     if m:
         scene = (m.group(1) or m.group(2) or "").strip()
-        return RoutineAction(service="activate_scene",
+        # resolve scene name → entity_id when the registry knows it
+        scene_eid = resolve_entity(f"{scene} scene", devices, aliases) or \
+            resolve_entity(scene, devices, aliases) or ""
+        if not scene_eid.startswith("scene."):
+            scene_eid = f"scene.{scene.lower().replace(' ', '_')}"
+        return RoutineAction(entity_id=scene_eid, service="activate_scene",
                              params={"scene": scene}, raw=chunk)
     # bare device name → assume turn on ("kitchen lights + coffee")
     entity = resolve_entity(chunk, devices, aliases)
     if entity:
         return RoutineAction(entity_id=entity, service="turn_on", raw=chunk)
-    draft.unresolved.append(chunk.strip())
+    return _llm_try(chunk, devices, draft) or _mark_unresolved(draft, chunk)
+
+
+def _mark_unresolved(draft: RoutineDraft, text: str) -> None:
+    """Record an unparseable chunk; returns None so it chains with ``or``."""
+    draft.unresolved.append(text.strip())
     return None
 
 
@@ -502,6 +667,12 @@ def _action_text(action: RoutineAction) -> str:
         return f"activate the {action.params.get('scene', '')} scene"
     if action.service == "set_temperature":
         return f"set {action.entity_id} to {action.params.get('temperature')}°"
+    if action.service == "delay":
+        mins = action.params.get("minutes", 0)
+        return f"wait {mins} min"
+    if action.service == "wait_for":
+        return (f"wait for {action.entity_id} to be "
+                f"{action.params.get('to_state', '')}")
     verb = {"turn_on": "turn on", "turn_off": "turn off",
             "lock": "lock", "unlock": "unlock"}.get(action.service,
                                                     action.service)
@@ -509,24 +680,110 @@ def _action_text(action: RoutineAction) -> str:
 
 
 def _condition_text(cond: RoutineCondition) -> str:
-    return {"dark": "only when it's dark",
+    base = {"dark": "only when it's dark",
             "light": "only in daylight",
             "weekdays": "only on weekdays",
             "weekends": "only on weekends",
             "home": "only when I'm home",
-            "away": "only when I'm away"}.get(cond.kind, cond.kind)
+            "away": "only when I'm away"}.get(cond.kind)
+    if base:
+        return base
+    if cond.kind == "numeric":
+        if cond.above is not None:
+            return f"only if {cond.entity_id} is above {cond.above}"
+        if cond.below is not None:
+            return f"only if {cond.entity_id} is below {cond.below}"
+    return cond.kind
+
+
+def _smart_mode(draft: RoutineDraft) -> str:
+    """Default HA automation mode by starter kind.
+
+    Motion-style device triggers want ``restart`` (re-trigger resets
+    the timer); presence/time want ``single``; notify-heavy wants
+    ``parallel``. Mirrors HA best-practice guidance.
+    """
+    s = draft.starter
+    if s is None:
+        return "single"
+    if s.kind == "device":
+        return "restart"
+    if any(a.service == "notify" for a in draft.actions):
+        return "parallel"
+    return "single"
 
 
 def describe(draft: RoutineDraft) -> str:
-    """Plain-language description for the user to confirm."""
+    """Plain-language description for the user to confirm.
+
+    God-tier: numbered step breakdown with trigger / conditions /
+    actions sections instead of one flat sentence.
+    """
     if draft.needs_clarification:
         return draft.clarification
+    lines = [f"📋 **{draft.name}**", ""]
     starter = _starter_text(draft.starter) if draft.starter else "???"
-    actions = ", ".join(_action_text(a) for a in draft.actions) or "???"
-    conds = "".join(f", {_condition_text(c)}" for c in draft.conditions)
-    sentence = f"{starter}{conds}: {actions}."
-    sentence = sentence[0].upper() + sentence[1:]
-    return f"Here's what I'll do:\n{sentence}"
+    if draft.starter and draft.starter.for_min:
+        starter += f" (for {draft.starter.for_min} min)"
+    lines.append(f"▶️ **when:** {starter}")
+    if draft.conditions:
+        lines.append("🛡️ **only if:**")
+        for c in draft.conditions:
+            lines.append(f"   • {_condition_text(c)}")
+    lines.append("⚡ **then:**")
+    for i, a in enumerate(draft.actions, 1):
+        lines.append(f"   {i}. {_action_text(a)}")
+    lines.append(f"\n_mode: {_smart_mode(draft)}_")
+    if draft.unresolved:
+        lines.append("\n❓ **I couldn't resolve:** "
+                     + ", ".join(f'"{u}"' for u in draft.unresolved
+                                  if not u.startswith("__")))
+    return "\n".join(lines)
+
+
+def suggest_fix(draft: RoutineDraft,
+                devices: list[dict[str, Any]] | None = None) -> list[dict]:
+    """Structured repair options for each validation error.
+
+    Returns [{error, code, suggestions: [...]}] — the chat layer turns
+    these into tappable options instead of dead-end text.
+    """
+    devices = devices or []
+    out: list[dict] = []
+    for err in validate(draft):
+        item: dict[str, Any] = {"code": err.code, "error": err.message,
+                                "suggestions": []}
+        if err.code == "unknown_device":
+            phrase = err.message.split('"')[1] \
+                if '"' in err.message else ""
+            # closest device names as suggestions
+            names = [str(d.get("friendly_name") or d.get("name") or "")
+                     for d in devices if d.get("friendly_name")
+                     or d.get("name")]
+            close = difflib.get_close_matches(phrase, names, n=3, cutoff=0.4)
+            item["suggestions"] = [
+                {"label": f"use \"{c}\"",
+                 "fix": {"unresolved": phrase, "replace": c}}
+                for c in close]
+            item["suggestions"].append(
+                {"label": "teach me an alias",
+                 "fix": {"unresolved": phrase, "alias": True}})
+        elif err.code == "no_starter":
+            item["suggestions"] = [
+                {"label": "run at 7:00am", "fix": {"starter": "time 07:00"}},
+                {"label": "run at sunset", "fix": {"starter": "sunset"}},
+                {"label": "run when I leave home",
+                 "fix": {"starter": "presence leave"}}]
+        elif err.code == "no_actions":
+            item["suggestions"] = [
+                {"label": "add: turn on the lights",
+                 "fix": {"append_action": "turn on the lights"}}]
+        elif err.code == "conflict":
+            item["suggestions"] = [
+                {"label": "keep the first", "fix": {"conflict": "first"}},
+                {"label": "keep the last", "fix": {"conflict": "last"}}]
+        out.append(item)
+    return out
 
 
 def confirm(draft: RoutineDraft) -> Routine:
@@ -538,7 +795,7 @@ def confirm(draft: RoutineDraft) -> Routine:
     _DRAFTS.pop(draft.id, None)
     return Routine(id=uuid.uuid4().hex[:8], name=draft.name,
                    starter=draft.starter, conditions=draft.conditions,
-                   actions=draft.actions)
+                   actions=draft.actions, mode=_smart_mode(draft))
 
 
 # ── Home Assistant conversion ───────────────────────────────────────────────
@@ -557,7 +814,11 @@ def _service_domain(action: RoutineAction) -> str:
 
 
 def to_ha_automation(routine: Routine) -> tuple[dict, list[dict], list[dict]]:
-    """Convert to (trigger, actions, conditions) for create_automation."""
+    """Convert to (trigger, actions, conditions) for create_automation.
+
+    Honors routine.mode, delay actions, numeric conditions, trigger
+    for-durations, and resolved scene entity_ids.
+    """
     s = routine.starter
     if s.kind == "time":
         trigger: dict[str, Any] = {"platform": "time", "at": f"{s.at}:00"}
@@ -570,6 +831,8 @@ def to_ha_automation(routine: Routine) -> tuple[dict, list[dict], list[dict]]:
     elif s.kind == "device":
         trigger = {"platform": "state", "entity_id": s.entity_id,
                    "to": s.to_state}
+        if s.for_min:
+            trigger["for"] = {"minutes": s.for_min}
     elif s.kind == "presence":
         trigger = {"platform": "state", "entity_id": "person.owner",
                    "to": "not_home" if s.presence == "leave" else "home"}
@@ -582,13 +845,20 @@ def to_ha_automation(routine: Routine) -> tuple[dict, list[dict], list[dict]]:
             actions.append({"service": "notify.notify",
                             "data": {"message": a.params.get("message", "")}})
         elif a.service == "activate_scene":
-            scene = a.params.get("scene", "")
+            eid = a.entity_id or f"scene.{a.params.get('scene', '')}"
             actions.append({"service": "scene.turn_on",
-                            "target": {"entity_id": f"scene.{scene}"}})
+                            "target": {"entity_id": eid}})
         elif a.service == "set_temperature":
             actions.append({"service": "climate.set_temperature",
                             "target": {"entity_id": a.entity_id},
                             "data": {"temperature": a.params["temperature"]}})
+        elif a.service == "delay":
+            mins = int(a.params.get("minutes", 0))
+            actions.append({"delay": {"minutes": mins}})
+        elif a.service == "wait_for":
+            actions.append({"wait_template":
+                            "{{ is_state('%s', '%s') }}" % (
+                                a.entity_id, a.params.get("to_state", ""))})
         else:
             actions.append({"service": f"{_service_domain(a)}.{a.service}",
                             "target": {"entity_id": a.entity_id}})
@@ -615,14 +885,28 @@ def to_ha_automation(routine: Routine) -> tuple[dict, list[dict], list[dict]]:
             conditions.append({"condition": "state",
                                "entity_id": "person.owner",
                                "state": "not_home"})
+        elif c.kind == "numeric":
+            cond: dict[str, Any] = {"condition": "numeric_state",
+                                    "entity_id": c.entity_id}
+            if c.above is not None:
+                cond["above"] = c.above
+            if c.below is not None:
+                cond["below"] = c.below
+            conditions.append(cond)
     return trigger, actions, conditions
 
 
 async def activate(routine: Routine, integration: Any) -> Routine:
     """Activate via Home Assistant. Returns the routine with the HA id."""
     trigger, actions, conditions = to_ha_automation(routine)
-    automation_id = await integration.create_automation(
-        routine.name, trigger, actions, conditions=conditions or None)
+    try:
+        automation_id = await integration.create_automation(
+            routine.name, trigger, actions, conditions=conditions or None,
+            mode=routine.mode or "single")
+    except TypeError:
+        # older create_automation without mode support
+        automation_id = await integration.create_automation(
+            routine.name, trigger, actions, conditions=conditions or None)
     routine.ha_automation_id = automation_id
     return routine
 

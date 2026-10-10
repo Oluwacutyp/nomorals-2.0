@@ -76,6 +76,28 @@ class Product:
             "description": self.description[:200],
         }
 
+    def stars(self) -> str:
+        """★★★★☆ from a 0–5 rating."""
+        if not self.rating:
+            return "no ratings yet"
+        full = int(round(self.rating))
+        return "★" * full + "☆" * (5 - full) + f" {self.rating:.1f}"
+
+    def to_card(self) -> str:
+        """Rich product card: price, rating, shipping, stock."""
+        stock = "✅ in stock" if self.in_stock else "❌ out of stock"
+        ship = self.metadata.get("shipping", "")
+        lines = [f"🛍️ **{self.title}**",
+                 f"💰 {self.currency} {self.price:,.2f} · {stock}",
+                 f"{self.stars()} ({self.review_count:,} reviews)"
+                 if self.review_count else self.stars()]
+        if ship:
+            lines.append(f"🚚 {ship}")
+        lines.append(f"🏪 {self.retailer}")
+        if self.url:
+            lines.append(f"🔗 {self.url}")
+        return "\n".join(lines)
+
 
 @dataclass
 class PriceComparison:
@@ -93,6 +115,34 @@ class PriceComparison:
             "best_price": self.best_price.to_dict() if self.best_price else None,
             "all_prices": [p.to_dict() for p in sorted(self.products, key=lambda x: x.price)],
         }
+
+    def format(self) -> str:
+        """God-tier side-by-side comparison table, best price flagged."""
+        if not self.products:
+            return f"🔍 **{self.query}**\n_no results — try another query._"
+        lines = [f"🔍 **price comparison: {self.query}**",
+                 f"_{len(self.products)} results across retailers_",
+                 ""]
+        ranked = sorted(
+            [p for p in self.products if p.in_stock],
+            key=lambda p: p.price)
+        if not ranked:
+            ranked = sorted(self.products, key=lambda p: p.price)
+        cheapest = ranked[0].price if ranked else 0
+        priciest = ranked[-1].price if ranked else 0
+        for p in ranked:
+            flag = " 🏆 **best**" if p is ranked[0] else ""
+            save = ""
+            if p.price > cheapest:
+                save = f" (+{p.price - cheapest:,.2f} vs best)"
+            lines.append(f"• **{p.currency} {p.price:,.2f}**{save} — "
+                         f"{p.retailer} · {p.stars()}{flag}")
+            lines.append(f"  _{p.title[:70]}_")
+        if priciest > cheapest:
+            lines.append(f"\n💸 spread: {priciest - cheapest:,.2f} "
+                         f"({(priciest - cheapest) / priciest:.0%} savings "
+                         f"at best price)")
+        return "\n".join(lines)
 
 
 class ShoppingIntegration:
@@ -115,6 +165,7 @@ class ShoppingIntegration:
         *,
         retailers: list[str] | None = None,
         max_results: int = 10,
+        sort_by: str = "relevance",
     ) -> list[Product]:
         """Search for products across retailers.
         
@@ -122,9 +173,10 @@ class ShoppingIntegration:
             query: Search query
             retailers: Specific retailers to search (default: all)
             max_results: Maximum results per retailer
+            sort_by: relevance | price | rating | deals
             
         Returns:
-            List of Product objects
+            List of Product objects (deduped across retailers)
         """
         retailers = retailers or ["amazon", "ebay", "walmart", "bestbuy"]
         
@@ -147,8 +199,127 @@ class ShoppingIntegration:
             except Exception as e:
                 _log.warning(f"Failed to search {retailer}: {e}")
         
-        # Sort by relevance (for now, just return all)
-        return all_products[:max_results * len(retailers)]
+        # Cross-retailer dedupe: same product on two retailers counts once
+        # (keeps the cheaper listing).
+        deduped = self._dedupe_products(all_products)
+        
+        if sort_by == "price":
+            deduped.sort(key=lambda p: p.price)
+        elif sort_by == "rating":
+            deduped.sort(key=lambda p: (p.rating, p.review_count),
+                         reverse=True)
+        elif sort_by == "deals":
+            deduped.sort(key=lambda p: (
+                -(p.metadata.get("discount_pct", 0) or 0), p.price))
+        
+        return deduped[:max_results * len(retailers)]
+
+    @staticmethod
+    def _dedupe_products(products: list[Product]) -> list[Product]:
+        """Drop near-duplicate titles across retailers, keep cheapest."""
+        import re as _re
+        seen: dict[str, Product] = {}
+        for p in products:
+            key = _re.sub(r"[^a-z0-9]+", " ",
+                          (p.title or "").lower()).strip()
+            key = " ".join(sorted(key.split()))  # word-order invariant
+            if not key:
+                continue
+            if key not in seen or p.price < seen[key].price:
+                seen[key] = p
+        return list(seen.values())
+
+    # ── wishlist (price-drop alerts) ─────────────────────────────────
+
+    def _wishlist_path(self) -> str:
+        import os
+        path = os.path.expanduser("~/.nomorals/shopping/wishlist.json")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        return path
+
+    def _load_wishlist(self) -> list[dict[str, Any]]:
+        import os, json
+        path = self._wishlist_path()
+        if not os.path.isfile(path):
+            return []
+        try:
+            with open(path) as f:
+                return json.load(f)
+        except (ValueError, OSError):
+            return []
+
+    def _save_wishlist(self, items: list[dict[str, Any]]) -> None:
+        import json
+        with open(self._wishlist_path(), "w") as f:
+            json.dump(items, f, indent=2)
+
+    def add_to_wishlist(self, product: Product,
+                        target_price: float | None = None) -> dict:
+        """Save a product; optional target_price arms a drop alert."""
+        import time
+        items = self._load_wishlist()
+        entry = {"url": product.url, "title": product.title,
+                 "retailer": product.retailer, "currency": product.currency,
+                 "price_at_add": product.price,
+                 "target_price": target_price,
+                 "last_price": product.price,
+                 "added_at": time.time()}
+        items = [i for i in items if i.get("url") != product.url] + [entry]
+        self._save_wishlist(items)
+        return entry
+
+    def get_wishlist(self) -> list[dict[str, Any]]:
+        """All wishlist items."""
+        return self._load_wishlist()
+
+    def remove_from_wishlist(self, url: str) -> bool:
+        items = self._load_wishlist()
+        kept = [i for i in items if i.get("url") != url]
+        if len(kept) != len(items):
+            self._save_wishlist(kept)
+            return True
+        return False
+
+    async def check_wishlist_drops(self) -> list[dict[str, Any]]:
+        """Re-check wishlist prices; returns items that hit target or
+        dropped ≥10% since last check."""
+        import time
+        items = self._load_wishlist()
+        hits = []
+        for item in items:
+            try:
+                products = await self.search(
+                    item["title"], retailers=[item["retailer"]],
+                    max_results=3)
+            except Exception:  # noqa: BLE001
+                continue
+            match = next((p for p in products if p.url == item["url"]),
+                         products[0] if products else None)
+            if not match:
+                continue
+            old = item.get("last_price", item.get("price_at_add", 0))
+            item["last_price"] = match.price
+            item["checked_at"] = time.time()
+            target = item.get("target_price")
+            dropped_pct = ((old - match.price) / old * 100) if old else 0
+            if (target and match.price <= target) or dropped_pct >= 10:
+                hits.append({**item, "drop_pct": round(dropped_pct, 1)})
+        self._save_wishlist(items)
+        return hits
+
+    def format_wishlist(self) -> str:
+        """God-tier wishlist rendering."""
+        items = self._load_wishlist()
+        if not items:
+            return "💝 **wishlist**\n_empty — save products to watch prices._"
+        lines = [f"💝 **wishlist** ({len(items)})"]
+        for i in items:
+            target = (f" → 🎯 {i['currency']} {i['target_price']:,.2f}"
+                      if i.get("target_price") else "")
+            lines.append(f"• **{i['title'][:60]}**\n"
+                         f"  {i['currency']} {i.get('last_price', 0):,.2f}"
+                         f"{target} · {i['retailer']}")
+        return "\n".join(lines)
     
     async def compare_prices(self, query: str) -> PriceComparison:
         """Compare prices across retailers.

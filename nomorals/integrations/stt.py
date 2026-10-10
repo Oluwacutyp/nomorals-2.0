@@ -39,26 +39,45 @@ _log = get_logger(__name__)
 
 class STTEngine:
     """Supported STT engines."""
-    
+
     WHISPER = "whisper"           # Local Whisper model
+    FASTER_WHISPER = "faster_whisper"  # faster-whisper (CTranslate2, 4x)
     WHISPER_API = "whisper_api"   # OpenAI Whisper API
     GOOGLE = "google"             # Google Speech Recognition
     ASSEMBLYAI = "assemblyai"     # AssemblyAI API
 
 
 @dataclass
+class TranscriptionWord:
+    """One word with timing (word_timestamps=True)."""
+
+    word: str
+    start: float
+    end: float
+    probability: float = 0.0
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"word": self.word, "start": self.start, "end": self.end,
+                "probability": self.probability}
+
+
+@dataclass
 class TranscriptionSegment:
     """A segment of transcribed audio with timing."""
-    
+
     start: float  # Start time in seconds
     end: float    # End time in seconds
     text: str
-    
+    words: list[TranscriptionWord] = field(default_factory=list)
+    speaker: str = ""  # diarization label, e.g. "SPEAKER_00"
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "start": self.start,
             "end": self.end,
             "text": self.text,
+            "words": [w.to_dict() for w in self.words],
+            "speaker": self.speaker,
         }
 
 
@@ -83,6 +102,37 @@ class TranscriptionResult:
             "engine": self.engine,
         }
 
+    @staticmethod
+    def _fmt_ts(seconds: float) -> str:
+        h = int(seconds // 3600)
+        m = int((seconds % 3600) // 60)
+        s = int(seconds % 60)
+        ms = int((seconds % 1) * 1000)
+        return f"{h:02}:{m:02}:{s:02},{ms:03}"
+
+    def to_srt(self) -> str:
+        """SubRip subtitles from segments."""
+        out = []
+        for i, seg in enumerate(self.segments, 1):
+            out.append(str(i))
+            out.append(f"{self._fmt_ts(seg.start)} --> "
+                       f"{self._fmt_ts(seg.end)}")
+            label = f"[{seg.speaker}] " if seg.speaker else ""
+            out.append(f"{label}{seg.text.strip()}")
+            out.append("")
+        return "\n".join(out)
+
+    def to_vtt(self) -> str:
+        """WebVTT subtitles from segments."""
+        out = ["WEBVTT", ""]
+        for seg in self.segments:
+            out.append(f"{self._fmt_ts(seg.start).replace(',', '.')} --> "
+                       f"{self._fmt_ts(seg.end).replace(',', '.')}")
+            label = f"<v {seg.speaker}>" if seg.speaker else ""
+            out.append(f"{label}{seg.text.strip()}")
+            out.append("")
+        return "\n".join(out)
+
 
 class SpeechToText:
     """Speech-to-text transcription engine."""
@@ -93,11 +143,32 @@ class SpeechToText:
         *,
         whisper_model: str = "base",
         api_key: str = "",
+        device: str = "auto",
+        compute_type: str = "auto",
     ) -> None:
         self.engine = engine
         self.whisper_model = whisper_model
         self.api_key = api_key
+        # faster-whisper hardware ladder: cuda→float16, cpu→int8.
+        self.device = device
+        self.compute_type = compute_type
+        self._fw_model: Any = None
         _log.info(f"STT initialized with engine: {engine}")
+
+    def _fw_device(self) -> tuple[str, str]:
+        if self.device != "auto":
+            dev = self.device
+        else:
+            try:
+                import torch  # type: ignore[import]
+                dev = "cuda" if torch.cuda.is_available() else "cpu"
+            except ImportError:
+                dev = "cpu"
+        if self.compute_type != "auto":
+            ct = self.compute_type
+        else:
+            ct = "float16" if dev == "cuda" else "int8"
+        return dev, ct
     
     async def transcribe(
         self,
@@ -129,13 +200,21 @@ class SpeechToText:
         *,
         language: str = "en",
         prompt: str = "",
+        word_timestamps: bool = False,
+        vad_filter: bool = True,
+        beam_size: int = 5,
     ) -> TranscriptionResult:
         """Transcribe audio with full metadata.
         
         Args:
             audio_path: Path to audio file
-            language: Expected language code
+            language: Expected language code (pinned — avoids
+                mis-detection on short clips)
             prompt: Optional prompt to guide transcription
+            word_timestamps: Per-word timing (faster-whisper)
+            vad_filter: Silero VAD — strips silence, kills the
+                hallucinated-text-in-silence failure mode
+            beam_size: Decoding beam (5 = standard accuracy/speed trade)
             
         Returns:
             TranscriptionResult with segments and timing
@@ -145,6 +224,11 @@ class SpeechToText:
         
         if self.engine == STTEngine.WHISPER:
             return await self._transcribe_whisper(audio_path, language, prompt)
+        elif self.engine == STTEngine.FASTER_WHISPER:
+            return await self._transcribe_faster_whisper(
+                audio_path, language, prompt,
+                word_timestamps=word_timestamps,
+                vad_filter=vad_filter, beam_size=beam_size)
         elif self.engine == STTEngine.WHISPER_API:
             return await self._transcribe_whisper_api(audio_path, language, prompt)
         elif self.engine == STTEngine.GOOGLE:
@@ -153,6 +237,59 @@ class SpeechToText:
             return await self._transcribe_assemblyai(audio_path, language)
         else:
             raise ValueError(f"Unknown STT engine: {self.engine}")
+
+    async def transcribe_diarized(
+        self,
+        audio_path: str,
+        *,
+        language: str = "en",
+        min_speakers: int = 1,
+        max_speakers: int = 4,
+        hf_token: str = "",
+    ) -> TranscriptionResult:
+        """Transcribe + speaker diarization (WhisperX-style).
+
+        Needs ``whisperx`` + a HuggingFace token with access to the
+        pyannote diarization model. Raises a clear error when the
+        stack isn't installed — never a fake transcript.
+        """
+        if not Path(audio_path).exists():
+            raise FileNotFoundError(f"Audio file not found: {audio_path}")
+        try:
+            import whisperx  # type: ignore[import]
+        except ImportError as exc:
+            raise RuntimeError(
+                "diarization needs the whisperx stack: "
+                "pip install whisperx  (plus a HuggingFace token with "
+                "pyannote/speaker-diarization access)") from exc
+        device, compute_type = self._fw_device()
+        model = whisperx.load_model(self.whisper_model, device,
+                                    compute_type=compute_type,
+                                    language=language)
+        audio = whisperx.load_audio(audio_path)
+        result = model.transcribe(audio, batch_size=16)
+        diarize_model = whisperx.diarize.DiarizationPipeline(
+            use_auth_token=hf_token or None, device=device)
+        diarize_segments = diarize_model(audio, min_speakers=min_speakers,
+                                         max_speakers=max_speakers)
+        result = whisperx.assign_word_speakers(diarize_segments, result)
+        segments = []
+        for seg in result.get("segments", []):
+            words = [TranscriptionWord(
+                word=w.get("word", ""), start=w.get("start", 0.0),
+                end=w.get("end", 0.0))
+                for w in seg.get("words", []) or []]
+            segments.append(TranscriptionSegment(
+                start=seg.get("start", 0.0), end=seg.get("end", 0.0),
+                text=seg.get("text", "").strip(), words=words,
+                speaker=seg.get("speaker", "")))
+        return TranscriptionResult(
+            text=" ".join(s.text for s in segments).strip(),
+            language=result.get("language", language),
+            duration=segments[-1].end if segments else 0.0,
+            segments=segments,
+            engine="whisperx",
+        )
     
     async def _transcribe_whisper(
         self,
@@ -200,6 +337,67 @@ class SpeechToText:
             _log.error(f"Whisper transcription failed: {e}")
             raise
     
+    async def _transcribe_faster_whisper(
+        self,
+        audio_path: str,
+        language: str,
+        prompt: str,
+        *,
+        word_timestamps: bool = False,
+        vad_filter: bool = True,
+        beam_size: int = 5,
+    ) -> TranscriptionResult:
+        """Transcribe with faster-whisper (CTranslate2, ~4x faster).
+
+        Hallucination guards on by default: ``vad_filter=True`` strips
+        silence (Whisper invents text in long quiet stretches),
+        ``condition_on_previous_text=False`` stops drift on long-form
+        audio. Language is pinned, not detected.
+        """
+        try:
+            from faster_whisper import WhisperModel  # type: ignore[import]
+        except ImportError as exc:
+            raise RuntimeError(
+                "faster-whisper not installed: pip install faster-whisper"
+            ) from exc
+        device, compute_type = self._fw_device()
+        if self._fw_model is None:
+            _log.info("Loading faster-whisper %s (%s/%s)",
+                      self.whisper_model, device, compute_type)
+            self._fw_model = WhisperModel(self.whisper_model,
+                                          device=device,
+                                          compute_type=compute_type)
+        import asyncio
+        loop = asyncio.get_running_loop()
+        segments_iter, info = await loop.run_in_executor(
+            None, lambda: self._fw_model.transcribe(
+                audio_path,
+                language=language,
+                beam_size=beam_size,
+                vad_filter=vad_filter,
+                word_timestamps=word_timestamps,
+                condition_on_previous_text=False,
+                initial_prompt=prompt or None,
+            ))
+        segments = []
+        for seg in segments_iter:  # generator — must be consumed
+            words = []
+            if word_timestamps:
+                for w in seg.words or []:
+                    words.append(TranscriptionWord(
+                        word=w.word, start=w.start, end=w.end,
+                        probability=w.probability))
+            segments.append(TranscriptionSegment(
+                start=seg.start, end=seg.end,
+                text=seg.text.strip(), words=words))
+        return TranscriptionResult(
+            text=" ".join(s.text for s in segments).strip(),
+            language=getattr(info, "language", language),
+            duration=segments[-1].end if segments else 0.0,
+            segments=segments,
+            engine=STTEngine.FASTER_WHISPER,
+        )
+
     async def _transcribe_whisper_api(
         self,
         audio_path: str,

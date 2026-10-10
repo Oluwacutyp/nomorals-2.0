@@ -39,7 +39,8 @@ from ..accounts.manager import AccountManager
 from ..accounts.sessions import SessionManager
 from ..core.logging_setup import get_logger
 
-__all__ = ["EmailIntegration", "EmailError", "EmailMessage"]
+__all__ = ["EmailIntegration", "EmailError", "EmailMessage",
+           "format_digest"]
 
 _log = get_logger(__name__)
 
@@ -64,6 +65,8 @@ class EmailMessage:
         attachments: list[dict[str, Any]] | None = None,
         is_read: bool = False,
         labels: list[str] | None = None,
+        thread_id: str = "",
+        snippet: str = "",
     ):
         self.message_id = message_id
         self.from_addr = from_addr
@@ -76,7 +79,9 @@ class EmailMessage:
         self.attachments = attachments or []
         self.is_read = is_read
         self.labels = labels or []
-    
+        self.thread_id = thread_id
+        self.snippet = snippet
+
     def to_dict(self) -> dict[str, Any]:
         """Serialize to dict."""
         return {
@@ -90,8 +95,87 @@ class EmailMessage:
             "date": self.date,
             "is_read": self.is_read,
             "labels": self.labels,
+            "thread_id": self.thread_id,
+            "snippet": self.snippet,
             "attachments": len(self.attachments),
         }
+
+    def short_from(self) -> str:
+        """'Alice <alice@x.com>' → 'Alice'."""
+        name = self.from_addr.split("<")[0].strip().strip('"')
+        return name or self.from_addr
+
+
+def _html_to_text(html: str) -> str:
+    """Readable text from HTML: strip tags, keep line breaks."""
+    import re as _re
+    import html as _html
+    text = _re.sub(r"(?i)<(br|p|div|li|tr)[^>]*>", "\n", html)
+    text = _re.sub(r"<[^>]+>", "", text)
+    text = _html.unescape(text)
+    text = _re.sub(r"\n{3,}", "\n\n", text)
+    text = _re.sub(r"[ \t]+", " ", text)
+    return text.strip()
+
+
+def _extract_body(payload: dict[str, Any]) -> tuple[str, list[dict]]:
+    """Recursive MIME walk → (best text body, attachments).
+
+    Prefers text/plain; falls back to text/html → _html_to_text.
+    Attachment parts (with filename) are collected, not decoded.
+    """
+    best_plain, best_html = "", ""
+    attachments: list[dict] = []
+
+    def _walk(part: dict[str, Any]) -> None:
+        nonlocal best_plain, best_html
+        mime = part.get("mimeType", "")
+        filename = part.get("filename", "")
+        body = part.get("body", {}) or {}
+        if filename and body.get("attachmentId"):
+            attachments.append({
+                "filename": filename, "mimeType": mime,
+                "size": body.get("size", 0),
+                "attachmentId": body.get("attachmentId"),
+            })
+            return
+        data = body.get("data")
+        if mime == "text/plain" and data and not best_plain:
+            best_plain = base64.urlsafe_b64decode(data).decode(
+                "utf-8", "replace")
+        elif mime == "text/html" and data and not best_html:
+            best_html = base64.urlsafe_b64decode(data).decode(
+                "utf-8", "replace")
+        for sub in part.get("parts", []) or []:
+            _walk(sub)
+
+    _walk(payload)
+    text = best_plain or (_html_to_text(best_html) if best_html else "")
+    return text, attachments
+
+
+def format_digest(messages: list[EmailMessage], *,
+                  title: str = "📬 inbox") -> str:
+    """God-tier inbox rendering: unread-first, sender/subject/snippet,
+    one-line action hints."""
+    if not messages:
+        return f"{title}\n_all clear — nothing here._"
+    unread = [m for m in messages if not m.is_read]
+    lines = [f"{title} — {len(unread)} unread / {len(messages)} shown"]
+    ordered = sorted(messages,
+                     key=lambda m: (m.is_read, -(m.date or 0)))
+    for m in ordered:
+        dot = "🔵" if not m.is_read else "⚪"
+        when = time.strftime("%H:%M",
+                            time.localtime(m.date)) if m.date else ""
+        snippet = (m.snippet or m.body or "").strip().replace("\n", " ")
+        if len(snippet) > 90:
+            snippet = snippet[:87] + "…"
+        lines.append(f"{dot} **{m.subject or '(no subject)'}**")
+        lines.append(f"   {m.short_from()} · {when}")
+        if snippet:
+            lines.append(f"   _{snippet}_")
+    return "\n".join(lines)
 
 
 class EmailIntegration:
@@ -260,6 +344,359 @@ class EmailIntegration:
         
         # Default to IMAP/SMTP
         return "imap"
+
+    # ── Gmail plumbing: token refresh, authed requests, cursors ──────
+
+    def _gmail_token(self, account: str) -> str:
+        """Access token, refreshing transparently via refresh_token."""
+        import os
+        import urllib.parse
+        import urllib.request
+        cred = self.account_manager.get_credential("gmail_oauth", account)
+        try:
+            token_data = json.loads(cred.password)
+        except (TypeError, ValueError):
+            return cred.password
+        access = token_data.get("access_token", "")
+        if access and self._gmail_token_ok(access):
+            return access
+        refresh = token_data.get("refresh_token", "")
+        client_id = token_data.get("client_id", "") or os.environ.get(
+            "GOOGLE_CLIENT_ID", "")
+        client_secret = token_data.get("client_secret", "") or os.environ.get(
+            "GOOGLE_CLIENT_SECRET", "")
+        if not (refresh and client_id and client_secret):
+            if access:
+                return access  # no refresh material — use as-is
+            raise EmailError(
+                f"cannot refresh Gmail token for {account}: no "
+                "refresh_token/client credentials stored")
+        data = urllib.parse.urlencode({
+            "grant_type": "refresh_token", "refresh_token": refresh,
+            "client_id": client_id, "client_secret": client_secret,
+        }).encode()
+        req = urllib.request.Request(
+            "https://oauth2.googleapis.com/token", data=data,
+            headers={"Content-Type": "application/x-www-form-urlencoded"})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            fresh = json.loads(resp.read().decode())
+        token_data["access_token"] = fresh["access_token"]
+        token_data["expires_at"] = time.time() + int(
+            fresh.get("expires_in", 3600))
+        try:
+            self.account_manager.store_credential(
+                "gmail_oauth", account, json.dumps(token_data),
+                credential_type="oauth_token")
+        except Exception:  # noqa: BLE001 - best effort
+            _log.debug("could not persist refreshed gmail token",
+                       exc_info=True)
+        return token_data["access_token"]
+
+    @staticmethod
+    def _gmail_token_ok(access_token: str) -> bool:
+        import urllib.request
+        try:
+            req = urllib.request.Request(
+                "https://www.googleapis.com/oauth2/v3/tokeninfo",
+                headers={"Authorization": f"Bearer {access_token}"})
+            with urllib.request.urlopen(req, timeout=8):
+                return True
+        except Exception:  # noqa: BLE001
+            return False
+
+    def _gmail_request(self, account: str, method: str, url: str,
+                       payload: dict | None = None,
+                       params: dict | None = None) -> Any:
+        """Authenticated Gmail API call with transparent token refresh."""
+        import urllib.parse
+        import urllib.request
+        token = self._gmail_token(account)
+        if params:
+            url = url + "?" + urllib.parse.urlencode(params)
+        data = json.dumps(payload).encode() if payload is not None else None
+        headers = {"Authorization": f"Bearer {token}"}
+        if data is not None:
+            headers["Content-Type"] = "application/json"
+        req = urllib.request.Request(url, data=data, headers=headers,
+                                     method=method)
+        try:
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                raw = resp.read().decode()
+                return json.loads(raw) if raw else None
+        except urllib.error.HTTPError as exc:
+            if exc.code == 401:
+                # one retry after forced refresh
+                cred = self.account_manager.get_credential(
+                    "gmail_oauth", account)
+                td = json.loads(cred.password)
+                td.pop("access_token", None)
+                token = self._gmail_token(account)
+                headers["Authorization"] = f"Bearer {token}"
+                req = urllib.request.Request(url, data=data,
+                                             headers=headers, method=method)
+                with urllib.request.urlopen(req, timeout=15) as resp:
+                    raw = resp.read().decode()
+                    return json.loads(raw) if raw else None
+            raise
+
+    def _cursor_db(self):
+        import os
+        import sqlite3
+        path = os.path.expanduser("~/.nomorals/email/cursors.db")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        db = sqlite3.connect(path, check_same_thread=False)
+        db.execute("CREATE TABLE IF NOT EXISTS cursors ("
+                   " account TEXT PRIMARY KEY, history_id TEXT NOT NULL,"
+                   " updated REAL NOT NULL)")
+        db.execute("CREATE TABLE IF NOT EXISTS watches ("
+                   " account TEXT PRIMARY KEY, topic TEXT NOT NULL,"
+                   " history_id TEXT NOT NULL, expires_at REAL NOT NULL,"
+                   " updated REAL NOT NULL)")
+        db.commit()
+        return db
+
+    # ── incremental sync (History API, not search) ────────────────────
+
+    async def sync_new(self, account: str, *,
+                       label_ids: list[str] | None = None) -> dict[str, Any]:
+        """Fetch ONLY what's new since the last sync via the History API.
+
+        Persists the historyId cursor in sqlite. First call seeds the
+        cursor and returns []. This is the quota-friendly path — prefer
+        it over polling read_inbox().
+        """
+        import urllib.error
+        if self._detect_backend(account) != "gmail_api":
+            raise EmailError("sync_new needs the Gmail API backend")
+        db = self._cursor_db()
+        row = db.execute("SELECT history_id FROM cursors WHERE account = ?",
+                         (account,)).fetchone()
+        profile = self._gmail_request(
+            account, "GET",
+            "https://gmail.googleapis.com/gmail/v1/users/me/profile")
+        current_hid = str(profile.get("historyId", ""))
+        if not row:
+            db.execute("INSERT OR REPLACE INTO cursors VALUES (?, ?, ?)",
+                       (account, current_hid, time.time()))
+            db.commit(); db.close()
+            return {"new": [], "cursor_seeded": True,
+                    "history_id": current_hid}
+        start_hid = row[0]
+        params: dict[str, Any] = {"startHistoryId": start_hid,
+                                  "historyTypes": ["messageAdded"]}
+        if label_ids:
+            params["labelId"] = label_ids[0]
+        messages: list[EmailMessage] = []
+        page_token = ""
+        try:
+            while True:
+                if page_token:
+                    params["pageToken"] = page_token
+                result = self._gmail_request(
+                    account, "GET",
+                    "https://gmail.googleapis.com/gmail/v1/users/me/history",
+                    params=params) or {}
+                for h in result.get("history", []):
+                    for added in h.get("messagesAdded", []):
+                        mid = added["message"]["id"]
+                        msg = await self._get_gmail_message(
+                            mid, account, self._gmail_token(account))
+                        if msg:
+                            messages.append(msg)
+                page_token = result.get("nextPageToken", "")
+                if not page_token:
+                    break
+                new_hid = result.get("historyId", current_hid)
+            db.execute("INSERT OR REPLACE INTO cursors VALUES (?, ?, ?)",
+                       (account, current_hid, time.time()))
+            db.commit()
+        except urllib.error.HTTPError as exc:
+            if exc.code == 404:  # historyId too old — reseed
+                db.execute(
+                    "INSERT OR REPLACE INTO cursors VALUES (?, ?, ?)",
+                    (account, current_hid, time.time()))
+                db.commit()
+                messages = []
+            else:
+                raise
+        finally:
+            db.close()
+        return {"new": messages, "cursor_seeded": False,
+                "history_id": current_hid}
+
+    # ── push notifications (watch) ───────────────────────────────────
+
+    async def start_watch(self, topic_name: str, account: str, *,
+                          label_ids: list[str] | None = None) -> dict:
+        """Register a Gmail push watch (Pub/Sub topic). Watch expires
+        after ~7 days — :meth:`renew_watches` re-arms it."""
+        if self._detect_backend(account) != "gmail_api":
+            raise EmailError("watch needs the Gmail API backend")
+        payload: dict[str, Any] = {"topicName": topic_name}
+        if label_ids:
+            payload["labelIds"] = label_ids
+        result = self._gmail_request(
+            account, "POST",
+            "https://gmail.googleapis.com/gmail/v1/users/me/watch",
+            payload) or {}
+        db = self._cursor_db()
+        db.execute("INSERT OR REPLACE INTO watches VALUES (?, ?, ?, ?, ?)",
+                   (account, topic_name, str(result.get("historyId", "")),
+                    int(result.get("expiration", 0)) / 1000, time.time()))
+        db.commit(); db.close()
+        _log.info("gmail watch started for %s (expires %s)", account,
+                  time.strftime("%Y-%m-%d",
+                                time.localtime(int(result.get("expiration", 0))
+                                               / 1000)))
+        return {"history_id": result.get("historyId"),
+                "expiration": result.get("expiration")}
+
+    async def stop_watch(self, account: str) -> None:
+        if self._detect_backend(account) != "gmail_api":
+            return
+        try:
+            self._gmail_request(
+                account, "POST",
+                "https://gmail.googleapis.com/gmail/v1/users/me/stop")
+        finally:
+            db = self._cursor_db()
+            db.execute("DELETE FROM watches WHERE account = ?", (account,))
+            db.commit(); db.close()
+
+    def watch_status(self, account: str) -> dict | None:
+        """Watch metadata: topic, expiry. None when no watch."""
+        db = self._cursor_db()
+        row = db.execute("SELECT topic, history_id, expires_at FROM watches"
+                         " WHERE account = ?", (account,)).fetchone()
+        db.close()
+        if not row:
+            return None
+        return {"topic": row[0], "history_id": row[1],
+                "expires_at": row[2],
+                "expires_in_s": max(0.0, row[2] - time.time())}
+
+    async def renew_watches(self, topic_name: str) -> list[str]:
+        """Re-arm every watch expiring within 24h. Returns renewed accts."""
+        db = self._cursor_db()
+        rows = db.execute("SELECT account, expires_at FROM watches").fetchall()
+        db.close()
+        renewed = []
+        for account, expires_at in rows:
+            if expires_at - time.time() < 86400:
+                try:
+                    await self.start_watch(topic_name, account)
+                    renewed.append(account)
+                except Exception as exc:  # noqa: BLE001
+                    _log.warning("watch renew failed for %s: %s",
+                                 account, exc)
+        return renewed
+
+    # ── threads / drafts / batch / attachments ───────────────────────
+
+    async def get_thread(self, thread_id: str,
+                         account: str) -> list[EmailMessage]:
+        """All messages in a Gmail thread, oldest first."""
+        if self._detect_backend(account) != "gmail_api":
+            raise EmailError("threads need the Gmail API backend")
+        token = self._gmail_token(account)
+        result = self._gmail_request(
+            account, "GET",
+            f"https://gmail.googleapis.com/gmail/v1/users/me/threads/"
+            f"{thread_id}",
+            params={"format": "full"}) or {}
+        out = []
+        for m in result.get("messages", []):
+            msg = self._message_from_full(m, token)
+            if msg:
+                out.append(msg)
+        return sorted(out, key=lambda m: m.date or 0)
+
+    def _message_from_full(self, data: dict, token: str) -> Optional[
+            "EmailMessage"]:
+        """Parse a full-format Gmail message dict (shared by get/thread)."""
+        try:
+            headers = {h["name"].lower(): h["value"]
+                       for h in data["payload"]["headers"]}
+            body, attachments = _extract_body(data["payload"])
+            labels = data.get("labelIds", [])
+            return EmailMessage(
+                message_id=data["id"],
+                from_addr=headers.get("from", ""),
+                to_addrs=[headers.get("to", "")],
+                subject=headers.get("subject", ""),
+                body=body,
+                date=int(data.get("internalDate", "0")) / 1000,
+                labels=labels,
+                is_read="UNREAD" not in labels,
+                thread_id=data.get("threadId", ""),
+                snippet=data.get("snippet", ""),
+                attachments=attachments,
+            )
+        except Exception as e:
+            _log.error(f"Failed to parse message {data.get('id')}: {e}")
+            return None
+
+    async def create_draft(self, to: str | list[str], subject: str,
+                           body: str, *, account: str,
+                           html: bool = False) -> str:
+        """Create a Gmail draft (does NOT send). Returns draft id."""
+        if self._detect_backend(account) != "gmail_api":
+            raise EmailError("drafts need the Gmail API backend")
+        to_addrs = [to] if isinstance(to, str) else to
+        message = MIMEText(body, "html" if html else "plain")
+        message["to"] = ", ".join(to_addrs)
+        message["subject"] = subject
+        raw = base64.urlsafe_b64encode(message.as_bytes()).decode()
+        result = self._gmail_request(
+            account, "POST",
+            "https://gmail.googleapis.com/gmail/v1/users/me/drafts",
+            {"message": {"raw": raw}}) or {}
+        return result.get("id", "")
+
+    async def send_draft(self, draft_id: str, account: str) -> str:
+        """Send a previously created draft. Returns message id."""
+        if self._detect_backend(account) != "gmail_api":
+            raise EmailError("drafts need the Gmail API backend")
+        result = self._gmail_request(
+            account, "POST",
+            "https://gmail.googleapis.com/gmail/v1/users/me/drafts/send",
+            {"id": draft_id}) or {}
+        return result.get("id", "")
+
+    async def batch_modify(self, message_ids: list[str], account: str, *,
+                           add_labels: list[str] | None = None,
+                           remove_labels: list[str] | None = None) -> int:
+        """Add/remove labels on up to 1000 messages in ONE call."""
+        if self._detect_backend(account) != "gmail_api":
+            raise EmailError("batch_modify needs the Gmail API backend")
+        ids = list(message_ids or [])[:1000]
+        if not ids:
+            return 0
+        payload: dict[str, Any] = {"ids": ids}
+        if add_labels:
+            payload["addLabelIds"] = add_labels
+        if remove_labels:
+            payload["removeLabelIds"] = remove_labels
+        self._gmail_request(
+            account, "POST",
+            "https://gmail.googleapis.com/gmail/v1/users/me/messages/"
+            "batchModify", payload)
+        return len(ids)
+
+    async def download_attachment(self, message_id: str, attachment_id: str,
+                                  account: str, dest_path: str) -> str:
+        """Download a Gmail attachment to ``dest_path``."""
+        if self._detect_backend(account) != "gmail_api":
+            raise EmailError("attachments need the Gmail API backend")
+        result = self._gmail_request(
+            account, "GET",
+            f"https://gmail.googleapis.com/gmail/v1/users/me/messages/"
+            f"{message_id}/attachments/{attachment_id}") or {}
+        data = result.get("data", "")
+        raw = base64.urlsafe_b64decode(data)
+        with open(dest_path, "wb") as f:
+            f.write(raw)
+        return dest_path
     
     # ── Gmail API Backend ──────────────────────────────────────────────────
     
@@ -367,42 +804,20 @@ class EmailIntegration:
         account: str,
         access_token: str,
     ) -> Optional[EmailMessage]:
-        """Fetch a single Gmail message."""
+        """Fetch a single Gmail message (recursive MIME body extraction)."""
         import urllib.request
-        
+
         url = f"https://gmail.googleapis.com/gmail/v1/users/me/messages/{message_id}?format=full"
-        
+
         req = urllib.request.Request(
             url,
             headers={"Authorization": f"Bearer {access_token}"},
         )
-        
+
         try:
             with urllib.request.urlopen(req, timeout=10) as response:
                 data = json.loads(response.read().decode())
-                
-                # Parse headers
-                headers = {h["name"].lower(): h["value"] for h in data["payload"]["headers"]}
-                
-                # Extract body
-                body = ""
-                if "parts" in data["payload"]:
-                    for part in data["payload"]["parts"]:
-                        if part["mimeType"] == "text/plain":
-                            body = base64.urlsafe_b64decode(part["body"]["data"]).decode()
-                            break
-                elif "body" in data["payload"] and "data" in data["payload"]["body"]:
-                    body = base64.urlsafe_b64decode(data["payload"]["body"]["data"]).decode()
-                
-                return EmailMessage(
-                    message_id=message_id,
-                    from_addr=headers.get("from", ""),
-                    to_addrs=[headers.get("to", "")],
-                    subject=headers.get("subject", ""),
-                    body=body,
-                    date=int(data.get("internalDate", "0")) / 1000,
-                    labels=data.get("labelIds", []),
-                )
+                return self._message_from_full(data, access_token)
         except Exception as e:
             _log.error(f"Failed to fetch message {message_id}: {e}")
             return None
