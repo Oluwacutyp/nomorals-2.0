@@ -93,10 +93,16 @@ class StreamServerTests(unittest.TestCase):
         s.connect(("127.0.0.1", self.port))
         s.sendall(b"GET /stream?since=0 HTTP/1.1\r\nHost: localhost\r\n\r\n")
         buf = b""
-        # Read until we see an event frame or time out.
+        # Read until the recorded event arrives or we time out. (The
+        # stream now opens with `retry:` + an `event: ready` handshake
+        # before data frames, so wait for the event itself.)
+        deadline = time.time() + 8
         try:
-            while b"\n\ndata: " not in buf and b"\ndata: " not in buf:
-                chunk = s.recv(4096)
+            while b"test.event" not in buf and time.time() < deadline:
+                try:
+                    chunk = s.recv(4096)
+                except socket.timeout:
+                    break
                 if not chunk:
                     break
                 buf += chunk
