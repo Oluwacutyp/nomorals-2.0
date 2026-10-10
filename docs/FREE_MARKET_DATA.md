@@ -10,7 +10,22 @@ environment variables — never required.
 |---|---|---|
 | crypto | Binance → Kraken → Coinbase → CoinGecko | OHLCV klines, 1m–1M, up to 3000 bars (paginated) |
 | stocks | Yahoo → Stooq → *(keyed upgrades if env set)* | intraday+daily OHLCV via Yahoo v8 chart API (keyless, no package); Stooq daily as fallback |
-| forex | Frankfurter → Yahoo → Stooq → *(keyed upgrades if env set)* | ECB-blend daily fixings (O=H=L=C, no volume); Yahoo intraday via `EURUSD=X` |
+| forex | Frankfurter → open.er-api → ECB → Yahoo → Stooq → *(keyed)* | ECB-blend daily fixings; open.er-api live rates; ECB direct XML; Yahoo intraday via `EURUSD=X` |
+| commodities | gold-api → Yahoo futures → Frankfurter | real-time XAU/XAG/XPT/XPD spot; GC=F/SI=F/PL=F/PA=F OHLC; daily fixings |
+
+## Source reliability tiers
+
+Infrastructure first — these are the least likely to disappear:
+
+| Tier | Sources | Why |
+|---|---|---|
+| 1 — Infrastructure | Binance, Kraken, Coinbase (exchanges); ECB, Frankfurter (central banks) | Exchanges and central banks are the data originators |
+| 2 — Established aggregators | Yahoo, CoinGecko, Stooq | decade+ track records, widely depended upon |
+| 3 — Community utilities | gold-api.com, open.er-api.com | verified working keyless 2026-10-10, smaller operations |
+
+Every source has automatic health tracking: after 3 consecutive failures
+it's skipped for 5 minutes (circuit breaker), routing around dead sources
+without manual intervention. See `source_health()` in `market_data.py`.
 
 ## Keyless sources
 
@@ -22,11 +37,15 @@ environment variables — never required.
 | CoinGecko | `api.coingecko.com/api/v3/coins/{id}/ohlc` | crypto OHLC, **no volume** | ~5–15 calls/min free | granularity follows range (30m/4h/4d) |
 | Stooq | `stooq.com/q/d/l/?s=aapl.us&i=d` | stocks daily OHLCV; forex `eurusd` daily | generous, no key | bot-walled from datacenter IPs — kept as fallback |
 | Yahoo | `query1.finance.yahoo.com/v8/finance/chart/{sym}` | stocks/forex/crypto intraday+daily | unofficial, no key (~2000 req/hr tolerated) | default for stocks; forex via `EURUSD=X` |
-| Frankfurter | `api.frankfurter.dev/v2/rates` (time series), `/v2/rate/{base}/{quote}` | fiat FX daily (104 central-bank sources) | no quotas, no key | one fixing/day: O=H=L=C, volume 0 |
+| Frankfurter | `api.frankfurter.dev/v2/rates` (time series), `/v2/rate/{base}/{quote}` | fiat FX + XAU/XAG daily (central-bank sources) | no quotas, no key | one fixing/day: O=H=L=C, volume 0; covers XAU, XAG, NGN |
+| gold-api.com | `api.gold-api.com/price/{XAU,XAG,XPT,XPD}` | real-time metals spot | no key, CORS-enabled | verified 2026-10-10; /price/ keyless, /history/ needs key |
+| open.er-api.com | `open.er-api.com/v6/latest/{base}` | fiat FX live rates | no key | exchangerate-api.com free tier; forex redundancy |
+| ECB direct | `ecb.europa.eu/stats/eurofxref/eurofxref-daily.xml` | EUR reference rates | no key, no limit | the actual source; updated ~16:00 CET working days |
+| Yahoo metals | `query1.finance.yahoo.com/v8/finance/chart/GC=F` | GC=F/SI=F/PL=F/PA=F futures OHLC | unofficial, no key | XAUUSD=X is delisted — futures are the working path |
 
-Quotes (``/finance quote``) use the same hosts: Binance 24h ticker for
-crypto (real 24h change %), Yahoo v8 chart for stocks, Frankfurter
-`/v2/rate/{base}/{quote}` for FX.
+Quotes use the same hosts: Binance 24h ticker for crypto (real 24h change %),
+gold-api.com for metals spot (real-time), Frankfurter → open.er-api → ECB
+for FX, Yahoo v8 chart for stocks.
 
 ## Optional keyed upgrades (env vars)
 

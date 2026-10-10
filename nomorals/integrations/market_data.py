@@ -8,9 +8,20 @@ via environment variables — never required.
 
 Endpoint matrix (see ``docs/FREE_MARKET_DATA.md`` for the full table):
 
-crypto  (default chain) : binance → coingecko   [quote(); OHLC also tries kraken/coinbase]
-stocks  (default chain) : yahoo → stooq → [alphavantage|twelvedata|finnhub if keyed]
-forex   (default chain) : frankfurter → yahoo → stooq → [alphavantage|twelvedata if keyed]
+crypto      (default chain) : binance → kraken → coinbase → coingecko
+stocks      (default chain) : yahoo → stooq → [alphavantage|twelvedata|finnhub if keyed]
+forex       (default chain) : frankfurter → open_er_api → ecb → yahoo → stooq
+commodities (default chain) : gold_api → yahoo_futures → frankfurter
+
+Source reliability tiers (infrastructure first):
+  Tier 1 — Infrastructure (exchanges, central banks): binance, kraken,
+           coinbase, ecb, frankfurter
+  Tier 2 — Established aggregators: yahoo, coingecko, stooq
+  Tier 3 — Community utilities (verified working, keyless): gold_api,
+           open_er_api
+
+Each source has automatic health tracking — after 3 consecutive failures
+a source is skipped for 5 minutes (circuit breaker). See source_health().
 
 All OHLC fetchers return a pandas DataFrame with a DatetimeIndex and
 ``open/high/low/close/volume`` float columns — the exact shape Sentinel's
@@ -38,12 +49,15 @@ from ..core.logging_setup import get_logger
 __all__ = [
     "SOURCES",
     "KEYED_SOURCES",
+    "SOURCE_TIERS",
     "MarketDataError",
     "normalize_symbol",
     "get_ohlcv",
     "quote",
     "SentinelMarketProvider",
     "source_status",
+    "source_health",
+    "record_source_result",
 ]
 
 _log = get_logger(__name__)
@@ -90,10 +104,42 @@ SOURCES: dict[str, dict[str, str]] = {
         "key": "none",
     },
     "frankfurter": {
-        "covers": "fiat FX daily fixings (v2 API, 104 central-bank sources)",
+        "covers": "fiat FX + XAU/XAG daily fixings (v2 API, central-bank sources)",
         "limits": "no quotas, no key",
         "key": "none",
     },
+    "gold_api": {
+        "covers": "real-time XAU/XAG/XPT/XPD spot (gold-api.com, keyless /price/)",
+        "limits": "no key, CORS-enabled; /history/ needs key",
+        "key": "none",
+    },
+    "yahoo_metals": {
+        "covers": "metals futures OHLC: GC=F (gold), SI=F (silver), PL=F, PA=F",
+        "limits": "unofficial API, no key (~2000 req/hr tolerated)",
+        "key": "none",
+    },
+    "open_er_api": {
+        "covers": "fiat FX live rates (open.er-api.com, exchangerate-api.com free)",
+        "limits": "no key, daily updates",
+        "key": "none",
+    },
+    "ecb": {
+        "covers": "ECB euro reference rates direct (eurofxref-daily.xml)",
+        "limits": "no key, no rate limit, updated ~16:00 CET working days",
+        "key": "none",
+    },
+}
+
+#: Source reliability tiers — infrastructure first, community last.
+#: Tier 1: exchanges and central banks (most likely to survive long-term).
+#: Tier 2: established aggregators with track records.
+#: Tier 3: verified-working community utilities (keyless, but smaller ops).
+SOURCE_TIERS: dict[str, int] = {
+    "binance": 1, "kraken": 1, "coinbase": 1,
+    "ecb": 1, "frankfurter": 1,
+    "yahoo": 2, "yahoo_metals": 2, "coingecko": 2, "stooq": 2,
+    "gold_api": 3, "open_er_api": 3,
+    "alphavantage": 2, "twelvedata": 2, "finnhub": 2,
 }
 
 #: optional keyed upgrades — env var → source id
@@ -102,6 +148,76 @@ KEYED_SOURCES: dict[str, str] = {
     "TWELVEDATA_API_KEY": "twelvedata",         # 8 req/min, 800/day free
     "FINNHUB_API_KEY": "finnhub",              # 60 calls/min free
 }
+
+
+# ── source health tracking (circuit breaker) ──────────────────────────
+# After _HEALTH_FAIL_THRESHOLD consecutive failures, a source is skipped
+# for _HEALTH_COOLDOWN_S seconds. This routes around dead sources
+# automatically without manual intervention.
+_HEALTH_FAIL_THRESHOLD = 3
+_HEALTH_COOLDOWN_S = 300.0  # 5 minutes
+
+_source_health: dict[str, dict[str, Any]] = {}
+_health_lock = __import__("threading").Lock()
+
+
+def record_source_result(source: str, ok: bool) -> None:
+    """Record a source attempt. Called automatically by the fetchers."""
+    now = time.time()
+    with _health_lock:
+        h = _source_health.get(source)
+        if h is None:
+            h = {"fails": 0, "ok": 0, "last_fail": 0.0,
+                 "last_ok": 0.0, "cooling_until": 0.0}
+            _source_health[source] = h
+        if ok:
+            h["fails"] = 0
+            h["ok"] += 1
+            h["last_ok"] = now
+            h["cooling_until"] = 0.0
+        else:
+            h["fails"] += 1
+            h["last_fail"] = now
+            if h["fails"] >= _HEALTH_FAIL_THRESHOLD:
+                h["cooling_until"] = now + _HEALTH_COOLDOWN_S
+                _log.warning("market_data: %s cooling down for %ds "
+                             "(%d consecutive failures)",
+                             source, _HEALTH_COOLDOWN_S, h["fails"])
+
+
+def _source_healthy(source: str) -> bool:
+    """True if the source is not in cooldown."""
+    with _health_lock:
+        h = _source_health.get(source)
+        if h is None:
+            return True
+        return time.time() >= h.get("cooling_until", 0.0)
+
+
+def source_health() -> dict[str, dict[str, Any]]:
+    """Per-source health: fails, successes, cooling status, tier."""
+    now = time.time()
+    with _health_lock:
+        out = {}
+        for src in SOURCES:
+            h = _source_health.get(src, {})
+            cooling = now < h.get("cooling_until", 0.0)
+            out[src] = {
+                "tier": SOURCE_TIERS.get(src, 9),
+                "consecutive_fails": h.get("fails", 0),
+                "total_ok": h.get("ok", 0),
+                "cooling_down": cooling,
+                "cooling_secs_left": max(
+                    0.0, h.get("cooling_until", 0.0) - now) if cooling else 0.0,
+                "last_ok": h.get("last_ok", 0.0),
+                "last_fail": h.get("last_fail", 0.0),
+            }
+        return out
+
+
+def _healthy_chain(chain: list[str]) -> list[str]:
+    """Filter a source chain to healthy sources (circuit breaker)."""
+    return [s for s in chain if _source_healthy(s)]
 
 
 # ── HTTP ──────────────────────────────────────────────────────────────
@@ -140,6 +256,17 @@ def normalize_symbol(symbol: str, market: str = "crypto") -> dict[str, str]:
     market = (market or "crypto").strip().lower()
     if "/" in raw:
         base, quote_c = raw.split("/", 1)
+    elif market == "commodities":
+        # XAUUSD → XAU/USD, XAGUSD → XAG/USD, GOLD → XAU
+        noslash = raw.replace("/", "")
+        base, quote_c = noslash, "USD"
+        for metal in ("XAU", "XAG", "XPT", "XPD"):
+            if noslash.startswith(metal):
+                base, quote_c = metal, noslash[len(metal):] or "USD"
+                break
+        _ALIAS = {"GOLD": "XAU", "SILVER": "XAG", "PLATINUM": "XPT",
+                  "PALLADIUM": "XPD"}
+        base = _ALIAS.get(base, base)
     elif market == "forex" and len(raw) == 6 and raw.isalpha():
         base, quote_c = raw[:3], raw[3:]  # EURUSD → EUR/USD
     else:
@@ -155,7 +282,23 @@ def normalize_symbol(symbol: str, market: str = "crypto") -> dict[str, str]:
     out["coinbase"] = f"{base}-{quote_c}"
     out["stooq"] = (f"{base.lower()}.us" if market == "stocks"
                     else f"{(base + quote_c).lower()}")
+    # commodities: metal code → yahoo futures symbol + gold-api path
+    out["metal"] = _METAL_YAHOO.get(base, "")
     return out
+
+
+#: spot metal code → Yahoo futures symbol (GC=F gold, SI=F silver, …).
+#: XAUUSD=X is delisted on Yahoo — futures are the working path.
+_METAL_YAHOO = {
+    "XAU": "GC=F", "GOLD": "GC=F",
+    "XAG": "SI=F", "SILVER": "SI=F",
+    "XPT": "PL=F", "PLATINUM": "PL=F",
+    "XPD": "PA=F", "PALLADIUM": "PA=F",
+    "COPPER": "HG=F", "WTI": "CL=F", "BRENT": "BZ=F",
+}
+
+#: metal code → gold-api.com path segment (keyless /price/ endpoint).
+_METAL_GOLDAPI = {"XAU", "XAG", "XPT", "XPD"}
 
 
 _KRAKEN_BASE = {"BTC": "XXBT", "ETH": "XETH", "DOGE": "XXDG",
@@ -404,6 +547,128 @@ def _frankfurter_daily(sym: dict[str, str], bars: int) -> Any:
                                  "close", "volume"])
 
 
+# ── commodities adapters (gold-api.com + yahoo futures) ───────────────
+def _goldapi_quote(sym: dict[str, str]) -> dict[str, Any]:
+    """Real-time metal spot via gold-api.com (keyless /price/ endpoint).
+
+    Verified working 2026-10-10: XAU/XAG/XPT/XPD, updates every few
+    seconds. Only /price/ is keyless — /history/ needs a key.
+    """
+    base = sym["base"]
+    if base not in _METAL_GOLDAPI:
+        raise MarketDataError(
+            f"gold_api: no keyless spot for {base} "
+            f"(covered: {sorted(_METAL_GOLDAPI)})")
+    d = _json(f"https://api.gold-api.com/price/{base}")
+    try:
+        price = float((d or {})["price"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise MarketDataError(
+            f"gold_api: bad response for {base} ({str(d)[:120]})") from exc
+    record_source_result("gold_api", True)
+    return {"symbol": sym["raw"], "price": price,
+            "change_pct_24h": None, "currency": "USD",
+            "source": "gold_api"}
+
+
+def _yahoo_metal_ohlc(sym: dict[str, str], timeframe: str,
+                      bars: int) -> Any:
+    """Metals OHLC via Yahoo futures (GC=F, SI=F, PL=F, PA=F).
+
+    XAUUSD=X is delisted on Yahoo — futures contracts are the working
+    path for historical metal bars.
+    """
+    fsym = sym.get("metal") or _METAL_YAHOO.get(sym["base"], "")
+    if not fsym:
+        raise MarketDataError(
+            f"yahoo_metals: no futures symbol for {sym['base']}")
+    iv = _YAHOO_TF.get(timeframe)
+    if not iv:
+        raise MarketDataError(
+            f"yahoo_metals: unsupported timeframe {timeframe!r}")
+    data = _json(
+        f"https://query1.finance.yahoo.com/v8/finance/chart/{fsym}",
+        {"interval": iv, "range": _yahoo_range(timeframe, bars)})
+    try:
+        result = (data or {})["chart"]["result"][0]
+        ts = result["timestamp"]
+        q = result["indicators"]["quote"][0]
+    except (KeyError, TypeError, IndexError) as exc:
+        raise MarketDataError(
+            f"yahoo_metals: no data for {fsym}") from exc
+    rows = [[t * 1000, o, h, l, c, v or 0.0]
+            for t, o, h, l, c, v in zip(ts, q.get("open") or [],
+                                        q.get("high") or [],
+                                        q.get("low") or [],
+                                        q.get("close") or [],
+                                        q.get("volume") or [])]
+    rows.sort(key=lambda r: r[0])
+    if not rows:
+        raise MarketDataError(f"yahoo_metals: empty series for {fsym}")
+    record_source_result("yahoo_metals", True)
+    return _frame(rows[-bars:], ["timestamp", "open", "high", "low",
+                                 "close", "volume"])
+
+
+def _frankfurter_metal_ohlc(sym: dict[str, str], bars: int) -> Any:
+    """Daily metal fixings via frankfurter (XAU/XAG have history)."""
+    base = sym["base"]
+    if base not in ("XAU", "XAG"):
+        raise MarketDataError(
+            f"frankfurter: no metal history for {base} (XAU/XAG only)")
+    return _frankfurter_daily(
+        {"base": base, "quote": "USD"}, bars)
+
+
+# ── forex redundancy adapters ─────────────────────────────────────────
+def _open_er_api_quote(sym: dict[str, str]) -> dict[str, Any]:
+    """Fiat FX quote via open.er-api.com (keyless, exchangerate-api.com)."""
+    base, quote_c = sym["base"], sym["quote"]
+    if not base or not quote_c:
+        raise MarketDataError("open_er_api: need a pair like EURUSD")
+    d = _json(f"https://open.er-api.com/v6/latest/{base}")
+    rates = (d or {}).get("rates") or {}
+    try:
+        rate = float(rates[quote_c])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise MarketDataError(
+            f"open_er_api: no rate for {base}/{quote_c}") from exc
+    record_source_result("open_er_api", True)
+    return {"symbol": sym["raw"], "price": rate, "change_pct_24h": None,
+            "currency": quote_c, "source": "open_er_api"}
+
+
+def _ecb_direct_quote(sym: dict[str, str]) -> dict[str, Any]:
+    """ECB euro reference rates, straight from the source (no middleman).
+
+    Parses eurofxref-daily.xml directly. Rates are EUR-based; cross
+    rates computed for non-EUR pairs. Updated ~16:00 CET on working days.
+    """
+    import xml.etree.ElementTree as ET
+    base, quote_c = sym["base"], sym["quote"]
+    if not base or not quote_c:
+        raise MarketDataError("ecb: need a pair like EURUSD")
+    raw = _fetch("https://www.ecb.europa.eu/stats/eurofxref/"
+                 "eurofxref-daily.xml")
+    try:
+        root = ET.fromstring(raw)
+        ns = {"e": "http://www.ecb.int/vocabulary/2002-08-01/eurofxref"}
+        cubes = root.findall(".//e:Cube[@currency]", ns)
+        rates = {"EUR": 1.0}
+        for c in cubes:
+            rates[c.get("currency")] = float(c.get("rate"))
+    except Exception as exc:
+        raise MarketDataError(f"ecb: XML parse failed: {exc}") from exc
+    if base not in rates or quote_c not in rates:
+        raise MarketDataError(
+            f"ecb: pair {base}/{quote_c} not in reference rates")
+    # ECB quotes EUR/XXX; cross: base/quote = (EUR/quote) / (EUR/base)
+    rate = rates[quote_c] / rates[base]
+    record_source_result("ecb", True)
+    return {"symbol": sym["raw"], "price": rate, "change_pct_24h": None,
+            "currency": quote_c, "source": "ecb"}
+
+
 # ── optional keyed upgrades (env vars, never required) ────────────────
 def _key(name: str) -> str:
     return (os.environ.get(name) or "").strip()
@@ -526,7 +791,8 @@ def _keyed_chain(market: str) -> list[str]:
 _DEFAULT_CHAINS: dict[str, list[str]] = {
     "crypto": ["binance", "kraken", "coinbase", "coingecko"],
     "stocks": ["yahoo", "stooq"],
-    "forex": ["frankfurter", "yahoo", "stooq"],
+    "forex": ["frankfurter", "open_er_api", "ecb", "yahoo", "stooq"],
+    "commodities": ["yahoo_metals", "frankfurter"],
 }
 
 _FETCHERS: dict[str, Callable[..., Any]] = {
@@ -536,11 +802,29 @@ _FETCHERS: dict[str, Callable[..., Any]] = {
     "coingecko": lambda s, m, tf, b: _coingecko_ohlc(s, tf, b),
     "stooq": lambda s, m, tf, b: _stooq_csv(s, tf, b),
     "yahoo": _yahoo_chart,
-    "frankfurter": lambda s, m, tf, b: _frankfurter_daily(s, b),
+    "yahoo_metals": lambda s, m, tf, b: _yahoo_metal_ohlc(s, tf, b),
+    "frankfurter": lambda s, m, tf, b: (
+        _frankfurter_metal_ohlc(s, b) if m == "commodities"
+        else _frankfurter_daily(s, b)),
     "alphavantage": _alphavantage,
     "twelvedata": _twelvedata,
     "finnhub": _finnhub,
 }
+
+
+#: symbols that are metals, not forex pairs — auto-routed to commodities.
+_METAL_SYMBOLS = {"XAUUSD", "XAU", "GOLD", "XAGUSD", "XAG", "SILVER",
+                  "XPTUSD", "XPT", "XPDUSD", "XPD", "PLATINUM", "PALLADIUM"}
+
+
+def _detect_market(symbol: str, market: str) -> str:
+    """Auto-route metal symbols to the commodities market."""
+    if market == "forex":
+        raw = (symbol or "").strip().upper().replace("-", "/").replace(
+            " ", "")
+        if raw.replace("/", "") in _METAL_SYMBOLS:
+            return "commodities"
+    return market
 
 
 def get_ohlcv(symbol: str, market: str = "crypto",
@@ -550,14 +834,24 @@ def get_ohlcv(symbol: str, market: str = "crypto",
 
     ``source="auto"`` tries the market's default chain in order (keyed
     upgrades first *only* when their env var is set), returning the first
-    success. Pass an explicit source id (``"binance"``, ``"stooq"``…)
-    to pin one. Raises :exc:`MarketDataError` listing every failure.
+    success. Unhealthy sources (circuit breaker tripped) are skipped
+    automatically. Pass an explicit source id (``"binance"``,
+    ``"stooq"``…) to pin one. Raises :exc:`MarketDataError` listing
+    every failure.
+
+    Metal symbols (XAUUSD, XAG, …) passed with ``market="forex"`` are
+    auto-routed to the ``commodities`` market.
     """
-    market = (market or "crypto").strip().lower()
+    market = _detect_market(symbol, (market or "crypto").strip().lower())
     sym = normalize_symbol(symbol, market)
     if source == "auto":
         chain = _keyed_chain(market) + _DEFAULT_CHAINS.get(market,
                                                            ["binance"])
+        chain = _healthy_chain(chain)
+        if not chain:
+            # all sources cooling — try anyway, don't hard-fail
+            chain = _keyed_chain(market) + _DEFAULT_CHAINS.get(
+                market, ["binance"])
     else:
         chain = [source.strip().lower()]
     errors: list[str] = []
@@ -568,12 +862,15 @@ def get_ohlcv(symbol: str, market: str = "crypto",
             continue
         try:
             df = fn(sym, market, timeframe, bars)
+            record_source_result(src, True)
             _log.info("market_data: %s %s %s via %s (%d bars)",
                       symbol, market, timeframe, src, len(df))
             return df
         except MarketDataError as exc:
+            record_source_result(src, False)
             errors.append(f"{src}: {exc}")
         except Exception as exc:  # noqa: BLE001 - adapter bug, try next
+            record_source_result(src, False)
             errors.append(f"{src}: unexpected {exc}")
             _log.warning("market_data adapter %s failed: %s", src, exc)
     raise MarketDataError(
@@ -587,12 +884,15 @@ def quote(symbol: str, market: str = "crypto") -> dict[str, Any]:
 
     Returns ``{"symbol","price","change_pct_24h","currency","source"}``.
     ``change_pct_24h`` may be None when the source has no change data.
+
+    Metal symbols (XAUUSD, XAG, …) are auto-routed to the commodities
+    market even when ``market="forex"`` is passed.
     """
-    market = (market or "crypto").strip().lower()
+    market = _detect_market(symbol, (market or "crypto").strip().lower())
     sym = normalize_symbol(symbol, market)
     disp = (symbol or "").strip().upper()
     if market == "crypto":
-        for src in ("binance", "coingecko"):
+        for src in _healthy_chain(["binance", "coingecko"]):
             try:
                 if src == "binance":
                     d = _json(
@@ -604,6 +904,7 @@ def quote(symbol: str, market: str = "crypto") -> dict[str, Any]:
                     lo = float(d["lowPrice"]) if d.get("lowPrice") else None
                     spread_bps = ((ask - bid) / float(d["lastPrice"])
                                   * 10000) if bid and ask else None
+                    record_source_result("binance", True)
                     return {"symbol": disp,
                             "price": float(d["lastPrice"]),
                             "change_pct_24h": float(
@@ -622,11 +923,14 @@ def quote(symbol: str, market: str = "crypto") -> dict[str, Any]:
                      "include_24hr_change": "true"})
                 row = (d or {}).get(coin) or {}
                 if "usd" not in row:
+                    record_source_result("coingecko", False)
                     continue
+                record_source_result("coingecko", True)
                 return {"symbol": disp, "price": float(row["usd"]),
                         "change_pct_24h": row.get("usd_24h_change"),
                         "currency": "USD", "source": "coingecko"}
             except Exception:  # noqa: BLE001 - try next source
+                record_source_result(src, False)
                 continue
         raise MarketDataError(f"no crypto quote for {disp}")
     if market == "stocks":
@@ -660,15 +964,69 @@ def quote(symbol: str, market: str = "crypto") -> dict[str, Any]:
         raise MarketDataError(f"no stock quote for {disp}")
     if market == "forex":
         base, quote_c = sym["base"], sym["quote"]
-        d = _json(f"https://api.frankfurter.dev/v2/rate/"
-                  f"{base.lower()}/{quote_c.lower()}")
+        # Chain: frankfurter → open.er-api.com → ECB direct.
+        # Each records health; cooling sources are skipped.
+        forex_chain = _healthy_chain(
+            ["frankfurter", "open_er_api", "ecb"])
+        errors = []
+        for src in forex_chain:
+            try:
+                if src == "frankfurter":
+                    d = _json(f"https://api.frankfurter.dev/v2/rate/"
+                              f"{base.lower()}/{quote_c.lower()}")
+                    rate = float((d or {})["rate"])
+                    record_source_result("frankfurter", True)
+                    return {"symbol": disp, "price": rate,
+                            "change_pct_24h": None,
+                            "currency": quote_c, "source": "frankfurter"}
+                elif src == "open_er_api":
+                    return _open_er_api_quote(sym)
+                elif src == "ecb":
+                    return _ecb_direct_quote(sym)
+            except Exception as exc:  # noqa: BLE001 - try next
+                record_source_result(src, False)
+                errors.append(f"{src}: {exc}")
+                continue
+        # yahoo as last resort for forex (v8 chart)
         try:
-            rate = float((d or {})["rate"])
-        except (KeyError, TypeError, ValueError) as exc:
-            raise MarketDataError(
-                f"no forex quote for {base}/{quote_c}") from exc
-        return {"symbol": disp, "price": rate, "change_pct_24h": None,
-                "currency": quote_c, "source": "frankfurter"}
+            ysym = _yahoo_symbol(sym, market)
+            d = _json(
+                "https://query1.finance.yahoo.com/v8/finance/chart/"
+                f"{ysym}", {"interval": "1d", "range": "5d"})
+            meta = (d or {}).get("chart", {}).get("result", [{}])[0].get(
+                "meta", {})
+            price = meta.get("regularMarketPrice")
+            if price is not None:
+                record_source_result("yahoo", True)
+                return {"symbol": disp, "price": float(price),
+                        "change_pct_24h": None,
+                        "currency": quote_c or "USD",
+                        "source": "yahoo"}
+        except Exception as exc:  # noqa: BLE001
+            record_source_result("yahoo", False)
+            errors.append(f"yahoo: {exc}")
+        raise MarketDataError(
+            f"no forex quote for {base}/{quote_c}: {'; '.join(errors)}")
+    if market == "commodities":
+        # Chain: gold-api.com (real-time) → frankfurter (daily fixing).
+        errors = []
+        for src in _healthy_chain(["gold_api", "frankfurter"]):
+            try:
+                if src == "gold_api":
+                    return _goldapi_quote(sym)
+                d = _json(f"https://api.frankfurter.dev/v2/rate/"
+                          f"{sym['base'].lower()}/usd")
+                rate = float((d or {})["rate"])
+                record_source_result("frankfurter", True)
+                return {"symbol": disp, "price": rate,
+                        "change_pct_24h": None, "currency": "USD",
+                        "source": "frankfurter"}
+            except Exception as exc:  # noqa: BLE001 - try next
+                record_source_result(src, False)
+                errors.append(f"{src}: {exc}")
+                continue
+        raise MarketDataError(
+            f"no commodity quote for {disp}: {'; '.join(errors)}")
     raise MarketDataError(f"unknown market {market!r}")
 
 
@@ -708,11 +1066,16 @@ class SentinelMarketProvider:
 
 
 def source_status() -> dict[str, Any]:
-    """Which sources are usable right now (keyless always; keyed iff env)."""
+    """Which sources are usable right now (keyless always; keyed iff env).
+
+    Includes reliability tiers and live health (circuit-breaker state).
+    """
     keyed = {src: bool(_key(env)) for env, src in KEYED_SOURCES.items()}
     return {"keyless": list(SOURCES),
             "keyed": keyed,
-            "default_chains": _DEFAULT_CHAINS}
+            "tiers": SOURCE_TIERS,
+            "default_chains": _DEFAULT_CHAINS,
+            "health": source_health()}
 
 
 # ── TTL cache ─────────────────────────────────────────────────────────
