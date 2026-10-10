@@ -369,6 +369,16 @@ def probe_reference_audio(path: str) -> dict[str, Any]:
                      "audio clones poorly")
     if channels > 1:
         warns.append("stereo — will be mixed down to mono")
+    # acoustic voice-print: Devon's own measurement of the clip
+    try:
+        vp = voice_print(path)
+        info["voice_print"] = vp
+        for w in vp.get("warnings", []):
+            if w not in warns:
+                warns.append(w)
+        info["verdict"] = vp.get("verdict", "")
+    except Exception:  # noqa: BLE001 - the print is a bonus
+        _log.debug("voice_print failed inside probe", exc_info=True)
     return info
 
 
@@ -389,24 +399,65 @@ class TagProcessor:
     #: Legacy Bark-style tags plus every canonical director burst name.
     SOUND_TAGS = _LEGACY_SOUND_TAGS | set(CANONICAL_BURSTS)
 
+    #: Free-form NL direction tags: [said angrily in British accent]
+    NL_TAG_PATTERN = re.compile(r"\[([^\[\]]*[A-Za-z][^\[\]]*)\]")
+
     def parse(self, raw_text: str) -> List[Segment]:
         segments: list[Segment] = []
         active_tags: list[str] = []
         pos = 0
-        for match in TAG_PATTERN.finditer(raw_text or ""):
-            chunk = raw_text[pos:match.start()].strip()
+        # Collect both strict tags and NL tags, sorted by position
+        all_matches: list[tuple[int, int, str, bool]] = []
+        for m in TAG_PATTERN.finditer(raw_text or ""):
+            all_matches.append((m.start(), m.end(), m.group(0), False))
+        for m in self.NL_TAG_PATTERN.finditer(raw_text or ""):
+            inner = m.group(1)
+            # Skip if it's a strict tag (already captured)
+            if re.fullmatch(r"[a-z_]+(?::\d+)?", inner):
+                continue
+            all_matches.append((m.start(), m.end(), m.group(0), True))
+        all_matches.sort()
+
+        for start, end, full_tag, is_nl in all_matches:
+            chunk = raw_text[pos:start].strip()
             if chunk:
                 segments.append(Segment(text=chunk, tags=list(active_tags)))
-            tag_name = match.group(1)
-            pause_ms = match.group(2)
-            if tag_name == "pause" and pause_ms:
-                if segments:
-                    segments[-1].pause_after_ms = int(pause_ms)
-            elif tag_name in self.SOUND_TAGS:
-                segments.append(Segment(text=f"[{tag_name}]", tags=["_sound_"]))
-            elif tag_name in self.EMOTION_TAGS:
-                active_tags = [tag_name]
-            pos = match.end()
+            if is_nl:
+                # NL direction: parse into structured tags
+                try:
+                    from .nl_director import parse_direction
+                    d = parse_direction(full_tag)
+                    nl_tags: list[str] = []
+                    if d.emotion:
+                        nl_tags.append(d.emotion)
+                    if d.delivery:
+                        nl_tags.append(d.delivery)
+                    if d.accent:
+                        nl_tags.append(f"accent:{d.accent}")
+                    if d.ambient:
+                        segments.append(Segment(
+                            text=f"[{d.ambient}]", tags=["_ambient_"]))
+                    if d.pace:
+                        nl_tags.append(f"pace:{d.pace}")
+                    if nl_tags:
+                        active_tags = nl_tags
+                except Exception:
+                    pass  # NL parse is best-effort
+            else:
+                tag_name = full_tag.strip("[]").split(":")[0]
+                pause_ms = None
+                pm = re.search(r":(\d+)", full_tag)
+                if pm:
+                    pause_ms = pm.group(1)
+                if tag_name == "pause" and pause_ms:
+                    if segments:
+                        segments[-1].pause_after_ms = int(pause_ms)
+                elif tag_name in self.SOUND_TAGS:
+                    segments.append(
+                        Segment(text=f"[{tag_name}]", tags=["_sound_"]))
+                elif tag_name in self.EMOTION_TAGS:
+                    active_tags = [tag_name]
+            pos = end
         tail = raw_text[pos:].strip()
         if tail:
             segments.append(Segment(text=tail, tags=list(active_tags)))
@@ -2084,11 +2135,94 @@ class UniversalTTS:
         segments = self.tag_processor.parse(text)
         sample_rate = getattr(backend, "sample_rate", self.default_sample_rate)
 
+        # Segment cache: never regenerate the same phrase+voice twice
+        cache_key = ""
+        try:
+            from .efficiency import SegmentCache
+            if not hasattr(self, "_seg_cache"):
+                self._seg_cache = SegmentCache()
+            emotion_key = "|".join(
+                t for s in segments for t in s.tags)
+            cache_key = SegmentCache.key(
+                final_text if False else text,
+                getattr(voice, "name", "") or "",
+                getattr(backend, "name", ""), emotion_key)
+            cached = self._seg_cache.get(cache_key)
+            if cached is not None:
+                samples, sr = cached
+                path = out_path or os.path.join(
+                    self.voices.storage_dir, "..",
+                    f"tts-{int(__import__('time').time() * 1000)}.wav")
+                os.makedirs(os.path.dirname(os.path.abspath(path)),
+                            exist_ok=True)
+                written = write_wav(path, samples, sr)
+                return {
+                    "path": path, "bytes": written,
+                    "sample_rate": sr, "backend": backend.name,
+                    "segments": len(segments), "cached": True,
+                }
+        except Exception:
+            pass  # cache is best-effort, never breaks synthesis
+
         final_text, instruct, pause_points = self._render_for_backend(
             backend, segments)
         audio = backend.synthesize(final_text, voice, instruct=instruct)
         audio = self._insert_pauses(audio, pause_points, final_text,
                                     sample_rate)
+
+        # Emotion DSP: for backends WITHOUT native tags, shape the
+        # emotion in as post-processing (Step-Audio-EditX pattern).
+        # Tags WORK instead of being stripped.
+        if not getattr(backend, "supports_native_tags", False):
+            try:
+                from .emotion_dsp import shape_emotion
+                from .nl_director import direction_to_dsp_params
+                # Collect dominant emotion from segments
+                all_tags = [t for s in segments for t in s.tags]
+                emotion = next(
+                    (t for t in all_tags if t in (
+                        "angry", "excited", "happy", "sad", "fearful",
+                        "scared", "calm", "tired", "nervous", "confident",
+                        "tender", "sarcastic", "whisper", "whispers",
+                        "shout", "shouts")),
+                    "")
+                if emotion:
+                    from .nl_director import Direction
+                    d = Direction(
+                        emotion=emotion if emotion not in (
+                            "whisper", "whispers", "shout", "shouts")
+                        else "",
+                        delivery=emotion if emotion in (
+                            "whisper", "whispers", "shout", "shouts")
+                        else "")
+                    params = direction_to_dsp_params(d)
+                    import array as _arr
+                    if not isinstance(audio, _arr.array):
+                        audio = _arr.array(
+                            "h", [int(max(-32768, min(32767, v * 32767)))
+                                  for v in audio])
+                    breath = 0.12 if d.delivery in (
+                        "whisper", "whispers") else 0.0
+                    audio = shape_emotion(
+                        audio, sample_rate,
+                        pitch_shift_st=params["pitch_shift"],
+                        rate_mult=params["rate_mult"],
+                        energy=params["energy"],
+                        breathiness=breath)
+            except Exception:
+                pass  # DSP is best-effort
+
+        # Store in cache
+        try:
+            if cache_key and hasattr(self, "_seg_cache"):
+                import array as _arr2
+                to_cache = (audio if isinstance(audio, _arr2.array)
+                            else _arr2.array(
+                                "h", [int(max(-32768, min(32767, v * 32767)))
+                                      for v in audio]))
+                self._seg_cache.put(cache_key, to_cache, sample_rate)
+        except Exception:
+            pass
 
         path = out_path or os.path.join(
             self.voices.storage_dir, "..",
