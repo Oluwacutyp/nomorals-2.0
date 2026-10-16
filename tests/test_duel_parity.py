@@ -177,10 +177,12 @@ class DuelParityTests(unittest.TestCase):
     def test_duel_applies_rpg_attributes(self):
         _engine, room, _rr = self._duel()
         f = room.state["fighters"][ADA.key]
-        # stamina 8 -> +24 max HP ; strength 10 -> +5 atk
-        self.assertEqual(f["max_hp"], 50 + 8 + 24)
+        # Canonical multipliers (stats.py + test_dual_cast_stats):
+        # stamina +6 max HP/pt, mana base 30 + 4/pt, strength +1 atk/pt.
+        # stamina 8 -> +48 max HP ; mana 20 -> +80 ; strength 10 -> +10 atk
+        self.assertEqual(f["max_hp"], 50 + 8 + 48)
         self.assertIn("max_mana", f)
-        self.assertEqual(f["max_mana"], 30 + 20 * 2)
+        self.assertEqual(f["max_mana"], 30 + 20 * 4)
         self.assertEqual(f["intelligence"], 12)
 
     def test_duel_intro_shows_kit(self):

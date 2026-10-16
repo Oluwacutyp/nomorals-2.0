@@ -288,3 +288,70 @@ def validate_track(track: PoseTrack, score: dict) -> ValidationReport:
         rep.deduct(8, f"frame snap: max joint step {worst:.2f} between "
                       f"frames (limit 0.25)")
     return rep
+
+
+# ---------------------------------------------------------------------------
+# Project-wide continuity gate (EDIT_GEN_UPGRADE 2.5)
+# ---------------------------------------------------------------------------
+# Flags identity / look mismatches — the gate that refuses to ship a
+# mismatched shot. Wraps videogen.consistency (the measurement layer);
+# this module owns the ship/no-ship verdict.
+
+
+def validate_identity_continuity(shots: list[dict],
+                                 identity_locks: list[dict] | None = None,
+                                 look_lock: dict | None = None
+                                 ) -> ValidationReport:
+    """Shots vs identity + look locks → ValidationReport.
+
+    Every mismatch is an ERROR (flag, not ship) — a drifted face or a
+    broken look must be re-locked or re-generated, never silently
+    shipped. Pure: measurements are supplied in ``shots``.
+    """
+    from ..videogen.consistency import continuity_check
+    rep = ValidationReport()
+    result = continuity_check(shots, identity_locks=identity_locks,
+                              look_lock=look_lock)
+    for mm in result["mismatches"]:
+        for issue in mm.get("issues", []):
+            rep.deduct(20, f"shot {mm.get('shot')}: "
+                           f"{mm.get('kind')} mismatch — {issue}",
+                       error=True)
+    if result["ok"]:
+        rep.deduct(0, "continuity: all shots match identity + look locks")
+    return rep
+
+
+def validate_look_lock(shot: dict, look_lock: dict) -> ValidationReport:
+    """One shot vs one look lock → ValidationReport (flag, not ship)."""
+    from ..videogen.consistency import LookLock, check_look
+    rep = ValidationReport()
+    lock = look_lock if isinstance(look_lock, LookLock) else \
+        LookLock.from_dict(dict(look_lock))
+    res = check_look(lock, shot)
+    for issue in res["issues"]:
+        rep.deduct(20, f"look mismatch — {issue}", error=True)
+    return rep
+
+
+def validate_document_continuity(document: dict) -> ValidationReport:
+    """A Document dict's own locks vs its measured shots.
+
+    ``document`` carries ``identity_locks`` / ``look_lock`` plus an
+    optional ``shot_measurements`` list (per-shot ``face_embedding`` /
+    ``palette`` / ``wardrobe`` / ``grade``). No measurements → a
+    warning (unverified, not a pass); mismatches → errors.
+    """
+    rep = ValidationReport()
+    shots = document.get("shot_measurements") or []
+    if not shots:
+        rep.deduct(5, "continuity unverified — document carries no "
+                      "shot_measurements")
+        return rep
+    sub = validate_identity_continuity(
+        shots, identity_locks=document.get("identity_locks") or [],
+        look_lock=document.get("look_lock"))
+    rep.errors.extend(sub.errors)
+    rep.warnings.extend(sub.warnings)
+    rep.score = max(0.0, min(rep.score, sub.score))
+    return rep

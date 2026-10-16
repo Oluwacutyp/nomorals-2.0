@@ -3,8 +3,9 @@
 A *player* is one human (or the AI, ``ai``) identified per platform by
 ``platform:sender``.  The same person on Telegram and Discord is two
 player keys — genuinely different networks don't share identity — but
-endpoints on the *same* network do: ``telegram`` (userbot) and
-``telegram-bot`` (BotFather bot) see the same Telegram user IDs, so
+endpoints on the *same* network do: ``telegram`` (userbot),
+``telegram-bot`` (gated BotFather bot) and ``telegram-personal`` (personal
+BotFather bot) see the same Telegram user IDs, so
 ``GAME_IDENTITY_ALIASES`` folds them into one game key.  The *profile*
 system is global: every game played in any chat on any platform updates
 one per-player ledger of wins, losses, points, streaks and per-game
@@ -36,10 +37,11 @@ def _caller_sets_username(caller_platform: str,
     """True when a sighting from ``caller_platform`` may overwrite the
     stored Telegram username.
 
-    Both endpoints see the same @handle, so either may report it — but
-    the userbot (``telegram``) is the authority on conflicts, mirroring
-    the display-name rule.  A ``telegram-bot`` sighting only fills in a
-    username when none is stored yet; it never overwrites one.
+    Both BotFather endpoints see the same @handle, so either may report
+    it — but the userbot (``telegram``) is the authority on conflicts,
+    mirroring the display-name rule.  A ``telegram-bot`` /
+    ``telegram-personal`` sighting only fills in a username when none is
+    stored yet; it never overwrites one.
     """
     caller = (caller_platform or "").strip().lower()
     if not caller:
@@ -59,14 +61,18 @@ SOFT_DELETE_RESTORE_S = 48 * 3600
 AI_PLAYER = "ai"
 
 #: Platforms that share one underlying network identity. ``telegram``
-#: (the userbot) and ``telegram-bot`` (the BotFather bot) both see the
-#: same Telegram user IDs, so a human's XP, gear, skills and attributes
-#: must follow them across the two endpoints — otherwise a duel started
-#: from one side sees a fresh level-1 profile from the other.
-#: The alias applies to the *game key* only; ``Player.platform`` keeps
-#: the real endpoint so message routing is untouched.
+#: (the userbot), ``telegram-bot`` (the gated BotFather bot) and
+#: ``telegram-personal`` (the personal BotFather bot) all see the same
+#: Telegram user IDs, so a human's XP, gear, skills and attributes
+#: must follow them across the three endpoints — otherwise a duel started
+#: from one side sees a fresh level-1 profile from another, and the
+#: owner would become a second player key with a second wallet, a
+#: second profile, a second leaderboard slot, split coins and reset
+#: streaks.  The alias applies to the *game key* only; ``Player.platform``
+#: keeps the real endpoint so message routing is untouched.
 GAME_IDENTITY_ALIASES = {
     "telegram-bot": "telegram",
+    "telegram-personal": "telegram",
 }
 
 

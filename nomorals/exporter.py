@@ -341,3 +341,112 @@ def register(registry: Any) -> None:
             }
         except Exception as exc:  # noqa: BLE001
             return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+
+
+# ── Tier 3: hard exclusions + consent namespaces + contribution report ───
+# Added without touching existing APIs.  The exporter harvests the
+# owner's own account history; these guards make sure some of it can
+# NEVER become training data, no matter what ``only_chats`` says.
+
+#: Hard exclusion list: dialog titles / namespaces matching any of these
+#: are refused at harvest time.  Partner conversations, vault material,
+#: and community (semi-public) chats are not the owner's voice to train
+#: on — and vault content must never leak into a dataset, even scrubbed.
+HARD_EXCLUSIONS: tuple[str, ...] = (
+    "partner",
+    "vault",
+    "community",
+    "trial",
+    "secret",
+    "private",
+    "password",
+    "credential",
+)
+
+#: Consent namespaces: the only harvest scopes that may be exported.
+#: A dialog outside these namespaces needs an explicit per-dialog opt-in
+#: (which this module does not grant — it only reports).
+CONSENT_NAMESPACES: tuple[str, ...] = (
+    "owner-dm",        # 1:1 chats the owner consented to export
+    "owner-chat",      # owner-authored chat history
+    "owner-saved",     # the owner's own Saved Messages / notes
+)
+
+
+def is_excluded_dialog(title: str, *, chat_id: str = "") -> tuple[bool, str]:
+    """True + reason when a dialog must never be exported.
+
+    Matching is case-insensitive substring on the title plus a
+    ``partner:`` / ``vault:`` / ``community:`` namespace prefix on the
+    title or chat id.  Empty titles are NOT excluded here (they fail
+    later validation) — exclusion is about named sensitive scopes.
+    """
+    haystack = f"{title or ''} {chat_id or ''}".lower()
+    for marker in HARD_EXCLUSIONS:
+        if marker in haystack:
+            return True, f"hard exclusion: matches {marker!r}"
+    for prefix in ("partner:", "vault:", "community:", "trial:"):
+        if haystack.strip().startswith(prefix) or f" {prefix}" in haystack:
+            return True, f"hard exclusion: namespace {prefix}"
+    return False, ""
+
+
+def filter_excluded_dialogs(
+    dialogs: Iterable[tuple[str, list[tuple[bool, str]]]],
+) -> tuple[list[tuple[str, list[tuple[bool, str]]]], list[dict[str, str]]]:
+    """Split dialogs into ``(kept, excluded)``.  ``excluded`` entries
+    carry ``{"title", "reason"}`` — the refusal is visible, never
+    silent.  Pure: the input list is not mutated."""
+    kept: list[tuple[str, list[tuple[bool, str]]]] = []
+    excluded: list[dict[str, str]] = []
+    for title, entries in dialogs:
+        blocked, reason = is_excluded_dialog(title)
+        if blocked:
+            excluded.append({"title": title, "reason": reason})
+        else:
+            kept.append((title, entries))
+    return kept, excluded
+
+
+def contribution_report(examples: list[Example]) -> dict[str, Any]:
+    """"What did I contribute?" — the report on an export's examples.
+
+    Counts only what THIS export harvested: per-source example/turn
+    counts, owner (assistant-role) vs other-side (user-role) turns, and
+    the hard-exclusion guarantee (sources matching
+    :data:`HARD_EXCLUSIONS` must be absent — the report flags any that
+    slipped through instead of hiding them).
+    """
+    by_source: dict[str, dict[str, int]] = {}
+    owner_turns = 0
+    other_turns = 0
+    total_turns = 0
+    for example in examples:
+        source = getattr(example, "source", "") or "unknown"
+        bucket = by_source.setdefault(
+            source, {"examples": 0, "turns": 0, "owner_turns": 0})
+        bucket["examples"] += 1
+        for turn in getattr(example, "turns", []) or []:
+            total_turns += 1
+            bucket["turns"] += 1
+            if getattr(turn, "role", "") == "assistant":
+                owner_turns += 1
+                bucket["owner_turns"] += 1
+            else:
+                other_turns += 1
+    leaked = [s for s in by_source if is_excluded_dialog(s)[0]]
+    return {
+        "total_examples": len(examples),
+        "total_turns": total_turns,
+        "owner_turns": owner_turns,
+        "other_turns": other_turns,
+        "by_source": by_source,
+        "hard_exclusions": list(HARD_EXCLUSIONS),
+        "consent_namespaces": list(CONSENT_NAMESPACES),
+        "excluded_sources_present": leaked,
+        "clean": not leaked,
+    }
+
+
+__all__ += ["HARD_EXCLUSIONS", "CONSENT_NAMESPACES", "is_excluded_dialog",
+            "filter_excluded_dialogs", "contribution_report"]

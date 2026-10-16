@@ -75,10 +75,12 @@ _PII_PATTERNS: tuple[tuple[str, re.Pattern[str], str], ...] = (
     ("email", re.compile(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", re.I), "[REDACTED_EMAIL]"),
     ("ip", re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b"), "[REDACTED_IP]"),
     # Nigerian national identifiers: NIN and BVN are both 11 digits.  The
-    # keyword-anchored form is high-precision; the bare 11-digit form errs
-    # toward redaction (it also catches un-prefixed 080 mobile numbers).
+    # keyword-anchored form is high-precision; the bare 11-digit form
+    # excludes Nigerian mobile prefixes (070/071/080/081/090/091) so an
+    # un-prefixed mobile number scrubs as PHONE, not NIN — a bare
+    # 11-digit number with a mobile prefix is a phone, not an ID.
     ("national_id", re.compile(r"(?i)\b(?:nin|bvn|national[\s_]?id)[\s:=\-]*\d{11}\b"), "[REDACTED_NIN]"),
-    ("national_id", re.compile(r"(?<!\d)\d{11}(?!\d)"), "[REDACTED_NIN]"),
+    ("national_id", re.compile(r"(?<!\d)(?!0[789][01])\d{11}(?!\d)"), "[REDACTED_NIN]"),
     # Nigerian 10-digit bank account numbers.
     ("bank_account", re.compile(r"(?i)\b(?:account[\s_]?(?:no|number)?)[\s:=\-]*\d{10}\b"), "[REDACTED_ACCOUNT]"),
     # Require separators or a leading country code, but do not mistake an

@@ -34,6 +34,7 @@ from typing import Any
 from ..core.errors import ToolError
 from ..core.events import Event, global_bus
 from ..core.ids import ulid_now
+from ..core.proxy_tiers import TierGate, normalize_tier
 from ..core.logging_setup import get_logger
 from ..storage.artifacts import Provenance
 from . import errors
@@ -2791,6 +2792,9 @@ class BrowserService:
         #: per-session proxy URL (in-memory only — never persisted to
         #: sessions.json, since URLs can carry credentials).
         self._session_proxies: dict[str, str] = {}
+        #: per-session proxy trust tier, parallel to _session_proxies.
+        #: The tier gate consults this before credential-carrying work.
+        self._session_proxy_tiers: dict[str, str] = {}
         #: proxy pool (duck-typed — see attach_proxy_pool). The pool lives
         #: at L5 (nomorals/connectors), which L4 must not import, so the
         #: service talks to any object with a conforming rotate().
@@ -2903,6 +2907,7 @@ class BrowserService:
         """Detach the pool and clear every session/tab proxy (direct traffic)."""
         self._proxy_pool = None
         self._session_proxies = {}
+        self._session_proxy_tiers = {}
         for handle in self._sessions.values():
             for tab in handle._tabs.values():
                 tab.session.set_proxy("")
@@ -2911,25 +2916,59 @@ class BrowserService:
     def proxy_pool_attached(self) -> bool:
         return self._proxy_pool is not None
 
-    def rotate_proxy(self, session_name: str = "") -> dict[str, Any]:
+    def rotate_proxy(self, session_name: str = "", *,
+                    require_tier: str | None = None,
+                    carries_credentials: bool = False) -> dict[str, Any]:
         """Pull the next healthy proxy from the pool and apply it.
 
         With ``session_name`` given, only that session's tabs (and future
         tabs — new tabs inherit the session proxy); empty applies to every
         open session. Returns the masked proxy URL and what it covered.
+
+        Tier gate: the pool is asked through ``select()`` when it has
+        one (the real proxypool enforces the gate); pools exposing only
+        ``rotate()`` get the picked proxy's tier checked here.
+        ``carries_credentials=True`` refuses a ``free`` proxy with a
+        typed ``TierGateRefusal`` — free tier is never on an
+        authenticated path.
         """
         if self._proxy_pool is None:
             raise BrowserError(
                 "no proxy pool attached — attach_proxy_pool() first")
         try:
-            details = self._proxy_pool.rotate()
+            select = getattr(self._proxy_pool, "select", None)
+            if callable(select):
+                details = select(require_tier=require_tier,
+                                 carries_credentials=carries_credentials)
+            else:
+                details = self._proxy_pool.rotate()
+                tier = normalize_tier(
+                    (details or {}).get("tier", "free")
+                    if isinstance(details, dict) else "free")
+                TierGate.require(tier, carries_credentials=carries_credentials,
+                                 require_tier=require_tier)
+        except BrowserError:
+            raise
         except Exception as exc:
+            # A typed tier refusal propagates as-is — it is the gate
+            # doing its job, not a pool failure.
+            from ..core.proxy_tiers import TierGateRefusal
+
+            if isinstance(exc, TierGateRefusal):
+                raise
             raise BrowserError(f"proxy pool rotate() failed: {exc}") from exc
         proxy_url = (details or {}).get("url_with_auth", "") \
             if isinstance(details, dict) else ""
         if not proxy_url:
             raise BrowserError(
                 "proxy pool rotate() returned no url_with_auth")
+        tier = normalize_tier(
+            (details or {}).get("tier", "free")
+            if isinstance(details, dict) else "free")
+        # Verify here too: a duck-typed pool's select() may not enforce
+        # the gate, so the service never trusts the pool's word alone.
+        TierGate.require(tier, carries_credentials=carries_credentials,
+                         require_tier=require_tier)
         names = [session_name] if session_name else list(self._sessions)
         applied = 0
         for name in names:
@@ -2937,6 +2976,7 @@ class BrowserService:
             if handle is None:
                 raise BrowserError(f"unknown session {name!r}")
             self._session_proxies[name] = proxy_url
+            self._session_proxy_tiers[name] = tier
             for tab in handle._tabs.values():
                 tab.session.set_proxy(proxy_url)
                 applied += 1
@@ -2944,24 +2984,59 @@ class BrowserService:
             "session": session_name or "*",
             "proxy": _mask_proxy(proxy_url),
             "tabs": applied,
+            "tier": tier,
         })
         return {"proxy": _mask_proxy(proxy_url), "sessions": names,
-                "tabs": applied}
+                "tabs": applied, "tier": tier}
 
     def set_session_proxy(self, session_name: str,
-                          proxy_url: str = "") -> dict[str, Any]:
-        """Pin a session to an explicit proxy URL ("" = direct traffic)."""
+                          proxy_url: str = "", *,
+                          tier: str = "direct",
+                          carries_credentials: bool = False) -> dict[str, Any]:
+        """Pin a session to an explicit proxy URL ("" = direct traffic).
+
+        ``tier`` declares the proxy's trust tier (default ``direct`` —
+        an explicit URL with no tier claim is treated as the caller's
+        own direct route, not a scraped free proxy).  The tier gate
+        runs before the pin: ``tier="free"`` +
+        ``carries_credentials=True`` refuses with a typed
+        ``TierGateRefusal``.  Callers that know the session will carry
+        a login must pass ``carries_credentials=True``.
+        """
         handle = self.get_session(session_name)  # fail fast: unknown session
         proxy_url = (proxy_url or "").strip()
+        tier = normalize_tier(tier) if proxy_url else "direct"
+        TierGate.require(tier, carries_credentials=carries_credentials)
         self._session_proxies[session_name] = proxy_url
+        self._session_proxy_tiers[session_name] = tier
         for tab in handle._tabs.values():
             tab.session.set_proxy(proxy_url)
         _emit("browser.proxy.set", {
             "session": session_name,
             "proxy": _mask_proxy(proxy_url) if proxy_url else "direct",
+            "tier": tier,
         })
         return {"session": session_name,
-                "proxy": _mask_proxy(proxy_url) if proxy_url else "direct"}
+                "proxy": _mask_proxy(proxy_url) if proxy_url else "direct",
+                "tier": tier}
+
+    def session_proxy_tier(self, session_name: str) -> str:
+        """The trust tier of a session's proxy (``direct`` = no proxy)."""
+        return self._session_proxy_tiers.get(session_name, "direct")
+
+    def require_session_tier(self, session_name: str, *,
+                             carries_credentials: bool = False,
+                             require_tier: str | None = None) -> str:
+        """Gate a session's current proxy for the work about to run.
+
+        Raises a typed ``TierGateRefusal`` when the session's proxy tier
+        may not carry it — the check login flows run before touching a
+        credential.  Returns the session's tier when allowed.
+        """
+        tier = self.session_proxy_tier(session_name)
+        TierGate.require(tier, carries_credentials=carries_credentials,
+                         require_tier=require_tier)
+        return tier
 
     def session_proxy(self, session_name: str) -> str:
         """The proxy URL configured for a session ("" = direct). Masked? No —

@@ -81,6 +81,47 @@ def sanitize_tool_description(name: str, description: str) -> str:
         return description
 
 
+def _normalize_parameters(parameters: dict[str, Any]) -> dict[str, Any]:
+    """Normalize a tool's parameter declaration to the flat contract.
+
+    The contract is ``{name: {type, required, default, description}}``.
+    ``tools/social.py`` and ``tools/whatsapp.py`` historically passed a
+    full JSON-Schema object (``{type: object, properties: {...},
+    required: [...]}``) instead, which :meth:`ToolSpec.schema` then
+    wrapped a second time — so listings rendered the schema's own keys
+    (``type, properties, required``) as the tool's parameters. Detect
+    the wrapped shape (top-level keys are all schema keywords, ``type``
+    is ``object``, ``properties`` is a dict) and unwrap one level,
+    marking the schema-level ``required`` names on their specs. Flat
+    declarations pass through untouched.
+    """
+    if not isinstance(parameters, dict):
+        return parameters
+    if parameters.get("type") != "object":
+        return parameters
+    properties = parameters.get("properties")
+    if not isinstance(properties, dict):
+        return parameters
+    if not set(parameters) <= {
+        "type", "properties", "required", "additionalProperties",
+        "description", "$schema", "title",
+    }:
+        return parameters
+    required = set(parameters.get("required") or [])
+    flat: dict[str, Any] = {}
+    for name, spec in properties.items():
+        if isinstance(spec, dict):
+            entry = dict(spec)
+        elif isinstance(spec, str):
+            entry = {"type": spec}
+        else:
+            entry = {"type": "any"}
+        if name in required:
+            entry["required"] = True
+        flat[name] = entry
+    return flat
+
+
 @dataclass
 class ToolSpec:
     """A callable an agent may invoke."""
@@ -116,6 +157,12 @@ class ToolSpec:
     # explicit notice (MCP rule: never truncate silently).
     max_result_chars: int = 200_000
 
+    def __post_init__(self) -> None:
+        # Accept a full JSON-Schema object as `parameters` (social.py /
+        # whatsapp.py historically passed one) and normalize it to the
+        # flat contract, so every consumer sees real parameter names.
+        self.parameters = _normalize_parameters(self.parameters)
+
     def resolved_annotations(self) -> dict[str, bool]:
         """Explicit annotations merged over kind-derived defaults."""
         merged = annotations_for_kind(self.kind)
@@ -138,7 +185,9 @@ class ToolSpec:
         for name, spec in params.items():
             entry = dict(spec) if isinstance(spec, dict) else {"type": "any"}
             entry.pop("required", None)
-            entry.setdefault("description", name.replace("_", " "))
+            # No stub description: a parameter with no recorded description
+            # stays undescribed. The old setdefault wrote the parameter's
+            # own name back as its description ("path" described as "path").
             properties[name] = entry
         out: dict[str, Any] = {
             "name": self.name,
@@ -206,6 +255,32 @@ class ToolHealth:
             "last_error": self.last_error,
             "timeout_s": self.timeout_s,
         }
+
+
+def _format_params(schema: dict[str, Any]) -> str:
+    """Render a tool's parameters as ``name`` / ``name=default`` pairs.
+
+    ``schema["parameters"]`` is a JSON-Schema object (``type`` /
+    ``properties`` / ``required`` / ``additionalProperties``) — joining its
+    keys produced the nonsense ``(type, properties, required,
+    additionalProperties)`` on every tool in every listing. This renders
+    the actual parameter names in definition order: required params bare,
+    optional params with their recorded default (repr, truncated to ~40
+    chars), optional params without a recorded default bare.
+    """
+    params = schema.get("parameters") or {}
+    properties = params.get("properties") or {}
+    required = set(params.get("required") or [])
+    parts = []
+    for name, spec in properties.items():
+        if name in required or not isinstance(spec, dict) or "default" not in spec:
+            parts.append(name)
+        else:
+            default = repr(spec["default"])
+            if len(default) > 40:
+                default = default[:37] + "..."
+            parts.append(f"{name}={default}")
+    return ", ".join(parts)
 
 
 class ToolRegistry:
@@ -521,7 +596,7 @@ class ToolRegistry:
     def prompt_listing(self, *, capabilities: CapabilitySet | None = None) -> str:
         lines = []
         for schema in self.schemas(capabilities=capabilities):
-            params = ", ".join(schema["parameters"])
+            params = _format_params(schema)
             lines.append(f"- {schema['name']}({params}): {schema['description']}")
         return "\n".join(lines)
 
@@ -589,7 +664,7 @@ class ToolRegistry:
         picked = picked[:limit]
         lines = []
         for schema in picked:
-            params = ", ".join(schema["parameters"])
+            params = _format_params(schema)
             lines.append(
                 f"- {schema['name']}({params}): {schema['description']}")
         listing = "\n".join(lines)
@@ -946,12 +1021,14 @@ class ToolRegistry:
             if not biometric_required or policy is None:
                 return None
             from ..core.policy import approve_with_biometric
+            from ..native.biometric import biometric_available, request_biometric
 
             return approve_with_biometric(
                 policy,
                 spec.capability,
                 title=title or f"approve {name}",
                 timeout_s=timeout_s,
+                biometric=(biometric_available, request_biometric),
             )
         except Exception:  # noqa: BLE001 - approval must never raise
             return None
@@ -1089,12 +1166,28 @@ def _infer_parameters(fn: Callable[..., Any]) -> dict[str, Any]:
     return out
 
 
+#: Python type names -> JSON Schema type names. ``_type_name`` maps only
+#: these exact simple names; anything else (``list[str]``, ``str | None``,
+#: ``Optional[str]``, …) passes through unchanged.
+_TYPE_ALIASES = {
+    "str": "string",
+    "int": "integer",
+    "bool": "boolean",
+    "float": "number",
+    "list": "array",
+    "dict": "object",
+    "bytes": "string",
+}
+
+
 def _type_name(hint: Any) -> str:
     if not hint:
         return "any"
     if isinstance(hint, str):
-        return hint.lower()
-    return getattr(hint, "__name__", str(hint)).lower()
+        name = hint.lower()
+    else:
+        name = getattr(hint, "__name__", str(hint)).lower()
+    return _TYPE_ALIASES.get(name, name)
 
 
 def _jsonable(value: Any) -> bool:

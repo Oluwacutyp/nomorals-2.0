@@ -103,14 +103,41 @@ class HandleCallbackTests(unittest.TestCase):
         self.assertEqual(received[0].text, "/equip sword")
 
     def test_non_allowlisted_chat_rejected(self):
+        # Owner-only buttons stay owner-gated: a non-allowlisted chat
+        # tapping "research approve latest" gets "Not authorized".
         a = _adapter(chat_allow="42")
         received = []
-        a._handle_callback(_query(a, a._sign_callback("inventory"), chat_id="99"),
-                           received.append)
+        a._handle_callback(
+            _query(a, a._sign_callback("research approve latest"),
+                   chat_id="99"),
+            received.append)
         self.assertEqual(received, [])
         toasts = [p.get("text", "") for u, p in a._session.calls
                   if u.endswith("answerCallbackQuery")]
         self.assertIn("Not authorized", toasts)
+
+    def test_non_allowlisted_game_callback_delivered(self):
+        # Game buttons are social: a non-allowlisted chat tapping a
+        # game button flows to the normal pipeline (same as typing it).
+        a = _adapter(chat_allow="42")
+        received = []
+        a._handle_callback(_query(a, a._sign_callback("inventory"),
+                                  chat_id="99"),
+                           received.append)
+        self.assertEqual(len(received), 1)
+        self.assertEqual(received[0].text, "/inventory")
+
+    def test_non_allowlisted_arena_callback_delivered_to_redirect(self):
+        # The Arena button sits on public game messages: it flows to
+        # the pipeline (where the public-bot gate redirects it) instead
+        # of dying here as "Not authorized".
+        a = _adapter(chat_allow="42")
+        received = []
+        a._handle_callback(_query(a, a._sign_callback("arena"),
+                                  chat_id="99"),
+                           received.append)
+        self.assertEqual(len(received), 1)
+        self.assertEqual(received[0].text, "/arena")
 
     def test_bad_signature_rejected(self):
         a = _adapter(chat_allow="42")

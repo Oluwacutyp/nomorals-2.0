@@ -1,0 +1,5 @@
+{
+  "library": true,
+  "reason": "SQLite identity spine promoted from social/relationships.py. New in NEW_MODULES_17; callers migrate to it as follow-up.",
+  "owner_decision_needed": "Migrate commitments/gifts/groups/family callers onto the spine, or keep as import-only library."
+}

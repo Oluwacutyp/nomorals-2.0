@@ -53,7 +53,9 @@ from dataclasses import dataclass
 __all__ = ["CONTROL_COMMANDS", "COMMAND_DETAILS", "ControlCommand",
            "parse_control", "PLATFORMS", "help_text", "help_menu", "whatsapp_menu",
            "detailed_help",
-           "list_catalog", "LIST_GROUPS", "LIST_ONELINERS", "GAME_COMMANDS"]
+           "list_catalog", "LIST_GROUPS", "LIST_ONELINERS", "GAME_COMMANDS",
+           "PUBLIC_COMMANDS", "PUBLIC_GAME_COMMANDS", "caller_may_run",
+           "public_menu_text"]
 
 PLATFORMS = ("telegram", "discord", "whatsapp", "local")
 
@@ -98,6 +100,94 @@ GAME_COMMANDS = (
     "gift",
 )
 
+#: The public BotFather command list — the ONLY commands a non-owner
+#: may run on the public Telegram bot. Owner-only commands stay hidden
+#: from the menu AND denied by :func:`caller_may_run`.
+#:
+#: ⚠️  TENTATIVE — the 32 game commands below are a RECONSTRUCTION
+#: (easy 8 + G1 3 + medium 7 + ambitious 3 + wild 7 + arcade 4), NOT the
+#: confirmed BotFather list. Verify against the list already set in
+#: BotFather and trim this constant to match — it is one line to trim.
+#: Excluded on purpose: pvp/raid (need live opponents), casino 3
+#: (betting), inbox 3 (async), puzzles 3. Those still RUN for everyone
+#: via the any-chat game dispatch (games are social); they are just not
+#: on the public menu.
+PUBLIC_GAME_COMMANDS: tuple[str, ...] = (
+    # easy (8)
+    "wordchain", "hangman", "numberguess", "two_truths", "wyrr", "spy",
+    "auction", "trivia",
+    # easy, wave G1 (3)
+    "20q", "rps", "digits",
+    # medium (7)
+    "mafia", "king", "story", "rpg", "shop", "duel", "case",
+    # ambitious (3)
+    "world", "escape", "political",
+    # wild, wave 95 (7)
+    "poker", "ttt", "bulls", "craps", "memory", "mines", "wordle",
+    # arcade, wave 97 (4)
+    "2048", "snake", "connect4", "battleship",
+)
+
+#: Every kind a non-owner may run on the public bot: the 19 named public
+#: commands + /game + the 32 public game commands. ``/menu`` and ``/list``
+#: are NOT in here — bare /menu is a menu trigger, not a menu item.
+PUBLIC_COMMANDS: frozenset[str] = frozenset([
+    "help", "search", "news", "book", "music", "play", "video", "podcast",
+    "tts", "stt", "look", "image", "lens", "decode", "dns", "whois",
+    "cipher", "wisdom", "think",
+    "game",
+    *PUBLIC_GAME_COMMANDS,
+])
+
+
+#: Commands that require an explicit confirmation before they run.
+#: The gate lives in ``PartnerRuntime.handle_control``: a bare
+#: ``/<kind> ...`` returns a confirm prompt (with Confirm/Cancel inline
+#: buttons on the Bot API adapter); ``/<kind> confirm`` runs the stored
+#: original request; ``/<kind> cancel`` drops it. Pending confirmations
+#: expire after :data:`CONFIRM_TTL_S`. Confirmable implies owner-only —
+#: a non-owner gets the grant deny, never a confirm prompt. ``/game
+#: delete`` keeps its own bespoke confirm; ``trial rm`` is untouched.
+CONFIRMABLE_COMMANDS: frozenset[str] = frozenset({"quit", "forget"})
+#: Pending-confirmation lifetime, seconds (matches /game delete).
+CONFIRM_TTL_S = 300.0
+
+
+def public_menu_text() -> str:
+    """Menu text for bare /start and bare /menu — the PUBLIC list only.
+
+    Short: title + grouped command names + the tap-a-button line. No
+    per-command descriptions (those live in /help); the keyboard
+    carries the actions. Owner-only commands are never listed here —
+    the owner reaches the full catalog via /list.
+    """
+    games = " ".join(f"/{name}" for name in PUBLIC_GAME_COMMANDS)
+    return (
+        "🥷 Devon — tap a button below, or type a command:\n"
+        "\n"
+        "talk — /help /search /news /book\n"
+        "make — /music /play /video /podcast\n"
+        "see & hear — /tts /stt /look /image /lens\n"
+        "tools — /decode /dns /whois /cipher /wisdom /think\n"
+        f"play — /game {games}\n"
+        "\n"
+        "tap a button below to run it · /help for what each one does"
+    )
+
+
+def caller_may_run(kind: str, is_owner: bool) -> bool:
+    """Capability grant: may this caller run this command kind?
+
+    Owner → anything registered. Non-owner → the public list, or any
+    game command (games are social — the menu curates the 52, the game
+    dispatch stays open per the existing social contract). Everything
+    else is owner-only: deny without grant.
+    """
+    if is_owner:
+        return True
+    return kind in PUBLIC_COMMANDS or kind in GAME_COMMANDS
+
+
 #: kind -> (min_args, max_args) — used by /help and by validation.
 CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "help": (0, 1),
@@ -115,8 +205,15 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "deny": (1, 1),
     "stage": (0, 1),
     "power": (1, 2),
-    "quit": (0, 0),
+    "quit": (0, 1),        # /quit [confirm|cancel] — the 1 arg is the confirm verb
     "profile": (0, 0),      # /profile — the profile-aware runtime (env + tuned knobs)
+    # self-update from chat (Step 9): drain → checkpoint → restart → resume.
+    # Owner-only: absent from PUBLIC_COMMANDS, so caller_may_run denies
+    # non-owners in the policy layer (menu hiding is not the enforcement).
+    "update": (0, 0),      # /update — pull + migrate + health-check + restart
+    "pull": (0, 0),        # /pull — git pull --ff-only only, no restart
+    "deploy": (0, 0),      # /deploy — update + restart (deploy this code)
+    "restart": (0, 0),     # /restart — checkpoint missions + restart, no pull
     # search engine (Telegram / WhatsApp / console — same commands everywhere)
     "search": (1, None),     # /search <query> — free text, no length cap
     "searchdeep": (1, None), # /searchdeep <query>  (power mode)
@@ -125,6 +222,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "searchhist": (0, 1),    # /searchhist [n]
     # BookForge: write a real book → PDF → send when done
     "book": (0, None),       # /book <topic> [chapters] | status | list | build <slug> | send <slug> <p> <c>
+    "books": (0, None),      # alias of /book — /books read <url|slug> | continue <slug> [n] | sources
     "novel": (0, None),      # /novel follow <url|title> | list | read <slug> [ch] | continue <slug> [n]
     # WisdomKeeper: esoteric corpus Q&A, history timeline, guided practice
     "wisdom": (0, None),     # /wisdom ask <q> | practice list|<id>|stop | timeline [t] | compare <t> | status
@@ -132,7 +230,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     # Universal Decoder: identify + decode anything, send binary results
     "decode": (0, None),     # /decode <data> | /decode file:<path> | /decode hash <digest>
     # Cookie analysis & handling (the CookieLab)
-    "cookies": (1, None),    # /cookies <header> | /cookies file:<path> | /cookies ingest <header>
+    "cookielab": (1, None),  # /cookielab <header> | /cookielab file:<path> | /cookielab ingest <header>
     # Prompt/mission structuring sub-agent
     "structure": (1, None),  # /structure <objective> — the structured brief
     # one-pass investigation: decode → crack → OSINT → knowledge graph
@@ -148,7 +246,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     # expansion wave
     "game": (0, 12),         # /game [list|<name>|quit|leaderboard|stats|shop|balance]
     "npc": (0, None),        # /npc list | talk <name> <msg> | mood <name> — the living cast
-    "character": (0, None),  # /character list | create | talk | play | forget — persistent agents
+    "charagent": (0, None),  # /charagent list | create | talk | play | forget — persistent agents
     "dm": (0, 2),            # /dm mood [mood] — the narrator's persona
     # wave 87: direct game-start commands — games are social, so they work in
     # EVERY chat. In non-owner chats these commands are the ONLY game trigger;
@@ -206,6 +304,8 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "remember": (1, None),   # /remember <text> [kind] [tags:a,b]
     "review": (0, 1),       # /review [days] — "how did I do?" representation review
     "tutor": (0, None),       # /tutor [guide me] <topic> | answer <text> | hint | stop | status
+    "learn": (0, None),        # /learn tutor|quiz|flashcards|mastery|waec|jamb — one front door over learn/
+    "immune": (0, None),      # /immune status|scan|antibodies|quarantine|disarm|arrest|fever|drift|casefile — defensive immune system (owner-only)
     "tour": (0, 1),         # /tour — smoke-test every command; /tour <cmd> deep-probes one
     "heal": (0, 1),         # /heal [--dry] | /heal <cmd> — self-healing loop: diagnose + auto-fix broken commands
     "ekiti": (0, None),       # /ekiti converse <text> | debate <topic> | say <text> | check "<expected>" | tones
@@ -326,6 +426,10 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "commands": (0, 1),      # alias of /list
     # redteam: defensive self-attack suite
     "redteam": (0, 1),       # /redteam [scenario_id] — attack our own loop, report holes
+    "balances": (0, None),   # /balances [rail…] — unified money view
+    "alert": (0, None),       # /alert add|list|remove|check|snooze|sync-bills
+    "goal": (0, None),        # /goal add|list|done|snooze|remove
+    "insights": (0, None),    # /insights [days] — native money analytics
     "predict": (0, 3),       # /predict <stake> <over|under> <1-99> — prediction pit (progression-unlocked)
     "menu": (0, 1),          # alias of /list
     # wave 72 systems: media, execution, archives, builders
@@ -386,6 +490,7 @@ _HELP_TEXT = "\n".join(
         "  /book read <slug> [n] | next | prev     read chapters",
         "  /book bible <slug>                      auto-built story bible",
         "  /book continue <slug> [n]               keep the story going in its voice",
+        "  /books read <url|slug> [n] | continue <slug> [n] | sources | library",
         "  — fiction studio (genre engines, novel|serial) —",
         "  /book fiction <premise> --genre <g> --mode <novel|serial>",
         "  /book fiction-write <slug>              next chapter (validated)",
@@ -398,7 +503,8 @@ _HELP_TEXT = "\n".join(
         "  — decode & crypto —",
         "  /decode <data> | /decode file:<path>     Universal Decoder (sends binary back)",
         "  /decode hash <digest> | /decode decoders identify hashes / list engine",
-        "  /cookies <header> | /cookies ingest <h>  CookieLab: classify, fingerprint, decode",
+        "  /cookies [check]                     YouTube cookie file status / setup help",
+        "  /cookielab <header> | /cookielab ingest <h>  CookieLab: classify, fingerprint, decode",
         "  /structure <objective>                   structured brief (subgoals, acceptance…)",
         "  /cipher enc <data> with <pass>           AES-256 sealed blob (integrity-tagged)",
         "  /cipher vault put <name> <secret> with <pass>   named secrets vault",
@@ -961,9 +1067,18 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
                 "usage": "/contract review [tenancy|employment|freelance] <paste contract text> | /contract types",
                 "example": "/contract review tenancy This tenancy agreement between landlord and tenant...",
                 "related": "/legal"},
-    "legal": {"what": "consumer legal aid — ask a legal question in plain language and get the answer in English, Pidgin, Yoruba, Hausa, or Igbo, with sources cited. Legal information, never legal advice; Devon is not a lawyer. Owner only.",
-                "usage": "/legal [en|pcm|yo|ha|ig] <your question>",
-                "example": "/legal pcm my landlord don lock me out"},
+    "legal": {"what": "legal information hub — contract review (Nigerian playbooks), portfolio obligations, regulatory monitoring, plain-language aid in English, Pidgin, Yoruba, Hausa, or Igbo, grounded research, and precedent citations. Legal information, never legal advice; Devon is not a lawyer. Owner only.",
+                "usage": "/legal contract review [tenancy|employment|freelance] <paste contract text> | /legal portfolio | /legal regulatory regulators | /legal aid [en|pcm|yo|ha|ig] <question> | /legal research <question> | /legal citations | /legal [en|pcm|yo|ha|ig] <question>",
+                "example": "/legal contract review tenancy <paste agreement>",
+                "related": "/contract /contracts /regwatch /learn"},
+    "immune": {"what": "defensive immune system — thymus negative selection, innate scan, antibody memory, seven-rung revoke-only police, fever, drift, case files. Owner only. Never acquires capability; owner work is report-only.",
+                "usage": "/immune status | scan <text> | antibodies list | add <pattern> <reason> | retire <id> <reason> | test <pattern> | quarantine <artifact> | disarm <grant-id> | arrest <process-id> [system] | fever status | start <reason> <seconds> | end | drift add <tokens> <spawned> <grants> <errors> | report | casefile list | add <text> | seal <id-prefix>",
+                "example": "/immune status",
+                "related": "/heal /review"},
+    "learn": {"what": "one front door over learn/ — Socratic/direct tutoring, quiz formats, FSRS flashcards from the mistake notebook, BKT mastery, and WAEC/JAMB syllabus. Owner only.",
+                "usage": "/learn tutor [guide me] <topic> | answer <text> | hint | status | stop | /learn quiz formats | /learn flashcards due | stats | list | review <id> <1-4> | export <path> | /learn mastery [weakest] | /learn waec <subject> | waec grade <pct> | /learn jamb <subject> | jamb formats",
+                "example": "/learn tutor guide me fractions",
+                "related": "/tutor /course /legal"},
     "research": {"what": "web research — one-shot swarm research on any topic with a brief back in chat, plus the always-on research loop (status/ideas/approve). For legal questions use /legal instead. Owner only.",
                 "usage": "/research <topic> | /research run <topic> | /research status | /research ideas",
                 "example": "/research agent coding",
@@ -1006,6 +1121,14 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
              "usage": "/book <topic> [chapters]   |   /book status [slug]  |  /book list",
              "example": "/book eBPF for system security 8",
              "related": "/searchdeep (it researches the topic first)"},
+    "books": {"what": "Story reader + continuer (alias of /book for reading): "
+                      "follow stories on legal archives (Gutenberg, Royal Road, "
+                      "Scribble Hub, AO3, Wattpad, Webnovel), read chapters with "
+                      "progress tracking, continue past the ending in the story's "
+                      "voice, list sources.",
+             "usage": "/books read <url|slug> [n] | /books continue <slug> [n] | /books sources | /books library",
+             "example": "/books read https://www.gutenberg.org/ebooks/84",
+             "related": "/book /novel"},
     "novel": {"what": "Story reader + continuer: follow webnovels (freewebnovel, pandanovel, "
                       "more), read chapters with progress tracking, and continue any story "
                       "past its ending in the story's own voice (story bible auto-built).",
@@ -1032,15 +1155,15 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
               "usage": "/decode <data>   |   /decode file:<path>   |   /decode hash <digest>   |   /decode decoders",
               "example": "/decode cGFzc3dvcmQ=",
               "related": "/monitor, nm decode"},
-    "cookies": {"what": "Cookie analysis & handling (the CookieLab): parses a "
+    "cookielab": {"what": "Cookie analysis & handling (the CookieLab): parses a "
                         "Cookie / Set-Cookie header, classifies each cookie "
                         "(session/auth/csrf/tracking/jwt/encoded), fingerprints "
                         "the platforms it implies, decodes opaque values "
                         "(URL, base64, JSON, JWT, hex, gzip), and flags "
                         "cookies missing HttpOnly/Secure. 'ingest' also feeds "
                         "the entities into the knowledge graph.",
-             "usage": "/cookies <cookie-header>   |   /cookies file:<path>   |   /cookies ingest <header>",
-             "example": "/cookies PHPSESSID=abc; path=/; HttpOnly; Secure\nJSESSIONID=xyz",
+             "usage": "/cookielab <cookie-header>   |   /cookielab file:<path>   |   /cookielab ingest <header>",
+             "example": "/cookielab PHPSESSID=abc; path=/; HttpOnly; Secure\nJSESSIONID=xyz",
              "related": "/decode, nm cookies"},
     "structure": {"what": "turns a plain-English objective into a structured "
                           "mission brief — intent, ordered subgoals, inputs, "
@@ -1099,15 +1222,15 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
                      "/npc mood <name>",
             "example": "/npc list  ·  /npc talk Marlowe \"any advice?\"",
             "related": "/dm · /game"},
-    "character": {"what": "persistent character agents — they converse, "
+    "charagent": {"what": "persistent character agents — they converse, "
                          "remember, and play games with Devon as fellow "
                          "agents, not scripted NPCs. Foundation for podcast "
                          "hosts and room participants.",
-            "usage": "/character list · /character create <name> [trait=0.8] · "
-                     "/character talk <name> <message> · "
-                     "/character play <game> <names...> · /character forget <name>",
-            "example": "/character create Zara witty=0.9  ·  "
-                       "/character play auction Zara Kilo",
+            "usage": "/charagent list · /charagent create <name> [trait=0.8] · "
+                     "/charagent talk <name> <message> · "
+                     "/charagent play <game> <names...> · /charagent forget <name>",
+            "example": "/charagent create Zara witty=0.9  ·  "
+                       "/charagent play auction Zara Kilo",
             "related": "/npc · /game"},
     "dm": {"what": "the game master's persona — the narrator's mood for "
                    "the current game. Grim, whimsical, epic, deadpan or "
@@ -1312,6 +1435,22 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
              "usage": "/heal | /heal --dry | /heal <command>",
              "example": "/heal --dry",
              "related": "/tour /help"},
+    "update": {"what": "Self-update from chat: mission gate (refuses mid-mission), checkpoint resumable missions, transactional pull + migrate + health-check (auto-rollback on failure), then restart and resume. The chat layer over `nm update`.",
+             "usage": "/update",
+             "example": "/update",
+             "related": "/pull /deploy /restart /mission"},
+    "pull": {"what": "Pull the latest code (git pull --ff-only) without restarting. The running process keeps its loaded code; new code takes effect on the next restart. Refuses mid-mission.",
+             "usage": "/pull",
+             "example": "/pull",
+             "related": "/update /deploy /restart"},
+    "deploy": {"what": "Deploy this code: same as /update (gate + checkpoint + pull + restart).",
+             "usage": "/deploy",
+             "example": "/deploy",
+             "related": "/update /pull /restart"},
+    "restart": {"what": "Restart the process: mission gate, checkpoint resumable missions, restart, resume from checkpoints. No code pull — use /update for that.",
+             "usage": "/restart",
+             "example": "/restart",
+             "related": "/update /mission"},
     "course": {"what": "WAEC/JAMB course builder — scoping questions, syllabus-mapped lessons, embedded tutor.",
                  "usage": "/course <topic> | /course waec <subject> | /course set <field> <value> | /course build | /course list | /course teach <id>",
                  "example": "/course quadratic equations",
@@ -1860,9 +1999,9 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
     ("wisdom keeper — corpus · history · practice", ["wisdom", "wis"]),
     ("building for real", ["code", "py", "devon", "swarm", "task", "gen",
                            "data", "evolve", "upgrade", "arena", "trial",
-                           "identity", "book", "features"]),
+                           "identity", "book", "books", "features"]),
     ("memory & thinking", ["remember", "recall", "forget", "memories", "think",
-                           "benchmark", "redteam", "review", "tutor", "ekiti", "course", "health", "train", "form", "film", "graph", "route", "eta", "congestion"]),
+                           "benchmark", "redteam", "review", "tutor", "learn", "ekiti", "course", "health", "train", "form", "film", "graph", "route", "eta", "congestion", "immune"]),
     ("money & spending", ["spend", "budget", "spending", "mandate"]),
     ("games — 41, DM + group, start them directly",
      ["game", "inventory", "equip", "unequip", "repair", "level",
@@ -1874,9 +2013,9 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
       "2048", "snake", "connect4", "battleship",
       "blackjack", "roulette", "slots", "miniapp", "gtrip", "predict",
       "gomoku", "reversi", "checkers", "20q", "rps", "digits",
-      "sudoku", "anagram", "cryptogram", "npc", "dm"]),
+      "sudoku", "anagram", "cryptogram", "npc", "dm", "charagent"]),
     ("voice & vision", ["tts", "speak", "stt", "voice", "look", "image", "lens"]),
-    ("decoding & crypto", ["decode", "cookies", "structure", "cipher",
+    ("decoding & crypto", ["decode", "cookies", "cookielab", "structure", "cipher",
                            "monitor", "investigate"]),
     ("media system", ["music", "distribute", "play", "video", "hub", "podcast", "dj", "produce", "like", "dislike", "cookies"]),
     ("execution · archives · builders", ["exec", "zip", "apps", "fix", "deliver"]),
@@ -1884,7 +2023,8 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
                             "gcal", "trello", "proxy", "workspace", "record",
                             "macro", "file", "publish", "notify", "proactive", "mission",
                             "bet", "finance", "weather", "tz", "email", "routine", "home", "store", "track", "untrack", "trip", "travelclient", "contract", "legal", "research", "contracts", "regwatch", "uprofile", "vnote", "match", "cgroup", "challenge", "room", "scamcheck", "passport", "truecost", "value", "valuepick", "watch", "send", "leads", "guardrails", "competitor", "cost", "panel"]),
-    ("platform control", ["start", "stop", "profile"]),
+    ("platform control", ["start", "stop", "profile",
+                          "update", "pull", "deploy", "restart"]),
     ("discovery", ["list", "commands", "menu", "help", "tour", "heal"]),
 ]
 
@@ -1990,25 +2130,6 @@ _GAME_HELP: dict[str, str] = {
     "rps": "rock paper scissors — best of five vs the house.",
     "digits": "digit memory — repeat the digits back, they grow every round.",
 }
-for _kind in CONTROL_COMMANDS:
-    if _kind not in COMMAND_DETAILS:
-        _g = _GAME_HELP.get(_kind)
-        if _g is not None:
-            COMMAND_DETAILS[_kind] = {
-                "what": _g,
-                "usage": f"/{_kind} [bet] — starts it; /game controls the session",
-                "example": f"/{_kind}",
-                "related": "/game /list",
-            }
-        else:
-            COMMAND_DETAILS[_kind] = {
-                "what": LIST_ONELINERS.get(_kind, f"run /{_kind}."),
-                "usage": f"/{_kind}",
-                "example": f"/{_kind}",
-                "related": "/list /help",
-            }
-
-
 def _wrap_commands(kinds: list[str], width: int = 64) -> list[str]:
     """Wrap ``/cmd`` tokens so a catalog line never runs long in chat.
 
@@ -2076,7 +2197,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
      ["music", "play", "video", "hub", "podcast", "zip", "audio", "overview", "character", "audiobook"]),
     ("memory & thinking",
      ["remember", "recall", "forget", "memories", "think", "benchmark", "redteam",
-      "review", "tutor", "ekiti", "course", "health", "train", "form", "film", "graph", "route", "eta", "congestion"]),
+      "review", "tutor", "learn", "ekiti", "course", "health", "train", "form", "film", "graph", "route", "eta", "congestion"]),
     ("games — 41, DM + group, start them directly",
      ["game", "inventory", "equip", "unequip", "repair", "level",
       "skill", "title", "stats", "daily", "mastery", "gift",
@@ -2087,13 +2208,15 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
       "2048", "snake", "connect4", "battleship",
       "blackjack", "roulette", "slots", "miniapp", "gtrip", "predict",
       "gomoku", "reversi", "checkers", "20q", "rps", "digits",
-      "sudoku", "anagram", "cryptogram", "npc", "dm"]),
+      "sudoku", "anagram", "cryptogram", "npc", "dm", "charagent"]),
     ("voice & vision",
      ["tts", "speak", "stt", "voice", "look", "image", "lens"]),
     ("tools & automation",
      ["schedule", "db", "api", "proxy", "workspace", "record", "macro", "file",
-      "publish", "notify", "proactive", "mission", "features", "decode", "cookies", "cipher",
+      "publish", "notify", "proactive", "mission", "features", "decode", "cookies", "cookielab", "cipher",
       "monitor", "investigate", "bet", "finance", "weather", "tz", "routine", "home", "store", "track", "untrack", "trip", "travelclient", "contract", "legal", "research", "contracts", "regwatch", "uprofile", "vnote", "match", "cgroup", "challenge", "room", "scamcheck", "passport", "truecost", "value", "valuepick", "watch", "send", "leads", "panel"]),
+    ("platform control — updates & restarts",
+     ["update", "pull", "deploy", "restart"]),
     ("discovery",
      ["list", "commands", "menu", "help"]),
 ]
@@ -2109,6 +2232,7 @@ _GROUP_EMOJI = {
     "games — 41, DM + group, start them directly": "🎮",
     "voice & vision": "🎙️",
     "tools & automation": "⚙️",
+    "platform control — updates & restarts": "🔄",
     "discovery": "🧭",
 }
 
@@ -2157,12 +2281,18 @@ LIST_ONELINERS: dict[str, str] = {
     "quit": "shut the system down",
     "mode": "autonomy mode: off | suggest | auto",
     "profile": "profile-aware runtime: detected environment + every tuned knob",
+    "update": "self-update from chat: gate + checkpoint + pull + restart",
+    "pull": "git pull --ff-only, no restart",
+    "deploy": "deploy this code: gate + checkpoint + pull + restart",
+    "restart": "checkpoint missions + restart, no pull",
     "search": "quick research + cited summary",
     "structure": "turn an objective into a structured mission brief",
     "book": "BookForge: write a real book → PDF → send",
+    "books": "story reader + continuer: /books read <url|slug> | continue <slug> [n] | sources",
     "decode": "identify + decode anything: /decode <data|file|hash>",
     "investigate": "one-pass investigation: decode → crack → OSINT → knowledge graph",
-    "cookies": "CookieLab: analyze & handle cookie headers",
+    "cookies": "YouTube cookie file status — needed when YouTube blocks downloads",
+    "cookielab": "CookieLab: analyze & handle cookie headers",
     "cipher": "real crypto: AES-256 sealed blobs + classic ciphers + vault",
     "monitor": "watch a target on a cadence, alert on change",
     "workspace": "the VCPU farm: status/scale/up/down/pause/resume",
@@ -2213,6 +2343,7 @@ LIST_ONELINERS: dict[str, str] = {
     "audio": "transcript-as-timeline audio editing (owner only)",
     "overview": "interactive audio overviews — the podcast you can talk to (owner only)",
     "character": "conversational story characters — talk to them in character (owner only)",
+    "charagent": "persistent character agents — converse, remember, play games",
     "audiobook": "EPUB → audiobook, one click, with store disclosure (owner only)",
     "watch": "persistent match alerts — saved listing searches",
     "aeo": "AEO/GEO visibility tracking — share of answer (owner only)",
@@ -2294,6 +2425,29 @@ LIST_ONELINERS: dict[str, str] = {
     "podcast": "find → download → transcribe → chapters, transcript saved",
     "fix": "run code, model rewrites failures until it's green (CI loop)",
 }
+
+
+#: Fill COMMAND_DETAILS for kinds that only have a one-liner or a game
+#: blurb. This loop MUST run after LIST_ONELINERS is defined (it reads
+#: it) — it used to sit above LIST_ONELINERS, which made the whole
+#: module unimportable (NameError at import time).
+for _kind in CONTROL_COMMANDS:
+    if _kind not in COMMAND_DETAILS:
+        _g = _GAME_HELP.get(_kind)
+        if _g is not None:
+            COMMAND_DETAILS[_kind] = {
+                "what": _g,
+                "usage": f"/{_kind} [bet] — starts it; /game controls the session",
+                "example": f"/{_kind}",
+                "related": "/game /list",
+            }
+        else:
+            COMMAND_DETAILS[_kind] = {
+                "what": LIST_ONELINERS.get(_kind, f"run /{_kind}."),
+                "usage": f"/{_kind}",
+                "example": f"/{_kind}",
+                "related": "/list /help",
+            }
 
 
 def list_catalog(topic: str = "") -> str:

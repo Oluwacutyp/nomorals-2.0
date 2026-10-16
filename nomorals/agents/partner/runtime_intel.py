@@ -181,13 +181,13 @@ class RuntimeIntelMixin:
                 sent = f" (saved at {v['saved_to']})"
         return text + sent
 
-    def _control_cookies(self, tail: str) -> str:
-        """``/cookies <header>`` / ``/cookies file:<path>`` /
-        ``/cookies ingest <header>`` — the CookieLab report."""
+    def _control_cookielab(self, tail: str) -> str:
+        """``/cookielab <header>`` / ``/cookielab file:<path>`` /
+        ``/cookielab ingest <header>`` — the CookieLab report."""
         tail = (tail or "").strip()
         if not tail:
-            return "usage: /cookies <cookie-header>  |  /cookies file:<path>" \
-                   "  |  /cookies ingest <cookie-header>"
+            return "usage: /cookielab <cookie-header>  |  /cookielab file:<path>" \
+                   "  |  /cookielab ingest <cookie-header>"
         ingest = False
         if tail.lower().startswith("ingest "):
             ingest = True

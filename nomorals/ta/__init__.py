@@ -46,3 +46,23 @@ __all__ = [
     "strategies",
     "structure",
 ]
+
+from .evidence import (
+    EvidenceRecord,
+    EvidenceStore,
+    DEFAULT_HALF_LIFE_DAYS,
+    DEFAULT_STALE_AFTER_DAYS,
+    decay_score,
+    is_stale,
+    monitor,
+)
+
+__all__ += [
+    "EvidenceRecord",
+    "EvidenceStore",
+    "DEFAULT_HALF_LIFE_DAYS",
+    "DEFAULT_STALE_AFTER_DAYS",
+    "decay_score",
+    "is_stale",
+    "monitor",
+]

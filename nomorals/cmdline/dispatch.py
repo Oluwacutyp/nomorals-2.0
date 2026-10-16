@@ -42,6 +42,9 @@ from .commands.shorts import cmd_shorts
 from .commands.video import cmd_video
 from .commands.improve import _cmd_improve
 from .commands.inbox import _cmd_inbox
+from .commands.learn import _cmd_learn
+from .commands.legal import _cmd_legal
+from .commands.immune import _cmd_immune
 from .commands.media import _cmd_media, _cmd_studio
 from .commands.memory import _cmd_memory
 from .commands.meta import _cmd_commands, _cmd_connectors, _cmd_deliver, _cmd_help, _cmd_zip
@@ -59,6 +62,7 @@ from .commands.project import _cmd_project
 from .commands.pulse import _cmd_pulse
 from .commands.plugin import _cmd_plugin
 from .commands.queue import _cmd_queue
+from .commands.sent import _cmd_sent
 from .commands.recover import _cmd_recover
 from .commands.repo import _cmd_repo
 from .commands.research import _cmd_cookies, _cmd_kg, _cmd_research_loop, _cmd_structure
@@ -280,6 +284,7 @@ _COMMANDS: dict[str, _CommandSpec] = {
     "serve": _CommandSpec(_cmd_serve),
     "stream": _CommandSpec(_cmd_stream),
     "queue": _CommandSpec(_cmd_queue),
+    "sent": _CommandSpec(_cmd_sent),
     "commands": _CommandSpec(_cmd_commands),
     "zip": _CommandSpec(_cmd_zip),
     "deliver": _CommandSpec(_cmd_deliver),
@@ -349,6 +354,9 @@ _COMMANDS: dict[str, _CommandSpec] = {
     "shorts": _CommandSpec(cmd_shorts),
     "video": _CommandSpec(cmd_video),
     "inbox": _CommandSpec(_cmd_inbox),
+    "learn": _CommandSpec(_cmd_learn),
+    "legal": _CommandSpec(_cmd_legal),
+    "immune": _CommandSpec(_cmd_immune),
     "audio": _CommandSpec(_cmd_audio),
     "room": _CommandSpec(_cmd_room),
     "briefing": _CommandSpec(_cmd_briefing),

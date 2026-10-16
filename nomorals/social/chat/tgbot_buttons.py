@@ -94,6 +94,18 @@ def buttons_for_text(text: str) -> Keyboard | None:
     """
     t = text or ""
 
+    # ── confirm-flow prompt (CONFIRMABLE commands: quit/forget) ──
+    # handle_control's confirm gate writes "⚠️ confirm: /<kind> …"; the
+    # buttons deliver "/<kind> confirm" / "/<kind> cancel", which the
+    # gate resolves against the pending confirmation for this chat.
+    if "⚠️ confirm: /" in t:
+        import re as _re
+        m = _re.search(r"⚠️ confirm: /([a-z0-9_]+)", t)
+        if m:
+            kind = m.group(1)
+            return [[("❌ Cancel", f"{kind} cancel"),
+                     ("✅ Confirm", f"{kind} confirm")]]
+
     # ── game menu (/game, /game list, /game help) ──
     if "modes & mastery" in t and "/game <name>" in t:
         return [
@@ -111,7 +123,14 @@ def buttons_for_text(text: str) -> Keyboard | None:
 
     # ── game results ──
     if "The House wins" in t or "points and coins credited" in t:
-        return [[("🔁 Rematch", "game rematch"), ("📊 Stats", "game stats")]]
+        # Rematch runs it back; Next opens the game list; Arena goes to
+        # the self-improvement arena (public bot: the public-bot gate
+        # redirects it with a friendly message; owner chat: it runs);
+        # Expert rematches at expert difficulty.
+        return [[("🔁 Rematch", "game rematch"),
+                 ("⏭️ Next", "game list")],
+                [("🏟️ Arena", "arena"),
+                 ("💀 Expert", "game rematch expert")]]
 
     # ── gift flow ──
     if t.startswith("🎁 gifting") or "\n🎁 gifting" in t:
@@ -229,7 +248,31 @@ def confirm_keyboard(action: str,
     return [[(cancel_label, cancel_data), (confirm_label, confirm_data)]]
 
 
-# ── inline queries ────────────────────────────────────────────────────
+# ── public bottom menu (BotFather list) ─────────────────────────────────
+
+def public_menu_keyboard() -> list[list[str]]:
+    """Persistent bottom reply keyboard: the PUBLIC command list only.
+
+    Button text is the command itself (``"/help"``) — tapping one sends
+    it as a message. 13 rows: 5 rows of named commands + 8 rows of the
+    32 public games (4 per row). Owner-only commands are never on the
+    menu. Built from ``PUBLIC_COMMANDS`` so the menu can never drift
+    from the grant table (the 32 games come from PUBLIC_GAME_COMMANDS;
+    the 19 named rows are the fixed BotFather order).
+    """
+    from .control import PUBLIC_GAME_COMMANDS
+
+    rows = [
+        ["/help", "/search", "/news", "/book"],
+        ["/music", "/play", "/video", "/podcast"],
+        ["/tts", "/stt", "/look", "/image"],
+        ["/lens", "/decode", "/dns", "/whois"],
+        ["/cipher", "/wisdom", "/think", "/game"],
+    ]
+    games = [f"/{name}" for name in PUBLIC_GAME_COMMANDS]
+    for i in range(0, len(games), 4):
+        rows.append(games[i:i + 4])
+    return rows
 
 def _article(article_id: str, title: str, description: str,
              message_text: str) -> dict:

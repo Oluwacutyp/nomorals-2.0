@@ -163,51 +163,55 @@ class PolicyBiometricTests(unittest.TestCase):
 
 
 class ApproveWithBiometricTests(unittest.TestCase):
-    def _stubs(self, available=True, approved=True):
-        p1 = patch("nomorals.native.biometric.biometric_available",
-                   return_value=(available, "" if available else "nope"))
-        p2 = patch("nomorals.native.biometric.request_biometric",
-                   return_value=approved)
-        return p1, p2
+    def _fakes(self, available=True, approved=True):
+        # Explicit injected fakes: approve_with_biometric no longer
+        # imports the native module (kernel may not import native), so
+        # the biometric pair is passed in, not patched in.
+        def available_fn():
+            return (available, "" if available else "nope")
+
+        def request_fn(title, timeout_s=60.0):
+            return approved
+
+        return (available_fn, request_fn)
 
     def test_full_round_trip_deny_approve_check(self):
         p = _open_policy()
         denied = p.check(Capability.FS_DELETE, actor="agent")
         self.assertTrue(denied.needs_biometric)
-        p1, p2 = self._stubs(available=True, approved=True)
-        with p1, p2:
-            token = approve_with_biometric(p, Capability.FS_DELETE, title="delete it?")
+        p1, p2 = self._fakes(available=True, approved=True)
+        token = approve_with_biometric(
+            p, Capability.FS_DELETE, title="delete it?", biometric=(p1, p2))
         self.assertIsNotNone(token)
         allowed = p.check(Capability.FS_DELETE, actor="agent", confirmation=token)
         self.assertTrue(allowed.allowed)
 
     def test_unavailable_returns_none(self):
         p = _open_policy()
-        p1, p2 = self._stubs(available=False)
-        with p1, p2:
-            self.assertIsNone(approve_with_biometric(p, Capability.FS_DELETE))
+        self.assertIsNone(approve_with_biometric(
+            p, Capability.FS_DELETE,
+            biometric=self._fakes(available=False)))
 
     def test_prompt_denied_returns_none(self):
         p = _open_policy()
-        p1, p2 = self._stubs(available=True, approved=False)
-        with p1, p2:
-            self.assertIsNone(approve_with_biometric(p, Capability.FS_DELETE))
+        self.assertIsNone(approve_with_biometric(
+            p, Capability.FS_DELETE,
+            biometric=self._fakes(available=True, approved=False)))
 
     def test_prompt_exception_returns_none(self):
         p = _open_policy()
-        p1 = patch("nomorals.native.biometric.biometric_available",
-                   return_value=(True, ""))
-        with p1, patch("nomorals.native.biometric.request_biometric",
-                       side_effect=RuntimeError("boom")):
-            self.assertIsNone(approve_with_biometric(p, Capability.FS_DELETE))
 
-    def test_missing_biometric_module_returns_none(self):
+        def boom(title, timeout_s=60.0):
+            raise RuntimeError("boom")
+
+        self.assertIsNone(approve_with_biometric(
+            p, Capability.FS_DELETE,
+            biometric=(lambda: (True, ""), boom)))
+
+    def test_no_injected_biometric_returns_none(self):
         p = _open_policy()
-        import sys
-        with patch.dict(sys.modules, {"nomorals.native.biometric": None}):
-            # `from X import Y` with None in sys.modules raises ImportError;
-            # the helper must swallow it and return None.
-            self.assertIsNone(approve_with_biometric(p, Capability.FS_DELETE))
+        # No biometric pair injected: fall back to the text-confirm flow.
+        self.assertIsNone(approve_with_biometric(p, Capability.FS_DELETE))
 
 
 class RegistryRequestApprovalTests(unittest.TestCase):

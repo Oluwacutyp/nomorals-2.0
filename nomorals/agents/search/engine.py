@@ -23,6 +23,7 @@ from ...core.http import HttpClient
 from ...core.ids import new_short_id
 from ...core.logging_setup import get_logger
 from ...core.policy import Capability
+from ...storage.kv import KVStore
 from ...search.adaptive import adaptive_result_limit
 from ...tools.web import RobotsCache, html_to_text
 from ..power import power_mode_for
@@ -305,7 +306,10 @@ class SearchEngine:
         # read earns a persistent penalty)
         trust: SourceTrust | None = None
         try:
-            trust = SourceTrust(self.context)
+            # The kernel may not import storage: the caller builds the store.
+            db = getattr(self.context, "db", None)
+            trust = SourceTrust(
+                self.context, store=KVStore(db) if db is not None else None)
             trust.annotate(top)
         except Exception:  # noqa: BLE001 — trust is a display bonus
             _log.debug("source trust unavailable", exc_info=True)

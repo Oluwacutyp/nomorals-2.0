@@ -170,8 +170,11 @@ def bake_seal(seal: str, path: str | None = None) -> str:
     """
     import pathlib
 
-    if not _check_format(seal):
-        raise ValueError("not a valid v1 seal string")
+    # make_seal produces v2 seals; v1 seals are still accepted for
+    # migration tooling. (bake_seal used to check v1 only, which made
+    # `nm owner seal` reject every fresh seal.)
+    if not _check_format(seal) and not _check_format_v2(seal):
+        raise ValueError("not a valid v1/v2 seal string")
     target = pathlib.Path(path) if path else pathlib.Path(__file__)
     src = target.read_text(encoding="utf-8")
     replacement = f'PASSPHRASE_SEAL = "{seal}"'

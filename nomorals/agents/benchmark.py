@@ -1306,6 +1306,19 @@ class _SelfTestRouter:
             text='{"kind": "chat", "confidence": 0.1, "why": "self-test"}',
         )
 
+    def chat(self, messages: Any, params: Any = None, **kw: Any) -> Any:
+        # _model_check reaches the router through
+        # brain_for(...).chat_json, which calls router.chat — complete()
+        # alone left the heavy path failing instantly (AttributeError: no
+        # 'chat') instead of simulating a model call, so the "heavy" path
+        # measured ~0.3ms and the fast-vs-heavy comparison was jitter.
+        self.calls += 1
+        time.sleep(self.delay_s)
+        return _SimpleResponse(
+            ok=True,
+            text='{"kind": "chat", "confidence": 0.1, "why": "self-test"}',
+        )
+
 
 class _SimpleResponse:
     def __init__(self, ok: bool, text: str) -> None:
@@ -1333,6 +1346,15 @@ def _dim_latency(context: Any, limit: int, *,
     else:
         mind = CoreMind(context)
     fast_ms: list[float] = []
+    # Warmup: the first decide() pays cold-start costs (lazy imports,
+    # cache building) — ~50ms, enough to intermittently lose to the
+    # heavy p50 and cost a point for a path that is really ~700x
+    # faster. Standard benchmarking practice: one un-timed rep first,
+    # then measure the steady state.
+    try:
+        mind.decide(_FAST_TEXTS[0], allow_model=False)
+    except Exception:  # noqa: BLE001 — warmup failure is not a result
+        pass
     for i in range(reps):
         text = _FAST_TEXTS[i % len(_FAST_TEXTS)]
         started = time.perf_counter()

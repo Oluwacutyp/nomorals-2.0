@@ -128,6 +128,12 @@ def check_outgoing(
 
     Returns a Warning when something doesn't match the owner's pattern,
     else None. Pure function of (to, amount, history) — never raises.
+
+    The unusual-hour signal (23:00–05:00 local) is advisory and blocks
+    only until an explicit override: the override IS the confirmation
+    ("send it anyway"), so the warning is the confirmation prompt, not
+    a veto. This is deliberate — an unusual hour alone never silently
+    stops a transfer the owner explicitly approved.
     """
     try:
         return _check(to, amount_kobo, ledger, now=now or time.time())

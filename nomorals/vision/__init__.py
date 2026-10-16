@@ -42,3 +42,20 @@ def register(registry) -> None:
     def see_tool(image_path: str, question: str = "") -> str:
         """Look at an image and answer a question about it."""
         return see(image_path, question)
+
+
+from .critique_bridge import (
+    compare_images,
+    critique_from_vision,
+    visual_dimension,
+    describe_screen,
+    SCREEN_ELEMENT_KINDS,
+)
+
+__all__ += [
+    "compare_images",
+    "critique_from_vision",
+    "visual_dimension",
+    "describe_screen",
+    "SCREEN_ELEMENT_KINDS",
+]

@@ -6,6 +6,8 @@ import argparse
 import json
 from typing import Any
 
+from ...tools.registry import _format_params
+
 
 
 def _cmd_tools(args: argparse.Namespace, context: Any) -> int:
@@ -14,7 +16,7 @@ def _cmd_tools(args: argparse.Namespace, context: Any) -> int:
         print(json.dumps(tools.schemas(), indent=2))
         return 0
     for schema in tools.schemas():
-        params = ", ".join(schema["parameters"])
+        params = _format_params(schema)
         print(f"{schema['name']:<20} [{schema['capability'] or '-'}]  {schema['description']}")
         if params:
             print(f"{'':<20} ({params})")

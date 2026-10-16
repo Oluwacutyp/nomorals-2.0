@@ -212,24 +212,35 @@ def status(manager: Any) -> dict[str, Any]:
 
 # ── scheduler registration ───────────────────────────────────────────────
 
-def ensure_consolidation_job(context: Any) -> dict[str, Any]:
+def ensure_consolidation_job(
+    context: Any,
+    *,
+    scheduler_factory: Any = None,
+) -> dict[str, Any]:
     """Register the single durable ``memory-consolidation`` job (idempotent).
 
     Spec ``every <Ns>`` from ``consolidation_interval_seconds`` (default
     3600).  Payload is the ``memory`` tool's ``consolidate`` action — the
     same tick ``/memory consolidate`` runs by hand.  Safe to call on every
     boot; a changed interval replaces the job.  Never raises.
+
+    ``scheduler_factory`` builds the scheduler (``Scheduler(context)``,
+    injected — memory is L3 and may not import agents L5). None means
+    the job is not scheduled, reported honestly (same shape as the
+    disabled-interval path).
     """
     try:
-        from ..agents.scheduler import Scheduler
-
+        if scheduler_factory is None:
+            return {"name": CONSOLIDATION_JOB_NAME,
+                    "scheduled": False,
+                    "reason": "no scheduler factory injected"}
         manager = getattr(context, "memory", None)
         interval = interval_seconds(manager) if manager is not None else 3600.0
         if interval <= 0:
             return {"name": CONSOLIDATION_JOB_NAME,
                     "scheduled": False, "reason": "disabled"}
         spec = f"every {int(interval)}s"
-        sched = Scheduler(context)
+        sched = scheduler_factory(context)
         try:
             have = [j for j in sched.list_jobs()
                     if j.get("name") == CONSOLIDATION_JOB_NAME]

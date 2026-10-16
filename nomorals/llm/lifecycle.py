@@ -222,6 +222,35 @@ def _sha256_of(path: Path, chunk: int = 1 << 20) -> str:
     return digest.hexdigest()
 
 
+def card_for_model(model: ManagedModel) -> "ModelCard":
+    """Build the broker card for a lifecycle-managed model.
+
+    Lives here (not in the ``nm models`` CLI command) because
+    :func:`nomorals.agents.context.build_router` also registers
+    lifecycle-managed cards at boot — the agents layer may not import
+    the cmdline layer.
+    """
+    from .capabilities import Capability, ModelCard, capability_from
+
+    caps = set()
+    for raw in model.capabilities:
+        try:
+            caps.add(capability_from(raw))
+        except ValueError:
+            continue
+    return ModelCard(
+        id=model.id,
+        capabilities=caps or {Capability.CHAT},
+        context_len=model.context_len,
+        local=model.local,
+        provider=model.provider or ("llama_cpp" if model.local else "hf_serverless"),
+        model_id=model.source,
+        quant=model.quant,
+        cost_per_1k=0.0,
+        notes=model.notes,
+    )
+
+
 class ModelLifecycle:
     """Persistent, transition-guarded lifecycle for servable models."""
 

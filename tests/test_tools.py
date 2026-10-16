@@ -78,8 +78,12 @@ class RegistryTests(unittest.TestCase):
     def test_registration_and_schema_inference(self):
         schemas = {s["name"]: s for s in self.registry.schemas()}
         self.assertIn("add", schemas)
-        self.assertIn("a", schemas["add"]["parameters"])
-        self.assertIn("b", schemas["add"]["parameters"])
+        # parameters is a JSON-Schema object (see ToolSpec.schema):
+        # names live under properties, required lists the bare ones.
+        params = schemas["add"]["parameters"]
+        self.assertIn("a", params["properties"])
+        self.assertIn("b", params["properties"])
+        self.assertEqual(params["required"], ["a"])
         self.assertEqual(schemas["add"]["description"], "Add two numbers.")
 
     def test_call_returns_the_value(self):

@@ -1,0 +1,5 @@
+{
+  "library": true,
+  "reason": "Per-nation source descriptors + health \u2014 pure data/descriptor library keyed by (nation, language, domain); fetching stays with the existing registry machinery. Genuine import-only library.",
+  "owner_decision_needed": "Wire descriptors into search/news fetchers or keep as import-only library."
+}

@@ -11,7 +11,16 @@ import os
 
 import pytest
 
-torch = pytest.importorskip("torch")
+try:
+    import torch
+except ImportError:  # pragma: no cover - torch is optional
+    torch = None
+
+# Module-level pytest.importorskip raises Skipped at import time, which
+# the unittest runner counts as a module ERROR (it imports every test
+# module). A skipif mark + a None torch keeps the module importable
+# under both runners; the tests skip cleanly when torch is absent.
+pytestmark = pytest.mark.skipif(torch is None, reason="torch not installed")
 
 
 def _tiny_setup(tmp_path, size=16, n_images=16):

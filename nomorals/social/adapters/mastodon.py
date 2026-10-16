@@ -1,4 +1,4 @@
-"""Mastodon adapter — the official REST API, no scraping.
+"""Mastodon adapter — the official REST API.
 
 Mastodon is the reference adapter here: it is federated, self-hostable, and its
 API is stable and well documented. Most other ActivityPub servers accept the same

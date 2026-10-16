@@ -28,6 +28,9 @@ from .golden import _cmd_golden
 from .hub import _cmd_hub
 from .improve import _cmd_improve, _inbox_obj
 from .inbox import _cmd_inbox
+from .learn import _cmd_learn
+from .legal import _cmd_legal
+from .immune import _cmd_immune
 from .media import (
     _VIDEO_EXTS,
     _cmd_media,
@@ -70,6 +73,7 @@ from .research import _cmd_cookies, _cmd_kg, _cmd_research_loop, _cmd_structure
 from .room import _cmd_room, _room_obj
 from .security import _cmd_cipher, _cmd_crack, _cmd_decode, _cmd_monitor, _cmd_osint, _cmd_watch
 from .serve import _cmd_serve
+from .sent import _cmd_sent
 from .skills import _cmd_skill_pkg
 from .snapshot import _cmd_snapshot
 from .status import _cmd_status, _status_section
@@ -155,6 +159,9 @@ __all__ = [
     "_inbox_obj",
     "_cmd_improve",
     "_cmd_inbox",
+    "_cmd_learn",
+    "_cmd_legal",
+    "_cmd_immune",
     "_VIDEO_EXTS",
     "_media_tools",
     "_media_call",
@@ -192,6 +199,7 @@ __all__ = [
     "_cmd_power",
     "_cmd_project",
     "_cmd_queue",
+    "_cmd_sent",
     "_cmd_research_loop",
     "_cmd_kg",
     "_cmd_cookies",

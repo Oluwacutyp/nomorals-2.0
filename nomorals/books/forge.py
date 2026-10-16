@@ -831,7 +831,8 @@ def md_to_xhtml(md: str, title: str = "") -> str:
                 close_list()
                 paras.append("<ul>")
                 list_tag = "ul"
-            paras.append(f"<li>{_inline_md(re.sub(r'^[-*]\\s+', '', stripped))}</li>")
+            cleaned = re.sub(r"^[-*]\s+", "", stripped)
+            paras.append(f"<li>{_inline_md(cleaned)}</li>")
         elif re.match(r"^\d+[.)]\s+", stripped):
             if buf:
                 flush()
@@ -839,7 +840,8 @@ def md_to_xhtml(md: str, title: str = "") -> str:
                 close_list()
                 paras.append("<ol>")
                 list_tag = "ol"
-            paras.append(f"<li>{_inline_md(re.sub(r'^\\d+[.)]\\s+', '', stripped))}</li>")
+            cleaned = re.sub(r"^\d+[.)]\s+", "", stripped)
+            paras.append(f"<li>{_inline_md(cleaned)}</li>")
         elif stripped.startswith(">"):
             flush()
             paras.append(f"<blockquote>{_inline_md(stripped.lstrip('> '))}</blockquote>")

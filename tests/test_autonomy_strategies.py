@@ -17,6 +17,7 @@ from nomorals.agents.autonomy import (
 )
 from nomorals.core.events import EventBus
 from nomorals.storage.db import Database
+from tests.frozen_clock import MIDDAY_TS
 
 
 def _mood(label="calm", **values):
@@ -155,7 +156,10 @@ class SafetyVetoTests(unittest.TestCase):
                 raise RuntimeError("strategy exploded")
 
         agent._strategies = [Bad()]
-        out = agent.tick()
+        # Frozen noon: the bare tick() read the wall clock, so a run
+        # inside quiet hours (22:00-08:00) returned "quiet hours"
+        # instead of exercising the bad-strategy path.
+        out = agent.tick(now=MIDDAY_TS)
         self.assertEqual(out["decision"], "nothing to send")
 
 
@@ -195,7 +199,8 @@ class AdaptiveThresholdTests(unittest.TestCase):
                                  strategy="weak")]
 
         agent._strategies = [Weak()]
-        out = agent.tick()
+        # Frozen noon — see test_bad_strategy_never_kills_tick.
+        out = agent.tick(now=MIDDAY_TS)
         self.assertEqual(out["decision"], "below threshold")
 
 

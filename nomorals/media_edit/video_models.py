@@ -39,6 +39,18 @@ from ..core.profiles import get_profile_kind
 
 _log = get_logger(__name__)
 
+#: Connector factory injected by the composition root
+#: (:func:`nomorals.agents.context.build_context`): ``factory()`` returning
+#: a GoogleFlowConnector — media_edit is L4 and may not import connectors
+#: (L5). None means the GoogleFlow route cannot build a connector.
+_CONNECTOR_FACTORY: Any = None
+
+
+def set_connector_factory(factory: Any | None) -> None:
+    """Inject (or clear) the factory used by the GoogleFlow video route."""
+    global _CONNECTOR_FACTORY
+    _CONNECTOR_FACTORY = factory
+
 
 class VideoModelError(Exception):
     """No video model can serve this request (profile/key/backend gap)."""
@@ -385,7 +397,8 @@ def generate_video(prompt: str, *, duration_s: int = 5,
                    out_dir: str | os.PathLike[str] | None = None,
                    confirmed: bool = False, db: Any = None,
                    context: Any = None,
-                   progress_cb: Any = None) -> Path:
+                   progress_cb: Any = None,
+                   connector_factory: Any | None = None) -> Path:
     """Route and render a text-to-video clip. Returns the mp4 path.
 
     Local (Wan 2.2 via ComfyUI) renders immediately. Paid API routes
@@ -394,6 +407,10 @@ def generate_video(prompt: str, *, duration_s: int = 5,
     a human checkpoint (see :mod:`nomorals.connectors._confirm`); with
     neither, raises :class:`VideoModelError` naming the confirmation
     needed. Paid gates are never bypassed.
+
+    ``connector_factory`` (per-call) wins over the module-level injected
+    factory for the GoogleFlow route; with neither, that route raises
+    :class:`VideoModelError` instead of importing connectors.
     """
     prompt = (prompt or "").strip()
     if not prompt:
@@ -421,8 +438,12 @@ def generate_video(prompt: str, *, duration_s: int = 5,
             vae_file=VIDEO_MODELS[route.model]["vae_file"],
             progress_cb=progress_cb)
     elif route.backend == "googleflow":
-        from ..connectors.googleflow import GoogleFlowConnector
-        conn = GoogleFlowConnector()
+        factory = connector_factory or _CONNECTOR_FACTORY
+        if factory is None:
+            raise VideoModelError(
+                "googleflow route: no connector factory injected — "
+                "the composition root wires one at boot")
+        conn = factory()
         result = conn.generate_video(
             prompt, duration_seconds=min(duration_s, 8),
             negative_prompt=negative_prompt or "",

@@ -240,7 +240,11 @@ class HelpMenuTests(unittest.TestCase):
     def test_help_menu_renders(self):
         from nomorals.social.chat.control import help_menu
         out = help_menu("whatsapp")
-        self.assertIn("*DEVON — COMMAND MENU*", out)
+        # WhatsApp gets its own menu with a time-aware greeting
+        # (_whatsapp_greeting) — the daypart varies, so pin the
+        # stable shape, not one literal header.
+        self.assertIn("✨ *Devon —", out)
+        self.assertIn("here's what I can do", out)
         self.assertIn("🔍 *SEARCH*", out)
 
     def test_help_menu_telegram(self):

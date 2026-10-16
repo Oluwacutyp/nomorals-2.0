@@ -19,3 +19,8 @@ __all__ = [
     "SyncResult", "SyncError", "SyncAuthError", "SyncConnectionError",
     "SyncHubError", "SyncRecord", "SyncStore", "HttpSyncPeer",
 ]
+
+# Tier 3: sync namespaces — typed replicated state with visible conflicts.
+from .namespaces import Conflict, Namespace, NamespaceSet, merge_namespaces
+
+__all__ += ["Conflict", "Namespace", "NamespaceSet", "merge_namespaces"]

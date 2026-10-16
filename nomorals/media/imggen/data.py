@@ -47,15 +47,28 @@ def caption_from_filename(path: str) -> str:
     return text or "untrained image"
 
 
-def caption_with_devon_vision(path: str) -> str | None:
+#: Vision function injected by the caller/composition root:
+#: ``see(path, prompt=...)`` — media is L4 and may not import agents (L5).
+#: None means vision captioning is unavailable (filename fallback).
+_SEE_FN: Any = None
+
+
+def set_see_fn(fn: Any | None) -> None:
+    """Inject (or clear) the vision function used for image captions."""
+    global _SEE_FN
+    _SEE_FN = fn
+
+
+def caption_with_devon_vision(path: str, *,
+                              see_fn: Any | None = None) -> str | None:
     """Caption via Devon's own vision stack. None when unavailable.
 
     Tries the seer/vision tool path used by the rest of the codebase;
     any failure returns None (the caller falls back to filename).
+    ``see_fn`` (per-call) wins over the module-level injected function.
     """
-    try:
-        from ...agents.seer import see  # type: ignore
-    except Exception:
+    see = see_fn if see_fn is not None else _SEE_FN
+    if see is None:
         return None
     try:
         result = see(path, prompt=(
@@ -74,7 +87,8 @@ def caption_with_devon_vision(path: str) -> str | None:
 
 def build_dataset_manifest(image_dir: str, out_path: str | None = None,
                            use_vision: bool = True,
-                           progress: Any = None) -> dict:
+                           progress: Any = None,
+                           see_fn: Any | None = None) -> dict:
     """Walk ``image_dir`` → ``manifest.jsonl``. Returns a summary dict.
 
     Never raises on a bad image — it is skipped and counted.
@@ -104,7 +118,7 @@ def build_dataset_manifest(image_dir: str, out_path: str | None = None,
             except OSError:
                 caption = None
         if caption is None and use_vision:
-            caption = caption_with_devon_vision(str(img))
+            caption = caption_with_devon_vision(str(img), see_fn=see_fn)
             if caption:
                 vision_used += 1
         if caption is None:

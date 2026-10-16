@@ -1,4 +1,11 @@
-"""Afrobeats LoRA + Nigerian-language sung vocals — the continental moat.
+"""Afrobeats LoRA + Nigerian-language sung vocals — the Nigeria DEFAULT pack.
+
+Scope (universal, Nigeria as default, not boundary): this module is the
+Nigeria pack of a global system. THE MOAT is tone languages, not
+Yoruba — Yoruba is the first and hardest test case. The global,
+language-agnostic engine lives in :mod:`nomorals.media.tonal_g2p`
+(G2P descriptors per language + ONE tone-aware melody engine that
+consumes (phoneme, tone[, quality]) units and never knows the language).
 
 Two halves:
 
@@ -18,7 +25,8 @@ Two halves:
    :func:`tone_aware_melody` rewrites clashing notes; :meth:`sing` routes
    through the DiffSinger → RVC chain with the fixed melody.
 
-Positioning: "the AI that sings in Yoruba." No competitor exists.
+Positioning: "the AI that sings in Yoruba" — first pack of the
+tone-language moat (see :mod:`nomorals.media.tonal_g2p`). No competitor exists.
 
 Honest boundaries: no corpus/GPU → the training job fails closed with a
 recipe, never a fake LoRA. No LLM → Yoruba lyrics fail closed (the user
@@ -599,9 +607,9 @@ class SungVocalResult:
 class NaijaSungVocals:
     """Tone-aware sung vocals for Nigerian languages.
 
-    The moat: Yoruba/Igbo tones are checked against the melody BEFORE
-    DiffSinger renders, and clashing notes are rewritten so the sung
-    words keep their meaning.
+    Nigeria-default pack of the tone-language moat: Yoruba/Igbo tones
+    are checked against the melody BEFORE DiffSinger renders, and
+    clashing notes are rewritten so the sung words keep their meaning.
     """
 
     def __init__(self, *, chain: Any = None) -> None:
@@ -840,8 +848,9 @@ def register(registry: Any) -> None:
     @registry.register(
         "afrobeats",
         description=(
-            "Afrobeats LoRA + Nigerian-language sung vocals (the continental "
-            "moat): action=lora-spec (corpus curation checklist) | "
+            "Afrobeats LoRA + Nigerian-language sung vocals (Nigeria "
+            "DEFAULT pack of the tone-language moat; Yoruba is the first/"
+            "hardest test case): action=lora-spec (corpus curation checklist) | "
             "lora-train (corpus_dir, preset, dry_run → training plan/recipe) "
             "| lora-list | lora-register (name, path) | align (lyrics, "
             "melody JSON, language → tone↔melody report) | sing (topic, "

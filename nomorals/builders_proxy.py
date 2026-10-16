@@ -321,3 +321,183 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
+
+
+# ── Tier 3: TLS verification + routing + deploy story (additive) ───────────
+# New functions only; the proxy's behaviour is unchanged.  These give
+# callers a way to VERIFY a deployment (is the cert real? does it
+# expire soon? where does this path route?) and to narrate the deploy
+# (the exact command + checks) instead of trusting the proxy blindly.
+
+
+def verify_tls_cert(cert_path: str, *, key_path: str = "") -> dict:
+    """Verify a TLS certificate file: exists, parses, dates, identity.
+
+    Returns ``{"ok", "exists", "key_exists", "subject", "issuer",
+    "not_before", "not_after", "days_left", "self_signed", "error"}``.
+    Prefers ``cryptography``; falls back to the ``openssl`` CLI.
+    ``ok`` is False when the cert is missing, unparseable, expired, or
+    not-yet-valid — never silently True.  An expired cert is a fact in
+    the report, not an exception.
+    """
+    import datetime as _dt
+
+    out: dict = {"cert": cert_path, "exists": os.path.exists(cert_path),
+                 "key_exists": bool(key_path) and os.path.exists(key_path),
+                 "ok": False, "subject": "", "issuer": "",
+                 "not_before": "", "not_after": "", "days_left": None,
+                 "self_signed": False, "error": ""}
+    if not out["exists"]:
+        out["error"] = f"certificate not found: {cert_path}"
+        return out
+    try:
+        from cryptography import x509 as _x509
+
+        with open(cert_path, "rb") as fh:
+            cert = _x509.load_pem_x509_certificate(fh.read())
+        out["subject"] = cert.subject.rfc4514_string()
+        out["issuer"] = cert.issuer.rfc4514_string()
+        out["not_before"] = cert.not_valid_before_utc.isoformat()
+        out["not_after"] = cert.not_valid_after_utc.isoformat()
+        out["self_signed"] = cert.subject == cert.issuer
+        now = _dt.datetime.now(_dt.timezone.utc)
+        out["days_left"] = (cert.not_valid_after_utc - now).days
+        if now < cert.not_valid_before_utc:
+            out["error"] = "certificate is not yet valid"
+        elif now > cert.not_valid_after_utc:
+            out["error"] = "certificate is expired"
+        else:
+            out["ok"] = True
+        return out
+    except ImportError:
+        pass
+    except Exception as exc:  # noqa: BLE001 — fall through to openssl
+        out["error"] = f"cryptography parse failed: {exc}"
+    try:
+        proc = subprocess.run(
+            ["openssl", "x509", "-in", cert_path, "-noout",
+             "-subject", "-issuer", "-dates"],
+            capture_output=True, text=True, timeout=30)
+        if proc.returncode != 0:
+            out["error"] = out["error"] or (
+                f"openssl could not parse cert: {proc.stderr.strip()[:200]}")
+            return out
+        fields: dict[str, str] = {}
+        for line in proc.stdout.splitlines():
+            if "=" in line:
+                key, _, val = line.partition("=")
+                fields[key.strip()] = val.strip()
+        out["subject"] = fields.get("subject", "")
+        out["issuer"] = fields.get("issuer", "")
+        out["not_before"] = fields.get("notBefore", "")
+        out["not_after"] = fields.get("notAfter", "")
+        out["self_signed"] = bool(out["subject"] and
+                                  out["subject"] == out["issuer"])
+        try:
+            exp = _dt.datetime.strptime(
+                out["not_after"], "%b %d %H:%M:%S %Y %Z").replace(
+                    tzinfo=_dt.timezone.utc)
+            now = _dt.datetime.now(_dt.timezone.utc)
+            out["days_left"] = (exp - now).days
+            out["ok"] = now <= exp
+            if not out["ok"]:
+                out["error"] = "certificate is expired"
+        except ValueError:
+            out["error"] = "could not parse certificate expiry"
+        return out
+    except (FileNotFoundError, subprocess.SubprocessError) as exc:
+        out["error"] = out["error"] or f"openssl unavailable: {exc}"
+        return out
+
+
+def route_request(path: str, *, prefix: str = "", domain: str = "",
+                  backend_host: str = "127.0.0.1",
+                  backend_port: int = 8000) -> dict:
+    """Pure routing decision for one request path: strip the prefix,
+    rewrite Host, build the backend URL.  Mirrors
+    :class:`ReverseProxyHandler`'s ``_target_path`` / ``_forward_headers``
+    logic without touching the network — testable, auditable."""
+    norm_prefix = "/" + prefix.strip("/") if prefix.strip("/") else ""
+    target = path
+    if norm_prefix and (path == norm_prefix
+                        or path.startswith(norm_prefix + "/")):
+        target = path[len(norm_prefix):] or "/"
+    headers = {}
+    if domain:
+        headers["Host"] = domain
+    return {
+        "path": path,
+        "prefix": norm_prefix,
+        "target_path": target,
+        "host_header": headers.get("Host", ""),
+        "backend": f"{backend_host}:{backend_port}",
+        "backend_url": f"http://{backend_host}:{backend_port}{target}",
+    }
+
+
+def build_proxy_command(*, backend: str, listen: str, prefix: str = "",
+                        domain: str = "", tls: bool = False,
+                        cert: str = "", key: str = "") -> list[str]:
+    """The exact detached-proxy command for a deploy (argv list)."""
+    cmd = [sys.executable, "-m", "nomorals.builders_proxy",
+           "--backend", backend, "--listen", listen]
+    if prefix:
+        cmd += ["--prefix", prefix]
+    if domain:
+        cmd += ["--domain", domain]
+    if tls:
+        cmd += ["--tls"]
+        if cert:
+            cmd += ["--cert", cert]
+        if key:
+            cmd += ["--key", key]
+    return cmd
+
+
+def deploy_story(*, backend: str, listen: str, prefix: str = "",
+                 domain: str = "", tls: bool = False,
+                 cert: str = "", key: str = "") -> dict:
+    """The deploy story: command + verification steps + honest notes.
+
+    Functions only — this does not launch anything.  The caller runs
+    ``command`` (detached, as ``AppBuilder.deploy`` does) and then the
+    ``checks`` in order.  TLS notes say plainly when the cert is
+    self-signed (browsers will flag it) instead of implying CA trust.
+    """
+    command = build_proxy_command(backend=backend, listen=listen,
+                                  prefix=prefix, domain=domain, tls=tls,
+                                  cert=cert, key=key)
+    scheme = "https" if tls else "http"
+    public = f"{scheme}://{domain or listen}{prefix}"
+    checks = [
+        f"proxy announces ready on {listen} (backend {backend})",
+        f"GET {public}/ returns the app (not a 502)",
+        "a 302 from the backend rewrites Location to the public origin",
+    ]
+    notes = []
+    if tls:
+        if cert and key:
+            notes.append(f"TLS terminates with the supplied cert {cert}.")
+            notes.append("Verify it first: verify_tls_cert(cert).")
+        else:
+            notes.append("TLS uses a generated self-signed cert cached "
+                         "under ~/.nomorals/tls — browsers will flag it; "
+                         "it is NOT CA-trusted.")
+        checks.append("TLS handshake succeeds; cert expiry checked "
+                      "via verify_tls_cert().")
+    else:
+        notes.append("No TLS: traffic between client and proxy is plain "
+                     "HTTP — put a real terminator (Caddy/nginx) in "
+                     "front for anything public.")
+    return {
+        "command": command,
+        "command_str": " ".join(command),
+        "public_url": public,
+        "scheme": scheme,
+        "checks": checks,
+        "notes": notes,
+    }
+
+
+__all__ += ["verify_tls_cert", "route_request", "build_proxy_command",
+            "deploy_story"]

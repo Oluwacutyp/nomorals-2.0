@@ -40,4 +40,17 @@ __all__ = [
     "weakness",
     "patterns",
     "presence",
+    # Six autonomy additions (2026-10-16): unified scheduler, budget
+    # governor, nm why, owner rhythm, prep usage, preemption ladder.
+    "unified",
+    "budget",
+    "why",
+    "rhythm",
+    "usage",
+    "preemption",
 ]
+
+# Tier 0: power-aware gate for organ ticks (new file, additive).
+from .power_aware import PowerAwareGate, check_power, should_tick
+
+__all__ += ["PowerAwareGate", "check_power", "should_tick"]

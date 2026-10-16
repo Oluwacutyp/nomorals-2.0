@@ -185,10 +185,74 @@ class TrialFlowP9Tests(unittest.TestCase):
         self.assertIn("one account per service", text)
         self.assertIn("/trial send github", text)
 
-    def test_existing_account_none_when_empty(self):
+    def test_existing_account_none_when_checked_and_empty(self):
+        # Passphrase set + both vaults clean -> genuinely none.
         flow, _, _ = self._flow()
-        self.assertIsNone(flow._existing_account("github"))
-        self.assertIsNone(flow._existing_account(""))
+        with mock.patch.dict(os.environ,
+                             {"NM_VAULT_PASSPHRASE": "test-pass"}):
+            self.assertEqual(("none", None),
+                             flow._existing_account("github"))
+
+    def test_existing_account_unknown_without_passphrase(self):
+        # P1-9b: passphrase unset -> personal vault never checked ->
+        # absence unproven -> unknown (fail closed), NOT none.
+        flow, _, _ = self._flow()
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("NM_VAULT_PASSPHRASE", None)
+            self.assertEqual(("unknown", None),
+                             flow._existing_account("github"))
+            self.assertEqual(("unknown", None),
+                             flow._existing_account(""))
+
+    def test_existing_account_unknown_when_trial_vault_errors(self):
+        flow, _, _ = self._flow()
+        with mock.patch.dict(os.environ,
+                             {"NM_VAULT_PASSPHRASE": "test-pass"}), \
+                mock.patch.object(flow.vault, "get",
+                                  side_effect=RuntimeError("boom")):
+            self.assertEqual(("unknown", None),
+                             flow._existing_account("github"))
+
+    def test_existing_account_unknown_when_entry_unreadable(self):
+        # An entry EXISTS but cannot be verified (tampered MAC) -> unknown.
+        flow, _, _ = self._flow()
+        with mock.patch.object(flow.vault, "get",
+                                return_value={"login": "octocat",
+                                              "unreadable": True}):
+            self.assertEqual(("unknown", None),
+                             flow._existing_account("github"))
+
+    def test_existing_account_found_in_personal_vault(self):
+        from nomorals.accounts.vault import CredentialVault
+
+        flow, db, _ = self._flow()
+        with mock.patch.dict(os.environ,
+                             {"NM_VAULT_PASSPHRASE": "test-pass"}):
+            vault = CredentialVault(db, master_passphrase="test-pass")
+            vault.store("github", "octocat", "pw123")
+            self.assertEqual(("found", ("accounts", "octocat")),
+                             flow._existing_account("github"))
+
+    def test_assist_refuses_when_unknown(self):
+        # No passphrase + no trial entry -> unknown -> refuse, never draft.
+        flow, _, _ = self._flow()
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("NM_VAULT_PASSPHRASE", None)
+            text = flow.assist("github", auto_yes=True)
+        self.assertIn("couldn't verify", text)
+        self.assertNotIn("already have an account", text)
+
+    def test_launch_assist_refuses_when_unknown(self):
+        # Passphrase gate passes, then the tri-state check fails closed.
+        flow, _, _ = self._flow()
+        with mock.patch.dict(os.environ,
+                             {"NM_VAULT_PASSPHRASE": "test-pass"}), \
+                mock.patch.object(flow.vault, "get",
+                                  side_effect=RuntimeError("boom")):
+            text = flow._launch_assist("github", chat_key="",
+                                       identity={"name": "X",
+                                                 "email": "x@y.z"})
+        self.assertIn("couldn't verify", text)
 
     def test_assist_empty_platform_raises(self):
         flow, _, _ = self._flow()

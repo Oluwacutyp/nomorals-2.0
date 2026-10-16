@@ -30,6 +30,15 @@ LAYERS: dict[str, int] = {
     "training": 3,
     "cognition": 3,
     "ta": 3,
+    # matching/ is the two-sided stable-matching engine (Gale-Shapley):
+    # a leaf engine beside ta, importing only core, used by agents.
+    "matching": 3,
+    # planning/ is the plan engine: imports memory (L3), imported by the
+    # scheduler (L4). Sits with the other L3 engines.
+    "planning": 3,
+    # security/ is the low-level leak-check organ (dnsleak/netleak):
+    # imports only core, imported by tools (L4). L3 per the review brief.
+    "security": 3,
     "tools": 4,
     "social": 4,
     "media": 4,
@@ -79,6 +88,50 @@ LAYERS: dict[str, int] = {
     # plugins/ is the plugin package model (manifests, registry, sandboxed
     # loading): a service organ at L4 beside skills, reaching only downward.
     "plugins": 4,
+    # ── T1.5: the 18 previously unmapped packages. Each layer satisfies
+    # max_imported <= L <= min_importer_layer for the package, verified
+    # per-module; the five packages where no single layer satisfies it
+    # (autonomy, characters, console, finance, research) get MODULE_PINS
+    # below for the modules that break the package layer. ──
+    # audio/ is the audio service organ (audiobooks, editing, DSP): imports
+    # documents/media_edit/voice (L4), imported by media/voice (L4). L4.
+    "audio": 4,
+    # characters/ is the character service organ (casting, dialogue,
+    # arcs): imported by tools/media (L4). Its match module imports games
+    # (L5) and is pinned there; the rest is L4.
+    "characters": 4,
+    # commerce/ is the commerce service organ: imports social (L4),
+    # imported by tools (L4). L4.
+    "commerce": 4,
+    # community/ is the community/groups service organ: imports tools
+    # (L4), imported by agents (L5). L4, peer of social.
+    "community": 4,
+    # finance/ is the money service organ (budgets, ledger, trading desk):
+    # its agent-facing modules (alerts, commands, digest, overview, tools)
+    # import agents/connectors (L5) and are pinned there, plus
+    # tools/finance pinned L5; the ledger-facing remainder is L4,
+    # imported by voice/media/tools (L4).
+    "finance": 4,
+    # learn/ is the learning service organ (courses, tutoring): imports
+    # documents/voice (L4), imported by agents (L5). L4.
+    "learn": 4,
+    # legal/ is the legal-aid service organ: imports documents (L4),
+    # imported by agents (L5). L4.
+    "legal": 4,
+    # marketing/ is the marketing service organ (AEO, content, competitor):
+    # imports social (L4), imported by agents (L5). L4.
+    "marketing": 4,
+    # property/ is the property service organ (rental passport, scam
+    # checks): imports nothing above L0, imported by agents/triggers (L5).
+    # L4, peer of the other service organs.
+    "property": 4,
+    # research/ is the research service organ (grounded pipeline): imports
+    # documents/social (L4), imported by agents/social (L4/L5). Its costs
+    # module is imported by llm (L3) and pinned there; the rest is L4.
+    "research": 4,
+    # vision/ is the vision service organ: imports browser (L4), imported
+    # by tools (L4). L4.
+    "vision": 4,
     "workspace": 5,
     # mesh/: phone-to-cloud worker mesh (nodes/heartbeats/task dispatch).
     # L5 organ; wraps storage.queue, reaches only downward.
@@ -99,7 +152,25 @@ LAYERS: dict[str, int] = {
     # strict hierarchy here was fiction.  Peers at the same layer may import
     # each other; the test still forbids either from reaching above L5.
     "missions": 5,
+    # autonomy/ is the autonomy organ (presence, weakness, coordinator):
+    # imports agents/wisdom (L5), imported by agents (L5) and
+    # tools/autonomy — the latter pinned L5 with it. L5.
+    "autonomy": 5,
+    # health/ is the health organ: imports agents (L5), imported by
+    # agents/games (L5). L5.
+    "health": 5,
+    # travel/ is the travel organ: imports connectors (L5), imported by
+    # agents/connectors (L5). L5.
+    "travel": 5,
     "tui": 6,
+    # console/ is the terminal-UI surface (dashboard, godconsole,
+    # commands) — but it sits at L5, not L6/L7: agents/context and
+    # agents/partner/runtime (both L5) import console.debug / console,
+    # so L6+ would create 2 new violations for a layer its own usage
+    # does not support. It imports nothing upward. Its palette is a
+    # leaf imported by social/chat (L4) and is pinned there; the rest
+    # is L5.
+    "console": 5,
     # os is the control plane (may import L1-L6; imported by L7 entry points
     # cli/api; LOWER layers must NEVER import os — integration is via
     # callbacks/events, never upward imports).
@@ -141,8 +212,35 @@ TOP_LEVEL_LAYER = {
 MODULE_PINS: dict[str, int] = {
     # Leaf stores/services: import core only, despite living in agents/.
     "nomorals.agents.kg": 1,            # knowledge-graph store (core/cookies writes to it)
-    "nomorals.agents.power": 1,         # power-mode lookup (tools/sandbox_code reads it)
-    "nomorals.agents.osint_graph": 1,  # identity graph (tools/decoder reads it)
+    # L2 persistence-backed services: they persist via storage.kv (L2),
+    # so L1 was a mis-pin — their true layer is L2 (imports: core L1 +
+    # storage L2 only; all importers are L4+). Injecting a store into
+    # their 5+ call sites would buy the same invariant at far higher
+    # churn; the pin states the true dependency level.
+    "nomorals.agents.power": 2,         # power-mode lookup (tools/sandbox_code reads it)
+    "nomorals.agents.osint_graph": 2,   # identity graph (tools/decoder reads it)
+    # Short-form publishers are connector subclasses/adapters (MetaPublisher
+    # subclasses InstagramConnector, YouTubePublisher subclasses
+    # YouTubeConnector) — genuinely L5 application services on connectors,
+    # not L4 media helpers. The whole package is pinned so the intra-package
+    # imports (incl. the lazy __getattr__ in __init__) stay same-layer.
+    # Importers: cmdline shorts (L7) + partner runtime_media ledger (L5).
+    "nomorals.media.contentops.publish": 5,
+    "nomorals.media.contentops.publish.ledger": 5,
+    "nomorals.media.contentops.publish.meta": 5,
+    "nomorals.media.contentops.publish.youtube": 5,
+    "nomorals.media.contentops.publish.tiktok": 5,
+    "nomorals.media.contentops.publish.x": 5,
+    # Agent-composed tool modules: they compose agents/games/connectors/
+    # integrations (L5) into tool surfaces — they ARE the L5 composition
+    # layer, not L4 foundation tools. The pins ARE the foundation-vs-
+    # composition split, enforced by the test. Their imports are all
+    # <= L5; the only static importer is cmdline trade (L7, downward).
+    "nomorals.tools.deals": 5,       # -> integrations.naija_deals
+    "nomorals.tools.gameplayer": 5,  # -> games.player.session
+    "nomorals.tools.games": 5,       # -> games.*
+    "nomorals.tools.services": 5,    # -> connectors.registry
+    "nomorals.tools.trading": 5,     # -> connectors.* + agents.financial_expert
     # Low-level adapters inside higher-level packages.
     "nomorals.integrations.voice_integration": 1,
     "nomorals.integrations.sentinel_bridge": 2,  # vendored-sentinel bridge
@@ -153,6 +251,27 @@ MODULE_PINS: dict[str, int] = {
     # tool registry's register_builtins() imports.  An entry-point-layer
     # (L7) adapter, like builders_proxy.
     "nomorals.tools.build_app": 7,
+    # ── T1.5: per-module pins for the packages whose modules span layers.
+    # Each pin is a module whose true layer differs from its package's.
+    # characters.match imports games (L5); the rest of characters/ is L4.
+    "nomorals.characters.match": 5,
+    # console.palette is a color-constant leaf imported by social/chat
+    # (L4); the rest of console/ is the L6 terminal-UI surface.
+    "nomorals.console.palette": 4,
+    # research.costs is imported by llm (L3); the rest of research/ is L4.
+    "nomorals.research.costs": 3,
+    # finance's agent-facing modules import agents/connectors (L5).
+    "nomorals.finance.alerts": 5,
+    "nomorals.finance.commands": 5,
+    "nomorals.finance.digest": 5,
+    "nomorals.finance.overview": 5,
+    "nomorals.finance.tools": 5,
+    # tools/autonomy and tools/finance are agent-composed capabilities
+    # (they orchestrate autonomy.* / finance.* at L5), not foundation
+    # tools — pinned with the modules they compose. The rest of tools/
+    # stays L4; the full foundation-vs-composition split is T1.6.
+    "nomorals.tools.autonomy": 5,
+    "nomorals.tools.finance": 5,
 }
 
 #: Grandfathered upward imports.  Each entry is an (importer, target) dotted
@@ -171,7 +290,6 @@ KNOWN_VIOLATIONS: frozenset[tuple[str, str]] = frozenset({
     ("nomorals.tools.edit_loop", "nomorals.agents.coding"),
     ("nomorals.tools.decoder_agent", "nomorals.agents.decoder"),
     ("nomorals.tools.decoder_agent", "nomorals.agents.context"),
-    ("nomorals.tools.trading", "nomorals.agents.financial_expert"),
     ("nomorals.tools.proxylab", "nomorals.agents.scheduler"),
     ("nomorals.tools.weather", "nomorals.agents.weather"),
     ("nomorals.tools.workspace", "nomorals.agents.goals"),
@@ -187,17 +305,13 @@ KNOWN_VIOLATIONS: frozenset[tuple[str, str]] = frozenset({
     # Deferred optional-dependency imports (function-local, try/except-guarded
     # where fallible): the static AST check can't see they never run at
     # import time.  Documented here rather than exempted silently.
-    # sweep(finance): exness connector only constructed when no injected
-    # connector is present on the context.
-    ("nomorals.finance.commands", "nomorals.connectors.exness"),
-    ("nomorals.finance.tools", "nomorals.connectors.exness"),
+    # T1.5 removed the sweep(finance) pair (finance.commands/tools pinned
+    # L5, so connectors.exness is same-layer now), the sweep(research)
+    # pair (research L4 -> memory L3 is downward), and the sweep(security)
+    # pair (security L3 -> core L1 is downward): the edges-as-violations
+    # are gone, so the entries go with them.
     # sweep(integrations): deal-hunter reuse inside one grouping method.
     ("nomorals.integrations.naija_shopping", "nomorals.integrations.naija_deals"),
-    # sweep(research): MemoryKind only read when a remember() exists.
-    ("nomorals.research.autonomy", "nomorals.memory.base"),
-    # sweep(security): stdlib-shipped logger helper, same pattern as the rest
-    # of the tree's deferred logging convention.
-    ("nomorals.security.netleak", "nomorals.core.logging_setup"),
 })
 
 

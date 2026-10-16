@@ -164,6 +164,67 @@ class RuntimeSearchMixin:
                 r = forge.send(parts[1], parts[2], parts[3])
                 return f"sent {r['slug']} to {parts[2]}:{parts[3]}"
 
+            if verb == "sources":
+                from ...books.descriptors import list_sources
+                lines = ["story sources (legal first, licence on every row):"]
+                for s in list_sources():
+                    mark = "✓" if s["verified"] else "?"
+                    lines.append(
+                        f"  {mark} {s['id']} — {s['rights_class']} — "
+                        f"{s['licence']}"
+                        + (" (needs API key)" if s["requires_key"] else ""))
+                lines.append("\n/books read <url|slug> [n] follows + reads; "
+                             "/books continue <slug> [n] continues in its voice")
+                return "\n".join(lines)
+
+            if verb == "read":
+                # /books read <url|slug> [n] — follow a URL, or read a
+                # followed story. Chapter 0 = resume where you left off.
+                from ...books.reader import StoryReader
+                if len(parts) < 2:
+                    return "usage: /books read <url|slug> [chapter] — 0 = resume"
+                target = parts[1]
+                chapter = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 0
+                reader = StoryReader(self.context)
+                try:
+                    if target.startswith("http"):
+                        followed = reader.follow(target)
+                        slug = followed.slug
+                    else:
+                        slug = target
+                    result = reader.read(slug, chapter=chapter)
+                except Exception as exc:  # noqa: BLE001 - chat surface
+                    return f"read failed: {exc}"
+                text = result.get("text", "")
+                shown = text[:3500]
+                suffix = "\n…(truncated — /books read %s %s for the next part)" % (
+                    slug, int(result.get("chapter", chapter or 1)) + 1) if len(text) > 3500 else ""
+                return (f"📖 {result.get('title', slug)} — chapter "
+                        f"{result.get('chapter', chapter)}\n\n{shown}{suffix}")
+
+            if verb == "continue":
+                # /books continue <slug> [n] — continue past the ending
+                # in the story's voice, with per-chapter drift scores
+                from ...books.serial import SerialManager
+                if len(parts) < 2:
+                    return "usage: /books continue <slug> [n] — continue past the ending"
+                n = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 1
+                try:
+                    result = SerialManager(self.context).continue_past_ending(
+                        parts[1], max(1, min(n, 5)))
+                except Exception as exc:  # noqa: BLE001 - chat surface
+                    return f"continue failed: {exc}"
+                lines = [f"✍️ {result['title']} — continued "
+                         f"{len(result['chapters'])} chapter(s) "
+                         f"from chapter {result['continued_from_chapter']}"]
+                for ch in result["chapters"]:
+                    drift = ch.get("drift") or {}
+                    lines.append(
+                        f"  ch {ch.get('chapter')} — {ch.get('words', 0)} words · "
+                        f"voice drift {drift.get('drift', '—')} "
+                        f"({drift.get('verdict', 'no reference voice')})")
+                return "\n".join(lines)
+
             # ── new book ────────────────────────────────────────────────────
             # chapters: explicit number wins, otherwise the book grows
             # organically as it is written (no count decided up front)

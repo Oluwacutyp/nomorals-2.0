@@ -73,6 +73,28 @@ class Credential:
         if self.expires_at is None:
             return False
         return time.time() > self.expires_at
+
+    @property
+    def tier(self) -> str:
+        """Proxy trust tier for this credential: ``free`` | ``paid`` | ``direct``.
+
+        Read from ``metadata["tier"]`` (set by the proxy pool for proxy
+        credentials; ``proxypool.add_proxy(..., tier=...)``).  Unlabelled
+        credentials default to ``direct`` — no proxy is involved — while
+        an unlabelled *proxy* credential is ``free`` (untrusted until
+        proven otherwise).  Invalid values fail closed to ``free``.
+        """
+        from ..core.proxy_tiers import normalize_tier
+
+        raw = (self.metadata or {}).get("tier")
+        if raw is None or str(raw).strip() == "":
+            if self.credential_type == "proxy":
+                return "free"
+            return "direct"
+        try:
+            return normalize_tier(raw)
+        except ValueError:
+            return "free"
     
     def to_dict(self) -> dict[str, Any]:
         """Serialize to dict (password excluded for safety)."""
@@ -81,6 +103,7 @@ class Credential:
             "service": self.service,
             "username": self.username,
             "credential_type": self.credential_type,
+            "tier": self.tier,
             "tags": self.tags,
             "metadata": self.metadata,
             "created_at": self.created_at,

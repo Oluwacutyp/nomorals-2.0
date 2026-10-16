@@ -149,12 +149,15 @@ class TestUpgradeOwnerGating(unittest.TestCase):
         self.assertIn("pending upgrades (1)", out)
         self.assertIn(self.p1["id"], out)
 
-    def test_handle_control_threads_chat_for_stranger(self):
+    def test_handle_control_denies_stranger_before_dispatch(self):
+        # The capability grant in handle_control denies a stranger before
+        # dispatch — the upgrade queue is never touched (the tripwire
+        # below proves it), and the stranger never reaches _control_upgrade.
         msg = SimpleNamespace(chat=STRANGER_CHAT, text="/upgrade list")
         with explode_queue_and_pipeline(self):
             out = self.rt.handle_control("/upgrade list", "telegram:999",
                                          message=msg)
-        self.assertEqual(out, UPGRADE_DENIAL)
+        self.assertEqual(out, "that one's just for the owner.")
         self.assertEqual(ExplodingQueue.instances, [])
 
     def test_handle_control_threads_chat_for_owner(self):

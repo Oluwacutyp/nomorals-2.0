@@ -431,6 +431,20 @@ Return your plan as JSON:
                 result.success = False
                 result.error = "Final tests failed"
 
+        # A failed FINAL step is a failed plan: the replanner's
+        # "continue" only redeems mid-plan failures (later independent
+        # steps may still succeed). This check MUST run before the
+        # rollback block below — otherwise a plan whose last step
+        # failed exits the loop with success=True, skips rollback,
+        # and only then gets marked failed, leaving the partial
+        # edits in place.
+        if (result.success and result.step_results
+                and not result.step_results[-1].success):
+            last = result.step_results[-1]
+            result.success = False
+            result.error = (f"Step {last.step_id} failed ({last.error}); "
+                            "no recovery")
+
         # Automatic rollback on failure: undo the steps that ran, in reverse.
         if not result.success and plan.rollback_steps:
             _log.warning("plan failed (%s) - running %d rollback steps",
@@ -452,16 +466,6 @@ Return your plan as JSON:
                     rollback_errors.append(f"{rb.step_id}: {e}")
             if rollback_errors:
                 result.error += f" | rollback issues: {'; '.join(rollback_errors)}"
-
-        # A failed FINAL step is a failed plan: the replanner's
-        # "continue" only redeems mid-plan failures (later independent
-        # steps may still succeed).
-        if (result.success and result.step_results
-                and not result.step_results[-1].success):
-            last = result.step_results[-1]
-            result.success = False
-            result.error = (f"Step {last.step_id} failed ({last.error}); "
-                            "no recovery")
 
         result.duration = time.time() - start
         result.steps_total = len(result.step_results)

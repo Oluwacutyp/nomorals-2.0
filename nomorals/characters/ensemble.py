@@ -62,8 +62,8 @@ def _speak_in_scene(char: Character, scene: Scene,
     ctx = (f"{scene.title} — topic: {scene.topic}\n"
            f"{others_block}"
            f"Conversation so far:\n{scene.transcript()}\n"
-           f"Respond naturally as yourself. React to what's been said — "
-           f"agree, disagree, build, joke. Don't repeat others.")
+           f"Respond as yourself, human always. Decide how you act from "
+           f"your own mood and how the others here are acting.")
     if steer:
         ctx += f"\nDirection for this turn: {steer}"
     mem = char.recall(scene.transcript(4))
@@ -106,36 +106,38 @@ def _short_turns(scene: Scene, n: int = 3, max_len: int = 60) -> bool:
 
 
 def default_beats() -> list[Beat]:
-    """The standard beat pool: energy rescue, provocation, intimacy."""
+    """The beat pool. Steers are mood/interlocutor-driven, never tone presets —
+    the character decides how to act from its own mood and how the others
+    are acting. Human always."""
     return [
         Beat("hot_take",
-             "Drop a hot take about the topic — something the others will "
-             "react to. Be specific, be bold.",
+             "Say what you would say here, from your own mood and how "
+             "the others are acting.",
              energy_boost=0.25,
              precondition=lambda sc, d: d.energy < 0.45),
         Beat("call_out",
-             "Call someone here out BY NAME — disagree with something they "
-             "said, playfully or seriously. Make it personal.",
+             "Respond to someone here by name, as you would, from your "
+             "mood and how they are acting.",
              energy_boost=0.3,
              precondition=lambda sc, d: d.energy < 0.4 and len(sc.participants) >= 3),
         Beat("story_time",
-             "Tell a short personal story connected to the topic — something "
-             "real that happened to you. Stories reset a dying room.",
+             "Say what comes to you from your own life, as you would, "
+             "from your mood and how the room is acting.",
              energy_boost=0.22,
              precondition=lambda sc, d: d.energy < 0.5),
         Beat("change_angle",
-             "The conversation is circling. Change the angle — ask the "
-             "question nobody has asked yet.",
+             "The conversation is circling. Say what you would say next, "
+             "from your mood and how the others are acting.",
              energy_boost=0.2,
              precondition=lambda sc, d: _short_turns(sc)),
         Beat("cool_down",
-             "Energy is peaking — let it breathe. Say something quieter, "
-             "more reflective, more honest.",
+             "Energy is peaking — respond as you would, from your mood "
+             "and how the room is acting.",
              energy_boost=-0.1,
              precondition=lambda sc, d: d.energy > 0.9),
         Beat("draw_out",
-             "Someone here has been quiet. Ask them a direct question and "
-             "actually listen to the answer.",
+             "Someone here has been quiet. Respond as you would, from "
+             "your mood and how they are acting.",
              energy_boost=0.15,
              precondition=lambda sc, d: d.energy < 0.55 and len(sc.participants) >= 3),
     ]
@@ -279,8 +281,7 @@ def run_scene(chars: list[Character], title: str, topic: str,
     elif fmt == "roast" and len(chars) >= 2:
         sc.add("Devon (director)",
                f"🎙️ Roast format: everyone roasts {chars[-1].name}. "
-               f"{chars[-1].name} gets a rebuttal every few turns. "
-               f"Funny, not cruel.")
+               f"{chars[-1].name} gets a rebuttal every few turns.")
     for round_no, seq in enumerate(_sequence(fmt, chars, rounds, rng, teams)):
         for char in seq:
             others = [c for c in chars if c.id != char.id]
@@ -292,7 +293,7 @@ def run_scene(chars: list[Character], title: str, topic: str,
                         "You're debating — rebut the other side's last point."
                 elif fmt == "roast" and char is not chars[-1]:
                     steer = (steer + " " if steer else "") + \
-                        f"Roast {chars[-1].name} — sharp but loving."
+                        f"Roast {chars[-1].name} — as you would, from your mood and how they're acting."
                 elif fmt == "story_circle":
                     steer = (steer + " " if steer else "") + \
                         "Build on the previous story — same thread, your angle."
@@ -334,7 +335,8 @@ def podcast_episode(host: Character, guests: list[Character], topic: str,
         f"You are opening your podcast episode about: {topic}. "
         f"Your guests: {', '.join(g.name for g in guests)}. "
         f"Welcome the listeners and your guests, set up the topic. "
-        f"Be yourself — energetic, curious.",
+        f"Be yourself — human always, decide from your mood and how "
+        f"your guests are acting.",
         suggest)
     sc.add(host.name, opener)
     host.remember(f"Hosted podcast on '{topic}' with "
@@ -356,8 +358,8 @@ def podcast_episode(host: Character, guests: list[Character], topic: str,
         if i % 3 == 2:  # host steers
             steer = host.speak(
                 f"You're hosting. Topic: {topic}. Conversation so far:\n"
-                f"{sc.transcript()}\nSteer it — ask a sharp question, "
-                f"challenge someone gently, or move to the next angle.",
+                f"{sc.transcript()}\nSteer it as you would — from your mood "
+                f"and how the conversation is going.",
                 suggest)
             sc.add(host.name, steer)
             if director:

@@ -1464,10 +1464,14 @@ class GameEngine:
             won, score=score, difficulty=difficulty,
             streak_after=streak_after)
 
-    def rematch(self, chat_key: str) -> tuple[Room | None, list[str]]:
+    def rematch(self, chat_key: str, difficulty: str = "normal",
+                ) -> tuple[Room | None, list[str]]:
         """Start the last finished game again with the same humans.
 
-        Returns (room, messages) or (None, [why-not])."""
+        Returns (room, messages) or (None, [why-not]). ``difficulty``
+        is handed to :meth:`start` (only games that declare a named
+        ``difficulty`` parameter on ``new_state`` see it).
+        """
         with self._lock:
             last = self._last_game.get(chat_key)
             live = self._rooms.get(chat_key)
@@ -1479,7 +1483,8 @@ class GameEngine:
         game_name, humans, kind = last
         host, rest = humans[0], humans[1:]
         try:
-            room, msgs = self.start(chat_key, game_name, host, kind=kind)
+            room, msgs = self.start(chat_key, game_name, host, kind=kind,
+                                    difficulty=difficulty)
         except ValueError as exc:
             return None, [str(exc)]
         joined: list[str] = []

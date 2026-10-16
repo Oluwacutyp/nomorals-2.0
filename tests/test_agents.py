@@ -8,19 +8,26 @@ time rather than just checking that results came back.
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
+import subprocess
+import sys
 import tempfile
 import time
 import unittest
+from pathlib import Path
+from unittest.mock import patch
 
 from nomorals.agents.base import Agent, AgentResult, Budget
 from nomorals.agents.blackboard import Blackboard
 from nomorals.agents.context import build_context
 from nomorals.agents.orchestrator import MasterOrchestrator, Plan, PlanStep
 from nomorals.agents.roles import ROLES, build_agent
-from nomorals.agents.runtime import HybridExecutor
+from nomorals.agents.runtime import HybridExecutor, default_process_workers
 from nomorals.agents.supervisor import RestartPolicy, Supervisor
+from nomorals.core.platform import detect_platform
+from tests.taxonomy import slow
 from nomorals.core.tasks import Task, TaskGraph, TaskKind, TaskState, cycle_in
 from nomorals.core.config import Settings
 from nomorals.core.errors import ValidationError
@@ -36,6 +43,15 @@ def _burn(iterations: int) -> int:
     for i in range(iterations):
         total += (i * i) % 7
     return total
+
+
+def _burn_with_pid(iterations: int) -> tuple[int, int]:
+    """Like :func:`_burn`, but also reports the worker PID that ran it.
+
+    The PID is how the wall-time tests prove tasks actually ran on
+    distinct pool workers instead of merely reporting parallelism.
+    """
+    return _burn(iterations), os.getpid()
 
 
 def _boom() -> None:
@@ -185,6 +201,122 @@ class ExecutorTests(unittest.TestCase):
         snapshot = report.to_dict()
         self.assertIn("task_seconds", snapshot)
         self.assertIn("speedup_vs_serial", snapshot)
+
+    # ── T1.1: worker-count formula + env override + termux pools-off ──
+
+    def test_default_process_workers_formula(self):
+        cpu = os.cpu_count() or 1
+        expected = max(2, cpu - 1)
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("NM_PROCESS_WORKERS", None)
+            self.assertEqual(default_process_workers(), expected)
+            self.assertEqual(default_process_workers(None), expected)
+            self.assertEqual(default_process_workers(0), expected)
+
+    def test_default_process_workers_env_override(self):
+        cpu = os.cpu_count() or 1
+        expected = max(2, cpu - 1)
+        with patch.dict(os.environ, {"NM_PROCESS_WORKERS": "3"}):
+            self.assertEqual(default_process_workers(), 3)
+            # Explicit argument beats the env var.
+            self.assertEqual(default_process_workers(5), 5)
+        with patch.dict(os.environ, {"NM_PROCESS_WORKERS": "0"}):
+            self.assertEqual(default_process_workers(), expected)
+        with patch.dict(os.environ, {"NM_PROCESS_WORKERS": "-2"}):
+            self.assertEqual(default_process_workers(), expected)
+        with patch.dict(os.environ, {"NM_PROCESS_WORKERS": "banana"}):
+            self.assertEqual(default_process_workers(), expected)
+
+    def test_executor_default_processes_use_formula(self):
+        # Reverting the formula (cpu // 2) must fail this on a 2-core box:
+        # old formula gives 1 worker, new formula gives max(2, cpu - 1) = 2.
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("NM_PROCESS_WORKERS", None)
+            executor = HybridExecutor(use_processes=False)
+            try:
+                self.assertEqual(executor.processes,
+                                 max(2, (os.cpu_count() or 1) - 1))
+            finally:
+                executor.shutdown(wait=False, timeout=2.0)
+
+    def test_executor_env_override(self):
+        with patch.dict(os.environ, {"NM_PROCESS_WORKERS": "3"}):
+            executor = HybridExecutor(use_processes=False)
+            try:
+                self.assertEqual(executor.processes, 3)
+            finally:
+                executor.shutdown(wait=False, timeout=2.0)
+
+    def test_termux_profile_forces_pools_off(self):
+        # The termux preset (fork unreliable on Android) must keep pools
+        # off even after the worker-count change: the count is moot when
+        # no pool is built, and a pool must never be built.
+        from nomorals.core.config import load_settings
+
+        settings = load_settings(env={"NM_PROFILE": "termux"},
+                                 use_env_file=False)
+        self.assertFalse(settings.concurrency.use_processes)
+        executor = HybridExecutor(
+            threads=settings.concurrency.threads,
+            processes=settings.concurrency.processes,
+            use_processes=settings.concurrency.use_processes,
+        )
+        try:
+            self.assertIsNone(executor._process_pool)
+        finally:
+            executor.shutdown(wait=False, timeout=2.0)
+
+    # ── T1.3: wall-time parallelism (not just reported numbers) ──
+
+    @slow
+    def test_wall_time_speedup_at_defaults(self):
+        # The regression test for the 4.46x fiction: measure wall time
+        # against a serial baseline AND prove >1 distinct worker PID.
+        # Reverting T1.1 (1 worker on 2 cores) fails this on desktop.
+        # The measurement runs in a subprocess (tests/_walltime_probe.py):
+        # wall time is a global-resource measurement, and background
+        # threads from earlier tests in the shared process push the ratio
+        # from ~0.60 to ~0.76, flaking the 0.75 bar. A fresh process
+        # isolates it; the criterion itself is not widened.
+        if (os.cpu_count() or 1) < 2:
+            self.skipTest("needs >= 2 cores to show parallelism")
+        if not detect_platform().supports("process_pool"):
+            self.skipTest("process pools disabled on this platform")
+        root = Path(__file__).resolve().parent.parent
+        env = dict(os.environ)
+        env.pop("NM_PROCESS_WORKERS", None)
+        proc = subprocess.run(
+            [sys.executable, "-m", "tests._walltime_probe"],
+            cwd=root, env=env, capture_output=True, text=True, timeout=120,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr[-2000:])
+        data = json.loads(proc.stdout.strip().splitlines()[-1])
+        if "skipped" in data:
+            self.skipTest(data["skipped"])
+        self.assertEqual(data["done"], 8)
+        self.assertLess(data["wall"], data["serial"] * 0.75,
+                        f"wall {data['wall']:.2f}s not < 75% of "
+                        f"serial {data['serial']:.2f}s — no real parallelism")
+        self.assertGreater(len(data["pids"]), 1,
+                           f"all tasks ran on one PID {data['pids']} — pool "
+                           f"did not actually parallelize")
+
+    @slow
+    def test_serial_forced_reports_unit_speedup(self):
+        # One worker: the honest metric must report ~1.0, not the old 4.46x.
+        n_tasks, n = 4, 2_000_000
+        executor = HybridExecutor(processes=1)
+        try:
+            graph = TaskGraph()
+            for i in range(n_tasks):
+                graph.add_task(f"cpu{i}", _burn, n, kind=TaskKind.CPU)
+            report = executor.run(graph)
+        finally:
+            executor.shutdown(wait=False, timeout=5.0)
+        self.assertEqual(report.done, n_tasks)
+        self.assertAlmostEqual(report.speedup_vs_serial, 1.0, delta=0.15,
+                               msg=f"serial-forced run reported "
+                               f"{report.speedup_vs_serial}, expected ~1.0")
 
     def test_report_shape(self):
         graph = TaskGraph()

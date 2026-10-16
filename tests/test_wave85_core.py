@@ -32,6 +32,15 @@ def _make_context(tmp: str, **kw) -> Any:
     return context
 
 
+def _trust(context: Any) -> SourceTrust:
+    """SourceTrust with the KV store injected (the kernel may not import
+    storage, so the caller builds it). Without a store, feedback is
+    lost — exactly like the old ``db is None`` path."""
+    from nomorals.storage.kv import KVStore
+
+    return SourceTrust(context, store=KVStore(context.db))
+
+
 # ── 1. the domain ladder ────────────────────────────────────────────────────
 
 
@@ -98,7 +107,7 @@ class TrustFeedbackTests(unittest.TestCase):
         self.tmp.cleanup()
 
     def test_failures_sink_the_source(self) -> None:
-        t = SourceTrust(self.context)
+        t = _trust(self.context)
         url = "https://flaky.example.org/page"
         tier, _ = domain_tier(url)
         for _ in range(3):
@@ -108,14 +117,14 @@ class TrustFeedbackTests(unittest.TestCase):
 
     def test_penalty_persists_across_instances(self) -> None:
         url = "https://flaky.example.org/page"
-        SourceTrust(self.context).feedback(url, ok=False)
+        _trust(self.context).feedback(url, ok=False)
         # a NEW instance (simulating a restart) still sees the penalty
         tier, _ = domain_tier(url)
-        self.assertLess(SourceTrust(self.context).score(url), tier)
+        self.assertLess(_trust(self.context).score(url), tier)
 
     def test_successes_claw_back(self) -> None:
         url = "https://flaky.example.org/page"
-        t = SourceTrust(self.context)
+        t = _trust(self.context)
         t.feedback(url, ok=False)
         sank = t.score(url)
         for _ in range(3):
@@ -123,7 +132,7 @@ class TrustFeedbackTests(unittest.TestCase):
         self.assertGreater(t.score(url), sank)
 
     def test_annotate_idempotent_and_ranked_stable(self) -> None:
-        t = SourceTrust(self.context)
+        t = _trust(self.context)
         results = [{"url": "https://www.reddit.com/r/x", "title": "forum"},
                    {"url": "https://www.reuters.com/y", "title": "press"},
                    {"url": "https://example.com/z", "title": "web"}]
@@ -180,7 +189,7 @@ class SearchTrustIntegrationTests(unittest.TestCase):
 
     def test_failed_read_earns_persistent_penalty(self) -> None:
         self.engine.run("some topic", mode="quick", pages=3)
-        t = SourceTrust(self.context)
+        t = _trust(self.context)
         self.assertLess(t.score("https://www.reddit.com/r/topic"), 0.4)
         # the gov link, which delivered, keeps its tier
         self.assertGreaterEqual(t.score("https://www.gov.uk/topic"), 0.9)

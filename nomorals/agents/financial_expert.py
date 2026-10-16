@@ -546,6 +546,13 @@ class FinancialExpert:
             "rsi_divergence": "RSI/price divergence reversals at extremes",
             "bollinger_squeeze": "volatility-squeeze release breakouts",
             "sar_reversal": "Parabolic SAR stop-and-reverse",
+            "connors_rsi2": "Connors RSI(2) mean-reversion at extremes",
+            "heikin_ashi_trend": "Heikin-Ashi candle-run trend following",
+            "keltner_breakout": "Keltner-channel breakout, volume-confirmed",
+            "macd_cross": "MACD signal-line crossovers",
+            "pattern_confluence": "multi-pattern confluence scoring",
+            "stoch_cross": "stochastic %K/%D crossovers at extremes",
+            "supertrend": "Supertrend + ADX trend filter",
         }
         out = []
         for name in ta_strategies.list_strategies():

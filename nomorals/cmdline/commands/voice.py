@@ -50,6 +50,7 @@ def _voice_think_runtime(context: Any, device: str) -> Any:
     (``voice:<device>``) for every turn — the conversation identity
     persists in memory/DB across sessions, exactly like a chat DM.
     """
+    from ...os.resources import default_manager
     from ...social.chat.base import ChatMessage, ChatRef
     from ...social.chat.gateway import ChatGateway
     from ...agents.partner_runtime import PartnerRuntime
@@ -58,7 +59,9 @@ def _voice_think_runtime(context: Any, device: str) -> Any:
                    title="Voice call", peer="owner")
     gateway = ChatGateway({}, db=context.db, owner_chats={chat.key})
     gateway.register_chat(chat)  # marks is_owner in the chat registry
-    runtime = PartnerRuntime(context, gateway=gateway)
+    # Resource advisor injected (runtime is L5, may not import os/L6).
+    runtime = PartnerRuntime(context, gateway=gateway,
+                             resource_advisor=default_manager)
     counter = [0]
 
     def think(transcript: str) -> str:

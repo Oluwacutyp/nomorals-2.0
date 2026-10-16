@@ -270,3 +270,212 @@ def consistency_pass(clips: list[str], *,
         boundaries.append(entry)
     return adjusted, {"boundaries": boundaries,
                       "head_frames": head_frames}
+
+
+# ---------------------------------------------------------------------------
+# Project-wide identity + look lock (EDIT_GEN_UPGRADE 2.5)
+# ---------------------------------------------------------------------------
+# Identity lock: face + wardrobe + palette per character, carried across
+# every shot and every backend. Look lock: grade + palette + grain +
+# lens as a NAMED preset (data, not code — the look lives in the
+# document, the engine just applies it). continuity_check() flags
+# mismatches; it never ships a mismatched shot (see
+# directed.validate.validate_identity_continuity).
+
+__all__ += [
+    "IdentityLock",
+    "LookLock",
+    "palette_distance",
+    "embedding_similarity",
+    "check_identity",
+    "check_look",
+    "continuity_check",
+]
+
+#: identity similarity below this → mismatch (flag, not ship).
+IDENTITY_MIN_SIM = 0.75
+#: look palette distance above this → mismatch.
+LOOK_MAX_PALETTE_DIST = 60.0
+
+
+def palette_distance(a: list, b: list) -> float:
+    """Mean per-colour Euclidean distance between two palettes.
+
+    Palettes are ``[[r, g, b], ...]``; compared up to the shorter
+    length. ``0`` = identical. Pure — no image I/O.
+    """
+    import math as _math
+    if not a or not b:
+        return float("inf")
+    n = min(len(a), len(b))
+    tot = 0.0
+    for i in range(n):
+        tot += _math.sqrt(sum((float(x) - float(y)) ** 2
+                              for x, y in zip(a[i], b[i])))
+    return tot / n
+
+
+def embedding_similarity(a: list[float], b: list[float]) -> float:
+    """Cosine similarity between two embeddings (0..1, 1 = identical)."""
+    import math as _math
+    if not a or not b:
+        return 0.0
+    n = min(len(a), len(b))
+    dot = sum(float(x) * float(y) for x, y in zip(a[:n], b[:n]))
+    na = _math.sqrt(sum(float(x) ** 2 for x in a[:n])) or 1e-9
+    nb = _math.sqrt(sum(float(y) ** 2 for y in b[:n])) or 1e-9
+    return max(0.0, min(1.0, dot / (na * nb)))
+
+
+from dataclasses import dataclass as _dataclass, field as _field  # noqa: E402
+
+
+@_dataclass
+class IdentityLock:
+    """One character's identity lock: face + wardrobe + palette.
+
+    ``face_embedding``: face-recognition vector for the character
+    (mean over reference frames). ``wardrobe``: free-text wardrobe
+    description (e.g. "red jacket, black jeans"). ``palette``: the
+    character's reference palette ``[[r,g,b], ...]``.
+    """
+    character_id: str
+    face_embedding: list[float] = _field(default_factory=list)
+    wardrobe: str = ""
+    palette: list = _field(default_factory=list)
+
+    def to_dict(self) -> dict:
+        return {"character_id": self.character_id,
+                "face_embedding": list(self.face_embedding),
+                "wardrobe": self.wardrobe,
+                "palette": [list(map(float, px)) for px in self.palette]}
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "IdentityLock":
+        return cls(character_id=str(data.get("character_id", "")),
+                   face_embedding=[float(v) for v in
+                                   data.get("face_embedding", [])],
+                   wardrobe=str(data.get("wardrobe", "")),
+                   palette=[list(map(float, px))
+                            for px in data.get("palette", [])])
+
+
+@_dataclass
+class LookLock:
+    """One named look: grade + palette + grain + lens (data, not code)."""
+    name: str
+    grade: str = ""
+    palette: list = _field(default_factory=list)
+    grain: float = 0.0
+    lens: str = ""
+
+    def to_dict(self) -> dict:
+        return {"name": self.name, "grade": self.grade,
+                "palette": [list(map(float, px)) for px in self.palette],
+                "grain": float(self.grain), "lens": self.lens}
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "LookLock":
+        return cls(name=str(data.get("name", "")),
+                   grade=str(data.get("grade", "")),
+                   palette=[list(map(float, px))
+                            for px in data.get("palette", [])],
+                   grain=float(data.get("grain", 0.0)),
+                   lens=str(data.get("lens", "")))
+
+
+def check_identity(lock: IdentityLock, shot: dict) -> dict:
+    """Shot vs one identity lock → ``{similarity, palette_dist,
+    wardrobe_match, ok, issues}``.
+
+    ``shot``: ``{"face_embedding", "palette", "wardrobe"}`` — any
+    missing field is reported as an unmeasured issue, never assumed
+    matching.
+    """
+    issues: list[str] = []
+    sim: float | None = None
+    if shot.get("face_embedding") is not None and lock.face_embedding:
+        sim = embedding_similarity(lock.face_embedding,
+                                   shot["face_embedding"])
+        if sim < IDENTITY_MIN_SIM:
+            issues.append(
+                f"face similarity {sim:.2f} < {IDENTITY_MIN_SIM} "
+                f"for {lock.character_id!r}")
+    elif lock.face_embedding:
+        issues.append(f"no face embedding measured for "
+                      f"{lock.character_id!r}")
+    pdist: float | None = None
+    if shot.get("palette") and lock.palette:
+        pdist = palette_distance(lock.palette, shot["palette"])
+        if pdist > LOOK_MAX_PALETTE_DIST:
+            issues.append(f"palette distance {pdist:.1f} > "
+                          f"{LOOK_MAX_PALETTE_DIST}")
+    wardrobe_match: bool | None = None
+    if lock.wardrobe and shot.get("wardrobe") is not None:
+        wardrobe_match = (str(shot["wardrobe"]).strip().lower()
+                          == lock.wardrobe.strip().lower())
+        if not wardrobe_match:
+            issues.append(f"wardrobe {shot['wardrobe']!r} != locked "
+                          f"{lock.wardrobe!r}")
+    return {"character_id": lock.character_id, "similarity": sim,
+            "palette_dist": pdist, "wardrobe_match": wardrobe_match,
+            "ok": not issues, "issues": issues}
+
+
+def check_look(lock: LookLock, shot: dict) -> dict:
+    """Shot vs the look lock → ``{palette_dist, grade_match, ok,
+    issues}``. ``shot``: ``{"grade", "palette", "grain", "lens"}``."""
+    issues: list[str] = []
+    pdist: float | None = None
+    if shot.get("palette") and lock.palette:
+        pdist = palette_distance(lock.palette, shot["palette"])
+        if pdist > LOOK_MAX_PALETTE_DIST:
+            issues.append(f"look palette distance {pdist:.1f} > "
+                          f"{LOOK_MAX_PALETTE_DIST}")
+    grade_match: bool | None = None
+    if lock.grade and shot.get("grade") is not None:
+        grade_match = str(shot["grade"]).strip().lower() == \
+            lock.grade.strip().lower()
+        if not grade_match:
+            issues.append(f"grade {shot['grade']!r} != locked "
+                          f"{lock.grade!r} ({lock.name!r})")
+    return {"look": lock.name, "palette_dist": pdist,
+            "grade_match": grade_match, "ok": not issues,
+            "issues": issues}
+
+
+def continuity_check(shots: list[dict], *,
+                     identity_locks: list[IdentityLock | dict] | None = None,
+                     look_lock: LookLock | dict | None = None) -> dict:
+    """Project-wide continuity: every shot vs every lock.
+
+    ``shots``: ``[{"id", "character_id", "face_embedding", "palette",
+    "wardrobe", "grade", ...}]``. Returns ``{"ok", "mismatches",
+    "checked"}`` — mismatches flag shots that must NOT ship until
+    re-locked or re-generated. Pure: no image I/O.
+    """
+    locks = [lk if isinstance(lk, IdentityLock)
+             else IdentityLock.from_dict(dict(lk))
+             for lk in (identity_locks or [])]
+    look = (look_lock if isinstance(look_lock, LookLock)
+            else LookLock.from_dict(dict(look_lock))) \
+        if look_lock else None
+    mismatches: list[dict] = []
+    checked = 0
+    for shot in shots:
+        checked += 1
+        sid = shot.get("id", checked)
+        for lk in locks:
+            if shot.get("character_id") and shot["character_id"] != \
+                    lk.character_id:
+                continue
+            res = check_identity(lk, shot)
+            if not res["ok"]:
+                mismatches.append({"shot": sid, "kind": "identity",
+                                   **res})
+        if look is not None:
+            res = check_look(look, shot)
+            if not res["ok"]:
+                mismatches.append({"shot": sid, "kind": "look", **res})
+    return {"ok": not mismatches, "mismatches": mismatches,
+            "checked": checked}

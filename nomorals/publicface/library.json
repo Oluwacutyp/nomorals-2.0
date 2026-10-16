@@ -1,0 +1,5 @@
+{
+  "library": true,
+  "reason": "Public-face publishing gate \u2014 small pure API (publish/unpublish/scan_private_data/list_public). Genuine import-only library; the publish surface itself needs an owner-approval design decision.",
+  "owner_decision_needed": "Wire into CLI/chat with an owner-approval gate or keep as import-only library. Owner decision needed: public publishing surface."
+}

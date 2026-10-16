@@ -540,3 +540,11 @@ def register(registry: Any) -> None:
                        platform=platform, seed=seed or None, play=play,
                        send_transcript=st, send_to=send_to,
                        max_results=max_results)
+
+# GROUPS Tier 1 — /mix surface + delivery (shareable, reproducible mixes).
+from .mix_surface import MixDescriptor, MixTrack, deliver, render_mix, render_plan
+
+__all__ += ["MixDescriptor", "MixTrack", "deliver", "render_mix", "render_plan"]
+
+# GROUPS Tier 3: long-form DJ (dj_long) — stems, drops, live DJ.
+__all__ += ["dj_long"]

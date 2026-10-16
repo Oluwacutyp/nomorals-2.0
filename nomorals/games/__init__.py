@@ -35,3 +35,54 @@ __all__ = [
     "SendFn", "ShopItem", "active_event", "analyze_vod",
     "control_film", "dm_feed", "export_breakdown",
 ]
+
+# Math Class + difficulty-reward ladder (appended; new modules only).
+from .math_class import Duel, MathClass, Problem, TIERS as MATH_TIERS
+from .math_commands import MathCommandHandler
+from .math_economy import MATH_COINS_DISCLAIMER, MathEconomy
+from .reward_ladder import REWARD_TABLE, reward_for
+
+__all__ += [
+    "Duel", "MATH_COINS_DISCLAIMER", "MATH_TIERS", "MathClass",
+    "MathCommandHandler", "MathEconomy", "Problem", "REWARD_TABLE",
+    "reward_for",
+]
+
+# New-player onboarding boost + early quests + fresh start (appended; new modules only).
+from .early_quests import (
+    EARLY_QUESTS as EARLY_QUESTS,
+    claim_chest as claim_early_chest,
+    early_quests as list_early_quests,
+    quest_progress as early_quest_progress,
+    record_progress as record_early_progress,
+)
+from .fresh_start import (
+    SCHEMA_VERSION as GAME_SCHEMA_VERSION,
+    backup_old as backup_old_game_db,
+    fresh_start as fresh_start_game_db,
+    verify_clean as verify_fresh_start,
+)
+from .onboarding import (
+    BOOST_DAYS as ONBOARDING_BOOST_DAYS,
+    COIN_MULTIPLIER as ONBOARDING_COIN_MULTIPLIER,
+    STARTER_GEAR_PACK as STARTER_GEAR_PACK,
+    TUTORIAL_STEPS as TUTORIAL_STEPS,
+    XP_MULTIPLIER as ONBOARDING_XP_MULTIPLIER,
+    boost_profile_line as onboarding_profile_line,
+    complete_tutorial_step as complete_tutorial_step,
+    get_boost as get_onboarding_boost,
+    grant_starter_gear as grant_starter_gear,
+    start_boost as start_onboarding_boost,
+)
+
+__all__ += [
+    "EARLY_QUESTS", "GAME_SCHEMA_VERSION", "ONBOARDING_BOOST_DAYS",
+    "ONBOARDING_COIN_MULTIPLIER", "ONBOARDING_XP_MULTIPLIER",
+    "STARTER_GEAR_PACK", "TUTORIAL_STEPS",
+    "backup_old_game_db", "onboarding_profile_line",
+    "claim_early_chest", "complete_tutorial_step",
+    "early_quest_progress", "fresh_start_game_db", "list_early_quests",
+    "get_onboarding_boost", "grant_starter_gear",
+    "record_early_progress", "start_onboarding_boost",
+    "verify_fresh_start",
+]

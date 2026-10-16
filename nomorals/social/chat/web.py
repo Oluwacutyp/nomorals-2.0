@@ -56,6 +56,7 @@ class WebAdapter(ChatAdapter):
     def send(self, chat: ChatRef, text: str, *,
              reply_to: str = "",
              buttons: list[list[tuple[str, str]]] | None = None,
+             reply_keyboard: list[list[str]] | None = None,
              parse_mode: str = "") -> SendResult:
         with self._lock:
             self._parts.setdefault(chat.key, []).append(text)

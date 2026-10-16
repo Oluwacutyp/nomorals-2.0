@@ -61,12 +61,14 @@ def test_claim_confidence():
 
 
 def test_osint_specs_count():
-    assert len(OSINT_SPECS) == 9, f"expected 9, got {len(OSINT_SPECS)}"
     names = [s[0] for s in OSINT_SPECS]
+    # Set assertion, not a hardcoded count: the registry grows, and a magic
+    # number here is the same drift that broke test_osint_godtier.
+    assert len(names) == len(set(names)), "duplicate OSINT spec names"
     for expected in ["osint_phone", "osint_github", "osint_wayback",
                      "osint_gravatar", "osint_leakcheck"]:
         assert expected in names, f"missing {expected}"
-    print("✓ 9 OSINT adapters registered")
+    print(f"✓ {len(names)} OSINT adapters registered")
 
 
 def test_phone_detection():

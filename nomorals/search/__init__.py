@@ -142,3 +142,20 @@ __all__ = [
     "GravatarAdapter",
     "LeakCheckAdapter",
 ]
+
+# Tier 0: search spine — canonical federated entry point (new file, additive).
+from .spine import (
+    SearchSpine,
+    books_library_adapter,
+    memory_hybrid_adapter,
+    search,
+    wisdom_hybrid_adapter,
+)
+
+__all__ += [
+    "SearchSpine",
+    "search",
+    "memory_hybrid_adapter",
+    "wisdom_hybrid_adapter",
+    "books_library_adapter",
+]

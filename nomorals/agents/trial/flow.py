@@ -293,8 +293,9 @@ class TrialFlow:
         except Exception as exc:  # noqa: BLE001
             return f"account automation unavailable: {exc}"
         # One account per service — refuse before drafting any identity.
-        existing = self._existing_account(platform)
-        if existing:
+        state, existing = self._existing_account(platform)
+        if state == "found":
+            assert existing is not None
             source, login = existing
             self._audit("assist_refused", platform,
                         f"already have account ({source} vault)")
@@ -304,6 +305,19 @@ class TrialFlow:
                 "service.\n"
                 f"  /trial send {platform}   — redeliver the credentials\n"
                 f"  /trial rm {platform}     — remove it, then retry assist"
+            )
+        if state == "unknown":
+            # Fail closed: a vault could not be checked, so absence is
+            # unproven — never risk a duplicate signup.
+            self._audit("assist_refused", platform,
+                        "could not verify no existing account")
+            return (
+                f"couldn't verify whether an account already exists for "
+                f"{platform} — refusing to risk a duplicate signup.\n"
+                "  a vault could not be checked (passphrase unset, vault "
+                "locked, or a vault read failed).\n"
+                "  set NM_VAULT_PASSPHRASE so the personal vault can be "
+                "checked, then retry."
             )
         # Owner's own identity wins when set (services tied to them).
         # Otherwise draft a disposable persona — confirmation-gated.
@@ -375,38 +389,62 @@ class TrialFlow:
             persona_id=gen["persona_id"],
         )
 
-    def _existing_account(self, platform: str) -> tuple[str, str] | None:
-        """(vault_source, login) if an account for ``platform`` exists.
+    def _existing_account(
+        self, platform: str,
+    ) -> tuple[str, tuple[str, str] | None]:
+        """Tri-state one-account-per-service check.
 
-        Checks the trial vault (always readable) and the accounts vault
-        (when the passphrase is set — the passphrase gate in
-        ``_launch_assist`` refuses the run anyway when it isn't).  Used
-        to enforce one-account-per-service in code before a new signup
-        is launched, instead of relying on prose.
+        Returns ``(state, (vault_source, login) | None)`` with state in:
+
+        * ``"found"`` — an account exists (trial vault hit, or personal
+          vault hit). The ``(source, login)`` pair is the evidence.
+        * ``"none"`` — both vaults were checked and neither has one.
+        * ``"unknown"`` — a vault could not be checked, so absence is
+          UNPROVEN: trial-vault read error, an entry that exists but is
+          unreadable (tampered MAC), personal vault unreachable, or the
+          passphrase unset (personal vault never checked). Callers MUST
+          fail closed on ``"unknown"`` — treating it as "none" would let
+          a second signup run for a service that already has an account.
+
+        The trial vault is always readable without a passphrase, so a
+        trial hit refuses even when the vault is locked. The personal
+        vault is only checked when the passphrase is set.
         """
         key = (platform or "").strip().lower()
         if not key:
-            return None
+            return ("unknown", None)
+        trial_error = False
         try:
             entry = self.vault.get(key)
-        except Exception:  # noqa: BLE001 - treat as unknown, keep going
+        except Exception:  # noqa: BLE001 - indeterminate, not absent
+            trial_error = True
             entry = None
-        if entry is not None and not entry.get("unreadable"):
-            return ("trial", str(entry.get("login") or "?"))
+        if entry is not None:
+            if entry.get("unreadable"):
+                # An entry EXISTS but cannot be verified — fail closed.
+                return ("unknown", None)
+            return ("found", ("trial", str(entry.get("login") or "?")))
         passphrase = os.environ.get("NM_VAULT_PASSPHRASE", "")
-        if passphrase and self.db is not None:
-            try:
-                from ...accounts.vault import CredentialVault
+        if not passphrase or self.db is None:
+            # Personal vault never checked — absence unproven.
+            return ("unknown", None)
+        try:
+            from ...accounts.vault import CredentialVault
 
-                vault = CredentialVault(self.db,
-                                        master_passphrase=passphrase)
-                for cred in vault.list_all(service=key, active_only=True):
-                    return ("accounts",
-                            str(getattr(cred, "username", "?") or "?"))
-            except Exception:  # noqa: BLE001 - absence of evidence
-                _log.debug("trial existing-account check failed for %s",
-                           key)
-        return None
+            vault = CredentialVault(self.db,
+                                    master_passphrase=passphrase)
+            for cred in vault.list_all(service=key, active_only=True):
+                return ("found",
+                        ("accounts",
+                         str(getattr(cred, "username", "?") or "?")))
+        except Exception:  # noqa: BLE001 - indeterminate, not absent
+            _log.debug("trial existing-account check failed for %s", key)
+            return ("unknown", None)
+        if trial_error:
+            # Trial vault errored AND personal vault is clean: the trial
+            # side is still unverified, so the answer stays unknown.
+            return ("unknown", None)
+        return ("none", None)
 
     def _launch_assist(self, platform: str, *, chat_key: str,
                        identity: dict[str, str], persona_id: str = "",
@@ -423,8 +461,9 @@ class TrialFlow:
         # One account per service, enforced in code: refuse to drive a
         # second signup when one already exists in either vault.  The
         # owner redelivers with /trial send or removes it first.
-        existing = self._existing_account(platform)
-        if existing:
+        state, existing = self._existing_account(platform)
+        if state == "found":
+            assert existing is not None
             source, login = existing
             self._audit("assist_refused", platform,
                         f"already have account ({source} vault)")
@@ -434,6 +473,19 @@ class TrialFlow:
                 "service.\n"
                 f"  /trial send {platform}   — redeliver the credentials\n"
                 f"  /trial rm {platform}     — remove it, then retry assist"
+            )
+        if state == "unknown":
+            # Fail closed: a vault could not be checked, so absence is
+            # unproven — never risk a duplicate signup.
+            self._audit("assist_refused", platform,
+                        "could not verify no existing account")
+            return (
+                f"couldn't verify whether an account already exists for "
+                f"{platform} — refusing to risk a duplicate signup.\n"
+                "  a vault could not be checked (passphrase unset, vault "
+                "locked, or a vault read failed).\n"
+                "  set NM_VAULT_PASSPHRASE so the personal vault can be "
+                "checked, then retry."
             )
         if not self._assist_sem.acquire(blocking=False):
             return (

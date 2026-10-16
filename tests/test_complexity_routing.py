@@ -51,14 +51,25 @@ class _CostLogHome(unittest.TestCase):
     """Redirect the module-global cost log at ~/.nomorals into tmp_path."""
 
     def setUp(self):
+        import os
         import tempfile
         self._tmp = tempfile.TemporaryDirectory()
         self._old = router_mod._cost_log
         router_mod._cost_log = CostLog(
             f"{self._tmp.name}/cost.jsonl")
+        # log_llm_call also gates on NM_COST_LOG=off (another module
+        # used to set it at import time, poisoning the whole suite).
+        # These tests own the cost-logging path, so they own the gate.
+        self._old_env = os.environ.get("NM_COST_LOG")
+        os.environ.pop("NM_COST_LOG", None)
 
     def tearDown(self):
+        import os
         router_mod._cost_log = self._old
+        if self._old_env is None:
+            os.environ.pop("NM_COST_LOG", None)
+        else:
+            os.environ["NM_COST_LOG"] = self._old_env
         self._tmp.cleanup()
 
 

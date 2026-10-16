@@ -958,12 +958,14 @@ def ensure_heartbeat_job(scheduler: Any) -> None:
         have = [j for j in scheduler.list_jobs()
                 if j.get("name") == "presence-heartbeat"]
         if not have:
+            # No metadata kwarg: Scheduler.add has no metadata param
+            # and schedule_jobs has no metadata column — the job is
+            # identified by name ("presence-heartbeat").
             scheduler.add(
                 name="presence-heartbeat",
                 spec="*/30 * * * *",
                 payload_kind="tool",
                 payload={"tool": "__presence_heartbeat__", "args": {}},
-                metadata={"organ": "autonomy.presence"},
             )
             _log.info("presence heartbeat job registered")
     except Exception as exc:  # noqa: BLE001

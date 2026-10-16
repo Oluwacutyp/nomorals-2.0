@@ -1552,7 +1552,24 @@ class _Base85Decoder(Decoder):
         except (ValueError, binascii.Error):
             return None
         variant = "adobe ascii85" if adobe else "ascii85"
-        return _bytes_hit(self.name, raw, 0.75, variant)
+        # The ascii85 alphabet covers lowercase words, so plain English
+        # ("hello code beast", "card 4111 …") "decodes" to garbage bytes
+        # that pass the printable/commonness gate — the same false
+        # positive the leet decoder already rejects. Only accept a
+        # payload that is a known binary format, real English words,
+        # or structured JSON; random bytes are not a decode.
+        if identify_magic(raw):
+            return _bytes_hit(self.name, raw, 0.75, variant)
+        text = raw.decode("utf-8", "ignore")
+        if looks_like_text(text) and _cipher_wordy(text):
+            return _bytes_hit(self.name, raw, 0.75, variant)
+        if looks_like_text(text) and text.strip()[:1] in ("{", "["):
+            try:
+                json.loads(text)
+            except (ValueError, UnicodeDecodeError):
+                return None
+            return _bytes_hit(self.name, raw, 0.75, variant)
+        return None
 
 
 class _Rot47Decoder(Decoder):

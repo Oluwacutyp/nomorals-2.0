@@ -253,3 +253,82 @@ def load_baseline(quick: bool = False) -> dict[str, Any] | None:
     if isinstance(raw, dict) and "results" in raw:
         return raw["results"] if bool(raw.get("quick", False)) == quick else None
     return raw  # legacy flat format
+
+
+# ── Tier 3: honest speedup metric (additive) ────────────────────────────────
+# A reported speedup is a claim.  This module re-derives the claim from
+# the raw timings and flags any mismatch, so a benchmark report can
+# never say "12x" when the numbers say "1.2x".  Reported MUST equal
+# achieved (within tolerance); otherwise the entry is flagged, not
+# silently trusted.
+
+
+def verify_speedup(*, claimed: float, python_ms: float, native_ms: float,
+                   tolerance: float = 0.15) -> dict[str, Any]:
+    """Check one claimed speedup against its raw timings.
+
+    ``measured = python_ms / native_ms``.  ``mismatch`` is True when
+    the timings are unusable (zero/negative) or when
+    ``|measured - claimed| / max(claimed, tiny)`` exceeds ``tolerance``
+    (default 15% — covers rounding to 1 decimal, not fiction).  A
+    claim of ``0`` with a real measured speedup is also a mismatch:
+    "no speedup" is a claim too.
+    """
+    claimed = float(claimed or 0.0)
+    python_ms = float(python_ms or 0.0)
+    native_ms = float(native_ms or 0.0)
+    if python_ms <= 0 or native_ms <= 0:
+        return {"claimed": claimed, "measured": None, "mismatch": True,
+                "reason": "unusable timings "
+                f"(python_ms={python_ms}, native_ms={native_ms})",
+                "tolerance": tolerance}
+    measured = python_ms / native_ms
+    denom = max(abs(claimed), 1e-9)
+    rel = abs(measured - claimed) / denom
+    mismatch = rel > tolerance
+    return {
+        "claimed": claimed,
+        "measured": round(measured, 3),
+        "relative_error": round(rel, 4),
+        "mismatch": mismatch,
+        "reason": ("" if not mismatch else
+                   f"claimed {claimed} vs measured {measured:.3f} "
+                   f"(rel. error {rel:.1%} > {tolerance:.0%} tolerance)"),
+        "tolerance": tolerance,
+    }
+
+
+def honest_speedup_report(results: dict[str, Any], *,
+                          tolerance: float = 0.15) -> dict[str, Any]:
+    """Audit a :func:`run_benchmarks` result dict.  Every entry carrying
+    ``python_ms`` + ``native_ms`` + ``speedup`` is re-derived; entries
+    without timings are listed as ``skipped`` (no claim made, nothing
+    to verify — e.g. pure-python notes), never as verified.
+
+    Returns ``{"entries": [...], "mismatches": [...], "honest": bool}``.
+    ``honest`` is False when ANY checked entry mismatches."""
+    entries: list[dict[str, Any]] = []
+    mismatches: list[dict[str, Any]] = []
+    for name, payload in (results or {}).items():
+        if not isinstance(payload, dict):
+            continue
+        if not all(k in payload for k in ("python_ms", "native_ms",
+                                          "speedup")):
+            entries.append({"name": name, "checked": False,
+                            "reason": "no python/native timings to verify"})
+            continue
+        check = verify_speedup(claimed=float(payload["speedup"]),
+                               python_ms=float(payload["python_ms"]),
+                               native_ms=float(payload["native_ms"]),
+                               tolerance=tolerance)
+        check["name"] = name
+        check["checked"] = True
+        entries.append(check)
+        if check["mismatch"]:
+            mismatches.append(check)
+    return {"entries": entries, "mismatches": mismatches,
+            "honest": not mismatches,
+            "checked": sum(1 for e in entries if e["checked"])}
+
+
+__all__ += ["verify_speedup", "honest_speedup_report"]

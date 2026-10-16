@@ -1,4 +1,4 @@
-"""Niche: motivation — one idea, cold-open, mic-drop shorts."""
+"""Niche: motivation — one idea, cold-open, shorts."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from .registry import register
 
 class MotivationNiche(NichePlugin):
     name = "motivation"
-    thesis = "One brutal truth about discipline, delivered in 40 seconds."
+    thesis = "One truth about discipline, delivered in 40 seconds."
     cadence = 2.0
     target_seconds = (25, 45)
 
@@ -20,18 +20,18 @@ TOPIC: {topic}
 
 Write a spoken-word script, {lo}–{hi} words, for a vertical short.
 
-VOICE: blunt second-person. Short sentences. No guru clichés ("grind", "hustle", "mindset" are banned unless you twist them). Talk like a friend who is done watching the viewer waste their potential — tough, not cruel. Specific over abstract: name the 2 AM scroll, the snoozed alarm, the "I'll start Monday".
+VOICE: human, always. Tone is decided by mood + audience + context, not preset. Short sentences. Specific over abstract: name the 2 AM scroll, the snoozed alarm, the "I'll start Monday".
 
 RETENTION STRUCTURE (mandatory):
-1. HOOK (first line, under 3 seconds spoken): a painful mirror — "You're not tired. You're bored of your own excuses." style. Make the viewer flinch.
-2. ESCALATION: 2–3 rapid truths, each sharper than the last. No filler between them.
-3. THE TURN (~70% in): one reframe that makes the pain actionable — the one thing they can do in the next 24 hours.
-4. MIC-DROP ENDING: a single line that loops back to the hook. Design it so the short loops seamlessly on replay.
+1. HOOK (first line, under 3 seconds spoken): a mirror — "You're not tired. You're bored of your own excuses." style. Make it land.
+2. ESCALATION: 2–3 truths, each building on the last. No filler between them.
+3. THE TURN (~70% in): one reframe — a twist that makes the pain actionable — the one thing they can do in the next 24 hours.
+4. ENDING: a single line that loops back to the hook. Design it so the short loops seamlessly on replay.
 
 RULES:
 - Plain spoken text only. No stage directions, no [brackets], no emojis, no "hey guys".
 - Every line must earn its place. If a line could be cut without losing punch, cut it.
-- End on the mic-drop, not on a CTA. No "follow for more".
+- End on the closing line, not on a CTA. No "follow for more".
 
 Return ONLY the script text, paragraphs separated by blank lines."""
 
@@ -60,7 +60,7 @@ Return ONLY the script text, paragraphs separated by blank lines."""
     title_template = "{topic} — Watch This When You Want to Quit"
     description_template = (
         "{topic}\n\n"
-        "One brutal truth, forty seconds. Save this for the days you want to quit.\n\n"
+        "One truth, forty seconds. Save this for the days you want to quit.\n\n"
         "{script}"
     )
     hashtags = {
@@ -71,10 +71,10 @@ Return ONLY the script text, paragraphs separated by blank lines."""
     }
     voice_spec = VoiceSpec(
         preferred_voice="devon-deep",
-        mood="intense",
-        intensity=4,
+        mood="neutral",
+        intensity=3,
         pace_wpm=140,
-        pause_style="dramatic",
+        pause_style="natural",
     )
 
     ypp_rationale = (

@@ -190,7 +190,16 @@ class DecoderAgent(Agent):
                 resp = brain_for(self.context).chat([Message(role="user", content=prompt)], task_kind="judge")
                 text = str(getattr(resp, "text", "") or "").strip()
                 if text:
-                    return text
+                    # A canned fallback ("no real model here") names
+                    # nothing the report found — it is not an
+                    # explanation. Only trust model text that names at
+                    # least one decoder from the winning chain; else
+                    # use the grounded rule-based explanation.
+                    chain = (report.best or {}).get("chain") or []
+                    named = [c for c in chain if c != "text"]
+                    if not named or any(c.lower() in text.lower()
+                                        for c in named):
+                        return text
             except Exception as exc:  # noqa: BLE001 — fall back to rules
                 _log.debug("decoder explain model failed: %s", exc)
         return _explain_rules(report)

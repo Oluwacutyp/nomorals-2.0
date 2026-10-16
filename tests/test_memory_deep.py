@@ -374,8 +374,10 @@ class CadenceTests(Harness):
     def test_ensure_job_idempotent(self):
         from nomorals.memory.cadence import ensure_consolidation_job
         from nomorals.agents.scheduler import Scheduler
-        first = ensure_consolidation_job(self.context)
-        second = ensure_consolidation_job(self.context)
+        first = ensure_consolidation_job(
+            self.context, scheduler_factory=Scheduler)
+        second = ensure_consolidation_job(
+            self.context, scheduler_factory=Scheduler)
         self.assertTrue(first.get("scheduled") or
                         first.get("already_scheduled"))
         self.assertTrue(second.get("already_scheduled"))
@@ -384,6 +386,15 @@ class CadenceTests(Harness):
         self.assertEqual(len(jobs), 1)
         self.assertEqual(jobs[0]["payload_kind"], "tool")
         self.assertEqual(jobs[0]["spec"], "every 3600s")
+
+    def test_ensure_job_without_factory_reports_not_scheduled(self):
+        # T1.6: no scheduler factory injected -> honest not-scheduled,
+        # never a hidden import or a silent no-op.
+        from nomorals.memory.cadence import ensure_consolidation_job
+
+        out = ensure_consolidation_job(self.context)
+        self.assertFalse(out.get("scheduled"))
+        self.assertIn("factory", out.get("reason", ""))
 
 
 # ── backup / restore / import ──────────────────────────────────────────────

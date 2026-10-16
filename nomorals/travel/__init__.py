@@ -74,3 +74,28 @@ __all__ = [
     "trip_status", "trip_timeline", "detect_conflicts",
     "export_ics", "packing_list", "format_countdown",
 ]
+
+from .visa import (
+    VisaRequirement,
+    VisaTable,
+    VISA_TABLE,
+    visa_needed,
+    documents_required,
+    lookup,
+    UNKNOWN_REASON,
+)
+
+__all__ += [
+    "VisaRequirement",
+    "VisaTable",
+    "VISA_TABLE",
+    "visa_needed",
+    "documents_required",
+    "lookup",
+    "UNKNOWN_REASON",
+]
+
+# Tier 3: travel <-> community group impl (share + RSVP).
+from .community_impl import CommunityGroupTripBridge, GroupTripShare, RSVP
+
+__all__ += ["CommunityGroupTripBridge", "GroupTripShare", "RSVP"]

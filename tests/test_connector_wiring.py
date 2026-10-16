@@ -217,8 +217,10 @@ class _FakeNanoBanana:
 
 
 def _patch_connector(fake):
-    return mock.patch("nomorals.connectors.registry.create_connector",
-                      return_value=fake)
+    # The backends take their connector factory injected (module-level
+    # factory in generate); patch that seam, not the registry.
+    return mock.patch("nomorals.media_edit.generate._CONNECTOR_FACTORY",
+                      lambda name, vault: fake)
 
 
 class TestPaidBackendCalls:
@@ -863,3 +865,42 @@ class TestStripeCommand:
         monkeypatch.setenv("NM_VAULT_PASSPHRASE", "test")
         out = _mixin("_control_stripe", FakeSelf(chat_env.db), "balance")
         assert "/connectors connect stripe" in out
+
+class TestPaidBackendFactoryInjection:
+    """T1.6: paid image backends take their connector factory injected."""
+
+    def test_instance_factory_used(self):
+        from nomorals.media_edit.generate import get_backend
+
+        fake_conn = object()
+        be = get_backend("leonardo", vault=object(),
+                         connector_factory=lambda name, vault: fake_conn)
+        assert be._connector() is fake_conn
+
+    def test_no_factory_raises_honest_error(self):
+        import nomorals.media_edit.generate as gen
+        from nomorals.media_edit.generate import (
+            GenerativeEditError, get_backend)
+
+        old = gen._CONNECTOR_FACTORY
+        gen._CONNECTOR_FACTORY = None
+        try:
+            be = get_backend("leonardo", vault=object())
+            with pytest.raises(GenerativeEditError,
+                               match="no connector factory"):
+                be._connector()
+        finally:
+            gen._CONNECTOR_FACTORY = old
+
+    def test_module_factory_used(self):
+        import nomorals.media_edit.generate as gen
+        from nomorals.media_edit.generate import get_backend
+
+        fake_conn = object()
+        old = gen._CONNECTOR_FACTORY
+        gen._CONNECTOR_FACTORY = lambda name, vault: fake_conn
+        try:
+            be = get_backend("stability_ai", vault=object())
+            assert be._connector() is fake_conn
+        finally:
+            gen._CONNECTOR_FACTORY = old

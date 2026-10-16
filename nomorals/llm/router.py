@@ -11,6 +11,7 @@ rather than an exception from whichever provider happened to be last.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import random
 import statistics
@@ -28,6 +29,9 @@ from ..core.logging_setup import get_logger
 from ..core.retry import CircuitBreaker, CircuitOpen
 from ..research.costs import COST_TABLE
 from .base import LLMProvider, LLMResponse, Message, SamplingParams
+from .cassette import (CassetteStore, canonical_key, message_key,
+                       recording_enabled, replay_enabled,
+                       response_from_record)
 
 __all__ = [
     "LLMRouter",
@@ -485,7 +489,17 @@ class LLMRouter:
         half_open_probe_budget: int = 2,
         daily_budget_usd: float = 0.0,
         cost_log_path: str | Path | None = None,
+        cassette_dir: str | Path | None = None,
+        replay: bool | None = None,
     ) -> None:
+        """Create the router.
+
+        ``cassette_dir`` / ``replay`` wire the LLM cassette store (see
+        :mod:`nomorals.llm.cassette`): ``replay=True`` serves recorded
+        responses instead of calling providers; None reads
+        ``NM_LLM_REPLAY`` at call time. Recording is default-on
+        (``NM_LLM_CASSETTE=0`` disables it).
+        """
         self._providers: list[LLMProvider] = []
         self._by_name: dict[str, LLMProvider] = {}
         self._health: dict[str, ProviderHealth] = {}
@@ -542,6 +556,11 @@ class LLMRouter:
         # routing.  While unset the dispatch path below is exactly the
         # pre-learning code.
         self._learning: Any = None
+        # LLM cassettes (record/replay). The store is lazy — no I/O
+        # until the first lookup/record — so constructing it is cheap
+        # even when cassettes are never used.
+        self._cassette = CassetteStore(cassette_dir)
+        self._replay_arg = replay
 
     def _cost_log(self) -> CostLog:
         if self._cost_log_path is not None:
@@ -800,23 +819,73 @@ class LLMRouter:
             others = [p for p in self._providers if p.name != self._active]
             return ([active] if active else []) + others
 
+    # ── cassettes (record / replay) ──────────────────────────────────────
+    def _replay_on(self) -> bool:
+        """Replay on? Ctor arg wins; else the env, read at call time."""
+        return self._replay_arg if self._replay_arg is not None \
+            else replay_enabled()
+
+    def _cassette_lookup(
+        self, operation: str, task_kind: str, payload: Any,
+        params: SamplingParams | None,
+    ) -> tuple[str, LLMResponse | None]:
+        """(key, replayed response | None) — None unless replay hits."""
+        key = canonical_key(operation, task_kind, payload, params)
+        if not self._replay_on():
+            return key, None
+        record = self._cassette.lookup(key)
+        if record is None:
+            return key, None
+        return key, response_from_record(record)
+
+    def _cassette_record(self, key: str, response: LLMResponse) -> None:
+        """Record a successful live response.
+
+        Never a replay, and never while replay is on: replay mode is
+        read-only — otherwise a replay run would serve cassettes
+        recorded earlier in the SAME run, and later tests would assert
+        against earlier tests' recordings instead of live logic.
+        """
+        if self._replay_on():
+            return
+        if not response.ok:
+            return
+        if not recording_enabled():
+            return
+        try:
+            self._cassette.record(key, response)
+        except Exception:  # noqa: BLE001 — cassettes never break routing
+            _log.debug("cassette record failed", exc_info=True)
+
     def chat(
         self, messages: Sequence[Message], params: SamplingParams | None = None,
         tier: str | None = None, task_kind: str = "",
         constraints: Any = None,
         route: dict[str, Any] | None = None, **kw: Any
     ) -> LLMResponse:
-        return self._dispatch("chat", lambda p: p.chat(messages, params, **kw),
-                              tier=tier, task_kind=task_kind,
-                              constraints=constraints, route=route)
+        key, replayed = self._cassette_lookup(
+            "chat", task_kind, message_key(messages), params)
+        if replayed is not None:
+            return replayed
+        response = self._dispatch("chat", lambda p: p.chat(messages, params, **kw),
+                                  tier=tier, task_kind=task_kind,
+                                  constraints=constraints, route=route)
+        self._cassette_record(key, response)
+        return response
 
     def complete(self, prompt: str, params: SamplingParams | None = None,
                  tier: str | None = None, task_kind: str = "",
                  constraints: Any = None,
                  route: dict[str, Any] | None = None, **kw: Any) -> LLMResponse:
-        return self._dispatch("complete", lambda p: p.complete(prompt, params, **kw),
-                              tier=tier, task_kind=task_kind,
-                              constraints=constraints, route=route)
+        key, replayed = self._cassette_lookup(
+            "complete", task_kind, {"prompt": prompt}, params)
+        if replayed is not None:
+            return replayed
+        response = self._dispatch("complete", lambda p: p.complete(prompt, params, **kw),
+                                  tier=tier, task_kind=task_kind,
+                                  constraints=constraints, route=route)
+        self._cassette_record(key, response)
+        return response
 
     def embed(self, texts: Sequence[str], **kw: Any) -> list[list[float]]:
         chain = [p for p in self._chain() if "embed" in p.capabilities]
@@ -853,7 +922,13 @@ class LLMRouter:
         constraints: Any = None,
         route: dict[str, Any] | None = None, **kw: Any
     ) -> LLMResponse:
-        return self._dispatch(
+        payload = {"image_sha256": hashlib.sha256(image).hexdigest(),
+                   "prompt": prompt}
+        key, replayed = self._cassette_lookup(
+            "vision", task_kind, payload, params)
+        if replayed is not None:
+            return replayed
+        response = self._dispatch(
             "vision",
             lambda p: p.describe_image(image, prompt, params, **kw),
             require="vision",
@@ -862,6 +937,8 @@ class LLMRouter:
             constraints=constraints,
             route=route,
         )
+        self._cassette_record(key, response)
+        return response
 
     # ── routing policy (OpenRouter-style per-request knobs) ──────────────────
     def _route_price(self, provider_name: str) -> float:

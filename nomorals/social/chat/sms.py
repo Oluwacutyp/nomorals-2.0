@@ -42,6 +42,7 @@ from typing import Any
 
 from ...core.logging_setup import get_logger
 from .base import ChatAdapter, ChatKind, ChatMessage, ChatRef, SendResult
+from .platform_limits import for_platform
 
 __all__ = [
     "SMSAdapter",
@@ -62,7 +63,7 @@ _log = get_logger(__name__)
 
 #: One GSM segment. Multi-part messages use SMS_CONCAT_CHARS of content so the
 #: "(i/n) " prefix and the GSM concatenation headers still fit in 160.
-SMS_SEGMENT_CHARS = 160
+SMS_SEGMENT_CHARS = for_platform("sms").max_text  # one GSM segment
 SMS_CONCAT_CHARS = 147
 
 #: Restricted command set for the SMS surface. Kinds are the
@@ -430,6 +431,7 @@ class SMSAdapter(ChatAdapter):
     def send(self, chat: ChatRef, text: str, *,
              reply_to: str = "",
              buttons: list[list[tuple[str, str]]] | None = None,
+             reply_keyboard: list[list[str]] | None = None,
              parse_mode: str = "") -> SendResult:
         started = time.perf_counter()
         # SMS is text-only: buttons and parse modes are dropped, not faked.

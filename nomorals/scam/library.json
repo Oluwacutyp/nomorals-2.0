@@ -1,0 +1,5 @@
+{
+  "library": true,
+  "reason": "Universal scam-signal descriptors generalizing property/scam.py. New in NEW_MODULES_17; CLI/chat wiring is follow-up.",
+  "owner_decision_needed": "Wire into CLI/chat (scam-check commands) or keep as import-only library."
+}

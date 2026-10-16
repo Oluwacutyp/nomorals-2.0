@@ -81,7 +81,7 @@ class BackupSettings:
 @dataclass
 class ConcurrencySettings:
     threads: int = 8
-    processes: int = 0  # 0 -> cpu_count // 2; forced to 0 on termux
+    processes: int = 0  # 0 -> default_process_workers(): NM_PROCESS_WORKERS env, else max(2, cpu_count - 1); termux preset forces 0 (moot: pools off there)
     use_processes: bool = True
     max_subagents: int = 64
     network_permits: int = 16
@@ -269,6 +269,21 @@ class ChatSettings:
     telegram_bot_enabled: bool = False
     telegram_bot_token: str = ""
     telegram_bot_chats: str = ""
+    #: Partner (romantic) context on the gated bot. Default False:
+    #: groups on the gated bot never carry partner context; an owner DM
+    #: on it still does (brain rule — see brain._generate_and_persist).
+    telegram_bot_partner_context: bool = False
+    #: ── second BotFather bot: the personal bot ──────────────────────
+    #: Owner-only, ungated (every chat on it is an owner chat), always
+    #: carries partner context. NOT public: non-owners get one honest
+    #: denial and the message never reaches the brain (no credit spend).
+    #: Token per-adapter; empty/disabled = the bot simply doesn't run.
+    telegram_personal_bot_enabled: bool = False
+    telegram_personal_bot_token: str = ""
+    #: Allowlist for the personal bot. The owner_only gate (owner sender
+    #: IDs / owner_chats) governs regardless — this is an extra filter.
+    telegram_personal_bot_chats: str = ""
+    telegram_personal_bot_partner_context: bool = True
     discord_enabled: bool = False
     discord_token: str = ""
     discord_channels: str = ""
@@ -848,6 +863,11 @@ _ENV_MAP: dict[str, str] = {
     "NM_CHAT_TELEGRAM_BOT_ENABLED": "chat.telegram_bot_enabled",
     "NM_CHAT_TELEGRAM_BOT_TOKEN": "chat.telegram_bot_token",
     "NM_CHAT_TELEGRAM_BOT_CHATS": "chat.telegram_bot_chats",
+    "NM_CHAT_TELEGRAM_BOT_PARTNER_CONTEXT": "chat.telegram_bot_partner_context",
+    "NM_CHAT_TELEGRAM_PERSONAL_BOT_ENABLED": "chat.telegram_personal_bot_enabled",
+    "NM_CHAT_TELEGRAM_PERSONAL_BOT_TOKEN": "chat.telegram_personal_bot_token",
+    "NM_CHAT_TELEGRAM_PERSONAL_BOT_CHATS": "chat.telegram_personal_bot_chats",
+    "NM_CHAT_TELEGRAM_PERSONAL_BOT_PARTNER_CONTEXT": "chat.telegram_personal_bot_partner_context",
     "NM_CHAT_DISCORD_ENABLED": "chat.discord_enabled",
     "NM_CHAT_DISCORD_TOKEN": "chat.discord_token",
     "NM_CHAT_DISCORD_WEBHOOK": "social.discord_webhook",
@@ -1338,6 +1358,8 @@ def _validate(settings: Settings) -> None:
         problems.append("chat.webhook_port out of range")
     if settings.chat.telegram_bot_token and not settings.chat.telegram_bot_token.strip():
         problems.append("chat.telegram_bot_token is blank (set a real token or leave it unset)")
+    if settings.chat.telegram_personal_bot_token and not settings.chat.telegram_personal_bot_token.strip():
+        problems.append("chat.telegram_personal_bot_token is blank (set a real token or leave it unset)")
     weight_sum = sum(settings.memory.weights.values())
     if weight_sum <= 0:
         problems.append("memory.weights must sum to a positive value")

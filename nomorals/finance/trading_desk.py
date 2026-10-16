@@ -905,8 +905,9 @@ class TradingDesk:
         if not s["total_trades"]:
             return "\n".join(lines + ["  no closed trades yet."])
         wr_color = th.good if s["win_rate"] >= 0.5 else th.warn
+        wr = f"{s['win_rate']:.0%}"
         lines.append(
-            f"  win rate {th.paint(f'{s['win_rate']:.0%}', wr_color)} · "
+            f"  win rate {th.paint(wr, wr_color)} · "
             f"profit factor {s['profit_factor']} · "
             f"expectancy {s['expectancy_r']:+.2f}R "
             f"({s['expectancy_ccy']:+.2f}/trade)")

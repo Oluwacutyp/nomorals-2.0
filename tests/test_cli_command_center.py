@@ -92,6 +92,10 @@ class AliasMapTests(unittest.TestCase):
                       "studio": ["presets"], "swarm": ["run", "x"],
                       "trade": ["analyze", "x"], "vision": ["describe", "x"],
                       "voice": ["stats"], "weather": ["now"],
+                      # brain has a required subaction (ask/judge/status)
+                      "brain": ["status"],
+                      "imggen": ["checkpoints"], "shorts": ["status"],
+                      "video": ["list"], "audio": ["fx-list"],
                       "account": ["pending"]}
         for canonical, aliases in CLI_ALIASES.items():
             for alias in aliases:
@@ -278,6 +282,9 @@ class CommandCenterTests(unittest.TestCase):
         base = dict(start="", resume="", resume_all=False, status="",
                     show="", max_iterations=8, budget_wall=0.0,
                     budget_tokens=0, no_reflect=True, pause="", cancel="",
+                    # replan is a real parser flag; a hand-built
+                    # Namespace must carry it or _cmd_missions crashes.
+                    replan="",
                     resume_status="", json=False)
         base.update(kwargs)
         return argparse.Namespace(**base)

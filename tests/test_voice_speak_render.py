@@ -40,10 +40,29 @@ class _FakeBackend:
         return [0.0] * 2400  # 0.1 s of silence at 24 kHz
 
 
+class _NoCache:
+    """Segment-cache stub: every lookup misses, puts are dropped.
+
+    UniversalTTS.speak() consults a disk-backed SegmentCache
+    (~/.nomorals/voice_cache) before synthesizing — a cache hit from
+    an earlier run would return audio without ever calling the fake
+    backend, so these end-to-end tests must not see the shared cache.
+    """
+
+    def get(self, key):
+        return None
+
+    def put(self, key, samples, sample_rate):
+        return None
+
+
 def _engine(backend: _FakeBackend, **kw) -> UniversalTTS:
     eng = UniversalTTS(backend="bark", **kw)
     eng._impl = backend
     eng._loaded = True
+    # Bypass the shared disk segment cache (see _NoCache): the test
+    # asserts on what the backend was asked to synthesize.
+    eng._seg_cache = _NoCache()
     return eng
 
 

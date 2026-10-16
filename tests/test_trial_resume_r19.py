@@ -22,7 +22,11 @@ def _flow():
     db = Database(":memory:")
     db.execute(
         "CREATE TABLE IF NOT EXISTS kv_store ("
-        "key TEXT PRIMARY KEY, value TEXT, kind TEXT, updated_at REAL)")
+        "key TEXT PRIMARY KEY, value TEXT, kind TEXT, updated_at REAL, "
+        # KVStore.set writes expires_at (migration 86) — without it the
+        # identity persist fails silently (best-effort catch) and the
+        # resume read finds nothing.
+        "expires_at REAL)")
     ctx = SimpleNamespace(settings=SimpleNamespace(home=tmp), db=db)
     flow = TrialFlow(ctx)
     return flow, db, tmp

@@ -1,8 +1,8 @@
 """Platform adapters and the account model.
 
-One rule governs this whole layer: **official APIs only**. Scraping a platform to
-automate it violates its terms, breaks whenever markup changes, and is the fastest
-way to get an account banned. Every adapter here talks to a documented endpoint.
+Owner's account, owner's decision: if the owner says scraping, we scrape.
+Transport — official API or scraping — is the owner's choice, not a rule
+in this layer.
 
 The second rule: credentials are never stored. ``Account.credentials`` holds a
 *reference* into the secret store or an environment variable name. A database that

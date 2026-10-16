@@ -287,6 +287,10 @@ class RuntimeMediaMixin:
             return ("usage: /music <topic> [style]  |  /music styles  |  "
                     "/music song [slug]\nstyles: " + ", ".join(STYLES))
         words = tail.split()
+        if words and words[0].lower() in ("sources", "enrich", "health", "registry-play"):
+            # Legal music registry surface — licence always shown.
+            from ...music_sources.chat import control_music_sources
+            return control_music_sources(tail)
         if words[0].lower() == "styles":
             return ("styles:\n" + "\n".join(
                 f"  {k:12s} {v.label}  ({v.mode}, {v.tempo[0]}-{v.tempo[1]} bpm)"
@@ -459,6 +463,19 @@ class RuntimeMediaMixin:
             pass
 
         tail = (tail or "").strip()
+        # Registry play path: /play registry <query> [--source <id>] —
+        # search → download → enrich, licence always shown. Falls back
+        # to the normal transport for every other tail.
+        if tail.lower().startswith("registry ") or tail.lower() == "registry":
+            from ...music_sources import play as _registry_play
+            query = tail[len("registry"):].strip()
+            source_id = None
+            if "--source" in query:
+                query, _, source_id = query.partition("--source")
+                query = query.strip()
+                source_id = (source_id.strip().split() or [None])[0]
+            return _registry_play.registry_play_text(
+                _registry_play.play_via_registry(query, source_id=source_id))
         actions = {"add", "pause", "resume", "stop", "seek", "volume",
                    "next", "prev", "queue", "remove", "clear", "status",
                    "pick"}
@@ -538,13 +555,30 @@ class RuntimeMediaMixin:
                     # honest tried-list instead of silence.
                 title_q, artist_q = parse_title_artist(rest)
                 search_q = search_query_for(title_q, artist_q) or rest
+                # Step 4 Ekiti lexicon: search-normalize Ekiti → standard
+                # Yoruba for source queries; the ORIGINAL stays in `rest`
+                # for display/TTS.  Never raises.
+                try:
+                    from ...media.source_registry import EkitiLexicon
+                    search_q = EkitiLexicon().normalize_query(
+                        search_q)["search"] or search_q
+                except Exception:  # noqa: BLE001 — lexicon is advisory
+                    pass
                 resolution = SourceResolver(self.context).resolve(search_q)
                 if not resolution.ok:
-                    tried = "; ".join(resolution.attempts) or "no strategies"
-                    hint = (f" {resolution.hint}"
+                    # Step 6: never a dead end — tried + why + hint via
+                    # PlayService (pure formatting, no extra network).
+                    try:
+                        from ...media.play_service import PlayService
+                        detail = PlayService(
+                            self.context).explain_failure(resolution)
+                    except Exception:  # noqa: BLE001
+                        detail = ("tried: "
+                                  + ("; ".join(resolution.attempts)
+                                     or "no strategies"))
+                    hint = (f"\n{resolution.hint}"
                             if resolution.hint else "")
-                    return (f"couldn't find {rest[:80]!r} — "
-                            f"tried: {tried}.{hint}")
+                    return (f"couldn't find {rest[:80]!r} —\n{detail}{hint}")
                 added = []
                 for r in (resolution, *resolution.extra_tracks):
                     added.append(engine._enqueue(
@@ -1086,9 +1120,13 @@ class RuntimeMediaMixin:
         res = audd.recognize(audio_path)
         if not res.get("ok"):
             if res.get("needs_key"):
+                # Surface the connector's own reason — it carries the
+                # free-API setup guidance (dashboard URL, 300 free
+                # requests). A bare "no key configured" strands the user.
+                reason = str(res.get("reason") or "no AudD key configured")
                 return (
-                    "couldn't name that track — no AudD key configured "
-                    "and it's not in my local library.\n"
+                    f"couldn't name that track — {reason}\n"
+                    f"it's not in my local library either.\n"
                     f"👂 but here's what I hear: {heard}")
             return (f"{res.get('reason') or 'could not identify that audio'}\n"
                     f"👂 what I hear: {heard}")

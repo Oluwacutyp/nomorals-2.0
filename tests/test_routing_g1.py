@@ -78,11 +78,19 @@ class _RuntimeStub:
     ``handle_control``'s kind checks are pure comparisons until the chosen
     branch fires, so for kinds ``"arena"`` and ``"game"`` only the two leaf
     handlers (plus the player helper used by the ``"game"`` branch) need
-    to exist on the stub.
+    to exist on the stub — plus the two unconditional pre-dispatch
+    helpers handle_control calls before any branch: ``_progression_gate``
+    (open) and ``_ref_from_key`` (dummy ref).
     """
 
     def __init__(self) -> None:
         self.calls: list[tuple[str, str, str]] = []
+
+    def _progression_gate(self, kind: str, message: object) -> None:
+        return None  # gate open — the stub plays the owner
+
+    def _ref_from_key(self, chat_key: str) -> None:
+        return None  # no real chat ref needed for arena/game dispatch
 
     def _control_arena(self, tail: str, chat_key: str = "", **kwargs) -> str:
         self.calls.append(("arena", tail, chat_key))

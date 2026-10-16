@@ -20,6 +20,7 @@ from nomorals.integrations import market_data
 from nomorals.integrations import sentinel_bridge as bridge
 from nomorals.integrations.market_data import MarketDataError
 from nomorals.ta import data as ta_data
+from nomorals.ta.pipeline import list_strategies
 
 
 def _trend_bars(n=600, drift=0.002, seed=0):
@@ -97,17 +98,16 @@ class AnalyzeTests(unittest.TestCase):
         self.assertEqual(rep.regime_label, "TREND_UP")
         self.assertGreater(rep.bias, 0.5)
         self.assertEqual(rep.position_now, 1.0)
-        self.assertEqual(rep.n_strategies, 9)
+        self.assertEqual(rep.n_strategies, len(list_strategies()))
         self.assertEqual(rep.bars, 600)
         names = [s["name"] for s in rep.strategies]
         # ranked = committee members with >= 5 round-trips; the rest still vote
-        self.assertTrue(0 < len(names) <= 9)
+        self.assertTrue(0 < len(names) <= len(list_strategies()))
         self.assertEqual(sorted(names), sorted(set(names)))
         for n in names:
-            self.assertIn(n, ["bollinger_squeeze", "breakout",
-                              "ichimoku_trend", "mean_reversion", "momentum",
-                              "rsi_divergence", "sar_reversal", "trend_follow",
-                              "vwap_bounce"])
+            # membership in the registry, not a hardcoded count — the zoo
+            # grows (9 → 16) and a hardcoded list would go stale again.
+            self.assertIn(n, list_strategies())
         # stop distance stored as a fraction — the summary must read ~1%, not ~100%
         self.assertLess(rep.stop_distance_pct, 1.0)
         text = rep.summary_text()
@@ -155,10 +155,10 @@ class BacktestExpertTests(unittest.TestCase):
 
     def test_strategies_registry(self):
         rows = _expert().strategies()
-        self.assertEqual([r["name"] for r in rows],
-                         ["bollinger_squeeze", "breakout", "ichimoku_trend",
-                          "mean_reversion", "momentum", "rsi_divergence",
-                          "sar_reversal", "trend_follow", "vwap_bounce"])
+        # Registry-derived expectation: the zoo grows; a hardcoded list
+        # would go stale (as the 9-strategy list did when it reached 16).
+        self.assertEqual(sorted(r["name"] for r in rows),
+                         sorted(list_strategies()))
         for r in rows:
             self.assertTrue(r["blurb"])
             self.assertTrue(r["params"])

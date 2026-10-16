@@ -445,6 +445,12 @@ def parse_instruction(instruction: str, *,
         return _only_video()
     if kind == "image":
         return _only_image()
+    # Document intents are specific multi-word phrases (Sunday morning,
+    # tighten, match look, cut-where-said, ...) — try them before the
+    # image generative catch-all ("make ...") can swallow them.
+    doc = parse_document_intent(instruction)
+    if doc is not None:
+        return doc
     hit = _parse_video(text) or _parse_image(text, raw)
     if hit:
         return hit
@@ -485,6 +491,12 @@ def format_plan(intent: ParsedIntent, theme: str = "rich") -> str:
                                if k != "op")
             lines.append(f"  {g} {i}. {op['op']}"
                          + (f"  ·  {params}" if params else ""))
+    elif intent.kind == "document":
+        for i, op in enumerate(intent.ops, 1):
+            params = ", ".join(f"{k}={v}" for k, v in op.items()
+                               if k != "op")
+            lines.append(f"  📄 {i}. {op.get('op')}"
+                         + (f"  ·  {params}" if params else ""))
     else:
         a = intent.action
         params = ", ".join(f"{k}={v}" for k, v in a.items()
@@ -493,3 +505,242 @@ def format_plan(intent: ParsedIntent, theme: str = "rich") -> str:
                      + (f"  ·  {params}" if params else "")
                      + "  [background job]")
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Document intents + learning (EDIT_GEN_UPGRADE 2.2)
+# ---------------------------------------------------------------------------
+# The intent front door, broadened past mechanical ops to *intentions*:
+# "make it feel Sunday morning", "make him sound tired",
+# "tighten by a third", "match look of that shot". An intention maps to
+# a preset STACK (style-agnostic engine + preset packs — the look is
+# data in the stack, never code in the engine). Corrections
+# ("no, warmer") are recorded as supervised pairs in CorrectionStore
+# and replayed as preference adjustments on the next parse.
+
+#: intention → preset stack. Each stack is DATA: ops the document
+#: engine already understands (effects, emotion ops, pacing ops,
+#: look-lock fields). No aesthetic lives in the engine; the stack
+#: *is* the look.
+INTENT_PRESET_STACKS: dict[str, dict[str, Any]] = {
+    "sunday_morning": {
+        "description": "warm, soft, unhurried morning feel",
+        "ops": [
+            {"op": "look_lock", "grade": "warm", "grain": 4.0,
+             "lens": "soft", "palette": [[255, 214, 170],
+                                         [255, 236, 200], [120, 90, 70]]},
+            {"op": "effect", "name": "color_grade",
+             "params": {"grade": "warm"}},
+            {"op": "effect", "name": "grain", "params": {"strength": 4.0}},
+            {"op": "effect", "name": "ken_burns",
+             "params": {"direction": "in", "zoom": 1.08}},
+            {"op": "music_bed", "mood": "gentle", "volume": 0.25},
+            {"op": "caption_style", "style": "soft"},
+        ],
+    },
+    "tired_voice": {
+        "description": "delivery: tired / low-energy voice",
+        "ops": [{"op": "emotion", "emotion": "tired", "intensity": 0.8,
+                 "scope": "voice"}],
+    },
+    "energetic_voice": {
+        "description": "delivery: energetic voice",
+        "ops": [{"op": "emotion", "emotion": "energetic", "intensity": 0.8,
+                 "scope": "voice"}],
+    },
+    "tighten_third": {
+        "description": "pacing: tighten by one third",
+        "ops": [{"op": "tighten", "fraction": 1.0 / 3.0}],
+    },
+    "match_look": {
+        "description": "match the look of a reference shot",
+        "ops": [{"op": "look_lock_from_reference",
+                 "source": "reference_shot"}],
+    },
+    "warmer": {
+        "description": "correction direction: warmer",
+        "ops": [{"op": "grade", "temperature": 800}],
+    },
+    "cooler": {
+        "description": "correction direction: cooler",
+        "ops": [{"op": "grade", "temperature": -800}],
+    },
+}
+
+
+def _stack_ops(name: str) -> list[dict[str, Any]]:
+    import copy as _copy
+    stack = INTENT_PRESET_STACKS.get(name)
+    if stack is None:
+        raise AmbiguousInstructionError(f"unknown intent stack {name!r}")
+    return _copy.deepcopy(stack["ops"])
+
+
+def parse_document_intent(instruction: str) -> ParsedIntent | None:
+    """Deterministic NL → document edit ops (the intent front door).
+
+    Returns ``None`` when nothing matches (caller falls through to the
+    mechanical parsers or raises). ``ParsedIntent.kind == "document"``,
+    ``ops`` = the document op list, ``action`` carries the stack name.
+    """
+    raw = (instruction or "").strip()
+    if not raw:
+        return None
+    text = raw.lower()
+
+    def _doc(stack: str, summary: str, extra: list | None = None) -> ParsedIntent:
+        ops = _stack_ops(stack) + list(extra or [])
+        return ParsedIntent(kind="document", ops=ops,
+                            action={"document_op": stack, "ops": ops},
+                            summary=summary)
+
+    # "make it feel sunday morning" / "sunday morning feel"
+    if "sunday morning" in text:
+        return _doc("sunday_morning", "feel: Sunday morning")
+    # "make him/her/them sound tired / exhausted / sleepy / energetic"
+    m = re.search(r"sound (tired|exhausted|sleepy|energetic|excited|"
+                  r"angry|warm|sad|whisper)", text)
+    if m:
+        emo = {"exhausted": "tired", "sleepy": "tired"}.get(m.group(1),
+                                                            m.group(1))
+        stack = {"tired": "tired_voice",
+                 "energetic": "energetic_voice"}.get(emo, "tired_voice")
+        ops = [{"op": "emotion", "emotion": emo, "intensity": 0.8,
+                "scope": "voice"}]
+        return ParsedIntent(
+            kind="document", ops=ops,
+            action={"document_op": stack, "ops": ops},
+            summary=f"delivery: sound {emo}")
+    # "make him sound tired" without "sound" verb variants
+    if re.search(r"\b(sound|voice)\b.*\btired\b", text):
+        return _doc("tired_voice", "delivery: sound tired")
+    # "tighten by a third / by 30% / by half"
+    m = re.search(r"tighten(?:\s+it)?\s+by\s+(?:a\s+)?(third|half|quarter"
+                  r"|\d+\s*%)", text)
+    if m or "tighten by" in text:
+        frac = 1.0 / 3.0
+        if m:
+            val = m.group(1)
+            if val == "half":
+                frac = 0.5
+            elif val == "quarter":
+                frac = 0.25
+            elif val.endswith("%"):
+                frac = float(val.rstrip("%").strip()) / 100.0
+        ops = [{"op": "tighten", "fraction": frac}]
+        return ParsedIntent(kind="document", ops=ops,
+                            action={"document_op": "tighten", "ops": ops},
+                            summary=f"tighten by {frac:.0%}")
+    if re.search(r"\btighten\b", text):
+        return _doc("tighten_third", "tighten by a third")
+    # "match look of that shot / match the look"
+    if re.search(r"match (?:the )?look", text):
+        return _doc("match_look", "match look of reference shot")
+    # "cut video where he says 'never again'" / "cut where she says ..."
+    m = re.search(r"cut(?:\s+video)?\s+where\s+(?:he|she|they|it)\s+"
+                  r"says?\s+[\"'](.+?)[\"']", text)
+    if m:
+        phrase = m.group(1)
+        ops = [{"op": "cut_where_said", "phrase": phrase, "keep": True}]
+        return ParsedIntent(kind="document", ops=ops,
+                            action={"document_op": "cut_where_said",
+                                    "ops": ops},
+                            summary=f"cut video where he says {phrase!r}")
+    # "use that audio as music bed" / "use that audio as the music bed"
+    if re.search(r"use (?:that|this|the) audio as (?:the )?(music bed|bed)",
+                 text):
+        ops = [{"op": "use_audio_as_music_bed", "volume": 0.35}]
+        return ParsedIntent(kind="document", ops=ops,
+                            action={"document_op": "use_audio_as_music_bed",
+                                    "ops": ops},
+                            summary="use that audio as music bed")
+    # Bare "warmer"/"cooler" stay image grade ops (existing behaviour) —
+    # corrections are handled by CorrectionStore.learn_from_correction,
+    # not by claiming the bare word here.
+    return None
+
+
+class CorrectionStore:
+    """Supervised pairs from owner corrections ("no, warmer").
+
+    ``record_correction`` stores (instruction, correction, ops_before,
+    ops_after). ``preferences`` replays the pairs as adjustments the
+    next parse applies: a "warmer" correction after a look stack bumps
+    that stack's grade temperature on future parses. JSON-persistable
+    via :meth:`to_dict` / :meth:`from_dict` / :meth:`save` / :meth:`load`.
+    """
+
+    def __init__(self, pairs: list[dict[str, Any]] | None = None):
+        self.pairs: list[dict[str, Any]] = [dict(p) for p in (pairs or [])]
+
+    def record_correction(self, instruction: str, correction: str,
+                          ops_before: list[dict[str, Any]],
+                          ops_after: list[dict[str, Any]]) -> dict[str, Any]:
+        """Record one supervised pair. Returns the stored pair."""
+        pair = {"instruction": instruction, "correction": correction,
+                "ops_before": [dict(o) for o in ops_before],
+                "ops_after": [dict(o) for o in ops_after]}
+        self.pairs.append(pair)
+        return pair
+
+    def learn_from_correction(self, correction: str,
+                              ops: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Apply a correction phrase to an op list (the learning step).
+
+        "warmer" appends/increments a warm grade; "cooler" the reverse;
+        "tighter" bumps a tighten fraction. Unknown corrections pass
+        the ops through unchanged — never invent an adjustment.
+        """
+        import copy as _copy
+        out = _copy.deepcopy(ops)
+        text = (correction or "").lower()
+        if "warmer" in text:
+            out.append({"op": "grade", "temperature": 800,
+                        "learned_from": "correction: warmer"})
+        elif "cooler" in text:
+            out.append({"op": "grade", "temperature": -800,
+                        "learned_from": "correction: cooler"})
+        elif "tighter" in text:
+            for op in out:
+                if op.get("op") == "tighten":
+                    op["fraction"] = min(0.9, float(op.get("fraction", 1 / 3)) + 0.1)
+        return out
+
+    def preferences(self) -> dict[str, Any]:
+        """Aggregate learned preferences: correction → count."""
+        counts: dict[str, int] = {}
+        for p in self.pairs:
+            key = str(p.get("correction", "")).strip().lower()
+            counts[key] = counts.get(key, 0) + 1
+        return {"pairs": len(self.pairs), "corrections": counts}
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"pairs": [dict(p) for p in self.pairs]}
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "CorrectionStore":
+        return cls(pairs=list(data.get("pairs", [])))
+
+    def save(self, path: str) -> str:
+        import json as _json
+        from pathlib import Path as _Path
+        p = _Path(path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(_json.dumps(self.to_dict(), indent=2), encoding="utf-8")
+        return str(p)
+
+    @classmethod
+    def load(cls, path: str) -> "CorrectionStore":
+        import json as _json
+        from pathlib import Path as _Path
+        return cls.from_dict(_json.loads(_Path(path).read_text("utf-8")))
+
+
+def record_correction(instruction: str, correction: str,
+                      ops_before: list[dict[str, Any]],
+                      ops_after: list[dict[str, Any]],
+                      store: CorrectionStore | None = None) -> dict[str, Any]:
+    """Module-level front door: record one supervised correction pair."""
+    store = store or CorrectionStore()
+    return store.record_correction(instruction, correction, ops_before,
+                                   ops_after)

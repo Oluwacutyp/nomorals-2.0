@@ -532,7 +532,24 @@ class PartnerBrain:
                     message.text, self.context.memory, origin=_origin)
             except Exception:  # noqa: BLE001 - proactive is a bonus, never load-bearing
                 proactive_lines = []
-        romantic = is_owner and self.relationship.is_romantic()
+        # Per-adapter partner context (two-bot split): the adapter stamps
+        # ``meta["partner_context"]`` on every inbound message — True on
+        # the personal bot (every chat there is the owner, so partner
+        # context always rides along), False on the gated bot (its
+        # groups never carry it). An owner DM on the gated bot still
+        # does — that is the existing owner-DM behavior, preserved.
+        # Adapters that don't stamp (userbot, Discord, …) keep the
+        # legacy rule: owner ⇒ partner context allowed.
+        _adapter_partner = message.meta.get("partner_context")
+        if _adapter_partner is None:
+            _partner_allowed = True
+        elif _adapter_partner:
+            _partner_allowed = True
+        else:
+            _partner_allowed = bool(
+                is_owner and chat.kind == ChatKind.DM)
+        romantic = (is_owner and _partner_allowed
+                    and self.relationship.is_romantic())
         background_lines = self.background.context(
             message.text,
             user_in_us=flags["in_us"],
@@ -776,13 +793,30 @@ class PartnerBrain:
         if self._is_owner_sender(message):
             return True
         text = message.text.lower()
-        name = self.persona.name.lower()
         if message.mentioned:
             return True
         if message.reply_to:
             return True
-        if name in text:
+        if self._addressed_by_name(text):
             return True
+        return False
+
+    def _addressed_by_name(self, text: str) -> bool:
+        """True when the message addresses her by name OR nickname.
+
+        The nickname is how people actually address her in groups
+        (``Persona.nickname``, e.g. "wren") — matching only
+        ``persona.name`` meant a group message saying "wren, what do
+        you think?" was treated as not addressed to her at all. Same
+        substring semantics as the original name check; the
+        isinstance guard keeps MagicMock personas in tests from
+        exploding on ``in``.
+        """
+        for candidate in (self.persona.name,
+                          getattr(self.persona, "nickname", "")):
+            if (isinstance(candidate, str) and candidate
+                    and candidate.lower() in text):
+                return True
         return False
 
     def _is_owner_sender(self, message: ChatMessage) -> bool:

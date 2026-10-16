@@ -22,6 +22,10 @@ from collections import Counter
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
+#: Collab is the DEFAULT mode, not an option.  Sessions and the
+#: fiction writer run in collab mode unless explicitly opted out.
+DEFAULT_MODE = "collab"
+
 
 @dataclass
 class Critique:
@@ -502,13 +506,46 @@ class CollaborativeSession:
     The critic reviews before anything ships.
     """
 
-    def __init__(self, story_slug: str, context: Any = None) -> None:
+    def __init__(self, story_slug: str, context: Any = None, *,
+                 owner_texts: list[str] | None = None,
+                 mode: str = DEFAULT_MODE) -> None:
         self.story_slug = story_slug
         self.context = context
+        #: collab is the default mode, not an option
+        self.mode = mode or DEFAULT_MODE
+        self.collab = self.mode == DEFAULT_MODE
         self.critic = CriticAgent(context)
         self._characters: dict[str, Any] = {}
         self._sheets: dict[str, CharacterSheet] = {}
         self._log: list[dict[str, Any]] = []
+        # the owner's own prose is the default voiceprint: "write like
+        # me" means "match this measured fingerprint".  No owner texts
+        # → no owner voiceprint (None), never a fabricated one.
+        self.owner_voiceprint: Any = None
+        texts = [t for t in (owner_texts or []) if (t or "").strip()]
+        if texts:
+            try:
+                from .voiceprint import build_owner_voiceprint
+
+                vp = build_owner_voiceprint(texts)
+                self.owner_voiceprint = vp if vp.words > 0 else None
+            except Exception:  # noqa: BLE001 - voiceprint is advisory
+                self.owner_voiceprint = None
+
+    def voice_check(self, text: str) -> dict[str, Any] | None:
+        """Compare ``text`` against the owner's voiceprint.
+
+        Returns the drift report (``blocked`` always False) or None
+        when no owner voiceprint exists yet.
+        """
+        if self.owner_voiceprint is None:
+            return None
+        try:
+            from .voiceprint import compare, fingerprint
+
+            return compare(fingerprint(text or ""), self.owner_voiceprint)
+        except Exception:  # noqa: BLE001 - voice check is advisory
+            return None
 
     def cast_character(self, character: Any) -> None:
         """Add a character agent as a co-author.
@@ -579,6 +616,8 @@ class CollaborativeSession:
             "text": text,
             "words": len(text.split()),
             "voice_report": voice_report,
+            # drift vs the owner's own prose, on every written scene
+            "voice_drift_vs_owner": self.voice_check(text) if text else None,
         }
         self._log.append(entry)
 
@@ -594,7 +633,9 @@ class CollaborativeSession:
                  persona: str = "editor") -> dict[str, Any]:
         """Run the critic on a draft (persona: editor|line|beta|brutal)."""
         c = self.critic.review(text, brief, bible, suggest, persona=persona)
-        return {"ok": True, "persona": persona, "critique": c.to_dict()}
+        return {"ok": True, "persona": persona, "critique": c.to_dict(),
+                # drift vs the owner's own prose, on every critique
+                "voice_drift_vs_owner": self.voice_check(text)}
 
     def revise_with_critique(self, text: str, critique: dict[str, Any],
                              suggest: Callable | None = None) -> dict[str, Any]:

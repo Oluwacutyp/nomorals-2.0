@@ -80,7 +80,25 @@ def _cmd_books(args: argparse.Namespace, context: Any) -> int:
             return 0
 
         if action == "read":
-            slug = need("a book slug")
+            slug = need("a book slug or story URL")
+            if slug.startswith("http"):
+                # story reader: follow the URL, read a chapter
+                from ...books.reader import StoryReader
+                from ...books.sources import SourceError
+                try:
+                    reader = StoryReader(context)
+                    followed = reader.follow(slug)
+                    out = reader.read(
+                        followed.slug,
+                        chapter=int(getattr(args, "chapter", 0) or 0))
+                except SourceError as exc:
+                    print(f"books read: {exc}", file=sys.stderr)
+                    return 1
+                _emit(args, out,
+                      f"chapter {out['chapter']}: {out.get('title', '')}\n"
+                      f"{out['text']}"
+                      f"\n[…truncated]" if out.get("truncated") else "")
+                return 0
             out = lib.read(slug, chapter=int(getattr(args, "chapter", 0) or 0))
             if "outline" in out:
                 lines = [f"  {c['n']:>3}. {c['title'][:60]:<62} {c['words']}w"
@@ -261,6 +279,93 @@ def _cmd_books(args: argparse.Namespace, context: Any) -> int:
                 r = lib.get_rating(slug)
                 _emit(args, {"slug": slug, "stars": r},
                       f"{slug}: {'★' * r if r else 'not rated'}")
+            return 0
+
+        if action == "continue":
+            slug = need("a followed story slug")
+            from ...books.serial import SerialManager
+            out = SerialManager(context).continue_past_ending(
+                slug, n=max(1, int(getattr(args, "chapters", 1) or 1)),
+                from_chapter=int(getattr(args, "from_chapter", 0) or 0),
+                direction=getattr(args, "direction", "") or "")
+            lines = [f"continued {slug} — {len(out['chapters'])} chapter(s) "
+                     f"from chapter {out['continued_from_chapter']}"]
+            for ch in out["chapters"]:
+                drift = ch.get("drift") or {}
+                lines.append(f"  ch {ch.get('chapter')} — {ch.get('words', 0)}w · "
+                             f"voice drift {drift.get('drift', '—')}")
+            _emit(args, out, "\n".join(lines))
+            return 0
+
+        if action == "sources":
+            from ...books.descriptors import list_sources
+            sources = list_sources()
+            lines = [f"  {'✓' if s['verified'] else '?'} {s['id']:<14} "
+                     f"{s['rights_class']:<18} {s['licence']}"
+                     + (" (needs API key)" if s["requires_key"] else "")
+                     for s in sources]
+            _emit(args, {"sources": sources},
+                  "story sources (legal first):\n" + "\n".join(lines))
+            return 0
+
+        if action in ("serial", "novel"):
+            from ...books.serial import SerialManager
+            mgr = SerialManager(context)
+            premise = (getattr(args, "premise", "") or "").strip()
+            for_whom_raw = (getattr(args, "for_whom", "") or "").strip()
+            for_whom = {"name": for_whom_raw} if for_whom_raw else {}
+            if premise:
+                start = (mgr.start_serial if action == "serial"
+                         else mgr.start_novel)(
+                    premise, genre=getattr(args, "genre", "") or "fantasy",
+                    for_whom=for_whom,
+                    wisdom_theme=getattr(args, "theme", "") or "")
+                _emit(args, start,
+                      f"started {action} {start['slug']} — "
+                      f"{start['title']} (chapter 1 written)")
+                return 0
+            slug = need("a serial/novel slug, or --premise to start one")
+            if getattr(args, "status", False):
+                out = mgr.status(slug)
+                _emit(args, out,
+                      f"{out['title']} — {out['chapters_written']} chapters · "
+                      f"drift entries: {len(out.get('drift_log', []))}")
+                return 0
+            if action == "serial":
+                out = mgr.write_next(
+                    slug, direction=getattr(args, "direction", "") or "")
+                _emit(args, out,
+                      f"chapter {out.get('number')} — {out.get('words', 0)}w · "
+                      f"bible updated: {out.get('bible_updated')}")
+                return 0
+            out = mgr.write_novel(
+                slug, max_chapters=int(getattr(args, "chapters", 0) or 0))
+            _emit(args, out,
+                  f"novel {slug} — {out['chapters_written']} chapters written")
+            return 0
+
+        if action == "cache":
+            from ...books import cache_sync
+            if getattr(args, "list", False):
+                cached = cache_sync.list_cached(context)
+                lines = [f"  {c['slug']:<28} {c['cache_bytes']} bytes cached"
+                         for c in cached]
+                _emit(args, {"cached": cached},
+                      "cached stories:\n" + "\n".join(lines)
+                      if lines else "no cached stories")
+                return 0
+            if getattr(args, "import_", False):
+                out = cache_sync.import_cache(context, need("a cache zip path"))
+                _emit(args, out,
+                      f"imported {out['slug']} — {out['imported_files']} "
+                      f"files, {out['skipped_files']} skipped")
+                return 0
+            slug = need("a followed story slug to export")
+            dest = getattr(args, "path", "") or ""
+            out = cache_sync.export_cache(
+                context, slug, dest or f"{slug}-cache.zip")
+            _emit(args, out, f"exported {slug} → {out['path']} "
+                             f"({out['files']} files)")
             return 0
 
         print(f"books: unknown action {action}", file=sys.stderr)

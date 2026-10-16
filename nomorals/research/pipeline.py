@@ -120,6 +120,16 @@ class _BudgetExhausted(Exception):
     so exhaustion degrades the run instead of killing it."""
 
 
+def _flat_snippet(snippet: str, limit: int) -> str:
+    """Collapse whitespace for prompt packing.
+
+    Split out of an f-string (py3.11 forbids backslashes in f-string
+    expressions) — and the doubled form at two call sites was a typo
+    matching a literal backslash + ``s``, not whitespace.
+    """
+    return re.sub(r"\s+", " ", snippet).strip()[:limit]
+
+
 def _true_up_llm_cost(llm_fn: Any, budget: "ResearchBudget") -> None:
     """Replace the flat planning estimate with the metered cost, when known.
 
@@ -1216,7 +1226,7 @@ def synthesize_with_stats(question: str, findings: list[ResearchFinding],
     if llm_fn is not None:
         try:
             numbered = "\n\n".join(
-                f"[S{i}] {f.title}\n{re.sub(r'\s+', ' ', f.snippet).strip()[:600]}"
+                f"[S{i}] {f.title}\n{_flat_snippet(f.snippet, 600)}"
                 for i, f in enumerate(findings, 1)
             )
             raw = (llm_fn(_SYNTH_PROMPT.format(question=question,
@@ -1505,7 +1515,7 @@ def _reasoning_pass(question: str, findings: list[ResearchFinding],
         return []
     try:
         numbered = "\n\n".join(
-            f"[S{i}] {f.title}\n{re.sub(r'\\s+', ' ', f.snippet).strip()[:400]}"
+            f"[S{i}] {f.title}\n{_flat_snippet(f.snippet, 400)}"
             for i, f in enumerate(findings[:20], 1)
         )
         raw = (llm_fn(_REFINE_PROMPT.format(question=question,
@@ -1515,7 +1525,7 @@ def _reasoning_pass(question: str, findings: list[ResearchFinding],
         queries = []
         for line in raw.splitlines():
             line = line.strip().lstrip("-•*").strip()
-            line = re.sub(r"^\\d+[.)]\\s*", "", line).strip()
+            line = re.sub(r"^\d+[.)]\s*", "", line).strip()
             if len(line) > 5 and "DONE" not in line.upper():
                 queries.append(line)
         return queries[:3]
@@ -1571,7 +1581,7 @@ def _refinement_pass(question: str, findings: list[ResearchFinding],
         return Refinement(learnings=learnings, done=True)
     try:
         numbered = "\n\n".join(
-            f"[S{i}] {f.title}\n{re.sub(r'\\s+', ' ', f.snippet).strip()[:400]}"
+            f"[S{i}] {f.title}\n{_flat_snippet(f.snippet, 400)}"
             for i, f in enumerate(findings[:20], 1)
         )
         raw = (llm_fn(_REFINE_LEARN_PROMPT.format(
@@ -1589,7 +1599,7 @@ def _refinement_pass(question: str, findings: list[ResearchFinding],
                 section = "follow_ups"
                 continue
             s = s.lstrip("-•*").strip()
-            s = re.sub(r"^\\d+[.)]\\s*", "", s).strip()
+            s = re.sub(r"^\d+[.)]\s*", "", s).strip()
             if not s or len(s) < 8:
                 continue
             if section == "learnings":

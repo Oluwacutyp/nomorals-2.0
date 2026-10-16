@@ -271,7 +271,9 @@ class PlayerToolIndexTests(MediaCoreBase):
 class MusicStyleTests(unittest.TestCase):
     def test_aliases(self) -> None:
         self.assertEqual(resolve_style("lo-fi").name, "lofi")
-        self.assertEqual(resolve_style("rap").name, "hiphop")
+        # "rap" is its own Boom-bap style (STYLES["rap"], see
+        # test_music_upgrade NEW_STYLES), not an alias for hiphop.
+        self.assertEqual(resolve_style("rap").name, "rap")
         self.assertEqual(resolve_style("AfroBeat").name, "afrobeats")
         self.assertEqual(resolve_style("").name, "pop")
 

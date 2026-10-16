@@ -247,7 +247,7 @@ def _describe_value(old_text: str, new_text: str,
 
 def _llm_adjudicate(old_text: str, new_text: str,
                      old: Any, new: Any) -> float:
-    """Placeholder slot for the LLM strategy — the real implementation is
+    """Injection seam for the LLM strategy — the real implementation is
     injected via ``detect_for(..., llm_fn=...)`` / ``detect_against(...,
     llm_fn=...)``.  Without an ``llm_fn`` this strategy abstains (0.0).
     """

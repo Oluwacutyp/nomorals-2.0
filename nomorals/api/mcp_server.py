@@ -313,7 +313,14 @@ class MCPServer:
     def two_tier(self) -> Any:
         if self._memory is None:
             from ..memory.tiers import TwoTierMemory
-            self._memory = TwoTierMemory()
+            from ..documents.index import DocumentIndex
+            from ..documents.model import Document, Section
+            from ..memory.hybrid import HybridMemoryIndex
+            self._memory = TwoTierMemory(
+                hybrid_index_factory=lambda: HybridMemoryIndex(
+                    index_factory=DocumentIndex,
+                    document_factory=Document,
+                    section_factory=Section))
         return self._memory
 
     # ── JSON-RPC plumbing ──────────────────────────────────────────────

@@ -20,3 +20,28 @@ from __future__ import annotations
 from .version import __version__, version_info
 
 __all__ = ["__version__", "version_info"]
+
+# Tier 0 (additive): persisted organ bus + promotion rollback registry.
+from .organs_bus import PersistedBus
+from .tier0_rollback import (
+    promotion_status,
+    promotions,
+    record_promotion,
+    rollback,
+    rollback_all,
+)
+
+__all__ += [
+    "PersistedBus",
+    "record_promotion",
+    "rollback",
+    "rollback_all",
+    "promotions",
+    "promotion_status",
+]
+
+# MORE_TO_ADD gaps 4-6 (additive): family mode, location layer, offline
+# mode. Stdlib + sibling imports only, so this stays import-safe.
+from . import family as family, location as location, offline as offline
+
+__all__ += ["family", "location", "offline"]

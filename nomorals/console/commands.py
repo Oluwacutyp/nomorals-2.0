@@ -311,11 +311,12 @@ class ConsoleCommands:
         for call in calls:
             tstr = datetime.datetime.fromtimestamp(call["ts"]).strftime("%H:%M:%S")
             mark = paint("✓", GREEN) if call["success"] else paint("✗", WARN + BOLD)
+            latency = f"{call['latency_s']:.2f}s"
             lines.append(
                 f"  {paint(tstr, DIM)} {mark} "
                 f"{paint(str(call['provider'])[:18], BRIGHT_WHITE)} "
                 f"{paint(str(call['operation'])[:16], CYAN)} "
-                f"{paint(f'{call['latency_s']:.2f}s', DIM)}"
+                f"{paint(latency, DIM)}"
             )
         return "\n".join(lines)
 

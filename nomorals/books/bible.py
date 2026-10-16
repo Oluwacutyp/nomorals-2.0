@@ -30,6 +30,7 @@ from typing import Any
 
 from ..core.logging_setup import get_logger
 from .model import slugify
+from .voiceprint import Voiceprint, fingerprint
 
 _log = get_logger(__name__)
 
@@ -195,6 +196,37 @@ class StoryBible:
     lore: list[LorebookEntry] = field(default_factory=list)
     #: timeline-tracked detail changes (Novelcrafter Progressions)
     progressions: list[Progression] = field(default_factory=list)
+    #: Measured voiceprint of the digested chapters — the VOICE TARGET
+    #: new chapters are compared against (see :mod:`nomorals.books.voiceprint`).
+    #: Stored as a plain dict (``Voiceprint.to_dict()``); empty ``{}``
+    #: means "no voice measured yet".  Failures measuring it leave it
+    #: empty — they never break a build.
+    voiceprint: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def voice(self) -> Voiceprint | None:
+        """The bible's voice target as a :class:`Voiceprint`, or None."""
+        if not self.voiceprint:
+            return None
+        vp = Voiceprint.from_dict(self.voiceprint)
+        return vp if vp.words > 0 else None
+
+    def voice_target(self) -> list[str]:
+        """Prompt lines steering generation toward the bible's voice.
+
+        Empty when no voiceprint has been measured yet — a missing
+        target steers nothing, it never fabricates one.
+        """
+        vp = self.voice
+        if vp is None:
+            return []
+        return [
+            "VOICE TARGET — write in the story's measured voice:",
+            f"  {vp.describe()}",
+            "  Match this fingerprint (sentence length, dialogue ratio, "
+            "register, sensory balance, filtering). Drift is reported, "
+            "never blocking.",
+        ]
 
     def to_dict(self) -> dict[str, Any]:
         d = asdict(self)
@@ -214,7 +246,8 @@ class StoryBible:
             world_rules=list(d.get("world_rules", [])),
             arc_summary=d.get("arc_summary", ""),
             chapters_digested=int(d.get("chapters_digested", 0)),
-            built_at=d.get("built_at", ""), lore=lore, progressions=progs)
+            built_at=d.get("built_at", ""), lore=lore, progressions=progs,
+            voiceprint=dict(d.get("voiceprint") or {}))
 
     def character(self, name: str) -> BibleCharacter | None:
         low = name.lower()
@@ -233,6 +266,7 @@ class StoryBible:
             lines.append("Tone: " + ", ".join(self.tone))
         if self.voice_notes:
             lines.append("Voice: " + self.voice_notes)
+        lines.extend(self.voice_target())
         if self.world_rules:
             lines.append("World rules:")
             lines += [f"  - {r}" for r in self.world_rules[:12]]
@@ -779,9 +813,29 @@ class BibleBuilder:
                                      len(chapters))
         else:
             bible = self._from_heuristics(story_slug, title, chapters)
+        self._measure_voiceprint(bible, chapters)
         self._sync_lorebook(bible)
         self.save(bible)
         return bible
+
+    @staticmethod
+    def _measure_voiceprint(bible: StoryBible,
+                            chapters: list[tuple[int, str, str]]) -> None:
+        """Measure the voiceprint of ``chapters`` into ``bible.voiceprint``.
+
+        Failures leave it empty — a voiceprint failure must never break
+        a bible build.
+        """
+        try:
+            texts = [(t or "") for _, _, t in chapters if (t or "").strip()]
+            if not texts:
+                return
+            names = [c.name for c in bible.characters if c.name]
+            vp = fingerprint("\n\n".join(texts), names)
+            if vp.words > 0:
+                bible.voiceprint = vp.to_dict()
+        except Exception as exc:  # noqa: BLE001 - voiceprint is advisory
+            _log.debug("bible voiceprint measurement failed: %s", exc)
 
     def update(self, story_slug: str,
                new_chapters: list[tuple[int, str, str]]) -> StoryBible:
@@ -824,6 +878,9 @@ class BibleBuilder:
         bible.chapters_digested = max(
             bible.chapters_digested,
             max(n for n, _, _ in new_chapters))
+        # first update fills a voiceprint that build never measured
+        if not bible.voiceprint:
+            self._measure_voiceprint(bible, new_chapters)
         self._sync_lorebook(bible)
         self.save(bible)
         return bible

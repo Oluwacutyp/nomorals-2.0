@@ -39,8 +39,9 @@ from typing import Any
 from ..emit import _emit
 from ...llm.benchmarks import BenchmarkDB, seed_synthetic
 from ...llm.broker import ModelBroker
-from ...llm.capabilities import Capability, ModelCard, capability_from
-from ...llm.lifecycle import LifecycleError, ManagedModel, ModelLifecycle
+from ...llm.capabilities import capability_from
+from ...llm.lifecycle import (LifecycleError, ManagedModel,
+                               ModelLifecycle, card_for_model)
 from ...llm.providers.mock import MockProvider
 
 
@@ -52,32 +53,12 @@ def _benchmarks(context: Any) -> BenchmarkDB:
     return BenchmarkDB(getattr(context, "db", None))
 
 
-def _card_for(model: ManagedModel) -> ModelCard:
-    caps = set()
-    for raw in model.capabilities:
-        try:
-            caps.add(capability_from(raw))
-        except ValueError:
-            continue
-    return ModelCard(
-        id=model.id,
-        capabilities=caps or {Capability.CHAT},
-        context_len=model.context_len,
-        local=model.local,
-        provider=model.provider or ("llama_cpp" if model.local else "hf_serverless"),
-        model_id=model.source,
-        quant=model.quant,
-        cost_per_1k=0.0,
-        notes=model.notes,
-    )
-
-
 def _broker_for(context: Any) -> tuple[ModelBroker, ModelLifecycle, BenchmarkDB]:
     lifecycle = _lifecycle(context)
     benchmarks = _benchmarks(context)
     broker = ModelBroker(benchmarks=benchmarks)
     for model in lifecycle.list():
-        broker.register(_card_for(model))
+        broker.register(card_for_model(model))
     primary = lifecycle.primary
     if primary and broker.card(primary) is not None:
         broker.promote(primary)
@@ -144,7 +125,7 @@ def _cmd_model_broker(args: argparse.Namespace, context: Any) -> int:
         except (LifecycleError, ValueError) as exc:
             print(f"error: {exc}")
             return 1
-        broker.register(_card_for(model))
+        broker.register(card_for_model(model))
         _emit(args, {"added": model.to_dict()},
               f"registered {model.id} (stage={model.status}, provider={model.provider})\n"
               f"next: nm models benchmark {model.id}  (after download+verify)")
@@ -292,7 +273,7 @@ def _cmd_models_setup(args: argparse.Namespace, context: Any, broker: ModelBroke
     except (LifecycleError, ValueError) as exc:
         print(f"error: register failed: {exc}")
         return 1
-    broker.register(_card_for(model))
+    broker.register(card_for_model(model))
     print(f"  [1/5] registered {model.id} (stage={model.status})")
 
     # 2. download — HF token required for private repos like Cutyp/codebeast-3.8b

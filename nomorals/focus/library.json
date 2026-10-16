@@ -1,0 +1,5 @@
+{
+  "library": true,
+  "reason": "Focus sessions + weekly review \u2014 pure ledger functions (sessions are a ledger, review aggregates, never invents). Genuine import-only library.",
+  "owner_decision_needed": "Wire into CLI/chat (focus timer / weekly review commands) or keep as import-only library."
+}

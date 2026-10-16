@@ -88,6 +88,97 @@ class RegistrySweepTests(unittest.TestCase):
         self.assertEqual(schema["parameters"]["required"], ["a"])
         self.assertFalse(schema["parameters"]["additionalProperties"])
 
+    # ── T1.4: listings render parameter names, not JSON-Schema keys ──
+
+    def test_listing_renders_param_names_not_schema_keys(self):
+        reg = ToolRegistry(FakeContext())
+
+        def fs_read(path: str, *, encoding: str = "utf-8",
+                    max_bytes: int = 100) -> dict:
+            return {}
+
+        reg.register("fs_read", fs_read, description="read a file")
+        listing = reg.prompt_listing()
+        line = [ln for ln in listing.splitlines()
+                if ln.startswith("- fs_read(")][0]
+        self.assertIn("fs_read(path, encoding='utf-8', max_bytes=100)", line)
+        self.assertNotIn("type, properties, required", listing)
+        self.assertNotIn("additionalProperties", listing)
+
+    def test_format_params_variants(self):
+        from nomorals.tools.registry import _format_params
+
+        schema = {"parameters": {
+            "type": "object",
+            "properties": {
+                "req": {"type": "string", "required": True},
+                "opt": {"type": "string", "default": "x"},
+                "no_default": {"type": "integer"},
+                "long": {"type": "string", "default": "y" * 100},
+            },
+            "required": ["req"],
+            "additionalProperties": False,
+        }}
+        rendered = _format_params(schema)
+        self.assertTrue(rendered.startswith("req, opt='x', no_default, long='"))
+        self.assertTrue(rendered.endswith("..."),
+                        f"long default should truncate with ellipsis: {rendered}")
+
+    def test_type_name_maps_python_to_json_schema(self):
+        from nomorals.tools.registry import _infer_parameters, _type_name
+
+        self.assertEqual(_type_name(str), "string")
+        self.assertEqual(_type_name(int), "integer")
+        self.assertEqual(_type_name(bool), "boolean")
+        self.assertEqual(_type_name(float), "number")
+        self.assertEqual(_type_name(list), "array")
+        self.assertEqual(_type_name(dict), "object")
+        self.assertEqual(_type_name("str"), "string")
+        self.assertEqual(_type_name("list[str]"), "list[str]")
+        self.assertEqual(_type_name(""), "any")
+
+        def fn(a: str, b: int, c: bool = True) -> None:
+            pass
+
+        params = _infer_parameters(fn)
+        self.assertEqual(params["a"]["type"], "string")
+        self.assertEqual(params["b"]["type"], "integer")
+        self.assertEqual(params["c"]["type"], "boolean")
+
+    def test_schema_omits_stub_description(self):
+        spec = ToolSpec(name="t", fn=lambda: None,
+                        parameters={"a": {"type": "string", "required": True}})
+        props = spec.schema()["parameters"]["properties"]
+        self.assertNotIn("description", props["a"])
+
+    def test_wrapped_schema_parameters_normalize_to_flat(self):
+        # social.py / whatsapp.py historically passed a full JSON-Schema
+        # object as `parameters`; ToolSpec unwraps one level so listings
+        # render real parameter names, not the schema's own keys.
+        spec = ToolSpec(
+            name="t", fn=lambda: None,
+            parameters={
+                "type": "object",
+                "properties": {
+                    "chat_key": {"type": "string", "description": "chat"},
+                    "text": {"type": "string", "description": "msg"},
+                    "reply_to": {"type": "string", "description": "reply"},
+                },
+                "required": ["chat_key", "text"],
+            },
+        )
+        self.assertEqual(
+            spec.parameters,
+            {"chat_key": {"type": "string", "description": "chat",
+                         "required": True},
+             "text": {"type": "string", "description": "msg", "required": True},
+             "reply_to": {"type": "string", "description": "reply"}})
+        schema = spec.schema()
+        self.assertEqual(sorted(schema["parameters"]["properties"]),
+                         ["chat_key", "reply_to", "text"])
+        self.assertEqual(schema["parameters"]["required"],
+                         ["chat_key", "text"])
+
     def test_title_and_examples(self):
         spec = ToolSpec(name="t", fn=lambda: None, title="My Tool",
                         examples=['{"a": "1"}'])

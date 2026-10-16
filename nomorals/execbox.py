@@ -172,7 +172,18 @@ class CodeRunner:
 
     # ── execution ─────────────────────────────────────────────────────────
     def run(self, code: str, *, lang: str = "", file: str = "",
-            timeout: float = 30.0, stdin: str = "") -> dict[str, Any]:
+            timeout: float = 30.0, stdin: str = "",
+            egress_token: Any = None, cassette_dir: str = "",
+            cassette_mode: str = "record") -> dict[str, Any]:
+        """Run code in the sandbox.
+
+        Default is L1 (offline). Pass ``egress_token`` (an
+        :class:`~nomorals.core.egress.EgressToken` bound to the task) for
+        L2: same result shape plus ``level``/``egress``, with network ON
+        only through the token-gated egress proxy. With
+        ``cassette_mode="replay"`` the run is L1-offline and recorded
+        traffic is replayed through the egress client.
+        """
         from .tools.shell import run_sandboxed
 
         if not (code or "").strip() and not file:
@@ -221,8 +232,20 @@ class CodeRunner:
         if stdin:
             command = f"{command} <<'NM_STDIN'\n{stdin}\nNM_STDIN"
 
-        result = run_sandboxed(
-            command, cwd=work, timeout=timeout, network=False, stdin="")
+        result = None
+        if egress_token is not None:
+            from .core.cassette import GenericCassetteStore
+            from .tools.sandbox_l2 import run_sandboxed_l2
+
+            cassette = (GenericCassetteStore(cassette_dir, filename="network_cassettes.jsonl")
+                        if cassette_dir else None)
+            result = run_sandboxed_l2(
+                command, cwd=work, timeout=timeout, stdin="",
+                egress_token=egress_token, cassette=cassette,
+                cassette_mode=cassette_mode)
+        else:
+            result = run_sandboxed(
+                command, cwd=work, timeout=timeout, network=False, stdin="")
         stdout = (result.get("stdout") or "")[:MAX_OUTPUT]
         stderr = (result.get("stderr") or "")[:MAX_OUTPUT]
         exit_code = int(result.get("exit_code", -1))
@@ -247,6 +270,8 @@ class CodeRunner:
             "seconds": round(float(result.get("seconds", 0.0)), 3),
             "timed_out": timed_out,
             "backend": result.get("backend", ""),
+            "level": result.get("level", "L1"),
+            "egress": result.get("egress", {"mode": "L1", "network": False}),
             "workdir": str(work),
             "files": files[:50],
             "truncated": len(result.get("stdout") or "") > MAX_OUTPUT or

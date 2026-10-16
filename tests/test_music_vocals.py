@@ -383,7 +383,10 @@ class HumFallbackTests(unittest.TestCase):
         self.assertEqual(res.get("backend"), "hum")
         self.assertTrue(os.path.isfile(res["path"]))
         self.assertIn("hummed vocal melody", res["note"])
-        self.assertIn("termux-api", res["note"])
+        # Advice changed from termux-api to espeak: the codebase-wide
+        # TTS guidance is espeak (Termux: `pkg install espeak`), and
+        # termux-api TTS is phone-speaker-only.
+        self.assertIn("espeak", res["note"])
 
     def test_hum_follows_melodic_contour(self):
         # octave apart -> hum pitches an octave apart

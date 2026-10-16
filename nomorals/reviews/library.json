@@ -1,0 +1,5 @@
+{
+  "library": true,
+  "reason": "Weekly/monthly periodic synthesis composing focus/commitments/decisions. New in NEW_MODULES_17; CLI/chat wiring is follow-up.",
+  "owner_decision_needed": "Wire into CLI/chat (review commands) or keep as import-only library."
+}

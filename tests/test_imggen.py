@@ -295,3 +295,34 @@ def test_get_backend_accepts_native():
         get_backend("native")
     except Exception as exc:
         assert "unknown MEDIA_GEN_BACKEND" not in str(exc)
+
+
+def test_build_dataset_manifest_uses_injected_see_fn(tmp_path):
+    """T1.6: vision captions take the seer injected, never an import."""
+    from PIL import Image
+
+    from nomorals.media.imggen.data import (build_dataset_manifest,
+                                            load_manifest, set_see_fn)
+
+    Image.new("RGB", (16, 16), (0, 0, 0)).save(tmp_path / "photo.png")
+    seen = {}
+
+    def fake_see(path, prompt=""):
+        seen["path"] = path
+        return {"description": "a black square"}
+
+    summary = build_dataset_manifest(str(tmp_path), use_vision=True,
+                                     see_fn=fake_see)
+    rows = load_manifest(summary["manifest"])
+    assert rows[0]["caption"] == "a black square"
+    assert seen["path"] == str(tmp_path / "photo.png")
+    assert summary["vision_captions"] == 1
+
+    # Module-level setter is the fallback when no per-call fn is given.
+    set_see_fn(fake_see)
+    try:
+        summary = build_dataset_manifest(str(tmp_path), use_vision=True)
+        rows = load_manifest(summary["manifest"])
+        assert rows[0]["caption"] == "a black square"
+    finally:
+        set_see_fn(None)

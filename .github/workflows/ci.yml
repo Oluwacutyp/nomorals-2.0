@@ -92,7 +92,17 @@ jobs:
       - name: Error scan
         run: python3 -m nomorals.tools.error_scan nomorals/
 
+      - name: Collection gate (a broken test import must fail CI)
+        run: |
+          # Under `unittest discover` a broken test import degrades to one
+          # error and the rest of the suite still runs — which is how the
+          # stale `_confidence` import hid for days. This gate fails fast:
+          # any collection error makes CI red before the suite runs.
+          python3 -m pytest tests --collect-only -q
+
       - name: Offline unit suite (NM_RUN_INTEGRATION unset)
+        # Enforced budget: measured ~59 min on 2026-10-14 (docs/SUITE_RUNTIME.md).
+        timeout-minutes: 90
         run: |
           if [ -n "${NM_RUN_INTEGRATION:-}" ]; then
             echo "NM_RUN_INTEGRATION is set on the runner; refusing to run the offline suite with it" >&2

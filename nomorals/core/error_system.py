@@ -27,7 +27,6 @@ from .degradation import DegradationLadder, LadderManager, Rung
 from .incidents import IncidentJournal
 from .logging_setup import get_logger
 from .selfheal import SelfHealingExecutor, SubsystemSupervisor
-from ..storage.kv import KVStore
 
 _log = get_logger(__name__)
 
@@ -162,12 +161,22 @@ class ErrorSystem:
             pass
 
 
-def build_error_system(settings: Any = None) -> ErrorSystem:
+def build_error_system(
+    settings: Any = None,
+    *,
+    kv_factory: Callable[[Any], Any] | None = None,
+    message_factory: Callable[[str], Any] | None = None,
+) -> ErrorSystem:
     """Build the bundle with a persistent journal.
 
     Journal lives at ``<home>/data/error_journal.db`` (next to the main
     DB) so incident memory survives restarts. ``settings`` may be None in
     tests — then the journal falls back to ``:memory:``.
+
+    ``kv_factory`` / ``message_factory`` are injected by the composition
+    root (see :func:`register_default_ladders`): the kernel may not
+    import the storage / llm layers. None means the rungs that need
+    them fail honestly instead of persisting / building messages.
     """
     journal_path = ":memory:"
     if settings is not None:
@@ -184,7 +193,8 @@ def build_error_system(settings: Any = None) -> ErrorSystem:
     budgets = BudgetManager(journal=journal, on_alert=_on_budget_alert)
     ladders = LadderManager()
     es = ErrorSystem(journal=journal, budgets=budgets, ladders=ladders)
-    register_default_ladders(es)
+    register_default_ladders(es, kv_factory=kv_factory,
+                             message_factory=message_factory)
     _log.info("error system built (journal=%s)", journal_path)
     return es
 
@@ -248,11 +258,24 @@ def _llm_probe(router: Any) -> Callable[[], bool]:
     return probe
 
 
-def register_default_ladders(es: ErrorSystem, context: Any = None) -> None:
+def register_default_ladders(
+    es: ErrorSystem,
+    context: Any = None,
+    *,
+    kv_factory: Callable[[Any], Any] | None = None,
+    message_factory: Callable[[str], Any] | None = None,
+) -> None:
     """Declare ladders for the real subsystems.
 
     Rung 0 is always the primary path; lower rungs degrade honestly.
     Handlers receive the same args the primary got.
+
+    ``kv_factory`` builds the KV store for the telegram queue rung
+    (``kv_factory(db)``); ``message_factory`` builds the LLM request
+    messages for a prompt (``message_factory(prompt)``). Both are
+    injected by the caller — the kernel must not import storage or llm.
+    When a factory is None, the rung that needs it fails fast with an
+    honest error instead of silently degrading.
     """
     journal = es.journal
 
@@ -261,8 +284,13 @@ def register_default_ladders(es: ErrorSystem, context: Any = None) -> None:
         router = getattr(context, "router", None) if context else None
         if router is None:
             raise RuntimeError("no LLM router on context")
-        from ..llm.base import Message
-        msgs = kw.get("messages") or [Message.user(prompt)]
+        if kw.get("messages"):
+            msgs = kw["messages"]
+        elif message_factory is not None:
+            msgs = message_factory(prompt)
+        else:
+            raise RuntimeError(
+                "no message factory injected — cannot build LLM request")
         return router.chat(msgs, **{k: v for k, v in kw.items()
                                     if k != "messages"})
 
@@ -292,9 +320,12 @@ def register_default_ladders(es: ErrorSystem, context: Any = None) -> None:
         db = getattr(context, "db", None) if context else None
         if db is None:
             raise RuntimeError("no database to queue the message")
+        if kv_factory is None:
+            raise RuntimeError(
+                "no KV store factory injected — cannot queue telegram message")
         try:
-            KVStore(db).set(f"tg_retry:{time.time()}:{chat}",
-                            {"chat": chat, "text": text})
+            kv_factory(db).set(f"tg_retry:{time.time()}:{chat}",
+                               {"chat": chat, "text": text})
         except Exception as exc:  # noqa: BLE001
             raise RuntimeError(f"could not queue telegram message: {exc}")
         return {"ok": False, "queued": True, "chat": chat}

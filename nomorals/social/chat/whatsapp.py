@@ -52,6 +52,7 @@ from typing import Any
 
 from ...core.logging_setup import get_logger
 from .base import ChatAdapter, ChatKind, ChatMessage, ChatRef, IncomingHandler, MediaRef, SendResult
+from .platform_limits import for_platform
 
 __all__ = ["WhatsAppAdapter", "Outbox", "GROUP_CAPABILITIES"]
 
@@ -209,9 +210,12 @@ class Outbox:
             return {"sent": sent, "dropped": dropped, "kept": len(kept)}
 
 
-def _split_text(text: str, *, limit: int = 4000) -> list[str]:
+def _split_text(text: str, *, limit: int | None = None) -> list[str]:
     """Split long text on paragraph/line boundaries so no chunk exceeds
-    *limit* characters. Short text returns unchanged as a single chunk."""
+    *limit* characters. Short text returns unchanged as a single chunk.
+    Default limit is the PlatformLimits cap for WhatsApp."""
+    if limit is None:
+        limit = for_platform("whatsapp").max_text
     text = text or ""
     if len(text) <= limit:
         return [text]
@@ -233,7 +237,7 @@ def _split_text(text: str, *, limit: int = 4000) -> list[str]:
         current_len += piece_len
     if current:
         chunks.append("\n\n".join(current))
-    return [c for c in chunks if c] or [text[:limit]]
+    return [c for c in chunks if c] or [text]
 
 
 class WhatsAppAdapter(ChatAdapter):
@@ -633,6 +637,7 @@ class WhatsAppAdapter(ChatAdapter):
     def send(self, chat: ChatRef, text: str, *,
              reply_to: str = "",
              buttons: list[list[tuple[str, str]]] | None = None,
+             reply_keyboard: list[list[str]] | None = None,
              parse_mode: str = "") -> SendResult:
         started = time.perf_counter()
         if not self.connected.is_set():
@@ -653,7 +658,7 @@ class WhatsAppAdapter(ChatAdapter):
             pass
         # WhatsApp caps a text message well above this; split long sends so
         # one giant alert doesn't get silently truncated by the bridge.
-        chunks = _split_text(text, limit=4000)
+        chunks = _split_text(text)
         result: SendResult | None = None
         for i, chunk in enumerate(chunks):
             result = self._send_with_retry(

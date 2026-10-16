@@ -404,9 +404,10 @@ class HttpClient:
                                        timeout or self.timeout,
                                        opener_kwargs)
             else:
-                raw_cm = urllib.request.urlopen(
-                    request, timeout=timeout or self.timeout,
-                    **opener_kwargs)
+                # Direct: a dedicated no-proxy opener, never the
+                # process-global urlopen (see _no_proxy_opener).
+                raw_cm = _no_proxy_opener(opener_kwargs).open(
+                    request, timeout=timeout or self.timeout)
             with raw_cm as raw:
                 final_url = raw.geturl()
                 response_headers = {k.lower(): v for k, v in raw.headers.items()}
@@ -812,6 +813,25 @@ def _restore_socks_url(proxy_url: str) -> None:
         username=parsed.username, password=parsed.password)
 
 
+def _no_proxy_opener(opener_kwargs: dict) -> urllib.request.OpenerDirector:
+    """An opener that never uses a proxy, whatever the process env says.
+
+    ``urllib.request.urlopen`` uses the process-global opener, whose
+    ProxyHandler snapshots the process env at first build — in a
+    long-lived process an earlier env (or an earlier test) can route a
+    supposedly-direct request through an egress proxy, or fail it
+    outright (the egress proxy closes loopback fetches). A direct
+    request must be direct regardless of env history, so every
+    no-proxy path builds its own opener with an explicit empty
+    ProxyHandler instead of touching the global one.
+    """
+    handlers: list = [urllib.request.ProxyHandler({})]
+    ctx = opener_kwargs.get("context")
+    if ctx is not None:
+        handlers.append(urllib.request.HTTPSHandler(context=ctx))
+    return urllib.request.build_opener(*handlers)
+
+
 def _proxied_open(request, proxy_url: str, timeout: float,
                   opener_kwargs: dict):
     """Open ``request`` through ``proxy_url``.
@@ -833,14 +853,16 @@ def _proxied_open(request, proxy_url: str, timeout: float,
     if scheme not in ("socks4", "socks4a", "socks5", "socks5h", "socks"):
         _log.warning("unsupported proxy scheme %r — request goes direct",
                      scheme)
-        return urllib.request.urlopen(request, timeout=timeout,
-                                      **opener_kwargs)
+        return _no_proxy_opener(opener_kwargs).open(request, timeout=timeout)
 
     @contextmanager
     def _socks_open():
         with _temporary_socks_proxy(proxy_url):
-            with urllib.request.urlopen(request, timeout=timeout,
-                                        **opener_kwargs) as raw:
+            # No-proxy opener: the SOCKS tunnel is applied at the
+            # socket layer by _temporary_socks_proxy; the global
+            # opener's cached env proxy must not interfere.
+            with _no_proxy_opener(opener_kwargs).open(
+                    request, timeout=timeout) as raw:
                 yield raw
 
     return _socks_open()

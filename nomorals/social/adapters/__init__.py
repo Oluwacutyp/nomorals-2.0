@@ -1,1 +1,1 @@
-"""Platform adapters. Official APIs only — see social/base.py."""
+"""Platform adapters. Transport is the owner's choice — official API or scraping."""

@@ -579,3 +579,58 @@ class FetchBytesTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ProxyPoolFactoryTests(unittest.TestCase):
+    """T1.6: the proxy pool takes its connector factory injected."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.dl = MediaDownloader(_ctx(self.tmp))
+
+    def tearDown(self):
+        from nomorals.media.downloader import set_connector_factory
+        set_connector_factory(None)
+
+    def _env(self):
+        return patch.dict(os.environ, {"NM_VAULT_PASSPHRASE": "test"})
+
+    def test_module_factory_used(self):
+        from nomorals.media.downloader import set_connector_factory
+        seen = {}
+
+        def fake_factory(name, vault):
+            seen["args"] = (name, vault)
+            return "POOL"
+
+        with self._env(), patch(
+                "nomorals.accounts.vault.CredentialVault",
+                return_value="VAULT"):
+            set_connector_factory(fake_factory)
+            self.assertEqual(self.dl._proxy_pool(), "POOL")
+            self.assertEqual(seen["args"], ("proxypool", "VAULT"))
+
+    def test_no_factory_returns_none(self):
+        with self._env():
+            self.assertIsNone(self.dl._proxy_pool())
+
+    def test_no_passphrase_returns_none(self):
+        with patch.dict(os.environ, {"NM_VAULT_PASSPHRASE": ""}):
+            self.assertIsNone(self.dl._proxy_pool())
+
+    def test_instance_factory_wins_over_module(self):
+        from nomorals.media.downloader import set_connector_factory
+
+        def module_factory(name, vault):
+            return "MODULE"
+
+        def instance_factory(name, vault):
+            return "INSTANCE"
+
+        with self._env(), patch(
+                "nomorals.accounts.vault.CredentialVault",
+                return_value="VAULT"):
+            set_connector_factory(module_factory)
+            dl = MediaDownloader(_ctx(self.tmp),
+                                 connector_factory=instance_factory)
+            self.assertEqual(dl._proxy_pool(), "INSTANCE")

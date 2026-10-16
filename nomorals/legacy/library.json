@@ -1,0 +1,5 @@
+{
+  "library": true,
+  "reason": "Digital will \u2014 pure sealed domain classes (Will, Beneficiary, Executor, DigitalAsset). Genuine import-only library.",
+  "owner_decision_needed": "Wire into CLI/chat (owner-only will commands) or keep as import-only library. Owner decision needed: sealed/owner-only surface design."
+}

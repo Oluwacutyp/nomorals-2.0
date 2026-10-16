@@ -15,7 +15,13 @@ from .avatar import (
     render_ninja_mini,
 )
 from .banner import BANNER_STYLES, list_banner_styles, render_banner, tip_of_the_day
+from .alerts import AlertPolicy, AlertRecord, SeverityRule
+from .cockpit import Cockpit
 from .commands import ConsoleCommands, complete
+from .costmeter import CostMeter, OrganCost
+from .discovery import CommandEntry, CommandRegistry
+from .recording import SessionRecorder
+from .termux import MAX_COLS, TermuxScreen
 from .dashboard import (
     render_adapters_view,
     render_dashboard,
@@ -91,6 +97,8 @@ from .widgets import (
 __all__ = [
     "AVATAR",
     "AVATAR_STYLES",
+    "AlertPolicy",
+    "AlertRecord",
     "BANNER_STYLES",
     "BOX_DOUBLE",
     "BOX_HEAVY",
@@ -105,16 +113,25 @@ __all__ = [
     "WATCH_VIEW_KEYS",
     "WATCH_VIEWS",
     "ConsoleCommands",
+    "CommandEntry",
+    "CommandRegistry",
+    "Cockpit",
+    "CostMeter",
     "DebugHub",
     "EventBuffer",
     "GodConsole",
     "GodScreen",
     "InputLine",
     "LiveScreen",
+    "MAX_COLS",
     "MessageEvent",
     "MessageFeed",
+    "OrganCost",
     "ProgressBar",
+    "SessionRecorder",
+    "SeverityRule",
     "Spinner",
+    "TermuxScreen",
     "WatchHub",
     "avatar_size",
     "barchart",

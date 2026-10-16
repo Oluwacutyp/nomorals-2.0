@@ -3,6 +3,50 @@
 Status as of the current commit. Verified means covered by a test that runs
 offline in CI, or executed by hand with the result recorded here.
 
+## Verified live counts (2026-10-16, HEAD 7ba7b40)
+
+Correction: stale v7/52 claim corrected — the L2 section below previously
+said "7 migrations to 52 tables"; the live numbers are:
+
+packages: 75
+schema version: 86
+tables: 125 real (152 incl. FTS shadow tables)
+
+How counted: `packages` = sub-directories of `nomorals/` excluding
+`__pycache__` (75) plus 14 top-level `.py` modules = 89 entries total;
+`schema version` = `max(version)` in `nomorals/storage/migrations.py`
+(`MIGRATIONS`, 86 entries) and the live `data/nomorals.db`
+`schema_migrations` table (86 rows, `integrity_check()` = ok);
+`tables` = live DB tables excluding FTS5 shadow tables
+(`*_fts`, `*_fts_config`, `*_fts_content`, `*_fts_data`, `*_fts_docsize`,
+`*_fts_idx`), `sqlite_sequence`, and `schema_migrations*`.
+`tests/test_ten_packages_expose.py` re-asserts all three against the live
+tree on every run — if the tree grows, this section must be re-verified,
+not hand-edited upward.
+
+## Expose layer — `expose.py` facades (new, no rebuilds)
+
+Thin wrappers that expose what already exists, or say honestly that it
+does not:
+
+- `nomorals/integrations/expose.py` — email (Gmail API / IMAP+SMTP real;
+  browser advertised but unimplemented), calendar (Google API real;
+  CalDAV advertised but unimplemented), virtual cards, smart home,
+  digital-twin "what changed since I left?", Naija steal scores vs the
+  30-day median, NL → automation descriptors that never execute without
+  confirmation.
+- `nomorals/audio/expose.py` — native Shazam (Wang-2003 local-max,
+  local DB only), transcript-as-timeline `remove_fillers`, talk-to-book-characters
+  with a `spoiler_level` cap, backends picked by `resource_profile`.
+- `nomorals/documents/expose.py` — 16 formats (pdf/docx/xlsx/xls/pptx/
+  html/markdown/csv/tsv/txt/rtf/epub/odt/ods/json/xml), stdlib-only parsing,
+  phone-offline; `.docx` *output* needs optional `python-docx`.
+- `BUILD_MAP.md` — build-map numbering recovered from scattered
+  `build-map #N` citations (60 numbers with file:line evidence, 47
+  undefined, no invented entries). The full numbered plan itself is
+  NOT recoverable: no canonical plan document exists in tree, history,
+  or docs.
+
 ## Done
 
 ### L1 Core — `nomorals/core/` (14 modules, 105 tests)
@@ -13,13 +57,13 @@ logging with secret redaction, ULID ids, monotonic clock, stdlib HTTP client wit
 resumable range downloads.
 
 ### L2 Storage — `nomorals/storage/` (86 tests)
-Thread-local pooled connections, 7 forward-only checksummed migrations to 52
-tables, FTS5 full-text search with query building and snippets, vector store with
+Thread-local pooled connections, 86 forward-only checksummed migrations to 125
+real tables (152 incl. FTS5 shadow tables), FTS5 full-text search with query building and snippets, vector store with
 pure-Python cosine and an IVF path above 512 rows, content-addressed blob store
 with dedup and refcounting, durable work queue with leases and dead-lettering,
 versioned gzip backups with git push and restore.
 
-Verified: schema v7, `integrity_check()` clean, 13500 B blob → 159 B (ratio
+Verified: schema version 86, `integrity_check()` clean, 13500 B blob → 159 B (ratio
 0.012), backup gunzips to a valid `SQLite format 3` header and restores clean.
 
 ### L3 Cognition — `memory/`, `llm/` (57 tests)

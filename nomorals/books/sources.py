@@ -174,6 +174,7 @@ class StoryMeta:
     total_chapters: int = 0
     cover_url: str = ""
     updated: str = ""
+    licence: str = ""  # rights label, recorded on every fetch
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -182,6 +183,7 @@ class StoryMeta:
             "genres": self.genres, "status": self.status,
             "total_chapters": self.total_chapters,
             "cover_url": self.cover_url, "updated": self.updated,
+            "licence": self.licence,
         }
 
 
@@ -1113,6 +1115,15 @@ def adapter_for_url(url: str) -> SourceAdapter:
     for adapter in ADAPTERS:
         if adapter.matches(url):
             return adapter
+    # descriptor-driven legal sources (lazy import: descriptors imports
+    # this module, so a top-level import would be circular)
+    try:
+        from .descriptors import descriptor_adapters
+        for adapter in descriptor_adapters():
+            if adapter.matches(url):
+                return adapter
+    except Exception:  # noqa: BLE001 - descriptor failure never breaks lookup
+        pass
     # unknown aggregator → the self-tuning generic adapter, honestly flagged
     host = (urllib.parse.urlparse(url).hostname or "unknown").lower()
     return GenericAdapter(name=f"generic:{host}", domains=(host,))

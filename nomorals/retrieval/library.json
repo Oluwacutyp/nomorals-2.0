@@ -1,0 +1,5 @@
+{
+  "library": true,
+  "reason": "One retrieval spine (L3) \u2014 pure embed/index/fuse/rerank functions (RetrievalSpine, HashEmbedder). Genuine import-only library by design ('public package surface').",
+  "owner_decision_needed": "Wire as the shared retrieval backend for search/RAG callers or keep as import-only library."
+}

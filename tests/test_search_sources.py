@@ -313,11 +313,21 @@ class TimelineAdapterTests(unittest.TestCase):
 class RegistryTests(unittest.TestCase):
     def test_list_sources(self):
         srcs = list_sources()
+        # Exact order: SOURCE_SPECS order doubles as the ranking
+        # tie-break, so this pins the registry, not just the set —
+        # the OSINT entries joined the registry after this test was
+        # written (see SOURCE_SPECS in search/sources.py).
         self.assertEqual(
             [s["name"] for s in srcs],
             ["memory", "wisdom", "books", "docs", "code", "timeline",
              "web_searxng", "web_ddgs", "web_tavily", "web_serper",
-             "web_exa", "web_brave"])
+             "web_exa", "web_brave",
+             "osint_username", "osint_email", "osint_xon", "osint_disify",
+             "osint_domain", "osint_edgar", "osint_gleif",
+             "osint_courtlistener", "osint_ip", "osint_phone",
+             "osint_github", "osint_wayback", "osint_gravatar",
+             "osint_leakcheck", "osint_people_browser",
+             "osint_site_browser"])
         self.assertTrue(all(s["type"] and s["description"] for s in srcs))
 
     def test_build_adapters_needs_context(self):

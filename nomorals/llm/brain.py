@@ -194,6 +194,27 @@ class Brain:
         self._external_router = router
         self._router: Any = None
         self._lock = threading.Lock()
+        #: Preference-tuned adapter from ``training/preference.py``.
+        #: Served for owner-directed work: ``chat`` callers may prepend
+        #: :meth:`preference_lessons` for the action type.  ``None`` means
+        #: no tuned adapter is active — the base model serves alone.
+        self.preference_adapter: Any = None
+
+    def set_preference_adapter(self, adapter: Any) -> None:
+        """Activate a preference-tuned adapter for owner-directed work."""
+        self.preference_adapter = adapter
+
+    def preference_lessons(self, action_type: str = "") -> list[str]:
+        """Active adapter's lessons for one action type (empty when none)."""
+        adapter = self.preference_adapter
+        if adapter is None:
+            return []
+        lessons = getattr(adapter, "lessons", None) or []
+        if not action_type:
+            return list(lessons)
+        typed = [lesson for lesson in lessons
+                 if action_type.lower() in str(lesson).lower()]
+        return typed or list(lessons)
 
     # ── wiring ───────────────────────────────────────────────────────────
     def _get_router(self) -> Any:

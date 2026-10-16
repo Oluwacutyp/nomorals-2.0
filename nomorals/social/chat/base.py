@@ -420,12 +420,20 @@ class ChatAdapter(ABC):
     @abstractmethod
     def send(self, chat: ChatRef, text: str, *, reply_to: str = "",
              buttons: list[list[tuple[str, str]]] | None = None,
+             reply_keyboard: list[list[str]] | None = None,
              parse_mode: str = "") -> SendResult:
         """Send one text message. Returns a result, never raises for ordinary failure.
 
         ``buttons`` is ``[[(label, callback_data), ...], ...]`` — an inline
         keyboard. Adapters whose platform has no button concept ignore it;
         TelegramBotAdapter renders it as an inline keyboard.
+
+        ``reply_keyboard`` is ``[[text, ...], ...]`` — a persistent
+        bottom reply keyboard (tapping a button sends its text as a
+        message). Only the Telegram adapters render it; every other
+        adapter ignores it. When both ``buttons`` and ``reply_keyboard``
+        are passed, ``reply_keyboard`` wins (a message carries one
+        keyboard).
 
         ``parse_mode`` (e.g. "HTML") enables rich formatting — opt-in per
         message so plain-text messages are never accidentally parsed.

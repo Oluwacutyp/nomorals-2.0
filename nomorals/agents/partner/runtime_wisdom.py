@@ -74,9 +74,10 @@ class RuntimeWisdomMixin:
             return self._control_wisdom_timeline(keeper, rest, chat)
         if verb == "compare":
             return self._control_wisdom_compare(keeper, rest, chat)
-        # Unknown verb → treat the whole tail as a question (ask is the
-        # default; nobody should need to memorize verbs).
-        return self._control_wisdom_ask(keeper, (tail or "").strip(), chat)
+        # Unknown verb → say so (plus usage). Silently treating the
+        # tail as a question turns a typo'd verb (e.g. /wisdom stauts)
+        # into a nonsense question instead of a correction.
+        return f"unknown /wisdom verb {verb!r}\n\n{_WISDOM_USAGE}"
 
     def _control_wisdom_status(self, keeper) -> str:
         try:
@@ -126,11 +127,6 @@ class RuntimeWisdomMixin:
             st = keeper.status()["corpus"]
         except Exception:  # noqa: BLE001
             st = {}
-        if not st.get("ingested"):
-            return ("📚 the wisdom corpus is empty — nothing to ask yet. "
-                    "Run /wisdom seed and I'll fetch the 47-text starter "
-                    "library (public-domain scriptures, hermetic, gnostic, "
-                    "and wisdom texts), then ask again.")
         try:
             ans = keeper.ask(query, top=5)
         except Exception as exc:  # noqa: BLE001
@@ -142,6 +138,15 @@ class RuntimeWisdomMixin:
             src = p.url or "(no url)"
             lines.append(f"  source: {src} [{p.canon_status}]")
             lines.append("")
+        if not ans.passages and not st.get("ingested"):
+            # Truly empty corpus (not just no match): keep the seed
+            # pointer the old early-return carried, but route the
+            # reply through the checker like every other ask answer —
+            # no reply class bypasses _send_long_checked.
+            lines.append(
+                "📚 the corpus is empty — run /wisdom seed and I'll fetch "
+                "the 47-text starter library (public-domain scriptures, "
+                "hermetic, gnostic, and wisdom texts), then ask again.")
         return self._send_long_checked(
             chat.platform, chat, "\n".join(lines).strip()[:6000])
 

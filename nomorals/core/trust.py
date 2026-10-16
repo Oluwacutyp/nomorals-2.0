@@ -29,7 +29,6 @@ from typing import Any
 from urllib.parse import urlparse
 
 from .logging_setup import get_logger
-from ..storage.kv import KVStore
 
 __all__ = ["SourceTrust", "domain_tier"]
 
@@ -123,26 +122,31 @@ class SourceTrust:
 
     ``allow(url)`` / ``block(url)`` pin hosts to the top / bottom of the
     scale (persisted); ``explain(url)`` shows the full score breakdown.
+
+    ``store`` is the injected KV store (a ``KVStore`` built from the
+    context's db by the caller — the kernel may not import storage).
+    None means memory-only: feedback still affects this instance, but
+    nothing persists across restarts.
     """
 
     _KV = "search.trust.v1"
     _ALLOW_KV = "search.trust.allow.v1"
     _BLOCK_KV = "search.trust.block.v1"
 
-    def __init__(self, context: Any) -> None:
+    def __init__(self, context: Any, *, store: Any = None) -> None:
         self.context = context
+        self._store = store
         self._cache: dict[str, tuple[int, int, float]] = {}  # host → (ok, fail, last)
-        # in-memory fallback when no db is attached (persistence no-ops then)
+        # in-memory fallback when no store is injected (persistence no-ops then)
         self._allow_mem: set[str] = set()
         self._block_mem: set[str] = set()
 
     # ── persistence ────────────────────────────────────────────────────────
     def _load(self) -> dict[str, dict[str, Any]]:
-        db = getattr(self.context, "db", None)
-        if db is None:
+        if self._store is None:
             return {}
         try:
-            data = KVStore(db).get(self._KV)
+            data = self._store.get(self._KV)
             if isinstance(data, dict):
                 return data
         except Exception:  # noqa: BLE001
@@ -150,13 +154,12 @@ class SourceTrust:
         return {}
 
     def _save(self, data: dict[str, dict[str, Any]]) -> None:
-        db = getattr(self.context, "db", None)
-        if db is None:
+        if self._store is None:
             return
         try:
             import json
 
-            KVStore(db).set_raw(self._KV,
+            self._store.set_raw(self._KV,
                                 json.dumps(data, ensure_ascii=False), "json")
         except Exception:  # noqa: BLE001
             _log.debug("source-trust persist failed", exc_info=True)
@@ -197,11 +200,10 @@ class SourceTrust:
     # ── scoring ───────────────────────────────────────────────────────────
     def _host_set(self, kv_key: str) -> set[str]:
         mem = self._allow_mem if kv_key == self._ALLOW_KV else self._block_mem
-        db = getattr(self.context, "db", None)
-        if db is None:
+        if self._store is None:
             return set(mem)
         try:
-            data = KVStore(db).get(kv_key)
+            data = self._store.get(kv_key)
             if isinstance(data, list):
                 return {str(h) for h in data} | mem
         except Exception:  # noqa: BLE001
@@ -213,13 +215,12 @@ class SourceTrust:
             self._allow_mem = set(hosts)
         else:
             self._block_mem = set(hosts)
-        db = getattr(self.context, "db", None)
-        if db is None:
+        if self._store is None:
             return
         try:
             import json
 
-            KVStore(db).set_raw(kv_key, json.dumps(sorted(hosts)), "json")
+            self._store.set_raw(kv_key, json.dumps(sorted(hosts)), "json")
         except Exception:  # noqa: BLE001
             _log.debug("source-trust persist failed", exc_info=True)
 

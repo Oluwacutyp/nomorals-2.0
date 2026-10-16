@@ -27,8 +27,9 @@ import time
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from ...core.ids import new_short_id
+from ...core.ids import new_id, new_short_id
 from ...core.logging_setup import get_logger, scrub_secrets
+from ...core.retry import BackoffPolicy
 from ...storage.db import Database
 from .base import (
     ChatAdapter,
@@ -40,6 +41,15 @@ from .base import (
     SendResult,
     is_owner_chat,
 )
+from .chunking import (
+    chunk_for_platform,
+    label_chunks,
+    media_kind_for,
+    split_caption,
+)
+from .outbox import Outbox
+from .platform_limits import for_platform
+from .send_retry import send_with_retry
 
 __all__ = ["ChatGateway", "OwnerTarget", "parse_chat_keys",
            "resolve_owner_targets"]
@@ -101,6 +111,10 @@ class ChatGateway:
         clock: Callable[[], float] = time.time,
         adapter_builder: Callable[[str], ChatAdapter | None] | None = None,
         session_bridge: Any = None,
+        durable_outbox: bool = False,
+        outbox: Outbox | None = None,
+        durable_drain_sync: bool = True,
+        retry_policy: BackoffPolicy | None = None,
     ) -> None:
         """Create the gateway.
 
@@ -108,6 +122,19 @@ class ChatGateway:
         this module is L4 and must not import ``os``/L6). When present,
         every inbound message is attached to its OS Session before the
         brain's handler runs (``message.meta["os_session_id"]``).
+
+        ``durable_outbox`` (default OFF) routes sends through the durable
+        outbox (:mod:`nomorals.social.chat.outbox`): every send becomes a
+        row before it becomes a network call, and receipts are queryable
+        via :meth:`receipts` / ``nm sent``. Per-send ``durable=True``
+        overrides the flag. Durable sends are for anything the owner
+        would care about losing (reports, media, digests); typing
+        indicators never use the outbox. ``durable_drain_sync`` drains
+        the outbox synchronously inside :meth:`send` (so callers still
+        get a delivery verdict); False returns a receipt handle
+        immediately and leaves delivery to a later drain. ``retry_policy``
+        overrides the default classified-retry backoff (tests pass a
+        zero-delay policy).
         """
         if not adapters:
             raise ValueError("ChatGateway needs at least one adapter")
@@ -130,6 +157,24 @@ class ChatGateway:
         self.console_mirror: Callable[[Any], None] | None = None
         self._chat_locks: dict[str, threading.Lock] = {}
         self._locks_guard = threading.Lock()
+        #: Durable outbox (G2). Built lazily from ``db`` when the flag is
+        #: on and no outbox was injected. Without a db there is nowhere to
+        #: persist rows, so durability degrades to direct sends (logged,
+        #: never a silent drop).
+        self.durable_outbox = bool(durable_outbox)
+        self.outbox = outbox
+        if self.durable_outbox and self.outbox is None:
+            if db is not None:
+                try:
+                    self.outbox = Outbox(db)
+                except Exception as exc:  # noqa: BLE001 - durability is opt-in, never fatal
+                    _log.warning("chat gateway: could not build outbox: %s", exc)
+                    self.outbox = None
+            else:
+                _log.warning("chat gateway: durable_outbox needs a db — "
+                             "sends will go direct (no receipts)")
+        self.durable_drain_sync = bool(durable_drain_sync)
+        self.retry_policy = retry_policy
         #: Guards ``adapters``/``_known``: start_one/stop_one mutate them from
         #: the control thread while send()/status()/stop() read them from
         #: adapter, pool, and autonomy threads. Unlocked, a stop_one() pop
@@ -432,6 +477,276 @@ class ChatGateway:
                 self._chat_locks[chat.key] = lock
             return lock
 
+    # ── outbound: one chunk through one adapter, with classified retry ─
+    def _send_one_chunk(
+        self,
+        adapter: ChatAdapter,
+        chat: ChatRef,
+        chunk: str,
+        *,
+        reply_to: str = "",
+        buttons: list[list[tuple[str, str]]] | None = None,
+        reply_keyboard: list[list[str]] | None = None,
+        parse_mode: str = "",
+    ) -> tuple[SendResult, int]:
+        """Send one already-sized chunk. Returns ``(result, attempts)``.
+
+        Keyboards and parse mode are gated on the platform's descriptor:
+        platforms that cannot render them never receive them (previously
+        they were forwarded and silently ignored). Retries are classified
+        (transient → backoff+jitter, terminal → 1 attempt).
+        """
+        limits = for_platform(chat.platform)
+        kwargs: dict[str, Any] = {"reply_to": reply_to}
+        if buttons is not None and limits.supports_buttons:
+            kwargs["buttons"] = buttons
+        if parse_mode and limits.supports_html:
+            kwargs["parse_mode"] = parse_mode
+        if reply_keyboard is not None and limits.supports_buttons:
+            kwargs["reply_keyboard"] = reply_keyboard
+
+        def _call() -> SendResult:
+            result = adapter.send(chat, chunk, **kwargs)
+            if result.ok:
+                self.touch(chat)
+            return result
+
+        return send_with_retry(
+            _call, platform=chat.platform, policy=self.retry_policy,
+        )
+
+    def _send_one_media(
+        self,
+        adapter: ChatAdapter,
+        chat: ChatRef,
+        media: MediaRef,
+        *,
+        caption: str = "",
+    ) -> tuple[SendResult, int]:
+        """Send one media item with classified retry."""
+        def _call() -> SendResult:
+            result = adapter.send_media(chat, media, caption=caption)
+            if result.ok:
+                self.touch(chat)
+            return result
+
+        return send_with_retry(
+            _call, platform=chat.platform, policy=self.retry_policy,
+        )
+
+    def _deliver_outbox_payload(
+        self, payload: dict[str, Any],
+    ) -> tuple[SendResult, int]:
+        """The outbox drain's send function: one row → one adapter call."""
+        platform = str(payload.get("platform") or "")
+        chat_key = str(payload.get("chat_key") or "")
+        try:
+            chat = ChatRef(
+                platform=platform,
+                chat_id=str(payload.get("chat_id") or ""),
+                kind=str(payload.get("chat_kind") or ChatKind.DM),
+                thread_id=str(payload.get("thread_id") or ""),
+            )
+        except Exception as exc:  # noqa: BLE001 - bad row fails loudly, not silently
+            return SendResult(ok=False, platform=platform,
+                              error=f"bad outbox row for {chat_key}: {exc}"), 1
+        adapter = self._adapter_for(platform)
+        if adapter is None:
+            return SendResult(ok=False, platform=platform,
+                              error=f"no adapter for {platform!r}"), 1
+        if str(payload.get("kind") or "") == "chat_send_file":
+            media = payload.get("media") or {}
+            ref = MediaRef(
+                path=str(media.get("path") or ""),
+                mime=str(media.get("mime") or ""),
+                kind=str(media.get("kind") or "file"),
+                name=str(media.get("name") or ""),
+            )
+            result, attempts = self._send_one_media(
+                adapter, chat, ref,
+                caption=str(media.get("caption") or ""),
+            )
+            # A caption that was chunked at submit time: the remainder
+            # goes out as text, in order, as part of the same row.
+            rest = payload.get("caption_rest") or []
+            if result.ok and rest:
+                for piece in rest:
+                    piece_result, _ = self._send_one_chunk(
+                        adapter, chat, str(piece))
+                    if not piece_result.ok:
+                        return piece_result, attempts
+            return result, attempts
+        buttons_raw = payload.get("buttons")
+        buttons: list[list[tuple[str, str]]] | None = None
+        if buttons_raw is not None:
+            try:
+                buttons = [[(str(a), str(b)) for a, b in row]
+                           for row in buttons_raw]
+            except (TypeError, ValueError):
+                buttons = None
+        return self._send_one_chunk(
+            adapter, chat, str(payload.get("text") or ""),
+            reply_to=str(payload.get("reply_to") or ""),
+            buttons=buttons,
+            reply_keyboard=payload.get("reply_keyboard"),
+            parse_mode=str(payload.get("parse_mode") or ""),
+        )
+
+    def _chunked(self, chat: ChatRef, text: str) -> list[str]:
+        """Labelled chunks for ``text`` on this chat's platform. SMS is
+        returned as a single chunk — its adapter owns segmentation."""
+        chunks = chunk_for_platform(text, chat.platform)
+        return label_chunks(chunks)
+
+    def _send_direct(
+        self,
+        platform: str,
+        chat: ChatRef,
+        text: str,
+        *,
+        ordered: bool = True,
+        reply_to: str = "",
+        buttons: list[list[tuple[str, str]]] | None = None,
+        reply_keyboard: list[list[str]] | None = None,
+        parse_mode: str = "",
+    ) -> SendResult:
+        """Synchronous path: chunk, then send chunk-by-chunk in order.
+        Stops at the first failed chunk — later chunks must never overtake
+        a failed earlier one (ordering survives retry)."""
+        adapter = self._adapter_for(chat.platform)
+        if adapter is None:
+            return SendResult(ok=False, platform=platform,
+                              error=f"no adapter for {platform!r}")
+        chunks = self._chunked(chat, text)
+        total = len(chunks)
+
+        def _do() -> SendResult:
+            last = SendResult(ok=True, platform=platform,
+                              message_id=new_short_id("skip"))
+            for i, chunk in enumerate(chunks):
+                is_last = i == total - 1
+                result, _attempts = self._send_one_chunk(
+                    adapter, chat, chunk,
+                    reply_to=reply_to if i == 0 else "",
+                    buttons=buttons if is_last else None,
+                    reply_keyboard=reply_keyboard if is_last else None,
+                    parse_mode=parse_mode if is_last else "",
+                )
+                if not result.ok:
+                    return SendResult(
+                        ok=False, platform=platform,
+                        error=f"chunk {i + 1}/{total}: {result.error}")
+                last = result
+            return last
+
+        if ordered:
+            with self._lock_for(chat):
+                return _do()
+        return _do()
+
+    def _send_durable(
+        self,
+        platform: str,
+        chat: ChatRef,
+        text: str,
+        *,
+        ordered: bool = True,
+        reply_to: str = "",
+        buttons: list[list[tuple[str, str]]] | None = None,
+        reply_keyboard: list[list[str]] | None = None,
+        parse_mode: str = "",
+        durable_kind: str = "chat",
+    ) -> SendResult:
+        """Durable path: every chunk becomes a row, then the chat's queue
+        drains in order. Returns the delivery verdict when
+        ``durable_drain_sync`` is on, else a receipt handle (the first
+        job id) for ``nm sent``."""
+        assert self.outbox is not None  # noqa: S101 - caller checked
+        chunks = self._chunked(chat, text)
+        total = len(chunks)
+        group_id = new_id("send")
+
+        def _submit() -> list[str]:
+            job_ids: list[str] = []
+            for i, chunk in enumerate(chunks):
+                is_last = i == total - 1
+                job_ids.append(self.outbox.submit(
+                    platform=platform, chat=chat, text=chunk,
+                    reply_to=reply_to if i == 0 else "",
+                    buttons=buttons if is_last else None,
+                    reply_keyboard=reply_keyboard if is_last else None,
+                    parse_mode=parse_mode if is_last else "",
+                    durable_kind=durable_kind, group_id=group_id,
+                ))
+            return job_ids
+
+        if ordered:
+            with self._lock_for(chat):
+                job_ids = _submit()
+                if not self.durable_drain_sync:
+                    return SendResult(ok=True, platform=platform,
+                                      message_id=job_ids[0] if job_ids else "")
+                return self._collect_durable(platform, chat, job_ids)
+        job_ids = _submit()
+        if not self.durable_drain_sync:
+            return SendResult(ok=True, platform=platform,
+                              message_id=job_ids[0] if job_ids else "")
+        return self._collect_durable(platform, chat, job_ids)
+
+    def _collect_durable(
+        self, platform: str, chat: ChatRef, job_ids: list[str],
+    ) -> SendResult:
+        """Drain this chat's queue and reduce it to one verdict for the
+        submitted jobs. A job still queued after the drain (transient
+        head in backoff) is a queued-for-retry failure, not a silent
+        drop — the row stays queryable via ``nm sent``."""
+        assert self.outbox is not None  # noqa: S101 - caller checked
+        # Idempotent replay: a submit that hit an already-done row
+        # returns its stored verdict without re-sending.
+        if len(job_ids) == 1:
+            stored = self.outbox.job_result(job_ids[0])
+            if stored is not None:
+                return SendResult(
+                    ok=bool(stored["ok"]), platform=platform,
+                    message_id=str(stored.get("message_id") or ""),
+                    error=str(stored.get("error") or ""))
+        outcomes = self.outbox.deliver_chat(
+            chat.key, platform, self._deliver_outbox_payload)
+        by_job = {o["job_id"]: o for o in outcomes}
+        last_id = ""
+        for job_id in job_ids:
+            outcome = by_job.get(job_id)
+            if outcome is None:
+                stored = self.outbox.job_result(job_id)
+                if stored is not None and stored["ok"]:
+                    last_id = str(stored.get("message_id") or last_id)
+                    continue
+                return SendResult(
+                    ok=False, platform=platform,
+                    error="queued for retry (see: nm sent --to "
+                          f"{chat.key})")
+            if not outcome["ok"]:
+                return SendResult(
+                    ok=False, platform=platform, error=str(outcome["error"]))
+            last_id = str(outcome.get("message_id") or last_id)
+        return SendResult(ok=True, platform=platform, message_id=last_id)
+
+    def receipts(
+        self,
+        *,
+        chat_key: str = "",
+        platform: str = "",
+        since: float = 0.0,
+        limit: int = 200,
+    ) -> list[dict[str, Any]]:
+        """Delivery receipts from the durable outbox (G4). Empty when
+        durability was never enabled — receipts only exist for durable
+        sends."""
+        if self.outbox is None:
+            return []
+        return self.outbox.receipts(
+            chat_key=chat_key, platform=platform, since=since, limit=limit)
+
     def send(
         self,
         platform: str,
@@ -441,13 +756,25 @@ class ChatGateway:
         reply_to: str = "",
         ordered: bool = True,
         buttons: list[list[tuple[str, str]]] | None = None,
+        reply_keyboard: list[list[str]] | None = None,
         parse_mode: str = "",
+        durable: bool | None = None,
+        durable_kind: str = "chat",
     ) -> SendResult:
         """Send one message on one platform. Ordered per chat by default.
 
         ``buttons`` is ``[[(label, callback_data), ...], ...]`` — rendered
         as an inline keyboard by adapters whose platform supports it
-        (TelegramBotAdapter); ignored elsewhere.
+        (TelegramBotAdapter); stripped elsewhere. ``reply_keyboard`` is
+        ``[[text, ...], ...]`` — a persistent bottom keyboard, rendered
+        by the Telegram adapters, stripped elsewhere. When both are
+        passed, ``reply_keyboard`` wins.
+
+        ``durable`` routes the send through the durable outbox (row
+        first, then network call; receipts via :meth:`receipts` /
+        ``nm sent``). None means the gateway's ``durable_outbox`` flag
+        (default OFF). ``durable_kind`` labels the row (``chat``,
+        ``report``, ``media``, ``digest``).
         """
         chat = chat if isinstance(chat, ChatRef) else ChatRef.parse(str(chat))
         text = text if text is not None else ""
@@ -471,17 +798,20 @@ class ChatGateway:
             _log.info("DRY-RUN send %s: %s", chat.key, text[:120])
             return SendResult(ok=True, platform=platform, message_id=new_short_id("dry"))
 
-        def _do() -> SendResult:
-            result = adapter.send(chat, text, reply_to=reply_to,
-                                  buttons=buttons, parse_mode=parse_mode)
-            if result.ok:
-                self.touch(chat)
-            return result
-
-        if ordered:
-            with self._lock_for(chat):
-                return _do()
-        return _do()
+        use_durable = durable if durable is not None else self.durable_outbox
+        if use_durable and self.outbox is not None:
+            return self._send_durable(
+                platform, chat, text, ordered=ordered, reply_to=reply_to,
+                buttons=buttons, reply_keyboard=reply_keyboard,
+                parse_mode=parse_mode, durable_kind=durable_kind)
+        if use_durable and self.outbox is None:
+            _log.warning(
+                "gateway.send: durable requested for %s but no outbox "
+                "(no db) — sending direct", chat.key)
+        return self._send_direct(
+            platform, chat, text, ordered=ordered, reply_to=reply_to,
+            buttons=buttons, reply_keyboard=reply_keyboard,
+            parse_mode=parse_mode)
 
     def send_file(
         self,
@@ -491,12 +821,21 @@ class ChatGateway:
         *,
         caption: str = "",
         max_send_mb: float = 0.0,
+        durable: bool | None = None,
+        durable_kind: str = "media",
     ) -> SendResult:
         """Send a file, auto-compressing when it would exceed ``max_send_mb``.
 
         Compression is best-effort: if it doesn't help (already-compressed
         formats, no ffmpeg for video), the original goes out — the caller
         can pre-check with the compress tool.
+
+        Media over the platform's inline cap goes out as a document
+        (``PlatformLimits.max_file_mb``), never as a failed inline
+        attempt. A caption over the caption cap is chunked: first chunk
+        as the caption, the rest as follow-up text. ``durable`` routes
+        through the durable outbox like :meth:`send` (default: the
+        gateway's ``durable_outbox`` flag).
         """
         chat = chat if isinstance(chat, ChatRef) else ChatRef.parse(str(chat))
         adapter = self._adapter_for(chat.platform)
@@ -516,13 +855,48 @@ class ChatGateway:
                                   path, target, report.get("ratio"))
             except Exception as exc:  # noqa: BLE001 - never block the send on compression
                 _log.debug("send_file compression failed: %s", exc)
-        media = MediaRef(path=target, mime="", kind="file",
+        limits = for_platform(chat.platform)
+        try:
+            size_bytes = os.path.getsize(target)
+        except OSError:
+            size_bytes = 0
+        kind = media_kind_for(size_bytes, "file", limits)
+        caption_chunks = split_caption(caption, max_caption=limits.max_caption) \
+            if caption and limits.max_caption > 0 and len(caption) > limits.max_caption \
+            else [caption]
+        caption_first = caption_chunks[0]
+        caption_rest = caption_chunks[1:]
+        media = MediaRef(path=target, mime="", kind=kind,
                          name=os.path.basename(target))
+        use_durable = durable if durable is not None else self.durable_outbox
+        if use_durable and self.outbox is not None:
+            group_id = new_id("send")
+            with self._lock_for(chat):
+                job_id = self.outbox.submit(
+                    platform=platform, chat=chat, kind="chat_send_file",
+                    durable_kind=durable_kind, group_id=group_id,
+                    media={"path": target, "mime": "", "kind": kind,
+                           "name": os.path.basename(target),
+                           "caption": caption_first},
+                    caption_rest=caption_rest,
+                )
+                if not self.durable_drain_sync:
+                    return SendResult(ok=True, platform=platform,
+                                      message_id=job_id)
+                return self._collect_durable(platform, chat, [job_id])
 
         def _do() -> SendResult:
-            result = adapter.send_media(chat, media, caption=caption)
-            if result.ok:
-                self.touch(chat)
+            result, _attempts = self._send_one_media(
+                adapter, chat, media, caption=caption_first)
+            if not result.ok:
+                return result
+            for piece in caption_rest:
+                piece_result = self._send_direct(
+                    platform, chat, piece, ordered=False)
+                if not piece_result.ok:
+                    return SendResult(
+                        ok=False, platform=platform,
+                        error=f"caption remainder: {piece_result.error}")
             return result
 
         with self._lock_for(chat):

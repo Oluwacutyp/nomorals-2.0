@@ -668,9 +668,10 @@ def render_health_view(
     lines.append(f"  {paint('error ratio', CYAN, color=color)}")
     lines.append(f"  {gauge(err_ratio, width=min(30, w - 20), color=color, warn_at=0.05, crit_at=0.2)}")
     lines.append("")
+    log_rate = f"{stats['log_rate_s']:.2f}/s"
     lines.append(
         f"  {paint('log rate', CYAN, color=color)}  "
-        f"{paint(f'{stats['log_rate_s']:.2f}/s', BRIGHT_WHITE, color=color)}  "
+        f"{paint(log_rate, BRIGHT_WHITE, color=color)}  "
         f"{paint('telemetry', CYAN, color=color)}  "
         f"{paint(str(stats['captured']), BRIGHT_WHITE, color=color)} logs · "
         f"{paint(str(stats['exceptions']), WARN if stats['exceptions'] else SUBTLE, color=color)} exceptions"

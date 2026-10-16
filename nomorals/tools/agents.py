@@ -18,6 +18,7 @@ from typing import Any
 from ..core.errors import CapabilityDenied, ToolNotFound
 from ..core.policy import Capability, CapabilitySet
 from ..core.result import Err
+from .registry import _format_params
 
 __all__ = ["register", "AGENT_TOOL_MODULES", "agent_for",
            "CODING_TOOLS", "CODING_CAPABILITIES", "CodingRoleAgent",
@@ -176,7 +177,7 @@ class RoleScopedRegistry:
     def prompt_listing(self) -> str:
         lines = []
         for schema in self.schemas():
-            params = ", ".join(schema.get("parameters", ()))
+            params = _format_params(schema)
             lines.append(f"- {schema['name']}({params}): "
                          f"{schema.get('description', '')}")
         return "\n".join(lines)

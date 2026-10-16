@@ -26,6 +26,7 @@ from ..core.ids import new_id
 from ..core.logging_setup import get_logger
 from ..core.policy import Capability, CapabilitySet
 from ..core.result import Err, Ok, Outcome
+from ..tools.registry import _format_params
 from .base import Budget
 
 __all__ = [
@@ -476,7 +477,7 @@ class RoleEnforcingRegistry:
     def prompt_listing(self) -> str:
         lines = []
         for schema in self.schemas():
-            params = ", ".join(schema.get("parameters", ()))
+            params = _format_params(schema)
             lines.append(f"- {schema['name']}({params}): "
                          f"{schema.get('description', '')}")
         return "\n".join(lines)

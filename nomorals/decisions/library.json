@@ -1,0 +1,5 @@
+{
+  "library": true,
+  "reason": "Decision journal \u2014 pure domain classes (Decision, DecisionJournal, OutcomeRevision); honest emptiness, predictions before outcomes. Genuine import-only library.",
+  "owner_decision_needed": "Wire into CLI/chat (decision journal commands) or keep as import-only library."
+}

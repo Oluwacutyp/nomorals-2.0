@@ -1,0 +1,5 @@
+{
+  "library": true,
+  "reason": "Scheduled-briefing timezone helpers \u2014 pure functions (PulseAnchor, fire_at_local, resolve_owner_tz). Genuine import-only library.",
+  "owner_decision_needed": "Wire into scheduler/pulse commands or keep as import-only library."
+}

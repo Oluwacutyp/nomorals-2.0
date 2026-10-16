@@ -317,6 +317,13 @@ class Task:
     created_at: float = field(default_factory=time.time)
     started_at: float = 0.0
     finished_at: float = 0.0
+    #: Queue-free execution time (seconds), set by the executor when a
+    #: dispatch completes. Unlike :attr:`duration` (dispatch-to-settle, queue
+    #: wait included), this is the time the callable actually spent running,
+    #: so summing it across tasks gives the true serial-equivalent workload.
+    #: Reset on every :meth:`mark_running` (each dispatch); 0.0 when the task
+    #: never completed (failed, cancelled, timed out) — unknown, not zero work.
+    pure_seconds: float = 0.0
     metadata: dict[str, Any] = field(default_factory=dict)
     #: Acceptance criteria: what must hold for this task to count as
     #: *correct*.  Empty means "ran to completion" is the only bar — and
@@ -359,6 +366,8 @@ class Task:
         self.state = TaskState.RUNNING
         self.started_at = time.time()
         self.attempts += 1
+        # Fresh dispatch: the previous attempt's pure figure is stale.
+        self.pure_seconds = 0.0
 
     def mark_done(self, result: Any) -> None:
         self.state = TaskState.DONE

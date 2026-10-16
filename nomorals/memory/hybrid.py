@@ -230,17 +230,44 @@ class HybridMemoryIndex:
     are indexed incrementally. Thread-safe.
     """
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        index_factory: Callable[[], Any] | None = None,
+        document_factory: Callable[..., Any] | None = None,
+        section_factory: Callable[..., Any] | None = None,
+    ) -> None:
+        """Create the BM25 mirror.
+
+        The documents/ types are INJECTED, never imported here: memory
+        is L3, documents is L4, and an upward import would let the
+        recall spine silently depend on the layer above it. The
+        composition root passes the real factories
+        (``DocumentIndex`` / ``Document`` / ``Section``); all three or
+        none — a partial injection fails fast in :meth:`_ensure`.
+        Without factories the BM25 lane degrades honestly:
+        :meth:`bm25_search` returns [] and :meth:`index_unit` raises.
+        """
         self._lock = threading.RLock()
         self._index: Any = None
         self._indexed: set[str] = set()
+        self._index_factory = index_factory
+        self._document_factory = document_factory
+        self._section_factory = section_factory
 
     def _ensure(self) -> Any:
         if self._index is None:
-            from ..documents.index import DocumentIndex
-            from ..documents.model import Document
-            self._index = DocumentIndex()
-            self._Document = Document
+            if self._index_factory is None \
+                    or self._document_factory is None \
+                    or self._section_factory is None:
+                raise RuntimeError(
+                    "no document factories injected — "
+                    "HybridMemoryIndex requires index_factory, "
+                    "document_factory and section_factory "
+                    "(see agents/partner/runtime.py wiring)")
+            self._index = self._index_factory()
+            self._Document = self._document_factory
+            self._Section = self._section_factory
         return self._index
 
     def index_unit(self, unit_id: str, title: str, text: str) -> None:
@@ -248,8 +275,7 @@ class HybridMemoryIndex:
         with self._lock:
             idx = self._ensure()
             doc = self._Document(id=unit_id, title=title, format="memory")
-            from ..documents.model import Section
-            doc.sections = [Section(heading=title, text=text)]
+            doc.sections = [self._Section(heading=title, text=text)]
             try:
                 idx.add(doc)
             except Exception:  # noqa: BLE001

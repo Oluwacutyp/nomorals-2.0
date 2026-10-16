@@ -68,7 +68,7 @@ class RuntimeGamesMixin:
                 lines.append(
                     f"live game: {live.game} — send your move (or /game quit)")
             lines.append(engine.list_games())
-            lines.append("  /game <name> — start · /game rematch — run it back")
+            lines.append("  /game <name> — start · /game rematch [easy|normal|hard|expert] — run it back")
             lines.append("  /game <name> [easy|normal|hard|expert] — AI/puzzle difficulty")
             lines.append("  /game <name> [daily|timed|<variant>] — modes & mastery unlocks")
             lines.append("  /mastery — your per-game mastery tiers")
@@ -109,7 +109,13 @@ class RuntimeGamesMixin:
                 self._relay_send(doomed.other_chat(chat_key), msg)
             return "\n".join(out)
         if verb == "rematch":
-            room, msgs = engine.rematch(chat_key)
+            # /game rematch [easy|normal|hard|expert] — same difficulty
+            # words as the start path, default "normal" (unchanged).
+            difficulty = next(
+                (w for w in (p.lower() for p in parts[1:])
+                 if w in ("easy", "normal", "hard", "expert")),
+                "normal")
+            room, msgs = engine.rematch(chat_key, difficulty=difficulty)
             return "\n".join(msgs)
         if verb in {"leaderboard", "board", "ranks"}:
             game = parts[1].lower() if len(parts) > 1 else ""
@@ -1298,8 +1304,8 @@ class RuntimeGamesMixin:
         return ("usage: /npc list · /npc talk <name> <message> · "
                 "/npc mood <name>")
 
-    def _control_character(self, tail: str, chat_key: str) -> str:
-        """Character agents: /character list | create <name> [trait=0.8 ...]
+    def _control_charagent(self, tail: str, chat_key: str) -> str:
+        """Character agents: /charagent list | create <name> [trait=0.8 ...]
         | talk <name> <message> | play <game> <name...> | forget <name>."""
         from ...characters import (
             Character, CharacterStore, converse, AgentSeat,
@@ -1314,7 +1320,7 @@ class RuntimeGamesMixin:
             chars = store.all()
             if not chars:
                 return ("no characters yet — create one:\n"
-                        "/character create Zara witty=0.9 bold=0.6")
+                        "/charagent create Zara witty=0.9 bold=0.6")
             return "\n".join(
                 f"🎭 {c.name} — {', '.join(sorted(c.persona)[:4]) or 'no traits'}"
                 f"{' · voice: ' + c.voice_name if c.voice_name else ''}"
@@ -1323,7 +1329,7 @@ class RuntimeGamesMixin:
         if verb == "create":
             bits = rest.split()
             if not bits:
-                return "usage: /character create <name> [trait=0.0-1.0 ...]"
+                return "usage: /charagent create <name> [trait=0.0-1.0 ...]"
             name = bits[0]
             if store.get_by_name(name):
                 return f"🎭 {name} already exists."
@@ -1338,12 +1344,12 @@ class RuntimeGamesMixin:
             c = Character(name=name, persona=persona)
             store.save(c)
             return (f"🎭 {name} is alive. Talk to them:\n"
-                    f"/character talk {name} hello")
+                    f"/charagent talk {name} hello")
 
         if verb == "talk":
             bits = rest.split(None, 1)
             if len(bits) < 2:
-                return "usage: /character talk <name> <message>"
+                return "usage: /charagent talk <name> <message>"
             c = store.get_by_name(bits[0])
             if c is None:
                 return f"no character named '{bits[0]}'."
@@ -1357,7 +1363,7 @@ class RuntimeGamesMixin:
         if verb == "play":
             bits = rest.split()
             if len(bits) < 2:
-                return ("usage: /character play <game> <name...> — "
+                return ("usage: /charagent play <game> <name...> — "
                         "Devon + characters play a real match")
             game_name, names = bits[0], bits[1:]
             chars = []
@@ -1388,8 +1394,10 @@ class RuntimeGamesMixin:
             store.delete(c.id)
             return f"🎭 {c.name} is gone."
 
-        return ("usage: /character list · create <name> [trait=0.8] · "
+        return ("usage: /charagent list · create <name> [trait=0.8] · "
                 "talk <name> <msg> · play <game> <names...> · forget <name>")
+
+    def _control_dm(self, tail: str, chat_key: str) -> str:
         """DM persona: /dm [mood <m>] | say <text> | intro — the narrator
         speaks in its own voice, in the table's current mood."""
         from ..features import feature_enabled

@@ -4,6 +4,15 @@ The core package runs with **zero** third-party imports. Accelerators are probed
 once, cached, and every consumer has a pure-stdlib fallback. This module is the
 single place that asks "is X installed?" so that behaviour is predictable and
 reportable.
+
+NAME COLLISION — READ THIS FIRST: this module is named ``compat`` because it
+answers "is this optional dependency compatible/available here?" — it is
+**optional-dependency detection**, NOT Python-version compatibility. There is
+no Python-version compat layer in this file (no ``py3.11`` syntax shims, no
+``sys.version_info`` branches, no backports). Code that needs a version-gated
+feature must check ``sys.version_info`` at its own call site; importing this
+module never changes Python-version behaviour. If you came here looking for
+a Python-compat shim, you are in the wrong module.
 """
 
 from __future__ import annotations
@@ -251,3 +260,32 @@ def feature_report() -> dict[str, Any]:
             {"name": binary, "path": which(binary), "purpose": purpose}
         )
     return report
+
+
+# ── Tier 3: explicit optional-dependency probe (additive) ───────────────────
+
+
+def detect_optional_dep(name: str) -> dict[str, Any]:
+    """Detect one optional dependency and report it, honestly.
+
+    Returns ``{"name", "available", "module", "install", "fallback"}``.
+    ``available`` is :func:`available` — importable *right now* in this
+    process.  For a known :data:`FEATURES` entry the install hint and
+    fallback come from the feature record; for an unknown name the
+    module is the name itself (``available()`` already falls back to
+    treating it as a module path) with a generic ``pip install`` hint
+    and no fallback claim.  Never raises.
+    """
+    feature = next((f for f in FEATURES if f.name == name), None)
+    module = feature.module if feature else name
+    return {
+        "name": name,
+        "available": available(name),
+        "module": module,
+        "install": feature.install if feature else f"pip install {name}",
+        "fallback": feature.fallback if feature else "",
+        "known": feature is not None,
+    }
+
+
+__all__ += ["detect_optional_dep"]

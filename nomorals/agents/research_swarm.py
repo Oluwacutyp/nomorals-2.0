@@ -45,6 +45,7 @@ from typing import Any
 from ..llm.brain import brain_for
 from ..core.logging_setup import get_logger
 from ..core.trust import SourceTrust
+from ..storage.kv import KVStore
 from .search.engine import SearchEngine
 
 _log = get_logger(__name__)
@@ -320,7 +321,10 @@ class ResearchSwarm:
             default = min(default, max(2, int(getattr(tune, "mission_max_concurrent", 2) or 2)))
         self.workers = max(1, min(6, int(workers) if workers else default))
         self.search_engine = SearchEngine(context)
-        self.trust = SourceTrust(context)
+        # The kernel may not import storage: the caller builds the store.
+        db = getattr(context, "db", None)
+        self.trust = SourceTrust(
+            context, store=KVStore(db) if db is not None else None)
 
     # ── angle decomposition ────────────────────────────────────────────────
     def angles_for(self, query: str) -> list[str]:

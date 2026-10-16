@@ -622,3 +622,149 @@ def register(registry: Any) -> None:
         if action == "compress":
             return a.compress(path, fmt=fmt)
         raise ToolError(f"unknown archive action {action!r}")
+
+
+# ── Tier 3: magic-byte detection + traversal-safe extraction helpers ──────
+# Added without touching existing APIs.  ``detect_format()`` above mixes
+# extension hints with magic bytes; the helpers below are the pure
+# layers a downloader / source adapter should call: identify bytes by
+# magic alone, validate member names before extraction, and extract
+# through a pre-flight safety check that refuses unsafe archives
+# instead of skipping members mid-stream.
+
+#: (magic bytes, format, offset) — pure magic-byte identification.
+#: tar's ``ustar`` lives at offset 257; everything else is at 0.
+MAGIC_SIGNATURES: tuple[tuple[bytes, str, int], ...] = (
+    (b"PK\x03\x04", "zip", 0),
+    (b"PK\x05\x06", "zip", 0),          # empty zip
+    (b"\x1f\x8b", "gzip", 0),
+    (b"BZh", "bzip2", 0),
+    (b"\xfd7zXZ\x00", "xz", 0),
+    (b"7z\xbc\xaf\x27\x1c", "7z", 0),
+    (b"Rar!\x1a\x07\x00", "rar", 0),
+    (b"Rar!\x1a\x07\x01\x00", "rar", 0),
+    (b"\x28\xb5\x2f\xfd", "zstd", 0),
+    (b"ustar", "tar", 257),
+)
+
+
+def detect_magic_bytes(data: bytes) -> str:
+    """Identify bytes by magic alone — no filename, no extension.
+
+    Returns the format (``"zip"`` / ``"gzip"`` / ``"tar"`` / ...) or
+    ``"unknown"``.  A gzip stream is reported as ``"gzip"`` even when
+    it wraps a tarball: distinguishing ``.tar.gz`` needs the filename,
+    which is :func:`detect_file_magic`'s job.
+    """
+    head = bytes(data or b"")[:512]
+    for magic, fmt, offset in MAGIC_SIGNATURES:
+        if len(head) >= offset + len(magic) \
+                and head[offset:offset + len(magic)] == magic:
+            return fmt
+    return "unknown"
+
+
+def detect_file_magic(path: str | Path) -> str:
+    """Identify a file by magic bytes, with the extension only as the
+    tarball hint (``.tar.gz`` / ``.tgz`` / ``.tar.bz2`` / ``.tar.xz``).
+    Reads at most 512 bytes.  ``"unknown"`` when unreadable."""
+    p = Path(path)
+    try:
+        with open(p, "rb") as fh:
+            head = fh.read(512)
+    except OSError:
+        return "unknown"
+    fmt = detect_magic_bytes(head)
+    name = p.name.lower()
+    if fmt == "gzip" and name.endswith((".tar.gz", ".tgz")):
+        return "tar.gz"
+    if fmt == "bzip2" and name.endswith((".tar.bz2", ".tbz2")):
+        return "tar.bz2"
+    if fmt == "xz" and name.endswith((".tar.xz", ".txz")):
+        return "tar.xz"
+    return fmt
+
+
+def is_safe_member_name(name: str) -> tuple[bool, str]:
+    """Validate one archive member name before extraction.
+
+    Returns ``(True, "")`` when safe, ``(False, reason)`` when the
+    member must never be written: absolute paths, drive prefixes,
+    ``..`` escapes, NUL bytes, empty names, and — for the pre-flight
+    check — symlink-style trickery is caught by the extractor itself;
+    this gate covers the name layer.
+    """
+    if not name:
+        return False, "empty member name"
+    if "\x00" in name:
+        return False, "NUL byte in member name"
+    if name.startswith(("/", "\\")):
+        return False, f"absolute path: {name!r}"
+    if len(name) >= 2 and name[1] == ":" and name[0].isalpha():
+        return False, f"drive-prefixed path: {name!r}"
+    parts = name.replace("\\", "/").split("/")
+    if ".." in parts:
+        return False, f"path traversal: {name!r}"
+    return True, ""
+
+
+def validate_archive_members(names: list[str]) -> dict[str, Any]:
+    """Pre-flight check for a member-name list. Returns
+    ``{"safe": [...], "unsafe": [{"name", "reason"}]}`` — the caller
+    refuses the whole archive when ``unsafe`` is non-empty."""
+    safe: list[str] = []
+    unsafe: list[dict[str, str]] = []
+    for name in names:
+        ok, reason = is_safe_member_name(name)
+        if ok:
+            safe.append(name)
+        else:
+            unsafe.append({"name": name, "reason": reason})
+    return {"safe": safe, "unsafe": unsafe, "total": len(names)}
+
+
+def extract_for_downloader(archivist: "Archivist", path: str,
+                           dest: str = "") -> dict[str, Any]:
+    """Wire helper for the downloader + source adapters: identify an
+    archive by magic, pre-flight its member names, and extract only
+    when every member is safe.
+
+    Unlike :meth:`Archivist.extract` (skip-and-report per member), this
+    helper refuses the whole archive when ANY member is unsafe — a
+    downloaded archive with one traversal entry is treated as hostile,
+    not partially extracted.  Returns the extraction dict with an added
+    ``safety`` block (``{"checked": n, "unsafe": [...]}``), or a blocked
+    dict with ``extracted: 0`` when refused.
+    """
+    from pathlib import Path as _Path
+
+    p = _Path(path)
+    fmt = detect_file_magic(p)
+    try:
+        listing = archivist.list(path)
+        names = [e.get("name", "") for e in listing.get("entries", [])]
+    except Exception as exc:  # noqa: BLE001 — listing failure is a refusal
+        return {"path": str(p), "format": fmt, "extracted": 0,
+                "safety": {"checked": 0,
+                           "unsafe": [{"name": "",
+                                       "reason": f"could not list archive: {exc}"}]},
+                "blocked": True,
+                "reason": f"could not list archive members: {exc}"}
+    verdict = validate_archive_members(names)
+    if verdict["unsafe"]:
+        return {"path": str(p), "format": fmt, "extracted": 0,
+                "safety": {"checked": len(names),
+                           "unsafe": verdict["unsafe"]},
+                "blocked": True,
+                "reason": (f"refused: {len(verdict['unsafe'])} unsafe "
+                           f"member(s), e.g. "
+                           f"{verdict['unsafe'][0]['name']!r}")}
+    result = archivist.extract(path, dest=dest)
+    result["safety"] = {"checked": len(names), "unsafe": []}
+    result["blocked"] = False
+    return result
+
+
+__all__ += ["MAGIC_SIGNATURES", "detect_magic_bytes", "detect_file_magic",
+            "is_safe_member_name", "validate_archive_members",
+            "extract_for_downloader"]

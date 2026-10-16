@@ -86,3 +86,29 @@ __all__ = [
     "control_value",
     "control_valuepick",
 ]
+
+from .cross_listing import (
+    Listing,
+    PropertyPassport,
+    PassportEvent,
+    DocRef,
+    Viewing,
+    PropertyPassportStore,
+    normalize_address,
+    same_property,
+    group_listings,
+    cross_listing_score,
+)
+
+__all__ += [
+    "Listing",
+    "PropertyPassport",
+    "PassportEvent",
+    "DocRef",
+    "Viewing",
+    "PropertyPassportStore",
+    "normalize_address",
+    "same_property",
+    "group_listings",
+    "cross_listing_score",
+]

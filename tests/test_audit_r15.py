@@ -241,7 +241,10 @@ class TrialTempSmsTests(unittest.TestCase):
                 "masked": "+1555****111", "country": "us",
                 "country_name": "United States", "provider": "simcodes",
                 "inbox_id": "abc"}
-        with mock.patch("nomorals.accounts.temp_sms.grab_number",
+        # temp_number() drives grab_number_cascade (provider cascade with
+        # probe gating), not the single-provider grab_number — mock the
+        # seam the code actually calls.
+        with mock.patch("nomorals.accounts.temp_sms.grab_number_cascade",
                         return_value=info):
             out = flow.temp_number("us")
         self.assertIn("+15550001111", out)
@@ -264,7 +267,12 @@ class TrialTempSmsTests(unittest.TestCase):
 
     def test_assist_needs_identity(self):
         flow = self._flow()
-        out = flow.assist("github")
+        # P1-9b: the existing-account check runs before the identity
+        # check, so the passphrase must be set for the check to complete
+        # (else unknown -> refuse before identity is even considered).
+        with mock.patch.dict(os.environ,
+                             {"NM_VAULT_PASSPHRASE": "test-pass"}):
+            out = flow.assist("github")
         self.assertIn("/identity set", out)
 
     def test_assist_needs_vault_passphrase(self):

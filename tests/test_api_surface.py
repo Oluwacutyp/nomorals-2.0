@@ -442,9 +442,20 @@ class StreamTests(unittest.TestCase):
         try:
             self.assertEqual(resp.status, 200)
             self.assertIn("text/event-stream", resp.getheader("Content-Type"))
-            lines = [
+            # The stream opens with a `retry:` line + an `event: ready`
+            # handshake (see test_stream.py) before any timeline event —
+            # skip the preamble, then read the timeline frame.
+            lines: list[str] = []
+            for _ in range(12):
+                line = resp.fp.readline().decode("utf-8", "replace").rstrip("\n")
+                if line == "event: timeline":
+                    lines.append(line)
+                    break
+            else:
+                self.fail("no timeline event in first 12 stream lines")
+            lines += [
                 resp.fp.readline().decode("utf-8", "replace").rstrip("\n")
-                for _ in range(4)
+                for _ in range(3)
             ]
             self.assertEqual(lines[0], "event: timeline")
             self.assertTrue(lines[1].startswith("id: "))

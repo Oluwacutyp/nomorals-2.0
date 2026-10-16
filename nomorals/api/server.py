@@ -1179,7 +1179,10 @@ def _make_handler(server: APIServer) -> type[BaseHTTPRequestHandler]:
                 try:
                     _require_capability(principal, Capability.DB_READ)
                 except CapabilityDenied as exc:
-                    self._send_error(403, str(exc) or "capability denied")
+                    # Same kind as the JSON dispatch's denied shape, so
+                    # clients can match on kind across both surfaces.
+                    self._send_error(403, str(exc) or "capability denied",
+                                     extra={"kind": "CapabilityDenied"})
                     return
                 emit_sse(
                     self,

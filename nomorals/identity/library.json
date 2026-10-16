@@ -1,0 +1,5 @@
+{
+  "library": true,
+  "reason": "Identity document expiry tracker (vault refs only, owner-only). New in NEW_MODULES_17; CLI/chat wiring is follow-up.",
+  "owner_decision_needed": "Wire into CLI/chat (identity commands) or keep as import-only library."
+}

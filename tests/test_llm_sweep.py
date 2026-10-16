@@ -18,7 +18,26 @@ import time
 import unittest
 from pathlib import Path
 
-os.environ.setdefault("NM_COST_LOG", "off")
+# NM_COST_LOG must be off ONLY while this module's tests run: the flag
+# makes log_llm_call skip recording. It used to be set with
+# os.environ.setdefault at import time, which poisoned the whole suite
+# (the runner imports every test module before running any test, so
+# test_complexity_routing's CostLogTests saw 0 rows). Module-scoped
+# setup/teardown confines the flag to this module's tests.
+_OLD_NM_COST_LOG: str | None = None
+
+
+def setUpModule() -> None:
+    global _OLD_NM_COST_LOG
+    _OLD_NM_COST_LOG = os.environ.get("NM_COST_LOG")
+    os.environ["NM_COST_LOG"] = "off"
+
+
+def tearDownModule() -> None:
+    if _OLD_NM_COST_LOG is None:
+        os.environ.pop("NM_COST_LOG", None)
+    else:
+        os.environ["NM_COST_LOG"] = _OLD_NM_COST_LOG
 
 from nomorals.llm.adjudicate import adjudicate as adjudicate_fn
 from nomorals.llm.adjudicate import Judge, format_judgment, pairwise

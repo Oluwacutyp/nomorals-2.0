@@ -10,7 +10,10 @@ from __future__ import annotations
 
 import os
 import tempfile
+from typing import Any
 from unittest.mock import MagicMock
+
+import pytest
 
 from nomorals.core.error_system import (
     ErrorSystem,
@@ -155,3 +158,73 @@ def test_tools_degrade_gracefully_without_boot():
     tools = {t.name: t for t in reg._tools.values()}
     out = tools["system_health"].fn()
     assert out["ok"] is False and "not initialized" in out["error"]
+
+
+def test_ladders_use_injected_factories():
+    """T1.6 kernel: the ladders take kv/message factories, never imports."""
+    from types import SimpleNamespace
+
+    from nomorals.core.degradation import LadderExhausted
+    from nomorals.core.error_system import register_default_ladders
+
+    stored: dict[str, Any] = {}
+
+    class FakeKV:
+        def set(self, key, value):
+            stored[key] = value
+
+    class FakeRouter:
+        def __init__(self):
+            self.seen = None
+
+        def chat(self, msgs, **kw):
+            self.seen = msgs
+            return {"ok": True, "text": "hello"}
+
+    router = FakeRouter()
+    ctx = SimpleNamespace(db=object(), gateway=None, router=router)
+    prompts: list[str] = []
+
+    def message_factory(prompt):
+        prompts.append(prompt)
+        return [{"role": "user", "content": prompt}]
+
+    es = build_error_system(None)
+    try:
+        register_default_ladders(
+            es, ctx,
+            kv_factory=lambda db: FakeKV(),
+            message_factory=message_factory,
+        )
+        # telegram: primary raises (no gateway) -> queued rung uses the
+        # injected kv factory.
+        result, _meta = es.ladders.get("telegram").call("chat1", "hello")
+        assert result == {"ok": False, "queued": True, "chat": "chat1"}
+        assert len(stored) == 1
+        assert list(stored.values())[0] == {"chat": "chat1", "text": "hello"}
+        # llm: primary uses the injected message factory + router.
+        result, _meta = es.ladders.get("llm").call("ask me")
+        assert result == {"ok": True, "text": "hello"}
+        assert prompts == ["ask me"]
+        assert router.seen == [{"role": "user", "content": "ask me"}]
+    finally:
+        es.close()
+
+
+def test_ladders_fail_fast_without_factories():
+    """No factory injected -> the rung that needs it fails honestly."""
+    from types import SimpleNamespace
+
+    from nomorals.core.degradation import LadderExhausted
+    from nomorals.core.error_system import register_default_ladders
+
+    ctx = SimpleNamespace(db=object(), gateway=None, router=None)
+    es = build_error_system(None)
+    try:
+        register_default_ladders(es, ctx)
+        with pytest.raises(LadderExhausted):
+            es.ladders.get("telegram").call("chat1", "hello")
+        with pytest.raises(LadderExhausted):
+            es.ladders.get("llm").call("ask me")
+    finally:
+        es.close()

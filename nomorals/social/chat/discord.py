@@ -327,6 +327,7 @@ class DiscordAdapter(ChatAdapter):
     def send(self, chat: ChatRef, text: str, *,
              reply_to: str = "",
              buttons: list[list[tuple[str, str]]] | None = None,
+             reply_keyboard: list[list[str]] | None = None,
              parse_mode: str = "") -> SendResult:
         started = time.perf_counter()
         dc = self._dc()

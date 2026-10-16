@@ -27,3 +27,29 @@ __all__ = [
     "TaskKind",
     "TaskState",
 ]
+
+# Tier 0: agents runtime → VCPU farm adapter (new file, additive).
+from .runtime_vcpu import RuntimeVCPUAdapter
+
+__all__ += ["RuntimeVCPUAdapter"]
+
+# GROUPS Tier 0 — runtime profile envelope + autoscale (new file, additive).
+from .runtime_profile import (
+    RuntimeProfileManager,
+    autoscale,
+    hybrid_kwargs,
+    process_workers,
+    shed_level,
+    thread_workers,
+    workers_for,
+)
+
+__all__ += [
+    "RuntimeProfileManager",
+    "autoscale",
+    "hybrid_kwargs",
+    "process_workers",
+    "shed_level",
+    "thread_workers",
+    "workers_for",
+]

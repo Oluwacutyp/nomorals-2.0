@@ -1,0 +1,5 @@
+{
+  "library": true,
+  "reason": "Meta tooling \u2014 codebase inventories and self-description (dormant_modules, scan). Pure introspection library with no command surface; nothing imports it yet. Genuine import-only library.",
+  "owner_decision_needed": "Wire into CLI/chat (e.g. nm meta dormant / inventory commands) or keep as import-only library."
+}

@@ -60,3 +60,17 @@ bridge/media/
 # the .cpp sources are committed, the built libraries are not
 nomorals/native/*.so
 nomorals/native/*.dylib
+
+# Backup coordinator (nomorals/backup) — binary snapshots NEVER in commit
+# history on schedule. The backup repo holds manifests ONLY; blobs go to
+# GitHub Releases. These rules must exist BEFORE the first backup commit.
+*.gz
+*.enc
+*.part*
+cache/
+llm/
+temp/
+*.lock
+*.sock
+vault*
+.vault*

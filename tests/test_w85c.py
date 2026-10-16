@@ -22,6 +22,7 @@ import threading
 import time
 import unittest
 from types import SimpleNamespace
+from typing import Any
 
 from nomorals.agents.context import build_context
 from nomorals.agents.partner_runtime import PartnerBrain, PartnerRuntime
@@ -215,7 +216,9 @@ class ResponderGateTest(unittest.TestCase):
         router = _RecordingRouter()
         self._responder(router).respond(chat_platform="telegram", user_text="hey", gate_mode=MODE_OWNER)
         self.assertEqual(router.last_messages[0].role, "system")
-        self.assertIn("You are Wren", router.last_messages[0].content)
+        # The persona is Devon ("wren" is a nickname inside the prompt),
+        # so the prompt opens with "You are Devon".
+        self.assertIn("You are Devon", router.last_messages[0].content)
 
 
 class _RuntimeFixture:
@@ -273,11 +276,19 @@ class RecordingAdapter(ChatAdapter):
     def run(self, handler) -> None:  # pragma: no cover - never started in tests
         raise NotImplementedError
 
-    def send(self, chat: ChatRef, text: str, *, reply_to: str = "") -> SendResult:
+    def send(self, chat: ChatRef, text: str, *, reply_to: str = "",
+             buttons: Any = None, reply_keyboard: Any = None,
+             parse_mode: str = "") -> SendResult:
+        # Full ChatAdapter.send signature: the gateway forwards buttons /
+        # parse_mode when set, so a fake that narrows the signature breaks
+        # every send with a TypeError.
         self.sent.append(text)
         return SendResult(ok=True, platform=self.name, message_id=f"m{len(self.sent)}")
 
-    def typing(self, chat: ChatRef, seconds: float = 3.0) -> bool:
+    def typing(self, chat: ChatRef, seconds: float = 3.0,
+               action: str = "typing") -> bool:
+        # Full ChatAdapter.typing signature: the gateway passes action=,
+        # so a fake without it breaks every typing call with a TypeError.
         self.typing_calls.append((chat.key, seconds))
         return True
 

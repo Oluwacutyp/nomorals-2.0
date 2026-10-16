@@ -343,6 +343,12 @@ class GGUFServerManager:
         process_env: dict[str, str] | None = None,
         kv_cache_quant: str | None = None,
         flash_attn: bool | None = None,
+        # Speculative decoding (llm/speculative.py): small draft model
+        # proposes tokens, the target verifies.  Opt-in — empty means off.
+        draft_model: str = "",
+        draft_max: int = 4,
+        draft_min: int = 1,
+        draft_p_min: float = 0.9,
     ) -> None:
         from ..core.profiles import get_profile_kind, profile_value
         self.host = host
@@ -384,6 +390,13 @@ class GGUFServerManager:
         self.lora_files = [
             p.strip() for p in (lora_files or "").split(",") if p.strip()
         ]
+        # Speculative decoding (llm/speculative.py): draft model proposes,
+        # target verifies.  Off unless a draft model path is configured;
+        # a draft equal to the target is rejected (pure overhead).
+        self.draft_model = (draft_model or "").strip()
+        self.draft_max = max(1, int(draft_max))
+        self.draft_min = max(1, int(draft_min))
+        self.draft_p_min = float(draft_p_min)
         self._env = {**os.environ, **(process_env or {})}
         self._process: subprocess.Popen[bytes] | None = None
         self.model_path = ""
@@ -404,6 +417,14 @@ class GGUFServerManager:
         ]
         for lora in self.lora_files:
             args += ["--lora", lora]
+        # Speculative decoding: draft model proposes, target verifies.
+        # Only when a draft is configured AND it differs from the target
+        # (draft == target is pure overhead — emit nothing).
+        if self.draft_model and self.draft_model != model_path:
+            args += ["--draft-model", self.draft_model,
+                     "--draft-max", str(self.draft_max),
+                     "--draft-min", str(self.draft_min),
+                     "--draft-p-min", str(self.draft_p_min)]
         # KV-cache quantization: --ctk/--ctv shrink the runtime cache, not
         # the weights (see __init__ for why this is the phone OOM fix).
         if self.kv_cache_quant:

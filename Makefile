@@ -15,7 +15,7 @@ help: ## Show this help
 
 # ── verification ──────────────────────────────────────────────────────────────
 
-test: ## Run the full suite (offline, ~5s)
+test: ## Run the full suite (offline; budget 90 min, measured ~59 min — see docs/SUITE_RUNTIME.md)
 	@$(PYTHON) -u -m unittest discover -s tests -t .
 
 test-verbose: ## Run the full suite, naming each test

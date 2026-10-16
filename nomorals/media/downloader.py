@@ -54,6 +54,19 @@ from .cookies import BOT_COOKIE_HELP, is_bot_detection_error
 
 _log = get_logger(__name__)
 
+#: Connector factory injected by the composition root
+#: (:func:`nomorals.agents.context.build_context`): ``factory(name, vault)``
+#: — media is L4 and may not import connectors (L5). None means the proxy
+#: pool is unavailable (the same outcome as the old import-failure path).
+_CONNECTOR_FACTORY: Any = None
+
+
+def set_connector_factory(factory: Any | None) -> None:
+    """Inject (or clear) the connector factory used by the proxy pool."""
+    global _CONNECTOR_FACTORY
+    _CONNECTOR_FACTORY = factory
+
+
 __all__ = [
     "FailureKind",
     "StageLog",
@@ -61,6 +74,7 @@ __all__ = [
     "MediaDownloader",
     "classify_failure",
     "detect_profile",
+    "set_connector_factory",
 ]
 
 
@@ -329,9 +343,11 @@ class MediaDownloader:
     def __init__(self, context: Any = None, *,
                  profile: str | None = None,
                  max_proxies: int | None = None,
-                 direct_retries: int | None = None) -> None:
+                 direct_retries: int | None = None,
+                 connector_factory: Any | None = None) -> None:
         self.context = context
         self.profile = profile or detect_profile()
+        self._connector_factory = connector_factory
         budget = _PROFILE_BUDGETS.get(self.profile, _PROFILE_BUDGETS["laptop"])
         self.max_proxies = max_proxies if max_proxies is not None \
             else budget["max_proxies"]
@@ -434,12 +450,14 @@ class MediaDownloader:
         passphrase = os.environ.get("NM_VAULT_PASSPHRASE", "")
         if not passphrase:
             return None
+        factory = self._connector_factory or _CONNECTOR_FACTORY
+        if factory is None:
+            return None
         try:
             from ..accounts.vault import CredentialVault
-            from ..connectors.registry import create_connector
             vault = CredentialVault(getattr(self.context, "db", None),
                                     master_passphrase=passphrase)
-            return create_connector("proxypool", vault)
+            return factory("proxypool", vault)
         except Exception as exc:  # noqa: BLE001 — pool optional
             _log.debug("downloader: proxy pool unavailable: %s", exc)
             return None

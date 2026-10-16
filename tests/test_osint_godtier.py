@@ -364,14 +364,18 @@ class SweepTests(GodtierBase):
         self.assertEqual(out["kind"], "domain")
         self.assertEqual(out["target"], "example.com")
         self.assertEqual(out["base"]["kind"], "domain")
-        for name in ("dns_doh", "urlscan", "urlhaus", "threatfox", "hackertarget"):
+        # The domain sweep fans out to all 8 keyless sources: DoH + the
+        # three certificate-transparency subdomain enumerators (crt.sh,
+        # certspotter, rapiddns) + the four threat feeds.
+        for name in ("dns_doh", "crtsh", "certspotter", "rapiddns",
+                     "urlscan", "urlhaus", "threatfox", "hackertarget"):
             self.assertIn(name, out["sources"])
             section = out["sources"][name]
             self.assertTrue(section["ok"], name)
             self.assertIsNone(section["error"])
             self.assertGreaterEqual(section["seconds"], 0.0)
             self.assertIsNotNone(section["data"])
-        self.assertEqual(out["sources_ok"], 5)
+        self.assertEqual(out["sources_ok"], 8)
         self.assertEqual(out["sources_failed"], 0)
         # spot-check merged data
         self.assertEqual(out["sources"]["dns_doh"]["data"]["records"]["A"],
@@ -388,7 +392,7 @@ class SweepTests(GodtierBase):
         self.assertIn("RuntimeError", ht["error"])
         self.assertTrue(out["sources"]["urlscan"]["ok"])
         self.assertTrue(out["sources"]["threatfox"]["ok"])
-        self.assertEqual(out["sources_ok"], 4)
+        self.assertEqual(out["sources_ok"], 7)
         self.assertEqual(out["sources_failed"], 1)
 
     def test_sweep_ip_uses_ip_sources(self) -> None:

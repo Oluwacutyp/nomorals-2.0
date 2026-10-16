@@ -130,7 +130,13 @@ def _cmd_imggen_train(args: argparse.Namespace, context) -> int:
         return _err("training needs torch: pip install torch")
     try:
         print(f"building dataset manifest for {args.data} ...")
-        summary = build_dataset_manifest(args.data)
+        # Vision captions: the seer is injected (media may not import
+        # agents); a failed import falls back to filename captions.
+        try:
+            from ...agents.seer import see as _see
+        except Exception:  # noqa: BLE001 - vision captions are optional
+            _see = None
+        summary = build_dataset_manifest(args.data, see_fn=_see)
         print(f"  {summary['images']} images "
               f"({summary['vision_captions']} vision-captioned, "
               f"{summary['filename_captions']} filename-captioned)")

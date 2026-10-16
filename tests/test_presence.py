@@ -9,10 +9,12 @@ with the safety rule that substantive messages are delayed, never ignored.
 
 from __future__ import annotations
 
+import json
 import random
 import tempfile
 import time
 import unittest
+from pathlib import Path
 from typing import Any
 from unittest import mock
 
@@ -316,9 +318,26 @@ class RuntimePresenceE2E(unittest.TestCase):
                 "partner.typing_seconds": "2.0",
                 "partner.part_delay_seconds": "0.2",
                 "chat.local_enabled": "true",
+                # Autonomy OFF in this fixture: runtime.start() would
+                # otherwise fire catch-up briefings (fresh DB, nothing
+                # ever sent) into the adapter, and these tests measure
+                # the reply path — a briefing landing first makes every
+                # "first send is the reply" wait a race.
+                "partner.enabled": "false",
             }
         )
         self.context = build_context(settings, with_executor=False, with_tools=False)
+        # Pulse catch-up seeding: mark all three briefing slots delivered
+        # today, or runtime.start() fires catch-up briefings (fresh DB,
+        # no deliveries) into the adapter and every "first send is the
+        # reply" wait becomes a race. Same pattern as the briefings-table
+        # seed below.
+        _ws = Path(self.context.settings.workspace_dir)
+        for _marker in ("pulse_last_run.json", "pulse_last_run_afternoon.json",
+                        "pulse_last_run_evening.json"):
+            (_ws / _marker).write_text(
+                json.dumps({"ts": time.time(), "delivered_text": True}),
+                encoding="utf-8")
         # The responder holds this router for its whole life: it must be the
         # final router before PartnerRuntime builds the brain.
         self.router = _LongRouter()

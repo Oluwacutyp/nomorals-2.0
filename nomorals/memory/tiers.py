@@ -629,7 +629,18 @@ class TwoTierMemory:
     def __init__(self, db: Database | str | Path | None = None, *,
                  embedder: Embedder | None = None,
                  llm_fn: Callable[[str], str] | None = None,
-                 settings: Any = None) -> None:
+                 settings: Any = None,
+                 hybrid_index_factory: Callable[[], Any] | None = None,
+                 ) -> None:
+        """Create two-tier memory.
+
+        ``hybrid_index_factory`` builds the BM25 mirror on first hybrid
+        recall (lazy — no index exists until ``hybrid=True`` is asked
+        for). The composition root passes a factory that wires the
+        real documents/ types into
+        :class:`nomorals.memory.hybrid.HybridMemoryIndex`; None means
+        the BM25 lane degrades honestly to [] (vector-only recall).
+        """
         if db is None:
             path = two_tier_db_path(settings)
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -639,6 +650,7 @@ class TwoTierMemory:
         self.db = db
         self.embedder = embedder or Embedder(provider="hashing")
         self.llm_fn = llm_fn
+        self._hybrid_index_factory = hybrid_index_factory
         self.events = EventStore(db, embedder=self.embedder)
         self.facts = FactStore(db, embedder=self.embedder)
         self.session = SessionMemory(db)
@@ -741,7 +753,12 @@ class TwoTierMemory:
         """Lazy BM25 mirror of facts+events. Built on first hybrid recall."""
         if self.__dict__.get("_hybrid_idx") is None:
             from .hybrid import HybridMemoryIndex
-            idx = HybridMemoryIndex()
+            if self._hybrid_index_factory is not None:
+                idx = self._hybrid_index_factory()
+            else:
+                # No factories injected: the BM25 lane degrades to []
+                # (HybridMemoryIndex raises on use; callers catch it).
+                idx = HybridMemoryIndex()
             self._sync_hybrid_index(idx)
             self.__dict__["_hybrid_idx"] = idx
         else:

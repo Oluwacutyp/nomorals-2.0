@@ -36,3 +36,7 @@ __all__ = [
     "format_sse",
     "serve",
 ]
+
+# Dashboard client (Groups Tier 2): one client, four jobs, TimedGrant-enforced.
+from .dashboard_client import DashboardClient, DashboardSnapshot, JobResult
+__all__ += ["DashboardClient", "DashboardSnapshot", "JobResult"]

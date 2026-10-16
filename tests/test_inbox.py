@@ -15,7 +15,7 @@ import sys
 import tempfile
 import time
 import unittest
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import nomorals.workspace.inbox as inbox_mod
@@ -378,7 +378,12 @@ class HelperTestCase(unittest.TestCase):
         self.assertIsNotNone(parse_when("next monday 17:30", now))
         self.assertIsNotNone(parse_when("tomorrow", now))
         self.assertIsNotNone(parse_when("in 2 hours", now))
-        self.assertIsNotNone(parse_when("2026-10-05 09:00", now))
+        # ISO datetime: build it from now + 30d — a hardcoded date
+        # (e.g. 2026-10-05) ages into the past, and parse_when
+        # correctly rejects past reminder times.
+        future = datetime.fromtimestamp(now) + timedelta(days=30)
+        self.assertIsNotNone(
+            parse_when(future.strftime("%Y-%m-%d %H:%M"), now))
         self.assertIsNone(parse_when("sometime eventually", now))
 
     def test_parse_directive(self):

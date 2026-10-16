@@ -579,7 +579,9 @@ class ComposeTests(unittest.TestCase):
         self.assertTrue(d["sections"])
         md = song.to_markdown()
         self.assertIn(song.title, md)
-        self.assertIn("## CHORUS", md)
+        # Themed output renders section headers as "── CHORUS — … ──",
+        # not "## CHORUS" (see test_media_core, which asserts "CHORUS").
+        self.assertIn("CHORUS", md)
 
 
 # ─────────────────────────── arrangement ───────────────────────────────────

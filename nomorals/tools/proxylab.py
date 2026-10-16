@@ -152,6 +152,12 @@ class Proxy:
     consecutive_failures: int = 0
     backoff_until: float = 0.0    # unix ts: excluded from routing until then
     last_success: float = 0.0
+    # provenance: which source list this proxy came from (first source
+    # that yielded it) + every other source that also listed it.
+    # Dedupe is by (host, port, scheme) = Proxy.key; provenance survives
+    # it, so yield-per-source stays honest (see proxy_sources.dedupe).
+    source: str = ""
+    also_from: list[str] = field(default_factory=list)
 
     @property
     def url(self) -> str:
@@ -179,6 +185,8 @@ class Proxy:
             "consecutive_failures": int(self.consecutive_failures),
             "backoff_until": float(self.backoff_until),
             "last_success": float(self.last_success),
+            "source": self.source,
+            "also_from": list(self.also_from or []),
         }
 
     @classmethod
@@ -206,6 +214,8 @@ class Proxy:
             consecutive_failures=int(data.get("consecutive_failures") or 0),
             backoff_until=float(data.get("backoff_until") or 0.0),
             last_success=float(data.get("last_success") or 0.0),
+            source=str(data.get("source") or ""),
+            also_from=[str(s) for s in (data.get("also_from") or [])],
         )
 
     # -- latency with time decay -------------------------------------------
@@ -695,6 +705,9 @@ class ProxyScraper:
                     proxies = self.parse_html(text, self._source_scheme(name, kind))
             except Exception as exc:  # noqa: BLE001
                 return name, [], f"parse: {exc}"[:200]
+            for p in proxies:
+                if not p.source:
+                    p.source = name
             return name, proxies, ""
 
         with concurrent.futures.ThreadPoolExecutor(
@@ -708,6 +721,12 @@ class ProxyScraper:
                     if p.scheme not in wanted:
                         continue
                     if p.key in seen:
+                        # dedupe keeps the first copy; provenance of
+                        # the duplicate is recorded, not dropped
+                        if p.source and p.source not in (
+                                seen[p.key].also_from or []):
+                            if seen[p.key].source != p.source:
+                                seen[p.key].also_from.append(p.source)
                         continue
                     if len(seen) >= max(1, int(limit)):
                         break

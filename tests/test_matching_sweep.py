@@ -305,7 +305,13 @@ class TestBatches(unittest.TestCase):
         store = DailyBatchStore(_tmpdb())
         for i in range(8):
             store.add_candidate(_cand("g%d" % i, ["t%d" % (i % 3)], 0.5))
-        now = time.time()
+        # Frozen noon, not the wall clock: with now=time.time() a run
+        # within an hour of UTC midnight put now and now+3600 on
+        # different UTC days, so the second call curated a fresh batch
+        # ([g3, g4, g5]) instead of returning the cached one.
+        from tests.frozen_clock import MIDDAY_TS
+
+        now = MIDDAY_TS
         day1 = [c.candidate_id for c in store.today("gig", "o", {}, 3,
                                                    now=now, explore=0,
                                                    diversify=False)]

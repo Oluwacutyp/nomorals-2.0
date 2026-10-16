@@ -94,6 +94,21 @@ def _cmd_music(args: argparse.Namespace, context: Any) -> int:
         _emit(args, value, text)
         return 0
 
+    # ── registry (legal music sources, wired surface) ───────────────────
+    if action in ("sources", "enrich", "health", "play-registry"):
+        from ...music_sources.chat import control_music_sources
+
+        tail_words = [t for t in [topic, *extra] if t]
+        if action == "sources":
+            text = control_music_sources("sources " + " ".join(tail_words))
+        elif action == "enrich":
+            text = control_music_sources("enrich " + " ".join(tail_words))
+        elif action == "health":
+            text = control_music_sources("health " + " ".join(tail_words))
+        else:
+            text = control_music_sources("registry-play " + " ".join(tail_words))
+        return show({"action": action, "query": " ".join(tail_words)}, text)
+
     # ── composition (original surface, unchanged) ──────────────────────────
     if action == "styles":
         out = tools.call("music_writer", action="styles")

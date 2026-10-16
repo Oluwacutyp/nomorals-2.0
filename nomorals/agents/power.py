@@ -1,7 +1,7 @@
 """Power mode: the owner's documented, audited expansion of capability.
 
-This is the "Ultimate" tier, done the honest way: nothing hidden, nothing
-cruel, everything reversible. The owner unlocks power mode either with the key
+This is the "Ultimate" tier, done the honest way: nothing hidden,
+everything reversible. The owner unlocks power mode either with the key
 they set in ``partner.owner_key`` (env ``NM_PARTNER_OWNER_KEY``) or with the
 owner seal — one of their ingrained identities plus the passphrase baked via
 ``nm owner seal`` (``nomorals.core.owner``). Either way the runtime wakes her

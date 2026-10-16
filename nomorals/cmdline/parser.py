@@ -27,6 +27,7 @@ CLI_ALIASES: dict[str, list[str]] = {
     "missions": ["ms"],
     "mission": ["mi"],
     "queue": ["q"],
+    "sent": [],
     "help": ["h"],
     "monitor": ["mon"],
     "watch": ["w"],
@@ -106,6 +107,11 @@ CLI_ALIASES: dict[str, list[str]] = {
     # R14 CLI mirrors of the /schedule and /db chat commands.
     "schedule": ["sched"],
     "db": ["database"],
+
+    # Tier 0 wiring: CLI mirrors of the /learn and /legal chat commands.
+    "learn": [],
+    "legal": [],
+    "immune": [],
 
     # Shell completion scripts generated from the live parser.
     "completion": ["complete"],
@@ -443,6 +449,16 @@ def _parser() -> argparse.ArgumentParser:
     queue = sub.add_parser("queue", aliases=CLI_ALIASES["queue"],
                            help="inspect the durable work queue")
     queue.add_argument("--topic", default="")
+
+    sent_cmd = sub.add_parser("sent", aliases=CLI_ALIASES["sent"],
+                              help="show chat delivery receipts from the durable outbox")
+    sent_cmd.add_argument("--to", default="",
+                          help="chat to filter (platform:chat_id, or bare chat id)")
+    sent_cmd.add_argument("--since", default="24h",
+                          help="how far back: 30m, 1h, 7d, ISO date/datetime, or epoch")
+    sent_cmd.add_argument("--limit", type=int, default=50)
+    sent_cmd.add_argument("--json", action="store_true",
+                          help="emit JSON instead of prose")
 
     # Additional subcommands expected by tests
     commands = sub.add_parser("commands", aliases=CLI_ALIASES["commands"], help="list available commands")
@@ -2657,8 +2673,9 @@ def _parser() -> argparse.ArgumentParser:
     books.add_argument("action", nargs="?", default="list",
                        choices=["list", "ingest", "search", "read", "drop",
                                 "resume", "progress", "bookmark", "note",
-                                "shelf", "tag", "rate"],
-                       help="Action to perform")
+                                "shelf", "tag", "rate", "continue", "sources",
+                                "serial", "novel", "cache"],
+                       help="Action to perform (last five are reader actions)")
     books.add_argument("target", nargs="?", default="",
                        help="book slug / file path / query / collection name, per action")
     books.add_argument("--title", default="", help="ingest: book title")
@@ -2687,7 +2704,27 @@ def _parser() -> argparse.ArgumentParser:
     books.add_argument("--id", type=int, default=0,
                        help="bookmark/note: id to remove")
     books.add_argument("--list", dest="list", action="store_true",
-                       help="bookmark/note/shelf/tag: list instead of add")
+                       help="bookmark/note/shelf/tag/cache: list instead of add")
+    books.add_argument("--chapters", type=int, default=1,
+                       help="continue/novel: chapters to continue/write")
+    books.add_argument("--from-chapter", type=int, default=0,
+                       help="continue: continue from this chapter")
+    books.add_argument("--direction", default="",
+                       help="continue/serial: owner direction for the chapter(s)")
+    books.add_argument("--premise", default="",
+                       help="serial/novel: start from this premise")
+    books.add_argument("--genre", default="fantasy",
+                       help="serial/novel: genre")
+    books.add_argument("--for-whom", default="",
+                       help="serial/novel: who the book is for (humane for: field)")
+    books.add_argument("--theme", default="",
+                       help="serial/novel: wisdom theme to weave in")
+    books.add_argument("--status", action="store_true",
+                       help="serial: status")
+    books.add_argument("--import", dest="import_", action="store_true",
+                       help="cache: import a cache zip (target = zip path)")
+    books.add_argument("--path", default="",
+                       help="cache: export destination path")
     hub = sub.add_parser("hub", aliases=CLI_ALIASES["hub"], help="MediaHub: one-call media orchestrator (song/video/podcast)")
     hub.add_argument("mode", nargs="?", default="status",
                      choices=["song", "video", "podcast", "status", "styles"],
@@ -2912,7 +2949,8 @@ def _parser() -> argparse.ArgumentParser:
                                 "playlist-import",
                                 "playlist-play", "history", "history-clear",
                                 "top", "like",
-                                "unlike", "liked", "search", "stats"],
+                                "unlike", "liked", "search", "stats",
+                                "sources", "enrich", "health", "play-registry"],
                        help=("styles | compose <topic> | songs [name] | "
                              "soundfont [status|install] | play [n|files…] | "
                              "prev | status | now | queue | add <files…> | "
@@ -2931,7 +2969,8 @@ def _parser() -> argparse.ArgumentParser:
                              "playlist-import <name> <file.m3u> | "
                              "playlist-play <name> | history | history-clear | top | "
                              "like [target] | unlike [target] | liked | "
-                             "search <query> | stats"))
+                             "search <query> | stats | sources [class <c> | pack <a> <v> | licence <t> | <id>] | "
+                             "enrich <file-or-query> | health [id] | play-registry <query> [--source <id>]"))
     music.add_argument("topic", nargs="?", default="",
                        help="song topic (compose), lookup (songs), index/file "
                             "(play/add), playlist name, query (search), or a "
@@ -3389,6 +3428,50 @@ def _parser() -> argparse.ArgumentParser:
     completion.add_argument("shell", nargs="?", default="bash",
                             choices=["bash", "zsh", "fish", "powershell"],
                             help="which shell's script to print (default: bash)")
+
+    # Tier 0 wiring: CLI mirrors of the /learn and /legal chat commands.
+    # Same controls as chat (learn/chat.py, legal/chat.py) — CLI and chat
+    # stay in sync by delegating to the same functions.
+    learn = sub.add_parser("learn", aliases=CLI_ALIASES["learn"],
+        help="tutoring, flashcards, mastery, WAEC/JAMB",
+        description=("nm learn tutor [guide me] <topic> | answer <text> | hint | status | stop\n"
+                     "nm learn quiz formats | quiz start <exam> <subject>\n"
+                     "nm learn flashcards due [n] | stats | list | review <id> <1-4> | export <path>\n"
+                     "nm learn mastery [weakest]\n"
+                     "nm learn waec <subject> | waec grade <pct>\n"
+                     "nm learn jamb <subject> | jamb formats"),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    learn.add_argument("task", nargs="*", default=[], help="verb and arguments")
+    learn.add_argument("--json", action="store_true", help="Output as JSON")
+
+    legal = sub.add_parser("legal", aliases=CLI_ALIASES["legal"],
+        help="legal information, never legal advice",
+        description=("nm legal contract review [tenancy|employment|freelance] <paste contract text>\n"
+                     "nm legal portfolio — obligation tracker (renewals, notice deadlines, SLA)\n"
+                     "nm legal regulatory regulators | add <REG> [topics] | list | check | calendar\n"
+                     "nm legal aid [en|pcm|yo|ha|ig] <question> — plain-language aid\n"
+                     "nm legal research <question> — grounded research with citations\n"
+                     "nm legal citations — why information-only (precedent citations)\n"
+                     "nm legal [en|pcm|yo|ha|ig] <question> — ask directly (aid)\n"
+                     "Every output carries the 'not legal advice' disclaimer."),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    legal.add_argument("task", nargs="*", default=[], help="verb and arguments")
+    legal.add_argument("--json", action="store_true", help="Output as JSON")
+
+    # Immune wiring: CLI mirror of the /immune chat command.
+    immune = sub.add_parser("immune", aliases=CLI_ALIASES["immune"],
+        help="defensive immune system (revoke-only, never acquire)",
+        description=("nm immune status | scan <text> | antibodies list | add <pattern> <reason> | retire <id> <reason> | test <pattern>\n"
+                     "nm immune quarantine <artifact> | disarm <grant-id> | arrest <process-id> [system]\n"
+                     "nm immune fever status | start <reason> <seconds> | end\n"
+                     "nm immune drift add <tokens> <spawned> <grants> <errors> | report\n"
+                     "nm immune casefile list | add <text> | seal <id-prefix>"),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    immune.add_argument("task", nargs="*", default=[], help="verb and arguments")
+    immune.add_argument("--json", action="store_true", help="Output as JSON")
 
     return parser
 

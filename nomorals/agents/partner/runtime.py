@@ -69,6 +69,7 @@ class PartnerRuntime(
         brain: PartnerBrain | None = None,
         dry_run: bool = False,
         session_bridge: Any = None,
+        resource_advisor: Callable[[], Any] | None = None,
     ) -> None:
         """Create the runtime.
 
@@ -76,6 +77,11 @@ class PartnerRuntime(
         this module is L5 and must not import ``os``/L6). When present it is
         passed to the ChatGateway so every inbound message is attached to
         its OS Session before the brain runs.
+
+        ``resource_advisor`` is an optional factory returning the resource
+        manager (``os.resources.default_manager``, injected for the same
+        layering reason). When None, the scheduler runs ungated — the
+        same fallback as a missing advisor.
         """
         self.context = context
         self.settings = context.settings
@@ -95,8 +101,14 @@ class PartnerRuntime(
         self.mind = CoreMind(context, runtime=self)
         self.gateway = gateway
         self.dry_run = dry_run
+        #: Optional resource-advisor factory (os.resources, L6), injected
+        #: to keep layering clean. None means the scheduler runs ungated.
+        self._resource_advisor = resource_advisor
         #: Optional os.SessionBridge (L6), injected to keep layering clean.
         #: Also published on context.extras so CLI/tools can reach it.
+        #: (Restored: the resource_advisor commit accidentally replaced
+        #: this assignment instead of adding alongside it, breaking
+        #: gateway construction with a bridge + the bridge tests.)
         self._session_bridge = session_bridge
         if session_bridge is not None:
             try:
@@ -695,13 +707,30 @@ class PartnerRuntime(
         # slash commands stay owner-only: for everyone else a slash falls
         # through to her as text.
         if message.incoming and message.text.strip().startswith("/"):
-            from ...social.chat.control import GAME_COMMANDS, parse_control
+            from ...social.chat.control import (
+                GAME_COMMANDS, caller_may_run, parse_control)
 
             command = parse_control(message.text)
             _log.debug("game command check: text=%r, command=%s", 
                       message.text[:40], command)
             if (command is not None
                     and (command.kind == "game" or command.kind in GAME_COMMANDS)):
+                # Capability grant, stated explicitly: games are social,
+                # so any caller may run them (caller_may_run returns True
+                # for every game kind). The check documents the grant
+                # instead of leaving it implicit in the dispatch below.
+                if not caller_may_run(command.kind,
+                                      self._is_operator(message)):
+                    self._bump("controls")
+                    _log.info("game command /%s denied for %s in %s",
+                              command.kind, message.sender or "?",
+                              message.chat.key)
+                    try:
+                        self.gateway.send(message.chat.platform, message.chat,
+                                          "that one's just for the owner.")
+                    except Exception:  # noqa: BLE001
+                        pass
+                    return
                 self._bump("controls")
                 _log.info("game command %r from %s in %s (any-chat dispatch)",
                           message.text[:40], message.sender or "?", message.chat.key)
@@ -774,11 +803,41 @@ class PartnerRuntime(
                     _log.warning("game command produced empty reply in %s", message.chat.key)
                 return
             # telegram-bot is the public endpoint: conversation + games
-            # only. A known non-game slash here gets a friendly redirect
-            # instead of running — owner/system controls live on the
-            # userbot. Unknown slashes keep falling through to her as
-            # ordinary text, as before.
+            # + the PUBLIC command list only. A public command here goes
+            # through handle_control (which re-checks the caller's grant);
+            # a known non-public slash gets a friendly redirect instead of
+            # running — owner/system controls live on the userbot.
+            # Unknown slashes keep falling through to her as ordinary
+            # text, as before.
             if message.chat.platform == "telegram-bot" and command is not None:
+                from ...social.chat.control import PUBLIC_COMMANDS
+                from ...social.chat.tgbot_buttons import public_menu_keyboard
+
+                # Bare /start and bare /menu are menu triggers (the menu
+                # text is public); /menu <group> and /start <platform>
+                # are NOT bare, so they fall to the redirect below —
+                # list_catalog would leak the owner-only catalog.
+                bare_menu = message.text.strip() in ("/start", "/menu")
+                if bare_menu or command.kind in PUBLIC_COMMANDS:
+                    self._bump("controls")
+                    _log.info("public-bot command /%s from %s in %s",
+                              command.kind, message.sender or "?",
+                              message.chat.key)
+                    try:
+                        reply = self.handle_control(
+                            message.text, message.chat.key, message=message)
+                    except Exception as exc:  # noqa: BLE001
+                        _log.exception("public-bot command failed: %s", exc)
+                        reply = "that broke something on my end — try again."
+                    if reply:
+                        try:
+                            self.gateway.send(
+                                message.chat.platform, message.chat, reply,
+                                reply_keyboard=public_menu_keyboard()
+                                if bare_menu else None)
+                        except Exception:  # noqa: BLE001
+                            _log.warning("public-bot reply send failed")
+                    return
                 self._bump("controls")
                 _log.info("public-bot gate: blocked /%s from %s in %s",
                           command.kind, message.sender or "?",
@@ -860,8 +919,16 @@ class PartnerRuntime(
                         # Septorch-style outputs carry HTML tags — render
                         # them formatted, everything else stays plain text.
                         _pm = "HTML" if ("<b>" in reply or "<code>" in reply) else ""
+                        # Bare /start and /menu carry the bottom menu
+                        # keyboard on operator chats too (any platform).
+                        _kb = None
+                        if message.text.strip() in ("/start", "/menu"):
+                            from ...social.chat.tgbot_buttons import (
+                                public_menu_keyboard)
+                            _kb = public_menu_keyboard()
                         self.gateway.send(message.chat.platform, message.chat,
-                                          reply, parse_mode=_pm)
+                                          reply, parse_mode=_pm,
+                                          reply_keyboard=_kb)
                     except Exception as exc:  # noqa: BLE001
                         _log.warning("control reply send failed: %s", exc)
                 return
@@ -1074,8 +1141,18 @@ class PartnerRuntime(
                 return
             from ...memory.tiers import TwoTierMemory
             if self._two_tier is None:
+                # BM25 recall spine: the documents/ types are injected
+                # into HybridMemoryIndex (memory L3 never imports
+                # documents L4); see nomorals/memory/hybrid.py.
+                from ...documents.index import DocumentIndex
+                from ...documents.model import Document, Section
+                from ...memory.hybrid import HybridMemoryIndex
                 self._two_tier = TwoTierMemory(
-                    settings=self.settings, llm_fn=self._two_tier_llm)
+                    settings=self.settings, llm_fn=self._two_tier_llm,
+                    hybrid_index_factory=lambda: HybridMemoryIndex(
+                        index_factory=DocumentIndex,
+                        document_factory=Document,
+                        section_factory=Section))
             exchange = f"user: {user_text}\ndevon: {reply_text}"
             self._two_tier.observe(exchange, tags=f"chat:{message.chat.platform}")
         except Exception:  # noqa: BLE001 — memory never breaks chat
@@ -1296,13 +1373,12 @@ class PartnerRuntime(
                 # while the machine is under pressure.  Best-effort — the
                 # scheduler runs ungated when no advisor is available.
                 _resources = None
-                try:
-                    from ...os.resources import default_manager
-
-                    _resources = default_manager()
-                except Exception:  # noqa: BLE001 - ungated scheduling then
-                    _log.debug("no resource advisor for scheduler",
-                               exc_info=True)
+                if self._resource_advisor is not None:
+                    try:
+                        _resources = self._resource_advisor()
+                    except Exception:  # noqa: BLE001 - ungated scheduling then
+                        _log.debug("no resource advisor for scheduler",
+                                   exc_info=True)
                 self._scheduler = Scheduler(
                     self.context,
                     gateway=self.gateway,
@@ -1527,7 +1603,10 @@ class PartnerRuntime(
                 # itself never deletes anything.
                 try:
                     from ...memory.cadence import ensure_consolidation_job
-                    ensure_consolidation_job(self.context)
+                    from ..scheduler import Scheduler
+
+                    ensure_consolidation_job(
+                        self.context, scheduler_factory=Scheduler)
                 except Exception as exc:  # noqa: BLE001 - optional
                     _log.warning("consolidation job not registered: %s", exc)
                 # The cognitive loop (wave 51): one heartbeat that ticks
@@ -2052,6 +2131,58 @@ class PartnerRuntime(
 
         return build_adapter(self.settings, name)
 
+    def _confirm_gate(self, kind: str, tail: str, chat_key: str,
+                      ) -> tuple[str | None, bool, str]:
+        """Confirm-flow gate for CONFIRMABLE commands.
+
+        Returns ``(reply, proceed, effective_tail)``: ``proceed`` False
+        means handle_control should return ``reply`` (confirm prompt, or
+        cancel/expired/nothing-to-confirm message); True means dispatch
+        with ``effective_tail`` (the ORIGINAL tail stored when the
+        request was first made — so ``/forget abc`` + ``/forget confirm``
+        forgets ``abc``). Pending confirmations are keyed by chat_key,
+        expire after CONFIRM_TTL_S, and are single-use. The Bot API
+        adapter turns the ``⚠️ confirm: /<kind>`` line into Confirm /
+        Cancel inline buttons (see ``buttons_for_text``).
+        """
+        from ...social.chat.control import CONFIRM_TTL_S
+        import time as _time
+
+        pending: dict = getattr(self, "_pending_confirms", None)
+        if pending is None:
+            pending = self._pending_confirms = {}
+        verb = (tail or "").strip().lower()
+        if verb == "confirm":
+            stored = pending.pop(chat_key, None)
+            if stored is None or stored[0] != kind:
+                return (f"nothing to confirm — send /{kind} … first, "
+                        f"then /{kind} confirm within 5 minutes.", False, "")
+            _, original_tail, expires_at = stored
+            if expires_at < _time.time():
+                return (f"that confirmation expired — send /{kind} … again "
+                        f"if you still want it.", False, "")
+            return (None, True, original_tail)
+        if verb == "cancel":
+            stored = pending.pop(chat_key, None)
+            if stored is None or stored[0] != kind:
+                return (f"nothing to cancel — no pending /{kind}.",
+                        False, "")
+            return (f"cancelled — /{kind} did not run.", False, "")
+        # Fresh request: /quit takes no arguments, so a non-verb tail is
+        # a usage error, not a confirmable request.
+        if kind == "quit" and tail.strip():
+            return ("usage: /quit — no arguments (confirm with "
+                    "/quit confirm).", False, "")
+        pending[chat_key] = (kind, tail, _time.time() + CONFIRM_TTL_S)
+        if kind == "quit":
+            what = "shut Devon down"
+        else:
+            what = f"forget {tail.strip()!r}"
+        return (
+            f"⚠️ confirm: /{kind} — this will {what}.\n"
+            f"Send /{kind} confirm to go ahead, or /{kind} cancel to drop it.",
+            False, "")
+
     def handle_control(self, text: str, chat_key: str,
                        message: Any = None) -> str:
         """Parse + dispatch one control command. Returns the reply to send.
@@ -2061,9 +2192,18 @@ class PartnerRuntime(
         it falls back to an ``"unknown command /<kind>"`` reply rather than
         raising, so chat never dies on a dispatch-table gap.
         """
-        from ...social.chat.control import detailed_help, parse_control
+        from ...social.chat.control import (
+            CONFIRMABLE_COMMANDS, ControlCommand, caller_may_run,
+            detailed_help, parse_control, public_menu_text)
         from ..power import power_mode_for
 
+        # Bare /start is a menu trigger, not the /start <platform>
+        # hot-start (which needs an argument). Checked before
+        # parse_control, which would error on the missing argument.
+        if text.strip() == "/start":
+            return public_menu_text()
+
+        # Natural phrasing for the representation review: "/how did I do"
         # Natural phrasing for the representation review: "/how did I do"
         # (and variants) routes to the review command.  Checked before
         # parse_control because multi-word kinds aren't slash commands.
@@ -2080,6 +2220,32 @@ class PartnerRuntime(
         kind, arg = command.kind, command.arg
         if kind == "error":
             return arg
+
+        # Bare /menu is a menu trigger, not /list (which would leak the
+        # owner-only catalog to non-owners). /menu <group> still goes to
+        # list_catalog below — and the telegram-bot gate redirects it.
+        if kind == "menu" and not command.tail:
+            return public_menu_text()
+
+        # Capability grant: every command checks the caller's grant —
+        # deny without grant. message=None means an internal call
+        # (tour/heal/self-heal probe), which runs as the owner.
+        is_owner = True if message is None else self._is_operator(message)
+        if not caller_may_run(kind, is_owner):
+            return "that one's just for the owner."
+
+        # Confirm-flow gate for CONFIRMABLE commands (quit/forget):
+        # bare request → prompt + store; confirm → dispatch with the
+        # stored original tail; cancel/expired → honest message.
+        if kind in CONFIRMABLE_COMMANDS:
+            reply, proceed, effective = self._confirm_gate(
+                kind, command.tail, chat_key)
+            if not proceed:
+                return reply or ""
+            command = ControlCommand(
+                kind=kind,
+                arg=effective.split()[0] if effective.strip() else "",
+                tail=effective)
 
         # Progression-gated commands: beating challenges unlocks commands.
         # Checked before dispatch; the owner bypasses (their capabilities
@@ -2169,6 +2335,48 @@ class PartnerRuntime(
             result = self.stop_platform(arg)
             return (f"{arg}: stopped" if result.get("ok")
                     else f"{arg}: {result.get('error', 'could not stop')}")
+
+        if kind in ("update", "pull", "deploy", "restart"):
+            # Step 9: chat self-update — drain → checkpoint → restart → resume.
+            # Owner-only: caller_may_run already denied non-owners above
+            # (these kinds are absent from PUBLIC_COMMANDS).
+            from pathlib import Path
+
+            from ...missions.mission import MissionStore
+            from ...os.snapshots import SnapshotManager
+            from ...os.update import UpdateManager
+            from ...social.chat.update_control import ChatUpdateController
+
+            try:
+                settings = self.context.settings
+                repo_root = Path(__file__).resolve().parents[3]
+                snapshots = SnapshotManager(
+                    home=settings.home_path, db_path=settings.db_path,
+                    blob_dir=getattr(settings, "blob_dir", None))
+                updater = UpdateManager(repo_root, snapshots)
+                controller = ChatUpdateController(
+                    mission_store=MissionStore(self.context.db),
+                    update_runner=lambda pull: updater.run(pull=pull))
+                result = controller.execute(kind)
+            except Exception as exc:  # noqa: BLE001 - update wiring failure is a reply
+                return f"/{kind} failed to start: {type(exc).__name__}: {exc}"
+            if result.get("restart_requested"):
+                # The reply goes out first; the restart thread stops the
+                # runtime and re-execs the same argv. Boot resumes from
+                # the checkpoints the controller just took.
+                import os as _os
+                import sys as _sys
+
+                def _restart() -> None:
+                    try:
+                        time.sleep(2.0)
+                        self.stop()
+                    finally:
+                        _os.execv(_sys.executable,
+                                  [_sys.executable, *_sys.argv])
+                threading.Thread(target=_restart, name="partner-restart",
+                                 daemon=True).start()
+            return str(result.get("message", ""))
 
         if kind == "mood":
             return self._control_mood(command.tail or arg)
@@ -2397,16 +2605,44 @@ class PartnerRuntime(
                 sender=getattr(message, "sender", "") if message else "",
             )
         if kind == "legal":
-            # Consumer legal aid — legal information, owner-only.
+            # Legal hub — subcommands route to the matching legal control
+            # (contract / portfolio / regulatory / aid / research); a bare
+            # question keeps the existing aid behaviour (control_legal).
             if message is not None and not self._is_operator(message):
                 return "that one's just for the owner."
-            from ...legal.aid import control_legal
-            return control_legal(
+            from ...legal.chat import control_legal_full
+            return control_legal_full(
                 command.tail or arg,
                 context=self.context,
                 chat=chat,
                 sender_id=getattr(message, "sender_id", "") if message else "",
                 sender=getattr(message, "sender", "") if message else "",
+            )
+        if kind == "learn":
+            # One front door over learn/ — owner-only, like /tutor.
+            if message is not None and not self._is_operator(message):
+                return "that one's just for the owner."
+            from ...learn.chat import control_learn
+            return control_learn(
+                command.tail or arg,
+                context=self.context,
+                chat=chat,
+                sender_id=getattr(message, "sender_id", "") if message else "",
+                sender=getattr(message, "sender", "") if message else "",
+                chat_key=chat_key,
+            )
+        if kind == "immune":
+            # Defensive immune system — owner-only, like /learn.
+            if message is not None and not self._is_operator(message):
+                return "that one's just for the owner."
+            from ...immune.chat import control_immune
+            return control_immune(
+                command.tail or arg,
+                context=self.context,
+                chat=chat,
+                sender_id=getattr(message, "sender_id", "") if message else "",
+                sender=getattr(message, "sender", "") if message else "",
+                chat_key=chat_key,
             )
         if kind == "research":
             # Web research — swarm -> digest -> brief. Owner-only.
@@ -2670,7 +2906,7 @@ class PartnerRuntime(
             from ..email_triage import control_email
 
             return control_email(command.tail or arg, context=self.context)
-        if kind == "book":
+        if kind in {"book", "books"}:
             return self._control_book(tail=command.tail or arg, chat_key=chat_key)
         if kind == "novel":
             return self._control_novel(tail=command.tail or arg, chat_key=chat_key)
@@ -2682,6 +2918,8 @@ class PartnerRuntime(
             return self._control_decode(command.tail or arg, chat_key=chat_key)
         if kind == "cookies":
             return self._control_cookies(command.tail or arg)
+        if kind == "cookielab":
+            return self._control_cookielab(command.tail or arg)
         if kind == "structure":
             return self._control_structure(command.tail or arg)
         if kind == "investigate":
@@ -2728,8 +2966,6 @@ class PartnerRuntime(
             return self._control_like(command.tail or arg)
         if kind == "dislike":
             return self._control_dislike(command.tail or arg)
-        if kind == "cookies":
-            return self._control_cookies(command.tail or arg)
         if kind == "sham":
             return self._control_sham(command.tail or arg, chat_key=chat_key,
                                       message=message)
@@ -2764,10 +3000,10 @@ class PartnerRuntime(
         if kind == "npc":
             # the living cast — game-scoped via the live room in this chat
             return self._control_npc(command.tail or arg, chat_key=chat_key)
-        if kind == "character":
+        if kind == "charagent":
             # character agents — persistent entities beyond any one game
-            return self._control_character(command.tail or arg,
-                                          chat_key=chat_key)
+            return self._control_charagent(command.tail or arg,
+                                           chat_key=chat_key)
         if kind == "dm":
             # the narrator's persona for the current game
             return self._control_dm(command.tail or arg, chat_key=chat_key)

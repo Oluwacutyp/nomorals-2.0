@@ -28,6 +28,7 @@ from typing import Any
 from ..core.logging_setup import get_logger
 from .bible import BibleBuilder, StoryBible
 from .model import count_words, slugify
+from .voiceprint import compare, fingerprint
 from .reader import ReaderError, StoryReader
 
 _log = get_logger(__name__)
@@ -106,6 +107,35 @@ class StoryContinuer:
         if not chapters:
             chapters = [(1, title, text)]
         return self.bibles.build(slug, title, chapters)
+
+    # ── voice ─────────────────────────────────────────────────────────────
+    def validate_voice(self, text: str, bible: StoryBible) -> dict[str, Any]:
+        """Compare a new chapter against the bible's voice target.
+
+        Reported, never blocking: a drift score, the largest deltas,
+        and ``blocked: False``.  A bible with no measured voice yet
+        reports drift 0 with an explicit note instead of inventing a
+        target.
+        """
+        try:
+            target = getattr(bible, "voice", None)
+            if target is None or getattr(target, "words", 0) == 0:
+                return {
+                    "drift": 0.0,
+                    "verdict": ("no voice target yet — the bible has no "
+                                "measured voiceprint, nothing to drift from"),
+                    "blocked": False,
+                    "owner_may_overrule": True,
+                    "largest_deltas": [],
+                    "note": "Voice drift reported, never blocking.",
+                }
+            names = [c.name for c in (getattr(bible, "characters", []) or [])
+                     if getattr(c, "name", "")]
+            return compare(fingerprint(text or "", names), target)
+        except Exception as exc:  # noqa: BLE001 - voice check is advisory
+            return {"drift": 0.0, "blocked": False,
+                    "owner_may_overrule": True, "error": str(exc),
+                    "verdict": "voice check failed — reported, not blocking"}
 
     # ── writing ───────────────────────────────────────────────────────────
     def continue_story(self, slug: str, n: int = 1, *,
@@ -197,7 +227,9 @@ class StoryContinuer:
         return {"number": chapter_no, "title": ch_title,
                 "words": count_words(text), "path": path.as_posix(),
                 "text": text, "takes": alt_takes,
-                "take_scores": [round(s, 3) for s, _ in scored]}
+                "take_scores": [round(s, 3) for s, _ in scored],
+                # voice drift vs the bible's target, on every chapter
+                "voice_drift": self.validate_voice(text, bible)}
 
     def _assemble_prompt(self, bible: StoryBible, chapter_no: int,
                          tails: list[str], words: int,
@@ -233,6 +265,11 @@ class StoryContinuer:
             parts.append(f"STORY SO FAR:\n{summary}")
         if memory:
             parts.append(f"OPEN THREADS (advance, don't drop):\n{memory}")
+        # voice-target lines: the measured voice steers generation
+        voice_lines = (bible.voice_target()
+                       if hasattr(bible, "voice_target") else [])
+        if voice_lines:
+            parts.append("\n".join(voice_lines))
         parts.append(f"RECENT STORY:\n{recent[-3500:] or '(beginning)'}")
         # author's note: short, by position — right before the ask
         parts.append(

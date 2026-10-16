@@ -87,3 +87,44 @@ __all__ = [
     "format_status",
     "control_congestion",
 ]
+
+from .graph_missions import (
+    PlanNode,
+    PlanEdge,
+    PlanGraph,
+    CompiledPlan,
+    ExecutionResult,
+    plan_authoring,
+    compiled,
+    execute_graph,
+)
+
+__all__ += [
+    "PlanNode",
+    "PlanEdge",
+    "PlanGraph",
+    "CompiledPlan",
+    "ExecutionResult",
+    "plan_authoring",
+    "compiled",
+    "execute_graph",
+]
+
+# Tier 3: planning -> commerce logistics (injected quotes; no commerce import).
+from .commerce_logistics import (
+    LogisticsDescriptor,
+    LogisticsPlanStep,
+    attach_logistics_step,
+    estimate_cost,
+    estimate_eta,
+    plan_logistics_step,
+)
+
+__all__ += [
+    "LogisticsDescriptor",
+    "LogisticsPlanStep",
+    "attach_logistics_step",
+    "estimate_cost",
+    "estimate_eta",
+    "plan_logistics_step",
+]

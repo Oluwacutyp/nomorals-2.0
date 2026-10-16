@@ -44,6 +44,7 @@ from typing import Any, Callable
 
 from ..core.errors import NoMoralsError, NotFound
 from ..core.logging_setup import get_logger
+from ..core.proxy_tiers import TierGate
 
 __all__ = [
     "LoginConfig",
@@ -312,6 +313,7 @@ def login_with_vault(
     username: str | None = None,
     config: LoginConfig | None = None,
     captcha_solver: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
+    proxy_tier: str = "direct",
 ) -> dict[str, Any]:
     """Log in to ``service`` with the vault-stored password credential.
 
@@ -320,12 +322,21 @@ def login_with_vault(
     On success the tab's cookies are persisted into ``sessions`` (the
     :class:`SessionManager`), so the login survives restarts.
 
+    ``proxy_tier`` is the trust tier of the tab's route (``free`` /
+    ``paid`` / ``direct`` — the browser service reports it via
+    ``session_proxy_tier``).  The tier gate runs BEFORE any credential
+    is resolved or typed: a ``free`` proxy never carries a login —
+    the operator could hijack the session.  Raises a typed
+    ``TierGateRefusal`` on refusal.
+
     Returns ``{"ok": True, "service", "username", "url",
     "cookies_saved", "captcha_solved": [...], "note"}``. Raises
     :class:`LoginFailed` on config/credential problems and
     :class:`LoginCaptchaRequired` when a CAPTCHA blocks the login and no
     solver cleared it.
     """
+    # Tier gate FIRST — before the credential is even resolved.
+    TierGate.require(proxy_tier, carries_credentials=True)
     service = (service or "").strip()
     if not service:
         raise LoginFailed("login_with_vault needs a service")
@@ -459,6 +470,7 @@ def ensure_login(
     config: LoginConfig | None = None,
     captcha_solver: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
     force: bool = False,
+    proxy_tier: str = "direct",
 ) -> dict[str, Any]:
     """Log in only when the stored session can't.
 
@@ -515,6 +527,7 @@ def ensure_login(
         username=cred.username,
         config=config,
         captcha_solver=captcha_solver,
+        proxy_tier=proxy_tier,
     )
     result["from_session"] = False
     return result
@@ -584,6 +597,7 @@ def change_password_on_site(
     length: int = 32,
     config: PasswordChangeConfig | None = None,
     captcha_solver: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
+    proxy_tier: str = "direct",
 ) -> dict[str, Any]:
     """Rotate the password on the site itself, then in the vault.
 
@@ -604,6 +618,8 @@ def change_password_on_site(
     """
     from .creator import generate_password
 
+    # Tier gate FIRST — password rotation is credential-carrying traffic.
+    TierGate.require(proxy_tier, carries_credentials=True)
     service = (service or "").strip()
     if not service:
         raise LoginFailed("change_password_on_site needs a service")
@@ -626,7 +642,7 @@ def change_password_on_site(
     # Authenticate first (restores the session when it is still valid).
     ensure_login(manager, sessions, open_tab,
                  service=service, username=cred.username,
-                 captcha_solver=captcha_solver)
+                 captcha_solver=captcha_solver, proxy_tier=proxy_tier)
 
     tab = open_tab()
     try:

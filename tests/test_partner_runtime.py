@@ -90,9 +90,38 @@ def _make_context() -> tuple[Any, "tempfile.TemporaryDirectory"]:
             "home": tmp.name,
             "partner.platforms": "local",
             "chat.local_enabled": "true",
+            # Autonomy OFF: runtime.start() would otherwise fire
+            # catch-up briefings (fresh DB, nothing ever sent) into
+            # the adapter, and these E2E tests measure the reply path —
+            # a briefing landing first makes every "first send is the
+            # reply" wait a race. Autonomy itself is covered by
+            # AutonomyTest, which constructs AutonomyAgent directly.
+            "partner.enabled": "false",
         }
     )
     context = build_context(settings, with_executor=False, with_tools=False)
+    # Pulse catch-up seeding: mark all three briefing slots delivered
+    # today, or runtime.start() fires catch-up briefings (fresh DB, no
+    # deliveries) into the adapter and every "first send is the reply"
+    # wait becomes a race.
+    _ws = Path(context.settings.workspace_dir)
+    for _marker in ("pulse_last_run.json", "pulse_last_run_afternoon.json",
+                    "pulse_last_run_evening.json"):
+        (_ws / _marker).write_text(
+            json.dumps({"ts": time.time(), "delivered_text": True}),
+            encoding="utf-8")
+    # Morning-BRIEFING catch-up seeding: check_catchup() (a separate
+    # path from the pulse slots above) fires a "late" briefing on
+    # start when no briefing for today is stored — it only fires
+    # after briefing time, so it passed in overnight runs and failed
+    # in daytime runs (the briefing landing first broke the reply-path
+    # waits). Same seed as test_presence.py.
+    from nomorals.agents.morning_briefing import _today_str
+    context.db.execute(
+        "INSERT OR REPLACE INTO briefings (id, date, sections_json, generated_at)"
+        " VALUES (?, ?, '[]', ?)",
+        ("test-seed", _today_str(context), time.time()),
+    )
     return context, tmp
 
 

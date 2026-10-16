@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from typing import Any
 from pathlib import Path
@@ -33,6 +34,11 @@ def _cmd_doctor(args: argparse.Namespace, settings: Any) -> int:
                             "compiler": None, "fallback": "pure-python"}
     from ...storage.db import Database
 
+    # Executor worker count, surfaced so a "why is this slow?" question has
+    # a measured answer. Pure helper: no pool is constructed. Effective is
+    # 0 when pools are off (termux profile) regardless of the formula.
+    from ...agents.runtime import default_process_workers
+
     db = Database(settings.db_path)
     summary = db.migrate()
     health = {
@@ -45,6 +51,15 @@ def _cmd_doctor(args: argparse.Namespace, settings: Any) -> int:
             "integrity": db.integrity_check(),
         },
         "cpu_count": __import__("os").cpu_count(),
+        "executor": {
+            "effective_processes": (
+                default_process_workers(settings.concurrency.processes or None)
+                if settings.concurrency.use_processes
+                else 0
+            ),
+            "use_processes": settings.concurrency.use_processes,
+            "env_override": os.environ.get("NM_PROCESS_WORKERS") or None,
+        },
     }
     db.close()
     payload = {**health, **report}
@@ -55,6 +70,10 @@ def _cmd_doctor(args: argparse.Namespace, settings: Any) -> int:
     print(f"database: {health['database']['path']}")
     print(f"  schema v{summary.version}, {health['database']['tables']} tables, "
           f"integrity {health['database']['integrity']}")
+    print(f"executor: {health['executor']['effective_processes']} process workers, "
+          f"pools {'on' if health['executor']['use_processes'] else 'off'}"
+          + (f" (NM_PROCESS_WORKERS={health['executor']['env_override']})"
+             if health['executor']['env_override'] else ""))
     print()
     print(report_as_text(report))
     # Surface tool modules that failed to register — a broken tool must

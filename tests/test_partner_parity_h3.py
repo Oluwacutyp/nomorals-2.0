@@ -20,6 +20,7 @@ import tempfile
 import unittest
 from types import SimpleNamespace
 from typing import Any
+from unittest import mock
 
 import nomorals.agents.partner as partner_pkg
 import nomorals.agents.partner_runtime as facade
@@ -207,6 +208,109 @@ class RuntimeSmokeTest(unittest.TestCase):
         status = self.runtime.status()
         self.assertIsInstance(status, dict)
         self.assertTrue(status, "status() should report something")
+
+
+class CollisionResolutionTest(unittest.TestCase):
+    """The /character + /cookies collisions: both meanings stay reachable.
+
+    /character keeps Memory's story characters (owner-gated); the Games
+    character agents moved to /charagent. /cookies keeps Media's YouTube
+    cookie status; Intel's CookieLab moved to /cookielab. Neither handler
+    was deleted — each command runs its own handler.
+    """
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory(prefix="nm-collision-")
+        settings = load_settings(
+            overrides={
+                "home": self.tmp.name,
+                "partner.platforms": "local",
+                "chat.local_enabled": "true",
+            }
+        )
+        self.context = build_context(settings, with_executor=False, with_tools=False)
+
+        class _Router:
+            def chat(self, *a: Any, **k: Any) -> Any:
+                raise AssertionError("collision test must not call the model")
+
+        self.context.router = _Router()
+        self.runtime = facade.PartnerRuntime(self.context, gateway=_StubGateway())
+        self._env_patch = mock.patch.dict(
+            "os.environ", {"NOMORALS_DATA_DIR": self.tmp.name})
+        self._env_patch.start()
+
+    def tearDown(self) -> None:
+        self._env_patch.stop()
+        try:
+            self.runtime.stop()
+        except Exception:
+            pass
+        self.context.close()
+        self.tmp.cleanup()
+
+    def _stranger(self, text: str) -> SimpleNamespace:
+        return SimpleNamespace(
+            chat=SimpleNamespace(key="telegram:999"),
+            sender="stranger", incoming=True, text=text, meta={})
+
+    def test_renamed_methods_resolve_to_their_mixins(self) -> None:
+        import nomorals.agents.partner.runtime_games as games_mod
+        import nomorals.agents.partner.runtime_intel as intel_mod
+        self.assertIs(
+            PartnerRuntime._control_charagent,
+            games_mod.RuntimeGamesMixin._control_charagent)
+        self.assertIs(
+            PartnerRuntime._control_cookielab,
+            intel_mod.RuntimeIntelMixin._control_cookielab)
+
+    def test_charagent_reaches_games_handler(self) -> None:
+        out = self.runtime.handle_control("/charagent talk", "local:console")
+        self.assertIn("/charagent talk", out)
+        self.assertNotIn("/character talk", out)
+
+    def test_cookielab_reaches_intel_handler(self) -> None:
+        out = self.runtime.handle_control(
+            "/cookielab sessionid=abc123; path=/; HttpOnly", "local:console")
+        self.assertTrue(out.startswith("cookies: 1 parsed"), out)
+
+    def test_cookies_reaches_media_handler(self) -> None:
+        out = self.runtime.handle_control("/cookies", "local:console")
+        self.assertIn("cookies file found", out)
+        self.assertNotIn("parsed", out)
+
+    def test_character_reaches_memory_handler(self) -> None:
+        out = self.runtime.handle_control("/character", "local:console")
+        self.assertIn("/character talk", out)
+        self.assertIn("owner only", out)
+        self.assertNotIn("/charagent", out)
+
+    def test_character_denied_for_non_owner(self) -> None:
+        out = self.runtime.handle_control(
+            "/character", "telegram:999",
+            message=self._stranger("/character"))
+        self.assertEqual(out, "that one's just for the owner.")
+
+    def test_new_commands_registered(self) -> None:
+        from nomorals.social.chat.control import (
+            COMMAND_DETAILS, CONTROL_COMMANDS, LIST_GROUPS, LIST_ONELINERS,
+            parse_control)
+        grouped = {c for _, cs in LIST_GROUPS for c in cs}
+        for kind, usage in (("charagent", "/charagent"),
+                            ("cookielab", "/cookielab")):
+            with self.subTest(kind=kind):
+                self.assertIn(kind, CONTROL_COMMANDS)
+                self.assertIn(kind, COMMAND_DETAILS)
+                self.assertIn(kind, LIST_ONELINERS)
+                self.assertIn(kind, grouped)
+                self.assertIn(usage, COMMAND_DETAILS[kind]["usage"])
+                cmd = parse_control(f"/{kind} x")
+                self.assertIsNotNone(cmd)
+                assert cmd is not None
+                self.assertEqual(cmd.kind, kind)
+        # the short names still resolve to their own kinds
+        self.assertEqual(parse_control("/character").kind, "character")
+        self.assertEqual(parse_control("/cookies").kind, "cookies")
 
 
 if __name__ == "__main__":

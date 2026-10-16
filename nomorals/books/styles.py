@@ -10,6 +10,19 @@ helpers. Three themes:
 Mined from Royal Road/Tapas chapter cards and KOReader's progress display:
 readers respond to progress bars, per-chapter retention, and cards that
 show status at a glance — not raw dicts.
+
+PRESENTATION vs PROSE STYLE — do not confuse them (see
+:func:`prose_vs_presentation`):
+
+* PRESENTATION (this module) is how cards, tables, and progress bars
+  LOOK.  Picking a theme changes only rendering.
+* PROSE STYLE is how the writing itself SOUNDS, and it is MEASURED,
+  not chosen: the voiceprint (sentence length, punctuation habits,
+  register, sensory density, per-character idiolect), the bible's
+  voice target (``StoryBible.voice``), the craft passes, and the
+  humane structure.  Picking a theme NEVER rewrites prose — prose
+  style lives in the text and is reported on, never imposed by a
+  presentation choice.
 """
 
 from __future__ import annotations
@@ -18,6 +31,7 @@ from typing import Any
 
 __all__ = [
     "THEMES",
+    "prose_vs_presentation",
     "theme_ok",
     "progress_bar",
     "render_book_card",
@@ -29,6 +43,38 @@ __all__ = [
 ]
 
 THEMES = ("rich", "plain", "minimal")
+
+
+def prose_vs_presentation() -> str:
+    """PRESENTATION vs PROSE STYLE, stated plainly.
+
+    PRESENTATION (this module, ``styles.py``) is how cards, tables,
+    and progress bars LOOK — the ``rich`` / ``plain`` / ``minimal``
+    themes.  It changes rendering only.
+
+    PROSE STYLE is how the writing itself SOUNDS.  It is MEASURED,
+    not chosen: the voiceprint (a numeric fingerprint — sentence
+    length, punctuation habits, register, filtering, sensory density,
+    per-character idiolect), the bible's voice target
+    (``StoryBible.voice`` / ``voiceprint``), the eight craft passes,
+    and the humane structure (``for:``, character pushback, narrator
+    scope, silence).
+
+    Picking a theme NEVER rewrites prose.  Prose style lives in the
+    text; it is measured and reported on, never imposed by a
+    presentation choice.
+    """
+    return (
+        "PRESENTATION vs PROSE STYLE\n\n"
+        "PRESENTATION (styles.py) — how cards, tables, and progress "
+        "bars LOOK: rich / plain / minimal themes. Rendering only.\n\n"
+        "PROSE STYLE — how the writing itself SOUNDS, MEASURED not "
+        "chosen: voiceprint (sentence length, punctuation, register, "
+        "filtering, sensory density, per-character idiolect) + "
+        "bible.voice (the story's target voiceprint) + craft passes "
+        "+ humane structure (for:, pushback, narrator, silence).\n\n"
+        "Picking a theme NEVER rewrites prose."
+    )
 
 
 def theme_ok(theme: str) -> str:

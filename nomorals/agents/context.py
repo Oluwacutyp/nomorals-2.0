@@ -321,11 +321,37 @@ def build_context(
     # module-level accessor — no-op until this runs.
     try:
         from ..core.error_system import build_error_system, set_error_system
-        context.error_system = build_error_system(settings)
+        from ..llm.base import Message
+        from ..storage.kv import KVStore
+        # The kernel may not import storage / llm: the composition root
+        # injects the factories the degradation ladders need.
+        context.error_system = build_error_system(
+            settings,
+            kv_factory=lambda db: KVStore(db),
+            message_factory=lambda prompt: [Message.user(prompt)],
+        )
         set_error_system(context.error_system)
     except Exception as exc:  # noqa: BLE001 — error telemetry is optional
         _log.warning("error system failed to initialize: %s", exc)
         context.error_system = None
+
+    # Media connector factories: the media layers (L4) may not import
+    # connectors (L5), so the composition root injects the factories they
+    # need. Best-effort — an unwired factory means the media path that
+    # needs it fails honestly instead of importing upward.
+    try:
+        from ..connectors.googleflow import GoogleFlowConnector
+        from ..connectors.registry import create_connector
+        from ..media.downloader import set_connector_factory as _set_dl_factory
+        from ..media_edit.generate import (
+            set_connector_factory as _set_gen_factory)
+        from ..media_edit.video_models import (
+            set_connector_factory as _set_vm_factory)
+        _set_dl_factory(create_connector)
+        _set_gen_factory(create_connector)
+        _set_vm_factory(GoogleFlowConnector)
+    except Exception as exc:  # noqa: BLE001 — media factories are optional
+        _log.debug("media connector factories not wired: %s", exc)
 
     if db_recovered:
         # Surfaced in status/diagnostics: the owner should know their data
@@ -547,13 +573,12 @@ def build_router(settings: Settings, bus: EventBus, *, db: Any | None = None,
             pass
         # Also register lifecycle-managed models (local GGUFs etc.)
         try:
-            from ..llm.lifecycle import ModelLifecycle
-            from ..cmdline.commands.models import _card_for
+            from ..llm.lifecycle import ModelLifecycle, card_for_model
             lc = ModelLifecycle(db)
             primary_id = lc.primary
             for model in lc.list():
                 try:
-                    broker.register(_card_for(model))
+                    broker.register(card_for_model(model))
                     # Only load the local model if it's the primary — otherwise skip
                     # to avoid hanging boot on OOM-prone GGUF loads.
                     # Also skip if it's already failed this boot (don't retry loop).

@@ -40,7 +40,7 @@ from ..core.logging_setup import get_logger
 from ..core.platform import detect_platform
 from ..core.tasks import Task, TaskGraph, TaskKind, TaskState
 
-__all__ = ["ExecutionReport", "HybridExecutor", "run_pickled"]
+__all__ = ["ExecutionReport", "HybridExecutor", "run_pickled", "run_pickled_timed"]
 
 _log = get_logger(__name__)
 
@@ -48,6 +48,42 @@ _log = get_logger(__name__)
 def run_pickled(fn: Callable[..., Any], args: tuple, kwargs: dict) -> Any:
     """Module-level trampoline so process-pool payloads stay picklable."""
     return fn(*args, **kwargs)
+
+
+@dataclass
+class _TimedResult:
+    """A task's return value plus the queue-free time it took to produce.
+
+    Internal to the executor: every submit path wraps the callable so
+    :meth:`HybridExecutor._settle` can separate real execution time from
+    queue wait. Picklable (it crosses the process-pool boundary).
+    """
+
+    result: Any
+    pure_seconds: float = 0.0
+
+
+def run_pickled_timed(fn: Callable[..., Any], args: tuple, kwargs: dict) -> _TimedResult:
+    """Timed :func:`run_pickled`: same trampoline, plus pure execution time."""
+    start = time.perf_counter()
+    result = fn(*args, **kwargs)
+    return _TimedResult(result, time.perf_counter() - start)
+
+
+def _timed_call(fn: Callable[..., Any], args: tuple, kwargs: dict) -> _TimedResult:
+    """Timed call for the thread path (same shape as :func:`run_pickled_timed`)."""
+    start = time.perf_counter()
+    result = fn(*args, **kwargs)
+    return _TimedResult(result, time.perf_counter() - start)
+
+
+async def _timed_coro(
+    factory: Callable[..., Any], args: tuple, kwargs: dict
+) -> _TimedResult:
+    """Timed call for the async path: awaits the factory's coroutine."""
+    start = time.perf_counter()
+    result = await factory(*args, **kwargs)
+    return _TimedResult(result, time.perf_counter() - start)
 
 
 @dataclass
@@ -60,21 +96,33 @@ class ExecutionReport:
     cancelled: int = 0
     skipped: int = 0
     wall_seconds: float = 0.0
-    #: Sum of per-task elapsed time. NOT CPU time: tasks overlap, so this can
-    #: exceed wall_seconds * cores. It is the serial-equivalent workload.
+    #: Sum of per-task dispatch-to-settle time (``finished_at - started_at``).
+    #: INCLUDES queue wait: a task dispatched while all workers were busy
+    #: counts the wait as elapsed time. Kept for observability (how long
+    #: tasks spent in the system), but it is NOT the serial-equivalent
+    #: workload — use :attr:`pure_seconds` for that.
     task_seconds: float = 0.0
+    #: Sum of per-task queue-free execution time (what the callables
+    #: actually spent running). This is the serial-equivalent workload:
+    #: ``pure_seconds / wall_seconds`` is the true parallel speedup.
+    #: Failed/cancelled/timed-out tasks contribute 0.0 (their pure time is
+    #: unknown — the wrapper never returned — so it is not counted).
+    pure_seconds: float = 0.0
     by_kind: dict[str, int] = field(default_factory=dict)
     results: dict[str, Any] = field(default_factory=dict)
     failures: dict[str, str] = field(default_factory=dict)
 
     @property
     def speedup_vs_serial(self) -> float:
-        """Serial-equivalent workload divided by wall time.
+        """Queue-free per-task time divided by wall time: the true speedup.
 
-        Bounded by the machine's core count, so 2.0 on a 2-core box means the
-        scheduler is keeping both cores busy — not that it is underperforming.
+        Bounded by the machine's core count, so ~2.0 on a 2-core box means
+        the scheduler is keeping both cores busy — not underperforming.
+        A serial-forced run (one worker) reports ~1.0. Before T1.2 this
+        divided queue-inflated ``task_seconds`` by wall time and reported
+        4.46x for work that was actually serial.
         """
-        return round(self.task_seconds / self.wall_seconds, 2) if self.wall_seconds else 0.0
+        return round(self.pure_seconds / self.wall_seconds, 2) if self.wall_seconds else 0.0
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -85,6 +133,7 @@ class ExecutionReport:
             "skipped": self.skipped,
             "wall_seconds": round(self.wall_seconds, 3),
             "task_seconds": round(self.task_seconds, 3),
+            "pure_seconds": round(self.pure_seconds, 3),
             "speedup_vs_serial": self.speedup_vs_serial,
             "by_kind": self.by_kind,
             "failures": self.failures,
@@ -129,6 +178,28 @@ class _AsyncRunner:
             thread.join(timeout=timeout)
 
 
+def default_process_workers(explicit: int | None = None) -> int:
+    """Effective process-pool worker count for :class:`HybridExecutor`.
+
+    Precedence: explicit argument > ``NM_PROCESS_WORKERS`` env var >
+    formula ``max(2, cpu_count - 1)``. Env values of 0, negative, or
+    non-numeric mean "unset" and fall through to the formula — a worker
+    count must be positive to take effect. The old formula
+    (``max(1, cpu // 2)``) gave exactly 1 worker on 2-core machines, so
+    CPU graphs ran serially while the (then-lying) speedup metric still
+    reported parallelism. Pure: no pool is constructed.
+    """
+    if explicit:
+        return int(explicit)
+    try:
+        env_value = int(os.environ.get("NM_PROCESS_WORKERS", "") or "")
+    except (TypeError, ValueError):
+        env_value = 0
+    if env_value > 0:
+        return env_value
+    return max(2, (os.cpu_count() or 1) - 1)
+
+
 class HybridExecutor:
     """Runs a :class:`TaskGraph` across threads, processes, and an event loop."""
 
@@ -150,7 +221,7 @@ class HybridExecutor:
             # desktop/server platforms declare True.
             use_processes = detect_platform().supports("process_pool")
         self.use_processes = use_processes
-        self.processes = processes if processes else max(1, cpu // 2)
+        self.processes = default_process_workers(processes if processes else None)
         self.max_in_flight = max_in_flight or max(self.threads, self.processes) * 2
         self.poll_interval = poll_interval
 
@@ -236,7 +307,9 @@ class HybridExecutor:
                 _log.debug("task %s is not picklable; running it on a thread", task.name)
             else:
                 try:
-                    future = self._process_pool.submit(run_pickled, task.fn, task.args, task.kwargs)
+                    future = self._process_pool.submit(
+                        run_pickled_timed, task.fn, task.args, task.kwargs
+                    )
                     self.stats["process_tasks"] += 1
                     return future
                 except (pickle.PicklingError, TypeError, AttributeError, ValueError) as exc:
@@ -250,10 +323,12 @@ class HybridExecutor:
         if task.kind is TaskKind.ASYNC:
             self.stats["async_tasks"] += 1
             factory = task.fn
-            return self._async.submit(lambda: factory(*task.args, **task.kwargs))
+            return self._async.submit(
+                lambda: _timed_coro(factory, task.args, task.kwargs)
+            )
 
         self.stats["thread_tasks"] += 1
-        return self._thread_pool.submit(task.fn, *task.args, **task.kwargs)
+        return self._thread_pool.submit(_timed_call, task.fn, task.args, task.kwargs)
 
     @staticmethod
     def _picklable(task: Task) -> bool:
@@ -291,6 +366,7 @@ class HybridExecutor:
         report = ExecutionReport(total=len(graph))
         in_flight: dict[cf.Future, Task] = {}
         task_seconds = 0.0
+        pure_seconds = 0.0
 
         try:
             while True:
@@ -313,6 +389,7 @@ class HybridExecutor:
                     for future in done:
                         task = in_flight.pop(future)
                         task_seconds += self._settle(task, future)
+                        pure_seconds += task.pure_seconds
                         if on_task_done is not None:
                             try:
                                 on_task_done(task)
@@ -368,6 +445,7 @@ class HybridExecutor:
                     task.mark_cancelled("cancelled while running")
                     continue
                 task_seconds += self._settle(task, future, wait=True)
+                pure_seconds += task.pure_seconds
         finally:
             pass
 
@@ -378,6 +456,7 @@ class HybridExecutor:
         report.skipped = counts.get(TaskState.SKIPPED.value, 0)
         report.wall_seconds = time.perf_counter() - started
         report.task_seconds = task_seconds
+        report.pure_seconds = pure_seconds
         report.results = graph.results()
         report.failures = graph.failures()
         with self._lock:
@@ -386,13 +465,19 @@ class HybridExecutor:
         return report
 
     def _settle(self, task: Task, future: cf.Future, *, wait: bool = False) -> float:
-        """Transfer a future's outcome onto the task. Returns its CPU seconds."""
+        """Transfer a future's outcome onto the task.
+
+        Returns its wall seconds (dispatch-to-settle, queue wait included)
+        for ``task_seconds``. The queue-free figure lands on
+        ``task.pure_seconds`` (unwrapped from :class:`_TimedResult`) for
+        ``pure_seconds``; it stays 0.0 when the task never completed.
+        """
         if not wait and not future.done():
             return 0.0
         if task.timeout is not None and not future.done():
             future.cancel()
         try:
-            result = future.result(timeout=task.timeout if wait else None)
+            raw = future.result(timeout=task.timeout if wait else None)
         except cf.TimeoutError:
             future.cancel()
             task.mark_failed(f"timed out after {task.timeout}s")
@@ -419,6 +504,12 @@ class HybridExecutor:
                 return 0.0
             task.mark_failed(f"{error.code}: {error.message}")
             return task.duration
+        if isinstance(raw, _TimedResult):
+            task.pure_seconds = raw.pure_seconds
+            result = raw.result
+        else:  # pragma: no cover - every submit path wraps; defensive
+            task.pure_seconds = 0.0
+            result = raw
         task.mark_done(result)
         return task.duration
 

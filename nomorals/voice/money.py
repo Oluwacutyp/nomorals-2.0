@@ -639,10 +639,13 @@ def handle_voice_money(transcript: str, context: Any) -> str:
                 return _reply(lang, "need_details")
             staged = _staging_for(context).stage(
                 intent.amount_kobo, intent.recipient, note=intent.note)
+            from ..native.biometric import biometric_available, request_biometric
+
             token = approve_with_biometric(
                 Policy(), "finance.transfer",
                 title=f"Send {format_naira(intent.amount_kobo)} "
                       f"to {intent.recipient}",
+                biometric=(biometric_available, request_biometric),
             )
             if token:
                 _staging_for(context).mark(

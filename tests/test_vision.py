@@ -415,9 +415,12 @@ class InboxImageTests(unittest.TestCase):
         from nomorals.workspace.inbox import _default_classify
 
         item = SimpleNamespace(kind="file", name="photo.PNG", mime="image/png")
-        self.assertEqual(_default_classify(None, item), "image")
+        # _default_classify returns (intent, confidence) by design —
+        # the inbox splits it via _split_confidence and parks anything
+        # below min_confidence in needs_input.
+        self.assertEqual(_default_classify(None, item), ("image", 0.95))
         video = SimpleNamespace(kind="file", name="clip.mp4", mime="video/mp4")
-        self.assertEqual(_default_classify(None, video), "describe")
+        self.assertEqual(_default_classify(None, video), ("describe", 0.9))
 
     def test_directives_map_to_image_intent(self) -> None:
         from nomorals.workspace.inbox import DIRECTIVE_INTENTS

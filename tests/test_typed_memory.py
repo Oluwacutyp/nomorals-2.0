@@ -220,19 +220,47 @@ def test_type_aware_passthrough_when_ambiguous():
 
 # ── HybridMemoryIndex ────────────────────────────────────────────────────────
 
+def _hybrid_index():
+    """HybridMemoryIndex wired with the real documents/ factories."""
+    from nomorals.documents.index import DocumentIndex
+    from nomorals.documents.model import Document, Section
+    return HybridMemoryIndex(
+        index_factory=DocumentIndex,
+        document_factory=Document,
+        section_factory=Section)
+
 def test_hybrid_index_search():
-    idx = HybridMemoryIndex()
+    idx = _hybrid_index()
     idx.index_unit("u1", "fact", "my girlfriend is Ada")
     idx.index_unit("u2", "fact", "the sky is blue")
     hits = idx.bm25_search("girlfriend Ada")
     assert hits and hits[0][0] == "u1"
 
 
+def test_hybrid_index_without_factories_degrades_honestly():
+    # No factories injected: BM25 returns [] instead of raising, and
+    # index_unit fails fast (same shape as the old FTS5-missing path).
+    idx = HybridMemoryIndex()
+    assert idx.bm25_search("girlfriend Ada") == []
+    with pytest.raises(RuntimeError, match="no document factories"):
+        idx.index_unit("u1", "fact", "my girlfriend is Ada")
+
+
+def test_hybrid_index_partial_factories_fail_fast():
+    # All three factories or none — a partial injection must not
+    # silently build a half-working index.
+    from nomorals.documents.index import DocumentIndex
+    idx = HybridMemoryIndex(index_factory=DocumentIndex)
+    with pytest.raises(RuntimeError, match="no document factories"):
+        idx.index_unit("u1", "fact", "my girlfriend is Ada")
+
+
 # ── tiers wiring ─────────────────────────────────────────────────────────────
 
 @pytest.fixture()
 def tt(tmp_path):
-    m = TwoTierMemory(db=str(tmp_path / "t.db"))
+    m = TwoTierMemory(db=str(tmp_path / "t.db"),
+                      hybrid_index_factory=_hybrid_index)
     yield m
     m.close()
 

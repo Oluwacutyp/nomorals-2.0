@@ -38,6 +38,7 @@ import re
 import socket
 import ssl
 import struct
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -47,6 +48,7 @@ from typing import Any
 from ..accounts.vault import Credential
 from ..core.errors import NotFound
 from ..core.logging_setup import get_logger
+from ..core.proxy_tiers import TierGate, normalize_tier, tier_satisfies
 from .base import (
     AuthMethod,
     Connector,
@@ -87,6 +89,42 @@ _SOCKS4_ERRORS = {
 
 class ProxyPoolError(ConnectorError):
     """A proxy pool operation failed."""
+
+
+#: Guards the no_proxy stub in :meth:`_ExplicitProxyHandler.proxy_open`
+#: (below). ``proxy_bypass`` is a module-level attribute, so the swap
+#: must be atomic across threads — otherwise one thread's ``finally``
+#: could restore another thread's stub and leave bypass disabled
+#: process-wide. The lock is held only for the header computation
+#: inside ``proxy_open`` (no I/O), and it is re-entrant because
+#: ``proxy_open`` can recurse via ``parent.open`` for cross-type proxies.
+_PROXY_BYPASS_LOCK = threading.RLock()
+
+
+class _ExplicitProxyHandler(urllib.request.ProxyHandler):
+    """A ProxyHandler that never honours ``no_proxy``.
+
+    The probe names an explicit proxy, so ambient bypass rules must
+    not apply — but stdlib ``ProxyHandler.proxy_open`` consults
+    ``no_proxy`` from ``os.environ`` at request time.  A concurrent
+    env restore racing a cleared env (or a plain ambient
+    ``no_proxy=127.0.0.1``) then silently routes the probe around the
+    very proxy it must test: the request goes direct to the target,
+    returns 200, and a wrong-password proxy reports healthy.  That is
+    exactly how ``test_auth_proxy_fails_with_wrong_password`` flaked
+    in the full suite (probe-time env showed the sandbox
+    ``no_proxy``, ``bypass=True``, 200 in ~2ms with no request ever
+    reaching the fake proxy).
+    """
+
+    def proxy_open(self, req, proxy, type):
+        with _PROXY_BYPASS_LOCK:
+            orig = urllib.request.proxy_bypass
+            urllib.request.proxy_bypass = lambda host: False
+            try:
+                return super().proxy_open(req, proxy, type)
+            finally:
+                urllib.request.proxy_bypass = orig
 
 
 @register_connector
@@ -264,8 +302,15 @@ class ProxyPoolConnector(Connector):
         tags: list[str] | tuple[str, ...] | None = None,
         country: str = "",
         city: str = "",
+        tier: str = "free",
     ) -> dict[str, Any]:
         """Store a proxy endpoint. Re-adding an endpoint updates it in place.
+
+        ``tier`` is the trust tier — ``free`` (scraped public proxies,
+        default: untrusted until proven otherwise), ``paid`` (provider
+        contract), ``direct`` is never stored (it means no proxy).
+        The tier gate (``core.proxy_tiers.TierGate``) refuses
+        ``free`` + credential-carrying traffic at selection time.
 
         ``protocol`` is ``http``/``https`` (forward proxy), ``socks5``
         (``"socks"`` is accepted as an alias), ``socks4a`` (SOCKS4 with
@@ -302,6 +347,10 @@ class ProxyPoolConnector(Connector):
                 "the password"
             )
         clean_tags = self._normalize_tags(tags)
+        try:
+            tier = normalize_tier(tier)
+        except ValueError as exc:
+            raise ProxyPoolError(str(exc)) from exc
         proxy_id = f"{protocol}://{host}:{port_num}"
 
         # Preserve health history when an endpoint is re-added/updated.
@@ -319,6 +368,7 @@ class ProxyPoolConnector(Connector):
             "tags": clean_tags,
             "country": (country or "").strip().upper(),
             "city": (city or "").strip(),
+            "tier": tier,
             "health": health,
         }
         cred = self.vault.store(
@@ -478,7 +528,7 @@ class ProxyPoolConnector(Connector):
         parsed = urllib.parse.urlparse(proxy_url)
         if parsed.scheme in ("socks4", "socks4a", "socks5", "socks"):
             return self._probe_via_socks(parsed, url, timeout)
-        handler = urllib.request.ProxyHandler(
+        handler = _ExplicitProxyHandler(
             {"http": proxy_url, "https": proxy_url}
         )
         opener = urllib.request.build_opener(handler)
@@ -878,11 +928,17 @@ class ProxyPoolConnector(Connector):
         max_latency_ms: float | None = None,
         min_score: float = 0.0,
         include_unchecked: bool = False,
+        require_tier: str | None = None,
+        carries_credentials: bool = False,
     ) -> list[Credential]:
         """Healthy, un-quarantined proxies matching the filters.
 
         ``include_unchecked=True`` also admits never-checked proxies
         (neutral score 50) — useful for bootstrapping a fresh pool.
+
+        Tier gate (enforced, not advisory): ``carries_credentials=True``
+        excludes every ``free`` proxy; ``require_tier`` admits only
+        tiers at least that trusted (``direct`` > ``paid`` > ``free``).
         """
         now = time.time()
         wanted_country = (country or "").strip().upper()
@@ -891,6 +947,14 @@ class ProxyPoolConnector(Connector):
         for cred in sorted(self._load_all(), key=lambda c: c.id):
             meta = cred.metadata or {}
             health = dict(meta.get("health") or {})
+            # Tier gate first: an untrusted proxy never even competes
+            # for credential-carrying traffic.  Quiet predicate here
+            # (no per-proxy warning) — the explicit require() at the
+            # select/rotate boundary logs the actual refusal.
+            if carries_credentials and cred.tier == "free":
+                continue
+            if not tier_satisfies(cred.tier, require_tier):
+                continue
             if self._quarantined(health, now):
                 continue
             status = health.get("status", UNKNOWN)
@@ -924,6 +988,8 @@ class ProxyPoolConnector(Connector):
         max_latency_ms: float | None = None,
         min_score: float = 0.0,
         include_unchecked: bool = False,
+        require_tier: str | None = None,
+        carries_credentials: bool = False,
     ) -> dict[str, Any]:
         """Pick one proxy by strategy (proxyhive-style).
 
@@ -933,6 +999,11 @@ class ProxyPoolConnector(Connector):
         Filters: ``country`` (ISO-3166), ``protocol``, ``max_latency_ms``
         (EWMA ceiling), ``min_score``. Raises :class:`ProxyPoolError`
         when nothing is eligible.
+
+        Tier gate: ``carries_credentials=True`` refuses every ``free``
+        proxy with a typed ``TierGateRefusal`` (logged with reason) —
+        free proxies are anonymous unauthenticated fetches ONLY.
+        ``require_tier`` admits only tiers at least that trusted.
         """
         import random as _random
 
@@ -946,8 +1017,25 @@ class ProxyPoolConnector(Connector):
             country=country, protocol=protocol,
             max_latency_ms=max_latency_ms, min_score=min_score,
             include_unchecked=include_unchecked,
+            require_tier=require_tier,
+            carries_credentials=carries_credentials,
         )
         if not eligible:
+            # Was the tier gate the reason?  Say so, typed — a caller
+            # that needs credentials must upgrade tier, not retry.
+            ungated = self._eligible_proxies(
+                country=country, protocol=protocol,
+                max_latency_ms=max_latency_ms, min_score=min_score,
+                include_unchecked=include_unchecked,
+            )
+            if ungated and (carries_credentials or require_tier is not None):
+                from ..core.proxy_tiers import TIER_TRUST
+
+                best = max((c.tier for c in ungated),
+                           key=lambda t: TIER_TRUST.get(t, 0))
+                TierGate.require(
+                    best, carries_credentials=carries_credentials,
+                    require_tier=require_tier)
             raise ProxyPoolError(
                 "no eligible proxies for "
                 f"strategy={strategy} country={country} protocol={protocol} "
@@ -996,6 +1084,13 @@ class ProxyPoolConnector(Connector):
                     cred = self.vault.get(self._service, proxy_id,
                                           mark_used=False)
                     health = dict((cred.metadata or {}).get("health") or {})
+                    # A sticky pin is NOT a tier-gate bypass: a free pin
+                    # never serves a later credential-carrying request.
+                    TierGate.require(
+                        cred.tier,
+                        carries_credentials=bool(
+                            filters.get("carries_credentials", False)),
+                        require_tier=filters.get("require_tier"))
                     if (health.get("status") == HEALTHY
                             and not self._quarantined(health, now)):
                         details = self._details(cred, include_secret=True)
@@ -1129,7 +1224,8 @@ class ProxyPoolConnector(Connector):
                 out.append(self._details(full, include_secret=True))
         return out
 
-    def rotate(self) -> dict[str, Any]:
+    def rotate(self, *, require_tier: str | None = None,
+               carries_credentials: bool = False) -> dict[str, Any]:
         """Next healthy proxy, round-robin. Includes the credential.
 
         Skips proxies whose last recorded check was not healthy and any
@@ -1137,9 +1233,23 @@ class ProxyPoolConnector(Connector):
         proxy exists — run :meth:`health_check` to refresh the pool first.
         For strategy-based picking (p2c, least-latency, geo) use
         :meth:`select`.
+
+        Tier gate: ``carries_credentials=True`` refuses every ``free``
+        proxy with a typed ``TierGateRefusal``.
         """
-        healthy = self._eligible_proxies()
+        healthy = self._eligible_proxies(
+            require_tier=require_tier,
+            carries_credentials=carries_credentials)
         if not healthy:
+            if (carries_credentials or require_tier is not None) \
+                    and self._eligible_proxies():
+                from ..core.proxy_tiers import TIER_TRUST
+
+                best = max((c.tier for c in self._eligible_proxies()),
+                           key=lambda t: TIER_TRUST.get(t, 0))
+                TierGate.require(
+                    best, carries_credentials=carries_credentials,
+                    require_tier=require_tier)
             total = len(self._load_all())
             raise ProxyPoolError(
                 "no healthy proxies to rotate to"
@@ -1292,6 +1402,7 @@ class ProxyPoolConnector(Connector):
             "protocol": meta.get("protocol", "http"),
             "country": str(meta.get("country", "") or ""),
             "city": str(meta.get("city", "") or ""),
+            "tier": cred.tier,
             "username": str(meta.get("proxy_username") or ""),
             "password": self.MASK if authed else "",
             "has_auth": authed,

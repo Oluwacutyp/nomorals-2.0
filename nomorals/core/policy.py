@@ -1108,8 +1108,15 @@ def approve_with_biometric(
     *,
     title: str = "",
     timeout_s: float = 60.0,
+    biometric: tuple[Callable[[], Any], Callable[..., Any]] | None = None,
 ) -> str | None:
     """Mint a confirmation token through the fingerprint prompt.
+
+    ``biometric`` is the injected ``(biometric_available,
+    request_biometric)`` pair from :mod:`nomorals.native.biometric` —
+    the kernel may not import the native layer. None means no biometric
+    functions were injected: return None and the caller falls back to
+    the text-confirm flow (never raise, never prompt implicitly).
 
     Returns the capability-bound single-use token when the user
     authenticates, else None (biometric unavailable, prompt denied, or any
@@ -1117,11 +1124,10 @@ def approve_with_biometric(
     and never prompts implicitly: callers invoke this explicitly from an
     interactive context only.
     """
-    try:
-        from ..native.biometric import biometric_available, request_biometric
-    except Exception:  # noqa: BLE001 - no biometric module, no biometric path
-        _log.debug("biometric module unavailable for %s", capability)
+    if biometric is None:
+        _log.debug("no biometric functions injected for %s", capability)
         return None
+    biometric_available, request_biometric = biometric
     try:
         available, reason = biometric_available()
     except Exception:  # noqa: BLE001 - fail closed

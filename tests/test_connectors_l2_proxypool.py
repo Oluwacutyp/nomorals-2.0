@@ -102,13 +102,17 @@ class _ForwardProxyHandler(_QuietHandler):
         # stall that would trip the caller's own timeout instead.
         # The whole budget stays under the client's typical 5s timeout so
         # the caller gets a definitive 200/502, not a client-side timeout.
+        # A dedicated no-proxy opener: urllib.request.urlopen uses the
+        # process-global opener, whose ProxyHandler snapshots the env
+        # at first build — in the full suite an earlier test can leave
+        # it pointing at the sandbox egress proxy, which closes
+        # loopback fetches and turns every upstream fetch into a 502.
         body = b"bad gateway"
         code = 502
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
         for attempt in range(5):
             try:
-                with urllib.request.urlopen(
-                    self.path, timeout=0.8
-                ) as upstream:
+                with opener.open(self.path, timeout=0.8) as upstream:
                     body = upstream.read()
                     code = int(upstream.status)
                 break

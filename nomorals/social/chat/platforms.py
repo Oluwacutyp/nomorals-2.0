@@ -31,6 +31,8 @@ import html as _html
 import re
 from typing import Any
 
+from .platform_limits import for_platform as _for_platform
+
 __all__ = [
     "TELEGRAM", "WHATSAPP", "SMS", "WEB", "DISCORD", "LOCAL",
     "PLATFORM_LIMITS",
@@ -49,14 +51,14 @@ WEB = "web"
 DISCORD = "discord"
 LOCAL = "local"
 
-#: Safe per-message character budgets per platform.
+#: Per-message character budgets per platform — derived from the
+#: :class:`PlatformLimits` descriptor table (``platform_limits.py``), the
+#: single source of truth for platform caps. Callers that want a
+#: conservative rendering budget below the hard cap pass their own limit
+#: to :func:`chunk_text`.
 PLATFORM_LIMITS: dict[str, int] = {
-    WHATSAPP: 3000,   # channels render long posts poorly; stay well under the cap
-    TELEGRAM: 4000,   # Bot API hard cap is 4096
-    DISCORD: 2000,    # hard cap
-    SMS: 1500,        # concatenated-SMS sanity budget
-    WEB: 8000,
-    LOCAL: 8000,
+    name: _for_platform(name).max_text
+    for name in (WHATSAPP, TELEGRAM, DISCORD, SMS, WEB, LOCAL)
 }
 
 #: chat_key prefixes (``platform:chat_id``) → canonical platform.
@@ -252,36 +254,17 @@ def mention(name: str, user_id: str = "", platform: str = TELEGRAM) -> str:
 
 
 def chunk_text(text: str, limit: int = 3000) -> list[str]:
-    """Split text on paragraph boundaries so no chunk exceeds *limit*.
+    """Split text so no chunk exceeds *limit*.
 
-    Short text → single chunk. A single oversized paragraph is hard-split
-    at a space. Never raises; never returns an empty list for non-empty
-    input.
+    Delegates to the canonical lossless chunker
+    (:mod:`nomorals.social.chat.chunking`): paragraph → sentence → hard
+    boundary, never truncates, ``"".join(chunks) == text``. The ``limit``
+    here is a caller-chosen rendering budget, not a platform cap — the
+    platform caps live in :mod:`platform_limits`.
     """
+    from .chunking import chunk_message
+
     try:
-        text = str(text or "")
-        if not text:
-            return [""]
-        if len(text) <= limit:
-            return [text]
-        chunks: list[str] = []
-        current: list[str] = []
-        current_len = 0
-        for para in text.split("\n\n"):
-            while len(para) > limit:
-                cut = para.rfind(" ", 0, limit)
-                cut = cut if cut > limit // 2 else limit
-                chunks.append(para[:cut])
-                para = para[cut:].lstrip()
-            piece_len = len(para) + 2
-            if current and current_len + piece_len > limit:
-                chunks.append("\n\n".join(current))
-                current, current_len = [], 0
-            current.append(para)
-            current_len += piece_len
-        if current:
-            chunks.append("\n\n".join(current))
-        return [c for c in chunks if c] or [text[:limit]]
+        return chunk_message(str(text or ""), max_text=limit)
     except Exception:  # noqa: BLE001
-        text = str(text or "")
-        return [text[:limit] or text] if text else [""]
+        return [str(text or "") or text] if text else [""]

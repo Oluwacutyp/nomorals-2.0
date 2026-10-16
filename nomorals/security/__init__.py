@@ -57,3 +57,8 @@ __all__ = [
     "strip_metadata_bytes",
     "verify_clean",
 ]
+
+# Tier 3: security -> egress auditing for sandbox L2.
+from .egress_audit import EgressAuditor, EgressDecision, EgressRecord
+
+__all__ += ["EgressAuditor", "EgressDecision", "EgressRecord"]

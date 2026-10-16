@@ -37,6 +37,7 @@ from typing import Any
 from ...core.errors import ValidationError
 from ...core.logging_setup import get_logger
 from .base import ChatAdapter, ChatKind, ChatMessage, ChatRef, IncomingHandler, MediaRef, SendResult
+from .platform_limits import for_platform
 
 __all__ = ["TelegramAdapter", "TelegramBotAdapter"]
 
@@ -401,6 +402,7 @@ class TelegramAdapter(ChatAdapter):
         media_max_mb: float = 20.0,
         threads_enabled: bool = True,
         companion_bot_id: int | str | None = None,
+        companion_bot_ids: Any = None,
         flood_max_wait_s: float = 300.0,
     ) -> None:
         super().__init__(media_dir=media_dir)
@@ -410,15 +412,39 @@ class TelegramAdapter(ChatAdapter):
         # retry). Larger waits fail fast instead of parking the send
         # thread — the gateway/outbound caller can retry later.
         self.flood_max_wait_s = max(1.0, float(flood_max_wait_s))
-        # ID of the companion BotFather bot (if any). The bot's messages
+        # IDs of the companion BotFather bots (if any). The bots' messages
         # arrive at this userbot as incoming — without this, the
         # _sender_is_bot guard relies solely on Telethon's .bot flag,
         # which isn't always populated (unresolved senders, certain
         # chat types). An explicit ID match is bulletproof.
+        # ``companion_bot_id`` (singular) is kept for back-compat: it is
+        # folded into the set below. New code passes ``companion_bot_ids``
+        # with BOTH bot IDs — the userbot must never reply to either bot.
+        _ids: set[int] = set()
+        _raw_ids: Any = companion_bot_ids
+        if _raw_ids is None:
+            _raw_ids = ()
+        elif isinstance(_raw_ids, (str, int)):
+            _raw_ids = (_raw_ids,)
+        for _cand in _raw_ids:
+            try:
+                if _cand:
+                    _ids.add(int(_cand))
+            except (TypeError, ValueError):
+                pass
         try:
-            self._companion_bot_id = int(companion_bot_id) if companion_bot_id else None
+            if companion_bot_id:
+                _ids.add(int(companion_bot_id))
         except (TypeError, ValueError):
-            self._companion_bot_id = None
+            pass
+        self._companion_bot_ids: frozenset[int] = frozenset(_ids)
+        # Singular back-compat view: the first (lowest) id, or None.
+        self._companion_bot_id: int | None = min(_ids) if _ids else None
+
+    @property
+    def companion_bot_ids(self) -> frozenset[int]:
+        """Both companion BotFather bot IDs (gated + personal)."""
+        return self._companion_bot_ids
         try:
             self.api_id = int(api_id)
         except (TypeError, ValueError) as exc:
@@ -554,21 +580,22 @@ class TelegramAdapter(ChatAdapter):
     def _sender_is_bot(self, event: Any, message: Any) -> bool:
         """True iff the sender of this inbound message is a bot account.
 
-        The companion BotFather bot runs as a separate Telegram account. When
-        both adapters are live, the bot's messages arrive at this userbot as
-        incoming — without this guard the bot would reply to its own output
-        in a loop.
+        The companion BotFather bots run as separate Telegram accounts. When
+        the adapters are live, the bots' messages arrive at this userbot as
+        incoming — without this guard the userbot would reply to its own
+        bots' output in a loop.
         """
         # Primary: explicit companion bot ID match — bulletproof even when
-        # Telethon hasn't resolved the sender entity.
-        if self._companion_bot_id:
+        # Telethon hasn't resolved the sender entity. Membership test
+        # against the full set: the userbot must not reply to EITHER bot.
+        if self._companion_bot_ids:
             for candidate in (
                 getattr(event, "sender_id", None),
                 getattr(getattr(event, "message", None), "sender_id", None),
                 getattr(message, "sender_id", None),
             ):
                 try:
-                    if candidate is not None and int(candidate) == self._companion_bot_id:
+                    if candidate is not None and int(candidate) in self._companion_bot_ids:
                         return True
                 except (TypeError, ValueError) as exc:
                     _log.debug("bot detection: candidate %r not numeric (%s)", candidate, exc)
@@ -1262,13 +1289,16 @@ class TelegramAdapter(ChatAdapter):
     def send(self, chat: ChatRef, text: str, *,
              reply_to: str = "",
              buttons: list[list[tuple[str, str]]] | None = None,
+             reply_keyboard: list[list[str]] | None = None,
              parse_mode: str = "") -> SendResult:
         client = self._client
         if client is None:
             return SendResult(ok=False, platform=self.name, error="not connected")
         started = time.perf_counter()
         try:
-            result = self._run_on_loop(self._send_async(client, chat, text, reply_to, parse_mode))
+            result = self._run_on_loop(self._send_async(
+                client, chat, text, reply_to, parse_mode,
+                reply_keyboard=reply_keyboard))
             try:
                 from ...core.error_system import heartbeat
                 heartbeat("telegram", True)
@@ -1323,7 +1353,8 @@ class TelegramAdapter(ChatAdapter):
             return await fn()
 
     async def _send_async(self, client: Any, chat: ChatRef, text: str, reply_to: str,
-                          parse_mode: str = "") -> Any:
+                          parse_mode: str = "",
+                          reply_keyboard: list[list[str]] | None = None) -> Any:
         # Try to use cached input entity first (most reliable for DMs)
         entity = self._input_entity_cache.get(chat.chat_id)
         if entity is None:
@@ -1335,8 +1366,31 @@ class TelegramAdapter(ChatAdapter):
         if parse_mode in ("html", "HTML", "md", "markdown"):
             kwargs["parse_mode"] = parse_mode
         kwargs.update(self._thread_kwargs(chat))
+        # Persistent bottom reply keyboard (Telethon ReplyKeyboardMarkup).
+        # Guarded import + best-effort: if Telethon lacks the type, the
+        # message still goes out, just without the keyboard. resize +
+        # single_use=False are the universally supported fields; the
+        # Bot API side adds is_persistent explicitly.
+        markup = None
+        if reply_keyboard:
+            try:
+                from telethon.tl.types import (
+                    KeyboardButton, ReplyKeyboardMarkup)
+                markup = ReplyKeyboardMarkup(
+                    rows=[[KeyboardButton(text=t) for t in row]
+                          for row in reply_keyboard if row],
+                    resize=True, single_use=False)
+            except Exception:  # noqa: BLE001 - keyboard is cosmetic
+                _log.debug("telegram: could not build reply keyboard",
+                           exc_info=True)
+        chunks = _chunk_text(text, for_platform("telegram").max_text)
         result = None
-        for chunk in _chunk_text(text, 4096):
+        for i, chunk in enumerate(chunks):
+            # The keyboard goes on the last chunk only — it replaces the
+            # chat's current keyboard, so an earlier chunk carrying it
+            # would be immediately superseded anyway.
+            if markup is not None and i == len(chunks) - 1:
+                kwargs["buttons"] = markup
             async def _one() -> Any:
                 try:
                     return await client.send_message(entity, chunk, **kwargs)
@@ -1349,6 +1403,7 @@ class TelegramAdapter(ChatAdapter):
             # Only the first chunk carries the reply/thread reference.
             kwargs.pop("reply_to", None)
             kwargs.pop("message_thread_id", None)
+            kwargs.pop("buttons", None)
         self._remember_sent(getattr(result, "id", None))  # self-chat loop guard
         return result
 
@@ -1800,14 +1855,14 @@ class TelegramBotAdapter(ChatAdapter):
 
     Long-polling ``getUpdates`` on this adapter's own thread; no webhook
     server needed, works behind NAT. Media downloads go through
-    ``getFile``. Sending splits at Telegram's 4096-char limit.
+    ``getFile``. Sending splits at the PlatformLimits text cap.
     """
 
     name = "telegram-bot"
     supported_kinds = (ChatKind.DM, ChatKind.GROUP, ChatKind.CHANNEL)
 
     #: Bot API text limit per message.
-    MAX_TEXT = 4096
+    MAX_TEXT = for_platform("telegram-bot").max_text
 
     def __init__(
         self,
@@ -1819,23 +1874,79 @@ class TelegramBotAdapter(ChatAdapter):
         media_max_mb: float = 25.0,
         poll_timeout: int = 30,
         session: Any = None,
+        lock_path: str = "data/telegram-bot.lock",
+        # ── two-bot support ──────────────────────────────────────────
+        # ``adapter_name`` is the adapter's identity (``"telegram-bot"``
+        # for the gated bot, ``"telegram-personal"`` for the personal
+        # bot). It keys ChatRef.platform, chat keys, media routing and
+        # the gateway's adapter map — same class, per-adapter config
+        # as data, not code.
+        adapter_name: str | None = None,
+        # Whether this adapter's chats may carry partner (romantic)
+        # context in the brain: True on the personal bot (every chat
+        # on it is the owner), False on the gated bot (groups never
+        # carry it; an owner DM on the gated bot still does — see
+        # brain._generate_and_persist). Stamped on every inbound
+        # message's meta so the brain never has to guess the adapter.
+        partner_context: bool = False,
+        # Personal-bot gate: when True, ONLY the owner may use this
+        # bot. Non-owners get one honest denial sent directly (no
+        # brain call, no credit spend) and the message never reaches
+        # the pipeline. The personal bot is NOT public.
+        owner_only: bool = False,
+        # Owner recognition for the owner_only gate: sender IDs
+        # (``partner.owner_sender_ids``) and full chat keys
+        # (``partner.owner_chats``, e.g. ``"telegram-personal:123"``).
+        owner_sender_ids: Any = (),
+        owner_chat_keys: Any = (),
+        # Honest denial for non-owners on the personal bot.
+        deny_text: str = (
+            "This is a private bot — only the owner can chat here."
+        ),
     ) -> None:
         super().__init__(media_dir=media_dir)
         if not token:
             raise ValidationError("telegram bot token is required")
         self.token = token
+        # Instance identity: shadows the class-level ``name`` so one
+        # class serves both BotFather bots with distinct chat keys.
+        self.name = (adapter_name or "telegram-bot").strip().lower() \
+            or "telegram-bot"
+        self.partner_context = bool(partner_context)
+        self.owner_only = bool(owner_only)
+        self.owner_sender_ids = {str(v).strip() for v in (owner_sender_ids or ())
+                                 if str(v).strip()}
+        self.owner_chat_keys = {str(v).strip() for v in (owner_chat_keys or ())
+                                if str(v).strip()}
+        self.deny_text = deny_text or (
+            "This is a private bot — only the owner can chat here.")
         self.chat_allow = {c.strip() for c in chat_allow.split(",") if c.strip()}
         self.media_in_groups = media_in_groups
         self.media_max_mb = media_max_mb
         self.poll_timeout = poll_timeout
         self._session = session
         self._offset = 0
-        self._bot_id: int | None = None
+        # Bot ID straight from the token ("<bot_id>:<secret>") — available
+        # without a getMe round-trip, so the two-bot router and the
+        # userbot loop guard can identify this bot before it ever polls.
+        # preflight() overwrites it with the authoritative getMe id.
+        try:
+            self._bot_id: int | None = int(str(token).split(":", 1)[0])
+        except (TypeError, ValueError):
+            self._bot_id = None
         self._bot_username = ""
         # (chat_id, message_id) already delivered — getUpdates offset
         # tracking normally prevents replays, but a restarted poll loop
         # can re-fetch recent updates; guarantee at-most-once here too.
         self._seen_inbound: set[tuple[str, str]] = set()
+        # Single getUpdates consumer: lockfile path (see single_consumer).
+        self._lock_path = lock_path
+        # Last inbound /command per chat — the origin command for the
+        # auto action footer on tool results (Retry re-runs it).
+        self._last_command: dict[str, str] = {}
+        # Progress-edit throttle (edit-in-place ~1/3s, only on change).
+        from .progress_throttle import ProgressThrottler
+        self._progress = ProgressThrottler()
 
     def _note_inbound_seen(self, chat_id: str, message_id: str) -> bool:
         """Record an inbound Bot API message id; True if already seen.
@@ -1907,6 +2018,21 @@ class TelegramBotAdapter(ChatAdapter):
                   self._bot_username, self._bot_id)
 
     def run(self, handler: IncomingHandler) -> None:
+        from .single_consumer import ConsumerAlreadyRunning, SingleConsumerLock
+
+        lock = SingleConsumerLock(self._lock_path)
+        if not lock.acquire():
+            info = lock.holder() or {}
+            raise ConsumerAlreadyRunning(
+                "another getUpdates consumer is already running "
+                f"(pid={info.get('pid')}); refusing to start — a second "
+                "poll loop would silently steal updates / hit 409 Conflict")
+        try:
+            self._run_locked(handler)
+        finally:
+            lock.release()
+
+    def _run_locked(self, handler: IncomingHandler) -> None:
         try:
             self.preflight()
         except Exception as exc:  # noqa: BLE001 - fail fast, gateway logs the skip
@@ -1964,6 +2090,33 @@ class TelegramBotAdapter(ChatAdapter):
                     self._deliver(handler, message)
 
     # ── inbound ───────────────────────────────────────────────────────────
+    # ── two-bot: owner gate + partner-context stamping ──────────────
+    def _is_owner_sender(self, sender_id: Any, chat_id: str) -> bool:
+        """True iff this sender/chat is the owner (personal-bot gate).
+
+        Sender-ID match covers DMs (chat_id == sender_id there) and
+        groups the owner writes in; chat-key match covers owner chats
+        registered as ``"<adapter>:<chat_id>"`` in
+        ``partner.owner_chats``. Either is enough — both are data from
+        settings, never code.
+        """
+        if str(sender_id or "").strip() in self.owner_sender_ids:
+            return True
+        if f"{self.name}:{chat_id}" in self.owner_chat_keys:
+            return True
+        return False
+
+    def _deny_non_owner(self, chat_id: str) -> None:
+        """Send the honest personal-bot denial directly (no brain, no
+        credit spend). Best-effort: a failed denial must never raise
+        into the poll loop. Bot API getUpdates never delivers the bot's
+        own messages back, so this cannot loop."""
+        try:
+            self._api("sendMessage", chat_id=int(chat_id),
+                      text=self.deny_text)
+        except Exception as exc:  # noqa: BLE001 - denial is best-effort
+            _log.debug("telegram-personal: denial send failed: %s", exc)
+
     def _convert(self, update: dict[str, Any]) -> ChatMessage | None:
         msg = update.get("message") or update.get("edited_message") \
             or update.get("channel_post")
@@ -1976,11 +2129,26 @@ class TelegramBotAdapter(ChatAdapter):
         chat_id = str(chat.get("id", ""))
         if not chat_id:
             return None
+        # Personal bot (owner_only) FIRST, before the chat_allow filter:
+        # its allowlist IS the owner, and a stranger must get the honest
+        # denial — not a silent drop. Only fresh messages get a denial
+        # (an edited_message re-denial would spam on every edit).
+        if self.owner_only and not self._is_owner_sender(
+                sender.get("id", ""), chat_id):
+            _log.info("%s: denying non-owner sender %s in chat %s",
+                      self.name, sender.get("id", "?"), chat_id)
+            if "message" in update:
+                self._deny_non_owner(chat_id)
+            return None
         if self.chat_allow and chat_id not in self.chat_allow:
             _log.info("telegram-bot: ignoring chat %s — not in allowlist", chat_id)
             return None
         kind = _BOT_CHAT_TYPES.get(chat.get("type", ""), ChatKind.DM)
         text = msg.get("text") or msg.get("caption") or ""
+        # Remember the origin command per chat: the auto action footer
+        # on tool results re-runs exactly this command on Retry.
+        if text.strip().startswith("/"):
+            self._last_command[chat_id] = text.strip()
         mentioned = False
         if kind != ChatKind.DM and self._bot_username:
             for ent in msg.get("entities") or msg.get("caption_entities") or []:
@@ -2004,7 +2172,9 @@ class TelegramBotAdapter(ChatAdapter):
             if _rm.get("file_id"):
                 replied_audio_file_id = str(_rm["file_id"])
                 break
-        meta = {"update_id": update.get("update_id")}
+        meta = {"update_id": update.get("update_id"),
+                "partner_context": self.partner_context,
+                "bot_role": "personal" if self.owner_only else "gated"}
         if replied_audio_file_id:
             meta["replied_audio_file_id"] = replied_audio_file_id
         who = sender.get("username") or sender.get("first_name") or str(sender.get("id", ""))
@@ -2056,21 +2226,42 @@ class TelegramBotAdapter(ChatAdapter):
         if sender.get("is_bot"):
             self._answer_callback(query_id)
             return
-        # Owner gate: only the owner can trigger button actions.
+        # Owner gate: only the owner can trigger button actions — EXCEPT
+        # the commands a non-owner could already trigger by TYPING them.
+        # A button tap must never grant more than typing the same
+        # command: game + public commands flow to the normal pipeline
+        # gates (game dispatch runs games; the public-bot gate redirects
+        # owner-only kinds); owner-only buttons stay owner-gated here.
+        # "arena" is the one deliberate exception: its button sits on
+        # public game messages, so it flows to the public-bot gate's
+        # friendly redirect instead of dying here as "Not authorized".
         msg = query.get("message") or {}
         chat = msg.get("chat") or {}
         chat_id = str(chat.get("id", ""))
-        if self.chat_allow and chat_id not in self.chat_allow:
-            _log.info("telegram-bot: ignoring callback from %s — not in allowlist",
-                      chat_id)
-            self._answer_callback(query_id, text="Not authorized")
-            return
         signed = query.get("data", "")
         data = self._verify_callback(signed)
         if data is None:
             _log.warning("telegram-bot: ignoring callback with bad signature")
             self._answer_callback(query_id, text="Invalid button")
             return
+        # Personal bot: every callback must come from the owner — a
+        # stranger's button tap dies here, before any pipeline spend.
+        if self.owner_only and not self._is_owner_sender(
+                sender.get("id", ""), chat_id):
+            _log.info("%s: denying non-owner callback from %s in chat %s",
+                      self.name, sender.get("id", "?"), chat_id)
+            self._answer_callback(query_id, text="Not authorized")
+            return
+        if self.chat_allow and chat_id not in self.chat_allow:
+            from .control import GAME_COMMANDS, PUBLIC_COMMANDS
+            kind = (data or "").lstrip("/").split(None, 1)
+            kind = kind[0].lower() if kind and kind[0] else ""
+            if (kind != "game" and kind not in GAME_COMMANDS
+                    and kind not in PUBLIC_COMMANDS and kind != "arena"):
+                _log.info("telegram-bot: ignoring callback from %s — not in allowlist",
+                          chat_id)
+                self._answer_callback(query_id, text="Not authorized")
+                return
         self._answer_callback(query_id)
         # Deliver as a synthetic "/" command so the normal command
         # pipeline (owner gating, parsing, dispatch) handles it.
@@ -2089,7 +2280,9 @@ class TelegramBotAdapter(ChatAdapter):
             mentioned=False,
             ts=time.time(),
             message_id=f"cb_{query_id}",
-            meta={"callback_query": True},
+            meta={"callback_query": True,
+                  "partner_context": self.partner_context,
+                  "bot_role": "personal" if self.owner_only else "gated"},
         )
         self._deliver(handler, message)
 
@@ -2194,11 +2387,74 @@ class TelegramBotAdapter(ChatAdapter):
             return ""
 
     # ── outbound ──────────────────────────────────────────────────────────
+    def send_long(self, chat: ChatRef, text: str, *, reply_to: str = "",
+                  stem: str = "output") -> SendResult:
+        """Send long output as ONE document, not N message chunks.
+
+        The document holds the full text (nothing truncated); the
+        caption carries the char count. The temp file is removed after
+        the send attempt, success or failure.
+        """
+        from .progress_throttle import LongOutput
+        from .base import MediaRef as _MediaRef
+
+        router = LongOutput()
+        tmp = Path(self.media_dir) / f".long-{time.time_ns()}-{router.document_name(stem)}"
+        try:
+            tmp.parent.mkdir(parents=True, exist_ok=True)
+            tmp.write_bytes((text or "").encode("utf-8"))
+            return self.send_media(chat, _MediaRef(path=str(tmp), mime="text/plain",
+                                                   kind="document", name=tmp.name),
+                                   caption=router.caption(text))
+        finally:
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+
+    def edit_progress(self, chat: ChatRef, message_id: str, new_text: str) -> dict[str, Any] | None:
+        """Edit a progress message in place — throttled (~1/3s, on change).
+
+        Returns the API result, or None when the edit was suppressed
+        (unchanged text / too soon) or failed. Never raises.
+        """
+        if not self._progress.should_edit(new_text):
+            return None
+        try:
+            return self._api("editMessageText", chat_id=int(chat.chat_id),
+                             message_id=int(message_id),
+                             text=(new_text or "")[:for_platform("telegram-bot").max_text])
+        except Exception as exc:  # noqa: BLE001 - progress edits are best-effort
+            _log.debug("telegram-bot: edit_progress failed: %s", exc)
+            return None
+
+    def send_with_footer(self, chat: ChatRef, text: str, *,
+                         origin_command: str, save_command: str = "",
+                         send_command: str = "", reply_to: str = "") -> SendResult:
+        """Send with the standard action footer (Retry/Expand/Save/Send/Next).
+
+        For callers that know the origin command and the save/send
+        destinations. Generic replies use :meth:`send`, which attaches
+        the auto footer (Retry/Expand/Next) when the text looks like a
+        tool result and the origin command is known for the chat.
+        """
+        from .action_footers import tool_result_footer
+        return self.send(chat, text, reply_to=reply_to,
+                         buttons=tool_result_footer(origin_command,
+                                                    save_command=save_command,
+                                                    send_command=send_command))
+
     def send(self, chat: ChatRef, text: str, *, reply_to: str = "",
              buttons: list[list[tuple[str, str]]] | None = None,
+             reply_keyboard: list[list[str]] | None = None,
              parse_mode: str = "") -> SendResult:
+        from .action_footers import footer_for_text
+        from .progress_throttle import LongOutput
         from .tgbot_buttons import buttons_for_text
 
+        # Long output goes out as ONE document, not 40 chunks.
+        if LongOutput().route(text)[0] == "document":
+            return self.send_long(chat, text, reply_to=reply_to)
         started = time.perf_counter()
         last_id = ""
         try:
@@ -2215,29 +2471,47 @@ class TelegramBotAdapter(ChatAdapter):
                     params_base["reply_parameters"] = {"message_id": int(reply_to)}
                 except (TypeError, ValueError) as e:
                     _log.debug("dropping bad reply_to %r: %s", reply_to, e)
-            # Inline keyboard: [[(label, callback_data), ...], ...]
-            # Callback data is HMAC-signed to prevent spoofing.
-            # When the caller passes no explicit buttons, derive contextual
-            # ones from the reply text (game menus, results, …) — this is
-            # what puts [Join] [Stats] under game replies without every
-            # command handler having to know about buttons.
-            resolved = buttons if buttons is not None else buttons_for_text(text)
+            # Reply keyboard wins over the inline keyboard: a message
+            # carries one keyboard. The reply keyboard is the persistent
+            # bottom menu (tapping a button sends its text as a message).
             keyboard = None
-            if resolved:
-                keyboard = []
-                for row in resolved:
-                    krow = []
-                    for label, data in row:
-                        krow.append({"text": label,
-                                     "callback_data": self._sign_callback(data)})
-                    keyboard.append(krow)
+            if reply_keyboard:
+                keyboard = {
+                    "keyboard": [[{"text": t} for t in row]
+                                 for row in reply_keyboard if row],
+                    "resize_keyboard": True,
+                    "one_time_keyboard": False,
+                    "is_persistent": True,
+                }
+            else:
+                # Inline keyboard: [[(label, callback_data), ...], ...]
+                # Callback data is HMAC-signed to prevent spoofing.
+                # When the caller passes no explicit buttons, derive
+                # contextual ones from the reply text (game menus,
+                # results, …) — this is what puts [Join] [Stats] under
+                # game replies without every command handler having to
+                # know about buttons.
+                resolved = buttons if buttons is not None \
+                    else (buttons_for_text(text)
+                          or footer_for_text(text, self._last_command.get(chat.chat_id, "")))
+                if resolved:
+                    keyboard = []
+                    for row in resolved:
+                        krow = []
+                        for label, data in row:
+                            krow.append({"text": label,
+                                         "callback_data": self._sign_callback(data)})
+                        keyboard.append(krow)
             chunks = _chunk_text(text, self.MAX_TEXT)
             for i, chunk in enumerate(chunks):
                 params = dict(params_base)
                 # The keyboard goes on the last chunk only — every chunk
                 # carrying it would repeat the buttons N times.
                 if keyboard and i == len(chunks) - 1:
-                    params["reply_markup"] = {"inline_keyboard": keyboard}
+                    if reply_keyboard:
+                        params["reply_markup"] = keyboard
+                    else:
+                        params["reply_markup"] = {"inline_keyboard": keyboard}
                 result = self._api("sendMessage", text=chunk, **params)
                 last_id = str(result.get("message_id", ""))
                 # Only the first chunk carries the reply reference.
@@ -2277,7 +2551,7 @@ class TelegramBotAdapter(ChatAdapter):
             url = _BOT_API.format(token=self.token, method=method)
             data: dict[str, Any] = {"chat_id": chat.chat_id}
             if caption:
-                data["caption"] = caption[:1024]
+                data["caption"] = caption[:for_platform("telegram-bot").max_caption]
             with open(path, "rb") as fh:
                 files = {field: (path.name, fh, _mime_for(str(path)))}
                 resp = self._sess().post(url, data=data, files=files, timeout=120)
@@ -2306,7 +2580,7 @@ class TelegramBotAdapter(ChatAdapter):
             media_obj = {"type": "photo",
                          "media": f"attach://{path.name}"}
             if caption:
-                media_obj["caption"] = caption[:1024]
+                media_obj["caption"] = caption[:for_platform("telegram-bot").max_caption]
             data = {"chat_id": chat.chat_id,
                     "message_id": message_id,
                     "media": json.dumps(media_obj)}

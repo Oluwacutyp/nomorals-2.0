@@ -1,0 +1,5 @@
+{
+  "library": true,
+  "reason": "Podcast/radio show composer (schedule + segments + RSS). New in NEW_MODULES_17; CLI/chat wiring is follow-up.",
+  "owner_decision_needed": "Wire into CLI/chat (show commands) or keep as import-only library."
+}

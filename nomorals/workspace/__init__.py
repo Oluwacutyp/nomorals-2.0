@@ -25,3 +25,8 @@ __all__ = [
     "memory_mb",
     "resolve_profile",
 ]
+
+# Tier 3: remote VCPUs — one farm across phone/laptop/workstation/Kaggle GPU.
+from .remote_vcpu import RemoteFarm, RemoteResult, RemoteWorker
+
+__all__ += ["RemoteFarm", "RemoteResult", "RemoteWorker"]

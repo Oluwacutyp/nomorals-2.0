@@ -17,7 +17,6 @@ import time
 from pathlib import Path
 from typing import Any
 
-from ..voice.money import TransferStaging, parse_amount as _voice_parse_amount
 from .budgets import finance_paths
 from .guard import Warning, check_outgoing
 from .ledger import Ledger, format_naira, parse_amount
@@ -178,7 +177,15 @@ def resolve_recipient(
     }
 
 
-def _staging(settings: Any = None) -> TransferStaging:
+def _staging(settings: Any = None) -> "TransferStaging":
+    # Lazy import: finance.send is imported by finance/__init__, and
+    # voice.money imports finance.budgets/ledger — a top-level import
+    # here makes `import nomorals.voice` fail with a circular import.
+    # (parse_voice_money below already uses the same lazy pattern.)
+    # The unused `parse_amount as _voice_parse_amount` import is gone:
+    # send.py parses amounts via finance.ledger.parse_amount.
+    from ..voice.money import TransferStaging
+
     _, budgets_path = finance_paths(settings)
     path = Path(budgets_path).parent / "staged_transfers.jsonl"
     return TransferStaging(path=path)
@@ -195,6 +202,7 @@ def send_money(
     override_warning: bool = False,
     mandate_store: MandateStore | None = None,
     principal: str = "owner",
+    now: float | None = None,
 ) -> dict[str, Any]:
     """Stage an outgoing transfer. Returns a result dict (never raises).
 
@@ -206,6 +214,9 @@ def send_money(
        "prompt": ...}                                   — staged; caller must
         run the biometric prompt, then call confirm_send()
       {"ok": False, "error": ...}                       — failed cleanly
+
+    ``now`` is the clock for the guard check (tests pass a frozen
+    instant; production defaults to the wall clock).
     """
     settings = getattr(context, "settings", None)
     ledger = ledger or Ledger(finance_paths(settings)[0])
@@ -234,7 +245,7 @@ def send_money(
     # 3. guard — advisory, not blocking
     warning: Warning | None = None
     if not override_warning:
-        warning = check_outgoing(recipient["name"], kobo, ledger)
+        warning = check_outgoing(recipient["name"], kobo, ledger, now=now)
     if warning is not None:
         _audit(ledger, kobo, recipient["name"], "warning_shown",
                note=warning.message)

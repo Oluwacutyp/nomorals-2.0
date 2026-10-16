@@ -1,0 +1,5 @@
+{
+  "library": true,
+  "reason": "Commitment ledger \u2014 pure domain record-keeping (promises, deadlines, follow-through) with no command wiring. Genuine import-only library.",
+  "owner_decision_needed": "Wire into CLI/chat (commitment tracking commands) or keep as import-only library."
+}

@@ -42,7 +42,7 @@ from ..core.policy import Capability
 
 _log = get_logger(__name__)
 
-__all__ = ["MusicLibrary", "read_metadata", "register"]
+__all__ = ["MusicLibrary", "ClipIndex", "read_metadata", "register"]
 
 _META_KEYS = ("title", "artist", "album", "genre", "duration")
 
@@ -650,6 +650,163 @@ class MusicLibrary:
                 "unique_tracks_played": int(unique["n"]),
                 "favorites_seconds": round(float(secs["s"] or 0), 1),
                 "queue": count("media_queue")}
+
+
+# ---------------------------------------------------------------------------
+# Shot-level semantic search (EDIT_GEN_UPGRADE 2.6)
+# ---------------------------------------------------------------------------
+# Every clip is indexed ONCE — segments, characters, transcript, audio
+# energy, motion, aesthetic — then queried in plain language:
+# "find shot where he laughs", "widest shot last minute",
+# "where music drops". Index entries are plain dicts (JSON-safe) so the
+# index survives a restart via to_dict/from_dict. Feature extraction
+# reuses scene_intel.score + highlight_model.features — no new
+# extractor, no second index.
+
+#: transcript tokens that count as laughter / music-drop cues.
+_LAUGH_TOKENS = ("laugh", "laughs", "laughing", "haha", "lol", "giggle",
+                 "chuckle")
+_MUSIC_DROP_TOKENS = ("music drops", "drop", "beat drops", "bass drops")
+
+
+class ClipIndex:
+    """In-memory shot index with semantic query.
+
+    Entry shape (all fields optional except ``clip_id``/``start``/``end``)::
+
+        {"clip_id", "start", "end", "characters": [char_id, ...],
+         "transcript": "he laughs at the joke",
+         "audio_energy": [0.1, 0.9, ...] | float (mean),
+         "motion": float, "aesthetic": float,
+         "framing_width": float (0..1, subject bbox width — wide shot
+         when small), "tags": ["laughing", ...], "duration": float}
+    """
+
+    def __init__(self, entries: list[dict[str, Any]] | None = None):
+        self.entries: list[dict[str, Any]] = [dict(e) for e in (entries or [])]
+
+    def __len__(self) -> int:
+        return len(self.entries)
+
+    def index_clip(self, entry: dict[str, Any]) -> dict[str, Any]:
+        """Index one clip (one call per clip, not per query)."""
+        entry = dict(entry)
+        if not entry.get("clip_id"):
+            raise ToolError("index_clip needs clip_id")
+        entry["start"] = float(entry.get("start", 0.0))
+        entry["end"] = float(entry.get("end", entry["start"]))
+        if entry["end"] < entry["start"]:
+            raise ToolError("index_clip needs end >= start")
+        entry.setdefault("duration", round(entry["end"] - entry["start"], 3))
+        self.entries.append(entry)
+        return entry
+
+    def index_file(self, path: str, *, segments: list[tuple[float, float]] | None = None,
+                   transcript: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
+        """Index a media file once via scene_intel + highlight features.
+
+        ``segments`` defaults to the file's scene segmentation;
+        transcript words are binned into segments. Feature extraction
+        failures leave that signal at 0.0 (honest) — the entry still
+        indexes with its transcript + characters.
+        """
+        from .scene_intel.segment import segment_movie
+        from .highlight_model.features import extract_features
+        indexed: list[dict[str, Any]] = []
+        try:
+            bounds = segments or [(s.start, s.end) for s in
+                                  segment_movie(path).segments
+                                  if s.kind == "scene"]
+        except Exception:  # noqa: BLE001 - segmentation is best-effort
+            bounds = [(0.0, 0.0)]
+        try:
+            feats = extract_features(path)
+        except Exception:  # noqa: BLE001
+            feats = []
+        for i, (s, e) in enumerate(bounds):
+            words = [w for w in (transcript or [])
+                     if s <= float(w.get("start", 0)) < e]
+            text = " ".join(str(w.get("text", "")) for w in words)
+            feat = feats[int(s)] if feats and int(s) < len(feats) else None
+            entry = {"clip_id": str(path), "start": round(float(s), 3),
+                     "end": round(float(e), 3),
+                     "transcript": text,
+                     "audio_energy": float(feat[0]) if feat else 0.0,
+                     "motion": float(feat[1]) if feat else 0.0,
+                     "aesthetic": float(sum(feat[:3]) / 3.0) if feat else 0.0,
+                     "segment_index": i}
+            self.index_clip(entry)
+            indexed.append(entry)
+        return indexed
+
+    # -- query -----------------------------------------------------------
+    def query(self, text: str, *, limit: int = 10) -> list[dict[str, Any]]:
+        """Semantic shot query. Deterministic token + signal matching."""
+        q = (text or "").strip().lower()
+        if not q:
+            raise ToolError("ClipIndex.query needs a query")
+        pool = list(self.entries)
+        # "widest shot [last minute]" — smallest subject framing, recent window
+        if "widest" in q:
+            window = 60.0 if "last minute" in q else None
+            if window is not None and pool:
+                latest = max(e["end"] for e in pool)
+                pool = [e for e in pool if e["end"] >= latest - window]
+            pool.sort(key=lambda e: float(e.get("framing_width", 1.0)))
+            return pool[:limit]
+        # "where music drops" — largest audio-energy fall between neighbours
+        if any(t in q for t in _MUSIC_DROP_TOKENS):
+            drops: list[tuple[float, dict[str, Any]]] = []
+            ordered = sorted(pool, key=lambda e: (str(e.get("clip_id", "")),
+                                                  float(e.get("start", 0))))
+            prev: dict[str, Any] | None = None
+            for e in ordered:
+                cur = self._energy(e)
+                if prev is not None and str(prev.get("clip_id")) == str(e.get("clip_id")):
+                    drop = self._energy(prev) - cur
+                    if drop > 0:
+                        drops.append((drop, e))
+                prev = e
+            drops.sort(key=lambda d: -d[0])
+            return [e for _d, e in drops[:limit]]
+        # laugh / character / transcript / tag text match
+        tokens = [t.strip(".,!?\"'") for t in q.split() if len(t) > 2]
+        if "laugh" in q or "laughs" in q or "laughing" in q:
+            tokens += list(_LAUGH_TOKENS)
+        scored: list[tuple[float, dict[str, Any]]] = []
+        for e in pool:
+            hay = " ".join([
+                str(e.get("transcript", "")),
+                " ".join(str(c) for c in e.get("characters", [])),
+                " ".join(str(t) for t in e.get("tags", [])),
+                str(e.get("clip_id", "")),
+            ]).lower()
+            hits = sum(1 for t in tokens if t in hay)
+            if hits:
+                scored.append((hits + float(e.get("aesthetic", 0.0)) * 0.1, e))
+        scored.sort(key=lambda s: -s[0])
+        return [e for _s, e in scored[:limit]]
+
+    @staticmethod
+    def _energy(entry: dict[str, Any]) -> float:
+        val = entry.get("audio_energy", 0.0)
+        if isinstance(val, (list, tuple)):
+            return float(sum(val) / len(val)) if val else 0.0
+        try:
+            return float(val)
+        except (TypeError, ValueError):
+            return 0.0
+
+    def search_shots(self, text: str, **kw: Any) -> list[dict[str, Any]]:
+        """Alias for :meth:`query` (the shot-search front door)."""
+        return self.query(text, **kw)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"entries": [dict(e) for e in self.entries]}
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "ClipIndex":
+        return cls(entries=list(data.get("entries", [])))
 
 
 def register(registry: Any) -> None:

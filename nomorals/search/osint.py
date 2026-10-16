@@ -516,6 +516,21 @@ class IpIntelAdapter(SourceAdapter):
 
 
 
+def _confidence(count: int, corroborated: bool = False) -> str:
+    """Map evidence count to a confidence label.
+
+    Restored: the Phase 7 tests assert this contract (``_confidence(3) ==
+    "high"``, ``_confidence(1, True) == "medium"``, ``_confidence(1) ==
+    "low"``, ``_confidence(0) == "low"``). Three or more independent hits
+    is high; a single hit is low unless corroborated.
+    """
+    if count >= 3:
+        return "high"
+    if count >= 1 and corroborated:
+        return "medium"
+    return "low"
+
+
 def _looks_like_phone(q: str) -> str | None:
     """Extract a phone number from a query, or None."""
     import re as _re

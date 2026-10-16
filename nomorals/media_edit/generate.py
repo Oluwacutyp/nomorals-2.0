@@ -774,6 +774,19 @@ class NativeBackend(GenerativeBackend):
 #: ``nomorals/connectors/`` (Leonardo AI, Stability AI, Nano Banana).
 PAID_IMAGE_BACKENDS = ("leonardo", "stability_ai", "nano_banana")
 
+#: Connector factory injected by the composition root
+#: (:func:`nomorals.agents.context.build_context`): ``factory(name, vault)``
+#: — media_edit is L4 and may not import connectors (L5). None means the
+#: paid backends cannot build a connector (honest error, same outcome as
+#: the old import-failure path).
+_CONNECTOR_FACTORY: Any = None
+
+
+def set_connector_factory(factory: Any | None) -> None:
+    """Inject (or clear) the connector factory used by paid backends."""
+    global _CONNECTOR_FACTORY
+    _CONNECTOR_FACTORY = factory
+
 
 def _paid_vault(vault: Any | None) -> Any:
     """Resolve the credential vault for a paid image backend.
@@ -828,14 +841,21 @@ class _PaidAPIBackend(GenerativeBackend):
     #: short cost note shown in describe(), e.g. "costs Leonardo API credits"
     cost_note = "paid — costs real money/credits per image"
 
-    def __init__(self, vault: Any | None = None) -> None:
+    def __init__(self, vault: Any | None = None, *,
+                 connector_factory: Any | None = None) -> None:
         self._vault = _paid_vault(vault)
+        # Per-instance override wins over the module-level factory.
+        self._connector_factory = connector_factory
 
     # -- connector ------------------------------------------------------
     def _connector(self) -> Any:
-        from ..connectors.registry import create_connector
+        factory = self._connector_factory or _CONNECTOR_FACTORY
+        if factory is None:
+            raise GenerativeEditError(
+                "paid backend %r: no connector factory injected — "
+                "the composition root wires one at boot" % self.name)
         try:
-            return create_connector(self.connector_id, self._vault)
+            return factory(self.connector_id, self._vault)
         except Exception as exc:  # noqa: BLE001 - surfaced as a clear message
             raise GenerativeEditError(
                 f"paid backend {self.name!r}: {exc}") from exc
@@ -913,8 +933,9 @@ class LeonardoBackend(_PaidAPIBackend):
     connector_id = "leonardo"
     cost_note = "paid — costs Leonardo API credits per generation"
 
-    def __init__(self, vault: Any | None = None) -> None:
-        super().__init__(vault)
+    def __init__(self, vault: Any | None = None, *,
+                 connector_factory: Any | None = None) -> None:
+        super().__init__(vault, connector_factory=connector_factory)
         self.model_id = os.environ.get("LEONARDO_MODEL_ID", "")
 
     def generate(self, prompt: str, *,
@@ -1040,8 +1061,9 @@ class StabilityAIBackend(_PaidAPIBackend):
     ASPECTS = {"1:1", "16:9", "21:9", "2:3", "3:2",
                "4:5", "5:4", "9:16", "9:21"}
 
-    def __init__(self, vault: Any | None = None) -> None:
-        super().__init__(vault)
+    def __init__(self, vault: Any | None = None, *,
+                 connector_factory: Any | None = None) -> None:
+        super().__init__(vault, connector_factory=connector_factory)
         self.model = os.environ.get("STABILITY_MODEL", "sd3.5-large")
 
     def generate(self, prompt: str, *,
@@ -1158,8 +1180,9 @@ class NanoBananaBackend(_PaidAPIBackend):
     ASPECTS = {"1:1", "2:3", "3:2", "3:4", "4:3",
                "4:5", "5:4", "9:16", "16:9", "21:9"}
 
-    def __init__(self, vault: Any | None = None) -> None:
-        super().__init__(vault)
+    def __init__(self, vault: Any | None = None, *,
+                 connector_factory: Any | None = None) -> None:
+        super().__init__(vault, connector_factory=connector_factory)
         self.model = os.environ.get("NANO_BANANA_MODEL",
                                     "gemini-2.5-flash-image")
 
@@ -1277,18 +1300,20 @@ _NO_BACKEND_MSG = (
 )
 
 
-def _paid_backend(name: str, vault: Any | None) -> GenerativeBackend:
+def _paid_backend(name: str, vault: Any | None, *,
+                  connector_factory: Any | None = None) -> GenerativeBackend:
     """Instantiate a paid image backend by name."""
     backends = {
         "leonardo": LeonardoBackend,
         "stability_ai": StabilityAIBackend,
         "nano_banana": NanoBananaBackend,
     }
-    return backends[name](vault=vault)
+    return backends[name](vault=vault, connector_factory=connector_factory)
 
 
 def get_backend(name: str | None = None,
-                vault: Any | None = None) -> GenerativeBackend:
+                vault: Any | None = None, *,
+                connector_factory: Any | None = None) -> GenerativeBackend:
     """Resolve a generative backend.
 
     ``name`` or ``MEDIA_GEN_BACKEND``: "auto" (default), "native", "hf",
@@ -1305,7 +1330,8 @@ def get_backend(name: str | None = None,
     if want == "off":
         raise GenerativeEditError(_NO_BACKEND_MSG)
     if want in PAID_IMAGE_BACKENDS:
-        return _paid_backend(want, vault)
+        return _paid_backend(want, vault,
+                             connector_factory=connector_factory)
     if want == "native":
         if not NativeBackend.available():
             _ok, _reason = NativeBackend.readiness()
@@ -1352,9 +1378,13 @@ def _paid_backend_status() -> dict[str, Any]:
         except GenerativeEditError as exc:
             out[name] = {"ready": False, "reason": str(exc)}
             continue
+        factory = _CONNECTOR_FACTORY
+        if factory is None:
+            out[name] = {"ready": False,
+                         "reason": "no connector factory injected"}
+            continue
         try:
-            from ..connectors.registry import create_connector
-            conn = create_connector(name, vault)
+            conn = factory(name, vault)
             cred = conn._load_credential()
         except Exception as exc:  # noqa: BLE001 - status, not a failure
             out[name] = {"ready": False, "reason": str(exc)}

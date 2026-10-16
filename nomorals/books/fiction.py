@@ -178,6 +178,10 @@ class StoryState:
     total_planned: int = 0
     style: dict[str, Any] = field(default_factory=dict)
     ledger: dict[str, Any] = field(default_factory=dict)
+    #: Humane ``for:`` field — who the story is for (name / relationship /
+    #: occasion).  JSON key ``"for"``; attribute ``for_whom`` since
+    #: ``for`` is a keyword.  Steers register, never plot.
+    for_whom: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -257,6 +261,21 @@ class GenreEngine(ABC):
                 brief: ChapterBrief) -> None: ...
 
     # -- shared helpers ---------------------------------------------------------
+    def character_pushback(self, text: str, state: StoryState,
+                           brief: "ChapterBrief | None" = None
+                           ) -> list[dict[str, Any]]:
+        """Characters push back against the scene — advisory, alongside
+        :meth:`validate`, NEVER inside its blocking problem list.
+
+        Blocking semantics are test-pinned: ``validate()`` returns only
+        the genre-mechanics problems (fair-play, costs, rules, ...);
+        pushback rides alongside as a report (every note
+        ``blocked: False``), surfaced by :meth:`FictionWriter.validate`.
+        """
+        from .humane import character_pushback as _pushback
+
+        return _pushback(text, state.characters, brief)
+
     def voice(self) -> dict[str, str]:
         """POV/tense/tone directive for this genre. Engines override."""
         return {"pov": "third limited", "tense": "past",
@@ -1186,10 +1205,128 @@ def engine_for(genre: str, seed: int = 0) -> GenreEngine:
 
 
 class FictionWriter:
-    """Devon's fiction studio: start stories, write chapters, run serials."""
+    """Devon's fiction studio: start stories, write chapters, run serials.
 
-    def __init__(self, context: Any) -> None:
+    Collab is the DEFAULT mode, not an option: ``collab=True`` unless
+    explicitly opted out (``FictionWriter(ctx, collab=False)``).
+    """
+
+    def __init__(self, context: Any, collab: bool = True) -> None:
         self.context = context
+        #: collab mode — on by default; opt out explicitly only.
+        self.collab = bool(collab)
+        self.use_collab = self.collab
+
+    # -- humane validation (advisory, never blocking) ------------------------
+    def validate(self, text: str, state: StoryState,
+                 brief: "ChapterBrief | None" = None) -> dict[str, Any]:
+        """One advisory report for a chapter: genre problems + 8 craft
+        passes + AI-tells + voiceprint drift + humane + mechanical tests.
+
+        ``blocked`` is always False — every section reports, none gates.
+        Character pushback rides ALONGSIDE the genre validation (see
+        :meth:`GenreEngine.character_pushback`), not inside its
+        blocking problem list.
+        """
+        from .ai_tells import scan_ai_tells
+        from .craft import run_craft_passes
+        from .humane import humane_report
+        from .mechanical import (
+            delete_first_paragraph_per_scene,
+            delete_first_paragraph_test,
+            delete_last_paragraph_test,
+            read_aloud_check,
+        )
+        from .voiceprint import compare, fingerprint
+
+        report: dict[str, Any] = {"blocked": False}
+        # genre mechanics (the only section with a blocking list — and
+        # even it only reports here; write_next never rewrites on it)
+        if brief is not None:
+            try:
+                engine = engine_for(state.genre)
+                report["genre_problems"] = engine.validate(text, state, brief)
+            except Exception as exc:  # noqa: BLE001 - advisory only
+                report["genre_problems"] = []
+                report["genre_error"] = str(exc)
+        else:
+            report["genre_problems"] = []
+        # 8 craft passes
+        try:
+            report["craft"] = run_craft_passes(text)
+        except Exception as exc:  # noqa: BLE001
+            report["craft"] = {"passes": {}, "blocked": False,
+                               "error": str(exc)}
+        # AI-tells: counts + locations, never a block
+        try:
+            report["ai_tells"] = scan_ai_tells(text)
+        except Exception as exc:  # noqa: BLE001
+            report["ai_tells"] = {"total": 0, "tells": [],
+                                  "blocked": False, "error": str(exc)}
+        # voiceprint drift vs the owner's measured voice (when known)
+        try:
+            char_names = [c.get("name", "") for c in state.characters
+                          if isinstance(c, dict) and c.get("name")]
+            new_vp = fingerprint(text or "", char_names)
+            owner_raw = (state.style or {}).get("owner_voiceprint")
+            drift_vs_owner = None
+            if owner_raw:
+                from .voiceprint import Voiceprint
+
+                owner_vp = Voiceprint.from_dict(owner_raw)
+                if owner_vp.words > 0:
+                    drift_vs_owner = compare(new_vp, owner_vp)
+            report["voiceprint"] = {
+                "fingerprint": new_vp.to_dict(),
+                "drift_vs_owner": drift_vs_owner,
+                "blocked": False,
+            }
+            report["voice_drift"] = (
+                drift_vs_owner["drift"] if drift_vs_owner else None)
+        except Exception as exc:  # noqa: BLE001
+            report["voiceprint"] = {"blocked": False, "error": str(exc)}
+            report["voice_drift"] = None
+        # humane structure (for: + pushback + narrator + silence)
+        try:
+            report["humane"] = humane_report(
+                text, state.characters,
+                getattr(state, "for_whom", None) or {})
+        except Exception as exc:  # noqa: BLE001
+            report["humane"] = {"character_pushback": [],
+                                "blocked": False, "error": str(exc)}
+        # mechanical tests
+        try:
+            report["mechanical"] = {
+                "read_aloud": read_aloud_check(text),
+                "delete_first_paragraph":
+                    delete_first_paragraph_test(text),
+                "delete_first_paragraph_per_scene":
+                    delete_first_paragraph_per_scene(text),
+                "delete_last_paragraph":
+                    delete_last_paragraph_test(text),
+                "blocked": False,
+            }
+        except Exception as exc:  # noqa: BLE001
+            report["mechanical"] = {"blocked": False, "error": str(exc)}
+        return report
+
+    def _collab_critique(self, text: str, chapter_no: int,
+                         arc_name: str) -> dict[str, Any] | None:
+        """Default critic pass for a written chapter (collab mode).
+
+        Advisory only — the critique is attached to the chapter result,
+        never used to block or rewrite it.
+        """
+        if not self.use_collab:
+            return None
+        try:
+            from .collab import CollaborativeSession
+
+            return CollaborativeSession(
+                "", self.context).critique(
+                    text, {"summary": f"Chapter {chapter_no} — {arc_name}"})
+        except Exception as exc:  # noqa: BLE001 - critique is advisory
+            return {"ok": False, "reason": str(exc)}
 
     # -- paths ------------------------------------------------------------------
     def _workspace(self) -> Path:
@@ -1268,8 +1405,16 @@ class FictionWriter:
 
     def start(self, premise: str, genre: str = "fantasy",
               mode: str = "novel", title: str = "",
-              theme: str = "") -> dict[str, Any]:
-        """Begin a story: shape it, plan arcs, weave wisdom, write ch.1."""
+              theme: str = "", *,
+              for_whom: dict[str, Any] | None = None,
+              owner_texts: list[str] | None = None) -> dict[str, Any]:
+        """Begin a story: shape it, plan arcs, weave wisdom, write ch.1.
+
+        ``for_whom`` is the humane ``for:`` field (name / relationship /
+        occasion) stored on the state; ``owner_texts`` are the owner's
+        own prose, measured into ``state.style["owner_voiceprint"]`` —
+        the default "write like me" target.
+        """
         genre = (genre or "fantasy").strip().lower()
         mode = (mode or "novel").strip().lower()
         if mode not in ("novel", "serial"):
@@ -1280,7 +1425,17 @@ class FictionWriter:
         state = StoryState(
             slug=slug, title=title or premise[:60], premise=premise,
             genre=engine.name, mode=mode, total_planned=total,
-            style={"theme": theme or premise[:80]})
+            style={"theme": theme or premise[:80]},
+            for_whom=dict(for_whom or {}))
+        if owner_texts:
+            try:
+                from .voiceprint import build_owner_voiceprint
+
+                vp = build_owner_voiceprint(list(owner_texts))
+                if vp.words > 0:
+                    state.style["owner_voiceprint"] = vp.to_dict()
+            except Exception as exc:  # noqa: BLE001 - voiceprint is advisory
+                _log.debug("owner voiceprint failed: %s", exc)
         arcs = engine.plan_arcs(premise, state)
         # the mystery engine learns its reveal chapter from the shape
         if engine.name == "mystery":
@@ -1300,6 +1455,7 @@ class FictionWriter:
                 "mode": mode, "shape": shape_note,
                 "arcs": [a["name"] for a in state.arcs],
                 "wisdom_motifs": len(motifs),
+                "for_whom": dict(state.for_whom),
                 "chapter_1": first}
 
     # -- writing ------------------------------------------------------------------
@@ -1376,12 +1532,21 @@ class FictionWriter:
         path = self.story_dir(slug) / "chapters" / f"{chapter_no:04d}.md"
         path.write_text(f"# Chapter {chapter_no}\n\n*{arc.name}*\n\n{text}\n",
                         encoding="utf-8")
+        # humane wiring: advisory + default critic pass ride ALONGSIDE
+        # the chapter — reported, never blocking, never rewriting.
+        try:
+            advisory = self.validate(text, state, brief)
+        except Exception as exc:  # noqa: BLE001 - advisory only
+            advisory = {"blocked": False, "error": str(exc)}
         return {"number": chapter_no, "arc": arc.name,
                 "words": count_words(text),
                 "validation_notes": problems,
                 "beat": brief.extra.get("beat_note", ""),
                 "scene_beats": brief.extra.get("scene_beats", []),
-                "path": path.as_posix(), "text": text}
+                "path": path.as_posix(), "text": text,
+                "advisory": advisory,
+                "collab_critique": self._collab_critique(
+                    text, chapter_no, arc.name)}
 
     def _maybe_roll_arc(self, state: StoryState, engine: GenreEngine,
                         arc: Arc, chapter_no: int) -> None:
@@ -1869,7 +2034,8 @@ class FictionWriter:
                  "goal": a.get("goal", "")[:100]} for a in state.arcs]
         return {
             "slug": state.slug, "title": state.title, "genre": state.genre,
-            "mode": state.mode, "chapters_written": state.chapters_written,
+            "mode": state.mode, "for_whom": dict(state.for_whom),
+            "chapters_written": state.chapters_written,
             "total_planned": state.total_planned,
             "current_arc": self._current_arc(state).name
             if state.arcs else "",

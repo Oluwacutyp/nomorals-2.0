@@ -24,7 +24,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Sequence
 
-from ..compat import available, load_optional
+from ..compat import load_optional
 from ..core.errors import StorageError, ValidationError
 from ..core.ids import new_id
 from ..core.logging_setup import get_logger
@@ -35,7 +35,15 @@ __all__ = ["VectorRecord", "VectorSearchHit", "VectorStore", "cosine", "normaliz
 
 _log = get_logger(__name__)
 
-np = load_optional("numpy")
+
+def _load_numpy() -> Any | None:
+    """Import numpy on first use — never at module import time.
+
+    Importing this module must not pull numpy (trading/market_data
+    import it transitively and promise a light import). The numpy
+    backend is only needed when a VectorStore actually opts into it.
+    """
+    return load_optional("numpy")
 
 
 def normalize(vector: Sequence[float]) -> list[float]:
@@ -125,7 +133,9 @@ class VectorStore:
         self.db = db
         self.table = table
         self.model = model
-        self._numpy = np if (use_numpy and available("numpy")) else None
+        # load_optional returns None when numpy is not installed, so
+        # this is both the availability check and the import.
+        self._numpy = _load_numpy() if use_numpy else None
         #: C++ vecsim kernel: the phone's hot path.  Explicit opt-in because
         #: it scores in float32 (agreement with the float64 paths is to ~5
         #: decimal places — every parity test this ships with checks that).

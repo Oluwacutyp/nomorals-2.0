@@ -13,6 +13,11 @@ Real tests for breakable behavior:
 
 import sqlite3
 import time
+
+# T2.5: frozen clock — tests pass MIDDAY_TS explicitly; the two
+# remaining time.time() calls are live-clock tests (see comments there)
+# and are grandfathered in test_no_direct_clock's baseline.
+from tests.frozen_clock import MIDDAY_TS
 from types import SimpleNamespace
 
 import pytest
@@ -72,7 +77,7 @@ class TestIdleDbUnification:
         db = _idle.workspace_db(tmp_path)
         try:
             fired = []
-            _idle.note_activity(db, ts=time.time() - 7200)
+            _idle.note_activity(db, ts=time.time() - 7200)  # LIVE-CLOCK: check_once() reads production's real clock
             mon = _idle.IdleMonitor(
                 tmp_path, idle_seconds=60, on_idle=lambda s: fired.append(s))
             assert mon.check_once() == "idle"
@@ -160,10 +165,10 @@ class TestCoordinator:
         db = _idle.workspace_db(tmp_path)
         try:
             _patterns.record_interests(
-                db, "ancient pottery", ts=time.time() - 60 * 86400)
+                db, "ancient pottery", ts=MIDDAY_TS - 60 * 86400)
             coord = IdleCoordinator(tmp_path)
             coord._idle = True
-            out = coord._tick_patterns(db, time.time())
+            out = coord._tick_patterns(db, time.time())  # LIVE-CLOCK: `started` is a wall-clock budget start
             assert out["ok"] is True
             assert out["interests_dropped"] >= 1
         finally:
@@ -176,7 +181,7 @@ class TestCoordinator:
             db.migrate()  # production runs migrations at boot
             coord = IdleCoordinator(tmp_path)
             coord._idle = True
-            out = coord._tick_memory(db, time.time())
+            out = coord._tick_memory(db, time.time())  # LIVE-CLOCK: `started` is a wall-clock budget start
             assert out["ok"] is True
             assert "episodes" in out
         finally:
@@ -268,7 +273,7 @@ class TestWeaknessChain:
         assert _weakness.open_weaknesses(db) == []
 
     def test_scan_tool_failures_feeds_recovery(self, db):
-        now = time.time()
+        now = time.time()  # LIVE-CLOCK: scan filters by production's real clock
         audit = [{"tool": "t1", "ok": False, "error": "e", "ts": now - i}
                  for i in range(4)]
         opened = _weakness.scan_tool_failures(db, audit)
@@ -357,14 +362,14 @@ class TestPatternHygiene:
     def test_prune_drops_decayed_interests(self, db):
         _patterns.record_interests(db, "fresh topic here")
         _patterns.record_interests(
-            db, "ancient pottery", ts=time.time() - 60 * 86400)
+            db, "ancient pottery", ts=MIDDAY_TS - 60 * 86400)
         report = _patterns.prune(db)
         assert report["interests_dropped"] >= 1
         topics = [i["topic"] for i in _patterns.current_interests(db)]
         assert "fresh topic here" in " ".join(topics)
 
     def test_prune_drops_stale_patterns(self, db):
-        old = time.time() - 200 * 86400
+        old = MIDDAY_TS - 200 * 86400
         _patterns.record_sequence(db, "old-trigger", "old-action", ts=old)
         for _ in range(3):  # likely_next needs count >= 3 by default
             _patterns.record_sequence(db, "new-trigger", "new-action")
@@ -492,7 +497,7 @@ class TestAutonomyOutcomes:
                 "INSERT INTO proactive_log (id, kind, platform, chat_id, "
                 "content, status, acted_at) VALUES "
                 "('prop-9', 'dm', 'tg', '123', 'hey', 'sent', ?)",
-                (time.time(),))
+                (MIDDAY_TS,))
 
             agent = _fake_autonomy_agent(db)
             agent._strategy_by_proposal["prop-9"] = "silence_checkin"
@@ -546,7 +551,7 @@ class TestAutonomyOutcomes:
             # threshold gate (past the strategy-stats bookkeeping that
             # used to KeyError) without drafting or sending.
             agent._threshold = 1.0
-            out = agent.tick(now=time.time())
+            out = agent.tick(now=MIDDAY_TS)
             assert out.get("decision") == "below threshold"
             assert agent.strategy_stats["weak"]["proposed"] == 1
         finally:
