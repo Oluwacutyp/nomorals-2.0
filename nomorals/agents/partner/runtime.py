@@ -2473,13 +2473,18 @@ class PartnerRuntime(
             return "sent." if result.ok else f"send failed: {result.error}"
 
         if kind == "proposals":
-            # Allow /proposals approve <id> and /proposals deny <id> as natural subcommands
-            parts = (arg or "").strip().split(None, 1)
+            # Allow /proposals approve <id> and /proposals deny <id> [reason]
+            # as natural subcommands. Deny takes an optional reason (required
+            # for upgrade tickets — UpgradeQueue.deny demands one).
+            parts = (arg or "").strip().split(None, 2)
             if parts and parts[0] in ("approve", "deny"):
                 sub_id = parts[1] if len(parts) > 1 else ""
                 if not sub_id:
                     return f"usage: /proposals {parts[0]} <proposal_id>"
-                result = self.approve(sub_id) if parts[0] == "approve" else self.deny(sub_id)
+                if parts[0] == "approve":
+                    result = self.approve(sub_id)
+                else:
+                    result = self.deny(sub_id, parts[2] if len(parts) > 2 else "")
                 if result.get("ok"):
                     return f"{parts[0]}d {sub_id} → {result.get('status', 'done')}"
                 err = result.get("error") or "no reason given"
@@ -2488,9 +2493,18 @@ class PartnerRuntime(
             if not rows:
                 return "no pending proposals."
             lines = [f"pending proposals ({len(rows)}):"]
-            for row in rows[:10]:
-                lines.append(f"  {row['id']} [{row['kind']}→{row['platform']}:{row['chat_id']}] {str(row['content'])[:70]}")
-            lines.append("tip: /proposals approve <id> or /approve <id>")
+            upgrades = [r for r in rows if r.get("queue") == "upgrade"]
+            proactive = [r for r in rows if r.get("queue") != "upgrade"]
+            if upgrades:
+                lines.append("  upgrade proposals (research → approve → evolve):")
+                for row in upgrades[:10]:
+                    lines.append(f"    {row.get('id')} {str(row.get('title') or '')[:70]}")
+                lines.append("  tip: /upgrade show <id> | /upgrade diff <id> | /upgrade approve <id>")
+            if proactive:
+                lines.append("  proactive actions:")
+                for row in proactive[:10]:
+                    lines.append(f"    {row['id']} [{row['kind']}→{row['platform']}:{row['chat_id']}] {str(row['content'])[:70]}")
+            lines.append("tip: /proposals approve <id> or /approve <id>  ·  /proposals deny <id> <reason>")
             return "\n".join(lines)
 
         if kind == "approve":
@@ -2501,7 +2515,10 @@ class PartnerRuntime(
             return f"approve failed: {err} — /proposals to check what's still pending"
 
         if kind == "deny":
-            result = self.deny(arg)
+            sub = (arg or "").strip().split(None, 1)
+            pid = sub[0] if sub else ""
+            reason = sub[1] if len(sub) > 1 else ""
+            result = self.deny(pid, reason)
             if result.get("ok"):
                 return "denied."
             err = result.get("error") or "no reason given"
@@ -3536,17 +3553,86 @@ class PartnerRuntime(
         return self.gateway.stop_one(name.strip().lower())
 
     def proposals(self, status: str = "pending") -> list[dict[str, Any]]:
-        return self.context.db.query(
+        """Everything awaiting owner approval, unified across both queues.
+
+        Two proposal systems exist, and /proposals used to show only one:
+        * proactive sends (``proactive_log``, status ``pending``) — the
+          autonomy suggest-mode queue.
+        * research upgrade tickets (``upgrade_proposals``, status
+          ``proposed``) — filed by the research loop via UpgradePipeline.
+
+        The research-loop notification says "N proposal(s)", so the owner
+        checks /proposals — which read only proactive_log and always came
+        back empty for research proposals. This returns both, each row
+        tagged with ``queue`` ("proactive" | "upgrade"), upgrades first
+        (they are the ones the notification points at).
+        """
+        rows: list[dict[str, Any]] = []
+        try:
+            from ..upgrade_queue import UpgradeQueue
+
+            for row in UpgradeQueue(self.context).list(status="proposed"):
+                r = dict(row)
+                r["queue"] = "upgrade"
+                rows.append(r)
+        except Exception:  # noqa: BLE001 — upgrade table may not exist yet
+            pass
+        for row in self.context.db.query(
             "SELECT * FROM proactive_log WHERE status = ? ORDER BY decided_at DESC LIMIT 50",
             (status,),
-        )
+        ):
+            r = dict(row)
+            r["queue"] = "proactive"
+            rows.append(r)
+        return rows
 
     def approve(self, proposal_id: str) -> dict[str, Any]:
+        # Upgrade tickets (upg_…) live in upgrade_proposals, not
+        # proactive_log — route them to approve+implement (same as
+        # /upgrade approve), not the autonomy path (which would fail
+        # with "unknown proposal").
+        try:
+            from ..upgrade_queue import UpgradePipeline, UpgradeQueue
+
+            if UpgradeQueue(self.context).get(proposal_id) is not None:
+                try:
+                    done = UpgradePipeline(self.context).approve_and_implement(
+                        proposal_id, by="owner")
+                except Exception as exc:  # noqa: BLE001 — already recorded failed
+                    return {"ok": False,
+                            "error": f"{type(exc).__name__}: {exc}"}
+                return {"ok": True,
+                        "status": done.get("status", "implemented"),
+                        "proposal": done}
+        except Exception:  # noqa: BLE001 — fall through to proactive path
+            pass
         if self._autonomy is not None:
             return self._autonomy.approve(proposal_id)
         return _direct_approve(self.context, self.gateway, proposal_id)
 
-    def deny(self, proposal_id: str) -> dict[str, Any]:
+    def deny(self, proposal_id: str, reason: str = "") -> dict[str, Any]:
+        # Upgrade tickets need a denial reason (UpgradeQueue.deny
+        # requires one) — ask for it instead of failing silently.
+        try:
+            from ..upgrade_queue import UpgradeQueue
+
+            row = UpgradeQueue(self.context).get(proposal_id)
+            if row is not None:
+                if not (reason or "").strip():
+                    return {"ok": False,
+                            "error": "upgrade deny needs a reason: "
+                                     "/deny <id> <reason>"}
+                try:
+                    denied = UpgradeQueue(self.context).deny(
+                        proposal_id, reason.strip(), by="owner")
+                except Exception as exc:  # noqa: BLE001 — status/validation
+                    return {"ok": False,
+                            "error": f"{type(exc).__name__}: {exc}"}
+                return {"ok": True,
+                        "status": denied.get("status", "denied"),
+                        "proposal": denied}
+        except Exception:  # noqa: BLE001 — fall through to proactive path
+            pass
         if self._autonomy is not None:
             return self._autonomy.deny(proposal_id)
         return _direct_deny(self.context, proposal_id)

@@ -204,7 +204,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "say": (2, None),
     "proposals": (0, 0),
     "approve": (1, 1),
-    "deny": (1, 1),
+    "deny": (1, 2),       # /deny <id> [reason] — reason required for upgrade tickets
     "stage": (0, 1),
     "power": (1, 3),  # /power on <key> | /power on <identity> <passphrase> (seal)
     "quit": (0, 1),        # /quit [confirm|cancel] — the 1 arg is the confirm verb
@@ -1022,14 +1022,14 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
             "usage": "/say <platform:chat> <text> | /say <voice> <text>",
             "example": "/say telegram:123 hi — or — /say trump hello there",
             "related": "/file /publish /voices /voice"},
-    "proposals": {"what": "list the actions she is waiting for you to approve (suggest mode).",
+    "proposals": {"what": "list everything waiting for your approval: proactive actions + research upgrade proposals.",
                   "usage": "/proposals", "example": "/proposals",
-                  "related": "/approve /deny"},
-    "approve": {"what": "approve one pending proposal so she executes it.",
+                  "related": "/approve /deny /upgrade"},
+    "approve": {"what": "approve one pending proposal so she executes it (upgrade tickets are approved + test-gated applied).",
                 "usage": "/approve <id>", "example": "/approve p3",
                 "related": "/proposals /deny"},
-    "deny": {"what": "deny one pending proposal.",
-             "usage": "/deny <id>", "example": "/deny p3",
+    "deny": {"what": "deny one pending proposal (upgrade tickets need a reason).",
+             "usage": "/deny <id> [reason]", "example": "/deny upg_abc not now",
              "related": "/proposals /approve"},
     "stage": {"what": "set the relationship stage (committed|dating|…), which tunes her behavior.",
               "usage": "/stage [stage]", "example": "/stage dating",
