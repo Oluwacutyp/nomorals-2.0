@@ -244,6 +244,53 @@ def _install_console_mirror(runtime, history: _MessageHistory) -> None:
         pass
 
 
+#: Main-thread shutdown wait cadence. ``threading.Event.wait()`` with NO
+#: timeout blocks in ``WaitForSingleObject`` on Windows and the CPython
+#: SIGINT handler never gets to run — Ctrl+C is deferred forever and the
+#: bot can only be killed from a second window. Waking every 0.5s lets
+#: the main thread run bytecode, process pending signals, and exit
+#: promptly. (``time.sleep()`` is interruptible on Windows; an
+#: indefinite ``Event.wait()`` is not.)
+_SHUTDOWN_POLL_S = 0.5
+
+
+def _install_signal_handlers(stop: threading.Event, log: logging.Logger) -> None:
+    """Install SIGINT/SIGTERM (+SIGBREAK on Windows) shutdown handlers.
+
+    Handlers do exactly one thing — set ``stop``. All real work (gateway
+    stop, adapter close, context teardown) happens on the main thread
+    in :func:`main`, never inside a signal handler. Installed BEFORE
+    the runtime starts so Ctrl+C works from the first second.
+
+    Safe to call from any thread: ``signal.signal`` raises ValueError
+    off the main thread, which is swallowed (the bot then still stops
+    via the wait loop + a second-window kill, same as before).
+    """
+    def _on_signal(signum: int, _frame: object) -> None:
+        log.info("shutdown signal received (signal %s)", signum)
+        stop.set()
+
+    for _name in ("SIGTERM", "SIGINT", "SIGBREAK"):
+        _sig = getattr(signal, _name, None)
+        if _sig is None:
+            continue  # SIGBREAK is Windows-only; SIGTERM missing on some platforms
+        try:
+            signal.signal(_sig, _on_signal)
+        except (ValueError, OSError, RuntimeError) as exc:
+            log.debug("shutdown handler for %s not installed: %s", _name, exc)
+
+
+def _wait_for_shutdown(stop: threading.Event) -> None:
+    """Block until ``stop`` is set, waking every :data:`_SHUTDOWN_POLL_S`.
+
+    The short timeout is the Ctrl+C fix on Windows (see
+    :data:`_SHUTDOWN_POLL_S`): an indefinite ``stop.wait()`` never
+    returns to the interpreter, so a pending SIGINT handler never runs.
+    """
+    while not stop.is_set():
+        stop.wait(timeout=_SHUTDOWN_POLL_S)
+
+
 def _telegram_bot_start_message(started: list, gateway: object | None) -> str | None:
     """Warning when the telegram-bot adapter did not start.
 
@@ -280,12 +327,11 @@ def main() -> int:
 
     stop = threading.Event()
 
-    def _on_signal(*_args: object) -> None:
-        log.info("shutdown signal received")
-        stop.set()
-
-    signal.signal(signal.SIGTERM, _on_signal)
-    signal.signal(signal.SIGINT, _on_signal)
+    # Handlers BEFORE the runtime starts, so Ctrl+C / Ctrl+Break work
+    # from the first second — and the wait loop below wakes every
+    # _SHUTDOWN_POLL_S so the main thread actually processes them
+    # (an indefinite Event.wait() swallows Ctrl+C on Windows).
+    _install_signal_handlers(stop, log)
 
     with build_context(settings) as context:
         # One OS Session per chat, across every platform (session_bridge):
@@ -324,13 +370,14 @@ def main() -> int:
         except Exception:  # noqa: BLE001 - console commands are optional
             log.debug("console commands unavailable", exc_info=True)
         try:
-            stop.wait()
+            _wait_for_shutdown(stop)
         finally:
             try:
                 runtime.stop()
             except Exception:  # noqa: BLE001 - best-effort shutdown
                 pass
-    log.info("bye")
+    print("Devon stopped.", flush=True)
+    log.info("Devon stopped.")
     return 0
 
 
