@@ -2518,7 +2518,7 @@ class PartnerRuntime(
                     return f"power mode: active (persisted, by {s['unlocked_by']}; this process has the base dials)"
                 fields = ", ".join(c["field"] for c in s["changes"])
                 return f"power mode: ACTIVE (by {s['unlocked_by']}). widened: {fields}"
-            return "usage: /power on <key> | /power off | /power status"
+            return "usage: /power on <key> | /power on <identity> <passphrase> | /power off | /power status"
 
         # ── search engine ────────────────────────────────────────────────────
         if kind == "search":

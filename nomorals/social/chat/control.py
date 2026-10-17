@@ -24,6 +24,7 @@ Commands:
     /stage                       show relationship stage + trust
     /stage <stage>               advance/regress explicitly
     /power on <key>              unlock power mode (owner key)
+    /power on <id> <passphrase>  unlock power mode (owner seal)
     /power off|status            lock / report
     /search <query>              quick web research + cited summary
     /searchdeep <query>          deep research (power mode)
@@ -204,7 +205,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "approve": (1, 1),
     "deny": (1, 1),
     "stage": (0, 1),
-    "power": (1, 2),
+    "power": (1, 3),  # /power on <key> | /power on <identity> <passphrase> (seal)
     "quit": (0, 1),        # /quit [confirm|cancel] — the 1 arg is the confirm verb
     "profile": (0, 0),      # /profile — the profile-aware runtime (env + tuned knobs)
     # self-update from chat (Step 9): drain → checkpoint → restart → resume.
@@ -474,7 +475,7 @@ _HELP_TEXT = "\n".join(
         "  /say telegram:123 text…                 send as her",
         "  /proposals /approve <id> /deny <id>",
         "  /stage [committed|dating|…]",
-        "  /power on <key> | /power off | /power status",
+        "  /power on <key> | /power on <identity> <passphrase> | /power off | /power status",
         "  — search —",
         "  /search <query>                         quick research + cited summary",
         "  /searchdeep <query>                     deep research (power mode)",
@@ -1025,8 +1026,8 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
     "stage": {"what": "set the relationship stage (committed|dating|…), which tunes her behavior.",
               "usage": "/stage [stage]", "example": "/stage dating",
               "related": "/mood"},
-    "power": {"what": "power mode: no human-like pacing, maximum capability — needs the key you set in config.",
-              "usage": "/power on <key> | off | status", "example": "/power on mykey",
+    "power": {"what": "power mode: no human-like pacing, maximum capability — needs the key you set in config, or the owner seal (identity + passphrase).",
+              "usage": "/power on <key> | /power on <identity> <passphrase> | off | status", "example": "/power on mykey",
               "related": "/mode /features"},
     "quit": {"what": "shut the whole system down (everything is already on disk).",
              "usage": "/quit", "example": "/quit"},
@@ -2101,7 +2102,8 @@ _TOPIC_PAGES: dict[str, str] = {
         "  /mode suggest  works, but sensitive actions wait for /approve\n"
         "  /mode auto     acts on her own within the rules\n"
         "  /power on <key>  power mode: no human-like pacing, maximum "
-        "capability (key from your config)\n"
+        "capability (key from your config; or /power on <identity> "
+        "<passphrase> with the owner seal)\n"
         "  /stage …     relationship stage tunes tone & initiative\n"
         "  normal mode keeps protective pacing (DMs/groups/hourly); "
         "power mode removes it — that's the only switch."),
