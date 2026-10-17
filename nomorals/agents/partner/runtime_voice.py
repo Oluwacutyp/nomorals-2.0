@@ -14,23 +14,91 @@ class RuntimeVoiceMixin:
 
     # ── voice: /tts /stt ─────────────────────────────────────────────────────
     def _control_tts(self, tail: str, *, chat_key: str) -> str:
-        """Speak text: synthesize with the best available engine, send the file."""
-        text = (tail or "").strip()
+        """Speak text: synthesize with the best available engine, send the file.
+
+        Options (leading key=value): speed=0.25-4.0, pace=tight|natural|slow,
+        gap=<ms> (espeak-ng word gap). Tags: [pause] / [pause:MS] insert real
+        silence; [laugh] [cough] etc. are dropped (these engines cannot laugh
+        — use /speak for real laughs); emotion tags are stripped; unknown
+        [bracket text] is kept. `/tts engines` reports which engine is in
+        use on this machine and what tags it supports.
+        """
+        import re as _re
+
+        rest = (tail or "").strip()
+        if rest.lower() == "engines":
+            return self._tts_engines_report()
+        speed, pace, gap_ms = 1.0, "natural", 0
+        while True:
+            m = _re.match(r"(speed|pace|gap)=(?:\"([^\"]+)\"|(\S+))\s+", rest)
+            if not m:
+                break
+            val = m.group(2) or m.group(3)
+            if m.group(1) == "speed":
+                try:
+                    speed = float(val)
+                except ValueError:
+                    return "usage: /tts [speed=0.25-4.0] [pace=tight|natural|slow] [gap=<ms>] <text>"
+            elif m.group(1) == "gap":
+                try:
+                    gap_ms = int(val)
+                except ValueError:
+                    return "usage: /tts [speed=0.25-4.0] [pace=tight|natural|slow] [gap=<ms>] <text>"
+            else:
+                pace = val.lower()
+            rest = rest[m.end():]
+        text = rest.strip()
         if not text:
-            return "usage: /tts <text to speak>"
-        outcome = self.context.tools.call("speak", text=text[:4000])
+            return ("usage: /tts [speed=1.0] [pace=natural] [gap=0] <text to speak>\n"
+                    "tags: [pause] / [pause:300] = silence; [laugh] etc. dropped "
+                    "(use /speak for real laughs) — /tts engines shows what works where")
+        outcome = self.context.tools.call("speak", text=text[:4000],
+                                          speed=speed, pace=pace, gap_ms=gap_ms)
         if not outcome.ok:
             return f"tts failed: {getattr(outcome.error, 'message', outcome.error)}"
         info = outcome.value
+        note = ""
+        if info.get("dropped_sounds"):
+            note += (" — [" + "] [".join(info["dropped_sounds"]) + "] dropped "
+                     "(this engine can't laugh; /speak for real laughs)")
+        if info.get("pauses_dropped"):
+            note += " — pauses dropped (endpoint rejected wav format)"
+        elif info.get("pauses_ms"):
+            note += f" — pauses {info['pauses_ms']}ms"
+        if info.get("gap_ignored"):
+            note += f" — gap ignored ({info.get('engine')} has no word-gap control)"
         chat = self._ref_from_key(chat_key)
         try:
             result = self.gateway.send_file(chat.platform, chat, info["path"],
                                             caption=f"[{info.get('engine')}]")
             if getattr(result, "ok", False):
-                return f"🔊 spoken ({info.get('engine')}, {info.get('bytes', 0) // 1024} KB, {info.get('seconds')}s)"
+                return (f"🔊 spoken ({info.get('engine')}, {info.get('bytes', 0) // 1024} KB, "
+                        f"{info.get('seconds')}s){note}")
         except Exception:  # noqa: BLE001 - console and other adapters
             pass
-        return f"🔊 spoken ({info.get('engine')}) — saved at {info.get('path')}"
+        return f"🔊 spoken ({info.get('engine')}) — saved at {info.get('path')}{note}"
+
+    def _tts_engines_report(self) -> str:
+        """Which /tts engine is in use here, and what tags it supports."""
+        from ...tools.audio import TTS_ENGINE_TAG_SUPPORT, detect_tts_engines
+
+        found = detect_tts_engines()
+        active = found[0] if found else "openai_compat (API endpoint, if configured)"
+        lines = ["🎙️ /tts engines — auto-detected on this machine:"]
+        for name in TTS_ENGINE_TAG_SUPPORT:
+            mark = "● ACTIVE" if name == (found[0] if found else "openai_compat") else "○"
+            have = "detected" if name in found else ("API" if name == "openai_compat" else "not installed")
+            lines.append(f"  {mark} {name} ({have})")
+        lines.append(f"\nauto picks: {active}")
+        lines.append("\ntags per engine (pause = [pause]/[pause:MS] → real silence):")
+        for name, caps in TTS_ENGINE_TAG_SUPPORT.items():
+            lines.append(
+                f"  {name}: pause → {caps['pause']}; sound → {caps['sound']}; "
+                f"emotion → {caps['emotion']}; speed → {caps['speed']}; "
+                f"gap → {caps['gap']}")
+        lines.append("\nreal laughs ([laugh] etc.) need Chatterbox/Bark — "
+                     "use /speak, not /tts.")
+        return "\n".join(lines)
 
     def _control_stt(self, tail: str) -> str:
         """Transcribe an audio file with the best available STT backend."""

@@ -38,6 +38,338 @@ _log = get_logger(__name__)
 _TTS_TIMEOUT = 120.0
 _STT_TIMEOUT = 300.0
 
+# ── TTS pacing + expressive tags ──────────────────────────────────────────
+# /tts goes through this module (speak tool), NOT the neural UniversalTTS
+# engine (/speak, /voice say). These engines have no native tag support, so
+# tags must never reach them literally — "[laugh]" spoken as words is a
+# bug, not a feature. Rules:
+#   * [pause] / [pause:MS]  -> real silence (default 500ms for bare [pause])
+#   * [laugh] [cough] [sigh] ... (sound tags) -> DROPPED (these engines
+#     cannot laugh; use /speak for real laughs via Chatterbox/Bark)
+#   * [happy] [whisper] ... (emotion tags) -> stripped (no emotion control)
+#   * unknown [bracket text] -> left as literal text (never eat real words)
+# Pacing profiles insert breathing room at sentence/comma/paragraph
+# boundaries. "tight" = legacy behaviour (no added pauses).
+
+#: Bare [pause] with no :MS means this much silence.
+DEFAULT_PAUSE_MS = 500
+
+#: Sentence/comma/paragraph pause (ms) per pacing profile.
+PACE_PROFILES: dict[str, dict[str, int]] = {
+    "tight": {"sentence": 0, "comma": 0, "paragraph": 0},
+    "natural": {"sentence": 250, "comma": 120, "paragraph": 500},
+    "slow": {"sentence": 450, "comma": 200, "paragraph": 900},
+}
+
+#: Words whose trailing period never ends a sentence (no pause after).
+_PACING_ABBREV = frozenset({
+    "mr", "mrs", "ms", "dr", "st", "sr", "jr", "vs", "etc",
+    "e.g", "i.e", "fig", "no", "vol", "pp", "u.s", "u.k", "a.m", "p.m",
+})
+
+_STRICT_TAG_RE = re.compile(r"\[([a-z_]+)(?::(\d+))?\]")
+
+# Words-per-minute for the local engines at speed 1.0.
+_ESPEAK_BASE_WPM = 175
+
+
+def _known_tts_tags() -> tuple[frozenset[str], frozenset[str]]:
+    """(emotion_tags, sound_tags) from the shared TagProcessor vocabulary.
+
+    Lazy import: voice/tts.py is heavy; tools/audio.py must stay
+    importable without it.
+    """
+    from ..voice.tts import TagProcessor
+
+    return frozenset(TagProcessor.EMOTION_TAGS), frozenset(TagProcessor.SOUND_TAGS)
+
+
+def chunk_tts_text(text: str, pace: str = "natural") -> tuple[list[tuple[str, int]], list[str]]:
+    """Split TTS input into speakable chunks with pauses.
+
+    Returns ``(chunks, dropped_sounds)`` where ``chunks`` is a list of
+    ``(text, pause_after_ms)``. All known tags are consumed (never left
+    in the speakable text); unknown ``[bracket text]`` is preserved.
+    Sentence/comma/paragraph pauses come from the ``pace`` profile;
+    explicit ``[pause:MS]`` adds its silence at that position.
+
+    Pure — no I/O, fully testable.
+    """
+    profile = PACE_PROFILES.get((pace or "natural").lower())
+    if profile is None:
+        raise ToolError(
+            f"unknown pace {pace!r} — use one of "
+            f"{', '.join(sorted(PACE_PROFILES))}")
+    emotion_tags, sound_tags = _known_tts_tags()
+    chunks: list[tuple[str, int]] = []
+    dropped: list[str] = []
+    pending_pause = 0  # explicit [pause] before any text = leading silence
+
+    def _emit(run: str, extra_pause: int) -> None:
+        """Split one tag-free text run into pacing chunks."""
+        nonlocal pending_pause
+        if not run.strip():
+            return
+        # Paragraph breaks first (blank line = paragraph pause).
+        for para_i, para in enumerate(re.split(r"\n\s*\n", run)):
+            if para_i > 0 and chunks:
+                text, pause = chunks[-1]
+                chunks[-1] = (text, pause + profile["paragraph"])
+            elif para_i > 0 and pending_pause == 0 and not chunks:
+                pending_pause = profile["paragraph"]
+            _split_sentences(para, extra_pause if para_i == len(re.split(r"\n\s*\n", run)) - 1 else 0)
+
+    def _split_sentences(para: str, extra_pause: int) -> None:
+        nonlocal pending_pause
+        # Split after sentence-ending punctuation followed by space +
+        # uppercase/quote/EOS, skipping abbreviations; commas/semicolons/
+        # colons/em-dashes get the comma pause.
+        tokens = re.split(r"(\n+)", para)
+        for tok in tokens:
+            if not tok.strip():
+                continue
+            if tok.startswith("\n"):
+                continue
+            pos = 0
+            # Find split points: (index_after_boundary, kind)
+            splits: list[tuple[int, str]] = []
+            for m in re.finditer(r"([.!?…]+|[;,:\u2014])\s+", tok):
+                kind = "sentence" if m.group(1)[0] in ".!?\u2026" else "comma"
+                if kind == "sentence":
+                    # Abbreviation check: word before the period.
+                    before = tok[:m.start()]
+                    word = re.split(r"[\s\"'(\u201c]+", before)[-1].lower().rstrip(".")
+                    if word in _PACING_ABBREV:
+                        continue
+                    # Initial chain (J. R. R. Tolkien): a single letter
+                    # followed by another "X. " is not a sentence end.
+                    # The pronoun "I." does NOT match (next word has no
+                    # period), so "I went home. I left." still splits.
+                    if (len(word) == 1
+                            and re.match(r"[A-Za-z]\.\s",
+                                         tok[m.end():])):
+                        continue
+                    # Lowercase starts DO split: casual text
+                    # ("hello. world") is the common case.
+                splits.append((m.end(), kind))
+            last = 0
+            for end, kind in splits:
+                piece = tok[last:end].strip()
+                if piece:
+                    pause = profile[kind]
+                    if pending_pause:
+                        # Leading explicit pause merges into the first chunk's
+                        # preceding silence: emit as its own silence chunk.
+                        chunks.append(("", pending_pause))
+                        pending_pause = 0
+                    chunks.append((piece, pause))
+                last = end
+            tail = tok[last:].strip()
+            if tail:
+                if pending_pause:
+                    chunks.append(("", pending_pause))
+                    pending_pause = 0
+                chunks.append((tail, extra_pause))
+
+    pos = 0
+    for m in _STRICT_TAG_RE.finditer(text or ""):
+        run = text[pos:m.start()]
+        name, ms = m.group(1), m.group(2)
+        if name == "pause":
+            _emit(run, 0)
+            pause_ms = int(ms) if ms else DEFAULT_PAUSE_MS
+            if chunks:
+                t, p = chunks[-1]
+                chunks[-1] = (t, p + pause_ms)
+            else:
+                pending_pause += pause_ms
+        elif name in sound_tags:
+            _emit(run, 0)
+            dropped.append(name)
+        elif name in emotion_tags:
+            _emit(run, 0)
+            # Emotion tags carry no audio on these engines — strip silently.
+        else:
+            # Unknown tag: leave the bracket text in the speakable output.
+            _emit(run + m.group(0), 0)
+        pos = m.end()
+    _emit(text[pos:], 0)
+    if pending_pause:
+        chunks.insert(0, ("", pending_pause))
+    # Merge adjacent chunks with no pause between them (avoids one API
+    # call per clause when pacing is tight).
+    merged: list[tuple[str, int]] = []
+    for t, p in chunks:
+        if t == "" and merged:
+            tt, pp = merged[-1]
+            merged[-1] = (tt, pp + p)
+        elif t == "" and not merged:
+            merged.append((t, p))
+        elif merged and merged[-1][1] == 0 and merged[-1][0]:
+            tt, _ = merged[-1]
+            merged[-1] = (tt + " " + t, p)
+        else:
+            merged.append((t, p))
+    return [(t, p) for t, p in merged if t.strip() or p > 0], dropped
+
+
+def _concat_wav_chunks(wav_blobs: list[bytes], pauses_ms: list[int],
+                       sample_rate: int, leading_silence_ms: int = 0) -> bytes:
+    """Concatenate WAV blobs (same params) with silence gaps, stdlib only.
+
+    ``pauses_ms[i]`` is the silence after chunk ``i`` (last entry ignored).
+    ``leading_silence_ms`` is silence before the first chunk (from leading
+    ``[pause]`` tags). All chunks must share channels/samplewidth/framerate;
+    the first chunk's params win.
+    """
+    import io
+
+    out = io.BytesIO()
+    params = None
+    with wave.open(out, "wb") as wout:
+        for i, blob in enumerate(wav_blobs):
+            with wave.open(io.BytesIO(blob), "rb") as win:
+                if params is None:
+                    params = win.getparams()
+                    wout.setparams(params)
+                    if leading_silence_ms > 0:
+                        n = int(sample_rate * leading_silence_ms / 1000)
+                        wout.writeframes(
+                            b"\x00" * (n * params.nchannels * params.sampwidth))
+                frames = win.readframes(win.getnframes())
+            wout.writeframes(frames)
+            if i < len(pauses_ms) and pauses_ms[i] > 0:
+                n_silence = int(sample_rate * pauses_ms[i] / 1000)
+                n_channels = params.nchannels if params else 1
+                sampwidth = params.sampwidth if params else 2
+                wout.writeframes(b"\x00" * (n_silence * n_channels * sampwidth))
+    return out.getvalue()
+
+
+def _fold_empty_chunks(chunks: list[tuple[str, int]]) -> tuple[list[tuple[str, int]], int]:
+    """Fold empty-text chunks (pure [pause] tags) into neighbours.
+
+    Returns ``(text_chunks, leading_silence_ms)``: an empty chunk's pause
+    joins the previous text chunk's pause-after, or becomes leading
+    silence when it precedes all text.
+    """
+    text_chunks: list[tuple[str, int]] = []
+    leading = 0
+    carry = 0
+    for ctext, pause_ms in chunks:
+        if not ctext.strip():
+            carry += pause_ms
+            continue
+        if carry:
+            if text_chunks:
+                t, p = text_chunks[-1]
+                text_chunks[-1] = (t, p + carry)
+            else:
+                leading += carry
+            carry = 0
+        text_chunks.append((ctext, pause_ms))
+    if carry and text_chunks:
+        t, p = text_chunks[-1]
+        text_chunks[-1] = (t, p + carry)
+    elif carry:
+        leading += carry
+    return text_chunks, leading
+
+
+def _wav_sample_rate(blob: bytes) -> int:
+    import io
+
+    with wave.open(io.BytesIO(blob), "rb") as w:
+        return w.getframerate()
+
+
+#: What each /tts engine does with tags — the honest capability table.
+#: Shared by the /tts engines report and help. "pause" = [pause]/[pause:MS]
+#: becomes real silence; "sound" = [laugh]/[cough]/... dropped (no engine
+#: here can laugh); "emotion" = [happy]/... stripped. Native-tag engines
+#: (Chatterbox/Bark) live under /speak, not /tts.
+TTS_ENGINE_TAG_SUPPORT: dict[str, dict[str, str]] = {
+    "espeak_ng": {
+        "pause": "SSML <break time>",
+        "sound": "dropped — espeak-ng cannot laugh",
+        "emotion": "stripped",
+        "speed": "-s (wpm)",
+        "gap": "-g (word gap, 10ms units)",
+    },
+    "pico2wave": {
+        "pause": "silence spliced between chunks",
+        "sound": "dropped — cannot laugh",
+        "emotion": "stripped",
+        "speed": "not supported",
+        "gap": "not supported",
+    },
+    "say": {
+        "pause": "[[slnc N]]",
+        "sound": "dropped — cannot laugh",
+        "emotion": "stripped",
+        "speed": "-r (wpm)",
+        "gap": "not supported",
+    },
+    "edge_tts": {
+        "pause": "SSML <break time>",
+        "sound": "dropped — cannot laugh",
+        "emotion": "stripped",
+        "speed": "SSML prosody rate",
+        "gap": "not supported",
+    },
+    "openai_compat": {
+        "pause": "silence spliced between wav chunks",
+        "sound": "dropped — API cannot laugh",
+        "emotion": "stripped",
+        "speed": "API speed param (0.25-4.0)",
+        "gap": "not supported",
+    },
+}
+
+
+def _escape_ssml(text: str) -> str:
+    from xml.sax.saxutils import escape
+
+    return escape(text, {'"': "&quot;", "'": "&apos;"})
+
+
+def _espeak_ssml(chunks: list[tuple[str, int]]) -> str:
+    """Chunks -> one SSML document for espeak-ng (-m).
+
+    Sentence/comma/paragraph/explicit pauses become <break time>.
+    Text is XML-escaped; tags are already stripped by chunking.
+    """
+    parts: list[str] = []
+    for ctext, pause_ms in chunks:
+        if ctext.strip():
+            parts.append(_escape_ssml(ctext))
+        if pause_ms > 0:
+            parts.append(f'<break time="{pause_ms}ms"/>')
+    return ('<speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis" '
+            'xml:lang="en-US">' + "".join(parts) + "</speak>")
+
+
+def _tts_espeak_ssml(chunks: list[tuple[str, int]], voice: str, out: Path,
+                     *, speed: float, gap_ms: int = 0) -> None:
+    """espeak-ng via SSML: -m interprets <break>; -s sets speed (wpm);
+    -g sets the word gap in 10ms units. Speed is -s ONLY (no <prosody
+    rate> — passing both would double-apply the rate)."""
+    ssml = _espeak_ssml(chunks)
+    argv = [_ESPEAK, "-m"]
+    if voice:
+        argv += ["-v", voice]
+    wpm = max(80, min(450, round(_ESPEAK_BASE_WPM * speed)))
+    argv += ["-s", str(wpm)]
+    if gap_ms > 0:
+        argv += ["-g", str(max(1, gap_ms // 10))]
+    argv += ["-w", str(out), ssml]
+    proc = subprocess.run(argv, capture_output=True, timeout=_TTS_TIMEOUT, check=False)
+    if proc.returncode != 0 or not out.exists() or out.stat().st_size == 0:
+        raise ToolError(
+            f"espeak_ng failed (exit {proc.returncode}): "
+            f"{(proc.stderr or proc.stdout or b'').decode('utf-8', 'replace')[:300]}"
+        )
+
 #: engine name -> how to invoke it. argv is a template; {out} and {voice} are
 #: substituted, the text is always a final argv element (never a shell string).
 _ESPEAK = "espeak-ng"
@@ -100,21 +432,23 @@ def _whisper_cpp_model() -> str | None:
 # ── TTS ──────────────────────────────────────────────────────────────────────
 
 
-def _tts_local(text: str, engine: str, voice: str, out: Path) -> None:
+def _tts_local(text: str, engine: str, voice: str, out: Path,
+               *, speed: float = 1.0) -> None:
     if engine == "espeak_ng":
         argv = [_ESPEAK]
         if voice:
             argv += ["-v", voice]
-        argv += ["-w", str(out), text]
+        # espeak speed: words per minute (80-450), default 175.
+        wpm = max(80, min(450, round(_ESPEAK_BASE_WPM * speed)))
+        argv += ["-s", str(wpm), "-w", str(out), text]
     elif engine == "pico2wave":
-        argv = [_PICO, "-w", str(out)]
-        if voice:
-            argv += ["-w", str(out)]  # pico2wave has no voice arg; keep single -w
         argv = [_PICO, "-w", str(out), text]
     elif engine == "say":
         argv = [_SAY, "-o", str(out), "aiff"]
         if voice:
             argv += ["-v", voice]
+        # macOS say rate: words per minute.
+        argv += ["-r", str(max(90, min(300, round(175 * speed))))]
         argv.append(text)
     else:
         raise ToolError(f"unknown local TTS engine {engine!r}")
@@ -126,31 +460,60 @@ def _tts_local(text: str, engine: str, voice: str, out: Path) -> None:
         )
 
 
-def _tts_edge(text: str, voice: str, out: Path) -> None:
+def _tts_edge(text: str, voice: str, out: Path, *,
+              chunks: list[tuple[str, int]] | None = None,
+              speed: float = 1.0) -> None:
+    """edge-tts: single call. With chunks, SSML carries <break> pauses and
+    a <prosody rate> — edge-tts treats input starting with <speak> as SSML."""
     import asyncio
 
     import edge_tts
 
+    if chunks is not None:
+        pct = round((speed - 1.0) * 100)
+        rate = f"{pct:+d}%"
+        parts: list[str] = []
+        for ctext, pause_ms in chunks:
+            if ctext.strip():
+                parts.append(_escape_ssml(ctext))
+            if pause_ms > 0:
+                parts.append(f'<break time="{pause_ms}ms"/>')
+        ssml = (f'<speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis" '
+                f'xml:lang="en-US"><prosody rate="{rate}">'
+                + "".join(parts) + "</prosody></speak>")
+        payload = ssml
+    else:
+        payload = text
     voice_id = voice or None
     if voice_id:
-        coro = edge_tts.Communicate(text, voice_id).save(str(out))
+        coro = edge_tts.Communicate(payload, voice_id).save(str(out))
     else:
-        coro = edge_tts.Communicate(text).save(str(out))
+        coro = edge_tts.Communicate(payload).save(str(out))
     asyncio.run(asyncio.wait_for(coro, timeout=_TTS_TIMEOUT))
     if not out.exists() or out.stat().st_size == 0:
         raise ToolError("edge_tts produced no audio")
 
 
-def _tts_openai_compat(text: str, voice: str, out: Path, *, base_url: str, api_key: str, model: str) -> None:
+def _tts_openai_compat(text: str, voice: str, out: Path, *, base_url: str,
+                       api_key: str, model: str, speed: float = 1.0,
+                       response_format: str = "mp3") -> None:
     from ..core.http import HttpClient
 
     base = base_url.rstrip("/")
     if not base.endswith("/v1") and "/v1" not in base:
         base = base + "/v1"
     client = HttpClient(timeout=_TTS_TIMEOUT)
+    payload: dict[str, Any] = {
+        "model": model or "tts-1",
+        "voice": voice or "alloy",
+        "input": text[:4000],
+        "speed": max(0.25, min(4.0, speed)),
+    }
+    if response_format != "mp3":
+        payload["response_format"] = response_format
     response = client.post_json(
         f"{base}/audio/speech",
-        {"model": model or "tts-1", "voice": voice or "alloy", "input": text[:4000]},
+        payload,
         headers={"Authorization": f"Bearer {api_key}"},
     )
     if not response.ok:
@@ -170,11 +533,35 @@ def tts(
     api_key: str = "",
     model: str = "",
     timeout: float = _TTS_TIMEOUT,
+    speed: float = 1.0,
+    pace: str = "natural",
+    gap_ms: int = 0,
 ) -> dict[str, Any]:
-    """Synthesize speech to a file. Returns {path, engine, format, bytes, seconds}."""
+    """Synthesize speech to a file.
+
+    Returns ``{path, engine, format, bytes, seconds, speed, pace, gap_ms,
+    pauses_ms, dropped_sounds, pauses_dropped, gap_ignored}``.
+
+    Tags: ``[pause]`` / ``[pause:MS]`` insert real silence; sound tags
+    (``[laugh]`` ...) are dropped — these engines cannot laugh, use
+    ``/speak`` for real laughs; emotion tags are stripped; unknown
+    ``[bracket text]`` is preserved. Tag text is never spoken literally.
+    ``pace`` (tight | natural | slow) adds sentence/comma/paragraph
+    breathing room; ``speed`` scales the speaking rate (0.25–4.0);
+    ``gap_ms`` is the espeak-ng word gap (``-g``); other engines ignore it.
+    """
     text = (text or "").strip()
     if not text:
         raise ToolError("tts needs text")
+    speed = max(0.25, min(4.0, float(speed)))
+    gap_ms = max(0, int(gap_ms))
+    chunks, dropped_sounds = chunk_tts_text(text, pace)
+    speakable = " ".join(t for t, _ in chunks if t.strip())
+    if not speakable:
+        raise ToolError(
+            "tts needs speakable text — input was only tags "
+            f"(dropped: {', '.join(dropped_sounds) or 'none'})")
+    total_pause_ms = sum(p for _, p in chunks)
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -194,13 +581,38 @@ def tts(
         "aiff" if engine == "say" else "wav")
     out = out_dir / f"tts-{int(time.time() * 1000)}.{ext}"
     started = time.perf_counter()
+    pauses_dropped = False
     try:
         if engine == "edge_tts":
-            _tts_edge(text, voice, out)
+            _tts_edge(speakable, voice, out, chunks=chunks, speed=speed)
         elif engine == "openai_compat":
-            _tts_openai_compat(text, voice, out, base_url=base_url, api_key=api_key, model=model)
+            if total_pause_ms > 0:
+                try:
+                    _tts_openai_chunked(chunks, voice, out, base_url=base_url,
+                                        api_key=api_key, model=model, speed=speed)
+                    ext = "wav"
+                except ToolError:
+                    # Endpoint rejected wav format (or a chunk failed):
+                    # fall back to one mp3 call, tags stripped, no pauses.
+                    pauses_dropped = True
+                    _tts_openai_compat(speakable, voice, out, base_url=base_url,
+                                       api_key=api_key, model=model, speed=speed)
+            else:
+                _tts_openai_compat(speakable, voice, out, base_url=base_url,
+                                   api_key=api_key, model=model, speed=speed)
+        elif engine == "espeak_ng":
+            # SSML path: <break> carries every pause (sentence/comma/
+            # paragraph/explicit) in ONE call; -s speed, -g word gap.
+            _tts_espeak_ssml(chunks, voice, out, speed=speed, gap_ms=gap_ms)
+        elif engine == "pico2wave":
+            if total_pause_ms > 0:
+                _tts_local_chunked(chunks, engine, voice, out, speed=speed)
+            else:
+                _tts_local(speakable, engine, voice, out, speed=speed)
+        elif engine == "say":
+            _tts_say_with_pauses(chunks, voice, out, speed=speed)
         else:
-            _tts_local(text, engine, voice, out)
+            _tts_local(speakable, engine, voice, out, speed=speed)
     except subprocess.TimeoutExpired as exc:
         raise ToolError(f"TTS timed out after {timeout}s") from exc
     return {
@@ -209,7 +621,71 @@ def tts(
         "format": ext,
         "bytes": out.stat().st_size,
         "seconds": round(time.perf_counter() - started, 2),
+        "speed": speed,
+        "pace": pace,
+        "gap_ms": gap_ms,
+        "pauses_ms": 0 if pauses_dropped else total_pause_ms,
+        "dropped_sounds": dropped_sounds,
+        "pauses_dropped": pauses_dropped,
+        "gap_ignored": bool(gap_ms and engine != "espeak_ng"),
     }
+
+
+def _tts_openai_chunked(chunks: list[tuple[str, int]], voice: str, out: Path,
+                        *, base_url: str, api_key: str, model: str,
+                        speed: float) -> None:
+    """API TTS with real silence: per-chunk WAV calls, stdlib concat."""
+    import tempfile
+
+    text_chunks, leading = _fold_empty_chunks(chunks)
+    if not text_chunks:
+        raise ToolError("TTS API returned no audio for any chunk")
+    wav_blobs: list[bytes] = []
+    pauses: list[int] = []
+    with tempfile.TemporaryDirectory(prefix="tts-chunks-") as tmp:
+        for i, (ctext, pause_ms) in enumerate(text_chunks):
+            part = Path(tmp) / f"part-{i}.wav"
+            _tts_openai_compat(ctext, voice, part, base_url=base_url,
+                               api_key=api_key, model=model, speed=speed,
+                               response_format="wav")
+            wav_blobs.append(part.read_bytes())
+            pauses.append(pause_ms)
+    sample_rate = _wav_sample_rate(wav_blobs[0])
+    out.write_bytes(_concat_wav_chunks(wav_blobs, pauses, sample_rate,
+                                       leading_silence_ms=leading))
+
+
+def _tts_local_chunked(chunks: list[tuple[str, int]], engine: str, voice: str,
+                       out: Path, *, speed: float) -> None:
+    """Local wav engines with real silence: per-chunk WAV + stdlib concat."""
+    import tempfile
+
+    text_chunks, leading = _fold_empty_chunks(chunks)
+    if not text_chunks:
+        raise ToolError(f"{engine} produced no audio for any chunk")
+    wav_blobs: list[bytes] = []
+    pauses: list[int] = []
+    with tempfile.TemporaryDirectory(prefix="tts-chunks-") as tmp:
+        for i, (ctext, pause_ms) in enumerate(text_chunks):
+            part = Path(tmp) / f"part-{i}.wav"
+            _tts_local(ctext, engine, voice, part, speed=speed)
+            wav_blobs.append(part.read_bytes())
+            pauses.append(pause_ms)
+    sample_rate = _wav_sample_rate(wav_blobs[0])
+    out.write_bytes(_concat_wav_chunks(wav_blobs, pauses, sample_rate,
+                                       leading_silence_ms=leading))
+
+
+def _tts_say_with_pauses(chunks: list[tuple[str, int]], voice: str, out: Path,
+                         *, speed: float) -> None:
+    """macOS `say`: single call, `[[slnc N]]` carries the pauses natively."""
+    parts: list[str] = []
+    for ctext, pause_ms in chunks:
+        if ctext.strip():
+            parts.append(ctext)
+        if pause_ms > 0:
+            parts.append(f"[[slnc {pause_ms}]]")
+    _tts_local(" ".join(parts), "say", voice, out, speed=speed)
 
 
 # ── STT ──────────────────────────────────────────────────────────────────────
@@ -409,16 +885,26 @@ def register(registry: Any) -> None:
         "speak",
         description=(
             "text-to-speech: synthesize audio to a file "
-            "(espeak-ng / pico2wave / say / edge-tts / OpenAI-compatible, auto-detected)"
+            "(espeak-ng / pico2wave / say / edge-tts / OpenAI-compatible, auto-detected). "
+            "Tags: [pause] / [pause:MS] insert real silence; sound tags "
+            "([laugh] [cough] ...) are dropped (these engines cannot laugh — "
+            "use tts_say for real laughs); emotion tags are stripped; "
+            "unknown [bracket text] is preserved. pace = tight | natural | slow; "
+            "speed = speaking rate (0.25-4.0)."
         ),
         capability=Capability.EXEC_SHELL,
         parameters={
             "text": "str — what to say",
             "engine": "str (optional) — auto | espeak_ng | pico2wave | say | edge_tts | openai_compat",
             "voice": "str (optional) — engine voice name",
+            "speed": "float (optional, default 1.0) — speaking rate 0.25-4.0",
+            "pace": "str (optional, default natural) — tight | natural | slow sentence/comma/paragraph pauses",
+            "gap_ms": "int (optional, default 0) — espeak-ng word gap in ms (-g); ignored by other engines",
         },
     )
-    def speak(text: str, *, engine: str = "auto", voice: str = "") -> dict[str, Any]:
+    def speak(text: str, *, engine: str = "auto", voice: str = "",
+              speed: float = 1.0, pace: str = "natural",
+              gap_ms: int = 0) -> dict[str, Any]:
         base, key = api_base(), api_key()
         if engine in ("auto", "") and base and key and not detect_tts_engines():
             engine = "openai_compat"
@@ -428,6 +914,7 @@ def register(registry: Any) -> None:
             text, engine=engine, voice=voice, out_dir=audio_dir(),
             base_url=base, api_key=key,
             model=getattr(audio_settings, "stt_model", "") or "tts-1",
+            speed=speed, pace=pace, gap_ms=gap_ms,
         )
 
     @registry.register(
