@@ -33,6 +33,7 @@ from .runtime_media import RuntimeMediaMixin
 from .runtime_intel import RuntimeIntelMixin
 from .runtime_search import RuntimeSearchMixin
 from .runtime_wisdom import RuntimeWisdomMixin
+from .runtime_reach import RuntimeReachMixin
 _log = get_logger(__name__)
 
 #: telegram-bot is the public endpoint: conversation + games only. A known
@@ -59,6 +60,7 @@ class PartnerRuntime(
     RuntimeIntelMixin,
     RuntimeSearchMixin,
     RuntimeWisdomMixin,
+    RuntimeReachMixin,
 ):
     """Runs the partner across all configured platforms, at the same time."""
 
@@ -3087,6 +3089,35 @@ class PartnerRuntime(
         # ── identity bank (profile for signups) ──────────────────────────────
         if kind == "identity":
             return self._control_identity(command.tail or arg)
+
+        # ── reachability wave: temp mail/SMS, browser, paper, people,
+        # commitments, focus — capabilities that existed with no chat
+        # surface. Temp inboxes are per-user: the message (sender id)
+        # scopes the read, so one user can never read another's inbox.
+        if kind == "tempmail":
+            return self._control_tempmail(
+                command.tail or arg, chat_key=chat_key, message=message)
+        if kind == "checkmail":
+            return self._control_checkmail(
+                command.tail or arg, chat_key=chat_key, message=message)
+        if kind == "vnumber":
+            return self._control_vnumber(
+                command.tail or arg, chat_key=chat_key, message=message)
+        if kind == "checksms":
+            return self._control_checksms(
+                command.tail or arg, chat_key=chat_key, message=message)
+        if kind == "browser":
+            return self._control_browser(command.tail or arg, chat_key=chat_key)
+        if kind == "paper":
+            return self._control_paper(command.tail or arg, chat_key=chat_key)
+        if kind == "people":
+            return self._control_people(command.tail or arg, chat_key=chat_key)
+        if kind == "commitments":
+            return self._control_commitments(command.tail or arg, chat_key=chat_key)
+        if kind == "focus":
+            return self._control_focus(command.tail or arg, chat_key=chat_key)
+        if kind == "backup":
+            return self._control_backup(command.tail or arg, chat_key=chat_key)
 
         # ── expansion wave ───────────────────────────────────────────────────
         if kind == "game":

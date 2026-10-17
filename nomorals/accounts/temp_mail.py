@@ -165,6 +165,18 @@ class OneSecMailProvider(TempMailProvider):
     name = "1secmail"
     BASE = "https://www.1secmail.com/api/v1/"
 
+    def probe(self) -> bool:
+        """True when the domain listing parses. Never raises — the
+        cascade skips a down provider instead of burning a timeout in
+        ``grab_address`` (1secmail has been observed to hang/drop
+        connections for extended periods)."""
+        try:
+            domains = self._get(action="getDomainList")
+            return bool(domains)
+        except Exception:  # noqa: BLE001 - probe failure = unavailable
+            _log.debug("1secmail probe failed")
+            return False
+
     def _get(self, **params: str) -> Any:
         qs = urllib.parse.urlencode(params)
         return _fetch_json(self.BASE + "?" + qs)
@@ -223,6 +235,16 @@ class GuerrillaMailProvider(TempMailProvider):
     def _call(self, **params: str) -> Any:
         qs = urllib.parse.urlencode(params)
         return _fetch_json(self.BASE + "?" + qs)
+
+    def probe(self) -> bool:
+        """True when a session address comes back. Never raises."""
+        try:
+            raw = self._call(f="get_email_address", ip="127.0.0.1",
+                             agent="Mozilla/5.0")
+            return bool(raw.get("email_addr"))
+        except Exception:  # noqa: BLE001 - probe failure = unavailable
+            _log.debug("guerrillamail probe failed")
+            return False
 
     def grab_address(self) -> TempAddress:
         raw = self._call(f="get_email_address", ip="127.0.0.1",
