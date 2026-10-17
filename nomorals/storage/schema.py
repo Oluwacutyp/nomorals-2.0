@@ -332,7 +332,21 @@ class MigrationRunner:
         if path is None or fcntl is None:
             yield
             return
+        # Defense in depth: an in-memory database must never acquire a
+        # lock *file*. A db object whose .path is the string ":memory:" or
+        # Path(":memory:") (see Database.__init__ for how that used to leak
+        # through) would otherwise create ":memory:.migrate.lock" — a name
+        # Windows cannot check out, which once broke every Windows clone.
+        # Likewise, never create a lock file whose name contains any
+        # Windows-illegal character.
+        if str(path) == ":memory:" or Path(path).name == ":memory:":
+            yield
+            return
         lock_path = Path(str(path) + ".migrate.lock")
+        if any(ch in lock_path.name for ch in '<>:"/\\|?*') or lock_path.name.rstrip(" .") != lock_path.name:
+            _log.warning("skipping migration lock: unsafe lock filename %s", lock_path.name)
+            yield
+            return
         lock_path.parent.mkdir(parents=True, exist_ok=True)
         deadline = time.monotonic() + timeout_s
         with open(lock_path, "a+b") as handle:

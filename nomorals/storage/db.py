@@ -86,7 +86,15 @@ class Database:
         slow_query_threshold_s: float | None = 5.0,
         journal_size_limit: int = 64 * 1024 * 1024,
     ) -> None:
-        self.path = Path(path) if path != ":memory:" else None
+        # NB: compare via str() — a caller may pass Path(":memory:") (e.g.
+        # open_database() wraps its argument in Path first), and
+        # Path(":memory:") == ":memory:" is False (Path never equals str).
+        # The old comparison therefore treated an in-memory database as
+        # file-backed with the literal path ":memory:", and the migration
+        # lock then created a file named ":memory:.migrate.lock" — a name
+        # containing ':' that Windows cannot check out, which broke EVERY
+        # Windows clone of the repo (checkout failed, scripts/ missing).
+        self.path = None if str(path) == ":memory:" else Path(path)
         self.wal = wal and self.path is not None
         self.busy_timeout_ms = busy_timeout_ms
         self.synchronous = synchronous
