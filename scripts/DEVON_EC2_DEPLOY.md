@@ -20,17 +20,34 @@ configured, started, or touched by this deploy.
 
 ## Deploy — exact commands
 
-From PowerShell on the RDP:
+From PowerShell on the RDP.
+
+**FIRST — if `C:\devon\nomorals-2.0` already exists, SKIP clone.**
+Cloning into an existing directory fails with
+`fatal: destination path already exists and is not an empty directory`.
+Do this instead:
 
 ```powershell
-# 1. Get the deploy wrapper (first time only). If you already have a checkout, skip to step 2.
+# Already have a checkout? SKIP clone — cd in and pull:
+cd C:\devon\nomorals-2.0
+git pull origin main
+```
+
+**Only if the directory does NOT exist yet** (first time ever):
+
+```powershell
 git clone https://github.com/Oluwacutyp/nomorals-2.0.git C:\devon\nomorals-2.0
 cd C:\devon\nomorals-2.0
+```
 
-# 2. Preview (changes nothing):
+Then, **from `C:\devon\nomorals-2.0`** (not from `C:\devon` — running
+`.\scripts\...` from the parent directory gives "not recognized"):
+
+```powershell
+# 1. Preview (changes nothing):
 .\scripts\deploy_devon_ec2_rdp.ps1 -DryRun
 
-# 3. Deploy (pulls latest main, runs the real installer, writes .env from template):
+# 2. Deploy (pulls latest main, runs the real installer, writes .env from template):
 .\scripts\deploy_devon_ec2_rdp.ps1
 
 #    Variants:
@@ -39,13 +56,55 @@ cd C:\devon\nomorals-2.0
 #    .\scripts\deploy_devon_ec2_rdp.ps1 -RepoPath D:\devon\nomorals-2.0
 ```
 
+## Recovery — if you already hit the failed-clone / wrong-directory error
+
+Symptoms: `fatal: destination ... is not an empty`,
+`.\scripts\deploy_devon_ec2_rdp.ps1` "not recognized",
+`notepad .env` opened an **empty** `.env`, `.\.venv\Scripts\python.exe`
+"not recognized". That chain means: the clone failed (dir already
+existed), so the deploy script never ran, so no `.env` was copied and
+no venv was created — and the later commands ran from `C:\devon`
+instead of `C:\devon\nomorals-2.0`. Fix with these exact commands:
+
+```powershell
+# 1. Get into the repo (the checkout already exists — do NOT re-clone):
+cd C:\devon\nomorals-2.0
+git pull origin main
+
+# 2. If the failed run left an EMPTY .env in the WRONG directory, remove it
+#    (only if it is 0 bytes — check first, never delete a filled .env):
+#    Get-Item C:\devon\.env   # confirm 0 bytes
+#    Remove-Item C:\devon\.env
+
+# 3. Run the deploy from the repo directory. It pulls latest main, runs the
+#    installer, and writes .env from the template (an empty .env in the repo
+#    is backed up to .env.empty.bak and replaced — never left as "done"):
+.\scripts\deploy_devon_ec2_rdp.ps1
+
+# 4. Fill .env (from the repo directory, so notepad opens the REAL file):
+notepad .env
+
+# 5. Start Devon (from the repo directory):
+.\.venv\Scripts\python.exe -m nomorals
+```
+
+If `git pull` fails with divergent history, the script prints the exact
+recovery and stops — it does **not** auto-reset (reset discards local
+changes). Follow the printed recovery, then re-run the deploy.
+
 What the wrapper does:
 
-1. Clone (or `git pull --ff-only`) the `nomorals-2.0` repo, `main`.
+1. Pull (`git pull --ff-only`) if the repo exists, clone only if it
+   does not. A non-empty directory without `.git` is refused with a
+   clear message instead of a bare git error. A failed pull prints the
+   exact recovery and stops — never an auto-reset.
 2. Call `scripts/install_devon_windows.ps1` — the real installer. The
    wrapper never duplicates it.
-3. Copy `scripts/devon_ec2_env.template` → `.env` **only when `.env`
-   is missing**. An existing `.env` is never overwritten.
+3. Copy `scripts/devon_ec2_env.template` → `.env` when `.env` is
+   missing. A non-empty existing `.env` is never overwritten. An
+   **empty** (0-byte) `.env` is backed up to `.env.empty.bak` and
+   replaced from the template, then verified (non-empty, placeholder
+   keys present) — never left as an empty "done".
 4. Verify: `python -m nomorals --help`, `nm doctor`,
    `nm impossible examples` (Impossible Made Possible CLI smoke).
 5. Print the start commands.
@@ -121,6 +180,11 @@ is affordable. XTTS / diffusion / RVC are skipped on RDP (API fallback).
 
 | Symptom | Fix |
 |---|---|
+| `fatal: destination path already exists and is not an empty directory` | Directory already exists — **SKIP clone**. See "Recovery" above: `cd C:\devon\nomorals-2.0` + `git pull origin main`. |
+| `.\scripts\deploy_devon_ec2_rdp.ps1` "not recognized" | Wrong directory — you are in `C:\devon`, not `C:\devon\nomorals-2.0`. Run `cd C:\devon\nomorals-2.0` first, then re-run. |
+| `notepad .env` opened an empty `.env` | It opened `.env` in the wrong directory (or an empty one). Close it, `cd C:\devon\nomorals-2.0`, re-run deploy — an empty repo `.env` is backed up to `.env.empty.bak` and replaced from the template. Delete a stray empty `C:\devon\.env` only after confirming 0 bytes. |
+| `.\.venv\Scripts\python.exe` "not recognized" | No venv — the installer never ran (deploy script never ran). Run the deploy from `C:\devon\nomorals-2.0` first. |
+| `git pull --ff-only` fails (divergent) | Script prints exact recovery and stops — it does not auto-reset. Follow the printed recovery, then re-run. |
 | `winget not found` | Install App Installer from the Microsoft Store, re-run. |
 | Python still old after install | Close + reopen PowerShell (PATH refresh). |
 | `.env` lost / wrong | Re-run deploy; existing `.env` is kept. To regenerate, back it up first, delete it, re-run. |

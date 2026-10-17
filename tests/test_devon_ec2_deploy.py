@@ -98,3 +98,55 @@ def test_doc_has_exact_commands_and_singing():
 def test_installer_still_present_and_untouched_by_wrapper():
     assert INSTALLER.exists()
     assert "install_devon_windows" in _text(DEPLOY)
+
+
+def test_existing_dir_path_pulls_instead_of_clone():
+    """Existing repo dir -> pull, never clone into it. Non-empty non-git dir -> clear refusal."""
+    src = _text(DEPLOY)
+    assert "SKIP clone" in src
+    assert "pull --ff-only" in src
+    assert "not an empty" in src  # names the exact git failure the user hit
+    assert "already exists and is not empty" in src
+
+
+def test_wrong_dir_guard_prints_cd_command():
+    """Wrong-directory run fails with the exact cd command, not a bare CommandNotFound."""
+    src = _text(DEPLOY)
+    assert "WRONG DIRECTORY" in src
+    assert "Run this from" in src
+    assert r"cd $RepoPath" in src or "cd C:" in src
+
+
+def test_pull_failure_prints_recovery_and_never_auto_resets():
+    """Divergent pull -> exact recovery printed, no auto reset --hard."""
+    src = _text(DEPLOY)
+    assert "reset --hard" in src
+    assert "does NOT auto-reset" in src or "does not auto-reset" in src.lower()
+    assert "discards local changes" in src
+    # The script must not execute reset --hard itself.
+    assert "git reset --hard" in src  # only inside the printed recovery message
+    # Every reset --hard occurrence must be inside a Write-Host recovery line or a comment.
+    for ln in src.splitlines():
+        if "reset --hard" in ln:
+            assert ("Write-Host" in ln or ln.strip().startswith("#") or "Recovery" in ln), \
+                f"reset --hard outside printed recovery: {ln[:100]}"
+
+
+def test_empty_env_backed_up_and_replaced_then_verified():
+    """Empty (0-byte) .env -> backup + template replacement + verification; never left empty."""
+    src = _text(DEPLOY)
+    assert ".empty.bak" in src
+    assert "EMPTY (0 bytes)" in src
+    assert "NM_CHAT_TELEGRAM_BOT_TOKEN" in src  # verification key check
+    assert "verification FAILED" in src
+
+
+def test_doc_recovery_section_has_exact_commands():
+    """Doc: SKIP-clone first step + Recovery section with the exact commands."""
+    src = _text(DOC)
+    assert "SKIP clone" in src
+    assert "Recovery" in src
+    assert "git pull origin main" in src
+    assert r"cd C:\devon\nomorals-2.0" in src
+    assert ".env.empty.bak" in src
+    assert "not recognized" in src

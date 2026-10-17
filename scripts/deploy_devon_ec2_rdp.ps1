@@ -73,20 +73,71 @@ Write-Host 'Devon EC2 RDP deploy (Devon ONLY)' -ForegroundColor Green
 Write-Host "Repo: $RepoPath   Branch: $Branch"
 if ($DryRun) { Write-Host '[DRY RUN — nothing will change]' -ForegroundColor Yellow }
 
+# ── 0. Wrong-directory guard ────────────────────────────────────────────────
+# Exact failure seen on EC2: the owner ran `.\scripts\deploy_devon_ec2_rdp.ps1`
+# from C:\devon (the PARENT) after a failed clone, so PowerShell answered
+# "not recognized" and every later command ran in the wrong directory.
+# If this script IS running (invoked by absolute path) but the shell is
+# sitting in the parent of the repo, stop with the exact cd command.
+# (If it was invoked relatively from the wrong dir, PowerShell itself
+#  errors before this code runs — the deploy doc tells the user to cd first.)
+$cwd = (Get-Location).Path
+$repoLeaf = Split-Path $RepoPath -Leaf
+$repoParent = Split-Path $RepoPath -Parent
+if ($cwd -eq $repoParent -and (Test-Path (Join-Path $cwd $repoLeaf))) {
+    throw ("WRONG DIRECTORY: you are in $cwd, not in the repo.`n" +
+           "Run this from $RepoPath, not from $cwd.`n" +
+           "Run:  cd $RepoPath`n" +
+           "Then: .\\scripts\\deploy_devon_ec2_rdp.ps1")
+}
+if ($cwd -ne $RepoPath) {
+    Write-Warn ("Shell is in $cwd, repo is $RepoPath. Recommended: cd $RepoPath first, " +
+                "so `notepad .env` and `.\.venv\...` land in the repo, not in $cwd.")
+}
+
 # ── 1. Clone or pull ────────────────────────────────────────────────────────
-Write-Step '1/5 — Checkout (clone or pull --ff-only)'
+Write-Step '1/5 — Checkout (pull if present, clone only if absent)'
+Write-Host '  If the repo directory already exists, SKIP clone — pull instead.'
+Write-Host '  Never clone into an existing non-empty directory (git refuses:'
+Write-Host '  "fatal: destination path already exists and is not an empty directory").'
 if (-not (Test-Path (Join-Path $RepoPath '.git'))) {
+    if ((Test-Path $RepoPath) -and (Get-ChildItem -Path $RepoPath -Force | Select-Object -First 1)) {
+        throw ("CHECKOUT BLOCKED: $RepoPath already exists and is not empty, but it is " +
+               "not a git checkout (no .git). Do NOT clone into it — git will fail with " +
+               "`fatal: destination path already exists and is not an empty directory`. " +
+               "Recovery: if it is a partial/failed clone, rename it aside " +
+               "(`Rename-Item $RepoPath ${RepoPath}.bak`) or delete it, then re-run this script. " +
+               "If it IS a checkout whose .git is missing, re-clone to a fresh path instead.")
+    }
     if ($DryRun) { Write-Host "  [dry-run] git clone -b $Branch $RepoUrl $RepoPath" }
     else {
         $parent = Split-Path $RepoPath -Parent
         if (-not (Test-Path $parent)) { New-Item -ItemType Directory -Path $parent | Out-Null }
         git clone -b $Branch $RepoUrl $RepoPath
+        if ($LASTEXITCODE -ne 0) {
+            throw ("git clone failed (exit $LASTEXITCODE). If the directory already exists, " +
+                   "do NOT re-clone — cd into it and pull instead:  cd $RepoPath ; git pull origin $Branch")
+        }
         Write-Ok "Cloned $RepoUrl ($Branch)"
     }
 } else {
     if ($DryRun) { Write-Host "  [dry-run] git -C $RepoPath pull --ff-only origin $Branch" }
     else {
         git -C $RepoPath pull --ff-only origin $Branch
+        if ($LASTEXITCODE -ne 0) {
+            # Divergent history (local commits + remote commits). Do NOT auto-reset:
+            # reset --hard discards local changes. Print the exact recovery and stop.
+            Write-Host ''
+            Write-Host '  PULL FAILED (divergent history: local commits + remote commits).' -ForegroundColor Red
+            Write-Host '  This script does NOT auto-reset — `git reset --hard` discards local changes.'
+            Write-Host '  Recovery (run these yourself, only if you are OK discarding local changes):'
+            Write-Host "    cd $RepoPath"
+            Write-Host '    git fetch origin'
+            Write-Host "    git reset --hard origin/$Branch"
+            Write-Host "    git pull origin $Branch"
+            Write-Host '  Or keep your local changes: `git pull --rebase origin main` and resolve conflicts.'
+            throw "git pull --ff-only failed (exit $LASTEXITCODE). Recovery printed above — fix it, then re-run."
+        }
         Write-Ok "Pulled latest $Branch"
     }
 }
@@ -103,22 +154,46 @@ else {
     Write-Ok 'Installer finished'
 }
 
-# ── 3. .env from the full template (never overwrite an existing .env) ───────
+# ── 3. .env from the full template ──────────────────────────────────────────
+# Rules: a missing .env is created from the template. A non-empty existing
+# .env is NEVER overwritten. An EMPTY .env (0 bytes — e.g. created by
+# `notepad .env` in the wrong directory before the deploy ran) is NOT
+# "done": it is backed up and replaced with the template, with a message.
+# After writing, verify the .env is non-empty and contains placeholder keys.
 Write-Step '3/5 — .env (full template, placeholders only)'
 $envPath = Join-Path $RepoPath '.env'
 $template = Join-Path $RepoPath 'scripts\devon_ec2_env.template'
 if (-not (Test-Path $template)) { throw "Env template not found: $template. Checkout is incomplete." }
-if (Test-Path $envPath) {
-    Write-Ok '.env already exists (kept). Fill missing keys with: notepad .env'
-} elseif ($DryRun) {
-    Write-Host "  [dry-run] Copy-Item $template -> $envPath"
+$envExists = Test-Path $envPath
+$envSize = if ($envExists) { (Get-Item $envPath).Length } else { -1 }
+if ($envExists -and $envSize -gt 0) {
+    Write-Ok ".env already exists ($envSize bytes, kept). Fill missing keys with: notepad .env"
+    Write-Host "  (Run this from $RepoPath so `notepad .env` opens THIS file, not an empty one elsewhere.)"
 } else {
-    Copy-Item $template $envPath
-    Write-Ok 'Wrote .env from scripts/devon_ec2_env.template (placeholders only)'
-    Write-Warn 'Fill .env with: notepad .env — from your secure store. NEVER paste secrets in chat.'
-    Write-Host '  REQUIRED: one LLM key (Groq recommended) + BOTH Devon bot tokens:'
-    Write-Host '    NM_CHAT_TELEGRAM_BOT_TOKEN          (Devon main bot, GATED)'
-    Write-Host '    NM_CHAT_TELEGRAM_PERSONAL_BOT_TOKEN (second Devon bot, USER-ONLY)'
+    if ($envExists -and $envSize -eq 0) {
+        $backup = "$envPath.empty.bak"
+        if ($DryRun) { Write-Host "  [dry-run] .env exists but is EMPTY (0 bytes) — would back up to $backup and replace from template" }
+        else {
+            Copy-Item $envPath $backup -Force
+            Write-Warn ".env existed but was EMPTY (0 bytes) — backed up to $backup and replaced from template."
+            Write-Host '  (An empty .env usually means `notepad .env` ran in the wrong directory before deploy.)'
+        }
+    }
+    if ($DryRun) { Write-Host "  [dry-run] Copy-Item $template -> $envPath" }
+    else {
+        Copy-Item $template $envPath -Force
+        # Verify: non-empty and contains placeholder keys.
+        $written = (Get-Item $envPath).Length
+        $content = Get-Content $envPath -Raw
+        if ($written -eq 0 -or $content -notmatch 'NM_CHAT_TELEGRAM_BOT_TOKEN') {
+            throw ".env verification FAILED: wrote $written bytes, placeholder keys missing. Template copy did not land — do not edit an empty .env."
+        }
+        Write-Ok "Wrote .env from scripts/devon_ec2_env.template ($written bytes, placeholders only, verified)"
+        Write-Warn 'Fill .env with: notepad .env — from your secure store. NEVER paste secrets in chat.'
+        Write-Host '  REQUIRED: one LLM key (Groq recommended) + BOTH Devon bot tokens:'
+        Write-Host '    NM_CHAT_TELEGRAM_BOT_TOKEN          (Devon main bot, GATED)'
+        Write-Host '    NM_CHAT_TELEGRAM_PERSONAL_BOT_TOKEN (second Devon bot, USER-ONLY)'
+    }
 }
 
 # ── 4. Verify ───────────────────────────────────────────────────────────────
