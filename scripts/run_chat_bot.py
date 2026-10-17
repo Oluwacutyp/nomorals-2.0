@@ -349,60 +349,89 @@ def main() -> int:
     setup_logging(level=os.environ.get("NM_LOG_LEVEL", "INFO"), color=True)
     log = logging.getLogger("run_chat_bot")
 
-    settings = load_settings()
-    boot_mono = time.monotonic()
+    from nomorals.agents.startup_progress import (
+        StartupProgress, verify_stores)
 
-    stop = threading.Event()
+    progress = StartupProgress()
+    progress.start()
+    progress.stage("starting")
+    settings = None
+    try:
+        settings = load_settings()
+        progress.stage("config loaded")
+        # Ping FIRST — the owner DM hears "starting" before the heavy
+        # context build, never after minutes of silence.
+        progress.ping(settings, "Devon is starting… (config loaded)")
+        boot_mono = time.monotonic()
 
-    # Handlers BEFORE the runtime starts, so Ctrl+C / Ctrl+Break work
-    # from the first second — and the wait loop below wakes every
-    # _SHUTDOWN_POLL_S so the main thread actually processes them
-    # (an indefinite Event.wait() swallows Ctrl+C on Windows).
-    _install_signal_handlers(stop, log)
+        stop = threading.Event()
 
-    with build_context(settings) as context:
-        # One OS Session per chat, across every platform (session_bridge):
-        # the gateway attaches message.meta["os_session_id"] on inbound so
-        # memory, persona, and missions key off the session, not the platform.
-        from nomorals.os.session_bridge import SessionBridge
+        # Handlers BEFORE the runtime starts, so Ctrl+C / Ctrl+Break work
+        # from the first second — and the wait loop below wakes every
+        # _SHUTDOWN_POLL_S so the main thread actually processes them
+        # (an indefinite Event.wait() swallows Ctrl+C on Windows).
+        _install_signal_handlers(stop, log)
 
-        bridge = SessionBridge(db=context.db)
-        runtime = PartnerRuntime(context, session_bridge=bridge)
-        started = runtime.start()
-        _print_banner(started)
-        log.info("adapters started: %s", started)
-        msg = _telegram_bot_start_message(started, getattr(runtime, "gateway", None))
-        if msg:
-            log.warning("%s", msg)
-        # Console-only commands (dashboard, status, jobs, …) for the local
-        # terminal adapter. Anything else flows to the brain untouched.
-        # Also: rich inbound mirror + activity history for the dashboard.
-        history = _MessageHistory()
-        _install_console_mirror(runtime, history)
-        try:
-            # Imported here (not at top of main): console commands are
-            # optional — if the console package ever fails to import
-            # (e.g. a Unix-only dep on Windows), the bot must still run.
-            from nomorals.console import ConsoleCommands
+        with build_context(settings) as context:
+            # One OS Session per chat, across every platform (session_bridge):
+            # the gateway attaches message.meta["os_session_id"] on inbound so
+            # memory, persona, and missions key off the session, not the platform.
+            from nomorals.os.session_bridge import SessionBridge
 
-            snapshot = _build_snapshot_provider(runtime, context, boot_mono, history)
-            commands = ConsoleCommands(snapshot)
-            local = None
+            bridge = SessionBridge(db=context.db)
+            runtime = PartnerRuntime(context, session_bridge=bridge)
+            started = runtime.start()
+            progress.stage("adapters up")
+            # Stores verified BEFORE ready: a store that cannot even
+            # be read is a boot failure, reported honestly (DM +
+            # console) instead of surfacing as weird behaviour later.
+            _problems = verify_stores(context)
+            if _problems:
+                raise RuntimeError("stores failed verification: "
+                                   + "; ".join(_problems))
+            progress.stage("stores verified")
+            _print_banner(started)
+            log.info("adapters started: %s", started)
+            msg = _telegram_bot_start_message(started, getattr(runtime, "gateway", None))
+            if msg:
+                log.warning("%s", msg)
+            # Console-only commands (dashboard, status, jobs, …) for the local
+            # terminal adapter. Anything else flows to the brain untouched.
+            # Also: rich inbound mirror + activity history for the dashboard.
+            history = _MessageHistory()
+            _install_console_mirror(runtime, history)
             try:
-                local = runtime.gateway.adapters.get("local")
-            except Exception:  # noqa: BLE001 - gateway internals are best-effort
+                # Imported here (not at top of main): console commands are
+                # optional — if the console package ever fails to import
+                # (e.g. a Unix-only dep on Windows), the bot must still run.
+                from nomorals.console import ConsoleCommands
+
+                snapshot = _build_snapshot_provider(runtime, context, boot_mono, history)
+                commands = ConsoleCommands(snapshot)
                 local = None
-            if local is not None:
-                local.command_hook = commands.handle
-        except Exception:  # noqa: BLE001 - console commands are optional
-            log.debug("console commands unavailable", exc_info=True)
-        try:
-            _wait_for_shutdown(stop)
-        finally:
+                try:
+                    local = runtime.gateway.adapters.get("local")
+                except Exception:  # noqa: BLE001 - gateway internals are best-effort
+                    local = None
+                if local is not None:
+                    local.command_hook = commands.handle
+            except Exception:  # noqa: BLE001 - console commands are optional
+                log.debug("console commands unavailable", exc_info=True)
+            progress.stage("ready")
+            # Ready ping — the owner hears the boot finished, not just
+            # that it started. Best-effort: a failed ping never blocks.
+            progress.ping(settings, "Devon is ready.")
+            progress.stop()
             try:
-                runtime.stop()
-            except Exception:  # noqa: BLE001 - best-effort shutdown
-                pass
+                _wait_for_shutdown(stop)
+            finally:
+                try:
+                    runtime.stop()
+                except Exception:  # noqa: BLE001 - best-effort shutdown
+                    pass
+    except Exception as exc:  # noqa: BLE001 - honest failure, then raise
+        progress.fail(settings, exc)
+        raise
     print("Devon stopped.", flush=True)
     log.info("Devon stopped.")
     return 0

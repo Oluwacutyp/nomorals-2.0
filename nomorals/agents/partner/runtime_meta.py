@@ -445,6 +445,160 @@ class RuntimeMetaMixin:
                 f"again. (Feature toggles are kept: "
                 f"/chatmode status shows them.)")
 
+    def _control_doctor(self) -> str:
+        """System health — the Telegram twin of ``nm doctor`` (spec §8.6).
+
+        Owner-only (enforced by the grant check in handle_control
+        before dispatch). Five checks, each pass/fail with the REAL
+        cause — never a bare "unhealthy":
+
+        - registry: every registered command has details + a list
+          slot + a dispatch branch (the orphan audit, live).
+        - config: every template env key mapped (ignored must be 0).
+        - stores: chat-modes + style-overrides + database readable.
+        - adapters: every adapter's running state + health error.
+        - providers: the LLM chain's keys present (no values shown).
+        """
+        import os
+        import re
+
+        from ...social.chat.control import (
+            COMMAND_DETAILS, CONTROL_COMMANDS, LIST_GROUPS, LIST_ONELINERS)
+
+        results: list[tuple[bool, str]] = []
+
+        # ── registry ──
+        try:
+            runtime_src = open(
+                os.path.join(os.path.dirname(__file__), "runtime.py"),
+                encoding="utf-8").read()
+            start = runtime_src.index("    def handle_control(")
+            rest = runtime_src[start:]
+            nxt = re.search(r"\n    def ", rest[1:])
+            body = rest[: nxt.start() + 1] if nxt else rest
+            handled: set[str] = set(re.findall(r'if kind == "([^"]+)"', body))
+            for m in re.finditer(r"if kind in \{([^}]+)\}", body):
+                handled.update(re.findall(r'"([^"]+)"', m.group(1)))
+            for m in re.finditer(r"if kind in \(([^)]+)\)", body):
+                handled.update(re.findall(r'"([^"]+)"', m.group(1)))
+            missing = sorted(
+                k for k in CONTROL_COMMANDS
+                if k not in handled
+                or k not in COMMAND_DETAILS
+                or k not in LIST_ONELINERS
+                or sum(k in kinds for _, kinds in LIST_GROUPS) != 1)
+            if missing:
+                results.append((False, "registry: undispatchable or "
+                                f"undocumented commands: {', '.join(missing)}"))
+            else:
+                results.append((True, "registry: "
+                                f"{len(CONTROL_COMMANDS)} commands, all with "
+                                "details + list slot + dispatch"))
+        except Exception as exc:  # noqa: BLE001 - report, don't crash
+            from ...core.errors import exc_str
+            results.append((False, f"registry: check failed: {exc_str(exc)}"))
+
+        # ── config ──
+        try:
+            from ...core.config import config_env_status
+            status = config_env_status()
+            ignored = status["ignored"]
+            if ignored:
+                results.append((False, "config: "
+                                f"{len(ignored)} ignored key(s): "
+                                + ", ".join(sorted(ignored))))
+            else:
+                results.append((True, "config: "
+                                f"{status['set_mapped']} set / "
+                                f"{status['unset_mapped']} unset, "
+                                "0 ignored"))
+        except Exception as exc:  # noqa: BLE001 - report, don't crash
+            from ...core.errors import exc_str
+            results.append((False, f"config: check failed: {exc_str(exc)}"))
+
+        # ── stores ──
+        try:
+            from ..startup_progress import verify_stores
+            problems = verify_stores(getattr(self, "context", None))
+            if problems:
+                results.append((False, "stores: " + "; ".join(problems)))
+            else:
+                results.append((True, "stores: chat-modes + "
+                                "style-overrides + database readable"))
+        except Exception as exc:  # noqa: BLE001 - report, don't crash
+            from ...core.errors import exc_str
+            results.append((False, f"stores: check failed: {exc_str(exc)}"))
+
+        # ── adapters ──
+        try:
+            gateway = getattr(self, "gateway", None)
+            if gateway is None:
+                results.append((False, "adapters: no gateway attached"))
+            else:
+                status = gateway.status() or {}
+                parts = []
+                any_running = False
+                for name in sorted(status):
+                    if name.startswith("_"):
+                        continue
+                    info = status[name] or {}
+                    running = bool(info.get("running_in_session"))
+                    any_running = any_running or running
+                    err = str(info.get("error") or "")
+                    parts.append(f"{name} {'up' if running else 'down'}"
+                                 + (f" ({err[:80]})" if err and not running else ""))
+                if not parts:
+                    results.append((False, "adapters: no adapters registered"))
+                elif not any_running:
+                    results.append((False, "adapters: none running — "
+                                    + ", ".join(parts)))
+                else:
+                    results.append((True, "adapters: " + ", ".join(parts)))
+        except Exception as exc:  # noqa: BLE001 - report, don't crash
+            from ...core.errors import exc_str
+            results.append((False, f"adapters: check failed: {exc_str(exc)}"))
+
+        # ── providers ──
+        try:
+            chain = [p.strip().lower() for p in
+                     (os.environ.get("NM_LLM_PROVIDER", "") or "").split(",")
+                     if p.strip()]
+            fallbacks = [p.strip().lower() for p in
+                         (os.environ.get("NM_LLM_FALLBACK_CHAIN", "") or "").split(",")
+                         if p.strip()]
+            for provider in fallbacks:
+                if provider not in chain:
+                    chain.append(provider)
+            key_for = {"groq": "NM_GROQ_API_KEY",
+                       "openrouter": "NM_OPENROUTER_API_KEY",
+                       "hf": "HF_TOKEN",
+                       "huggingface": "HF_TOKEN",
+                       "openai": "OPENAI_API_KEY",
+                       "anthropic": "ANTHROPIC_API_KEY",
+                       "gemini": "GEMINI_API_KEY",
+                       "together": "TOGETHER_API_KEY"}
+            if not chain:
+                results.append((True, "providers: no provider chain "
+                                "configured (local/default brain)"))
+            else:
+                missing_keys = [f"{p} needs {key_for[p]} (unset)"
+                                for p in chain
+                                if p in key_for and not os.environ.get(key_for[p])]
+                if missing_keys:
+                    results.append((False, "providers: " + "; ".join(missing_keys)))
+                else:
+                    results.append((True, "providers: chain "
+                                    f"{' → '.join(chain)}, keys present"))
+        except Exception as exc:  # noqa: BLE001 - report, don't crash
+            from ...core.errors import exc_str
+            results.append((False, f"providers: check failed: {exc_str(exc)}"))
+
+        passed = sum(1 for ok, _ in results if ok)
+        lines = [f"doctor — {passed}/{len(results)} checks pass"]
+        for ok, text in results:
+            lines.append(f"{'OK  ' if ok else 'FAIL'} {text}")
+        return "\n".join(lines)
+
     def _control_style(self, command: Any, chat_key: str,
                        message: Any = None) -> str:
         """Inspect + tune the mined style profile (spec §3.4). Owner-only

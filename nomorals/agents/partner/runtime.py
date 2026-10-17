@@ -2703,6 +2703,9 @@ class PartnerRuntime(
         if kind == "style":
             return self._control_style(command, chat_key, message)
 
+        if kind == "doctor":
+            return self._control_doctor()
+
         if kind == "model":
             return self._control_model(command.tail)
 

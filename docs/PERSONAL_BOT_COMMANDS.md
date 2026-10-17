@@ -83,7 +83,7 @@ mood - set her mood — a label (happy, tired, playful, calm, …), or set dimen
 stage - set the relationship stage (committed|dating|…), which tunes her behavior.
 model - switch the active model live (up to 5 fallbacks); no argument shows the chain.
 providers - probe every registered provider and report live/dead with the reason — the diagnostic for a silent brain.
-say - rich voice: emotion, accent, ambience, room reverb.
+say - three forms: send a message to a chat as her, from your hands — speak text as a voice note in a named voice — or rich voice with direction/accent/ambience.
 power - power mode: no human-like pacing, maximum capability — needs the key you set in config, or the owner seal (identity + passphrase).
 proposals - list everything waiting for your approval: proactive actions + research upgrade proposals.
 approve - approve one pending proposal so she executes it (upgrade tickets are approved + test-gated applied).
@@ -103,7 +103,7 @@ restart - Restart the process: mission gate, checkpoint resumable missions, rest
 searchdeep - deep multi-query research with synthesis (power mode).
 money - hunts every kind of money-making opportunity — paid tasks, referrals, free courses, bounties, gigs — ranked by value vs effort.
 searchhist - your recent research runs.
-research - scheduled research runs: lifestyle | tech | cyber.
+research - web research — one-shot swarm research on any topic with a brief back in chat, plus the always-on research loop (status/ideas/approve/deny/history/from/ask/docs).
 code - the coding bot: drafts code, runs it in the sandbox, fixes until the acceptance command passes; the real file lands in her workspace.
 py - run python in the sandbox; -s name keeps a session, -r resets it.
 devon - the autonomous dev & investigation agent: he plans the tools himself, runs them, digests, replies — for anything you say.
