@@ -18,7 +18,7 @@ import statistics
 import threading
 import time
 from collections import deque
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Collection, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -868,6 +868,7 @@ class LLMRouter:
         if replayed is not None:
             return replayed
         response = self._dispatch("chat", lambda p: p.chat(messages, params, **kw),
+                                  require="chat",
                                   tier=tier, task_kind=task_kind,
                                   constraints=constraints, route=route)
         self._cassette_record(key, response)
@@ -882,6 +883,7 @@ class LLMRouter:
         if replayed is not None:
             return replayed
         response = self._dispatch("complete", lambda p: p.complete(prompt, params, **kw),
+                                  require="complete",
                                   tier=tier, task_kind=task_kind,
                                   constraints=constraints, route=route)
         self._cassette_record(key, response)
@@ -931,7 +933,9 @@ class LLMRouter:
         response = self._dispatch(
             "vision",
             lambda p: p.describe_image(image, prompt, params, **kw),
-            require="vision",
+            # Vision reads accept a vision model OR the OCR floor
+            # (tesseract).  OCR advertises "ocr", not "vision".
+            require={"vision", "ocr"},
             tier=tier,
             task_kind=task_kind,
             constraints=constraints,
@@ -1115,7 +1119,7 @@ class LLMRouter:
         operation: str,
         call: Callable[[LLMProvider], LLMResponse],
         *,
-        require: str | None = None,
+        require: str | Collection[str] | None = None,
         tier: str | None = None,
         task_kind: str = "",
         constraints: Any = None,
@@ -1139,13 +1143,27 @@ class LLMRouter:
                 _log.debug("broker consult raised; using name-based chain",
                            exc_info=True)
         chain = self._chain()
-        if require is not None:
-            capable = [p for p in chain if require in p.capabilities]
+        if require is not None and chain:
+            # An empty chain falls through to the "no providers
+            # registered" response below — a router with nothing
+            # registered must not raise (test_empty_router_does_not_explode).
+            # A single token or a set of acceptable tokens: a provider is
+            # eligible when ANY required token is in its capabilities.
+            # (Vision reads accept {"vision", "ocr"}; chat accepts only
+            # "chat" — an OCR provider is never a chat fallback.)
+            required = {require} if isinstance(require, str) else set(require)
+            capable = [p for p in chain if required & set(p.capabilities)]
             if not capable:
                 # mirror embed(): never silently fall back to providers that
                 # can't do the job — the owner gets one clean error instead
-                # of a chain of doomed attempts.
-                raise ModelError(f"no registered provider supports {require}")
+                # of a chain of doomed attempts.  Name the registered
+                # providers and what they CAN do, so the gap is diagnosable.
+                registered = ", ".join(
+                    f"{p.name}({', '.join(sorted(p.capabilities)) or 'none'})"
+                    for p in chain) or "none"
+                raise ModelError(
+                    f"no registered provider supports {', '.join(sorted(required))}; "
+                    f"registered: {registered}")
             chain = capable
         if not chain:
             return LLMResponse(text="", error="no providers registered")
@@ -1160,12 +1178,14 @@ class LLMRouter:
         self.stats["calls"] += 1
         attempted = 0
         failed: list[tuple[str, str]] = []  # (provider name, error) in attempt order
+        skipped: list[str] = []  # capable providers never attempted, with reason
         trace: list[dict[str, Any]] = []  # per-attempt routing trace
         last = LLMResponse(text="", error="no attempt made")
         learning = self._learning  # read once; a detach mid-dispatch is harmless
         for provider in chain:
             health = self._health[provider.name]
             if not health.available(self._clock()):
+                skipped.append(f"{provider.name} (cooling down)")
                 continue
             # Circuit breaker gate: an open breaker rejects without touching
             # the dependency; a half-open breaker admits probes within the
@@ -1176,6 +1196,7 @@ class LLMRouter:
                 try:
                     health.breaker.before_call()
                 except CircuitOpen:
+                    skipped.append(f"{provider.name} (circuit open)")
                     continue
                 if health.breaker.state == CircuitBreaker.HALF_OPEN:
                     with self._lock:
@@ -1250,7 +1271,16 @@ class LLMRouter:
 
         self.stats["failures"] += 1
         if attempted == 0:
-            last.error = "all providers are cooling down"
+            if skipped:
+                # Honest failure: name the capable providers that were
+                # skipped and why — never blame a wrong-capability
+                # provider (e.g. OCR) that was never eligible.
+                last.error = (
+                    f"no {operation} provider available: "
+                    f"{', '.join(skipped)}; all providers are cooling down"
+                )
+            else:
+                last.error = "all providers are cooling down"
         # Even a total failure reports the whole attempt chain.
         last.failed_providers = [name for name, _ in failed]
         last.route_trace = list(trace)

@@ -224,7 +224,9 @@ class ModelCard:
             for cap in Capability:
                 if CAPABILITY_PROVIDER_TOKENS[cap] & tokens:
                     caps.add(cap)
-            # The OCR provider only advertises "vision"; it is OCR-first.
+            # The OCR provider advertises "ocr"; keep the name-based
+            # override as a safety net so its card is OCR-first even if a
+            # future provider mislabels its tokens.
             if name == "ocr":
                 caps.discard(Capability.VISION)
                 caps.add(Capability.OCR)
