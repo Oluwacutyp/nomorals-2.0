@@ -62,6 +62,7 @@ Registered as the ``player`` tool.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import random
@@ -1297,6 +1298,9 @@ class PlaybackEngine:
 
     def _mpv_connect(self, sock_path: str,
                      timeout: float = 8.0) -> socket.socket | None:
+        if getattr(socket, "AF_UNIX", None) is None:
+            # Windows: no Unix-domain sockets, so mpv IPC is unavailable.
+            return None
         deadline = time.time() + timeout
         while time.time() < deadline:
             try:

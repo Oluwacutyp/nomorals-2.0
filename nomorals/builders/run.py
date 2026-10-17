@@ -341,6 +341,25 @@ def run_probe(probe: HttpProbe | TcpProbe, host: str, port: int,
                        attempts, None, time.monotonic() - started)
 
 
+def _kill_tree(proc: subprocess.Popen, sig_name: str) -> None:
+    """Signal ``proc``'s whole process group, or the process alone.
+
+    ``sig_name`` is ``"SIGTERM"`` or ``"SIGKILL"``. On Windows
+    ``os.killpg``/``os.getpgid`` and ``SIGKILL`` do not exist, so the
+    group kill raises ``AttributeError`` and we fall back to signalling
+    the single process (with ``SIGTERM`` when ``SIGKILL`` is missing).
+    Never raises.
+    """
+    sig = getattr(signal, sig_name, None)
+    if sig is None:
+        sig = signal.SIGTERM
+    try:
+        os.killpg(os.getpgid(proc.pid), sig)
+    except (OSError, ProcessLookupError, AttributeError):
+        with contextlib.suppress(OSError, AttributeError, ProcessLookupError):
+            os.kill(proc.pid, sig)
+
+
 def _snapshot_mtimes(root: Path) -> dict[str, float]:
     """mtime snapshot of a project tree (watch mode)."""
     snap: dict[str, float] = {}
@@ -467,27 +486,21 @@ class ServeHandle:
 
     def _kill_locked(self) -> None:
         if self._proc.poll() is None:
-            try:
-                os.killpg(os.getpgid(self._proc.pid), signal.SIGTERM)
-            except (OSError, ProcessLookupError, AttributeError):
-                # AttributeError: no killpg/getpgid on Windows.
-                with contextlib.suppress(OSError):
-                    self._proc.terminate()
+            _kill_tree(self._proc, "SIGTERM")
             try:
                 self._proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
-                try:
-                    os.killpg(os.getpgid(self._proc.pid),
-                              getattr(signal, "SIGKILL", signal.SIGTERM))
-                except (OSError, ProcessLookupError, AttributeError):
-                    # AttributeError: no killpg/getpgid/SIGKILL on Windows.
-                    with contextlib.suppress(OSError):
-                        self._proc.kill()
+                _kill_tree(self._proc, "SIGKILL")
                 try:
                     self._proc.wait(timeout=5)
                 except subprocess.TimeoutExpired:
-                    _log.warning("serve %s would not die",
-                                 self.config.project_dir)
+                    with contextlib.suppress(OSError, AttributeError):
+                        self._proc.kill()
+                    try:
+                        self._proc.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        _log.warning("serve %s would not die",
+                                     self.config.project_dir)
         try:
             self._stderr.join(timeout=2.0)
         except Exception:  # noqa: BLE001
@@ -621,13 +634,7 @@ def serve(project_dir: str | Path, port: int = 0, *,
     def _fail_startup(message: str) -> ServeError:
         drainer.join(timeout=2.0)
         err = drainer.text().strip()
-        try:
-            os.killpg(os.getpgid(proc.pid),
-                      getattr(signal, "SIGKILL", signal.SIGTERM))
-        except (OSError, ProcessLookupError, AttributeError):
-            # AttributeError: no killpg/getpgid/SIGKILL on Windows.
-            with contextlib.suppress(OSError):
-                proc.kill()
+        _kill_tree(proc, "SIGKILL")
         return ServeError(
             message + (f"\nstderr:\n{err}" if err else " (no stderr output)"),
             stderr=err)

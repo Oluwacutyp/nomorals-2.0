@@ -1937,21 +1937,7 @@ class AppBuilder:
         killed = False
         pid = int(entry.get("pid", 0) or 0)
         if pid and _pid_alive(pid):
-            try:
-                import signal
-
-                os.killpg(os.getpgid(pid),
-                          getattr(signal, "SIGKILL", signal.SIGTERM))
-                killed = True
-            except (ProcessLookupError, PermissionError, OSError, AttributeError):
-                # AttributeError: no killpg/getpgid/SIGKILL on Windows.
-                try:
-                    import signal
-
-                    os.kill(pid, getattr(signal, "SIGKILL", signal.SIGTERM))
-                    killed = True
-                except (ProcessLookupError, PermissionError, OSError, AttributeError):  # noqa: E103 - process already gone; kill chain is best-effort
-                    pass
+            killed = _signal_tree(pid, "SIGKILL")
         return {"app": slug, "stopped": killed or not _pid_alive(pid),
                 "was_pid": pid}
 
@@ -2095,19 +2081,7 @@ class AppBuilder:
         killed = False
         pid = int(entry.get("pid", 0) or 0)
         if pid and _pid_alive(pid):
-            import signal
-
-            try:
-                os.killpg(os.getpgid(pid),
-                          getattr(signal, "SIGKILL", signal.SIGTERM))
-                killed = True
-            except (ProcessLookupError, PermissionError, OSError, AttributeError):
-                # AttributeError: no killpg/getpgid/SIGKILL on Windows.
-                try:
-                    os.kill(pid, getattr(signal, "SIGKILL", signal.SIGTERM))
-                    killed = True
-                except (ProcessLookupError, PermissionError, OSError, AttributeError):  # noqa: E103 - process already gone; kill chain is best-effort
-                    pass
+            killed = _signal_tree(pid, "SIGKILL")
         return {"app": slug, "stopped": killed or not _pid_alive(pid),
                 "was_pid": pid, "url": entry.get("url", "")}
 
@@ -2459,6 +2433,33 @@ def _run_server(app_dir: Path, stack: str, port: int):
                     with contextlib.suppress(OSError):
                         proc.kill()
                 proc.wait(timeout=5)
+
+
+def _signal_tree(pid: int, sig_name: str) -> bool:
+    """Signal ``pid``'s whole process group, or the process alone.
+
+    ``sig_name`` is ``"SIGTERM"`` or ``"SIGKILL"``. On Windows
+    ``os.killpg``/``os.getpgid`` and ``SIGKILL`` do not exist, so the
+    group kill raises ``AttributeError`` and we fall back to signalling
+    the single process (with ``SIGTERM`` when ``SIGKILL`` is missing).
+    Returns True when a signal was delivered, False when the process
+    was already gone or the signal could not be delivered.
+    """
+    import signal
+
+    sig = getattr(signal, sig_name, None)
+    if sig is None:
+        sig = signal.SIGTERM
+    try:
+        os.killpg(os.getpgid(pid), sig)
+        return True
+    except (ProcessLookupError, PermissionError, OSError, AttributeError):
+        pass
+    try:
+        os.kill(pid, sig)
+        return True
+    except (ProcessLookupError, PermissionError, OSError, AttributeError):
+        return False
 
 
 def _pid_alive(pid: int) -> bool:

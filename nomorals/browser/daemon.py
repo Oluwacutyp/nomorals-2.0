@@ -150,7 +150,12 @@ class DaemonClient:
     def call(self, op: str, params: dict[str, Any] | None = None,
              *, timeout: float | None = None) -> tuple[Any, list[dict[str, Any]]]:
         """Send one op; return ``(result, events)``. Raises DaemonError."""
-        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        af_unix = _af_unix()
+        if af_unix is None:
+            raise DaemonError(
+                "browser daemon requires Unix-domain sockets, "
+                "which are unavailable on this platform")
+        sock = socket.socket(af_unix, socket.SOCK_STREAM)
         try:
             sock.settimeout(timeout if timeout is not None else self.timeout)
             try:
@@ -206,6 +211,11 @@ def republish_events(events: list[dict[str, Any]]) -> int:
 # ── process helpers ──────────────────────────────────────────────────────────
 
 
+def _af_unix() -> int | None:
+    """``socket.AF_UNIX`` or None on platforms without Unix-domain sockets."""
+    return getattr(socket, "AF_UNIX", None)
+
+
 def _pid_alive(pid: int) -> bool:
     """True when pid names a live, non-zombie process."""
     try:
@@ -213,16 +223,23 @@ def _pid_alive(pid: int) -> bool:
             state = fh.read().rsplit(b")", 1)[-1].split()[0]
         return state not in (b"Z", b"X", b"x")
     except FileNotFoundError:
-        return False
+        # Either the pid is gone, or /proc itself is absent (Windows):
+        # only the latter falls through to the kill(0) probe.
+        if os.path.exists("/proc"):
+            return False
     except (OSError, IndexError) as exc:
         _log.debug("pid %d liveness probe fell back to kill(0): %r", pid, exc)
-        try:
-            os.kill(pid, 0)
-        except ProcessLookupError:
-            return False
-        except PermissionError:
-            return True
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
         return True
+    except (OSError, AttributeError):
+        # os.kill missing/unusable on this platform: assume alive so
+        # callers escalate rather than treat a live daemon as stale.
+        return True
+    return True
 
 
 @contextlib.contextmanager
@@ -423,12 +440,15 @@ class DaemonControl:
         """SIGTERM, then SIGKILL. Returns True when force was needed."""
         if pid is None or not _pid_alive(pid):
             return False
-        # SIGKILL does not exist on Windows; SIGTERM terminates there.
-        sigkill = getattr(signal, "SIGKILL", signal.SIGTERM)
-        for sig, wait in ((signal.SIGTERM, 5.0), (sigkill, 3.0)):
+        # SIGKILL does not exist on Windows: SIGTERM-only escalation there.
+        steps: list[tuple[int, float]] = [(signal.SIGTERM, 5.0)]
+        sigkill = getattr(signal, "SIGKILL", None)
+        if sigkill is not None:
+            steps.append((sigkill, 3.0))
+        for sig, wait in steps:
             try:
                 os.kill(pid, sig)
-            except (ProcessLookupError, PermissionError) as exc:
+            except (ProcessLookupError, PermissionError, AttributeError) as exc:
                 _log.debug("kill pid %d with %s failed: %r", pid, sig, exc)
                 break
             if self._wait_gone(pid, wait):
@@ -448,7 +468,7 @@ class DaemonControl:
                 done, _ = os.waitpid(pid, os.WNOHANG)
                 if done == 0:
                     break
-        except (ChildProcessError, OSError) as exc:
+        except (ChildProcessError, OSError, AttributeError) as exc:
             # Not our child (or already reaped): nothing to wait for.
             _log.debug("reap of pid %d skipped: %r", pid, exc)
 
@@ -887,6 +907,10 @@ _STARTED_AT = time.time()
 
 def serve(data_dir: str | os.PathLike[str]) -> int:
     """Daemon entry point: hold one live BrowserService and serve the socket."""
+    if _af_unix() is None:
+        print("daemon: Unix-domain sockets are unavailable on this platform",
+              file=sys.stderr)
+        return 1
     data_path = Path(data_dir).expanduser()
     data_path.mkdir(parents=True, exist_ok=True)
     sock_path = data_path / _SOCK_NAME
@@ -910,7 +934,9 @@ def serve(data_dir: str | os.PathLike[str]) -> int:
 
     sub_id = global_bus.subscribe("browser.*", _collect, sync=True)
 
-    listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    af_unix = _af_unix()
+    assert af_unix is not None  # checked at serve() entry
+    listener = socket.socket(af_unix, socket.SOCK_STREAM)
     try:
         try:
             listener.bind(str(sock_path))

@@ -36,7 +36,7 @@ with build_context(load_settings()) as ctx:
     def on_step(mission, outcome):
         print(f"STEP {outcome.step}", flush=True)
         if mission.iterations >= die_after:
-            os.kill(os.getpid(), signal.SIGKILL)
+            os.kill(os.getpid(), getattr(signal, "SIGKILL", signal.SIGTERM))
     runner.on_step = on_step
     pending = MissionStore(ctx.db).resumable()
     if pending:

@@ -247,7 +247,7 @@ class RunSweepTests(unittest.TestCase):
         with serve(self.proj, startup_timeout=15,
                    restart_policy="on-failure", max_restarts=2) as handle:
             pid_before = handle.pid
-            os.kill(pid_before, signal.SIGKILL)
+            os.kill(pid_before, getattr(signal, "SIGKILL", signal.SIGTERM))
             deadline = time.time() + 15
             while handle.restarts == 0 and time.time() < deadline:
                 time.sleep(0.3)

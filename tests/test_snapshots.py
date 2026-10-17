@@ -2,6 +2,7 @@
 
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -116,11 +117,21 @@ class TestSnapshots(unittest.TestCase):
         mgr = make_manager(home, db_path, blob_dir)
         snap = mgr.create()
         # Another *process* holds the lock (POSIX locks are per-process).
+        # sys.executable (not "python3", which is absent on Windows) with
+        # fcntl on POSIX / msvcrt.locking on Windows.
         holder = subprocess.Popen(
-            ["python3", "-c",
-             "import fcntl, time, sys; "
-             f"fd = open({str(home / 'nomorals.lock')!r}, 'w'); "
-             "fcntl.flock(fd, fcntl.LOCK_EX); time.sleep(15)"],
+            [sys.executable, "-c",
+             "import os, sys, time\n"
+             "lock_path = sys.argv[1]\n"
+             "fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)\n"
+             "try:\n"
+             "    import fcntl\n"
+             "    fcntl.flock(fd, fcntl.LOCK_EX)\n"
+             "except ImportError:\n"
+             "    import msvcrt\n"
+             "    msvcrt.locking(fd, msvcrt.LK_LOCK, 1)\n"
+             "time.sleep(15)",
+             str(home / "nomorals.lock")],
         )
         try:
             deadline = time.time() + 10

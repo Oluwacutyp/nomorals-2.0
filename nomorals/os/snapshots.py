@@ -117,6 +117,24 @@ def _dir_size(root: Path) -> int:
     return total
 
 
+def _locking_backend_available() -> bool:
+    """True when ``fcntl`` (POSIX) or ``msvcrt`` (Windows) can be imported.
+
+    Used by the restore path to fail closed: without a locking backend
+    we cannot prove no other process is restoring concurrently.
+    """
+    try:
+        import fcntl  # noqa: F401
+        return True
+    except ImportError:
+        pass
+    try:
+        import msvcrt  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
 def system_state(home: Path, db_path: Path) -> dict[str, bool]:
     """Report whether the live system is running and/or dirty.
 
@@ -583,6 +601,13 @@ class SnapshotManager:
         never hangs forever behind a live server: ``--force`` overrides a
         *dirty* database, never a *running* system writing to it.
         """
+        if not _locking_backend_available():
+            # Fail closed: without a locking backend we cannot prove no
+            # other process is restoring concurrently.
+            raise SnapshotRefused(
+                "no file-locking backend available on this platform; "
+                "refusing to restore without the state lock"
+            )
         lock_path = self.home / LOCK_FILENAME
         self.home.mkdir(parents=True, exist_ok=True)
         fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
