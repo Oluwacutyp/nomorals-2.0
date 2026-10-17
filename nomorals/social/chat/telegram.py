@@ -79,6 +79,19 @@ def media_download_allowed(kind: str, doc_size: int, media_in_groups: bool, medi
     return True
 
 
+def _safe_ts(value: Any) -> float:
+    """Coerce an external ``date`` field to a float timestamp.
+
+    Telegram sends a Unix int, but a malformed / forged update can carry
+    a string, list, or null — ``float(...)`` on those raises. Fall back
+    to now so one bad timestamp never drops the message.
+    """
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return time.time()
+
+
 _MIME_HINTS = {
     ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
     ".gif": "image/gif", ".webp": "image/webp", ".mp4": "video/mp4",
@@ -378,8 +391,8 @@ def _entity_aliases(entity: Any) -> list[str]:
             digits = re.sub(r"\D", "", str(phone))
             if digits:
                 out.append("tel:" + digits)
-    except Exception:  # noqa: BLE001 - alias extraction is best-effort
-        pass
+    except Exception as exc:  # noqa: BLE001 - alias extraction is best-effort
+        _log.debug("telegram: entity alias extraction failed: %s", exc)
     # de-dupe, preserve order
     seen: set[str] = set()
     return [k for k in out if k and not (k in seen or seen.add(k))]
@@ -673,8 +686,13 @@ class TelegramAdapter(ChatAdapter):
                 if chat_id.startswith("@"):
                     return await self._client.get_input_entity(chat_id)
                 return await self._client.get_input_entity(int(chat_id))
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as exc:  # noqa: BLE001
+                # Fall through to full resolution — but log it: a
+                # silently-failing peer cache used to be invisible.
+                _log.debug(
+                    "telegram: get_input_entity failed for chat_id=%s: %s",
+                    chat_id, exc,
+                )
 
         # 3. Timed full resolution (caches success + failure)
         if self._client is not None:
@@ -2041,7 +2059,18 @@ class TelegramBotAdapter(ChatAdapter):
         try:
             pending = self._api("getUpdates", offset=-1, timeout=1)
             if pending:
-                self._offset = max(u["update_id"] for u in pending) + 1
+                # Int-only ids: a malformed pending update (missing /
+                # non-numeric update_id) used to raise here and kill
+                # startup. Ignore those entries; valid ids still advance.
+                ids = [
+                    u["update_id"]
+                    for u in pending
+                    if isinstance(u, dict)
+                    and isinstance(u.get("update_id"), int)
+                    and not isinstance(u.get("update_id"), bool)
+                ]
+                if ids:
+                    self._offset = max(ids) + 1
                 _log.info("telegram-bot: skipped %d stale updates", len(pending))
         except Exception as exc:  # noqa: BLE001 - non-fatal, polling continues
             _log.debug("telegram-bot: stale-skip failed: %s", exc)
@@ -2063,31 +2092,70 @@ class TelegramBotAdapter(ChatAdapter):
                 poll_fail_delay = min(poll_fail_delay * 2.0, 300.0)
                 continue
             poll_fail_delay = 5.0
+            if not isinstance(updates, list):
+                _log.warning("telegram-bot: getUpdates returned %s, not a list — skipping batch",
+                             type(updates).__name__)
+                continue
             for update in updates:
-                self._offset = max(self._offset, update.get("update_id", 0) + 1)
-                # Callback queries (inline button taps) get their own path.
-                if "callback_query" in update:
-                    self._handle_callback(update["callback_query"], handler)
-                    continue
-                # Inline queries (@BotName <query> in any chat).
-                if "inline_query" in update:
-                    self._handle_inline_query(update["inline_query"])
-                    continue
-                message = self._convert(update)
-                if message is not None:
-                    # At-most-once: a restarted poll loop can re-fetch
-                    # updates the offset already passed. Skip replays by
-                    # (chat_id, message_id) so the brain/feed see each
-                    # message exactly once.
-                    if message.message_id and self._note_inbound_seen(
-                        message.chat.chat_id, message.message_id
-                    ):
-                        _log.debug(
-                            "telegram-bot: skipping replayed message %s in %s",
-                            message.message_id, message.chat.chat_id,
-                        )
-                        continue
-                    self._deliver(handler, message)
+                # Per-update protection: one malformed update used to raise
+                # out of this loop and kill the poll thread — the bot went
+                # deaf with no further log. Now it is logged and skipped.
+                try:
+                    self._dispatch_update(update, handler)
+                except Exception as exc:  # noqa: BLE001 - per-update isolation
+                    _log.warning("telegram-bot: dropping malformed update %r: %s",
+                                 type(update).__name__, exc)
+
+    def _dispatch_update(self, update: Any, handler: IncomingHandler) -> None:
+        """Route one polled update to its handler.
+
+        Validates the update's shape first: external update payloads are
+        untrusted, and every sub-handler assumes dicts. Malformed updates
+        are logged and dropped, never raised.
+        """
+        try:
+            if not isinstance(update, dict):
+                _log.warning("telegram-bot: dropping non-dict update %r",
+                             type(update).__name__)
+                return
+            uid = update.get("update_id")
+            if isinstance(uid, int) and not isinstance(uid, bool):
+                self._offset = max(self._offset, uid + 1)
+            # Callback queries (inline button taps) get their own path.
+            if "callback_query" in update:
+                query = update["callback_query"]
+                if not isinstance(query, dict):
+                    _log.warning("telegram-bot: dropping non-dict callback_query %r",
+                                 type(query).__name__)
+                    return
+                self._handle_callback(query, handler)
+                return
+            # Inline queries (@BotName <query> in any chat).
+            if "inline_query" in update:
+                query = update["inline_query"]
+                if not isinstance(query, dict):
+                    _log.warning("telegram-bot: dropping non-dict inline_query %r",
+                                 type(query).__name__)
+                    return
+                self._handle_inline_query(query)
+                return
+            message = self._convert(update)
+            if message is not None:
+                # At-most-once: a restarted poll loop can re-fetch
+                # updates the offset already passed. Skip replays by
+                # (chat_id, message_id) so the brain/feed see each
+                # message exactly once.
+                if message.message_id and self._note_inbound_seen(
+                    message.chat.chat_id, message.message_id
+                ):
+                    _log.debug(
+                        "telegram-bot: skipping replayed message %s in %s",
+                        message.message_id, message.chat.chat_id,
+                    )
+                    return
+                self._deliver(handler, message)
+        except Exception as exc:  # noqa: BLE001 - per-update isolation
+            _log.warning("telegram-bot: dropping malformed update: %s", exc)
 
     # ── inbound ───────────────────────────────────────────────────────────
     # ── two-bot: owner gate + partner-context stamping ──────────────
@@ -2118,14 +2186,20 @@ class TelegramBotAdapter(ChatAdapter):
             _log.debug("telegram-personal: denial send failed: %s", exc)
 
     def _convert(self, update: dict[str, Any]) -> ChatMessage | None:
+        if not isinstance(update, dict):
+            return None
         msg = update.get("message") or update.get("edited_message") \
             or update.get("channel_post")
-        if not msg:
+        if not isinstance(msg, dict) or not msg:
             return None
         sender = msg.get("from") or {}
+        if not isinstance(sender, dict):
+            sender = {}
         if sender.get("is_bot"):
             return None  # loop guard: never answer other bots (or our echoes)
         chat = msg.get("chat") or {}
+        if not isinstance(chat, dict):
+            chat = {}
         chat_id = str(chat.get("id", ""))
         if not chat_id:
             return None
@@ -2143,23 +2217,46 @@ class TelegramBotAdapter(ChatAdapter):
         if self.chat_allow and chat_id not in self.chat_allow:
             _log.info("telegram-bot: ignoring chat %s — not in allowlist", chat_id)
             return None
-        kind = _BOT_CHAT_TYPES.get(chat.get("type", ""), ChatKind.DM)
+        chat_type = chat.get("type", "")
+        if not isinstance(chat_type, str):
+            chat_type = ""
+        kind = _BOT_CHAT_TYPES.get(chat_type, ChatKind.DM)
         text = msg.get("text") or msg.get("caption") or ""
+        if not isinstance(text, str):
+            text = str(text)
         # Remember the origin command per chat: the auto action footer
         # on tool results re-runs exactly this command on Retry.
         if text.strip().startswith("/"):
             self._last_command[chat_id] = text.strip()
         mentioned = False
         if kind != ChatKind.DM and self._bot_username:
-            for ent in msg.get("entities") or msg.get("caption_entities") or []:
-                if ent.get("type") == "mention":
-                    piece = text[ent["offset"]:ent["offset"] + ent["length"]]
-                    if piece.lower() == f"@{self._bot_username.lower()}":
-                        mentioned = True
-                        break
+            entities = msg.get("entities") or msg.get("caption_entities") or []
+            if not isinstance(entities, list):
+                entities = []
+            for ent in entities:
+                # External entity entries are untrusted: non-dict,
+                # non-int, or out-of-bounds offset/length used to raise
+                # (TypeError / IndexError via slicing semantics) here.
+                # Skip bad entries; a bad entity never drops the message.
+                if not isinstance(ent, dict):
+                    continue
+                if ent.get("type") != "mention":
+                    continue
+                offset, length = ent.get("offset"), ent.get("length")
+                if (not isinstance(offset, int) or isinstance(offset, bool)
+                        or not isinstance(length, int) or isinstance(length, bool)):
+                    continue
+                if offset < 0 or length < 0 or offset + length > len(text):
+                    continue
+                piece = text[offset:offset + length]
+                if piece.lower() == f"@{self._bot_username.lower()}":
+                    mentioned = True
+                    break
         media = self._inbound_media(msg, kind)
         reply_to = ""
         replied = msg.get("reply_to_message") or {}
+        if not isinstance(replied, dict):
+            replied = {}
         if replied.get("message_id"):
             reply_to = str(replied["message_id"])
         # /sham support: stash the replied-to audio/voice file_id so the
@@ -2169,6 +2266,8 @@ class TelegramBotAdapter(ChatAdapter):
         replied_audio_file_id = ""
         for _key in ("voice", "audio"):
             _rm = replied.get(_key) or {}
+            if not isinstance(_rm, dict):
+                continue
             if _rm.get("file_id"):
                 replied_audio_file_id = str(_rm["file_id"])
                 break
@@ -2178,13 +2277,18 @@ class TelegramBotAdapter(ChatAdapter):
         if replied_audio_file_id:
             meta["replied_audio_file_id"] = replied_audio_file_id
         who = sender.get("username") or sender.get("first_name") or str(sender.get("id", ""))
+        if not isinstance(who, str):
+            who = str(who)
         # Stable numeric Telegram user id — game identity keys off this
         # so username/display-name changes don't split profiles.
         who_id = str(sender.get("id", "") or "")
         who_username = str(sender.get("username") or "")
+        _title = chat.get("title", "") or who
+        if not isinstance(_title, str):
+            _title = str(_title)
         return ChatMessage(
             chat=ChatRef(platform=self.name, chat_id=chat_id, kind=kind,
-                         title=chat.get("title", "") or who, peer=who),
+                         title=_title, peer=who),
             incoming=True,
             text=text,
             sender=who,
@@ -2193,7 +2297,7 @@ class TelegramBotAdapter(ChatAdapter):
             media=media,
             reply_to=reply_to,
             mentioned=mentioned,
-            ts=float(msg.get("date", time.time())),
+            ts=_safe_ts(msg.get("date", time.time())),
             message_id=str(msg.get("message_id", "")),
             meta=meta,
         )
@@ -2209,6 +2313,10 @@ class TelegramBotAdapter(ChatAdapter):
 
     def _verify_callback(self, signed: str) -> str | None:
         """Verify signature, return the original data or None."""
+        if not isinstance(signed, str):
+            # Non-string callback data (external input) used to raise
+            # AttributeError on ``"|" not in signed`` — reject it.
+            return None
         if "|" not in signed:
             return None
         data, sig = signed.rsplit("|", 1)
@@ -2221,8 +2329,16 @@ class TelegramBotAdapter(ChatAdapter):
     def _handle_callback(self, query: dict[str, Any],
                          handler: IncomingHandler) -> None:
         """Process an inline button tap as a synthetic command message."""
+        if not isinstance(query, dict):
+            _log.warning("telegram-bot: dropping non-dict callback_query %r",
+                         type(query).__name__)
+            return
         query_id = query.get("id", "")
+        if not isinstance(query_id, str):
+            query_id = str(query_id)
         sender = query.get("from") or {}
+        if not isinstance(sender, dict):
+            sender = {}
         if sender.get("is_bot"):
             self._answer_callback(query_id)
             return
@@ -2236,7 +2352,11 @@ class TelegramBotAdapter(ChatAdapter):
         # public game messages, so it flows to the public-bot gate's
         # friendly redirect instead of dying here as "Not authorized".
         msg = query.get("message") or {}
+        if not isinstance(msg, dict):
+            msg = {}
         chat = msg.get("chat") or {}
+        if not isinstance(chat, dict):
+            chat = {}
         chat_id = str(chat.get("id", ""))
         signed = query.get("data", "")
         data = self._verify_callback(signed)
@@ -2265,11 +2385,19 @@ class TelegramBotAdapter(ChatAdapter):
         self._answer_callback(query_id)
         # Deliver as a synthetic "/" command so the normal command
         # pipeline (owner gating, parsing, dispatch) handles it.
-        kind = _BOT_CHAT_TYPES.get(chat.get("type", ""), ChatKind.DM)
+        chat_type = chat.get("type", "")
+        if not isinstance(chat_type, str):
+            chat_type = ""
+        kind = _BOT_CHAT_TYPES.get(chat_type, ChatKind.DM)
         who = sender.get("username") or sender.get("first_name") or str(sender.get("id", ""))
+        if not isinstance(who, str):
+            who = str(who)
+        _title = chat.get("title", "") or who
+        if not isinstance(_title, str):
+            _title = str(_title)
         message = ChatMessage(
             chat=ChatRef(platform=self.name, chat_id=chat_id, kind=kind,
-                         title=chat.get("title", "") or who, peer=who),
+                         title=_title, peer=who),
             incoming=True,
             text=data if data.startswith("/") else f"/{data}",
             sender=who,
@@ -2304,13 +2432,23 @@ class TelegramBotAdapter(ChatAdapter):
         """Answer an inline query with tappable command articles."""
         from .tgbot_buttons import inline_results_for
 
+        if not isinstance(query, dict):
+            _log.warning("telegram-bot: dropping non-dict inline_query %r",
+                         type(query).__name__)
+            return
         query_id = query.get("id", "")
+        if not isinstance(query_id, str):
+            query_id = str(query_id)
         if not query_id:
             return
         sender = query.get("from") or {}
+        if not isinstance(sender, dict):
+            sender = {}
         if sender.get("is_bot"):
             return
         qtext = query.get("query", "") or ""
+        if not isinstance(qtext, str):
+            qtext = str(qtext)
         try:
             results = inline_results_for(qtext)
             self._api("answerInlineQuery", inline_query_id=query_id,
@@ -2322,22 +2460,43 @@ class TelegramBotAdapter(ChatAdapter):
 
     def _inbound_media(self, msg: dict[str, Any], kind: str) -> list[MediaRef]:
         """Download the largest attached file, when the gates allow it."""
+        if not isinstance(msg, dict):
+            return []
         file_id, fkind, fname = "", "", ""
-        if msg.get("photo"):
-            biggest = max(msg["photo"], key=lambda p: p.get("file_size", 0))
-            file_id, fkind, fname = biggest["file_id"], "image", "photo.jpg"
-        elif msg.get("document"):
+
+        def _fid(entry: Any) -> str:
+            # Direct ``entry["file_id"]`` indexing used to raise
+            # KeyError / TypeError on malformed media entries.
+            if not isinstance(entry, dict):
+                return ""
+            fid = entry.get("file_id")
+            return fid if isinstance(fid, str) and fid else ""
+
+        def _size(entry: Any) -> float:
+            if not isinstance(entry, dict):
+                return 0
+            size = entry.get("file_size", 0)
+            return size if isinstance(size, (int, float)) and not isinstance(size, bool) else 0
+
+        photo = msg.get("photo")
+        if isinstance(photo, list) and photo:
+            candidates = [p for p in photo if _fid(p)]
+            if candidates:
+                biggest = max(candidates, key=_size)
+                file_id, fkind, fname = _fid(biggest), "image", "photo.jpg"
+        elif _fid(msg.get("document")):
             d = msg["document"]
-            file_id, fkind = d["file_id"], "document"
-            fname = d.get("file_name", "file")
-        elif msg.get("video"):
-            file_id, fkind, fname = msg["video"]["file_id"], "video", "video.mp4"
-        elif msg.get("voice"):
-            file_id, fkind, fname = msg["voice"]["file_id"], "audio", "voice.ogg"
-        elif msg.get("audio"):
-            file_id, fkind, fname = msg["audio"]["file_id"], "audio", "audio.mp3"
-        elif msg.get("video_note"):
-            file_id, fkind, fname = msg["video_note"]["file_id"], "video", "note.mp4"
+            file_id, fkind = _fid(d), "document"
+            _fn = d.get("file_name", "file")
+            fname = _fn if isinstance(_fn, str) and _fn else "file"
+        elif _fid(msg.get("video")):
+            file_id, fkind, fname = _fid(msg.get("video")), "video", "video.mp4"
+        elif _fid(msg.get("voice")):
+            file_id, fkind, fname = _fid(msg.get("voice")), "audio", "voice.ogg"
+        elif _fid(msg.get("audio")):
+            file_id, fkind, fname = _fid(msg.get("audio")), "audio", "audio.mp3"
+        elif _fid(msg.get("video_note")):
+            file_id, fkind, fname = _fid(msg.get("video_note")), "video", "note.mp4"
         if not file_id:
             return []
         size = 0

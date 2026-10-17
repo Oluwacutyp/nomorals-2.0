@@ -58,6 +58,14 @@ SERVERLESS_URL = "https://api-inference.huggingface.co"
 ROUTER_URL = "https://router.huggingface.co/v1"
 
 
+def _safe_int(value: Any) -> int:
+    """Coerce an external usage count to int; non-numeric → 0."""
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 class HFServerlessProvider(LLMProvider):
     """Hugging Face Inference API / Inference Endpoints."""
 
@@ -432,18 +440,28 @@ class HFServerlessProvider(LLMProvider):
         if not isinstance(data, dict):
             return LLMResponse(text=str(data), model=self.model)
         choices = data.get("choices") or []
+        if not isinstance(choices, list):
+            choices = []
         if choices:
-            message = choices[0].get("message") or {}
-            usage = data.get("usage") or {}
+            # External shape: a non-dict choice / message / usage used to
+            # raise AttributeError / TypeError / ValueError here. Guard
+            # every level and coerce counts defensively.
+            first = choices[0] if isinstance(choices[0], dict) else {}
+            message = first.get("message")
+            if not isinstance(message, dict):
+                message = {}
+            usage = data.get("usage")
+            if not isinstance(usage, dict):
+                usage = {}
             return LLMResponse(
                 text=message.get("content") or "",
                 model=data.get("model", self.model),
                 usage=Usage(
-                    prompt_tokens=int(usage.get("prompt_tokens") or 0),
-                    completion_tokens=int(usage.get("completion_tokens") or 0),
-                    total_tokens=int(usage.get("total_tokens") or 0),
+                    prompt_tokens=_safe_int(usage.get("prompt_tokens")),
+                    completion_tokens=_safe_int(usage.get("completion_tokens")),
+                    total_tokens=_safe_int(usage.get("total_tokens")),
                 ),
-                finish_reason=choices[0].get("finish_reason", "stop"),
+                finish_reason=first.get("finish_reason", "stop"),
                 raw=data,
             )
         # Text-generation shape: [{"generated_text": "..."}] or {"generated_text": ...}
@@ -469,18 +487,42 @@ class HFServerlessProvider(LLMProvider):
 
     @staticmethod
     def _parse_embeddings(data: Any, expected: int) -> list[list[float]]:
-        if isinstance(data, list) and data and isinstance(data[0], list):
-            # Legacy shape: [[...], [...]]
-            return [list(map(float, vector)) for vector in data]
-        if isinstance(data, list):
-            items = sorted(
-                (d for d in data if isinstance(d, dict)), key=lambda d: d.get("index", 0)
-            )
-            if items:
-                return [list(map(float, item.get("embedding") or [])) for item in items]
-        if isinstance(data, dict) and "data" in data:
-            items = sorted(data["data"], key=lambda d: d.get("index", 0))
-            return [list(map(float, item.get("embedding") or [])) for item in items]
+        # Every branch converts malformed external data into an honest
+        # ModelError (the router fails over on it) instead of letting a
+        # raw TypeError / ValueError / AttributeError escape.
+        try:
+            if isinstance(data, list) and data and isinstance(data[0], list):
+                # Legacy shape: [[...], [...]]
+                return [list(map(float, vector)) for vector in data]
+            if isinstance(data, list):
+                items = sorted(
+                    (d for d in data if isinstance(d, dict)),
+                    key=lambda d: _safe_int(d.get("index")),
+                )
+                if items:
+                    return [
+                        list(map(float, item.get("embedding") or []))
+                        for item in items
+                    ]
+            if isinstance(data, dict) and "data" in data:
+                raw_items = data["data"]
+                if not isinstance(raw_items, list):
+                    raise ModelError(
+                        "unrecognized embedding response shape: "
+                        f"data['data'] is {type(raw_items).__name__}, not a list"
+                    )
+                items = sorted(
+                    (d for d in raw_items if isinstance(d, dict)),
+                    key=lambda d: _safe_int(d.get("index")),
+                )
+                return [
+                    list(map(float, item.get("embedding") or []))
+                    for item in items
+                ]
+        except ModelError:
+            raise
+        except (TypeError, ValueError) as exc:
+            raise ModelError(f"malformed embedding response: {exc}") from exc
         raise ModelError(f"unrecognized embedding response shape: {type(data).__name__}")
 
 

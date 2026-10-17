@@ -13,6 +13,7 @@ from typing import Any, Collection, Sequence
 
 from ...core.errors import ModelError, ProviderError, classify, is_not_found_error
 from ...core.http import HttpClient
+from ...core.logging_setup import get_logger
 from ...core.retry import BackoffPolicy, retry_call
 from ..base import (
     LLMProvider,
@@ -23,6 +24,9 @@ from ..base import (
     short_error,
     validate_messages,
 )
+
+
+_log = get_logger(__name__)
 
 
 def heal_model_id(configured: str, known: Collection[str]) -> str:
@@ -144,8 +148,15 @@ class OpenAICompatProvider(LLMProvider):
         except Exception:  # noqa: BLE001 — header store is an impl detail
             try:
                 self.http.headers["Authorization"] = f"Bearer {key}"
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as exc:  # noqa: BLE001
+                # Both header stores failed: the key pool rotated in
+                # memory (self.api_key) but the HTTP client still sends
+                # the old key. Log it — silently sending the stale key
+                # on every call used to be invisible.
+                _log.warning(
+                    "openai_compat: key rotation could not update the "
+                    "Authorization header: %s", exc
+                )
 
     def rotate_key(self) -> bool:
         """Move to the next key in the pool.  True when one was available.

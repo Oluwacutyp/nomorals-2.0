@@ -982,7 +982,7 @@ class EmailIntegration:
         imap_host = imap_servers.get(service, f"imap.{service}.com")
         
         try:
-            with imaplib.IMAP4_SSL(imap_host, 993) as mail:
+            with imaplib.IMAP4_SSL(imap_host, 993, timeout=30) as mail:
                 mail.login(account, cred.password)
                 mail.select(folder)
                 
@@ -1087,7 +1087,7 @@ class EmailIntegration:
         }
         imap_host = imap_servers.get(service, f"imap.{service}.com")
         try:
-            with imaplib.IMAP4_SSL(imap_host, 993) as mail:
+            with imaplib.IMAP4_SSL(imap_host, 993, timeout=30) as mail:
                 mail.login(account, cred.password)
                 mail.select("INBOX")
                 # message_id may be a sequence number or UID; try UID first
@@ -1113,7 +1113,7 @@ class EmailIntegration:
         }
         imap_host = imap_servers.get(service, f"imap.{service}.com")
         try:
-            with imaplib.IMAP4_SSL(imap_host, 993) as mail:
+            with imaplib.IMAP4_SSL(imap_host, 993, timeout=30) as mail:
                 mail.login(account, cred.password)
                 mail.select("INBOX")
                 status, _ = mail.uid("STORE", message_id, "+FLAGS", "\\Deleted")

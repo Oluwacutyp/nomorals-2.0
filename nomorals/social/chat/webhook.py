@@ -75,6 +75,11 @@ class _HookHandler(BaseHTTPRequestHandler):
         except (ValueError, OSError):
             self._send_json(400, {"ok": False, "error": "invalid JSON"})
             return
+        if not isinstance(payload, dict):
+            # A JSON array / string / number has no .get — reject honestly
+            # instead of raising AttributeError into the handler thread.
+            self._send_json(400, {"ok": False, "error": "JSON body must be an object"})
+            return
         text = str(payload.get("text", "") or "")
         if not text.strip():
             self._send_json(400, {"ok": False, "error": "text is required"})

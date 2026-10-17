@@ -248,8 +248,14 @@ class ChatGateway:
         for adapter in self._snapshot_adapters().values():
             try:
                 adapter.stop()
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as exc:  # noqa: BLE001
+                # One adapter's stop must never prevent the rest from
+                # stopping — but the failure is now logged, not swallowed.
+                _log.warning(
+                    "chat gateway: stop failed for %s: %s",
+                    getattr(adapter, "name", "?"),
+                    scrub_secrets(str(exc)),
+                )
 
     # ── hot start/stop (control commands) ───────────────────────────────────
     def known_platforms(self) -> list[str]:

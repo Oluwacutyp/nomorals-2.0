@@ -464,8 +464,10 @@ class TelegramConnector(Connector):
                 params = (body429.get("parameters") or {}) if isinstance(
                     body429, dict) else {}
                 retry_after = float(params.get("retry_after", 1) or 1)
-            except Exception:  # noqa: BLE001 - advisory only
-                pass
+            except Exception as exc:  # noqa: BLE001 - advisory only
+                # Unparseable retry_after: the 1s default stands, but the
+                # failure is now visible instead of silently swallowed.
+                _log.debug("telegram connector: retry_after parse failed: %s", exc)
             raise ConnectorRateLimitError(
                 "telegram rate limit hit (429) — back off before retrying",
                 retry_after=retry_after,
