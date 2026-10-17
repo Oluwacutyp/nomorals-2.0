@@ -192,6 +192,48 @@ class RuntimeMetaMixin:
             return f"mode set to {mode} (agent switch failed: {exc})"
         return f"autonomy: {mode}"
 
+    def _control_chatmode(self, command: Any, chat_key: str) -> str:
+        """Per-chat reply mode: /chatmode [games-only|normal|status]
+        [platform:chat_id]. No target sets the chat the command was sent
+        in; a target sets a remote chat by key. Owner-only (enforced by
+        the grant check in handle_control before dispatch)."""
+        from ...partner.chat_modes import (
+            MODE_GAMES_ONLY, MODE_NORMAL, get_chat_mode, set_chat_mode)
+
+        usage = ("usage: /chatmode [games-only|normal|status] "
+                 "[platform:chat_id]")
+        words = (command.tail or "").split()
+        sub = (words[0].lower() if words else "status")
+        target = words[1] if len(words) > 1 else chat_key
+        if sub in ("games-only", "games_only", "gamesonly", "games", "quiet"):
+            mode: str | None = MODE_GAMES_ONLY
+        elif sub in ("normal", "off", "clear", "default"):
+            mode = MODE_NORMAL
+        elif sub == "status":
+            mode = None
+        else:
+            return f"unknown mode {sub!r} — {usage}"
+        if len(words) > 1:
+            # A remote target must look like a chat key, or the set
+            # would silently apply to a key nothing ever matches.
+            platform, _, chat_id = target.partition(":")
+            if not platform or not chat_id:
+                return f"chat keys look like telegram:123456 — {usage}"
+        where = "this chat" if target == chat_key else target
+        if mode is None:
+            current = get_chat_mode(target)
+            if current == MODE_GAMES_ONLY:
+                return (f"{where} is games-only — normal chat stays silent "
+                        "here; game commands still work. "
+                        "/chatmode normal to restore.")
+            return f"{where} is normal — I answer everything here."
+        set_chat_mode(target, mode)
+        if mode == MODE_GAMES_ONLY:
+            return (f"{where} is now games-only — I'll stay silent for "
+                    "normal chat here, but game commands still work. "
+                    "/chatmode normal to restore.")
+        return f"{where} is back to normal — I'll answer everything here again."
+
     def _control_model(self, arg: str) -> str:
         """Live model switch — no restart.
 

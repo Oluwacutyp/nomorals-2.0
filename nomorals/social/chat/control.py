@@ -198,6 +198,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "stop": (1, 1),
     "mood": (0, 10),  # label, or several dim=NN pairs
     "mode": (1, 1),
+    "chatmode": (0, 2),  # /chatmode [games-only|normal|status] [chat_key] — per-chat reply mode
     "model": (0, 6),  # provider + up to 5 fallback providers
     "providers": (0, 0),  # /providers — probe the whole chain, live or why not
     "say": (2, None),
@@ -1003,6 +1004,10 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
     "mode": {"what": "her autonomy level: off (asleep) | suggest (proposes, you approve) | auto (acts).",
              "usage": "/mode off|suggest|auto", "example": "/mode auto",
              "related": "/proposals /power"},
+    "chatmode": {"what": "this chat's reply mode: normal (she answers everything) | games-only (silent for normal chat, game commands still work). Owner-only; run it in the chat to set that chat.",
+             "usage": "/chatmode [games-only|normal|status] [platform:chat_id]",
+             "example": "/chatmode games-only   ·   /chatmode normal telegram:123456",
+             "related": "/status /game"},
     "model": {"what": "switch the active model live (up to 5 fallbacks); no argument shows the chain.",
               "usage": "/model [provider [fallback …]]", "example": "/model local",
               "related": "/status /providers"},
@@ -2029,7 +2034,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
                             "gcal", "trello", "proxy", "workspace", "record",
                             "macro", "file", "publish", "notify", "proactive", "mission",
                             "bet", "finance", "weather", "tz", "email", "routine", "home", "store", "track", "untrack", "trip", "travelclient", "contract", "legal", "research", "contracts", "regwatch", "uprofile", "vnote", "match", "cgroup", "challenge", "room", "scamcheck", "passport", "truecost", "value", "valuepick", "watch", "send", "leads", "guardrails", "competitor", "cost", "panel"]),
-    ("platform control", ["start", "stop", "profile",
+    ("platform control", ["start", "stop", "profile", "chatmode",
                           "update", "pull", "deploy", "restart"]),
     ("discovery", ["list", "commands", "menu", "help", "tour", "heal"]),
 ]
@@ -2190,7 +2195,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
     ("her day — state & control",
      ["status", "platforms", "mood", "stage", "model", "providers", "say", "power",
       "proposals", "approve", "deny", "start", "stop", "quit",
-      "mode", "profile", "mind"]),
+      "mode", "chatmode", "profile", "mind"]),
     ("search & research",
      ["search", "searchdeep", "searchleads", "money", "searchhist", "research",
       "news", "osint", "dns", "scan", "whois", "ports"]),
@@ -2287,6 +2292,7 @@ LIST_ONELINERS: dict[str, str] = {
     "stop": "hot-stop a platform this session",
     "quit": "shut the system down",
     "mode": "autonomy mode: off | suggest | auto",
+    "chatmode": "per-chat reply mode: /chatmode games-only | normal | status",
     "profile": "profile-aware runtime: detected environment + every tuned knob",
     "update": "self-update from chat: gate + checkpoint + pull + restart",
     "pull": "git pull --ff-only, no restart",

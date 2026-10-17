@@ -12,6 +12,7 @@ from concurrent.futures import Future, ThreadPoolExecutor, wait
 from typing import Any, Callable
 from ...llm.brain import brain_for
 from ...core.logging_setup import get_logger
+from ...partner.chat_modes import is_games_only as _chat_modes_is_games_only
 from ...partner.gating import gate_decision, is_owner_chat, is_restricted
 from ...partner.presence import Presence, decide_presence, human_typing_seconds
 from ...social.chat.base import ChatKind, ChatMessage, ChatRef
@@ -475,6 +476,38 @@ class PartnerRuntime(
             with self._queue_guard:
                 self._draining[key] = False
 
+    def _passes_games_only(self, message: ChatMessage) -> bool:
+        """Does this message pass a games-only chat? Game moves were
+        already handled by the game router above; this decides the rest.
+
+        Passes: owner control commands (any registered kind — so the
+        owner can /chatmode normal), and game commands the sender's
+        grant allows. Everything else (plain chat, non-game slashes,
+        owner-only commands from non-owners) drops silently.
+        """
+        from ...social.chat.control import (
+            CONTROL_COMMANDS, GAME_COMMANDS, caller_may_run, parse_control)
+
+        text = (message.text or "").strip()
+        if not text.startswith("/"):
+            return False
+        command = parse_control(text)
+        if command is None or command.kind == "error":
+            return False
+        is_operator = self._is_operator(message)
+        if is_operator and command.kind in CONTROL_COMMANDS:
+            return True
+        # The games-only pass set: the game hub, every direct game
+        # command (from the registry, never a pasted list), plus /arena
+        # and /play (the owner's games-adjacent commands — /arena stays
+        # owner-only via caller_may_run, /play is public).
+        games_only_pass = (
+            frozenset({"game", "arena", "play"}) | frozenset(GAME_COMMANDS))
+        if command.kind in games_only_pass and caller_may_run(
+                command.kind, is_operator):
+            return True
+        return False
+
     def _process(self, message: ChatMessage) -> None:
         self._bump("messages")
         # Autonomy: every inbound message resets the idle clock and feeds
@@ -708,6 +741,16 @@ class PartnerRuntime(
                     self.gateway.send(message.chat.platform, message.chat, move_reply)
                 except Exception:  # noqa: BLE001
                     _log.exception("game reply send failed")
+                return
+        # Per-chat games-only mode: this chat stays silent for normal
+        # chat, but game commands and owner control commands still work
+        # (so the owner can unset it). Game moves were handled above —
+        # a plain message reaching here is not a move, so it drops.
+        if message.incoming and _chat_modes_is_games_only(message.chat.key):
+            if not self._passes_games_only(message):
+                self._bump("dropped")
+                _log.info("games-only: dropped non-game message in %s",
+                          message.chat.key)
                 return
         # /game AND the direct game commands (/hangman, /mafia, …) work in
         # EVERY chat, for EVERY participant — games are social by nature, so
@@ -2400,6 +2443,9 @@ class PartnerRuntime(
 
         if kind == "mode":
             return self._control_mode(arg)
+
+        if kind == "chatmode":
+            return self._control_chatmode(command, chat_key)
 
         if kind == "model":
             return self._control_model(command.tail)
