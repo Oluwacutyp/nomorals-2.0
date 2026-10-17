@@ -610,20 +610,27 @@ class HttpClient:
         files: Sequence[tuple[str, str | Path, str]] | None = None,
         **kw: Any,
     ) -> HttpResponse:
-        """``files`` entries are ``(form_name, path, mime)``."""
+        """``files`` entries are ``(form_name, path, mime)`` or
+        ``(form_name, path, mime, filename)``. The 4-tuple form sends an
+        explicit multipart ``filename`` (needed when the on-disk name
+        has no usable extension — e.g. a ``.bin`` temp download — but
+        the bytes are a known audio format: the API decides the type
+        from the filename extension, not the MIME)."""
         boundary = f"----nomorals{int(time.time() * 1000)}"
         chunks: list[bytes] = []
         for key, value in (fields or {}).items():
             chunks.append(
                 f"--{boundary}\r\nContent-Disposition: form-data; name=\"{key}\"\r\n\r\n{value}\r\n".encode()
             )
-        for name, path, mime in files or ():
+        for entry in files or ():
+            name, path, mime = entry[0], entry[1], entry[2]
             file_path = Path(path)
-            guess = mime or mimetypes.guess_type(file_path.name)[0] or "application/octet-stream"
+            filename = entry[3] if len(entry) > 3 and entry[3] else file_path.name
+            guess = mime or mimetypes.guess_type(filename)[0] or "application/octet-stream"
             chunks.append(
                 (
                     f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"; '
-                    f'filename="{file_path.name}"\r\nContent-Type: {guess}\r\n\r\n'
+                    f'filename="{filename}"\r\nContent-Type: {guess}\r\n\r\n'
                 ).encode()
             )
             chunks.append(file_path.read_bytes())

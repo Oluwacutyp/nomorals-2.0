@@ -1096,6 +1096,97 @@ def _stt_whisper_cpp(path: Path, language: str) -> str:
     return re.sub(r"\[[^]]*\]", "", proc.stdout.decode("utf-8", "replace")).strip()
 
 
+# Groq / OpenAI-compatible transcription endpoints decide the file type
+# from the MULTIPART FILENAME EXTENSION, not the MIME. A filename with
+# no supported extension — e.g. the MTProto download
+# ``tg-<millis>-0.bin`` (extensionless temp name + ".bin" appended by
+# the adapter) — is rejected with HTTP 400 unsupported_audio_format
+# even though the bytes are valid .ogg Opus. The MIME fix alone was
+# necessary but NOT sufficient; the filename extension is what Groq
+# checks. This is the set Groq accepts (from its 400 error message).
+_GROQ_SUPPORTED_EXTS = frozenset({
+    ".flac", ".mp3", ".mp4", ".mpeg", ".mpga", ".m4a", ".ogg", ".opus",
+    ".wav", ".webm",
+})
+
+
+def _sniff_audio_ext(path: Path) -> str:
+    """Detect the audio container from magic bytes. "" when unknown.
+
+    Used to name the upload correctly when the on-disk filename lies
+    (``.bin`` / extensionless temp download). Never trusts the suffix.
+    """
+    try:
+        with open(path, "rb") as handle:
+            head = handle.read(16)
+    except OSError:
+        return ""
+    if head.startswith(b"OggS"):
+        return ".ogg"
+    if head.startswith(b"RIFF") and head[8:12] == b"WAVE":
+        return ".wav"
+    if head.startswith(b"fLaC"):
+        return ".flac"
+    if head.startswith(b"\x1a\x45\xdf\xa3"):
+        return ".webm"
+    if head.startswith(b"ID3") or (len(head) >= 2 and head[0] == 0xFF
+                                   and (head[1] & 0xE0) == 0xE0):
+        return ".mp3"
+    if len(head) >= 8 and head[4:8] == b"ftyp":
+        return ".m4a"
+    return ""
+
+
+def _to_ogg(path: Path) -> Path:
+    """Convert a genuinely unsupported audio format to OGG/Opus.
+
+    Only for formats Groq cannot take at all (AAC, AMR, AIFF, ...).
+    Relabelling those bytes with a supported extension would be lying
+    about the content — convert, don't hope. Raises ToolError when
+    ffmpeg is unavailable or the conversion fails.
+    """
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        raise ToolError(
+            f"{path.suffix or 'extensionless'} audio is not a format Groq "
+            "accepts and ffmpeg is unavailable to convert it "
+            "(Termux: pkg install ffmpeg)"
+        )
+    converted = path.with_suffix(".ogg")
+    proc = subprocess.run(
+        [ffmpeg, "-y", "-i", str(path), "-c:a", "libopus", "-b:a", "64k",
+         str(converted)],
+        capture_output=True, timeout=_STT_TIMEOUT, check=False,
+    )
+    if proc.returncode != 0 or not converted.exists():
+        raise ToolError(
+            "ffmpeg conversion to ogg failed: "
+            f"{proc.stderr.decode('utf-8', 'replace')[:300]}"
+        )
+    return converted
+
+
+def _stt_upload_target(path: Path) -> tuple[Path, str]:
+    """Resolve (file to upload, multipart filename) for STT.
+
+    The multipart filename ALWAYS carries a Groq-supported extension
+    matching the actual audio format:
+    - suffix already supported → on-disk name unchanged;
+    - misnamed file (``.bin`` / extensionless) → magic-byte sniff
+      supplies the real extension (``.ogg`` for Telegram voice notes);
+    - genuinely unsupported format (AAC, AMR, AIFF, unknown) →
+      converted to OGG/Opus first, never sent with a lying extension.
+    """
+    suffix = path.suffix.lower()
+    if suffix in _GROQ_SUPPORTED_EXTS:
+        return path, path.name
+    sniffed = _sniff_audio_ext(path)
+    if sniffed in _GROQ_SUPPORTED_EXTS:
+        return path, path.stem + sniffed
+    converted = _to_ogg(path)
+    return converted, converted.name
+
+
 def _stt_openai_compat(
     path: Path, language: str, *, base_url: str, api_key: str, model: str
 ) -> str:
@@ -1108,15 +1199,19 @@ def _stt_openai_compat(
     # Groq doesn't serve OpenAI's "whisper-1" — use their turbo model.
     default_model = ("whisper-large-v3-turbo" if "groq.com" in base
                      else "whisper-1")
-    # Send the real audio MIME, not application/octet-stream: some
-    # endpoints reject a voice note whose part claims a generic binary
-    # type (Telegram voice notes are .ogg Opus).
-    mime = _AUDIO_MIME_BY_EXT.get(path.suffix.lower(),
+    # The upload filename must carry a supported extension matching the
+    # actual format: Groq decides the type from the filename, not the
+    # MIME. A misnamed file (``.bin`` temp download) gets its real
+    # extension from magic bytes; an unsupported format is converted
+    # to OGG first. The MIME follows the upload filename, not the
+    # on-disk suffix.
+    upload_path, upload_name = _stt_upload_target(path)
+    mime = _AUDIO_MIME_BY_EXT.get(Path(upload_name).suffix.lower(),
                                  "application/octet-stream")
     response = client.post_multipart(
         f"{base}/audio/transcriptions",
         fields={"model": model or default_model, **({"language": language} if language and language != "auto" else {})},
-        files=[("file", str(path), mime)],
+        files=[("file", str(upload_path), mime, upload_name)],
         headers={"Authorization": f"Bearer {api_key}"},
     )
     if not response.ok:
