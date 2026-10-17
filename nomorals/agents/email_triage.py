@@ -14,9 +14,15 @@ Safety posture (non-negotiable):
 * ``GmailConnector.send_message`` itself is confirmation-gated, so the
   draft queue is a second lock on top of the connector's own.
 
-Chat: ``/email triage|drafts|send <id>|followups``.  Natural language
+Chat: ``/email triage|inbox|search|read|thread|drafts|compose|reply|
+send|approve|discard|followups`` (aliases: ``/gmail``, ``/mail``;
+bare ``/inbox`` lists the inbox).  Natural language
 "what did <vendor> say about <topic>?" routes through the Core Mind's
 ``email_query`` intent (see ``_email_intent`` in coremind.py).
+
+Sending is always two-step: ``compose``/``reply`` queue a pending draft,
+``/email send <id>`` shows the exact payload and arms that one draft,
+and only the owner's explicit "send it" in chat sends it.
 """
 
 from __future__ import annotations
@@ -753,19 +759,262 @@ def check_explicit_send(text: str, context: Any) -> str | None:
 
 # ── chat command ─────────────────────────────────────────────────────────────
 
+_EMAIL_USAGE = (
+    "usage: /email triage | inbox [query] [n] | search <query> [n] | "
+    "read <message-id> | thread <thread-id> | drafts | "
+    "compose <to> | <subject> | <body> | reply <message-id> | <body> | "
+    "send <id> | approve <id> | discard <id> | followups\n"
+    "aliases: /gmail, /mail (same as /email); bare /inbox lists the inbox.\n"
+    "sending is two-step: /email send <id> shows the exact payload and "
+    "arms it — only your explicit \"send it\" sends it.\n"
+    "or just ask: \"what did <vendor> say about <topic>?\""
+)
+
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+_ADDR_IN_HEADER_RE = re.compile(r"<([^>]+)>")
+
+
+def _html_to_text(html: str) -> str:
+    """Readable text from HTML: strip tags, keep line breaks."""
+    import html as _html
+
+    text = re.sub(r"(?i)<(br|p|div|li|tr)[^>]*>", "\n", html or "")
+    text = re.sub(r"<[^>]+>", "", text)
+    text = _html.unescape(text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    text = re.sub(r"[ \t]+", " ", text)
+    return text.strip()
+
+
+def _extract_body(payload: dict[str, Any]) -> tuple[str, list[dict[str, Any]]]:
+    """Gmail API ``full`` payload → (best text body, attachments).
+
+    Prefers text/plain; falls back to text/html → plain text. Attachment
+    parts (with filename) are inventoried, never decoded here.
+    """
+    import base64 as _b64
+
+    best_plain, best_html = "", ""
+    attachments: list[dict[str, Any]] = []
+
+    def _decode(data: str) -> str:
+        try:
+            return _b64.urlsafe_b64decode(data).decode("utf-8", "replace")
+        except Exception:  # noqa: BLE001 - bad part, skip it
+            return ""
+
+    def _walk(part: dict[str, Any]) -> None:
+        nonlocal best_plain, best_html
+        mime = part.get("mimeType", "")
+        filename = part.get("filename", "")
+        body = part.get("body", {}) or {}
+        if filename and body.get("attachmentId"):
+            attachments.append({
+                "filename": filename,
+                "mimeType": mime,
+                "size": body.get("size", 0),
+                "attachmentId": body.get("attachmentId"),
+            })
+            return
+        data = body.get("data")
+        if mime == "text/plain" and data and not best_plain:
+            best_plain = _decode(data)
+        elif mime == "text/html" and data and not best_html:
+            best_html = _decode(data)
+        for sub in part.get("parts", []) or []:
+            _walk(sub)
+
+    _walk(payload or {})
+    text = best_plain or (_html_to_text(best_html) if best_html else "")
+    return text, attachments
+
+
+def _format_message(msg: dict[str, Any]) -> str:
+    """One full message → readable From/To/Subject/Date + body + files."""
+    payload = msg.get("payload") or {}
+    headers = payload.get("headers") or []
+    body, attachments = _extract_body(payload)
+    lines = [
+        f"📧 {_header(headers, 'subject') or '(no subject)'}",
+        f"From: {_header(headers, 'from') or '(unknown)'}",
+        f"To: {_header(headers, 'to') or '(unknown)'}",
+        f"Date: {_header(headers, 'date') or '(unknown)'}",
+        "",
+    ]
+    if body:
+        shown = body if len(body) <= 4000 else body[:4000] + "\n… (truncated)"
+        lines.append(shown)
+    else:
+        lines.append("(no readable body)")
+    if attachments:
+        lines.append("")
+        lines.append("attachments:")
+        for a in attachments:
+            lines.append(f"• {a['filename']} ({a['mimeType']}, {a['size']} bytes)")
+    return "\n".join(lines)
+
+
+def _parse_list_args(rest: str, default_query: str) -> tuple[str, int]:
+    """``[query] [n]`` → (query, max_results). A trailing integer is the count."""
+    tokens = (rest or "").split()
+    max_n = 10
+    if tokens and tokens[-1].isdigit():
+        max_n = max(1, min(int(tokens.pop()), 50))
+    query = " ".join(tokens) or default_query
+    return query, max_n
+
+
+def _list_messages(gmail: Any, query: str, max_n: int) -> str:
+    """List matching messages (metadata only): id + sender + subject + snippet."""
+    try:
+        listing = gmail.list_messages(query=query, max_results=max_n)
+    except Exception as exc:  # noqa: BLE001 - connector down, say so
+        return f"📧 couldn't list mail: {exc}"
+    refs = listing.get("messages") or []
+    if not refs:
+        return f"📧 nothing for `{query}`."
+    lines = [f"📧 {len(refs)} message{'s' if len(refs) != 1 else ''} for `{query}`:"]
+    for ref in refs[:max_n]:
+        try:
+            msg = gmail.get_message(ref.get("id", ""), format="metadata")
+        except Exception as exc:  # noqa: BLE001 - one bad message, keep going
+            lines.append(f"• {ref.get('id', '?')} — unreadable ({exc})")
+            continue
+        try:
+            item = _item_from_message(msg)
+        except Exception:  # noqa: BLE001
+            lines.append(f"• {ref.get('id', '?')} — unparsable")
+            continue
+        lines.append(f"• `{item.id}` — {item.sender} — {item.subject[:70]}")
+        if item.snippet:
+            lines.append(f"  {item.snippet[:140]}")
+    lines.append("\n`/email read <id>` reads one in full.")
+    return "\n".join(lines)
+
+
+def _address_from_header(from_header: str) -> str:
+    """``"Adaeze Okafor <ada@example.com>"`` → ``ada@example.com``."""
+    m = _ADDR_IN_HEADER_RE.search(from_header or "")
+    if m:
+        return m.group(1).strip()
+    return (from_header or "").strip()
+
+
+def _validate_recipients(to: str) -> str:
+    """Comma-separated recipients → "" when all valid, else the bad one."""
+    for addr in (to or "").split(","):
+        addr = addr.strip()
+        if not addr or not _EMAIL_RE.match(addr):
+            return addr
+    return ""
+
+
+def _draft_preview(draft: Draft) -> str:
+    return (f"📧 draft `{draft.id}` queued:\nTo: {draft.to}\n"
+            f"Subject: {draft.subject}\n\n{draft.body}\n\n"
+            f"`/email send {draft.id}` shows it again and arms it — "
+            "reply `send it` to send.")
+
+
 def control_email(arg: str, context: Any) -> str:
-    """``/email triage|drafts|send <id>|followups`` — the triage surface."""
+    """``/email`` — the full mailbox surface (see ``_EMAIL_USAGE``)."""
     tail = (arg or "").strip()
     parts = tail.split(None, 1)
     sub = (parts[0] if parts else "").lower()
     rest = parts[1] if len(parts) > 1 else ""
 
-    gmail = _get_gmail(context)
-    if gmail is None:
-        return ("📧 gmail isn't connected — run "
-                "`nm connectors connect --name gmail` first.")
-
     queue = DraftQueue(context=context)
+
+    # ── local-only: the draft queue works with no mailbox connection ──
+    if sub == "drafts":
+        pending = queue.pending()
+        approved = [d for d in queue._drafts.values() if d.status == "approved"]
+        if not pending and not approved:
+            return "📧 no pending drafts."
+        lines: list[str] = []
+        if pending:
+            lines.append(f"📧 {len(pending)} pending draft{'s' if len(pending) != 1 else ''}:")
+            for d in pending[:10]:
+                lines.append(f"`{d.id}` → {d.to} — {d.subject[:50]}")
+            if len(pending) > 10:
+                lines.append(f"… and {len(pending) - 10} more")
+        if approved:
+            lines.append(f"✅ {len(approved)} approved (still need `/email send <id>` + `send it`):")
+            for d in approved[:10]:
+                lines.append(f"`{d.id}` → {d.to} — {d.subject[:50]}")
+        lines.append("\n`/email send <id>` shows one and arms it — reply `send it` to send.")
+        return "\n".join(lines)
+
+    if sub == "compose":
+        segs = [s.strip() for s in rest.split("|")]
+        if len(segs) < 2 or not segs[0] or not segs[-1]:
+            return ("usage: /email compose <to> | <subject> | <body>\n"
+                    "subject may be empty: /email compose ada@x.com | | hello")
+        to = segs[0]
+        subject = segs[1] if len(segs) > 2 else ""
+        body = segs[2] if len(segs) > 2 else segs[1]
+        if len(segs) > 3:
+            body = " | ".join(segs[2:])
+        bad = _validate_recipients(to)
+        if bad:
+            return f"📧 `{bad}` doesn't look like an email address — check the To: field."
+        draft = queue.add(thread_id="", to=to, subject=subject, body=body)
+        return _draft_preview(draft)
+
+    if sub in ("approve", "discard"):
+        draft_id = rest.strip().split()[0] if rest.strip() else ""
+        if not draft_id:
+            return f"usage: /email {sub} <draft-id> — /email drafts lists them"
+        d = queue.get(draft_id)
+        if d is None:
+            return f"no draft `{draft_id}` — /email drafts lists them"
+        if sub == "approve":
+            if d.status == "sent":
+                return f"draft `{draft_id}` already sent."
+            if d.status == "discarded":
+                return f"draft `{draft_id}` was discarded."
+            if d.status == "approved":
+                return f"draft `{draft_id}` is already approved."
+            queue.approve(draft_id)
+            return (f"✅ draft `{draft_id}` approved — it still needs "
+                    f"`/email send {draft_id}` + your `send it` to go out.")
+        if not queue.discard(draft_id):
+            return f"draft `{draft_id}` can't be discarded (status: {d.status})."
+        return f"🗑️ draft `{draft_id}` discarded."
+
+    if sub == "send":
+        gmail = _get_gmail(context)
+        if gmail is None:
+            return ("📧 gmail isn't connected — run "
+                    "`nm connectors connect --name gmail` first.")
+        draft_id = rest.strip()
+        if not draft_id:
+            return "usage: /email send <draft-id> — /email drafts lists them"
+        # Explicit-override lives in the natural-language path (the owner
+        # saying "send it" in chat); the slash form always confirms first.
+        d = queue.get(draft_id)
+        if d is None:
+            return f"no draft `{draft_id}` — /email drafts lists them"
+        if d.status == "sent":
+            return f"draft `{draft_id}` already sent."
+        # Arm the explicit-override: the owner's next "send it" in this
+        # chat sends exactly this draft, no re-confirmation.
+        queue.mark_pending_send(draft_id)
+        return (f"📧 ready to send:\nTo: {d.to}\nSubject: {d.subject}\n\n"
+                f"{d.body}\n\nReply `send it` and it's gone — "
+                "nothing sends without your word.")
+
+    # ── everything below needs the mailbox ──
+    if sub in ("", "triage", "inbox", "list", "search", "read", "thread",
+               "reply", "followups"):
+        gmail = _get_gmail(context)
+        if gmail is None:
+            return ("📧 gmail isn't connected — run "
+                    "`nm connectors connect --name gmail` first.")
+    elif sub:
+        return _EMAIL_USAGE
+    else:  # pragma: no cover - "" is caught above
+        return _EMAIL_USAGE
 
     if sub in ("", "triage"):
         report = triage(gmail)
@@ -784,35 +1033,70 @@ def control_email(arg: str, context: Any) -> str:
             out += f"\n\n✏️ {made} draft{'s' if made != 1 else ''} queued — /email drafts to review"
         return out
 
-    if sub == "drafts":
-        pending = queue.pending()
-        if not pending:
-            return "📧 no pending drafts."
-        lines = [f"📧 {len(pending)} pending draft{'s' if len(pending) != 1 else ''}:"]
-        for d in pending[:10]:
-            lines.append(f"`{d.id}` → {d.to} — {d.subject[:50]}")
-        if len(pending) > 10:
-            lines.append(f"… and {len(pending) - 10} more")
-        lines.append("\n`/email send <id>` sends one (asks first, unless you say \"send it\")")
+    if sub in ("inbox", "list"):
+        query, max_n = _parse_list_args(rest, "in:inbox")
+        return _list_messages(gmail, query, max_n)
+
+    if sub == "search":
+        query, max_n = _parse_list_args(rest, "")
+        if not query:
+            return "usage: /email search <query> [n] — Gmail search syntax (from:, subject:, after:, …)"
+        return _list_messages(gmail, query, max_n)
+
+    if sub == "read":
+        mid = rest.strip().split()[0] if rest.strip() else ""
+        if not mid:
+            return "usage: /email read <message-id> — /email inbox lists ids"
+        try:
+            msg = gmail.get_message(mid, format="full")
+        except Exception as exc:  # noqa: BLE001
+            return f"📧 couldn't read message `{mid}`: {exc}"
+        return _format_message(msg)
+
+    if sub == "thread":
+        tid = rest.strip().split()[0] if rest.strip() else ""
+        if not tid:
+            return "usage: /email thread <thread-id> — /email inbox lists threads via message ids"
+        try:
+            thread = gmail.get_thread(tid)
+        except Exception as exc:  # noqa: BLE001
+            return f"📧 couldn't read thread `{tid}`: {exc}"
+        messages = thread.get("messages") or []
+        if not messages:
+            return f"📧 thread `{tid}` is empty."
+        lines = [f"📧 thread `{tid}` — {len(messages)} message{'s' if len(messages) != 1 else ''}:"]
+        for m in messages:
+            headers = (m.get("payload") or {}).get("headers") or []
+            snippet = str(m.get("snippet", ""))[:120]
+            lines.append(f"• `{m.get('id', '?')}` — {_header(headers, 'from') or '(unknown)'} — "
+                         f"{_header(headers, 'subject') or '(no subject)'}")
+            if snippet:
+                lines.append(f"  {snippet}")
+        lines.append("\n`/email read <id>` reads one in full.")
         return "\n".join(lines)
 
-    if sub == "send":
-        draft_id = rest.strip()
-        if not draft_id:
-            return "usage: /email send <draft-id> — /email drafts lists them"
-        # Explicit-override lives in the natural-language path (the owner
-        # saying "send it" in chat); the slash form always confirms first.
-        d = queue.get(draft_id)
-        if d is None:
-            return f"no draft `{draft_id}` — /email drafts lists them"
-        if d.status == "sent":
-            return f"draft `{draft_id}` already sent."
-        # Arm the explicit-override: the owner's next "send it" in this
-        # chat sends exactly this draft, no re-confirmation.
-        queue.mark_pending_send(draft_id)
-        return (f"📧 ready to send:\nTo: {d.to}\nSubject: {d.subject}\n\n"
-                f"{d.body}\n\nReply `send it` and it's gone — "
-                "nothing sends without your word.")
+    if sub == "reply":
+        if "|" not in rest:
+            return ("usage: /email reply <message-id> | <body>\n"
+                    "example: /email reply m123 | thanks, on it")
+        mid, body = rest.split("|", 1)
+        mid, body = mid.strip(), body.strip()
+        if not mid or not body:
+            return "usage: /email reply <message-id> | <body>"
+        try:
+            msg = gmail.get_message(mid, format="metadata")
+        except Exception as exc:  # noqa: BLE001
+            return f"📧 couldn't read message `{mid}`: {exc}"
+        headers = (msg.get("payload") or {}).get("headers") or []
+        to = _address_from_header(_header(headers, "from"))
+        if not to:
+            return f"📧 message `{mid}` has no sender to reply to."
+        subject = _header(headers, "subject") or "(no subject)"
+        if not subject.lower().startswith("re:"):
+            subject = f"Re: {subject}"
+        draft = queue.add(thread_id=str(msg.get("threadId", "")),
+                          to=to, subject=subject, body=body)
+        return _draft_preview(draft)
 
     if sub == "followups":
         fus = followup_watch(gmail, queue)
@@ -826,5 +1110,4 @@ def control_email(arg: str, context: Any) -> str:
         lines.append("\nSay `send it` + the thread, or I'll keep the nudge drafts ready.")
         return "\n".join(lines)
 
-    return ("usage: /email triage | drafts | send <id> | followups\n"
-            "or just ask: \"what did <vendor> say about <topic>?\"")
+    return _EMAIL_USAGE

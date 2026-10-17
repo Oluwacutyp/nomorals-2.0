@@ -36,18 +36,22 @@ _PUBLIC_ORDER: tuple[str, ...] = (
 
 #: Curated owner-only commands on the personal bot (48). Every entry is in
 #: ``CONTROL_COMMANDS`` and NOT in ``PUBLIC_COMMANDS``; no aliases
-#: (``books``/``wis``/``commands``/``menu`` are covered by their primaries).
+#: (``books``/``wis``/``commands``/``menu`` are covered by their primaries;
+#: ``gmail``/``mail``/``inbox`` are covered by ``email``).
 #: Ordered by group: control → updates → search → build → memory/money →
 #: catalog. 52 public + 48 here = 100, the BotFather maximum.
+#: ``searchleads`` is NOT on the menu (email took its slot — the mailbox
+#: surface matters more in the menu); it stays registered and runs when
+#: typed, like every other off-menu owner command.
 PERSONAL_OWNER_COMMANDS: tuple[str, ...] = (
     # control — state, model, power, approvals, lifecycle
     "status", "platforms", "mood", "stage", "model", "providers",
     "say", "power", "proposals", "approve", "deny", "start", "stop",
-    "quit", "mode", "profile", "mind", "features",
+    "quit", "mode", "profile", "mind", "features", "email",
     # platform control — updates & restarts
     "update", "pull", "deploy", "restart",
     # search & research (owner-only depth)
-    "searchdeep", "searchleads", "money", "searchhist", "research",
+    "searchdeep", "money", "searchhist", "research",
     # building for real — code, missions, solving
     "code", "py", "devon", "task", "mission", "schedule", "monitor",
     "immune", "impossible", "arena", "trial", "exec", "db",

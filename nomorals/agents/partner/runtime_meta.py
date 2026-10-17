@@ -588,7 +588,7 @@ class RuntimeMetaMixin:
         # code execution
         "exec",
         # outbound messaging
-        "send", "dm", "email",
+        "send", "dm", "email", "gmail", "mail", "inbox",
         # destructive / state-changing
         "quit", "upgrade", "train", "repair", "trial",
         # starts background work

@@ -2396,7 +2396,7 @@ class PartnerRuntime(
             return (f"{arg}: stopped" if result.get("ok")
                     else f"{arg}: {result.get('error', 'could not stop')}")
 
-        if kind in ("update", "pull", "deploy", "restart"):
+        if kind in {"update", "pull", "deploy", "restart"}:
             # Step 9: chat self-update — drain → checkpoint → restart → resume.
             # Owner-only: caller_may_run already denied non-owners above
             # (these kinds are absent from PUBLIC_COMMANDS).
@@ -2976,12 +2976,17 @@ class PartnerRuntime(
                 sender_id=getattr(message, "sender_id", "") if message else "",
                 sender=getattr(message, "sender", "") if message else "",
             )
-        if kind == "email":
-            # AI email triage. Drafts are never auto-sent; sending needs
-            # an approved draft or the owner's explicit "send it".
+        if kind in {"email", "gmail", "mail", "inbox"}:
+            # Full mailbox surface. /gmail and /mail are aliases of /email;
+            # bare /inbox lists the inbox instead of running triage.
+            # Drafts are never auto-sent; sending needs the owner's
+            # explicit "send it" after /email send <id> arms one draft.
             from ..email_triage import control_email
 
-            return control_email(command.tail or arg, context=self.context)
+            tail = command.tail or arg
+            if kind == "inbox":
+                tail = f"inbox {tail}" if tail else "inbox"
+            return control_email(tail, context=self.context)
         if kind in {"book", "books"}:
             return self._control_book(tail=command.tail or arg, chat_key=chat_key)
         if kind == "novel":

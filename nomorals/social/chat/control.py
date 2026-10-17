@@ -412,7 +412,10 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "task": (1, None),       # /task add <instruction>|run [id]|list
     "notify": (0, 1),        # /notify [n] — recent alerts
     "proactive": (0, 0),     # /proactive — push-send switches + delivery states
-    "email": (0, None),        # /email triage|drafts|send <id>|followups — AI email triage
+    "email": (0, None),        # /email triage|inbox|search|read|thread|drafts|compose|reply|send|approve|discard|followups — full mailbox (owner only)
+    "gmail": (0, None),        # alias of /email
+    "mail": (0, None),         # alias of /email
+    "inbox": (0, None),        # alias of /email — bare /inbox lists the inbox
     "mission": (0, None),    # /mission status|list|stall|clear|pause|resume|cancel|retry|watch|unwatch|new
                              #   /mission new <research|build|fix> <args>
     "image": (1, None),      # /image <path-or-url> — lookup; <prompt> — generate
@@ -521,7 +524,7 @@ _HELP_TEXT = "\n".join(
         "  — she speaks first (owner DMs only, never anyone else) —",
         "  /proactive                            push-send switches + delivery states",
         "  /notify [n]                           recent alerts with delivery states",
-        "  /email triage|drafts|send <id>|followups  AI email triage + draft queue",
+        "  /email triage|inbox|search|read|thread|drafts|compose|reply|send|approve|discard|followups  full mailbox (Gmail) + triage + draft queue",
         "  /mission status [id|name]             mission progress, ETA, stall reasons",
         "  /mission pause|resume|cancel|retry  pause, resume, stop, or restart a mission",
         "  /mission watch|unwatch <id>          this chat gets milestone updates",
@@ -1793,13 +1796,33 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
                   "usage": "/proactive",
                   "example": "/proactive",
                   "related": "/notify /watch"},
-    "email": {"what": ("AI email triage: classifies unread mail "
-                       "(urgent/action/fyi), drafts voice-matched replies "
-                       "for review, and resurfaces threads gone quiet 48h. "
-                       "Drafts are never auto-sent."),
-              "usage": "/email triage | drafts | send <id> | followups",
-              "example": "/email triage",
+    "email": {"what": ("the owner's mailbox over Gmail: list/search/read "
+                       "mail, classify unread mail (urgent/action/fyi), "
+                       "draft voice-matched replies for review, and "
+                       "resurface threads gone quiet 48h. Drafts are never "
+                       "auto-sent — /email send <id> shows the exact "
+                       "payload and arms it; only your explicit \"send it\" "
+                       "sends it."),
+              "usage": ("/email triage | inbox [query] [n] | search <query> [n] | "
+                        "read <message-id> | thread <thread-id> | drafts | "
+                        "compose <to> | <subject> | <body> | "
+                        "reply <message-id> | <body> | send <id> | approve <id> | "
+                        "discard <id> | followups"),
+              "example": "/email inbox from:ada 5",
               "related": "/notify"},
+    "gmail": {"what": "alias of /email — the owner's mailbox over Gmail.",
+              "usage": "/gmail [same as /email]",
+              "example": "/gmail inbox",
+              "related": "/email"},
+    "mail": {"what": "alias of /email — the owner's mailbox over Gmail.",
+             "usage": "/mail [same as /email]",
+             "example": "/mail search invoice",
+             "related": "/email"},
+    "inbox": {"what": ("alias of /email — bare /inbox lists the inbox; "
+                       "anything else passes through to /email."),
+              "usage": "/inbox [query] [n] | /inbox search <query> | /inbox read <id>",
+              "example": "/inbox",
+              "related": "/email"},
     "mission": {"what": ("mission progress in chat: % complete, current step, "
                          "an honest ETA, and — when stuck — the concrete "
                          "stall reason. Milestones (started / step / stalled / "
@@ -2033,7 +2056,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
     ("tools & automation", ["schedule", "db", "api", "connectors", "notion",
                             "gcal", "trello", "proxy", "workspace", "record",
                             "macro", "file", "publish", "notify", "proactive", "mission",
-                            "bet", "finance", "weather", "tz", "email", "routine", "home", "store", "track", "untrack", "trip", "travelclient", "contract", "legal", "research", "contracts", "regwatch", "uprofile", "vnote", "match", "cgroup", "challenge", "room", "scamcheck", "passport", "truecost", "value", "valuepick", "watch", "send", "leads", "guardrails", "competitor", "cost", "panel"]),
+                            "bet", "finance", "weather", "tz", "email", "gmail", "mail", "inbox", "routine", "home", "store", "track", "untrack", "trip", "travelclient", "contract", "legal", "research", "contracts", "regwatch", "uprofile", "vnote", "match", "cgroup", "challenge", "room", "scamcheck", "passport", "truecost", "value", "valuepick", "watch", "send", "leads", "guardrails", "competitor", "cost", "panel"]),
     ("platform control", ["start", "stop", "profile", "chatmode",
                           "update", "pull", "deploy", "restart"]),
     ("discovery", ["list", "commands", "menu", "help", "tour", "heal"]),
@@ -2226,7 +2249,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
     ("tools & automation",
      ["schedule", "db", "api", "proxy", "workspace", "record", "macro", "file",
       "publish", "notify", "proactive", "mission", "features", "decode", "cookies", "cookielab", "cipher",
-      "monitor", "investigate", "bet", "finance", "weather", "tz", "routine", "home", "store", "track", "untrack", "trip", "travelclient", "contract", "legal", "research", "contracts", "regwatch", "uprofile", "vnote", "match", "cgroup", "challenge", "room", "scamcheck", "passport", "truecost", "value", "valuepick", "watch", "send", "leads", "panel"]),
+      "monitor", "investigate", "bet", "finance", "weather", "tz", "email", "routine", "home", "store", "track", "untrack", "trip", "travelclient", "contract", "legal", "research", "contracts", "regwatch", "uprofile", "vnote", "match", "cgroup", "challenge", "room", "scamcheck", "passport", "truecost", "value", "valuepick", "watch", "send", "leads", "panel"]),
     ("platform control — updates & restarts",
      ["update", "pull", "deploy", "restart"]),
     ("discovery",
@@ -2423,7 +2446,10 @@ LIST_ONELINERS: dict[str, str] = {
     "notify": "recent alerts",
     "proactive": "proactive push sends: switches + delivery states",
     "mission": "mission progress + ETA + stall reasons",
-    "email": "AI email triage: urgent/action/fyi + draft queue + 48h follow-ups",
+    "email": "mailbox (Gmail): inbox/search/read/thread + triage + draft queue; sends need your explicit 'send it'",
+    "gmail": "alias of /email — the owner's mailbox over Gmail",
+    "mail": "alias of /email — the owner's mailbox over Gmail",
+    "inbox": "alias of /email — bare /inbox lists the inbox",
     "features": "feature toggles (arena, vision, search, …)",
     "list": "this catalog — every executable command, categorized",
     "help": "the full help: catalog, per-command pages, topics",

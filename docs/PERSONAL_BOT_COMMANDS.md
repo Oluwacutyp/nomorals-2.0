@@ -95,12 +95,12 @@ mode - her autonomy level: off (asleep) | suggest (proposes, you approve) | auto
 profile - the profile-aware runtime: detected environment (termux/mobile/pc/vps/workstation) and every tuned knob — threads, VCPUs, download caps, memory pressure, parallel chats, mission aggressiveness, model preference — with the source of each value.
 mind - the Core Mind — the always-on layer that turns a natural-language goal into routed work: research swarm, builder, browser, downloader, missions, games, orchestrator.
 features - list or toggle system features: arena, group_posts, proactive_dm, vision, search.
+email - the owner's mailbox over Gmail: list/search/read mail, classify unread mail (urgent/action/fyi), draft voice-matched replies for review, and resurface threads gone quiet 48h.
 update - Self-update from chat: mission gate (refuses mid-mission), checkpoint resumable missions, transactional pull + migrate + health-check (auto-rollback on failure), then restart and resume.
 pull - Pull the latest code (git pull --ff-only) without restarting.
 deploy - Deploy this code: same as /update (gate + checkpoint + pull + restart).
 restart - Restart the process: mission gate, checkpoint resumable missions, restart, resume from checkpoints.
 searchdeep - deep multi-query research with synthesis (power mode).
-searchleads - report on legit paid-task platforms — what is real, what pays.
 money - hunts every kind of money-making opportunity — paid tasks, referrals, free courses, bounties, gigs — ranked by value vs effort.
 searchhist - your recent research runs.
 research - scheduled research runs: lifestyle | tech | cyber.
@@ -153,3 +153,4 @@ never travel in a callback, so tapping it routes to the /power handler,
 which replies with usage; replies with no sensible next action get no
 keyboard. The gated bot's replies are unchanged (text + its existing
 shared patterns only).
+

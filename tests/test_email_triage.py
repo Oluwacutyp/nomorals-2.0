@@ -434,7 +434,221 @@ def test_control_email_usage(queue_path, monkeypatch):
     assert "usage" in control_email("frobnicate", ctx)
 
 
-# ── coremind intent ──────────────────────────────────────────────────────────
+# ── chat command: full mailbox surface ──────────────────────────────────────
+
+def _full_msg(mid, *, subject, sender, snippet, body_text=None,
+              html_text=None, thread="t9"):
+    import base64 as _b64
+
+    parts = []
+    if body_text is not None:
+        parts.append({"mimeType": "text/plain", "filename": "",
+                      "body": {"data": _b64.urlsafe_b64encode(
+                          body_text.encode()).decode()}})
+    if html_text is not None:
+        parts.append({"mimeType": "text/html", "filename": "",
+                      "body": {"data": _b64.urlsafe_b64encode(
+                          html_text.encode()).decode()}})
+    parts.append({"mimeType": "application/pdf", "filename": "inv.pdf",
+                  "body": {"attachmentId": "att1", "size": 123}})
+    return {
+        "id": mid, "threadId": thread, "snippet": snippet,
+        "labelIds": ["INBOX", "UNREAD"],
+        "payload": {"headers": [
+            {"name": "Subject", "value": subject},
+            {"name": "From", "value": sender},
+            {"name": "To", "value": "owner@example.com"},
+            {"name": "Date", "value": "Mon, 06 Oct 2026 10:00:00 +0000"},
+        ], "parts": parts},
+    }
+
+
+def test_control_email_inbox_lists(gmail, queue_path, monkeypatch):
+    import nomorals.agents.email_triage as et
+    monkeypatch.setattr(et, "_get_gmail", lambda context: gmail)
+    ctx, _ = _ctx(gmail, queue_path)
+    out = control_email("inbox", ctx)
+    assert "m1" in out and "card declined" in out
+    assert "read <id>" in out
+    out1 = control_email("inbox 1", ctx)
+    assert out1.count("`m") == 1
+
+
+def test_control_email_search(gmail, queue_path, monkeypatch):
+    import nomorals.agents.email_triage as et
+    monkeypatch.setattr(et, "_get_gmail", lambda context: gmail)
+    ctx, _ = _ctx(gmail, queue_path)
+    out = control_email("search from:stripe", ctx)
+    assert "card declined" in out
+    assert "Contract review" not in out
+
+
+def test_control_email_search_requires_query(gmail, queue_path, monkeypatch):
+    import nomorals.agents.email_triage as et
+    monkeypatch.setattr(et, "_get_gmail", lambda context: gmail)
+    ctx, _ = _ctx(gmail, queue_path)
+    assert "usage" in control_email("search", ctx)
+
+
+def test_control_email_read_full_body_and_attachments(
+        queue_path, monkeypatch):
+    import nomorals.agents.email_triage as et
+    gmail = FakeGmail([_full_msg(
+        "m9", subject="Invoice", sender="billing@x.com",
+        snippet="invoice attached", body_text="Hello body here")])
+    monkeypatch.setattr(et, "_get_gmail", lambda context: gmail)
+    ctx, _ = _ctx(gmail, queue_path)
+    out = control_email("read m9", ctx)
+    assert "Hello body here" in out
+    assert "inv.pdf" in out
+    assert "billing@x.com" in out
+
+
+def test_control_email_read_html_fallback(queue_path, monkeypatch):
+    import nomorals.agents.email_triage as et
+    gmail = FakeGmail([_full_msg(
+        "m9", subject="Hi", sender="a@x.com", snippet="hi",
+        html_text="<p>Hello <b>there</b></p>")])
+    monkeypatch.setattr(et, "_get_gmail", lambda context: gmail)
+    ctx, _ = _ctx(gmail, queue_path)
+    out = control_email("read m9", ctx)
+    assert "Hello there" in out
+    assert "<p>" not in out
+
+
+def test_control_email_thread(queue_path, monkeypatch):
+    import nomorals.agents.email_triage as et
+    gmail = FakeGmail([
+        _msg("m1", subject="Proposal", sender="bob@x.com",
+             snippet="thoughts?", thread="t9"),
+        _msg("m2", subject="Re: Proposal", sender="owner@x.com",
+             snippet="agree", thread="t9"),
+    ])
+    monkeypatch.setattr(et, "_get_gmail", lambda context: gmail)
+    ctx, _ = _ctx(gmail, queue_path)
+    out = control_email("thread t9", ctx)
+    assert "m1" in out and "m2" in out
+    assert "Proposal" in out
+
+
+def _send_flow_ctx(queue_path):
+    settings = SimpleNamespace(
+        resolve=lambda rel: queue_path if "email_triage" in rel else Path(rel))
+    return SimpleNamespace(db=None, settings=settings, persona=None)
+
+
+def test_control_email_compose_reply_send_flow(gmail, queue_path, monkeypatch):
+    import nomorals.agents.email_triage as et
+    monkeypatch.setattr(et, "_get_gmail", lambda context: gmail)
+    ctx = _send_flow_ctx(queue_path)
+    out = control_email("compose ada@x.com | Hello | thanks for this", ctx)
+    assert "draft" in out and "ada@x.com" in out
+    assert "thanks for this" in out
+    # slash form never sends by itself
+    assert gmail.sent == []
+    q = DraftQueue(path=queue_path)
+    did = q.pending()[0].id
+    preview = control_email(f"send {did}", ctx)
+    assert "ready to send" in preview and "send it" in preview
+    assert gmail.sent == []
+    # the owner's explicit "send it" sends exactly that draft
+    reply = check_explicit_send("send it", ctx)
+    assert reply and "sent" in reply
+    assert len(gmail.sent) == 1
+    assert gmail.sent[0]["to"] == "ada@x.com"
+    assert gmail.sent[0]["subject"] == "Hello"
+
+
+def test_control_email_compose_validates_address(queue_path, monkeypatch):
+    import nomorals.agents.email_triage as et
+    monkeypatch.setattr(et, "_get_gmail", lambda context: FakeGmail([]))
+    ctx = _send_flow_ctx(queue_path)
+    out = control_email("compose not-an-email | Hi | body", ctx)
+    assert "doesn't look like an email address" in out
+    assert DraftQueue(path=queue_path).pending() == []
+
+
+def test_control_email_compose_usage(queue_path, monkeypatch):
+    import nomorals.agents.email_triage as et
+    monkeypatch.setattr(et, "_get_gmail", lambda context: FakeGmail([]))
+    ctx = _send_flow_ctx(queue_path)
+    assert "usage" in control_email("compose onlyto", ctx)
+
+
+def test_control_email_reply_queues_to_sender(gmail, queue_path, monkeypatch):
+    import nomorals.agents.email_triage as et
+    monkeypatch.setattr(et, "_get_gmail", lambda context: gmail)
+    ctx = _send_flow_ctx(queue_path)
+    out = control_email("reply m2 | on it, reviewing now", ctx)
+    assert "ada@example.com" in out
+    assert "Re: Contract review" in out
+    q = DraftQueue(path=queue_path)
+    assert len(q.pending()) == 1
+    assert q.pending()[0].body == "on it, reviewing now"
+
+
+def test_control_email_approve_and_discard(queue_path, monkeypatch):
+    import nomorals.agents.email_triage as et
+    monkeypatch.setattr(et, "_get_gmail", lambda context: FakeGmail([]))
+    ctx = _send_flow_ctx(queue_path)
+    control_email("compose a@x.com | S | B", ctx)
+    did = DraftQueue(path=queue_path).pending()[0].id
+    out = control_email(f"approve {did}", ctx)
+    assert "approved" in out
+    assert "send it" in out  # approval alone never sends
+    assert "approved" in control_email("drafts", ctx)
+    out = control_email(f"discard {did}", ctx)
+    assert "discarded" in out
+    assert control_email("drafts", ctx) == "📧 no pending drafts."
+    assert "no draft" in control_email("approve nope", ctx)
+
+
+def test_control_email_draft_queue_works_without_gmail(queue_path, monkeypatch):
+    import nomorals.agents.email_triage as et
+    monkeypatch.setattr(et, "_get_gmail", lambda context: None)
+    ctx = _send_flow_ctx(queue_path)
+    control_email("compose a@x.com | S | B", ctx)
+    assert "a@x.com" in control_email("drafts", ctx)
+    # but anything needing the mailbox still says so
+    assert "isn't connected" in control_email("inbox", ctx)
+    assert "isn't connected" in control_email("read m1", ctx)
+
+
+def test_aliases_parse_to_email_kinds():
+    from nomorals.social.chat.control import parse_control
+
+    assert parse_control("/gmail inbox").kind == "gmail"
+    assert parse_control("/mail search invoice").kind == "mail"
+    assert parse_control("/inbox").kind == "inbox"
+    assert parse_control("/inbox from:ada").kind == "inbox"
+    assert parse_control("/email inbox").kind == "email"
+
+
+def test_aliases_share_handler_path_and_tour_denylist():
+    from pathlib import Path as _Path
+
+    runtime_src = (_Path(__file__).resolve().parents[1]
+                   / "nomorals" / "agents" / "partner" / "runtime.py").read_text()
+    assert 'if kind in {"email", "gmail", "mail", "inbox"}:' in runtime_src
+    from nomorals.agents.partner.runtime_meta import RuntimeMetaMixin
+    for alias in ("gmail", "mail", "inbox"):
+        assert alias in RuntimeMetaMixin._TOUR_DENYLIST
+
+
+def test_email_in_personal_bot_list():
+    from nomorals.social.chat.control import CONTROL_COMMANDS
+    from nomorals.social.chat.personal_commands import (
+        PERSONAL_OWNER_COMMANDS,
+        validate_botfather_commands,
+    )
+
+    assert "email" in PERSONAL_OWNER_COMMANDS
+    assert len(PERSONAL_OWNER_COMMANDS) == 48  # BotFather max still holds
+    assert validate_botfather_commands() == []
+    # searchleads left the *menu* only — the command still exists and runs.
+    assert "searchleads" in CONTROL_COMMANDS
+    assert "searchleads" not in PERSONAL_OWNER_COMMANDS
+
 
 def test_email_intent_matches_vendor_query():
     from nomorals.agents.coremind import understand
