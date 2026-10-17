@@ -25,6 +25,7 @@ classifier stays stable while the swarm's angle templates evolve.
 from __future__ import annotations
 
 import json
+import math
 import re
 import time
 from dataclasses import dataclass, field
@@ -39,6 +40,7 @@ from .research_swarm import (
     SwarmFinding,
     SwarmReport,
     _content_words,
+    _stem,
     _NEGATION,
 )
 
@@ -54,6 +56,11 @@ __all__ = [
     "repo_root",
     "verify_ticket_files",
     "gate_ticket",
+    "extract_repo_files",
+    "find_implementation",
+    "verify_gap",
+    "log_proposal_skip",
+    "build_proposal_spec",
     "ResearchDigest",
     "ResearchPipeline",
     "register",
@@ -167,6 +174,13 @@ class ResearchClaim:
     ``status`` is one of "active" | "superseded" | "contradicted".
     ``supersedes`` holds the older claim's id when this claim replaced it
     ("" otherwise). ``sources`` are {"url","title","trust"} dicts.
+
+    The ``behavior`` / ``gap`` / ``gap_evidence`` / ``target_files`` /
+    ``failing_test`` fields are the proposal spec (carried over from
+    ``SwarmFinding``): they say what behavior is missing, in which
+    owning module, with what evidence, and which test fails without
+    it. A claim without a spec is still KG knowledge — it is simply
+    never turned into an upgrade proposal (see ``build_proposal_spec``).
     """
 
     id: str
@@ -180,6 +194,11 @@ class ResearchClaim:
     status: str = "active"
     supersedes: str = ""
     version: int = 1
+    behavior: str = ""
+    gap: str = ""
+    gap_evidence: str = ""
+    target_files: list[str] = field(default_factory=list)
+    failing_test: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -194,6 +213,11 @@ class ResearchClaim:
             "status": self.status,
             "supersedes": self.supersedes,
             "version": self.version,
+            "behavior": self.behavior,
+            "gap": self.gap,
+            "gap_evidence": self.gap_evidence,
+            "target_files": list(self.target_files or []),
+            "failing_test": self.failing_test,
         }
 
     @classmethod
@@ -211,12 +235,19 @@ class ResearchClaim:
             status=str(data.get("status", "active") or "active"),
             supersedes=str(data.get("supersedes", "")),
             version=int(data.get("version", 1) or 1),
+            behavior=str(data.get("behavior", "") or ""),
+            gap=str(data.get("gap", "") or ""),
+            gap_evidence=str(data.get("gap_evidence", "") or ""),
+            target_files=list(data.get("target_files", []) or []),
+            failing_test=str(data.get("failing_test", "") or ""),
         )
 
 
 def claim_from_finding(finding: SwarmFinding, query: str) -> ResearchClaim:
     """Convert a ``SwarmFinding`` into a durable claim: fresh id, classified
-    domain, timestamp, version 1, status active."""
+    domain, timestamp, version 1, status active. The proposal spec
+    (behavior / gap / target files / failing test) carries over
+    untouched — it is what the ticket generator verifies."""
     sources = []
     for s in finding.sources or []:
         if not isinstance(s, dict):
@@ -247,6 +278,11 @@ def claim_from_finding(finding: SwarmFinding, query: str) -> ResearchClaim:
         status="active",
         supersedes="",
         version=1,
+        behavior=str(getattr(finding, "behavior", "") or ""),
+        gap=str(getattr(finding, "gap", "") or ""),
+        gap_evidence=str(getattr(finding, "gap_evidence", "") or ""),
+        target_files=list(getattr(finding, "target_files", []) or []),
+        failing_test=str(getattr(finding, "failing_test", "") or ""),
     )
 
 
@@ -566,6 +602,463 @@ def _claim_test_slug(claim_text: str) -> str:
     return re.sub(r"[^a-z0-9_]", "", slug)[:40]
 
 
+# ── proposal specs: verified against the code, never assumed ──────────────
+#
+# The old generator turned ANY finding into "survey title + generic test
+# template" ("encode the claim as a test: assert the behavior '<title>'")
+# and asserted — without ever reading the code — that "nothing in <files>
+# asserts it". Every ticket below is built by ``build_proposal_spec``,
+# which refuses to emit unless ALL of these hold:
+#
+# * the finding names a SPECIFIC behavior to implement/change, plus the
+#   owning module(s) — either carried as a structured spec on the claim
+#   (``behavior`` / ``target_files`` / ``failing_test``) or mined from the
+#   claim text (a ``nomorals/...py`` path + a gap sentence: lacks /
+#   missing / does not / never / without / no ...). A survey title, a
+#   taxonomy, or a bare factual claim has none of these -> skipped.
+# * the generator READS the owning module (code lines only: comments,
+#   docstrings, and string literals never count as implementation) and
+#   checks whether the behavior is already there. If it is -> skipped
+#   with "already implemented at <file:line>".
+# * otherwise the ticket carries ``gap_evidence`` naming a real
+#   ``file:line`` anchor in the owning module that was checked, plus a
+#   ``failing_test`` that fails on the current tree.
+#
+# ``verify_gap`` / ``find_implementation`` are the check. Matching is
+# keyword co-occurrence over code, not prose: a behavior counts as
+# implemented only when one code line touches >= 2 of its distinctive
+# keywords AND some 40-code-line window touches >= half of them
+# (min 3, or 2 when the behavior has only 2-3 keywords). That bar was
+# validated against real repo code: dedupe/merge behaviors in
+# research_loop.py / upgrade_queue.py clear it, while genuinely absent
+# behaviors (a weekly email digest, a gap check the old generator never
+# did) do not — even though comments and docstrings mention them.
+
+#: ``nomorals/...py:<line>`` references, the gap-evidence format.
+_REPO_FILE_LINE_RE = re.compile(
+    r"(nomorals/[A-Za-z0-9_./-]+\.py):(\d+)")
+
+#: ``nomorals/...py`` paths mentioned in free text.
+_REPO_FILE_RE = re.compile(r"nomorals/[A-Za-z0-9_./-]+\.py")
+
+#: Words that mark a sentence as stating a gap (something missing /
+#: wrong in the code), rather than a bare fact.
+_GAP_MARKERS = (
+    "lacks", "missing", "does not", "doesn't", "do not", "never",
+    "without", "fails to", "cannot", "can't", "not implemented",
+    "unhandled", "dropped", "lives only", "only in", "no ",
+)
+
+#: Findings that are surveys / taxonomies / paper titles, not behaviors.
+_SURVEY_MARKERS = (
+    "survey", "taxonomy", "literature review", "meta-analysis",
+    "systematic review", "state of the art", "a review of",
+    "overview of", "an overview",
+)
+
+#: Generic template phrases that must never appear in an emitted ticket.
+#: ("nothing in ... asserts it" is banned separately, by regex, so an
+#: innocent "nothing in the queue" does not trip it.)
+_GENERIC_TICKET_PHRASES = (
+    "encode the claim as a test",
+    "assert the behavior",
+    "not encoded anywhere",
+)
+
+#: Sliding window (code lines) for the implementation check.
+_IMPL_WINDOW = 40
+
+#: Keywords too generic to discriminate behavior (plus module-name parts,
+#: dropped per target file in ``_behavior_keywords``).
+_MATCH_STOPWORDS = {"before", "after", "each", "per"}
+
+_TRIPLE_DQ = '"""'
+_TRIPLE_SQ = "'''"
+_STRING_RE = re.compile(
+    r"""f?(?:""" + _TRIPLE_DQ + r""".*?""" + _TRIPLE_DQ + r"""|"""
+    + _TRIPLE_SQ + r""".*?""" + _TRIPLE_SQ + r"""|"[^"\n]*"|'[^'\n]*')""",
+    re.DOTALL)
+
+
+def extract_repo_files(text: str) -> list[str]:
+    """``nomorals/...py`` paths mentioned in *text*, in order, deduped."""
+    out: list[str] = []
+    for m in _REPO_FILE_RE.finditer(str(text or "")):
+        if m.group(0) not in out:
+            out.append(m.group(0))
+    return out
+
+
+def _strip_strings(line: str) -> str:
+    """Blank out string literals so prose inside quotes (SQL, messages,
+    f-string text) never counts as implementation."""
+    return _STRING_RE.sub('""', line)
+
+
+def _code_lines(raw_lines: list[str]) -> list[tuple[int, str]]:
+    """Code lines only: drop full-line comments and docstring blocks,
+    blank out string literals. Returns [(0-based lineno, match text)].
+    A comment or docstring that *mentions* a behavior is not the
+    behavior being implemented."""
+    out: list[tuple[int, str]] = []
+    in_doc: str | None = None
+    for i, line in enumerate(raw_lines):
+        stripped = line.strip()
+        if in_doc is not None:
+            if in_doc in stripped:
+                in_doc = None
+            continue
+        if stripped.startswith("#"):
+            continue
+        m = re.match(r'^(?:[A-Za-z_][\w]*\s*=\s*)?("""|\'\'\')', stripped)
+        if m:
+            quote = m.group(1)
+            if stripped.count(quote) < 2:
+                in_doc = quote
+            continue
+        code = _strip_strings(line).split("#", 1)[0]
+        out.append((i, code))
+    return out
+
+
+def _behavior_keywords(behavior: str, target_path: str) -> list[str]:
+    """Distinctive stemmed keywords for *behavior*: content words
+    (hyphenated words split into parts), minus words that come from
+    the target file's own path (``upgrade_queue`` must not match
+    ``UpgradeQueue``) and generic match stopwords."""
+    words: set[str] = set()
+    for w in _content_words(behavior or ""):
+        for part in w.split("-"):
+            if len(part) >= 4:
+                words.add(_stem(part))
+    path_parts: set[str] = set()
+    for part in re.split(r"[/_.]", target_path or ""):
+        if len(part) >= 3:
+            path_parts.add(_stem(part.lower()))
+    words = {w for w in words
+             if not any(w == p or p in w or w in p for p in path_parts)}
+    words -= _MATCH_STOPWORDS
+    return sorted(words)
+
+
+def _line_keyword_hits(line: str, keywords: list[str]) -> set[str]:
+    """Distinctive keywords matched by one code line (identifier-token
+    level; a keyword matches a token on equality or a >= 5-char
+    substring either way, so ``deduped`` matches ``dedup``)."""
+    tokens: set[str] = set()
+    for tok in re.findall(r"[a-z][a-z0-9_]{2,}", line.lower()):
+        for part in tok.split("_"):
+            if len(part) >= 3:
+                tokens.add(_stem(part))
+    matched: set[str] = set()
+    for kw in keywords:
+        for tok in tokens:
+            if kw == tok or (len(kw) >= 5 and len(tok) >= 5
+                             and (kw in tok or tok in kw)):
+                matched.add(kw)
+                break
+    return matched
+
+
+def find_implementation(behavior: str, file_path: str) -> str | None:
+    """Return ``"<file>:<line>"`` when the code in *file_path* already
+    implements *behavior* (one code line touches >= 2 distinctive
+    keywords AND some 40-code-line window touches >= half of them),
+    else None. Comments, docstrings, and string literals never count.
+    A behavior with fewer than 2 distinctive keywords cannot be
+    verified this way and is reported as not implemented (the caller
+    treats under-specified behaviors as unverifiable)."""
+    root = repo_root()
+    try:
+        raw = (root / file_path).read_text(encoding="utf-8",
+                                           errors="replace").splitlines()
+    except OSError:
+        return None
+    keywords = _behavior_keywords(behavior, file_path)
+    if len(keywords) < 2:
+        return None
+    need = max(2, math.ceil(len(keywords) / 2)) if len(keywords) <= 3 \
+        else max(3, math.ceil(len(keywords) / 2))
+    code = _code_lines(raw)
+    per_line = [(lineno, _line_keyword_hits(text, keywords))
+                for lineno, text in code]
+    best_lineno, best_hits = -1, set()
+    for lineno, hits in per_line:
+        if len(hits) > len(best_hits):
+            best_lineno, best_hits = lineno, hits
+    if len(best_hits) < 2:
+        return None
+    window_hits: set[str] = set()
+    seq = [hits for _, hits in per_line]
+    for start in range(len(seq)):
+        acc: set[str] = set()
+        for hits in seq[start:start + _IMPL_WINDOW]:
+            acc |= hits
+        if len(acc) > len(window_hits):
+            window_hits = acc
+    if len(window_hits) < need:
+        return None
+    return f"{file_path}:{best_lineno + 1}"
+
+
+def gap_anchor(behavior: str, file_path: str
+               ) -> tuple[int, str, int, int]:
+    """Anchor for a confirmed gap: the code line in *file_path* with the
+    most behavior-keyword overlap (earliest on ties). Returns
+    (1-based line, raw line text, best hit count, keyword count) —
+    the ``file:line`` the ticket cites as checked. Falls back to line 1
+    when nothing overlaps at all."""
+    root = repo_root()
+    try:
+        raw = (root / file_path).read_text(encoding="utf-8",
+                                           errors="replace").splitlines()
+    except OSError:
+        return 1, "", 0, 0
+    keywords = _behavior_keywords(behavior, file_path)
+    code = _code_lines(raw)
+    best_lineno, best_hits = 0, set()
+    for lineno, text in code:
+        hits = _line_keyword_hits(text, keywords)
+        if len(hits) > len(best_hits):
+            best_lineno, best_hits = lineno, hits
+    text = raw[best_lineno].strip() if raw else ""
+    return best_lineno + 1, text, len(best_hits), len(keywords)
+
+
+def verify_gap(behavior: str, target_files: list[str]) -> dict[str, Any]:
+    """Check *behavior* against each owning module in *target_files*.
+
+    Returns {"status", "evidence", "implemented_at", "anchor_file",
+    "anchor_line", "anchor_text"} where status is:
+    * ``already_implemented`` — the behavior is in the code at
+      ``implemented_at`` (``file:line``); no proposal may be emitted.
+    * ``gap_confirmed`` — no target file implements it; ``evidence``
+      cites the checked anchor ``file:line``.
+    * ``no_target`` — no target files were given.
+    * ``evidence_unverified`` — a target file does not exist on disk,
+      or the behavior has too few distinctive keywords to check.
+    """
+    files = [f for f in (target_files or []) if f]
+    if not files:
+        return {"status": "no_target", "evidence": "",
+                "implemented_at": "", "anchor_file": "",
+                "anchor_line": 0, "anchor_text": ""}
+    root = repo_root()
+    for path in files:
+        if not (root / path).exists():
+            return {"status": "evidence_unverified",
+                    "evidence": f"target file {path} does not exist on disk",
+                    "implemented_at": "", "anchor_file": path,
+                    "anchor_line": 0, "anchor_text": ""}
+    keywords = _behavior_keywords(behavior, files[0])
+    if len(keywords) < 2:
+        return {"status": "evidence_unverified",
+                "evidence": f"behavior {behavior!r} has only "
+                            f"{len(keywords)} distinctive keyword(s) — "
+                            "too vague to verify against the code",
+                "implemented_at": "", "anchor_file": files[0],
+                "anchor_line": 0, "anchor_text": ""}
+    for path in files:
+        at = find_implementation(behavior, path)
+        if at:
+            return {"status": "already_implemented",
+                    "evidence": f"behavior already implemented at {at}",
+                    "implemented_at": at, "anchor_file": path,
+                    "anchor_line": int(at.rsplit(":", 1)[1]),
+                    "anchor_text": ""}
+    # gap confirmed: anchor on the target file whose best line overlaps
+    # the behavior most (the closest code to where the change belongs).
+    best: tuple[int, str, int, int, str] = (0, "", -1, 0, files[0])
+    for path in files:
+        line, text, hits, total = gap_anchor(behavior, path)
+        if hits > best[2]:
+            best = (line, text, hits, total, path)
+    line, text, hits, total, anchor_file = best
+    need = max(2, math.ceil(total / 2)) if total <= 3 \
+        else max(3, math.ceil(total / 2))
+    evidence = (
+        f"{anchor_file}:{line}: {text[:120]} — code checked: no "
+        f"implementation of {behavior!r} found (best match {hits}/"
+        f"{total} distinctive keywords in any {_IMPL_WINDOW}-line "
+        f"window; implementation needs >= 2 keywords on one line and "
+        f">= {need} in a window)")
+    return {"status": "gap_confirmed", "evidence": evidence,
+            "implemented_at": "", "anchor_file": anchor_file,
+            "anchor_line": line, "anchor_text": text}
+
+
+def _is_survey_like(text: str) -> bool:
+    """True when *text* reads as a survey / taxonomy / paper title
+    rather than a behavior: it carries a survey marker and no gap
+    statement and no owning-module path."""
+    lowered = (text or "").lower()
+    if not any(m in lowered for m in _SURVEY_MARKERS):
+        return False
+    if extract_repo_files(text):
+        return False
+    return not any(m in lowered for m in _GAP_MARKERS)
+
+
+_SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+")
+
+
+def extract_gap_behavior(text: str) -> str:
+    """Mine a behavior from free claim text: the sentence that states a
+    gap (a ``_GAP_MARKERS`` phrase) in a Devon module. Returns "" when
+    the text states no gap — a bare fact is not a behavior. The owning
+    module's path is stripped from the returned sentence (it is
+    already carried as a target file) so the behavior reads as a
+    behavior, not a file reference."""
+    sentences = [s.strip() for s in _SENTENCE_SPLIT.split(text or "")
+                 if 40 <= len(s.strip()) <= 600]
+    best, best_score = "", -1
+    for s in sentences:
+        lowered = s.lower()
+        if not any(m in lowered for m in _GAP_MARKERS):
+            continue
+        score = sum(2 for m in _GAP_MARKERS if m in lowered)
+        if extract_repo_files(s):
+            score += 2
+        if score > best_score:
+            best, best_score = s, score
+    if not best:
+        return ""
+    cleaned = _REPO_FILE_RE.sub("", best)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" :;,")
+    return cleaned
+
+
+def derive_failing_test(behavior: str) -> str:
+    """The failing test for a behavior: a concrete ``test_`` name
+    derived from the behavior's words plus the fail-before/pass-after
+    description. Never a generic template."""
+    slug = _claim_test_slug(behavior)
+    name = f"test_{slug}_missing_behavior"
+    return (f"{name} — fails on the current tree because {behavior!r} "
+            f"is absent; passes once the behavior is implemented.")
+
+
+def log_proposal_skip(claim: Any, reason: str, detail: str = "") -> dict[str, Any]:
+    """Log a skipped finding in one stable format and return the skip
+    record: {"finding_id", "claim_id", "reason", "detail"}. Reasons
+    are one of: "no testable behavior" | "already implemented at
+    <file:line>" | "gap evidence not verified" | "empty claim".
+    The research loop surfaces these in its run output so skipped
+    findings are visible, not silently dropped."""
+    cid = ""
+    if isinstance(claim, dict):
+        cid = str(claim.get("id") or claim.get("claim_id") or "")
+    else:
+        cid = str(getattr(claim, "id", "") or "")
+    record = {"finding_id": cid, "claim_id": cid,
+              "reason": reason, "detail": detail}
+    _log.warning("proposal skipped: finding_id=%s reason=%s detail=%s",
+                 cid, reason, detail)
+    return record
+
+
+def _verify_supplied_evidence(evidence: str) -> str:
+    """Validate caller-supplied ``gap_evidence``: it must cite a real
+    ``nomorals/...py:<line>`` with the file on disk and the line in
+    range. Returns "" when valid, else the reason it is unverified."""
+    m = _REPO_FILE_LINE_RE.search(evidence or "")
+    if not m:
+        return ("supplied gap_evidence cites no real file:line "
+                f"({evidence[:120]!r})")
+    path, lineno = m.group(1), int(m.group(2))
+    root = repo_root()
+    if not (root / path).exists():
+        return f"supplied gap_evidence file {path} does not exist"
+    try:
+        total = len((root / path).read_text(
+            encoding="utf-8", errors="replace").splitlines())
+    except OSError as exc:
+        return f"supplied gap_evidence file {path} unreadable: {exc}"
+    if not 1 <= lineno <= total:
+        return (f"supplied gap_evidence line {lineno} out of range "
+                f"for {path} ({total} lines)")
+    return ""
+
+
+def build_proposal_spec(claim: ResearchClaim
+                        ) -> tuple[dict[str, Any] | None,
+                                   dict[str, Any] | None]:
+    """Build a verified proposal spec from *claim*, or skip it.
+
+    Returns (spec, None) when the finding distills into a concrete,
+    code-verified proposal, else (None, skip-record) — the skip is
+    logged via ``log_proposal_skip``. The spec carries ``behavior``,
+    ``target_files`` (all on disk), ``gap_evidence`` (a real
+    ``file:line`` anchor the generator checked), ``failing_test``,
+    and the anchor location. It never contains the old generic
+    template: no "encode the claim as a test", no "nothing asserts
+    it" without a code read behind it."""
+    text = (claim.claim or "").strip()
+    if not text:
+        return None, log_proposal_skip(
+            claim, "no testable behavior", "empty claim")
+    behavior = (claim.behavior or "").strip()
+    gap_text = (claim.gap or "").strip()
+    supplied_evidence = (claim.gap_evidence or "").strip()
+    targets = [str(f).strip() for f in (claim.target_files or []) if f]
+    failing = (claim.failing_test or "").strip()
+    if not behavior:
+        behavior = extract_gap_behavior(text)
+    if not targets:
+        targets = extract_repo_files(
+            " ".join([text, gap_text, supplied_evidence]))
+    if not behavior:
+        if _is_survey_like(text):
+            detail = ("survey/taxonomy/paper-title finding with no "
+                      "gap statement and no owning module — "
+                      f"{text[:120]!r}")
+        else:
+            detail = ("claim states no missing behavior (no gap "
+                      f"statement) — {text[:120]!r}")
+        return None, log_proposal_skip(
+            claim, "no testable behavior", detail)
+    if not targets:
+        return None, log_proposal_skip(
+            claim, "no testable behavior",
+            f"behavior {behavior[:120]!r} names no owning module in "
+            "this codebase (no nomorals/...py path) — cannot verify "
+            "a gap or place the change")
+    if supplied_evidence:
+        problem = _verify_supplied_evidence(supplied_evidence)
+        if problem:
+            return None, log_proposal_skip(
+                claim, "gap evidence not verified", problem)
+    check = verify_gap(behavior, targets)
+    if check["status"] == "already_implemented":
+        return None, log_proposal_skip(
+            claim, f"already implemented at {check['implemented_at']}",
+            f"code check found the behavior in "
+            f"{check['implemented_at']}")
+    if check["status"] != "gap_confirmed":
+        return None, log_proposal_skip(
+            claim, "gap evidence not verified", check["evidence"])
+    evidence = check["evidence"]
+    if supplied_evidence:
+        evidence = (f"caller evidence: {supplied_evidence} (verified: "
+                    f"real file:line); generator check: {evidence}")
+    if not failing:
+        failing = derive_failing_test(behavior)
+    elif "test_" not in failing:
+        failing = (f"{derive_failing_test(behavior).split(' — ')[0]} — "
+                   f"{failing}")
+    spec = {
+        "behavior": behavior,
+        "target_files": list(targets),
+        "gap_evidence": evidence,
+        "failing_test": failing,
+        "anchor_file": check["anchor_file"],
+        "anchor_line": check["anchor_line"],
+        "anchor_text": check["anchor_text"],
+    }
+    return spec, None
+
+
+
 # ── ticket quality: substantive content, no boilerplate ───────────────────
 
 #: Banned filler phrases: when a long-form ticket field contains one of
@@ -660,6 +1153,17 @@ def gate_ticket(ticket: dict[str, Any]) -> list[str]:
       review" beats invented specifics).
     * ``verify_steps`` — concrete tests/commands that prove the fix
       worked, distinct from acceptance_criteria (the done-definition).
+    * ``behavior`` — the specific behavior to implement/change
+      (>= 20 chars, not a generic template).
+    * ``gap_evidence`` — a real ``nomorals/...py:<line>`` anchor in an
+      owning module that was checked against the current code, with
+      the file on disk and the line in range.
+    * ``failing_test`` — a ``test_`` name plus the fail-before /
+      pass-after description (>= 20 chars).
+    * No generic template phrasing anywhere ("encode the claim as a
+      test", "assert the behavior", "not encoded anywhere" / "nothing
+      in ... asserts it" without a code read) — the old survey-title +
+      generic-test-template form is rejected, not just discouraged.
 
     Long-form fields are checked for boilerplate: too few distinct
     content words, fields that only restate the title/rationale, and
@@ -745,6 +1249,58 @@ def gate_ticket(ticket: dict[str, Any]) -> list[str]:
                          joined_steps, re.IGNORECASE):
             problems.append("verify steps name no concrete test/command "
                             "(a test_ name, pytest, or error_scan)")
+
+    # ── the concrete-proposal bar: behavior + verified gap evidence +
+    # failing test, and no generic template phrasing.
+    behavior = str(t.get("behavior") or "").strip()
+    if len(behavior) < 20:
+        problems.append("no behavior to implement/change (< 20 chars) — "
+                        "a finding without a specific behavior is not "
+                        "an implementable proposal")
+    evidence = str(t.get("gap_evidence") or "").strip()
+    if not evidence:
+        problems.append("no gap_evidence — a proposal must cite a checked "
+                        "file:line anchor in the owning module")
+    else:
+        m = _REPO_FILE_LINE_RE.search(evidence)
+        if not m:
+            problems.append("gap_evidence cites no real file:line "
+                            "(need nomorals/...py:<line>)")
+        else:
+            path, lineno = m.group(1), int(m.group(2))
+            root = repo_root()
+            if not (root / path).exists():
+                problems.append(f"gap_evidence file {path} does not exist")
+            else:
+                try:
+                    total = len((root / path).read_text(
+                        encoding="utf-8", errors="replace").splitlines())
+                except OSError:
+                    total = 0
+                if not 1 <= lineno <= total:
+                    problems.append(
+                        f"gap_evidence line {lineno} out of range for "
+                        f"{path} ({total} lines)")
+    failing = str(t.get("failing_test") or "").strip()
+    if len(failing) < 20 or not re.search(r"test_[a-z0-9_]+", failing):
+        problems.append("no failing_test — a proposal must name a "
+                        "test_<name> that fails without the change")
+    for field, text in (("behavior", behavior),
+                        ("proposed_change", proposed),
+                        ("test_plan", " ".join(
+                            str(x) for x in (t.get("test_plan") or [])))):
+        lowered = text.lower()
+        for phrase in _GENERIC_TICKET_PHRASES:
+            if phrase in lowered:
+                problems.append(
+                    f"{field} uses the generic template phrase "
+                    f"{phrase!r} — the survey-title + generic-test "
+                    "template form is never emitted")
+        if re.search(r"nothing in .* asserts it", lowered):
+            problems.append(
+                f"{field} claims 'nothing asserts it' without a code "
+                "read — gap claims must carry verified file:line "
+                "evidence")
     return problems
 
 
@@ -863,55 +1419,43 @@ class ResearchDigest:
         return "\n".join(lines)
 
     @staticmethod
-    def upgrade_ticket(claim: ResearchClaim) -> dict[str, Any]:
-        """Build an actionable upgrade ticket from a claim.
+    def upgrade_ticket_or_skip(
+            claim: ResearchClaim) -> tuple[dict[str, Any] | None,
+                                           dict[str, Any] | None]:
+        """Build a concrete ticket from *claim*, or skip it.
 
-        Every ticket is concrete or it is not built at all (ValueError):
-        * ``suggested_files`` names real repo paths — split into
-          ``verified_files`` (exist on disk) and ``unverified_files``;
-          the ticket is rejected when nothing verifies.
-        * ``expected_tests`` are specific test names derived from the
-          claim, not vague descriptions.
-        * ``acceptance_criteria`` is a done-definition: each criterion
-          is checkable, including a failing-before/passing-after test,
-          a green module suite, and a 0-error ``error_scan``.
-        * ``problem`` states what's wrong with evidence (claim, query,
-          angle, confidence, sources, current repo state) — not a title
-          rephrase.
-        * ``proposed_change`` names the approach AND ties it to the
-          suggested files (TDD first, smallest diff, heuristic caveat).
-        * ``risk`` is an honest blast-radius/reversibility assessment —
-          "unknown, needs human review" where nothing is verified, never
-          invented specifics.
-        * ``verify_steps`` are concrete tests/commands proving the fix
-          (distinct from acceptance_criteria, the done-definition).
-
-        ``suggested_files_basis`` stays an honest heuristic label —
-        verify the owning module before editing; it is not certainty.
+        Returns (ticket, None) on success, (None, skip-record) when the
+        finding cannot become an implementable proposal — vague
+        finding, already-implemented behavior, or unverifiable gap
+        evidence. The skip is logged (finding id + reason) by
+        ``build_proposal_spec``. Prefer this over ``upgrade_ticket``
+        in pipelines: it never raises for a skippable finding.
         """
-        text = (claim.claim or "").strip()
-        if not text:
-            raise ValueError("cannot build a ticket from an empty claim")
-        domain = claim.domain if claim.domain in _SUGGESTED_FILES else "general"
-        short = text[:90].rstrip()
-        if len(text) > 90:
-            short += "..."
-        hint = _DOMAIN_TEST_HINTS.get(domain, _DOMAIN_TEST_HINTS["general"])
-        files = list(_SUGGESTED_FILES[domain])
+        spec, skip = build_proposal_spec(claim)
+        if skip is not None:
+            return None, skip
+        assert spec is not None
+        behavior = spec["behavior"]
+        files = list(spec["target_files"])
         verified, unverified = verify_ticket_files(files)
         if not verified:
-            raise ValueError(
-                f"cannot build a concrete ticket: none of the suggested "
-                f"files for domain {domain!r} exist on disk "
-                f"({', '.join(files)})")
-        slug = _claim_test_slug(text)
+            skip = log_proposal_skip(
+                claim, "gap evidence not verified",
+                f"target files do not exist on disk: {files}")
+            return None, skip
+        domain = claim.domain if claim.domain in _SUGGESTED_FILES else "general"
+        hint = _DOMAIN_TEST_HINTS.get(domain, _DOMAIN_TEST_HINTS["general"])
+        failing = spec["failing_test"]
+        failing_name = re.search(r"test_[a-z0-9_]+", failing)
+        failing_name = failing_name.group(0) if failing_name else "test_missing_behavior"
+        slug = _claim_test_slug(behavior)
         expected_tests = [
-            f"test_claim_{slug}_asserts_behavior",
-            f"test_claim_{slug}_rejects_contradiction",
+            failing_name,
+            f"test_{slug}_keeps_existing_behavior",
             f"test_{domain}_{slug}_edge_cases",
         ]
+        anchor = f"{spec['anchor_file']}:{spec['anchor_line']}"
         verified_txt = ", ".join(verified)
-        # evidence for the problem statement: what the claim rests on
         source_bits = []
         for s in (claim.sources or [])[:3]:
             if isinstance(s, dict):
@@ -924,45 +1468,45 @@ class ResearchDigest:
         problem = (
             f"Research finding from query {claim.query!r} "
             f"(angle: {claim.angle or 'unspecified'}, "
-            f"confidence {float(claim.confidence or 0.0):.0%}): {text} "
-            f"Evidence: {evidence}. "
-            f"The claim is not encoded anywhere in the repo — nothing in "
-            f"{verified_txt} asserts it, so the behavior it describes is "
-            f"untested and the contradicting case is unguarded. "
-            f"(The domain→repo file map is heuristic: verify the owning "
-            f"module by reading it before editing.)")
+            f"confidence {float(claim.confidence or 0.0):.0%}): "
+            f"{claim.claim} Evidence: {evidence}. "
+            f"Gap, verified against the current code: {behavior} is "
+            f"absent. Checked anchor {anchor}: "
+            f"{spec['anchor_text'][:120]} — the generator read "
+            f"{verified_txt} and found no implementation of the "
+            f"behavior there. Full gap evidence: "
+            f"{spec['gap_evidence']}")
         proposed_change = (
-            f"Approach: encode the claim as a failing test first (TDD — "
-            f"{expected_tests[0]}), then implement the smallest change in "
-            f"the owning module that makes it pass, keeping the diff local "
-            f"to {verified_txt}. Confirm the owning module by reading it "
-            f"first — the domain→repo map is a heuristic, not certainty. "
+            f"Implement {behavior} in {verified_txt} (anchor {anchor}). "
+            f"TDD first: write {failing_name}, watch it fail on the "
+            f"current tree, then implement the change in the owning "
+            f"module and keep the diff local to {verified_txt}. "
             f"Re-run the module's test suite plus error_scan, then "
             f"promote the outcome back to the KG (research_digest "
             f"promote).")
         risk = (
-            f"Blast radius: unknown — the suggested files are a "
-            f"keyword→domain heuristic, not a verified owning module, so "
-            f"edits could land in the wrong module and regress unrelated "
-            f"behavior ({verified_txt}). Reversibility: full — revert the "
+            f"Blast radius: {verified_txt} plus its direct callers — "
+            f"the change is scoped to one behavior in the owning "
+            f"module, and the failing test plus the existing suite "
+            f"guard the callers. Reversibility: full — revert the "
             f"commit; the TDD-first plan keeps the diff minimal and "
-            f"test-covered. Honest status: needs human review of the "
-            f"owning module before any edit.")
+            f"test-covered. Honest status: the gap was verified by "
+            f"reading the code, but a human should still confirm the "
+            f"anchor is the right place before merging.")
         verify_steps = [
-            f"Run pytest -k {expected_tests[0]} — fails on the current "
+            f"Run pytest -k {failing_name} — fails on the current "
             "tree, passes after the change (TDD).",
-            "Run the owning module's existing test suite — green before "
-            "and after the change.",
+            f"Run the owning module's existing test suite for "
+            f"{verified_txt} — green before and after the change.",
             "Run python3 -m nomorals.tools.error_scan on every touched "
             "file — 0 errors.",
         ]
         acceptance_criteria = [
-            "The owning module is confirmed from verified_files (read it; "
-            "do not assume the heuristic is right) before any edit.",
-            f"{expected_tests[0]} fails on the current tree and passes "
+            f"{failing_name} fails on the current tree and passes "
             "after the change (TDD).",
-            f"{expected_tests[1]} passes — the contradicting case stays "
-            "rejected.",
+            f"The behavior {behavior!r} is present in {verified_txt}.",
+            f"{expected_tests[1]} passes — existing behavior outside "
+            "the change is untouched.",
             f"{expected_tests[2]} covers the domain edge cases: {hint}.",
             "The owning module's existing test suite is green before and "
             "after the change.",
@@ -970,38 +1514,46 @@ class ResearchDigest:
             "The outcome is promoted back to the KG (research_digest "
             "promote) with the new confidence.",
         ]
+        title = f"[{domain}] {behavior}"[:160]
         ticket = {
-            "title": f"[{domain}] {short}",
+            "title": title,
             "rationale": (
                 f"Research finding from query {claim.query!r} "
                 f"(angle: {claim.angle or 'unspecified'}, "
                 f"confidence {float(claim.confidence or 0.0):.0%}): "
-                f"{claim.claim}"),
+                f"{claim.claim} Behavior to implement/change: "
+                f"{behavior} Gap evidence: {spec['gap_evidence']}"),
             "domain": domain,
             "suggested_files": files,
             "verified_files": verified,
             "unverified_files": unverified,
             "suggested_files_basis": (
-                "heuristic: keyword-mapped domain -> repo area; verify the "
-                "owning module before editing — suggestions, not certainty"),
+                "verified: the generator read the owning module and "
+                "confirmed the gap in the current code — the anchor "
+                "file:line in gap_evidence is where the change belongs"),
             "expected_tests": expected_tests,
             "acceptance_criteria": acceptance_criteria,
             "problem": problem,
             "proposed_change": proposed_change,
             "risk": risk,
             "verify_steps": verify_steps,
+            "behavior": behavior,
+            "gap_evidence": spec["gap_evidence"],
+            "failing_test": failing,
             "test_plan": [
-                f"Encode the claim as a test: assert the behavior '{short}'.",
-                "Add a negative test for the contradicting case (check the "
-                "KG for a flagged conflict on this claim first).",
+                f"Write {failing_name}: fails on the current tree, "
+                f"passes once {behavior} lands in {verified_txt}.",
+                "Write a negative test for the contradicting case "
+                "(check the KG for a flagged conflict on this claim "
+                "first).",
                 f"Stress the domain edge cases: {hint}.",
                 "Run the owning module's test suite green before and after.",
             ],
             "patch_plan": [
-                "Confirm the owning module from suggested_files (read it; "
-                "do not assume the heuristic is right).",
-                "Write the failing test from the test plan first.",
-                "Implement the smallest change that makes the test pass.",
+                f"Confirm the owning module from suggested_files: read "
+                f"{verified_txt} at anchor {anchor}.",
+                f"Write the failing test {failing_name} first.",
+                f"Implement {behavior} in {verified_txt}.",
                 "Run the module tests plus error_scan; fix regressions.",
                 "Promote the outcome back to the KG (research_digest "
                 "promote) with the new confidence.",
@@ -1014,6 +1566,29 @@ class ResearchDigest:
             raise ValueError(
                 "built ticket failed the concreteness gate: "
                 + "; ".join(problems))
+        return ticket, None
+
+    @staticmethod
+    def upgrade_ticket(claim: ResearchClaim) -> dict[str, Any]:
+        """Build an actionable upgrade ticket from a claim.
+
+        Every ticket is concrete or it is not built at all (ValueError):
+        the finding must name a specific behavior + owning module(s),
+        the generator must have READ the owning module and confirmed
+        the gap in the current code, and the ticket must carry the
+        ``file:line`` gap evidence plus a failing test. Vague findings
+        (survey titles, taxonomies, bare facts) and already-implemented
+        behaviors raise ValueError with the skip reason — use
+        ``upgrade_ticket_or_skip`` in pipelines to collect the skip
+        record instead of raising. See ``build_proposal_spec``.
+        """
+        ticket, skip = ResearchDigest.upgrade_ticket_or_skip(claim)
+        if ticket is None:
+            reason = (skip or {}).get("reason", "no testable behavior")
+            detail = (skip or {}).get("detail", "")
+            raise ValueError(
+                f"no concrete proposal for finding "
+                f"{claim.id}: {reason} — {detail}")
         return ticket
 
 
@@ -1053,11 +1628,16 @@ class ResearchPipeline:
                                               min_confidence=min_confidence)
         note = ResearchDigest.technical_note(report)
         tickets: list[dict[str, Any]] = []
+        skipped: list[dict[str, Any]] = []
         for c in claims:
             ok, _reasons = promotion_gate(c, min_confidence=min_confidence)
             if not ok:
                 continue  # weak claims stay in the digest, never promoted
-            tickets.append(ResearchDigest.upgrade_ticket(c))
+            ticket, skip = ResearchDigest.upgrade_ticket_or_skip(c)
+            if ticket is not None:
+                tickets.append(ticket)
+            elif skip is not None:
+                skipped.append(skip)
 
         notified = False
         if notify and brief:
@@ -1080,6 +1660,8 @@ class ResearchPipeline:
             "brief": brief,
             "note": note,
             "tickets": tickets,
+            "skipped": skipped,
+            "skipped_count": len(skipped),
             "notified": notified,
         }
 

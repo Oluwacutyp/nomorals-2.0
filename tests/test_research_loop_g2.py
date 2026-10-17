@@ -223,9 +223,13 @@ class DedupeTests(unittest.TestCase):
         # finding (different topic, same ticket) and must dedupe it.
         ctx = _ctx()
         _enable(ctx)
-        ticket = ResearchDigest.upgrade_ticket(
-            _claim("c1", "Redis is the fastest in-memory cache for session "
-                         "storage in this stack", confidence=0.9))
+        claim = _claim("c1", "ResearchLoop never sends the owner a "
+                       "weekly email digest of skipped proposals",
+                       confidence=0.9)
+        claim.behavior = ("ResearchLoop publishes a weekly email digest "
+                          "listing skipped proposal reasons to the owner")
+        claim.target_files = ["nomorals/agents/research_loop.py"]
+        ticket = ResearchDigest.upgrade_ticket(claim)
         out1, _, _ = _run_loop(ctx, [ticket], max_proposals=5)
         self.assertEqual(out1["proposals_created"], 1)
         self.assertEqual(out1["proposals_deduped"], 0)

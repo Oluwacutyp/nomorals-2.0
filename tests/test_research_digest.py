@@ -305,13 +305,23 @@ class TechnicalNoteTests(unittest.TestCase):
 
 class UpgradeTicketTests(unittest.TestCase):
     def test_all_keys_and_suggested_files(self):
+        # A ticket now requires a verified spec: behavior + owning
+        # module + failing test. The same genuinely-absent behavior
+        # (a weekly email digest the loop never sends) is used for
+        # every domain so the test checks ticket shape, not mining.
         for domain in ("security", "competitors", "ml", "systems",
                        "tooling", "product", "general"):
-            claim = _claim("t1", "A claim worth acting on " * 6,
+            claim = _claim("t1", "ResearchLoop never sends the owner a "
+                           "weekly email digest of skipped proposals",
                            domain=domain, confidence=0.82)
+            claim.behavior = ("ResearchLoop publishes a weekly email "
+                              "digest listing skipped proposal reasons "
+                              "to the owner")
+            claim.target_files = ["nomorals/agents/research_loop.py"]
             ticket = ResearchDigest.upgrade_ticket(claim)
             for key in ("title", "rationale", "domain", "suggested_files",
-                        "test_plan", "patch_plan", "claim_ids", "confidence"):
+                        "test_plan", "patch_plan", "claim_ids", "confidence",
+                        "behavior", "gap_evidence", "failing_test"):
                 self.assertIn(key, ticket, f"{domain}:{key}")
             self.assertEqual(ticket["domain"], domain)
             self.assertTrue(ticket["suggested_files"], domain)
@@ -321,18 +331,34 @@ class UpgradeTicketTests(unittest.TestCase):
             self.assertTrue(ticket["patch_plan"], domain)
             self.assertEqual(ticket["claim_ids"], ["t1"])
             self.assertEqual(ticket["confidence"], 0.82)
+            self.assertIn("nomorals/agents/research_loop.py:",
+                          ticket["gap_evidence"], domain)
 
-    def test_suggested_files_marked_heuristic(self):
-        ticket = ResearchDigest.upgrade_ticket(
-            _claim("t2", "Some security claim about exploits",
-                   domain="security"))
-        self.assertIn("heuristic", ticket["suggested_files_basis"].lower())
+    def test_suggested_files_marked_verified(self):
+        claim = _claim("t2", "Some security claim about exploits",
+                       domain="security")
+        claim.behavior = ("ResearchLoop publishes a weekly email digest "
+                          "listing skipped proposal reasons to the owner")
+        claim.target_files = ["nomorals/agents/research_loop.py"]
+        ticket = ResearchDigest.upgrade_ticket(claim)
+        # the old heuristic label is gone: the generator READ the
+        # owning module, so the basis says verified, not heuristic
+        self.assertIn("verified", ticket["suggested_files_basis"].lower())
+        self.assertNotIn("heuristic",
+                         ticket["suggested_files_basis"].lower())
 
 
 # ── pipeline (fake swarm, no network) ──────────────────────────────────────
 
 class _FakeSwarm:
-    """Stand-in for ResearchSwarm: deterministic report, no network."""
+    """Stand-in for ResearchSwarm: deterministic report, no network.
+
+    Finding 1 carries a verified proposal spec (a Devon gap: the loop
+    never sends a weekly email digest) and must yield exactly one
+    concrete ticket. Finding 2 is a bare external fact (PostgreSQL)
+    with no behavior, no owning module — it must be SKIPPED, never
+    turned into a survey-title + generic-test ticket.
+    """
 
     def __init__(self, context, specialists=None, **kw):
         self.context = context
@@ -345,11 +371,15 @@ class _FakeSwarm:
             findings=[
                 SwarmFinding(
                     angle="core",
-                    claim="PostgreSQL is the best relational database for "
-                          "analytics workloads",
-                    sources=[{"url": "https://example.com/pg",
-                              "title": "PG", "trust": 0.9}],
-                    confidence=0.85),
+                    claim="ResearchLoop never sends the owner a weekly "
+                          "email digest of skipped proposals",
+                    sources=[{"url": "https://example.com/digest",
+                              "title": "Digest", "trust": 0.9}],
+                    confidence=0.85,
+                    behavior="ResearchLoop publishes a weekly email "
+                             "digest listing skipped proposal reasons "
+                             "to the owner",
+                    target_files=["nomorals/agents/research_loop.py"]),
                 SwarmFinding(
                     angle="critical",
                     claim="PostgreSQL is not suitable for analytics "
@@ -380,11 +410,9 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(promo["promoted"], 2)
         self.assertEqual(promo["skipped_low_confidence"], 0)
         self.assertEqual(promo["superseded"], 0)
-        # same-batch conflict: weaker claim contradicts the stronger one
-        self.assertEqual(len(promo["conflicts"]), 1)
-        self.assertEqual(promo["conflicts"][0]["kind"], "contradiction")
-        by_conf = sorted(result["claims"], key=lambda c: -c["confidence"])
-        self.assertEqual(by_conf[1]["status"], "contradicted")
+        # the two claims are about different subjects (Devon digest vs
+        # PostgreSQL), so no conflict is flagged
+        self.assertEqual(len(promo["conflicts"]), 0)
 
         # claims really landed in the KG
         kg = KnowledgeGraph(db)
@@ -394,7 +422,17 @@ class PipelineTests(unittest.TestCase):
         self.assertTrue(result["brief"])
         self.assertLessEqual(len(result["brief"].splitlines()), 20)
         self.assertIn("OBJECTIVE", result["note"])
-        self.assertEqual(len(result["tickets"]), 2)
+        # exactly one concrete ticket (the Devon gap); the bare
+        # PostgreSQL fact is skipped, not templated into a ticket
+        self.assertEqual(len(result["tickets"]), 1)
+        self.assertEqual(result["tickets"][0]["behavior"],
+                         "ResearchLoop publishes a weekly email digest "
+                         "listing skipped proposal reasons to the owner")
+        self.assertIn("nomorals/agents/research_loop.py:",
+                      result["tickets"][0]["gap_evidence"])
+        self.assertEqual(result["skipped_count"], 1)
+        self.assertEqual(result["skipped"][0]["reason"],
+                         "no testable behavior")
         self.assertFalse(result["notified"])
 
     def test_min_confidence_filters(self):
@@ -402,6 +440,7 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(result["promotion"]["promoted"], 0)
         self.assertEqual(result["promotion"]["skipped_low_confidence"], 2)
         self.assertEqual(result["tickets"], [])
+        self.assertEqual(result["skipped"], [])
 
     def test_promote_claims_false(self):
         result, db = self._run(promote_claims=False)

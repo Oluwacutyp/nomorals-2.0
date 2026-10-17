@@ -37,9 +37,15 @@ def _claim(cid, text, domain="general", confidence=0.85, query="g2 audit",
 
 
 def _concrete_ticket(**overrides):
-    ticket = ResearchDigest.upgrade_ticket(
-        _claim("seed", "apply_unified_diff is implemented in three separate "
-                       "modules with no shared canonical version"))
+    # A ticket built by the real generator from a verified spec: the
+    # loop never sends a weekly email digest — a behavior genuinely
+    # absent from nomorals/agents/research_loop.py.
+    claim = _claim("seed", "ResearchLoop never sends the owner a weekly "
+                           "email digest of skipped proposals")
+    claim.behavior = ("ResearchLoop publishes a weekly email digest "
+                      "listing skipped proposal reasons to the owner")
+    claim.target_files = ["nomorals/agents/research_loop.py"]
+    ticket = ResearchDigest.upgrade_ticket(claim)
     ticket.update(overrides)
     return ticket
 
@@ -190,10 +196,13 @@ class UpgradeTicketSubstanceTests(unittest.TestCase):
         for domain in ("security", "competitors", "ml", "systems",
                        "tooling", "product", "general"):
             claim = _claim(
-                new_id("c"), "Observed behavior in this area needs an "
-                             "encoded test and a minimal owning-module fix "
-                             "so regressions are caught",
+                new_id("c"), "ResearchLoop never sends the owner a "
+                             "weekly email digest of skipped proposals",
                 domain=domain, confidence=0.82)
+            claim.behavior = ("ResearchLoop publishes a weekly email "
+                              "digest listing skipped proposal reasons "
+                              "to the owner")
+            claim.target_files = ["nomorals/agents/research_loop.py"]
             ticket = ResearchDigest.upgrade_ticket(claim)
             self.assertEqual(gate_ticket(ticket), [], domain)
             baseline = _content_words(
@@ -210,19 +219,27 @@ class UpgradeTicketSubstanceTests(unittest.TestCase):
             self.assertRegex(joined, r"test_[a-z0-9_]+|pytest|error_scan")
 
     def test_risk_is_honest_not_invented(self):
-        ticket = ResearchDigest.upgrade_ticket(
-            _claim(new_id("c"), "Some claim about cache behavior",
-                   domain="systems"))
+        claim = _claim(new_id("c"), "ResearchLoop never sends the owner "
+                       "a weekly email digest of skipped proposals",
+                       domain="systems")
+        claim.behavior = ("ResearchLoop publishes a weekly email digest "
+                          "listing skipped proposal reasons to the owner")
+        claim.target_files = ["nomorals/agents/research_loop.py"]
+        ticket = ResearchDigest.upgrade_ticket(claim)
         risk = ticket["risk"].lower()
-        self.assertIn("unknown", risk)  # honest about the heuristic map
+        self.assertIn("verified", risk)  # gap verified by reading code
         self.assertIn("revert", risk)   # reversibility stated
-        self.assertIn("human review", risk)
+        self.assertIn("human", risk)  # human confirms the anchor
 
     def test_problem_carries_evidence(self):
-        ticket = ResearchDigest.upgrade_ticket(
-            _claim(new_id("c"), "Redis is the fastest in-memory cache",
-                   domain="systems", query="cache survey", angle="core",
-                   confidence=0.9))
+        claim = _claim(new_id("c"), "ResearchLoop never sends the owner "
+                       "a weekly email digest of skipped proposals",
+                       domain="systems", query="cache survey", angle="core",
+                       confidence=0.9)
+        claim.behavior = ("ResearchLoop publishes a weekly email digest "
+                          "listing skipped proposal reasons to the owner")
+        claim.target_files = ["nomorals/agents/research_loop.py"]
+        ticket = ResearchDigest.upgrade_ticket(claim)
         problem = ticket["problem"]
         self.assertIn("cache survey", problem)
         self.assertIn("90%", problem)
@@ -232,59 +249,83 @@ class UpgradeTicketSubstanceTests(unittest.TestCase):
 
 # ── audit: 8 real repo observations → tickets → gate with substance ────────
 #
-# Every claim below was verified by reading the repo first:
-#   1. apply_unified_diff duplicated in 3 modules (grep: def apply_unified_diff)
-#   2. estimate_tokens reimplemented in 3 modules (grep: def estimate_tokens)
-#   3. build_repo_map in 2 modules (grep: def build_repo_map)
-#   4. nomorals/native/ ships prebuilt .so files (ls: libbpe.so, libmemextract.so)
-#   5. error_scan is "descriptive, not a gate" (its own module docstring)
-#   6. propose_from_ticket drops the ticket's risk field (upgrade_queue.py:226-243)
-#   7. OpenRouter catalog pull lives in memory notes, not the repo (memory)
-#   8. 328/348 modules lack an obviously-named test file (measured via os.walk)
-
-_AUDIT_CLAIMS = [
+# Every observation below was verified by reading the repo first; each
+# now carries an explicit proposal spec (behavior + owning module)
+# that the generator VERIFIES against the current code. Seven name
+# genuine gaps and must emit concrete tickets. The eighth (render the
+# ticket risk in /upgrade show) is ALREADY implemented —
+# render_upgrade_show in upgrade_chat.py renders the full ticket
+# including risk — so the generator must SKIP it with
+# "already implemented at ...", proving the gap check is real and
+# not a rubber stamp. The old audit asserted all 8 emit; that was
+# the bug (the generator never checked the code).
+_AUDIT_SPECS = [
     ("tooling",
      "apply_unified_diff is implemented in three separate modules "
      "(nomorals/agents/patch.py, nomorals/agents/skill_evolution.py, "
      "nomorals/core/diff.py) with no shared canonical version — a "
-     "diff-parsing bug fixed in one copy stays broken in the other two."),
+     "diff-parsing bug fixed in one copy stays broken in the other two.",
+     "Unify apply_unified_diff into one canonical implementation in "
+     "nomorals/core/diff.py used by every caller",
+     ["nomorals/core/diff.py"]),
     ("ml",
      "estimate_tokens is reimplemented in nomorals/llm/base.py, "
      "nomorals/tools/repo_index.py and nomorals/tools/repo_context.py — "
      "three token-counting heuristics that can disagree on context "
-     "budgets, so one module's 'fits' is another's overflow."),
+     "budgets, so one module's 'fits' is another's overflow.",
+     "Unify estimate_tokens into one canonical implementation in "
+     "nomorals/llm/base.py used by every caller",
+     ["nomorals/llm/base.py"]),
     ("tooling",
      "build_repo_map exists in both nomorals/agents/repo_map.py and "
      "nomorals/tools/repo_index.py — two repo-map builders maintained "
      "separately that can drift out of sync on ignore rules and "
-     "entry formats."),
+     "entry formats.",
+     "Unify build_repo_map into one canonical implementation in "
+     "nomorals/agents/repo_map.py used by every caller",
+     ["nomorals/agents/repo_map.py"]),
     ("systems",
      "nomorals/native/ ships prebuilt shared objects (libbpe.so, "
      "libmemextract.so were found on disk) with no recorded test proving "
      "the pure-Python fallback path works when a .so fails to load on an "
-     "unsupported platform."),
+     "unsupported platform.",
+     "Add a test proving the pure-Python fallback path works when a "
+     "native shared object fails to load",
+     ["nomorals/native/__init__.py"]),
     ("security",
      "error_scan detects swallowed exceptions (E103) but its own "
      "docstring says it is 'descriptive, not a gate: it reports, it never "
      "rewrites' — a swallowed exception in an auth/trust path "
      "(nomorals/core/trust.py, nomorals/core/policy.py) can hide a "
-     "security failure with no blocking check anywhere in the pipeline."),
+     "security failure with no blocking check anywhere in the pipeline.",
+     "Add a blocking check that fails the pipeline when error_scan "
+     "finds a swallowed exception in an authentication path",
+     ["nomorals/core/trust.py"]),
     ("product",
      "/upgrade show renders risk as 'unstated in the ticket' when the "
      "plan carries none (upgrade_chat.py), and propose_from_ticket only "
      "queues title/rationale/patch_plan/files/tests/claim_ids — the "
      "ticket's risk field is dropped on the floor, so approved proposals "
-     "never show the blast radius the ticket author wrote."),
+     "never show the blast radius the ticket author wrote.",
+     "Render the ticket risk field in the upgrade show output for "
+     "every proposal",
+     ["nomorals/agents/upgrade_chat.py"]),
     ("competitors",
      "The 2026-10-01 OpenRouter catalog pull (464 models, 21 free, zero "
      "uncensored) lives only in memory notes, not in the repo — the bot "
      "brain fallback chain (HF -> Groq -> OpenRouter) can go stale "
-     "silently when the free catalog changes."),
+     "silently when the free catalog changes.",
+     "Sync the OpenRouter model catalog into the repo on a schedule "
+     "so the brain fallback chain never goes stale",
+     ["nomorals/llm/router.py"]),
     ("general",
      "328 of 348 repo modules have no obviously-named test file "
      "(measured by module↔test filename pairing over nomorals/) — "
      "coverage gaps are invisible because nothing in the repo measures "
-     "which modules lack tests."),
+     "which modules lack tests.",
+     "Add a coverage report listing every repo module with no "
+     "obviously-named test file",
+     ["nomorals/tools/repo_index.py"]),
 ]
 
 
@@ -312,20 +353,38 @@ def _assert_ticket_substance(testcase, ticket, label):
 
 class AuditRealTicketsTests(unittest.TestCase):
     def test_audit_tickets_pass_gate_with_substance(self):
-        for i, (domain, text) in enumerate(_AUDIT_CLAIMS):
+        for i, (domain, text, behavior, targets) in enumerate(
+                _AUDIT_SPECS):
             with self.subTest(i=i, domain=domain):
                 claim = _claim(new_id("audit"), text, domain=domain,
                                confidence=0.85,
                                query="repo code reading audit",
                                angle="weakness scan")
-                ticket = ResearchDigest.upgrade_ticket(claim)
+                claim.behavior = behavior
+                claim.target_files = list(targets)
+                ticket, skip = ResearchDigest.upgrade_ticket_or_skip(claim)
+                if i == 5:
+                    # already implemented: render_upgrade_show renders
+                    # the full ticket including risk — no proposal.
+                    self.assertIsNone(ticket, f"audit-{i} must skip")
+                    self.assertTrue(
+                        (skip or {}).get("reason", "").startswith(
+                            "already implemented at "
+                            "nomorals/agents/upgrade_chat.py:"),
+                        f"audit-{i}: {skip}")
+                    continue
+                self.assertIsNone(skip, f"audit-{i}: {skip}")
+                assert ticket is not None
                 _assert_ticket_substance(self, ticket, f"audit-{i}")
                 # the ticket still carries the original schema fields
                 for key in ("title", "rationale", "domain", "suggested_files",
                             "verified_files", "expected_tests",
                             "acceptance_criteria", "test_plan", "patch_plan",
-                            "claim_ids", "confidence"):
+                            "claim_ids", "confidence",
+                            "behavior", "gap_evidence", "failing_test"):
                     self.assertIn(key, ticket, f"audit-{i}:{key}")
+                self.assertIn("nomorals/", ticket["gap_evidence"],
+                              f"audit-{i}: gap evidence must cite a file")
 
 
 if __name__ == "__main__":

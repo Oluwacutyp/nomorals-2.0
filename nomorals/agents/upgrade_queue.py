@@ -456,7 +456,16 @@ class UpgradePipeline:
         cases):
         * confidence below ``_MIN_TICKET_CONFIDENCE`` — weak finding.
         * ``gate_ticket`` finds blocking problems — vague ticket (no real
-          files, no concrete test names, no acceptance criteria).
+          files, no concrete test names, no acceptance criteria, no
+          verified gap evidence, no behavior, no failing test).
+
+        The ticket's concrete substance (problem / proposed_change /
+        risk / verify_steps / behavior / gap_evidence / failing_test)
+        is carried into the stored ``patch_plan`` so /proposals shows
+        the verified gap and the failing test, not just a title —
+        ``UpgradeQueue.propose`` only stores title/rationale/plan/
+        files/tests, so anything not folded into the plan would be
+        dropped on the floor.
         """
         ticket = ticket or {}
         confidence = float(ticket.get("confidence") or 0.0)
@@ -476,14 +485,25 @@ class UpgradePipeline:
         raw_plan = ticket.get("patch_plan") or {}
         # digest tickets carry patch_plan as an ordered step list; the
         # queue stores a dict — normalize, never crash on the shape.
-        patch_plan = (raw_plan if isinstance(raw_plan, dict)
+        patch_plan = (dict(raw_plan) if isinstance(raw_plan, dict)
                       else {"steps": list(raw_plan)})
+        for key in ("problem", "proposed_change", "risk", "behavior",
+                    "gap_evidence", "failing_test"):
+            if ticket.get(key):
+                patch_plan.setdefault(key, ticket[key])
+        if ticket.get("verify_steps"):
+            patch_plan.setdefault("verify_steps",
+                                  list(ticket["verify_steps"]))
+        tests = list(ticket.get("test_plan") or [])
+        failing = str(ticket.get("failing_test") or "")
+        if failing and failing not in tests:
+            tests.append(failing)
         return queue.propose(
             title=str(ticket.get("title") or ""),
             rationale=str(ticket.get("rationale") or ""),
             patch_plan=patch_plan,
             files=list(ticket.get("suggested_files") or []),
-            tests=list(ticket.get("test_plan") or []),
+            tests=tests,
             claim_ids=list(ticket.get("claim_ids") or []),
             source=source,
         )

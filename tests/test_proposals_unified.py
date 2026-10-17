@@ -37,7 +37,8 @@ def _ctx(db=None):
 def _ticket(title):
     # Full ticket shape that passes gate_ticket (problem, approach,
     # risk, verify steps — each substantive, proposed change naming
-    # the suggested file).
+    # the suggested file) plus the concrete-proposal bar: behavior,
+    # verified file:line gap evidence, failing test.
     return {
         "title": title,
         "rationale": "The research loop surfaced a concrete improvement "
@@ -49,6 +50,15 @@ def _ticket(title):
         "expected_tests": ["test_a", "test_b"],
         "acceptance_criteria": ["a", "b", "c"],
         "claim_ids": ["claim-1"],
+        "behavior": "List both upgrade and proactive proposals in the "
+                    "/proposals output",
+        "gap_evidence": "nomorals/agents/research_loop.py:340 — checked "
+                        "anchor: /proposals reads only the proactive "
+                        "queue, so research upgrade tickets never show",
+        "failing_test": "test_proposals_lists_upgrade_and_proactive — "
+                        "fails on the current tree when /proposals reads "
+                        "only the proactive queue; passes once both "
+                        "queues are listed.",
         "problem": "Notification counts and the proposals list disagree, "
                    "so owners cannot find the tickets they were told "
                    "about and the review queue looks broken.",

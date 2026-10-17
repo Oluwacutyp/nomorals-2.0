@@ -58,16 +58,27 @@ def _ctx(db=None, proactive=True):
     return SimpleNamespace(db=db, settings=settings)
 
 
+def _concrete_claim(cid="t1", text=None, confidence=0.85):
+    """A claim with a verified proposal spec: the loop never sends a
+    weekly email digest — a behavior genuinely absent from
+    nomorals/agents/research_loop.py (verified by the generator's
+    code check, not assumed)."""
+    claim = _claim(
+        cid,
+        text or "ResearchLoop never sends the owner a weekly email "
+                "digest of skipped proposals",
+        confidence=confidence, domain="systems")
+    claim.behavior = ("ResearchLoop publishes a weekly email digest "
+                      "listing skipped proposal reasons to the owner")
+    claim.target_files = ["nomorals/agents/research_loop.py"]
+    return claim
+
+
 # ── ticket concreteness ────────────────────────────────────────────────────
 
 class TicketConcretenessTests(unittest.TestCase):
     def test_ticket_names_real_files_expected_tests_acceptance(self):
-        claim = _claim(
-            "t1",
-            "Redis is the fastest in-memory cache for session storage in "
-            "this stack",
-            confidence=0.85, domain="systems")
-        ticket = ResearchDigest.upgrade_ticket(claim)
+        ticket = ResearchDigest.upgrade_ticket(_concrete_claim())
         # files: all suggested, split into verified/unverified, verified real
         self.assertTrue(ticket["suggested_files"])
         self.assertTrue(all(f.startswith("nomorals/")
@@ -78,6 +89,11 @@ class TicketConcretenessTests(unittest.TestCase):
         self.assertTrue(ticket["verified_files"])
         for f in ticket["verified_files"]:
             self.assertTrue((rd.repo_root() / f).exists(), f)
+        # the ticket names the specific behavior + verified gap evidence
+        self.assertIn("weekly email digest", ticket["behavior"])
+        self.assertIn("nomorals/agents/research_loop.py:",
+                      ticket["gap_evidence"])
+        self.assertIn("test_", ticket["failing_test"])
         # expected tests: specific test names, not vague descriptions
         self.assertGreaterEqual(len(ticket["expected_tests"]), 2)
         for name in ticket["expected_tests"]:
@@ -111,9 +127,7 @@ class TicketConcretenessTests(unittest.TestCase):
         self.assertIn("acceptance_criteria", joined)
 
     def test_gate_rejects_nonexistent_files(self):
-        ticket = ResearchDigest.upgrade_ticket(
-            _claim("t2", "Redis is the fastest in-memory cache",
-                   confidence=0.8, domain="systems"))
+        ticket = ResearchDigest.upgrade_ticket(_concrete_claim("t2"))
         ticket["suggested_files"] = ["nomorals/agents/does_not_exist.py"]
         problems = gate_ticket(ticket)
         self.assertTrue(any("do not exist" in p for p in problems))
@@ -144,15 +158,19 @@ class TicketConcretenessTests(unittest.TestCase):
     def test_queue_accepts_concrete_ticket(self):
         ctx = _ctx()
         pipe = UpgradePipeline(ctx)
-        ticket = ResearchDigest.upgrade_ticket(
-            _claim("t4", "Redis is the fastest in-memory cache",
-                   confidence=0.85, domain="systems"))
+        ticket = ResearchDigest.upgrade_ticket(_concrete_claim("t4"))
         pid = pipe.propose_from_ticket(ticket, source="research")
         self.assertTrue(pid)
         row = UpgradeQueue(ctx).get(pid)
         self.assertEqual(row["status"], "proposed")
         self.assertEqual(row["source"], "research")
         self.assertTrue(row["files"])  # verified repo files carried through
+        # the concrete substance survives into the stored proposal
+        plan = row["patch_plan"]
+        self.assertIn("weekly email digest", plan["behavior"])
+        self.assertIn("nomorals/agents/research_loop.py:",
+                      plan["gap_evidence"])
+        self.assertIn("test_", plan["failing_test"])
 
 
 # ── swarm cross-specialist dedup ───────────────────────────────────────────

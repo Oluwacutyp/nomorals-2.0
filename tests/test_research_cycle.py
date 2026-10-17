@@ -39,21 +39,25 @@ class _FakeSwarm:
     def run(self, query: str) -> SwarmReport:
         findings = [
             SwarmFinding(
-                angle="postgres threat model",
-                domain="security",
-                claim=("PostgreSQL row-level security policies are not "
-                       "applied to table owners by default, which can "
-                       "silently expose rows the policy was meant to hide."),
-                sources=[{"url": "https://example.com/rls",
-                           "title": "RLS bypass for owners", "trust": 0.8}],
+                angle="research loop gaps",
+                domain="systems",
+                claim=("ResearchLoop never sends the owner a weekly "
+                       "email digest of skipped proposals."),
+                sources=[{"url": "https://example.com/digest",
+                           "title": "Digest gap", "trust": 0.8}],
                 confidence=0.75,
+                behavior=("ResearchLoop publishes a weekly email digest "
+                          "listing skipped proposal reasons to the owner"),
+                target_files=["nomorals/agents/research_loop.py"],
             ),
             SwarmFinding(
                 angle="postgres hardening",
                 domain="security",
-                claim=("Enabling row-level security without also revoking "
-                       "direct table grants leaves the policy ineffective "
-                       "against grantees with explicit privileges."),
+                claim=("Enabling \"Row-Level Security\" without also "
+                       "revoking direct table grants leaves the policy "
+                       "ineffective against grantees with explicit "
+                       "privileges — a hardening threat and a "
+                       "vulnerability that exposes a security policy gap."),
                 sources=[{"url": "https://example.com/rls2",
                            "title": "RLS grant interaction", "trust": 0.7}],
                 confidence=0.65,
@@ -95,7 +99,16 @@ class TestResearchCycle(unittest.TestCase):
         self.assertTrue(out["promotion"]["promoted"] >= 1)
         self.assertTrue(out["brief"])
         self.assertTrue(out["note"])
-        self.assertTrue(out["tickets"], "confident claims must yield tickets")
+        # exactly one concrete ticket (the Devon gap); the bare
+        # PostgreSQL fact is skipped, never templated into a ticket
+        self.assertEqual(len(out["tickets"]), 1)
+        self.assertEqual(len(out["skipped"]), 1)
+        self.assertEqual(out["skipped"][0]["reason"],
+                         "no testable behavior")
+        self.assertIn("weekly email digest",
+                      out["tickets"][0]["behavior"])
+        self.assertIn("nomorals/agents/research_loop.py:",
+                      out["tickets"][0]["gap_evidence"])
 
         pipe = TicketPipeline(self.ctx, evolution=_FakeEvolution())
         pid = pipe.propose_from_ticket(out["tickets"][0])
@@ -108,7 +121,7 @@ class TestResearchCycle(unittest.TestCase):
         self.assertEqual(len(evo.planned), 1)
         self.assertEqual(evo.applied, ["evo_test_1"])
         # the instruction given to the coding stack carries the substance
-        self.assertIn("row-level security", evo.planned[0].lower())
+        self.assertIn("weekly email digest", evo.planned[0].lower())
 
     def test_deny_path_records_reason(self) -> None:
         out = ResearchPipeline.run("postgres row level security", self.ctx)

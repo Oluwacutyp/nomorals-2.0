@@ -76,6 +76,18 @@ def sample_ticket(**overrides):
             "Run the integrations module test suite green before and "
             "after the change.",
         ],
+        # concrete-proposal bar: behavior + verified gap evidence +
+        # failing test (the _fetch function at market_data.py:228 has
+        # no retry loop).
+        behavior=("Wrap the exchange fetch chain in "
+                  "nomorals/integrations/market_data.py in a retry loop "
+                  "with exponential backoff and jitter"),
+        gap_evidence=("nomorals/integrations/market_data.py:228 — "
+                      "def _fetch performs a single fetch with no retry "
+                      "loop around it"),
+        failing_test=("test_market_data_retry_backoff_succeeds — fails "
+                      "on the current tree because fetches have no "
+                      "retry; passes once backoff retries land."),
     )
     t.update(overrides)
     return t
