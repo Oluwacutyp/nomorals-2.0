@@ -43,6 +43,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from ..core.logging_setup import get_logger
+from ..core.tool_render import describe_exc
 
 _log = get_logger(__name__)
 
@@ -920,6 +921,6 @@ def control_character(tail: str, context=None, chat=None,
             return f"🎭 no character named '{name}'."
 
         return _usage()
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
         _log.debug("control_character failed", exc_info=True)
-        return "🎭 something went wrong with that character command."
+        return f"🎭 character command failed: {describe_exc(exc)}"

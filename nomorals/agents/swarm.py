@@ -33,6 +33,7 @@ from typing import Any, Callable
 
 from ..llm.brain import brain_for
 from ..core.ids import new_short_id
+from ..core.tool_render import describe_exc, emit_progress
 from ..core.logging_setup import get_logger
 from .devon import DevonAgent, DevonResult
 
@@ -251,7 +252,9 @@ class SwarmAgent:
             _log.debug("swarm leg post failed", exc_info=True)
 
     def _run_leg(self, subtask: str, deadline: float, *,
-                 index: int = 0, run_id: str = "") -> dict[str, Any]:
+                 index: int = 0, run_id: str = "",
+                 on_progress: Callable[[int, int, str, str], None] | None = None,
+                 total_legs: int = 0) -> dict[str, Any]:
         started = time.time()
         remaining = max(20.0, deadline - started)
         brief = subtask
@@ -267,7 +270,14 @@ class SwarmAgent:
             # inside devon), so scale it to the swarm's remaining time.
             agent = DevonAgent(self.context, brain=self.brain, gateway=self.gateway,
                                max_steps=8, step_timeout=remaining / 8.0)
-            result: DevonResult = agent.run(brief, chat_key="")
+            emit_progress(on_progress, index + 1, total_legs or 1,
+                          f"swarm leg {index + 1}", "start")
+            result: DevonResult = agent.run(brief, chat_key="",
+                                            on_progress=lambda step, total, tool, status, _i=index: emit_progress(
+                                                on_progress, _i + 1, total_legs or 1,
+                                                f"leg {_i + 1} · {tool}", status))
+            emit_progress(on_progress, index + 1, total_legs or 1,
+                          f"swarm leg {index + 1}", "done")
             leg = {
                 "subtask": subtask,
                 "ok": True,
@@ -281,7 +291,7 @@ class SwarmAgent:
             leg = {
                 "subtask": subtask,
                 "ok": False,
-                "digest": f"leg failed: {exc}",
+                "digest": f"leg failed: {describe_exc(exc)}",
                 "planned_by": "error",
                 "steps": 0,
                 "seconds": round(time.time() - started, 1),
@@ -321,7 +331,11 @@ class SwarmAgent:
         return (merged or "all swarm legs failed"), False
 
     # ── the run ──────────────────────────────────────────────────────────────
-    def run(self, goal: str, workers: int = 3) -> SwarmResult:
+    def run(self, goal: str, workers: int = 3,
+            on_progress: Callable[[int, int, str, str], None] | None = None) -> SwarmResult:
+        """Run the swarm. ``on_progress(leg, total_legs, label, status)``
+        fires per leg and per Devon step inside each leg, so a chat
+        caller can show progress on this long-running path."""
         started = time.time()
         goal = (goal or "").strip()
         if not goal:
@@ -334,7 +348,9 @@ class SwarmAgent:
 
         pool = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="swarm")
         futures = [pool.submit(self._run_leg, sub, deadline,
-                               index=i, run_id=result.run_id)
+                               index=i, run_id=result.run_id,
+                               on_progress=on_progress,
+                               total_legs=len(subtasks))
                    for i, sub in enumerate(subtasks)]
         for i, future in enumerate(futures):
             try:
@@ -342,7 +358,7 @@ class SwarmAgent:
             except Exception as exc:  # noqa: BLE001 - a late leg is a result
                 leg = {
                     "subtask": subtasks[i], "ok": False,
-                    "digest": f"leg timed out: {exc}", "planned_by": "timeout",
+                    "digest": f"leg timed out: {describe_exc(exc)}", "planned_by": "timeout",
                     "steps": 0, "seconds": 0,
                 }
                 self._post_leg(result.run_id, i, leg)

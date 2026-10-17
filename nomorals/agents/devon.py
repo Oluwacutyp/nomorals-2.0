@@ -37,6 +37,12 @@ from typing import Any, Callable
 
 from ..core.ids import new_short_id
 from ..core.logging_setup import get_logger
+from ..core.tool_render import (
+    describe_exc,
+    emit_progress,
+    outcome_message,
+    render_tool_value,
+)
 from ..llm.base import Message, SamplingParams
 from ..llm.brain import brain_for
 
@@ -222,12 +228,22 @@ class DevonAgent:
 
     # ── public API ───────────────────────────────────────────────────────────
 
-    def run(self, task: str, chat_key: str = "") -> DevonResult:
+    def run(self, task: str, chat_key: str = "",
+            on_progress: Callable[[int, int, str, str], None] | None = None) -> DevonResult:
         """Run one investigation to completion. Never raises: a failure is a
-        result whose digest says what went wrong."""
+        result whose digest says what went wrong.
+
+        ``on_progress(step, total, tool, status)`` fires per step
+        (``status``: "start" | "done" | "failed") so a chat caller can
+        show progress instead of silence on a multi-step run. A
+        misbehaving callback can never break the run.
+        """
         started = time.time()
         run_id = new_short_id("devon")
         self._last_chat_key = chat_key
+        # Progress callback for this run (forwarded to nested long-running
+        # tools such as swarm so the chat caller sees per-step progress).
+        self._on_progress = on_progress
         task = (task or "").strip()
         if not task:
             return DevonResult(task="", steps=[], digest="no task given — tell me what to check.",
@@ -250,7 +266,11 @@ class DevonAgent:
                 outcome = StepOutcome(name or "(none)", args, False,
                                       f"unknown tool {name!r}", 0.0, error="not a valid tool")
             else:
+                emit_progress(on_progress, idx, len(steps_plan[: self.max_steps]),
+                              name, "start")
                 outcome = self._execute(name, args)
+                emit_progress(on_progress, idx, len(steps_plan[: self.max_steps]),
+                              name, "done" if outcome.ok else "failed")
             observations.append(outcome)
             self._remember(run_id, chat_key, task, idx, outcome)
             if time.time() - started > self.step_timeout * max(2, self.max_steps):
@@ -319,7 +339,7 @@ class DevonAgent:
             if rsteps:
                 return rsteps, "reasoning", "reasoning-engine", err
         except Exception as exc:  # noqa: BLE001 - reasoning is best-effort
-            err = err or f"reasoning unavailable: {exc}"
+            err = err or f"reasoning unavailable: {describe_exc(exc)}"
         # last resort: keyword heuristic. plan_error must ALWAYS be non-empty
         # here — a heuristic plan is a degradation and must never look like a
         # clean success.
@@ -439,7 +459,7 @@ class DevonAgent:
             task_kind="chat")
         except Exception as exc:  # noqa: BLE001 - planner must never kill the run
             _log.warning("devon planner LLM failed: %s", exc)
-            return [], "", f"model-error: {exc}"
+            return [], "", f"model-error: {describe_exc(exc)}"
         if not getattr(response, "ok", False) or not getattr(response, "text", ""):
             return [], "", (f"model-error: "
                             f"{getattr(response, 'error', 'empty reply')}")
@@ -590,8 +610,9 @@ class DevonAgent:
                                time.perf_counter() - started)
         except Exception as exc:  # noqa: BLE001 - one bad tool must not sink the run
             _log.exception("devon tool %s failed", name)
-            return StepOutcome(name, args, False, f"tool error: {exc}",
-                               time.perf_counter() - started, error=str(exc))
+            cause = describe_exc(exc)
+            return StepOutcome(name, args, False, f"tool error: {cause}",
+                               time.perf_counter() - started, error=cause)
 
     # ── memory box ───────────────────────────────────────────────────────────
 
@@ -652,7 +673,7 @@ class DevonAgent:
             return "I didn't run anything — that task didn't match a tool I can use. Rephrase it?"
         observations = "\n\n".join(
             f"[{i}] {s.tool} {json.dumps(s.args, default=str)}\n"
-            f"{'OK' if s.ok else 'FAILED: ' + s.error}\n{s.observation}"
+            f"{'OK' if s.ok else 'FAILED: ' + outcome_message(s.error)}\n{s.observation}"
             for i, s in enumerate(steps, start=1)
         )
         llm_digest, _ = self._llm_digest(task, observations, memory, model)
@@ -726,13 +747,13 @@ class DevonAgent:
         try:
             lines = target.read_text(encoding="utf-8", errors="replace").splitlines()
         except OSError as exc:
-            return f"could not read {path}: {exc}"
+            return f"could not read {path}: {describe_exc(exc)}"
         if grep:
             try:
                 rx = re.compile(grep)
                 lines = [ln for ln in lines if rx.search(ln)]
             except re.error as exc:
-                return f"bad grep pattern: {exc}"
+                return f"bad grep pattern: {describe_exc(exc)}"
         head = lines[:max_lines]
         if not head:
             return f"{path}: (no lines matched)"
@@ -750,7 +771,7 @@ class DevonAgent:
         try:
             rx = re.compile(grep)
         except re.error as exc:
-            return f"bad grep pattern: {exc}"
+            return f"bad grep pattern: {describe_exc(exc)}"
         hits: list[str] = []
         start = base if base.is_file() else None
         files = [start] if start else (
@@ -852,25 +873,25 @@ class DevonAgent:
         cmd = self._test_cmd(pattern)
         try:
             proc = subprocess.run(
-                cmd, cwd=str(self.repo_root), capture_output=True, text=True, encoding="utf-8", errors="replace",
+                cmd, cwd=str(self.repo_root), capture_output=True, text=True,
                 timeout=timeout, check=False,
             )
         except subprocess.TimeoutExpired:
             return f"test run timed out after {timeout}s (pattern {pattern})"
         except OSError as exc:
-            return f"could not run tests: {exc}"
+            return f"could not run tests: {describe_exc(exc)}"
         return summarize_test_run(pattern, proc.returncode, (proc.stdout or "") + (proc.stderr or ""))
 
     def _tool_git_status(self, args: dict[str, Any]) -> str:
         try:
             branch = subprocess.run(["git", "rev-parse", "--abbrev-ref", "HEAD"],
-                                    cwd=str(self.repo_root), capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=15)
+                                    cwd=str(self.repo_root), capture_output=True, text=True, timeout=15)
             commit = subprocess.run(["git", "rev-parse", "--short", "HEAD"],
-                                    cwd=str(self.repo_root), capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=15)
+                                    cwd=str(self.repo_root), capture_output=True, text=True, timeout=15)
             dirty = subprocess.run(["git", "status", "--porcelain"],
-                                   cwd=str(self.repo_root), capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=15)
+                                   cwd=str(self.repo_root), capture_output=True, text=True, timeout=15)
         except (OSError, subprocess.SubprocessError) as exc:
-            return f"git unavailable: {exc}"
+            return f"git unavailable: {describe_exc(exc)}"
         dirty_lines = [ln for ln in (dirty.stdout or "").splitlines() if ln.strip()]
         return (
             f"branch: {branch.stdout.strip()}\n"
@@ -887,7 +908,7 @@ class DevonAgent:
         try:
             lines = Path(log_file).read_text(encoding="utf-8", errors="replace").splitlines()
         except OSError as exc:
-            return f"could not read log: {exc}"
+            return f"could not read log: {describe_exc(exc)}"
         return f"tail of {log_file} ({len(lines)} lines total):\n" + "\n".join(lines[-n:])
 
     def _tool_mood(self, args: dict[str, Any]) -> str:
@@ -908,7 +929,9 @@ class DevonAgent:
             dims = json.loads(row["dims"]) if row["dims"] else {}
         except json.JSONDecodeError:
             dims = {}
-        return f"mood (persisted): {row['label']}, dims={dims}, updated_at={row['updated_at']}"
+        dims_txt = ", ".join(f"{k}={v}" for k, v in sorted(dims.items())) or "—"
+        return (f"mood (persisted): {row['label']}, dims: {dims_txt}, "
+                f"updated_at={row['updated_at']}")
 
     def _tool_chat_stats(self, args: dict[str, Any]) -> str:
         parts: list[str] = []
@@ -916,9 +939,9 @@ class DevonAgent:
         if gateway is not None:
             try:
                 status = gateway.status()
-                parts.append(json.dumps(status, default=str)[:800])
+                parts.append(render_tool_value(status))
             except Exception as exc:  # noqa: BLE001
-                parts.append(f"gateway status failed: {exc}")
+                parts.append(f"gateway status failed: {describe_exc(exc)}")
         try:
             rows = self.context.db.query(
                 "SELECT platform, kind, COUNT(*) AS n, MAX(last_active) AS last "
@@ -963,7 +986,7 @@ class DevonAgent:
             try:
                 healthy = provider.health()
             except Exception as exc:  # noqa: BLE001 - a probe must not kill the run
-                healthy = f"probe error: {exc}"
+                healthy = f"probe error: {describe_exc(exc)}"
             model = getattr(provider, "model_id", "") or ""
             tag = " ← PRIMARY" if name == primary else ""
             lines.append(f"  {name}: model={model or '?'} health={healthy}{tag}")
@@ -982,7 +1005,7 @@ class DevonAgent:
             power = power_mode_for(self.context)
             power_line = f"power mode: {'ACTIVE' if power.active else 'locked'}"
         except Exception as exc:  # noqa: BLE001
-            power_line = f"power mode: ? ({exc})"
+            power_line = f"power mode: ? ({describe_exc(exc)})"
         chain = [llm.provider] + [c for c in (llm.fallback_chain or []) if c and c != llm.provider]
         return (
             f"home: {settings.home}\n"
@@ -1061,14 +1084,14 @@ class DevonAgent:
         try:
             stat = subprocess.run(
                 ["git", "diff", "--stat", ref_a, ref_b] + ([path] if path else []),
-                cwd=str(self.repo_root), capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30,
+                cwd=str(self.repo_root), capture_output=True, text=True, timeout=30,
             )
             diff = subprocess.run(
                 ["git", "diff", "-U2", ref_a, ref_b] + ([path] if path else []),
-                cwd=str(self.repo_root), capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30,
+                cwd=str(self.repo_root), capture_output=True, text=True, timeout=30,
             )
         except (OSError, subprocess.SubprocessError) as exc:
-            return f"git diff failed: {exc}"
+            return f"git diff failed: {describe_exc(exc)}"
         text = diff.stdout or diff.stderr or ""
         lines = text.splitlines()
         capped = lines[:150]
@@ -1146,7 +1169,7 @@ class DevonAgent:
                 value=str(args.get("value") or ""),
             )
         except ToolError as exc:
-            return f"browser: {exc}"
+            return f"browser: {describe_exc(exc)}"
         return _format_browser_result(result, limit=2500)
 
     def _tool_mission(self, args: dict[str, Any]) -> str:
@@ -1245,8 +1268,8 @@ class DevonAgent:
             raise ToolError("tool registry unavailable")
         outcome = tools.call(tool, **kwargs)
         if not outcome.ok:
-            raise ToolError(getattr(outcome.error, "message", str(outcome.error)))
-        return json.dumps(outcome.value, default=str)
+            raise ToolError(outcome_message(outcome.error))
+        return render_tool_value(outcome.value)
 
     def _tool_dns_lookup(self, args: dict[str, Any]) -> str:
         return self._registry_tool(
@@ -1495,7 +1518,7 @@ class DevonAgent:
             )
             v = json.loads(raw) if isinstance(raw, str) else raw
         except Exception as exc:  # noqa: BLE001
-            return f"proxy_file failed: {exc}"
+            return f"proxy_file failed: {describe_exc(exc)}"
         if not isinstance(v, dict):
             return "proxy_file failed"
         if not v.get("written"):
@@ -1572,8 +1595,8 @@ class DevonAgent:
         tools = self.context.tools
         result = tools.call("api_call", connector=name, params=params_json)
         if not result.ok:
-            return f"api: {getattr(result.error, 'message', result.error)}"
-        return f"api {name}: " + json.dumps(result.value, default=str)[:2500]
+            return f"api: {outcome_message(result.error)}"
+        return f"api {name}:\n" + render_tool_value(result.value)
 
     def _tool_connector(self, args: dict[str, Any]) -> str:
         """Devon's own service integrations — the planner's answer to
@@ -1596,7 +1619,7 @@ class DevonAgent:
         try:
             cls = get_connector(cid)
         except Exception as exc:  # noqa: BLE001
-            return f"unknown connector {cid!r}: {exc}"
+            return f"unknown connector {cid!r}: {describe_exc(exc)}"
         if action == "info":
             desc = (cls.description or "").strip()
             auth = ", ".join(m.value for m in cls.auth_methods)
@@ -1630,15 +1653,15 @@ class DevonAgent:
                 inst = cls(vault)
                 st = inst.status()
                 return (f"{cid} status: "
-                        + json.dumps(st, default=str)[:800])
+                        + render_tool_value(st))
             except Exception as exc:  # noqa: BLE001
-                return f"{cid} status check failed: {exc}"
+                return f"{cid} status check failed: {describe_exc(exc)}"
         return f"unknown connector action {action!r} — use list|info|status"
 
     def _tool_db_tables(self, args: dict[str, Any]) -> str:
         result = self.context.tools.call("db_tables")
         if not result.ok:
-            return f"db: {getattr(result.error, 'message', result.error)}"
+            return f"db: {outcome_message(result.error)}"
         value = result.value
         return f"tables ({value['count']}): " + ", ".join(
             f"{t['name']}({t['rows']})" for t in value["tables"][:40]
@@ -1650,7 +1673,7 @@ class DevonAgent:
             return "db_schema needs a 'table'"
         result = self.context.tools.call("db_schema", table=table)
         if not result.ok:
-            return f"db: {getattr(result.error, 'message', result.error)}"
+            return f"db: {outcome_message(result.error)}"
         value = result.value
         cols = ", ".join(
             f"{c['name']} {c['type']}" + (" PK" if c["pk"] else "") for c in value["columns"]
@@ -1660,7 +1683,7 @@ class DevonAgent:
     def _tool_db_counts(self, args: dict[str, Any]) -> str:
         result = self.context.tools.call("db_counts")
         if not result.ok:
-            return f"db: {getattr(result.error, 'message', result.error)}"
+            return f"db: {outcome_message(result.error)}"
         value = result.value
         top = ", ".join(f"{t['name']}={t['rows']}" for t in value["tables"][:10])
         return f"database: {value['total_tables']} tables. largest: {top}"
@@ -1671,7 +1694,7 @@ class DevonAgent:
             return "speak needs a 'text'"
         result = self.context.tools.call("speak", text=text[:4000])
         if not result.ok:
-            return f"speak: {getattr(result.error, 'message', result.error)}"
+            return f"speak: {outcome_message(result.error)}"
         info = result.value
         sent = ""
         chat_key = getattr(self, "_last_chat_key", "") or ""
@@ -1697,7 +1720,7 @@ class DevonAgent:
         result = self.context.tools.call(
             "media_edit", image_path=source, instruction=instruction)
         if not result.ok:
-            return f"media_edit: {getattr(result.error, 'message', result.error)}"
+            return f"media_edit: {outcome_message(result.error)}"
         info = result.value or {}
         return (f"edited → {info.get('output') or info.get('path') or '?'} "
                 f"[{info.get('summary') or info.get('ops') or ''}]")
@@ -1711,7 +1734,7 @@ class DevonAgent:
             "media_edit_video", video_path=source, instruction=instruction)
         if not result.ok:
             return (f"media_edit_video: "
-                    f"{getattr(result.error, 'message', result.error)}")
+                    f"{outcome_message(result.error)}")
         info = result.value or {}
         return f"edited video → {info.get('output') or info.get('path') or '?'}"
 
@@ -1721,8 +1744,8 @@ class DevonAgent:
             return "media_probe needs a 'source'"
         result = self.context.tools.call("media_edit_probe", path=source)
         if not result.ok:
-            return f"media_probe: {getattr(result.error, 'message', result.error)}"
-        return json.dumps(result.value, default=str)[:1200]
+            return f"media_probe: {outcome_message(result.error)}"
+        return render_tool_value(result.value)
 
     def _tool_media_convert(self, args: dict[str, Any]) -> str:
         source = str(args.get("source") or "").strip()
@@ -1733,7 +1756,7 @@ class DevonAgent:
             "media_convert", path=source, format=fmt)
         if not result.ok:
             return (f"media_convert: "
-                    f"{getattr(result.error, 'message', result.error)}")
+                    f"{outcome_message(result.error)}")
         info = result.value or {}
         return f"converted → {info.get('output') or info.get('path') or '?'}"
 
@@ -1741,8 +1764,8 @@ class DevonAgent:
         result = self.context.tools.call("media_capability")
         if not result.ok:
             return (f"media_capability: "
-                    f"{getattr(result.error, 'message', result.error)}")
-        return json.dumps(result.value, default=str)[:1500]
+                    f"{outcome_message(result.error)}")
+        return render_tool_value(result.value)
 
     def _tool_swarm(self, args: dict[str, Any]) -> str:
         from .swarm import SwarmAgent
@@ -1756,7 +1779,8 @@ class DevonAgent:
         except (TypeError, ValueError):
             workers = 3
         result = SwarmAgent(self.context, brain=self.brain, gateway=self.gateway).run(
-            goal, workers=workers)
+            goal, workers=workers,
+            on_progress=getattr(self, "_on_progress", None))
         if not result.ok:
             return f"swarm: all legs failed — {result.synthesis[:600]}"
         return f"swarm ({sum(1 for l in result.legs if l['ok'])}/{len(result.legs)} legs, " \

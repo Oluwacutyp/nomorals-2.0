@@ -22,6 +22,7 @@ from __future__ import annotations
 from typing import Any
 
 from ..core.logging_setup import get_logger
+from ..core.tool_render import describe_exc
 
 _log = get_logger(__name__)
 
@@ -117,7 +118,7 @@ def _tutor(rest: str, *, chat_key: str = "") -> str:
         try:
             turn = sess.hint()
         except Exception as exc:  # noqa: BLE001
-            return f"hint failed: {exc}"
+            return f"hint failed: {describe_exc(exc)}"
         return f"{turn.feedback}\n{turn.prompt}"
     if verb == "answer":
         sess = get_session(chat_key)
@@ -128,7 +129,7 @@ def _tutor(rest: str, *, chat_key: str = "") -> str:
         try:
             turn = sess.respond(tail)
         except Exception as exc:  # noqa: BLE001
-            return f"couldn't process that: {exc}"
+            return f"couldn't process that: {describe_exc(exc)}"
         out = f"{turn.feedback}\n\n{turn.prompt}" if turn.feedback else turn.prompt
         # Wrong answers become flashcards automatically (same rule as /tutor).
         if turn.diagnosis == "wrong" and sess.mode == "socratic":
@@ -158,7 +159,7 @@ def _tutor(rest: str, *, chat_key: str = "") -> str:
         set_session(chat_key, sess)
         turn = sess.start()
     except Exception as exc:  # noqa: BLE001
-        return f"couldn't start tutoring: {exc}"
+        return f"couldn't start tutoring: {describe_exc(exc)}"
     opener = ("🔍 socratic mode — I'll guide you, not tell you. "
               "Answer with /learn tutor answer <text>."
               if mode == "socratic" else

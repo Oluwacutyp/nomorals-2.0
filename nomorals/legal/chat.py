@@ -31,6 +31,7 @@ from typing import Any
 
 from ..core.logging_setup import get_logger
 from .contracts import DISCLAIMER
+from ..core.tool_render import describe_exc
 
 _log = get_logger(__name__)
 
@@ -104,4 +105,4 @@ def control_legal_full(tail: str, context: Any = None, chat: Any = None,
         return control_legal(rest, context=context, chat=chat,
                              sender_id=sender_id, sender=sender)
     except Exception as exc:  # noqa: BLE001 — never raise from chat
-        return f"Legal hit an error ({exc}). {DISCLAIMER}"
+        return f"Legal hit an error ({describe_exc(exc)}). {DISCLAIMER}"

@@ -352,7 +352,14 @@ def render_metrics_card(metrics: dict[str, object],
         lines.append(f"\ntotal engagement: <b>{_fmt_num(total)}</b>")
         return "\n".join(lines)
     except Exception:  # noqa: BLE001 — never break the chat on rendering
-        return f"{title}: {metrics}"
+        # Fallback renders fields as lines — never a raw dict dump.
+        fields = []
+        for key in ("impressions", "views", "likes", "reposts", "replies",
+                    "comments", "shares", "bookmarks", "engagement"):
+            val = metrics.get(key) if isinstance(metrics, dict) else None
+            if isinstance(val, (int, float)) and val:
+                fields.append(f"• {key}: {val}")
+        return "\n".join([f"📊 {title}", *fields]) if fields else f"📊 {title}: no metrics"
 
 
 def _fmt_num(val: float) -> str:
