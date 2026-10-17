@@ -99,6 +99,23 @@ function Write-Step { param([string]$Text) Write-Host "`n==> $Text" -ForegroundC
 function Write-Warn { param([string]$Text) Write-Host "WARNING: $Text" -ForegroundColor Yellow }
 function Write-Ok   { param([string]$Text) Write-Host "OK: $Text" -ForegroundColor Green }
 
+function Invoke-Native {
+    param([string]$Exe, [string[]]$Args, [string]$OutFile, [string]$ErrFile)
+    # Run a native exe WITHOUT PowerShell's & operator. In Windows
+    # PowerShell 5.1 ANY stderr line from a native exe (even a benign
+    # INFO, even with `> file 2> file` redirection) becomes a
+    # NativeCommandError error record, and with
+    # $ErrorActionPreference = 'Stop' that kills the script.
+    # Start-Process redirects at the process level, so stderr just
+    # lands in the file - never an error record. ExitCode is the
+    # only success signal; stderr presence is NOT failure.
+    # Stderr is ALWAYS captured to $ErrFile, never silenced (2>$null
+    # would hide real tracebacks) and never merged into the error
+    # stream. Do not set $ErrorActionPreference to SilentlyContinue.
+    $proc = Start-Process -FilePath $Exe -ArgumentList $Args -RedirectStandardOutput $OutFile -RedirectStandardError $ErrFile -NoNewWindow -Wait -PassThru
+    return $proc.ExitCode
+}
+
 function Get-Preflight {
     $os = Get-CimInstance Win32_OperatingSystem
     $cs = Get-CimInstance Win32_ComputerSystem
@@ -118,7 +135,13 @@ function Get-Preflight {
         } catch { }
     }
     $pyVersion = $null
-    try { $pyVersion = (& python --version 2>&1).ToString().Trim() } catch { }
+    try {
+        $verOut = Join-Path $env:TEMP "devon-preflight-$PID.out.txt"
+        $verErr = Join-Path $env:TEMP "devon-preflight-$PID.err.txt"
+        $code = Invoke-Native -Exe 'python' -Args @('--version') -OutFile $verOut -ErrFile $verErr
+        $pyVersion = ((Get-Content $verOut -ErrorAction SilentlyContinue) + (Get-Content $verErr -ErrorAction SilentlyContinue) | Select-Object -First 1)
+        if ($null -ne $pyVersion) { $pyVersion = $pyVersion.ToString().Trim() }
+    } catch { }
     return [ordered]@{
         OS = "$($os.Caption) $($os.Version)"; CPU = $cpu; RAM_GB = $ramGB
         DiskFreeGB = $diskFreeGB; GPU = $gpuName; HasNvidia = [bool]$gpu
@@ -290,12 +313,25 @@ function Invoke-Verification {
     $venvPy = Join-Path $Repo '.venv\Scripts\python.exe'
     if (-not (Test-Path $venvPy)) { Write-Warn 'venv python not found - verification skipped.'; return }
     Write-Step 'Verification'
+    $verifyDir = Join-Path $env:TEMP "devon-install-verify-$PID"
+    if (-not (Test-Path $verifyDir)) { New-Item -ItemType Directory -Path $verifyDir | Out-Null }
     try {
-        $helpOut = & $venvPy -m nomorals --help 2>&1 | Select-Object -First 5
-        Write-Ok "python -m nomorals --help works: $($helpOut -join ' ')"
+        $helpOut = Join-Path $verifyDir 'help.out.txt'
+        $helpErr = Join-Path $verifyDir 'help.err.txt'
+        $helpCode = Invoke-Native -Exe $venvPy -Args @('-m', 'nomorals', '--help') -OutFile $helpOut -ErrFile $helpErr
+        if ($helpCode -eq 0) {
+            $helpText = (Get-Content $helpOut -TotalCount 5 -ErrorAction SilentlyContinue) -join ' '
+            Write-Ok "python -m nomorals --help works: $helpText"
+        } else {
+            Write-Warn "python -m nomorals --help failed (exit $helpCode); see $helpErr"
+        }
     } catch { Write-Warn "python -m nomorals --help failed: $_" }
     try {
-        & $venvPy -m nomorals.cli doctor 2>&1 | Select-Object -First 20 | ForEach-Object { Write-Host "  $_" }
+        $docOut = Join-Path $verifyDir 'doctor.out.txt'
+        $docErr = Join-Path $verifyDir 'doctor.err.txt'
+        $docCode = Invoke-Native -Exe $venvPy -Args @('-m', 'nomorals.cli', 'doctor') -OutFile $docOut -ErrFile $docErr
+        Get-Content $docOut -TotalCount 20 -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "  $_" }
+        if ($docCode -ne 0) { Write-Warn "nm doctor failed (exit $docCode); see $docErr (Devon still runs; see logs)" }
     } catch { Write-Warn "nm doctor failed: $_ (Devon still runs; see logs)" }
     Write-Host ''
     Write-Host 'Capability matrix for this host:' -ForegroundColor Cyan
