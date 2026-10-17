@@ -264,3 +264,53 @@ class ListFieldEnvTest(unittest.TestCase):
     def test_live_hf_base_url_is_not_touched(self) -> None:
         s = load_settings(env={"NM_HF_BASE_URL": "https://router.huggingface.co/v1"})
         self.assertEqual(s.llm.hf_base_url, "https://router.huggingface.co/v1")
+
+
+class ThreadsZeroMeansCpuCountTest(unittest.TestCase):
+    """NM_THREADS=0 must resolve to cpu_count, not crash validation.
+
+    Regression: the .env template promises "Thread pool size (0 =
+    cpu_count)" but _validate rejected 0 with "concurrency.threads must
+    be >= 1" — the 0 -> auto resolution never happened for threads (unlike
+    processes, where 0 genuinely means auto).
+    """
+
+    def test_zero_resolves_to_cpu_count(self) -> None:
+        import os
+
+        s = load_settings(
+            env={"NM_PROFILE": "laptop", "NM_THREADS": "0"},
+            use_env_file=False,
+        )
+        self.assertEqual(s.concurrency.threads, max(1, os.cpu_count() or 1))
+        self.assertGreaterEqual(s.concurrency.threads, 1)
+
+    def test_explicit_value_unchanged(self) -> None:
+        s = load_settings(
+            env={"NM_PROFILE": "laptop", "NM_THREADS": "2"},
+            use_env_file=False,
+        )
+        self.assertEqual(s.concurrency.threads, 2)
+
+    def test_negative_still_rejected(self) -> None:
+        from nomorals.core.errors import ConfigError
+
+        with self.assertRaises(ConfigError):
+            load_settings(
+                env={"NM_PROFILE": "laptop", "NM_THREADS": "-1"},
+                use_env_file=False,
+            )
+
+    def test_unset_default_still_eight(self) -> None:
+        from nomorals.core.config import ConcurrencySettings
+
+        self.assertEqual(ConcurrencySettings().threads, 8)
+        s = load_settings(env={"NM_PROFILE": "laptop"}, use_env_file=False)
+        self.assertEqual(s.concurrency.threads, 8)
+
+    def test_set_path_also_resolves_zero(self) -> None:
+        import os
+
+        s = load_settings(env={"NM_PROFILE": "laptop"}, use_env_file=False)
+        s2 = s.set("concurrency.threads", 0)
+        self.assertEqual(s2.concurrency.threads, max(1, os.cpu_count() or 1))

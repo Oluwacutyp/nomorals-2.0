@@ -1299,6 +1299,12 @@ def _find_field_type(root: type, dotted: str) -> type | None:
 
 
 def _validate(settings: Settings) -> None:
+    # 0 = auto (template: "Thread pool size (0 = cpu_count)"). Resolve to a
+    # real positive count BEFORE the >= 1 check below, so 0 genuinely means
+    # auto exactly like concurrency.processes == 0 does — it must never
+    # survive as 0, and negatives are still rejected by the check.
+    if settings.concurrency.threads == 0:
+        settings.concurrency.threads = max(1, os.cpu_count() or 1)
     problems: list[str] = []
     if settings.storage.synchronous not in {"OFF", "NORMAL", "FULL", "EXTRA"}:
         problems.append(f"storage.synchronous must be OFF|NORMAL|FULL|EXTRA")
