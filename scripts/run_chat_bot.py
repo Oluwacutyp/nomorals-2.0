@@ -46,6 +46,33 @@ import sys
 import threading
 import time
 
+
+def _ensure_ssl_cert_file() -> None:
+    """Point every HTTPS client in this process at certifi's CA bundle.
+
+    Runs at import time, before any provider / adapter module is imported,
+    so libraries that resolve their CA store from the environment
+    (httpx, requests, urllib's default context) all see the same bundle.
+    An explicitly set SSL_CERT_FILE is never overridden. When certifi is
+    unavailable, nothing is changed and clients fall back to the platform
+    store. Verification is never disabled here.
+    """
+    if os.environ.get("SSL_CERT_FILE"):
+        return
+    try:
+        import certifi
+    except ImportError:
+        return
+    try:
+        cafile = certifi.where()
+    except Exception:  # noqa: BLE001 - broken certifi: leave env alone
+        return
+    if cafile and os.path.isfile(cafile):
+        os.environ["SSL_CERT_FILE"] = cafile
+
+
+_ensure_ssl_cert_file()
+
 # Make the repo importable without pip install: repo root is the parent of
 # this script's directory (scripts/run_chat_bot.py -> <repo>/).
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))

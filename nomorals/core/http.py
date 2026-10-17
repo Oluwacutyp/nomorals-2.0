@@ -7,6 +7,11 @@ no httpx, so it works on Termux with nothing installed.
 It adds exactly what the raw stdlib is missing and nothing else: timeouts that
 actually apply, automatic redirect handling with a bound, JSON helpers, streaming
 downloads with resume, and multipart uploads.
+
+TLS: verified requests use an explicit CA bundle — an explicitly set
+``SSL_CERT_FILE`` wins, otherwise certifi's bundle, otherwise the platform
+default store — so hosts with a missing/stale system CA store (Windows
+Server) still verify. Verification is never disabled on the verified path.
 """
 
 from __future__ import annotations
@@ -15,8 +20,10 @@ import gzip
 import ipaddress
 import json
 import mimetypes
+import os
 import re
 import socket
+import ssl
 import threading
 import time
 import urllib.error
@@ -32,7 +39,7 @@ from .errors import NoMoralsError, ProviderError, RateLimited, TimeoutError_, cl
 from .logging_setup import get_logger
 
 __all__ = ["HttpClient", "HttpResponse", "RequestError", "download",
-           "url_filename"]
+           "tls_cafile", "url_filename"]
 
 _log = get_logger(__name__)
 
@@ -273,6 +280,48 @@ def http_error(status: int, body: str, url: str = "",
                          details={"http_status": status})
 
 
+def _certifi_cafile() -> str | None:
+    """certifi's CA bundle path, or None when certifi is unavailable.
+
+    certifi ships Mozilla's CA bundle. On hosts where the system OpenSSL
+    store is missing or stale (notably Windows Server), the system store
+    fails verification with ``CERTIFICATE_VERIFY_FAILED`` even though the
+    server's chain is fine — certifi is the maintained fallback.
+    """
+    try:
+        import certifi
+    except ImportError:
+        return None
+    try:
+        path = certifi.where()
+    except Exception:  # noqa: BLE001 - broken certifi install: fall back
+        return None
+    return path if path and os.path.isfile(path) else None
+
+
+def tls_cafile() -> str | None:
+    """The CA bundle verified requests in this process use.
+
+    Precedence: an explicitly set, existing ``SSL_CERT_FILE`` wins (the
+    operator's choice); otherwise certifi's bundle; None means "the
+    platform default store" (``ssl.create_default_context()`` with no
+    cafile). Never returns a path that does not exist.
+    """
+    env = os.environ.get("SSL_CERT_FILE", "")
+    if env and os.path.isfile(env):
+        return env
+    return _certifi_cafile()
+
+
+def _build_tls_context(cafile: str | None) -> "ssl.SSLContext":
+    """A verifying client TLS context for ``cafile`` (or the platform
+    default when ``cafile`` is None). Verification is always on — there is
+    no path here that disables it; ``verify_tls=False`` is handled
+    separately at the call site with an explicit CERT_NONE context.
+    """
+    return ssl.create_default_context(cafile=cafile)
+
+
 class HttpClient:
     """Small, predictable HTTP client."""
 
@@ -298,6 +347,19 @@ class HttpClient:
         #: internal tooling that needs loopback access.
         self.allow_private_ips = allow_private_ips
         self.stats = {"requests": 0, "errors": 0, "bytes": 0}
+        # Verifying TLS context, built once: an explicit SSL_CERT_FILE
+        # wins, else certifi's bundle, else the platform default store.
+        # On hosts with a missing/stale system store (Windows Server)
+        # the bare default fails with CERTIFICATE_VERIFY_FAILED while
+        # certifi verifies fine — so the bundle must be explicit, not
+        # left to the platform. None when verify_tls is off (the request
+        # path then builds its explicit CERT_NONE context).
+        if verify_tls:
+            self.tls_cafile: str | None = tls_cafile()
+            self._tls_context = _build_tls_context(self.tls_cafile)
+        else:
+            self.tls_cafile = None
+            self._tls_context = None
 
     def _effective_proxy(self, target: str) -> str:
         """Which proxy (if any) this request goes through.
@@ -389,12 +451,16 @@ class HttpClient:
 
         opener_kwargs: dict[str, Any] = {}
         if not self.verify_tls:
-            import ssl
-
             context = ssl.create_default_context()
             context.check_hostname = False
             context.verify_mode = ssl.CERT_NONE
             opener_kwargs["context"] = context
+        elif self._tls_context is not None:
+            # Verified path: the explicit certifi / SSL_CERT_FILE /
+            # platform-default context built in __init__. Without this,
+            # urllib falls back to the platform store, which fails on
+            # hosts whose system CA bundle is missing or stale.
+            opener_kwargs["context"] = self._tls_context
 
         # ── proxy routing: explicit client proxy → rotation resolver
         # (with the target URL, so domain affinity applies) → the
