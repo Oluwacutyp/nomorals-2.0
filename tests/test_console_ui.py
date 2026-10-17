@@ -257,6 +257,32 @@ class BannerTests(unittest.TestCase):
         self.assertEqual(tip_of_the_day(seed=42), tip_of_the_day(seed=42))
         self.assertTrue(tip_of_the_day(seed=7))
 
+    def test_tips_have_no_moral_framing(self):
+        # Owner rule: no "be polite / be kind" moral framing in Devon
+        # output. Tips state facts (what happens, where to look), never
+        # niceness norms.
+        from nomorals.console.banner import _TIPS, render_banner, tip_of_the_day
+
+        banned = (
+            "polite",
+            "politely",
+            "kind",
+            "kindly",
+            "nice",
+            "nicely",
+            "be good",
+            "behave",
+            "behave yourself",
+        )
+        for tip in _TIPS:
+            lowered = tip.lower()
+            for word in banned:
+                self.assertNotIn(word, lowered, msg=f"tip has moral framing: {tip!r}")
+        # Quiet-hours tip keeps its factual content (pause + scheduler).
+        self.assertIn("quiet hours", " ".join(_TIPS))
+        self.assertTrue(tip_of_the_day(seed=3))
+        self.assertIn("tip:", render_banner([], color=False, tip_seed=3))
+
 
 class WidgetTests(unittest.TestCase):
     def test_sparkline_shape(self):

@@ -69,7 +69,7 @@ _TIPS = [
     "type 'jobs' to see scheduled background tasks and their next run.",
     "Devon learns your @usernames — /gift @name works across endpoints.",
     "set NM_CONSOLE_THEME=violet (or sunrise) for a different palette.",
-    "quiet hours keep proactive messages polite — check the scheduler.",
+    "quiet hours pause proactive sends — check the scheduler.",
     "type 'theme <name>' to switch palettes without restarting.",
     "/game delete soft-deletes a profile — 48h to undo, then it's gone.",
     "the console never sends your typing to the brain — it's local only.",
