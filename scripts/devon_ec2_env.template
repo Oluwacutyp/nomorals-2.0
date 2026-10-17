@@ -1,0 +1,862 @@
+# Devon EC2 RDP — FULL environment template (Devon ONLY).
+# Copy to `.env` in the repo root on the EC2 RDP host, then fill in
+# ONLY the keys you use, via secure entry on that machine.
+# PLACEHOLDERS ONLY in this file. NEVER real tokens/keys/secrets here,
+# NEVER in chat, NEVER in screenshots, NEVER in git. `.env` is gitignored.
+# Devon boots fully offline against the Mock provider with no keys set.
+#
+# DEVON HAS TWO TELEGRAM BOTS (both Devon, both in this file):
+#   1. DEVON MAIN bot  - NM_CHAT_TELEGRAM_BOT_TOKEN         - GATED (stays gated)
+#   2. SECOND DEVON bot - NM_CHAT_TELEGRAM_PERSONAL_BOT_TOKEN - USER-ONLY (owner only)
+# Separate tokens, separate getUpdates pollers. NEVER share one token
+# across two bots (two pollers on one token = missed commands / 409).
+# There is NO other bot in Devon's config. Any other trading bot
+# lives in its own repo with its own config and is NOT part of Devon.
+#
+# HOW TO FILL: on the EC2 RDP, open PowerShell, run `notepad .env`,
+# paste values from your secure store. Or use the Secure Vault flow.
+# REQUIRED on EC2: one LLM key (Groq recommended) + both Devon bot tokens.
+# OPTIONAL: everything else - leave blank/commented if unused.
+# API-FIRST (owner decision): NO GGUF, NO local LLM, NO llama.cpp, NO Ollama.
+# LLM / STT / TTS / diffusion all via API keys below, till better hosting.
+# Singing = generation to audio FILES (EC2 has no speaker). Files are
+# sent via Telegram / saved to disk. Same voice/music stack, file output.
+
+# ══ REQUIRED — DEVON TELEGRAM BOTS (2) ══
+
+# ── 1. DEVON MAIN BOT — GATED (stays gated) ─────────────────────────────────────────────────────────────
+
+# 1 = Devon main bot polls getUpdates. Must be 1 on EC2.
+# NM_CHAT_TELEGRAM_BOT_ENABLED=
+# REQUIRED for bot 1. DEVON MAIN bot token (GATED - stays gated). From @BotFather. NEVER paste in chat. Separate token from bot 2; never share one token across two pollers.
+# NM_CHAT_TELEGRAM_BOT_TOKEN=
+# Chat IDs the main (gated) bot serves. Comma-separated.
+# NM_CHAT_TELEGRAM_BOT_CHATS=
+# 0 for the main bot (no owner-private relationship context in gated chats).
+# NM_CHAT_TELEGRAM_BOT_PARTNER_CONTEXT=
+
+# ── 2. SECOND DEVON BOT — USER-ONLY (owner only, no one else) ─────────────────────────────────────────────────────────────
+
+# 1 = second Devon bot polls getUpdates. Must be 1 on EC2.
+# NM_CHAT_TELEGRAM_PERSONAL_BOT_ENABLED=
+# REQUIRED for bot 2. SECOND DEVON bot token (USER-ONLY - owner only, no one else). From @BotFather, DIFFERENT bot from main. NEVER paste in chat.
+# NM_CHAT_TELEGRAM_PERSONAL_BOT_TOKEN=
+# Owner-only chat IDs for the second bot. Comma-separated.
+# NM_CHAT_TELEGRAM_PERSONAL_BOT_CHATS=
+# 1 for the second bot (owner-only, full context).
+# NM_CHAT_TELEGRAM_PERSONAL_BOT_PARTNER_CONTEXT=
+
+# ── 3. TELEGRAM USER ACCOUNT (MTProto / Telethon) — OFF unless intentional ─────────────────────────────────────────────────────────────
+
+# 0/1 - Telethon user-account (MTProto) adapter. OFF unless you intentionally run a user account.
+# NM_CHAT_TELEGRAM_ENABLED=
+# Telethon API ID (only if NM_CHAT_TELEGRAM_ENABLED=1). From my.telegram.org.
+# NM_CHAT_TELEGRAM_API_ID=
+# Telethon API hash (only if NM_CHAT_TELEGRAM_ENABLED=1).
+# NM_CHAT_TELEGRAM_API_HASH=
+# Telethon session name/path.
+# NM_CHAT_TELEGRAM_SESSION=
+# 
+# NM_CHAT_TELEGRAM_CHATS=
+
+# ── 4. LLM PROVIDERS — API-FIRST (at least one key required on EC2) ─────────────────────────────────────────────────────────────
+
+# Active LLM provider: groq | openrouter | openai | hf | mock. Default mock (offline). Set groq on EC2.
+# NM_LLM_PROVIDER=
+# Providers tried in order on primary failure. Default: groq,openrouter.
+# NM_LLM_FALLBACK_CHAIN=
+# LLM call timeout seconds. Default 120.
+# NM_LLM_TIMEOUT=
+# REQUIRED (recommended primary brain). Groq API key - free, no card. console.groq.com.
+# NM_GROQ_API_KEY=
+# Default: openai/gpt-oss-120b.
+# NM_GROQ_MODEL=
+# Config key read by Devon code.
+# NM_GROQ_BASE_URL=
+# OpenRouter API key (fallback brain). openrouter.ai.
+# NM_OPENROUTER_API_KEY=
+# Default: qwen/qwen3-8b:free.
+# NM_OPENROUTER_MODEL=
+# Config key read by Devon code.
+# NM_OPENROUTER_BASE_URL=
+# OpenAI API key (optional provider).
+# NM_OPENAI_API_KEY=
+# OpenAI model name.
+# NM_OPENAI_MODEL=
+# OpenAI-compatible base URL.
+# NM_OPENAI_BASE_URL=
+# Hugging Face token (model downloads, HF inference). huggingface.co/settings/tokens.
+# HF_TOKEN=
+# HF model name.
+# NM_HF_MODEL=
+# HF inference base URL.
+# NM_HF_BASE_URL=
+# Dedicated HF Inference Endpoint URL, if you run one.
+# NM_HF_ENDPOINT_URL=
+# Anthropic API key (optional provider).
+# NM_ANTHROPIC_API_KEY=
+# DeepSeek API key (optional provider).
+# NM_DEEPSEEK_API_KEY=
+# Google Gemini API key (optional provider).
+# NM_GEMINI_API_KEY=
+# Embeddings: hashing (offline) | openai_compat | hf_serverless.
+# NM_EMBED_PROVIDER=
+# Config key read by Devon code.
+# NM_EMBED_MODEL=
+# Config key read by Devon code.
+# NM_LLM_ACTIVE_MODEL=
+# Config key read by Devon code.
+# NM_LLM_CACHE_DIR=
+# Config key read by Devon code.
+# NM_LLM_SYSTEM_PROMPT=
+# Config key read by Devon code.
+# NM_LLM_LOCAL_MODEL=
+# Config key read by Devon code.
+# NM_LLM_LOCAL_AUTO_START=
+# Config key read by Devon code.
+# NM_LLM_LOCAL_HOST=
+# Config key read by Devon code.
+# NM_LLM_LOCAL_PORT=
+# Config key read by Devon code.
+# NM_LLM_VERIFY_AT_STARTUP=
+# Config key read by Devon code.
+# NM_LLAMA_CPP_URL=
+# Config key read by Devon code.
+# NM_LLM_ALLOW_MOCK_FALLBACK=
+
+# ── 5. PARTNER / OWNER ─────────────────────────────────────────────────────────────
+
+# Owner chat IDs (comma-separated) - the owner, for Partner + user-only gating.
+# NM_PARTNER_OWNER_CHATS=
+# Config key read by Devon code.
+# NM_PARTNER_OWNER_SENDER_IDS=
+# Config key read by Devon code.
+# NM_PARTNER_OWNER_KEY=
+# Platforms Partner is active on. Default: telegram-bot.
+# NM_PARTNER_PLATFORMS=
+# Config key read by Devon code.
+# NM_PARTNER_PERSONALITY=
+# 0/1 - Partner proactive messages.
+# NM_PARTNER_PROACTIVE_ENABLED=
+# Config key read by Devon code.
+# NM_PARTNER_PROACTIVE=
+# Config key read by Devon code.
+# NM_PARTNER_PROACTIVE_BRIEFING=
+# Config key read by Devon code.
+# NM_PARTNER_PROACTIVE_WATCHERS=
+# Quiet hours start (default 23:00).
+# NM_PARTNER_QUIET_START=
+# Quiet hours end (default 07:00).
+# NM_PARTNER_QUIET_END=
+# Devon power mode default ON (owner standing rule).
+# NM_PARTNER_POWER_DEFAULT_ON=
+# Config key read by Devon code.
+# NM_PARTNER_MEMORY_ENABLED=
+# Config key read by Devon code.
+# NM_PARTNER_LEXICON_SEED=
+# Config key read by Devon code.
+# NM_PARTNER_LEXICON_VOICE=
+# Config key read by Devon code.
+# NM_PARTNER_TRAIN_COLLECT=
+# Config key read by Devon code.
+# NM_PARTNER_TYPING_CAP_SECONDS=
+# Owner timezone, e.g. America/Denver.
+# NM_OWNER_TZ=
+# Runtime timezone.
+# NM_TIMEZONE=
+# Morning-pulse timezone.
+# NM_PULSE_TIMEZONE=
+
+# ── 6. VOICE / MUSIC / SINGING (file output on EC2 — no speaker) ─────────────────────────────────────────────────────────────
+
+# Private-voice engine (XTTS v2, private personal use).
+# NM_VOICE_PRIVATE=
+# Public-voice engine (Chatterbox, MIT).
+# NM_VOICE_PUBLIC=
+# Speech-to-text API key.
+# NM_AUDIO_STT_API_KEY=
+# STT API base URL.
+# NM_AUDIO_STT_BASE_URL=
+# Config key read by Devon code.
+# NM_AUDIO_TTS_VOICE=
+# Config key read by Devon code.
+# NM_AUDIO_VOICE_SILENCE_MS=
+# Singing voicebank dir (DiffSinger banks). Default ~/.nomorals/svs.
+# NM_SVS_DIR=
+# Local models dir.
+# NM_MODELS_DIR=
+# SoundFont path for music rendering.
+# NM_SOUNDFONT=
+# Music synth backend.
+# NM_SYNTH_BACKEND=
+# Music licensing gate.
+# NM_PLAY_UNLICENSED=
+# Config key read by Devon code.
+# NM_MEDIA_AUDIO_BITRATE=
+# Config key read by Devon code.
+# NM_MEDIA_IMAGE_MAX_WIDTH=
+# Config key read by Devon code.
+# NM_MEDIA_IMAGE_QUALITY=
+# Config key read by Devon code.
+# NM_MEDIA_VIDEO_CRF=
+# Config key read by Devon code.
+# NM_MEDIA_VIDEO_PRESET=
+# Config key read by Devon code.
+# NM_MEDIA_MAX_MB=
+# Config key read by Devon code.
+# NM_MUSIC_MODEL=
+# Config key read by Devon code.
+# NM_IMAGE_MODEL=
+# Config key read by Devon code.
+# NM_VOICE_STT_MODEL=
+# Config key read by Devon code.
+# NM_VOICE_TTS_ENGINE=
+# Config key read by Devon code.
+# NM_VOICE_STT_PROVIDER=
+# Config key read by Devon code.
+# NM_VOICE_TTS_PROVIDER=
+# Config key read by Devon code.
+# NM_IMAGE_PROVIDER=
+# Config key read by Devon code.
+# Devon never trades live. Paper only, always. These stay at paper/false.
+# NM_TRADING_ENABLED=
+# Config key read by Devon code.
+# NM_TRADING_MODE=
+# Config key read by Devon code.
+# NM_TRADING_ALLOW_LIVE=
+# Config key read by Devon code.
+# NM_VOICE_STT_MODEL=
+
+# ── 7. CHAT — DISCORD / WHATSAPP / WEBHOOK / SMS ─────────────────────────────────────────────────────────────
+
+# 0/1 - Discord adapter.
+# NM_CHAT_DISCORD_ENABLED=
+# Discord token (secure entry).
+# NM_CHAT_DISCORD_TOKEN=
+# Discord channels. Comma-separated.
+# NM_CHAT_DISCORD_CHANNELS=
+# Config key read by Devon code.
+# NM_CHAT_DISCORD_WEBHOOK=
+# 0/1 - WhatsApp adapter.
+# NM_CHAT_WHATSAPP_ENABLED=
+# WhatsApp outbox directory.
+# NM_CHAT_WHATSAPP_OUTBOX_DIR=
+# 0/1 - webhook adapter.
+# NM_CHAT_WEBHOOK_ENABLED=
+# Config key read by Devon code.
+# NM_CHAT_WEBHOOK_HOST=
+# Config key read by Devon code.
+# NM_CHAT_WEBHOOK_PORT=
+# Webhook token.
+# NM_CHAT_WEBHOOK_TOKEN=
+# Config key read by Devon code.
+# NM_CHAT_WEBHOOK_REPLY_URL=
+# 0/1 - SMS adapter.
+# NM_CHAT_SMS_ENABLED=
+# SMS auth token (Twilio).
+# NM_CHAT_SMS_AUTH_TOKEN=
+# SMS sender number.
+# NM_CHAT_SMS_FROM_NUMBER=
+# Config key read by Devon code.
+# NM_CHAT_SMS_HOST=
+# Config key read by Devon code.
+# NM_CHAT_SMS_PORT=
+# Config key read by Devon code.
+# NM_CHAT_SMS_PUBLIC_URL=
+# Config key read by Devon code.
+# NM_CHAT_MEDIA_IN_GROUPS=
+# Config key read by Devon code.
+# NM_CHAT_MEDIA_MAX_MB=
+
+# ── 8. CORE / STORAGE / API / HUB / BUDGETS ─────────────────────────────────────────────────────────────
+
+# Data root: db, blobs, models, backups, logs. Default ~/.nomorals.
+# NM_HOME=
+# workstation | laptop | termux. EC2 RDP: workstation.
+# NM_PROFILE=
+# Config key read by Devon code.
+# NM_DEBUG=
+# 0 = online-first (default). 1 = offline mode.
+# NM_OFFLINE=
+# Config key read by Devon code.
+# NM_LOG_LEVEL=
+# Config key read by Devon code.
+# NM_LOG_FILE=
+# SQLite path. Default data/nomorals.db.
+# NM_DB_PATH=
+# Config key read by Devon code.
+# NM_DB_WAL=
+# Config key read by Devon code.
+# NM_BACKUP_DIR=
+# Config key read by Devon code.
+# NM_BACKUP_KEEP=
+# Backup git remote, e.g. git@github.com:you/nm-backups.git.
+# NM_BACKUP_GIT_REPO=
+# Backup encryption key (base64, secure entry only). Lose it = backups unrecoverable.
+# NM_BACKUP_KEY_B64=
+# Thread pool size (0 = cpu_count).
+# NM_THREADS=
+# Config key read by Devon code.
+# NM_PROCESSES=
+# Config key read by Devon code.
+# NM_PROCESS_WORKERS=
+# Config key read by Devon code.
+# NM_WORKERS=
+# Max subagents. Default 64.
+# NM_MAX_SUBAGENTS=
+# Wall-clock budget seconds. Default 3600.
+# NM_BUDGET_WALL_SECONDS=
+# Token budget. Default 2000000.
+# NM_BUDGET_TOKENS=
+# Max child agents. Default 256.
+# NM_BUDGET_CHILDREN=
+# API bind host. Default 127.0.0.1 (localhost only).
+# NM_API_HOST=
+# API port. Default 8731.
+# NM_API_PORT=
+# REQUIRED if API is exposed beyond localhost. API auth token.
+# NM_API_TOKEN=
+# Hub URL (if using hub).
+# NM_HUB_URL=
+# Hub token.
+# NM_HUB_TOKEN=
+# Config key read by Devon code.
+# NM_HUB_HOST=
+# Config key read by Devon code.
+# NM_HUB_PORT=
+# Config key read by Devon code.
+# NM_HUB_TIMEOUT=
+# Config key read by Devon code.
+# NM_HUB_CERT=
+# Config key read by Devon code.
+# NM_HUB_CORS_ORIGINS=
+# Config key read by Devon code.
+# NM_HUB_KEY=
+# Config key read by Devon code.
+# NM_HUB_RATE_LIMIT=
+# Vault key reference.
+# NM_VAULT_KEY=
+# Vault passphrase (secure entry only).
+# NM_VAULT_PASSPHRASE=
+# Config key read by Devon code.
+# NM_COST_LOG=
+# Config key read by Devon code.
+# NM_DISTILL=
+# Config key read by Devon code.
+# NM_REASONING_MODE=
+# Config key read by Devon code.
+# NM_AGENTIC_MODE=
+# Config key read by Devon code.
+# NM_MEMORY_TWO_TIER=
+# Config key read by Devon code.
+# NM_REPO_DIR=
+# Config key read by Devon code.
+# NM_SANDBOX_ROOT=
+# Config key read by Devon code.
+# NM_PLAN_STORE=
+# Config key read by Devon code.
+# NM_SPEC_STORE=
+# Config key read by Devon code.
+# NM_NO_COLOR=
+# Config key read by Devon code.
+# NM_CONSOLE_THEME=
+
+# ── 9. SEARCH / OSINT / NETWORK / PROXY ─────────────────────────────────────────────────────────────
+
+# Tavily search API key.
+# NM_TAVILY_API_KEY=
+# Serper search API key.
+# NM_SERPER_API_KEY=
+# Brave Search API key.
+# NM_BRAVE_SEARCH_API_KEY=
+# Exa search API key.
+# NM_EXA_API_KEY=
+# SearXNG instance URL.
+# NM_SEARXNG_URL=
+# Config key read by Devon code.
+# NM_SEARXNG_CATEGORY=
+# Config key read by Devon code.
+# NM_SEARXNG_ENGINES=
+# Config key read by Devon code.
+# NM_SEARXNG_LANGUAGE=
+# Config key read by Devon code.
+# NM_SEARXNG_TIME_RANGE=
+# 0/1 - OSINT tools.
+# NM_OSINT_ENABLED=
+# Shodan API key.
+# NM_OSINT_SHODAN_KEY=
+# AbuseIPDB API key.
+# NM_OSINT_ABUSEIPDB_KEY=
+# HaveIBeenPwned API key.
+# NM_OSINT_HIBP_KEY=
+# Config key read by Devon code.
+# NM_OSINT_CRTSH_DAYS=
+# Config key read by Devon code.
+# NM_OSINT_REQUEST_TIMEOUT=
+# 0/1 - network probing tools.
+# NM_NET_ENABLED=
+# Proxy URL for network tools.
+# NM_NET_PROXY=
+# Config key read by Devon code.
+# NM_NET_ALLOWED_TARGETS=
+# Config key read by Devon code.
+# NM_NET_BANNER=
+# Config key read by Devon code.
+# NM_NET_DEFAULT_PORTS=
+# Config key read by Devon code.
+# NM_NET_MAX_PROBE_PORTS=
+# Config key read by Devon code.
+# NM_NET_PROBE_TIMEOUT=
+# Proxy URL.
+# NM_PROXY_URL=
+# Config key read by Devon code.
+# NM_PROXY_ACTIVE=
+# Config key read by Devon code.
+# NM_PROXY_KNOWN=
+# Config key read by Devon code.
+# NM_DDGS_BACKEND=
+# Config key read by Devon code.
+# NM_DDGS_KIND=
+# Config key read by Devon code.
+# NM_DDGS_REGION=
+# Config key read by Devon code.
+# NM_WEB_TIMEOUT=
+# Config key read by Devon code.
+# NM_WEB_RERANK=
+
+# ── 10. SOCIAL / GITHUB / EMAIL / CLOUD ─────────────────────────────────────────────────────────────
+
+# Mastodon token.
+# NM_SOCIAL_MASTODON_TOKEN=
+# Config key read by Devon code.
+# NM_SOCIAL_MASTODON_DOMAIN=
+# Bluesky handle.
+# NM_SOCIAL_BLUESKY_HANDLE=
+# Bluesky app password.
+# NM_SOCIAL_BLUESKY_APP_PASSWORD=
+# Social Telegram token (legacy social adapter - prefer NM_CHAT_* bot tokens).
+# NM_SOCIAL_TELEGRAM_TOKEN=
+# Discord webhook URL.
+# NM_SOCIAL_DISCORD_WEBHOOK=
+# X API key.
+# NM_SOCIAL_X_API_KEY=
+# X API secret.
+# NM_SOCIAL_X_API_SECRET=
+# X access token.
+# NM_SOCIAL_X_ACCESS_TOKEN=
+# X access secret.
+# NM_SOCIAL_X_ACCESS_SECRET=
+# Reddit client ID.
+# NM_SOCIAL_REDDIT_CLIENT_ID=
+# Reddit client secret.
+# NM_SOCIAL_REDDIT_CLIENT_SECRET=
+# GitHub token (alias NM_API_GITHUB_TOKEN).
+# NM_GITHUB_TOKEN=
+# GitHub token for backup/repo ops.
+# NM_API_GITHUB_TOKEN=
+# Config key read by Devon code.
+# NM_GH_ASKPASS_TOKEN=
+# GitHub token (plain alias).
+# GITHUB_TOKEN=
+# SMTP host for Devon mail.
+# DEVON_SMTP_HOST=
+# SMTP port (default 587).
+# DEVON_SMTP_PORT=
+# SMTP user.
+# DEVON_SMTP_USER=
+# SMTP password (secure entry).
+# DEVON_SMTP_PASSWORD=
+# SMTP from address.
+# DEVON_SMTP_FROM=
+# Config key read by Devon code.
+# DEVON_SES_FROM=
+# Config key read by Devon code.
+# DEVON_UNSUBSCRIBE_URL=
+# AWS access key (only if using AWS services).
+# AWS_ACCESS_KEY_ID=
+# AWS secret key (secure entry).
+# AWS_SECRET_ACCESS_KEY=
+# AWS region (default eu-west-1).
+# AWS_REGION=
+# Twilio account SID.
+# TWILIO_ACCOUNT_SID=
+# Twilio auth token.
+# TWILIO_AUTH_TOKEN=
+# Twilio sender number.
+# TWILIO_FROM=
+# Config key read by Devon code.
+# NM_WHATSAPP_BRIDGE_HOST=
+# Config key read by Devon code.
+# NM_WHATSAPP_BRIDGE_PORT=
+
+# ── APPENDIX A — REMAINING NM_ KEYS READ BY CODE (leave blank unless used) ─────────────────────────────────────────────────────────────
+
+# Every NM_ key found by grep in nomorals/ + scripts/ that is not in
+# sections 1-10 above. Blank = default. Fill only if you use that feature.
+# Config key read by Devon code.
+# NM_ARCHIVE_MAX_EXTRACT_FILES=
+# Config key read by Devon code.
+# NM_ARCHIVE_MAX_EXTRACT_MB=
+# Config key read by Devon code.
+# NM_ARENA_ANTI_REPEAT_WINDOW=
+# Config key read by Devon code.
+# NM_ARENA_BUILD=
+# Config key read by Devon code.
+# NM_ARENA_ENABLED=
+# Config key read by Devon code.
+# NM_ARENA_INTERVAL_HOURS=
+# Config key read by Devon code.
+# NM_ARENA_RESEARCH_PAGES=
+# Config key read by Devon code.
+# NM_AUTONOMY_DAILY_MODEL_CALLS=
+# Config key read by Devon code.
+# NM_BROWSER_PLAYWRIGHT=
+# Config key read by Devon code.
+# NM_CAPTCHA_API_MODE=
+# Config key read by Devon code.
+# NM_CAPTCHA_DAILY_CAP_USD=
+# Config key read by Devon code.
+# NM_CAPTCHA_ERROR_COOLDOWN=
+# Config key read by Devon code.
+# NM_CAPTCHA_MONTHLY_CAP_USD=
+# Config key read by Devon code.
+# NM_CAPTCHA_PER_DAY=
+# Config key read by Devon code.
+# NM_CAPTCHA_PER_MINUTE=
+# Config key read by Devon code.
+# NM_CAPTCHA_SOLVER=
+# TEST-ONLY / placeholder - leave blank.
+# NM_CLOUD=
+# Config key read by Devon code.
+# NM_CODEBEAST_MODEL=
+# TEST-ONLY / placeholder - leave blank.
+# NM_FLOAT=
+# TEST-ONLY / placeholder - leave blank.
+# NM_FOO_BAR=
+# Config key read by Devon code.
+# NM_HF_BASE=
+# Config key read by Devon code.
+# NM_HF_SERVER=
+# Config key read by Devon code.
+# NM_HF_TOKEN=
+# TEST-ONLY / placeholder - leave blank.
+# NM_HUB_=
+# Config key read by Devon code.
+# NM_LLAMA_CPP_MODEL=
+# Config key read by Devon code.
+# NM_LLM_CASSETTE=
+# Config key read by Devon code.
+# NM_LLM_CASSETTE_DIR=
+# Config key read by Devon code.
+# NM_LLM_LOCAL_LORA=
+# Config key read by Devon code.
+# NM_LLM_REPLAY=
+# Config key read by Devon code.
+# NM_MASTODON_TOKEN=
+# Config key read by Devon code.
+# NM_MIND_INFLIGHT_TIMEOUT=
+# Config key read by Devon code.
+# NM_MIND_MAX_INFLIGHT=
+# Config key read by Devon code.
+# NM_MISSION_STALE_HEARTBEAT_S=
+# Config key read by Devon code.
+# NM_OCR_BINARY=
+# Config key read by Devon code.
+# NM_RESEARCH_LOOP_DEDUPE_DAYS=
+# Config key read by Devon code.
+# NM_RESEARCH_LOOP_HOURS=
+# Config key read by Devon code.
+# NM_RESEARCH_LOOP_IGNORE_DAYS=
+# Config key read by Devon code.
+# NM_RESEARCH_LOOP_MAX_PROPOSALS=
+# Config key read by Devon code.
+# NM_RESOURCE_BATTERY_MIN=
+# Config key read by Devon code.
+# NM_RESOURCE_BATTERY_THROTTLE=
+# Config key read by Devon code.
+# NM_RESOURCE_CALM_SECONDS=
+# Config key read by Devon code.
+# NM_RESOURCE_CPU_CRITICAL=
+# Config key read by Devon code.
+# NM_RESOURCE_CPU_THROTTLE=
+# Config key read by Devon code.
+# NM_RESOURCE_DISK_CRITICAL=
+# Config key read by Devon code.
+# NM_RESOURCE_DISK_THROTTLE=
+# Config key read by Devon code.
+# NM_RESOURCE_HISTORY=
+# Config key read by Devon code.
+# NM_RESOURCE_MAX_PRESSURE=
+# Config key read by Devon code.
+# NM_RESOURCE_MEM_CRITICAL=
+# Config key read by Devon code.
+# NM_RESOURCE_MEM_THROTTLE=
+# Config key read by Devon code.
+# NM_RESOURCE_METERED=
+# Config key read by Devon code.
+# NM_RESOURCE_PSI_MEM_FULL_CRIT=
+# Config key read by Devon code.
+# NM_RESOURCE_PSI_MEM_WARN=
+# Config key read by Devon code.
+# NM_RESOURCE_RESERVE_MIN_MB=
+# Config key read by Devon code.
+# NM_RESOURCE_RESERVE_PCT=
+# Config key read by Devon code.
+# NM_RESOURCE_STEAL_CRITICAL=
+# Config key read by Devon code.
+# NM_RESOURCE_STEAL_WARN=
+# Config key read by Devon code.
+# NM_RESOURCE_THERMAL_HOT_C=
+# Config key read by Devon code.
+# NM_RESOURCE_THERMAL_WARM_C=
+# Config key read by Devon code.
+# NM_RESOURCE_UP_TICKS=
+# TEST-ONLY / placeholder - leave blank.
+# NM_RUNTIME_=
+# TEST-ONLY / placeholder - leave blank.
+# NM_STDIN=
+# Config key read by Devon code.
+# NM_TELEGRAM_API_HASH=
+# Config key read by Devon code.
+# NM_TELEGRAM_API_ID=
+# Config key read by Devon code.
+# NM_TELEGRAM_BOT_TOKEN=
+# Config key read by Devon code.
+# NM_TERMUX_NOTIFY=
+# Config key read by Devon code.
+# NM_TRAINING_BASE_MODEL=
+# Config key read by Devon code.
+# NM_VISION_OCR_BINARY=
+# Config key read by Devon code.
+# NM_WHISPER_CPP_BIN=
+# Config key read by Devon code.
+# NM_WHISPER_CPP_MODEL=
+
+# ── APPENDIX B — REMAINING PLAIN ENV KEYS READ BY CODE ─────────────────────────────────────────────────────────────
+
+# Non-NM_ env vars read by Devon code (LLM libs, media libs, OS).
+# Blank = default. Fill only if you use that feature.
+# Plain env key read by Devon code / a library it uses.
+# ANTHROPIC_API_KEY=
+# Plain env key read by Devon code / a library it uses.
+# ANTHROPIC_MODEL=
+# Plain env key read by Devon code / a library it uses.
+# BOT_TOKEN=
+# Plain env key read by Devon code / a library it uses.
+# BUILDERS_THEME=
+# Plain env key read by Devon code / a library it uses.
+# CAPTCHA_API_KEY=
+# Plain env key read by Devon code / a library it uses.
+# CAPTCHA_API_URL=
+# Plain env key read by Devon code / a library it uses.
+# CAPTCHA_PROXY=
+# Plain env key read by Devon code / a library it uses.
+# CHATTERBOX_DEVICE=
+# Plain env key read by Devon code / a library it uses.
+# CHATTERBOX_VARIANT=
+# Plain env key read by Devon code / a library it uses.
+# COMFYUI_CHECKPOINT=
+# Plain env key read by Devon code / a library it uses.
+# COMFYUI_HOST=
+# Plain env key read by Devon code / a library it uses.
+# COMFYUI_PORT=
+# Plain env key read by Devon code / a library it uses.
+# COSYVOICE_MODEL_DIR=
+# Plain env key read by Devon code / a library it uses.
+# DEEPSEEK_API_KEY=
+# Plain env key read by Devon code / a library it uses.
+# DEEPSEEK_MODEL=
+# Plain env key read by Devon code / a library it uses.
+# DEVON_ERROR_KB=
+# Plain env key read by Devon code / a library it uses.
+# DEVON_SD_CKPT=
+# Plain env key read by Devon code / a library it uses.
+# DEVON_WEATHER_PLACE=
+# Plain env key read by Devon code / a library it uses.
+# DIA_MODEL_ID=
+# Plain env key read by Devon code / a library it uses.
+# DISPLAY=
+# Plain env key read by Devon code / a library it uses.
+# DJANGO_DEBUG=
+# Plain env key read by Devon code / a library it uses.
+# DJANGO_SECRET_KEY=
+# Plain env key read by Devon code / a library it uses.
+# EMBEDDING_MODEL=
+# Plain env key read by Devon code / a library it uses.
+# EMBEDDING_URL=
+# Plain env key read by Devon code / a library it uses.
+# F5TTS_MODEL=
+# Plain env key read by Devon code / a library it uses.
+# FASTER_WHISPER_DEVICE=
+# Plain env key read by Devon code / a library it uses.
+# FASTER_WHISPER_MODEL=
+# Plain env key read by Devon code / a library it uses.
+# FINANCE_THEME=
+# Plain env key read by Devon code / a library it uses.
+# FOOTBALL_DATA_API_KEY=
+# Plain env key read by Devon code / a library it uses.
+# FORCE_COLOR=
+# Plain env key read by Devon code / a library it uses.
+# GEMINI_API_KEY=
+# Plain env key read by Devon code / a library it uses.
+# GEMINI_MODEL=
+# Plain env key read by Devon code / a library it uses.
+# GROQ_API_KEY=
+# Plain env key read by Devon code / a library it uses.
+# GROQ_BASE_URL=
+# Plain env key read by Devon code / a library it uses.
+# GROQ_MODEL=
+# Plain env key read by Devon code / a library it uses.
+# HF_MODEL=
+# Plain env key read by Devon code / a library it uses.
+# HF_STT_MODEL=
+# Plain env key read by Devon code / a library it uses.
+# HF_TTS_ENDPOINT_URL=
+# Plain env key read by Devon code / a library it uses.
+# HF_TTS_MODEL=
+# Plain env key read by Devon code / a library it uses.
+# HOME=
+# Plain env key read by Devon code / a library it uses.
+# HOST=
+# Plain env key read by Devon code / a library it uses.
+# KAGGLE_KERNEL_TYPE=
+# Plain env key read by Devon code / a library it uses.
+# KITTEN_MODEL=
+# Plain env key read by Devon code / a library it uses.
+# KITTEN_SPEED=
+# Plain env key read by Devon code / a library it uses.
+# KITTEN_VOICE=
+# Plain env key read by Devon code / a library it uses.
+# LATENTSYNC_CKPT=
+# Plain env key read by Devon code / a library it uses.
+# LATENTSYNC_GUIDANCE=
+# Plain env key read by Devon code / a library it uses.
+# LATENTSYNC_PYTHON=
+# Plain env key read by Devon code / a library it uses.
+# LATENTSYNC_REPO=
+# Plain env key read by Devon code / a library it uses.
+# LATENTSYNC_STEPS=
+# Plain env key read by Devon code / a library it uses.
+# LATENTSYNC_UNET_CONFIG=
+# Plain env key read by Devon code / a library it uses.
+# LEONARDO_MODEL_ID=
+# Plain env key read by Devon code / a library it uses.
+# LLAMA_CPP_URL=
+# Plain env key read by Devon code / a library it uses.
+# LLAMA_KV_QUANT=
+# Plain env key read by Devon code / a library it uses.
+# MEDIA_GEN_BACKEND=
+# Plain env key read by Devon code / a library it uses.
+# MEDIA_GEN_DIFFUSERS_MODEL=
+# Plain env key read by Devon code / a library it uses.
+# MEDIA_GEN_MODEL=
+# Plain env key read by Devon code / a library it uses.
+# MEDIA_GEN_PROVIDER=
+# Plain env key read by Devon code / a library it uses.
+# NANO_BANANA_MODEL=
+# Plain env key read by Devon code / a library it uses.
+# NOMORALS_BET_DIR=
+# Plain env key read by Devon code / a library it uses.
+# NOMORALS_CAPTCHA_DIR=
+# Plain env key read by Devon code / a library it uses.
+# NOMORALS_DATA_DIR=
+# Plain env key read by Devon code / a library it uses.
+# NOMORALS_HOME=
+# Plain env key read by Devon code / a library it uses.
+# NOMORALS_VOICES_DIR=
+# Plain env key read by Devon code / a library it uses.
+# NO_COLOR=
+# Plain env key read by Devon code / a library it uses.
+# ODDS_API_KEY=
+# Plain env key read by Devon code / a library it uses.
+# OLLAMA_HOST=
+# Plain env key read by Devon code / a library it uses.
+# OLLAMA_MODEL=
+# Plain env key read by Devon code / a library it uses.
+# OMNIVOICE_DEVICE_MAP=
+# Plain env key read by Devon code / a library it uses.
+# OMNIVOICE_MODEL_ID=
+# Plain env key read by Devon code / a library it uses.
+# OPENAI_API_KEY=
+# Plain env key read by Devon code / a library it uses.
+# OPENAI_BASE_URL=
+# Plain env key read by Devon code / a library it uses.
+# OPENROUTER_API_KEY=
+# Plain env key read by Devon code / a library it uses.
+# OPENROUTER_MODEL=
+# Plain env key read by Devon code / a library it uses.
+# ORPHEUS_MODEL_ID=
+# Plain env key read by Devon code / a library it uses.
+# PARAKEET_MODEL=
+# Plain env key read by Devon code / a library it uses.
+# PARAKEET_QUANTIZATION=
+# Plain env key read by Devon code / a library it uses.
+# PIPER_VOICE=
+# Plain env key read by Devon code / a library it uses.
+# PIPER_VOICES_DIR=
+# Plain env key read by Devon code / a library it uses.
+# PORT=
+# Plain env key read by Devon code / a library it uses.
+# POSTIZ_API_KEY=
+# Plain env key read by Devon code / a library it uses.
+# POSTIZ_URL=
+# Plain env key read by Devon code / a library it uses.
+# PREFIX=
+# Plain env key read by Devon code / a library it uses.
+# QR_DEBUG=
+# Plain env key read by Devon code / a library it uses.
+# QWEN3_TTS_BASE_MODEL=
+# Plain env key read by Devon code / a library it uses.
+# QWEN3_TTS_DEVICE_MAP=
+# Plain env key read by Devon code / a library it uses.
+# QWEN3_TTS_MODEL=
+# Plain env key read by Devon code / a library it uses.
+# RVC_HOME=
+# Plain env key read by Devon code / a library it uses.
+# SILERO_VAD_ONNX=
+# Plain env key read by Devon code / a library it uses.
+# SOURCE_DATE_EPOCH=
+# Plain env key read by Devon code / a library it uses.
+# SPARK_DEVICE=
+# Plain env key read by Devon code / a library it uses.
+# SPARK_MODEL_DIR=
+# Plain env key read by Devon code / a library it uses.
+# SPARK_TTS_DIR=
+# Plain env key read by Devon code / a library it uses.
+# STABILITY_MODEL=
+# Plain env key read by Devon code / a library it uses.
+# SUPIR_REPO=
+# Plain env key read by Devon code / a library it uses.
+# SYSTEM_TTS_LANG=
+# Plain env key read by Devon code / a library it uses.
+# TELEGRAM_API_BASE=
+# Plain env key read by Devon code / a library it uses.
+# TERM=
+# Plain env key read by Devon code / a library it uses.
+# TERMUX_VERSION=
+# Plain env key read by Devon code / a library it uses.
+# TMPDIR=
+# Plain env key read by Devon code / a library it uses.
+# TZ=
+# Plain env key read by Devon code / a library it uses.
+# USER=
+# Plain env key read by Devon code / a library it uses.
+# USERNAME=
+# Plain env key read by Devon code / a library it uses.
+# WAV2LIP_CKPT=
+# Plain env key read by Devon code / a library it uses.
+# WAV2LIP_PYTHON=
+# Plain env key read by Devon code / a library it uses.
+# WAV2LIP_REPO=
+# Plain env key read by Devon code / a library it uses.
+# WAYLAND_DISPLAY=
+# Plain env key read by Devon code / a library it uses.
+# WHISPERCPP_MODEL=
+# Plain env key read by Devon code / a library it uses.
+# WHISPER_MODEL=
+# Plain env key read by Devon code / a library it uses.
+# XDG_SESSION_TYPE=
+# Plain env key read by Devon code / a library it uses.
+# ZONOS_MODEL=
+
+# ── END ──
