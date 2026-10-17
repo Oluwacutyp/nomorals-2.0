@@ -22,12 +22,13 @@ from .ledger import HonestyLedger
 
 def digest_tick(queue: AttemptQueue | None = None, ledger: HonestyLedger | None = None,
                 max_seconds: float = 60.0, max_problems: int = 2,
-                prior_art_fn=None) -> dict:
+                prior_art_fn=None, digestion_fn=None) -> dict:
     """One always-on tick. Returns what moved (problems moved, not docs ingested)."""
     started = time.time()
     queue = queue or AttemptQueue()
     ledger = ledger or HonestyLedger()
     moved: list[dict] = []
+    sources_read_all: list[str] = []
     open_items = [i for i in queue.queue("open")]
     for item in open_items[:max_problems]:
         if time.time() - started > max_seconds:
@@ -46,12 +47,32 @@ def digest_tick(queue: AttemptQueue | None = None, ledger: HonestyLedger | None 
         else:
             art = {"summary": "no prior-art function wired — tick skipped ingestion"}
             new_hits = 0
+        # Knowledge digestion: read the standing sources registry for this
+        # problem (question-led), not just prior art for the exact problem.
+        digestion_sources: list[str] = []
+        digestion_hits = 0
+        digestion_summary = ""
+        if digestion_fn is not None:
+            try:
+                dig = digestion_fn(item["problem"])
+                digestion_sources = list(dig.get("sources_read") or [])
+                digestion_hits = sum(1 for v in (dig.get("results") or {}).values()
+                                     for r in v if r.get("status") == "found")
+                digestion_summary = dig.get("summary", "")
+                ledger.record_digestion(item["claim_id"], digestion_sources,
+                                        digestion_hits, digestion_summary)
+            except Exception as exc:  # noqa: BLE001 — digest must never crash the idle loop
+                digestion_summary = f"digestion pass failed: {exc}"
+        sources_read_all.extend(s for s in digestion_sources if s not in sources_read_all)
         after = len((ledger.get(item["claim_id"]) or {}).get("attempts", []))
-        delta = (new_hits > 0) or (after != before)
+        delta = (new_hits > 0) or (digestion_hits > 0) or (after != before)
         if delta:
             moved.append({"claim_id": item["claim_id"], "problem": item["problem"],
                           "new_prior_art_hits": new_hits,
-                          "prior_art_summary": art.get("summary", "")})
+                          "prior_art_summary": art.get("summary", ""),
+                          "digestion_sources": digestion_sources,
+                          "digestion_hits": digestion_hits,
+                          "digestion_summary": digestion_summary})
         else:
             # No delta this cycle — count toward dormancy.
             item["cycles_no_delta"] = item.get("cycles_no_delta", 0) + 1
@@ -60,6 +81,7 @@ def digest_tick(queue: AttemptQueue | None = None, ledger: HonestyLedger | None 
     return {"tick_seconds": round(time.time() - started, 2),
             "problems_checked": min(len(open_items), max_problems),
             "problems_moved": moved,
+            "digestion_sources_read": sources_read_all,
             "metric": "problems moved (not documents ingested)"}
 
 

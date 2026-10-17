@@ -112,8 +112,16 @@ class ImpossibleMadePossible:
 
     def digest(self, **kwargs) -> dict:
         from .digest import digest_tick
+        from .sources import digest_sources
         return digest_tick(queue=self.queue, ledger=self.ledger,
-                           prior_art_fn=_prior_art.prior_art, **kwargs)
+                           prior_art_fn=_prior_art.prior_art,
+                           digestion_fn=digest_sources, **kwargs)
+
+    def cross_query(self, problem: str, **kwargs) -> dict:
+        """One problem, three knowledge systems hand in hand
+        (Impossible + WisdomKeeper + BookForge). See bridges.py."""
+        from .bridges import cross_query as _cross
+        return _cross(problem, **kwargs)
 
     @staticmethod
     def _report(dossier: dict) -> str:

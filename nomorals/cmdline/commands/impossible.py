@@ -14,7 +14,7 @@ def _cmd_impossible(args: Any, context: Any) -> int:
     """Route ``nm impossible ...``."""
     words = list(getattr(args, "task", None) or [])
     if not words:
-        print("usage: nm impossible solve <problem> [--software] [--fetch-art] | status <id> | attempt <id> | dossier <id> | queue | charter | lattice | examples",
+        print("usage: nm impossible solve <problem> [--software] [--fetch-art] | status <id> | attempt <id> | dossier <id> | queue | charter | lattice | examples | sources [domain] | cross <problem>",
               file=sys.stderr)
         return 2
     from ...impossible.chat import control_impossible

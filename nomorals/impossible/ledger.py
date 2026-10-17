@@ -103,6 +103,21 @@ class HonestyLedger:
                 return c
         return None
 
+    def record_digestion(self, claim_id: str, sources_read: list, hits: int,
+                         summary: str) -> dict | None:
+        """Record which digestion sources were read for a claim this tick.
+        The digest is question-led; this is the audit trail of what it read."""
+        data = self._load()
+        for c in data.get("claims", []):
+            if c["id"] == claim_id or c["id"].startswith(claim_id):
+                c.setdefault("digestion_log", []).append(
+                    {"sources_read": list(sources_read), "hits": hits,
+                     "summary": summary, "at": time.time()})
+                c["updated_at"] = time.time()
+                self._save(data)
+                return c
+        return None
+
     def next_attempt_hint(self, claim_id: str) -> str:
         c = self.get(claim_id)
         if not c:

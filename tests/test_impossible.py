@@ -214,7 +214,116 @@ def test_submit_underspecified_returns_clarification(imp):
     assert d["clarifications"]
 
 
-def test_chat_examples_and_charter():
+
+
+# --- knowledge-digestion sources -------------------------------------------
+def test_sources_cover_owner_domains():
+    from nomorals.impossible import sources as src_mod
+    for domain in src_mod.OWNER_DOMAINS:
+        rows = src_mod.sources_by_domain(domain)
+        assert rows, f"no digestion sources for {domain}"
+        assert any(r["access"] == "free" for r in rows), f"no FREE source for {domain}"
+
+
+def test_sources_free_have_fetchers_and_key_gated_honest(monkeypatch):
+    from nomorals.impossible import sources as src_mod
+    # Offline-mock the HTTP layer: every free fetcher must work off mocks.
+    def fake_get_json(url):
+        if "doaj.org" in url:
+            return {"results": [{"bibjson": {"title": "T", "year": 2024,
+                                             "identifier": [{"id": "10.1/x", "type": "doi"}],
+                                             "link": [{"url": "http://x", "type": "fulltext"}]}}]}
+        if "chembl" in url:
+            return {"molecules": [{"pref_name": "Aspirin", "molecule_chembl_id": "CHEMBL25",
+                                   "molecule_properties": {"full_mwt": 180.0},
+                                   "molecule_structures": {"canonical_smiles": "CC"}}]}
+        if "clinicaltrials" in url:
+            return {"studies": [{"protocolSection": {
+                "identificationModule": {"briefTitle": "T", "nctId": "NCT1"},
+                "statusModule": {"overallStatus": "RECRUITING"}}}]}
+        if "wikipedia" in url:
+            return {"query": {"search": [{"title": "Heat", "snippet": "hot"}]}}
+        if "gutendex" in url:
+            return {"results": [{"title": "B", "authors": [{"name": "A"}],
+                                 "formats": {"text/html": "http://x/b.html"}}]}
+        if "archive.org" in url:
+            return {"response": {"docs": [{"identifier": "item1", "title": "T",
+                                           "creator": "C", "date": "2020"}]}}
+        if "europepmc" in url:
+            return {"resultList": {"result": [{"title": "P", "firstPublicDate": "2024-01-01",
+                                                "doi": "10.1/y", "id": "1", "source": "MED"}]}}
+        return None
+    monkeypatch.setattr("nomorals.impossible.prior_art._get_json", fake_get_json)
+    for key in ("doaj", "chembl", "clinicaltrials", "wikipedia", "gutendex",
+                "internet_archive", "europe_pmc"):
+        rows = src_mod.fetch_from_source(key, "heat")
+        assert rows and rows[0]["status"] == "found", key
+    # Key-gated / manual: honest, never fake.
+    for key in ("materials_project", "core", "epo_ops", "wipo", "lens"):
+        rows = src_mod.fetch_from_source(key, "heat")
+        assert rows[0]["status"] == "needs_key", key
+    for key in ("google_patents", "oqmd", "aflow", "nist", "mit_ocw"):
+        rows = src_mod.fetch_from_source(key, "heat")
+        assert rows[0]["status"] == "manual", key
+
+
+def test_digest_sources_question_led(monkeypatch):
+    from nomorals.impossible import sources as src_mod
+    monkeypatch.setattr("nomorals.impossible.prior_art._get_json", lambda url: None)
+    out = src_mod.digest_sources("heat exchanger", domains=["physics"], limit_per_source=1)
+    assert out["sources_read"], "digest must read free sources"
+    assert "physics" in src_mod.domains()
+    assert any(s["status"] in ("unavailable", "none") for v in out["results"].values() for s in v)
+
+
+def test_digest_tick_records_digestion_sources(imp):
+    d = imp.submit("a cooler that keeps drinks cold for 48 hours without power")
+    out = digest_tick(queue=imp.queue, ledger=imp.ledger, max_problems=1,
+                      prior_art_fn=lambda q: {"results": {}, "summary": "offline stub"},
+                      digestion_fn=lambda q: {"results": {"wikipedia": [{"status": "found"}]},
+                                                    "sources_read": ["wikipedia"],
+                                                    "summary": "1 hit"})
+    assert out["digestion_sources_read"] == ["wikipedia"]
+    entry = imp.ledger.get(d["claim_id"])
+    assert entry.get("digestion_log") and entry["digestion_log"][0]["sources_read"] == ["wikipedia"]
+
+
+def test_chat_sources_lists_domains():
     from nomorals.impossible.chat import control_impossible
-    assert "N+1" in control_impossible("/impossible examples")
-    assert "Nothing is refused" in control_impossible("/impossible charter")
+    out = control_impossible("/impossible sources physics")
+    assert "OpenAlex" in out and "free" in out
+    out2 = control_impossible("/impossible sources")
+    assert "Materials Project" in out2 and "needs_key" in out2
+
+
+# --- bridges: three knowledge systems hand in hand --------------------------
+def test_bridges_keyword_gates():
+    from nomorals.impossible import bridges as br
+    assert br.touches_wisdom_domains("what is the meaning of consciousness?")
+    assert not br.touches_wisdom_domains("a heat exchanger that wastes less energy")
+    assert br.touches_narrative("continue this story about a character")
+    assert not br.touches_narrative("a heat exchanger that wastes less energy")
+
+
+def test_bridges_honest_without_wiring():
+    from nomorals.impossible import bridges as br
+    assert br.query_wisdom("meaning")["status"] == "unavailable"
+    assert br.query_books("story")["status"] == "unavailable"
+    assert br.narrative_frame("story")["status"] == "unavailable"
+
+
+def test_bridges_cross_query_and_grounding(imp):
+    out = imp.cross_query("what is the meaning of consciousness?")
+    assert out["touches_wisdom"] is True
+    assert "wisdomkeeper" in out
+    assert out["impossible"]["status"] in ("gated", "needs_clarification")
+    from nomorals.impossible import bridges as br
+    g = br.ground_claim_with_science("a perpetual motion machine that makes free energy")
+    assert g["gate_verdict"] == "excluded"
+    assert "N+1" not in str(g)  # sanity: no cross-contamination from other examples
+
+
+def test_chat_cross_command():
+    from nomorals.impossible.chat import control_impossible
+    out = control_impossible("/impossible cross what is the meaning of consciousness?")
+    assert "WisdomKeeper" in out and "Impossible" in out

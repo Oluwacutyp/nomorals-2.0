@@ -8,7 +8,7 @@ from .charter import charter as _charter
 from .lattice import lattice as _lattice
 
 _HELP = ("Usage: /impossible solve <problem> [--software] [--fetch-art] | status <id> | "
-         "attempt <id> | dossier <id> | queue | charter | lattice | examples")
+         "attempt <id> | dossier <id> | queue | charter | lattice | examples | sources [domain] | cross <problem>")
 
 
 def control_impossible(text: str, context=None, chat_key: str = "chat", **_kwargs) -> str:
@@ -50,4 +50,32 @@ def control_impossible(text: str, context=None, chat_key: str = "chat", **_kwarg
         car = worked_example_car()
         sw = worked_example_software()
         return ("CAR:\n" + car["first_principles_answer"] + "\n\nSOFTWARE:\n" + sw["first_principles_answer"])
+    if cmd == "cross" and rest:
+        from .bridges import cross_query as _cross
+        out = _cross(rest.strip())
+        lines = [f"Cross-knowledge for: {rest.strip()}",
+                 f"Impossible: {out['impossible'].get('status')} "
+                 f"{out['impossible'].get('gate_verdict', '')}"]
+        if "wisdomkeeper" in out:
+            w = out["wisdomkeeper"]
+            lines.append(f"WisdomKeeper: {w.get('status')} — {w.get('reason', w.get('synthesis', ''))}")
+        if "bookforge" in out:
+            b = out["bookforge"]
+            lines.append(f"BookForge: {b.get('status')} — {b.get('reason', '')}")
+        return "\n".join(lines)
+    if cmd == "sources":
+        from .sources import sources as _sources, sources_by_domain as _by_domain, domains as _domains
+        if rest:
+            rows = _by_domain(rest.strip())
+            header = f"Digestion sources for domain '{rest.strip()}':"
+        else:
+            rows = _sources()
+            header = f"Digestion sources ({len(rows)} total, domains: {', '.join(_domains())}):"
+        if not rows:
+            return header + "\n(none — unknown domain)"
+        lines = [header]
+        for s in rows:
+            lines.append(f"- {s['name']} [{s['access']}] domains={','.join(s['domains'])} "
+                         f"yields={s['yields']} url={s['url']}")
+        return "\n".join(lines)
     return _HELP
