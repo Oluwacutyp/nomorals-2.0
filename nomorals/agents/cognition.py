@@ -19,8 +19,8 @@ The loop is the thing the scheduler calls on a cadence (``cognitive loop``
 job), and it is directly callable from the main AI and sub-agents via the
 ``autonomy`` tool (``action=tick``) or ``nm autonomy tick``.
 
-Off by default (``settings.autonomy.enabled``); power mode turns it on
-automatically — the "autonomy dial".
+ON by default (``settings.autonomy.enabled``) — the "autonomy dial".
+An explicit ``nm autonomy off`` (or ``NM_AUTONOMY_ENABLED=0``) turns it off.
 """
 
 from __future__ import annotations
@@ -40,7 +40,7 @@ __all__ = ["CognitiveLoop", "ModelBudget", "autonomy_enabled",
 _log = get_logger(__name__)
 
 #: Durable override so ``nm autonomy on`` survives process restarts. The
-#: config/env value is the default; a kv flag (set by the CLI) wins.
+#: config/env value is the default (ON); a kv flag (set by the CLI) wins.
 _OVERRIDE_KEY = "autonomy.enabled"
 
 

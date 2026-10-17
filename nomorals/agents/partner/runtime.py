@@ -1334,8 +1334,8 @@ class PartnerRuntime(
             except Exception as exc:  # noqa: BLE001 - autonomy is optional
                 _log.warning("autonomy agent failed to start: %s", exc)
                 self._autonomy = None
-        # Arena: the autonomous research/build loop. Off unless the owner
-        # opted in with NM_ARENA_ENABLED=1; even then each cycle re-checks the
+        # Arena: the autonomous research/build loop. ON by default
+        # (NM_ARENA_ENABLED=0 turns it off); each cycle re-checks the
         # ``arena`` feature flag and power mode before doing anything.
         self._arena: Any = None
         if getattr(self.settings, "arena", None) is not None \
@@ -1402,8 +1402,8 @@ class PartnerRuntime(
                 # expose to agents: the cognitive loop's cost-aware cadence
                 # (wave 63) reschedules its own job through this handle
                 self.context.extras["scheduler"] = self._scheduler
-                # Closed-loop self-improvement tick: when the owner opts in
-                # (improvement.auto_tick) and the mode is on, run a cycle on a
+                # Closed-loop self-improvement tick: ON by default
+                # (improvement.auto_tick, mode != "off"); run a cycle on a
                 # schedule. Idempotent — one durable job by name.
                 imp = getattr(self.settings, "improvement", None)
                 if imp is not None and imp.auto_tick and imp.mode != "off":

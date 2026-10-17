@@ -260,13 +260,13 @@ class ChatSettings:
     max_history: int = 100
     media_in_groups: bool = False
     media_max_mb: float = 20.0
-    telegram_enabled: bool = False
+    telegram_enabled: bool = True
     telegram_session: str = ""
     telegram_api_id: str = ""
     telegram_api_hash: str = ""
     telegram_chats: str = ""
     threads_enabled: bool = True
-    telegram_bot_enabled: bool = False
+    telegram_bot_enabled: bool = True
     telegram_bot_token: str = ""
     telegram_bot_chats: str = ""
     #: Partner (romantic) context on the gated bot. Default False:
@@ -278,31 +278,33 @@ class ChatSettings:
     #: carries partner context. NOT public: non-owners get one honest
     #: denial and the message never reaches the brain (no credit spend).
     #: Token per-adapter; empty/disabled = the bot simply doesn't run.
-    telegram_personal_bot_enabled: bool = False
+    telegram_personal_bot_enabled: bool = True
     telegram_personal_bot_token: str = ""
     #: Allowlist for the personal bot. The owner_only gate (owner sender
     #: IDs / owner_chats) governs regardless — this is an extra filter.
     telegram_personal_bot_chats: str = ""
     telegram_personal_bot_partner_context: bool = True
-    discord_enabled: bool = False
+    discord_enabled: bool = True
     discord_token: str = ""
     discord_channels: str = ""
     discord_greet_new: bool = True
-    whatsapp_enabled: bool = False
+    whatsapp_enabled: bool = True
     whatsapp_host: str = "127.0.0.1"
     whatsapp_port: int = 8787
     # Persistent outbox for bridge outages — sends queued here flush on
     # reconnect instead of dying (whatsapp.py Outbox).
     whatsapp_outbox_dir: str = "data/chat/outbox"
-    webhook_enabled: bool = False
+    webhook_enabled: bool = True
     webhook_host: str = "127.0.0.1"
     webhook_port: int = 0
     webhook_token: str = ""
     webhook_reply_url: str = ""
     # SMS fallback surface (build-map #19): text a number, get Devon.
     # COST: Twilio numbers cost real money (~$1/mo + per-segment each way).
-    # Off by default — needs sms_enabled=true AND sms_from_number set.
-    sms_enabled: bool = False
+    # ON by default — but a missing Twilio number means the adapter fails
+    # honestly ("needs sms_from_number") instead of silently not running;
+    # NM_CHAT_SMS_ENABLED=0 turns it off entirely.
+    sms_enabled: bool = True
     sms_from_number: str = ""
     sms_host: str = "127.0.0.1"
     sms_port: int = 0
@@ -318,7 +320,7 @@ class ChatSettings:
 
 @dataclass
 class AutonomySettings:
-    enabled: bool = False
+    enabled: bool = True
     interval_hours: float = 6.0
     adaptive_cadence: bool = True
     daily_model_calls: int = 0  # 0 = unlimited; the loop meters regardless
@@ -353,7 +355,7 @@ class AutonomySettings:
 @dataclass
 class EvolutionSettings:
     benchmark: str = ""
-    enabled: bool = False
+    enabled: bool = True
 
 
 @dataclass
@@ -363,7 +365,7 @@ class VisionSettings:
     api_key: str = ""
     ocr_binary: str = ""
     ocr_language: str = "eng"
-    enabled: bool = False
+    enabled: bool = True
     # Prompt 09: vision tool knobs. Screenshots stay a privileged, explicit,
     # per-call-confirmed action — never scheduled, never background.
     allow_screenshot: bool = False
@@ -374,8 +376,8 @@ class VisionSettings:
 
 @dataclass
 class ArenaSettings:
-    enabled: bool = False
-    build: bool = False
+    enabled: bool = True
+    build: bool = True
     research_pages: int = 3
     interval_hours: int = 24
     #: Topic anti-repeat window: no topic repeats within the last N
@@ -389,7 +391,11 @@ class PartnerSettings:
     enabled: bool = True
     autonomy_mode: str = "auto"
     typing_cap_seconds: float = 0.0
-    platforms: str = "local"
+    #: Which chat adapters to attempt at boot (comma-separated). ON by
+    #: default for every surface: adapters with missing credentials fail
+    #: honestly into the "chat adapters skipped" list instead of silently
+    #: not running. NM_PARTNER_PLATFORMS=... overrides (explicit list wins).
+    platforms: str = "local,telegram,telegram-bot,telegram-personal,discord,whatsapp,webhook,sms"
     #: Power mode default.  When True (the default), power mode auto-activates
     #: on first use without requiring the owner key — the owner's standing
     #: choice is unlimited/unrestricted operation.  An explicit `nm power
@@ -485,11 +491,14 @@ class APISettings:
 
 @dataclass
 class ImprovementSettings:
-    enabled: bool = False
-    mode: str = "off"
+    enabled: bool = True
+    # "approval" by default: the loop benchmarks, proposes, and WAITS for the
+    # owner — it never auto-applies code changes. "autonomous" applies
+    # through the test + benchmark-regression gate; "off" disables the loop.
+    mode: str = "approval"
     target: float = 0.8
     benchmark: str = ""
-    auto_tick: bool = False
+    auto_tick: bool = True
 
 @dataclass
 class TradingSettings:
@@ -504,7 +513,7 @@ class TradingSettings:
 
 @dataclass
 class OsintSettings:
-    enabled: bool = False
+    enabled: bool = True
     sources: list = field(default_factory=list)
     hibp_key: str = ""
     abuseipdb_key: str = ""
@@ -527,7 +536,7 @@ class MindSettings:
 
 @dataclass
 class AudioSettings:
-    enabled: bool = False
+    enabled: bool = True
     model: str = ""
     tts_engine: str = "auto"
     tts_voice: str = ""
@@ -554,12 +563,12 @@ class SchedulerSettings:
 
 @dataclass
 class NewsSettings:
-    enabled: bool = False
+    enabled: bool = True
     sources: list = field(default_factory=list)
 
 @dataclass
 class NetSettings:
-    enabled: bool = False
+    enabled: bool = True
     proxy: str = ""
     probe_timeout: float = 10.0
     allowed_targets: str = ""
@@ -575,7 +584,7 @@ class ProxySettings:
 
 @dataclass
 class RuntimeSettings:
-    enabled: bool = False
+    enabled: bool = True
     profile: str = ""
     # 0 = auto: build_tune() derives threads from CPU/RAM. Any nonzero value
     # is treated as an explicit override and wins over auto-tuning, so the

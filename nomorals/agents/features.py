@@ -4,8 +4,10 @@ The owner asked for "all features that can be turned on or off with a
 command". A flag is a row in ``kv_store`` (``feature.<key>`` = ``"on"`` /
 ``"off"``) — no migration needed, survives restarts, visible in ``/features``.
 
-Defaults: everything the bot does today stays ON, EXCEPT the arena loop
-(which is a new heavy subsystem — power-gated AND flag-gated).
+Defaults: everything the bot does stays ON. Power-gating still controls
+resource usage for heavy subsystems like arena (each cycle re-checks the
+flag AND power mode), but the flag itself defaults ON — ON-by-default
+means "on unless the owner turns it off", never "always on".
 """
 
 from __future__ import annotations
@@ -18,14 +20,14 @@ __all__ = ["FEATURES", "FeatureRegistry", "feature_enabled"]
 
 #: key -> (default_on, human description)
 FEATURES: dict[str, tuple[bool, str]] = {
-    "arena": (False, "self-improvement loop: research random tech topics, digest, "
+    "arena": (True, "self-improvement loop: research random tech topics, digest, "
                      "and (power) build candidate features for your review"),
     "group_posts": (True, "autonomous posts in groups she participates in"),
     "proactive_dm": (True, "spontaneous DMs to you"),
     "vision": (True, "process inbound media (photos, videos, documents)"),
     "search": (True, "web research: /search, /searchdeep, /searchleads + the web_research tool"),
-    "research": (False, "always-on research & suggestions (lifestyle / tech / cyber domains)"),
-    "news": (False, "news sub-agent: fetch feeds, summarize, deliver digests"),
+    "research": (True, "always-on research & suggestions (lifestyle / tech / cyber domains)"),
+    "news": (True, "news sub-agent: fetch feeds, summarize, deliver digests"),
     "games": (True, "the social game engine: /game — 41 games across DM, group "
                     "and channel, with a shared economy, items and leaderboards"),
     "notifier": (True, "deliver alerts (arena builds, research, news, tasks) to your chats"),

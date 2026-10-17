@@ -603,7 +603,7 @@ class ResearchLoopCommandTest(unittest.TestCase):
         self.assertEqual(rc, 0)
         out = buf.getvalue()
         self.assertIn("research loop:", out)
-        self.assertIn("feature=off", out)  # flag defaults off
+        self.assertIn("feature=on", out)  # flag defaults ON
 
     def test_topics_set_topics_roundtrip(self):
         from nomorals.cli import _cmd_research_loop
@@ -650,14 +650,19 @@ class ResearchLoopCommandTest(unittest.TestCase):
             self.assertTrue(json.loads(buf.getvalue())["enabled"])
 
     def test_run_defers_when_feature_off(self):
+        from nomorals.agents.features import FeatureRegistry
         from nomorals.cli import _cmd_research_loop
 
+        # The feature defaults ON now — explicitly turn it OFF to test
+        # the deferral path (and prove explicit OFF still works).
+        ctx = self._ctx()
+        self.assertTrue(FeatureRegistry(ctx.db).set("research", False))
         buf = io.StringIO()
         with redirect_stdout(buf):
             rc = _cmd_research_loop(
                 _ns(action="run", topic="tidal lagoons", topics="",
                     max_topics=0, json=True),
-                self._ctx())
+                ctx)
         self.assertEqual(rc, 0)
         payload = json.loads(buf.getvalue())
         self.assertTrue(payload["deferred"])
@@ -684,16 +689,18 @@ class ResearchLoopCommandTest(unittest.TestCase):
 
 
 class ResearchFeatureFlagTest(unittest.TestCase):
-    def test_flag_defaults_off_without_db(self):
+    def test_flag_defaults_on_without_db(self):
         from nomorals.agents.features import feature_enabled
 
-        self.assertFalse(feature_enabled(_FakeContext(), "research"))
+        self.assertTrue(feature_enabled(_FakeContext(), "research"))
 
     def test_flag_roundtrip_through_kv(self):
         from nomorals.agents.features import FeatureRegistry, feature_enabled
 
         db = _db()
         reg = FeatureRegistry(db)
+        self.assertTrue(reg.get("research"))  # default ON
+        self.assertTrue(reg.set("research", False))  # explicit OFF wins
         self.assertFalse(reg.get("research"))
         self.assertTrue(reg.set("research", True))
         self.assertTrue(reg.get("research"))

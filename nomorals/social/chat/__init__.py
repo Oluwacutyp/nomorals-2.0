@@ -235,6 +235,12 @@ def build_adapter(settings: Any, name: str, *, on_new_member: Any = None,
         from .sms import sms_enabled
 
         if not sms_enabled(settings):
+            # Flag ON but no Twilio number is a missing credential, not a
+            # disabled adapter — fail honestly so it lands in the
+            # "chat adapters skipped" list with the reason, never silently.
+            if bool(getattr(chat, "sms_enabled", False)):
+                raise ValueError(
+                    "sms unavailable: needs sms_from_number (Twilio number)")
             return None
         try:
             import os

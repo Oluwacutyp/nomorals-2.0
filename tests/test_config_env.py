@@ -114,12 +114,62 @@ class LoadSettingsChannelConfigTest(unittest.TestCase):
         self.assertEqual(settings.chat.whatsapp_port, 9999)  # int coercion
         self.assertTrue(settings.chat.local_enabled)
 
-    def test_defaults_stay_off(self) -> None:
+    def test_defaults_stay_on(self) -> None:
+        # ON-by-default: capabilities are on unless the owner turns them
+        # off — "on unless off", never "always on".
         settings = load_settings(env={}, use_env_file=False)
-        self.assertEqual(settings.partner.platforms, "local")
+        self.assertEqual(
+            settings.partner.platforms,
+            "local,telegram,telegram-bot,telegram-personal,discord,whatsapp,webhook,sms")
+        self.assertTrue(settings.chat.telegram_enabled)
+        self.assertTrue(settings.chat.discord_enabled)
+        self.assertTrue(settings.chat.whatsapp_enabled)
+        self.assertTrue(settings.chat.telegram_bot_enabled)
+        self.assertTrue(settings.chat.telegram_personal_bot_enabled)
+        self.assertTrue(settings.chat.webhook_enabled)
+        self.assertTrue(settings.chat.sms_enabled)
+        self.assertTrue(settings.autonomy.enabled)
+        self.assertTrue(settings.arena.enabled)
+        self.assertTrue(settings.arena.build)
+        self.assertTrue(settings.evolution.enabled)
+        self.assertTrue(settings.vision.enabled)
+        self.assertTrue(settings.osint.enabled)
+        self.assertTrue(settings.audio.enabled)
+        self.assertTrue(settings.news.enabled)
+        self.assertTrue(settings.net.enabled)
+        self.assertTrue(settings.improvement.enabled)
+        self.assertEqual(settings.improvement.mode, "approval")
+        self.assertTrue(settings.improvement.auto_tick)
+
+    def test_explicit_off_still_disables(self) -> None:
+        # An explicit OFF must still win over the ON default.
+        settings = load_settings(
+            env={
+                "NM_CHAT_TELEGRAM_ENABLED": "0",
+                "NM_CHAT_DISCORD_ENABLED": "0",
+                "NM_CHAT_WHATSAPP_ENABLED": "0",
+                "NM_CHAT_TELEGRAM_BOT_ENABLED": "0",
+                "NM_CHAT_TELEGRAM_PERSONAL_BOT_ENABLED": "0",
+                "NM_CHAT_WEBHOOK_ENABLED": "0",
+                "NM_CHAT_SMS_ENABLED": "0",
+                "NM_AUTONOMY_ENABLED": "0",
+                "NM_ARENA_ENABLED": "0",
+                "NM_ARENA_BUILD": "0",
+                "NM_IMPROVEMENT_MODE": "off",
+            },
+            use_env_file=False,
+        )
         self.assertFalse(settings.chat.telegram_enabled)
         self.assertFalse(settings.chat.discord_enabled)
         self.assertFalse(settings.chat.whatsapp_enabled)
+        self.assertFalse(settings.chat.telegram_bot_enabled)
+        self.assertFalse(settings.chat.telegram_personal_bot_enabled)
+        self.assertFalse(settings.chat.webhook_enabled)
+        self.assertFalse(settings.chat.sms_enabled)
+        self.assertFalse(settings.autonomy.enabled)
+        self.assertFalse(settings.arena.enabled)
+        self.assertFalse(settings.arena.build)
+        self.assertEqual(settings.improvement.mode, "off")
 
 
 class EnvExampleDocumentationTest(unittest.TestCase):

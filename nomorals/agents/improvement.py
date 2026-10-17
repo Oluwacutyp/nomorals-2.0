@@ -21,8 +21,9 @@ One cycle:
 
 The loop is continuous (``tick`` / scheduler hook) and self-correcting
 (reverts on regression, remembers what already failed).  It is gated by
-``settings.improvement.mode`` — off by default; ``approval`` proposes and
-waits for the owner; ``autonomous`` applies (always through the gate).
+``settings.improvement.mode`` — ``approval`` by default: proposes and
+waits for the owner; ``autonomous`` applies (always through the gate);
+``off`` disables the loop.
 """
 from __future__ import annotations
 
