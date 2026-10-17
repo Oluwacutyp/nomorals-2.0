@@ -306,6 +306,14 @@ class RuntimeGamesMixin:
                 relay.touch(code)
             return status
         if verb in engine.games:
+            # Per-game toggle (D5): this one game off in this chat —
+            # refused honestly before the table opens. (Whole-feature
+            # games-off is gated earlier in handle_control.)
+            from ...partner.chat_modes import (
+                game_disabled_reply as _game_off_reply,
+                is_game_disabled as _game_off)
+            if _game_off(chat_key, verb):
+                return _game_off_reply(verb)
             if player is None:
                 return "start a game from a chat — I need to know who's at the table."
             # "/hangman daily" — same word for everyone, all day
@@ -1186,6 +1194,16 @@ class RuntimeGamesMixin:
             engine = self._game_engine()
             room = engine.live(chat_key)
             if room is not None:
+                # Per-game toggle (D5): if this game's toggle was
+                # flipped while the table was open (the /chatmode
+                # handler ends it, but a crash between toggle and end
+                # must never let a move through), refuse the move
+                # honestly instead of playing a disabled game.
+                from ...partner.chat_modes import (
+                    game_disabled_reply as _game_off_reply,
+                    is_game_disabled as _game_off)
+                if _game_off(chat_key, str(getattr(room, "game", "") or "")):
+                    return _game_off_reply(str(getattr(room, "game", "") or ""))
                 # A live room owns plain messages (moves) and the engine's
                 # own commands (/status /pass /shop /leave …).  /game is the
                 # control plane, and any OTHER slash command (/mood, /status

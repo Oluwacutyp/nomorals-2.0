@@ -205,21 +205,28 @@ class RuntimeMetaMixin:
             /chatmode games-only [target]     silent for normal chat, games work
             /chatmode games-off [target]      normal chat works, games refused
             /chatmode games-on [target]       games back on (mode → normal)
+            /chatmode quiet [target]          never messages first here
             /chatmode normal [target]         mode → normal (toggles kept)
-            /chatmode feature <games|music|voice> <on|off> [target]
+            /chatmode feature <games|music|voice|images|proactive> <on|off> [target]
+            /chatmode feature games.<game> <on|off> [target]
 
         No target sets the chat the command was sent in; a target sets a
         remote chat by key. ``feature`` changes one toggle in one chat
         only — disabling games in Group A never affects Group B or DMs.
+        Modes gate reply-vs-silence; toggles gate features; no toggle
+        re-enables what a mode silences. Turning games off while a game
+        is live ends it honestly — scores kept, no further moves.
+        Voice off is text-replies-only: voice notes still transcribe.
         """
         from ...partner.chat_modes import (
             FEATURES, MODE_GAMES_OFF, MODE_GAMES_ONLY, MODE_NORMAL,
-            get_chat_settings, list_chat_settings, set_chat_mode,
-            set_feature)
+            MODE_QUIET, get_chat_settings, list_chat_settings,
+            set_chat_mode, set_feature, set_game)
 
-        usage = ("usage: /chatmode [games-only|games-off|games-on|normal|"
-                 "status|list] [platform:chat_id]  ·  /chatmode feature "
-                 "<games|music|voice> <on|off> [platform:chat_id]")
+        usage = ("usage: /chatmode [games-only|games-off|games-on|quiet|"
+                 "normal|status|list] [platform:chat_id]  ·  /chatmode feature "
+                 "<games|music|voice|images|proactive|games.<game>> <on|off> "
+                 "[platform:chat_id]")
         words = (command.tail or "").split()
         sub = (words[0].lower() if words else "status")
 
@@ -231,13 +238,43 @@ class RuntimeMetaMixin:
                 return f"chat keys look like telegram:123456 — {usage}"
             return None
 
+        def _end_live_game(target: str, *, game: str = "") -> str:
+            """D2: games going off ends the live game honestly — scores
+            kept (the engine records results on finish), no further
+            moves accepted. Returns the extra reply line ("" when no
+            game was live). Never raises."""
+            try:
+                engine = self._game_engine()  # type: ignore[attr-defined]
+            except Exception:  # noqa: BLE001 - no engine, no live game
+                return ""
+            try:
+                live = engine.live(target)
+            except Exception:  # noqa: BLE001 - a broken lookup is not a game
+                return ""
+            if live is None:
+                return ""
+            live_game = str(getattr(live, "game", "") or "")
+            if game and live_game.lower() != game.lower():
+                return ""
+            try:
+                engine.quit(target)
+            except Exception as exc:  # noqa: BLE001 - toggle still applied
+                return (f" (the live {live_game or 'game'} couldn't be "
+                        f"closed cleanly: {exc} — /game quit to close it)")
+            return (f" Games are now off in this chat — ending the live "
+                    f"{live_game or 'game'}, scores kept.")
+
         def _status_line(target: str) -> str:
             settings = get_chat_settings(target)
             mode = settings["mode"]
             disabled = settings["disabled"]
+            games_off = settings.get("games_disabled", [])
             where = "this chat" if target == chat_key else target
             toggles = ", ".join(
                 f"{f} {'off' if f in disabled else 'on'}" for f in FEATURES)
+            extra = ""
+            if games_off:
+                extra = (" games off: " + ", ".join(games_off) + ".")
             if mode == MODE_GAMES_ONLY:
                 head = (f"{where} is games-only — normal chat stays silent "
                         "here; game commands still work.")
@@ -249,6 +286,11 @@ class RuntimeMetaMixin:
                 head = (f"{where} is games-off — I answer normal chat "
                         "here, but game commands are refused.")
                 tail = " /chatmode games-on turns games back on."
+            elif mode == MODE_QUIET:
+                head = (f"{where} is quiet — I never message first here, "
+                        "but I reply when addressed.")
+                tail = (" /chatmode normal restores proactive messages; "
+                        "/chatmode feature proactive on does the same.")
             elif disabled:
                 head = (f"{where} is normal with features off: "
                         f"{', '.join(disabled)}.")
@@ -256,7 +298,10 @@ class RuntimeMetaMixin:
             else:
                 head = f"{where} is normal — I answer everything here."
                 tail = ""
-            return f"{head} features: {toggles}.{tail}"
+            if "voice" in disabled:
+                tail += (" Voice off = text replies only — voice notes "
+                         "still transcribe.")
+            return f"{head} features: {toggles}.{extra}{tail}"
 
         if sub == "list":
             if len(words) > 1:
@@ -269,9 +314,14 @@ class RuntimeMetaMixin:
             for key in sorted(all_settings):
                 settings = all_settings[key]
                 off = settings["disabled"]
+                games_off = settings.get("games_disabled", [])
+                suffix = ""
+                if off:
+                    suffix += f" (off: {', '.join(off)})"
+                if games_off:
+                    suffix += f" (games off: {', '.join(games_off)})"
                 lines.append(
-                    f"  {key}: {settings['mode'].replace('_', '-')}"
-                    + (f" (off: {', '.join(off)})" if off else ""))
+                    f"  {key}: {settings['mode'].replace('_', '-')}{suffix}")
             return "\n".join(lines)
 
         if sub == "feature":
@@ -279,9 +329,6 @@ class RuntimeMetaMixin:
                 return f"/chatmode feature needs a feature and on/off — {usage}"
             feature = words[1].lower()
             state = words[2].lower()
-            if feature not in FEATURES:
-                return (f"unknown feature {feature!r} — want one of: "
-                        f"{', '.join(FEATURES)} — {usage}")
             if state not in ("on", "off"):
                 return f"want on or off, got {state!r} — {usage}"
             if len(words) > 4:
@@ -291,16 +338,42 @@ class RuntimeMetaMixin:
                 err = _valid_target(target)
                 if err:
                     return err
-            set_feature(target, feature, state == "on")
             where = "this chat" if target == chat_key else target
             verb = "back on" if state == "on" else "off"
+            if feature.startswith("games."):
+                # Per-game toggle (D5): /chatmode feature games.chess off
+                game = feature.split(".", 1)[1].strip()
+                if not game:
+                    return f"want a game name after games. — {usage}"
+                set_game(target, game, state == "on")
+                extra = ""
+                if state == "off":
+                    extra = _end_live_game(target, game=game)
+                    if not extra:
+                        extra = (f" {game} doesn't run here now, but your "
+                                 f"other games still do.")
+                return f"games.{game} is {verb} in {where}.{extra}"
+            if feature not in FEATURES:
+                return (f"unknown feature {feature!r} — want one of: "
+                        f"{', '.join(FEATURES)} or games.<game> — {usage}")
+            set_feature(target, feature, state == "on")
             extra = ""
             if feature == "games" and state == "off":
                 extra = (" Game commands here now get an honest refusal "
                          "instead of running.")
+                extra += _end_live_game(target)
             elif feature == "games" and state == "on":
                 extra = (" Games work here again (a games-off mode is "
                          "cleared too).")
+            elif feature == "voice" and state == "off":
+                extra = (" Replies here stay text; voice notes still "
+                         "transcribe.")
+            elif feature == "proactive" and state == "off":
+                extra = (" I won't message first here anymore (same as "
+                         "/chatmode quiet).")
+            elif feature == "proactive" and state == "on":
+                extra = (" Proactive messages resume here (a quiet mode "
+                         "is cleared too).")
             return f"{feature} is {verb} in {where}.{extra}"
 
         if sub == "status":
@@ -313,7 +386,7 @@ class RuntimeMetaMixin:
                     return err
             return _status_line(target)
 
-        if sub in ("games-only", "games_only", "gamesonly", "games", "quiet"):
+        if sub in ("games-only", "games_only", "gamesonly", "games"):
             mode: str | None = MODE_GAMES_ONLY
             mode_word = "games-only"
         elif sub in ("games-off", "games_off", "nogames", "no-games"):
@@ -333,6 +406,9 @@ class RuntimeMetaMixin:
             where = "this chat" if target == chat_key else target
             return (f"games are back on in {where} — game commands work "
                     f"here again.")
+        elif sub in ("quiet", "silent"):
+            mode = MODE_QUIET
+            mode_word = "quiet"
         elif sub in ("normal", "off", "clear", "default"):
             mode = MODE_NORMAL
             mode_word = "normal"
@@ -358,7 +434,13 @@ class RuntimeMetaMixin:
             return (f"{where} is now games-off — I'll answer normal chat "
                     "here, but game commands are refused honestly "
                     "(never silently dropped, never run). "
-                    "/chatmode games-on turns games back on.")
+                    "/chatmode games-on turns games back on."
+                    + _end_live_game(target))
+        if mode == MODE_QUIET:
+            return (f"{where} is now quiet — I'll never message first "
+                    "here, but I reply when addressed. /chatmode normal "
+                    "or /chatmode feature proactive on restores proactive "
+                    "messages.")
         return (f"{where} is back to normal — I'll answer everything here "
                 f"again. (Feature toggles are kept: "
                 f"/chatmode status shows them.)")

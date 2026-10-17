@@ -406,7 +406,8 @@ class ChatModesTogglesTest(unittest.TestCase):
         self.assertTrue(chat_modes.is_games_only("telegram:1"))
         self.assertFalse(chat_modes.is_feature_disabled("telegram:1", "music"))
         self.assertEqual(chat_modes.get_chat_settings("telegram:1"),
-                         {"mode": "games_only", "disabled": []})
+                         {"mode": "games_only", "disabled": [],
+                          "games_disabled": []})
 
     def test_list_chat_settings(self) -> None:
         chat_modes.set_chat_mode("telegram:A", "games_off")
@@ -414,9 +415,11 @@ class ChatModesTogglesTest(unittest.TestCase):
         chat_modes.set_chat_mode("telegram:C", "normal")
         out = chat_modes.list_chat_settings()
         self.assertEqual(out["telegram:A"],
-                         {"mode": "games_off", "disabled": ["games"]})
+                         {"mode": "games_off", "disabled": ["games"],
+                          "games_disabled": []})
         self.assertEqual(out["telegram:B"],
-                         {"mode": "normal", "disabled": ["voice"]})
+                         {"mode": "normal", "disabled": ["voice"],
+                          "games_disabled": []})
         self.assertNotIn("telegram:C", out)
 
     def test_feature_for_command_mapping(self) -> None:
@@ -618,7 +621,10 @@ class FeatureGateTest(ChatmodeCommandTest):
         # music/voice toggles untouched by games-on
         self.assertTrue(chat_modes.is_feature_disabled("telegram:999", "music"))
 
-    def test_inbound_voice_note_refused_when_voice_off(self) -> None:
+    def test_inbound_voice_note_transcribed_when_voice_off(self) -> None:
+        # Decision D3 (spec §7): voice off = text-replies-only — the
+        # inbound voice note still transcribes; only the voice reply
+        # is suppressed. The old inbound-refusal behavior is gone.
         from nomorals.social.chat.base import MediaRef
         chat_modes.set_feature("telegram:999", "voice", False)
         gateway = self.runtime.gateway
@@ -627,9 +633,21 @@ class FeatureGateTest(ChatmodeCommandTest):
         voice_msg.media = [MediaRef(path="/tmp/note.ogg", kind="voice",
                                     mime="audio/ogg", voice_note=False)]
         with mock.patch.object(
-                self.runtime, "_route_game_move", return_value=None):
+                self.runtime, "_route_game_move", return_value=None), \
+                mock.patch.object(
+                    self.runtime.brain, "_spoken_command",
+                    return_value=""), \
+                mock.patch(
+                    "nomorals.voice.pingpong.transcribe_voice_media_with_reason",
+                    return_value=("", "no STT backend")), \
+                mock.patch.object(
+                    self.runtime.brain, "handle_message",
+                    return_value=SimpleNamespace(parts=["heard nothing"])):
             self.runtime._process(voice_msg)
-        self.assertTrue(any("Voice is turned off" in text
+        self.assertFalse(any("Voice replies are turned off" in text
+                             or "Voice is turned off" in text
+                             for _, text in gateway.sent))
+        self.assertTrue(any("heard nothing" in text
                             for _, text in gateway.sent))
 
     def test_inbound_voice_note_transcribed_when_voice_on(self) -> None:

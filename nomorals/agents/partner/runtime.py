@@ -15,7 +15,9 @@ from ...core.logging_setup import get_logger
 from ...partner.chat_modes import (
     feature_disabled_reply as _chat_modes_disabled_reply,
     feature_for_command as _chat_modes_feature_for,
+    game_disabled_reply as _chat_modes_game_disabled_reply,
     is_feature_disabled as _chat_modes_is_feature_disabled,
+    is_game_disabled as _chat_modes_is_game_disabled,
     is_games_disabled as _chat_modes_is_games_disabled,
     is_games_only as _chat_modes_is_games_only)
 from ...partner.gating import gate_decision, is_owner_chat, is_restricted
@@ -607,24 +609,13 @@ class PartnerRuntime(
             ]
         else:
             self.context.extras.pop("attachments", None)
-        # Per-chat voice toggle: with voice off in this chat, an inbound
-        # voice note is refused honestly instead of transcribed — a
-        # disabled feature must not run, and transcribing it would run
-        # it. Games-only chats stay silent (their gate owns them), so
-        # the refusal never fires there. Text messages pass through:
-        # only voice notes are gated here.
-        if (message.incoming and not (message.text or "").strip()
-                and not _chat_modes_is_games_only(message.chat.key)
-                and _chat_modes_is_feature_disabled(message.chat.key, "voice")):
-            from ...voice.pingpong import has_voice_media as _has_voice_media
-            if _has_voice_media(message):
-                self._bump("replies")
-                try:
-                    self.gateway.send(message.chat.platform, message.chat,
-                                      _chat_modes_disabled_reply("voice"))
-                except Exception:  # noqa: BLE001 - honest reply is best-effort
-                    _log.exception("voice-disabled reply send failed")
-                return
+        # Per-chat voice toggle, decision D3 (text-replies-only): with
+        # voice off in this chat, inbound voice notes STILL transcribe
+        # (transcription is understanding, not a voice reply) — only
+        # the outbound voice reply is suppressed (see _send_reply).
+        # There is deliberately no refusal here: a voice note in a
+        # voice-off chat is answered in text. Games-only chats stay
+        # silent (their gate owns them).
         # Voice notes use the typed-intent path: if the owner's voice note
         # transcribes to a slash command, it becomes the message text so the
         # whole downstream pipeline (command parsing, routing, gating) treats
@@ -2547,6 +2538,14 @@ class PartnerRuntime(
             if (_feature is not None
                     and _chat_modes_is_feature_disabled(chat_key, _feature)):
                 return _chat_modes_disabled_reply(_feature)
+            # Per-game toggle (D5): a single game off in this chat —
+            # the game-specific slash command (e.g. /chess) is refused
+            # honestly; /game <name> is gated in _control_game, plain
+            # moves in _route_game_move.
+            from ...social.chat.control import GAME_COMMANDS as _GAME_CMDS
+            if (kind in _GAME_CMDS
+                    and _chat_modes_is_game_disabled(chat_key, kind)):
+                return _chat_modes_game_disabled_reply(kind)
 
         # Confirm-flow gate for CONFIRMABLE commands (quit/forget):
         # bare request → prompt + store; confirm → dispatch with the

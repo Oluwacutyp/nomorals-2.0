@@ -492,6 +492,16 @@ class Notifier:
                 "error": "", "attempted_at": time.time(),
             }
             outcome.attempts.append(attempt)
+            # Per-chat proactive toggle / quiet mode (spec §7): a chat
+            # that never wants to be messaged first never gets a
+            # proactive send — recorded as skipped, never silent.
+            from ..partner.chat_modes import proactive_allowed
+            _chat_key = f"{target.platform}:{target.chat_id}"
+            if not proactive_allowed(_chat_key):
+                attempt["error"] = (
+                    "proactive messages are off for this chat "
+                    "(quiet mode / /chatmode feature proactive off)")
+                continue
             if not target.platform:
                 # Unresolvable config entry — recorded, not silent.
                 attempt["error"] = (
