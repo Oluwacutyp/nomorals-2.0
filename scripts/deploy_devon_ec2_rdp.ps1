@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    Devon (nomorals-2.0) EC2 RDP deploy wrapper — Devon ONLY.
+    Devon (nomorals-2.0) EC2 RDP deploy wrapper - Devon ONLY.
 
 .DESCRIPTION
     Deploys Devon on a Windows EC2 RDP host (same host type that already
@@ -10,13 +10,13 @@
 
     Steps:
       1. Clone the nomorals-2.0 repo (or git pull --ff-only if present).
-      2. Call scripts/install_devon_windows.ps1 (the real installer —
+      2. Call scripts/install_devon_windows.ps1 (the real installer -
          this script never duplicates it).
       3. Copy scripts/devon_ec2_env.template -> .env when .env is missing
          (existing .env is NEVER overwritten; placeholders only, never
          real secrets).
       4. Verify: `python -m nomorals --help`, `nm doctor`,
-         `/impossible` smoke (CLI), singing smoke (writes an audio FILE —
+         `/impossible` smoke (CLI), singing smoke (writes an audio FILE -
          EC2 has no speaker, so singing is generation to file, sent via
          Telegram / saved to disk).
       5. Print the exact commands to fill .env and start Devon.
@@ -71,16 +71,16 @@ function Write-Ok   { param([string]$Text) Write-Host "OK: $Text" -ForegroundCol
 
 Write-Host 'Devon EC2 RDP deploy (Devon ONLY)' -ForegroundColor Green
 Write-Host "Repo: $RepoPath   Branch: $Branch"
-if ($DryRun) { Write-Host '[DRY RUN — nothing will change]' -ForegroundColor Yellow }
+if ($DryRun) { Write-Host '[DRY RUN - nothing will change]' -ForegroundColor Yellow }
 
-# ── 0. Wrong-directory guard ────────────────────────────────────────────────
+# -- 0. Wrong-directory guard ------------------------------------------------
 # Exact failure seen on EC2: the owner ran `.\scripts\deploy_devon_ec2_rdp.ps1`
 # from C:\devon (the PARENT) after a failed clone, so PowerShell answered
 # "not recognized" and every later command ran in the wrong directory.
 # If this script IS running (invoked by absolute path) but the shell is
 # sitting in the parent of the repo, stop with the exact cd command.
 # (If it was invoked relatively from the wrong dir, PowerShell itself
-#  errors before this code runs — the deploy doc tells the user to cd first.)
+#  errors before this code runs - the deploy doc tells the user to cd first.)
 $cwd = (Get-Location).Path
 $repoLeaf = Split-Path $RepoPath -Leaf
 $repoParent = Split-Path $RepoPath -Parent
@@ -95,15 +95,15 @@ if ($cwd -ne $RepoPath) {
                 "so `notepad .env` and `.\.venv\...` land in the repo, not in $cwd.")
 }
 
-# ── 1. Clone or pull ────────────────────────────────────────────────────────
-Write-Step '1/5 — Checkout (pull if present, clone only if absent)'
-Write-Host '  If the repo directory already exists, SKIP clone — pull instead.'
+# -- 1. Clone or pull --------------------------------------------------------
+Write-Step '1/5 - Checkout (pull if present, clone only if absent)'
+Write-Host '  If the repo directory already exists, SKIP clone - pull instead.'
 Write-Host '  Never clone into an existing non-empty directory (git refuses:'
 Write-Host '  "fatal: destination path already exists and is not an empty directory").'
 if (-not (Test-Path (Join-Path $RepoPath '.git'))) {
     if ((Test-Path $RepoPath) -and (Get-ChildItem -Path $RepoPath -Force | Select-Object -First 1)) {
         throw ("CHECKOUT BLOCKED: $RepoPath already exists and is not empty, but it is " +
-               "not a git checkout (no .git). Do NOT clone into it — git will fail with " +
+               "not a git checkout (no .git). Do NOT clone into it - git will fail with " +
                "`fatal: destination path already exists and is not an empty directory`. " +
                "Recovery: if it is a partial/failed clone, rename it aside " +
                "(`Rename-Item $RepoPath ${RepoPath}.bak`) or delete it, then re-run this script. " +
@@ -116,7 +116,7 @@ if (-not (Test-Path (Join-Path $RepoPath '.git'))) {
         git clone -b $Branch $RepoUrl $RepoPath
         if ($LASTEXITCODE -ne 0) {
             throw ("git clone failed (exit $LASTEXITCODE). If the directory already exists, " +
-                   "do NOT re-clone — cd into it and pull instead:  cd $RepoPath ; git pull origin $Branch")
+                   "do NOT re-clone - cd into it and pull instead:  cd $RepoPath ; git pull origin $Branch")
         }
         Write-Ok "Cloned $RepoUrl ($Branch)"
     }
@@ -129,21 +129,21 @@ if (-not (Test-Path (Join-Path $RepoPath '.git'))) {
             # reset --hard discards local changes. Print the exact recovery and stop.
             Write-Host ''
             Write-Host '  PULL FAILED (divergent history: local commits + remote commits).' -ForegroundColor Red
-            Write-Host '  This script does NOT auto-reset — `git reset --hard` discards local changes.'
+            Write-Host '  This script does NOT auto-reset - `git reset --hard` discards local changes.'
             Write-Host '  Recovery (run these yourself, only if you are OK discarding local changes):'
             Write-Host "    cd $RepoPath"
             Write-Host '    git fetch origin'
             Write-Host "    git reset --hard origin/$Branch"
             Write-Host "    git pull origin $Branch"
             Write-Host '  Or keep your local changes: `git pull --rebase origin main` and resolve conflicts.'
-            throw "git pull --ff-only failed (exit $LASTEXITCODE). Recovery printed above — fix it, then re-run."
+            throw "git pull --ff-only failed (exit $LASTEXITCODE). Recovery printed above - fix it, then re-run."
         }
         Write-Ok "Pulled latest $Branch"
     }
 }
 
-# ── 2. Installer (the real one — never duplicated here) ─────────────────────
-Write-Step '2/5 — Installer (scripts/install_devon_windows.ps1)'
+# -- 2. Installer (the real one - never duplicated here) ---------------------
+Write-Step '2/5 - Installer (scripts/install_devon_windows.ps1)'
 $installer = Join-Path $RepoPath 'scripts\install_devon_windows.ps1'
 if (-not (Test-Path $installer)) { throw "Installer not found: $installer. Checkout is incomplete." }
 if ($SkipInstall) { Write-Host '  Skipped (-SkipInstall).' }
@@ -154,13 +154,13 @@ else {
     Write-Ok 'Installer finished'
 }
 
-# ── 3. .env from the full template ──────────────────────────────────────────
+# -- 3. .env from the full template ------------------------------------------
 # Rules: a missing .env is created from the template. A non-empty existing
-# .env is NEVER overwritten. An EMPTY .env (0 bytes — e.g. created by
+# .env is NEVER overwritten. An EMPTY .env (0 bytes - e.g. created by
 # `notepad .env` in the wrong directory before the deploy ran) is NOT
 # "done": it is backed up and replaced with the template, with a message.
 # After writing, verify the .env is non-empty and contains placeholder keys.
-Write-Step '3/5 — .env (full template, placeholders only)'
+Write-Step '3/5 - .env (full template, placeholders only)'
 $envPath = Join-Path $RepoPath '.env'
 $template = Join-Path $RepoPath 'scripts\devon_ec2_env.template'
 if (-not (Test-Path $template)) { throw "Env template not found: $template. Checkout is incomplete." }
@@ -172,10 +172,10 @@ if ($envExists -and $envSize -gt 0) {
 } else {
     if ($envExists -and $envSize -eq 0) {
         $backup = "$envPath.empty.bak"
-        if ($DryRun) { Write-Host "  [dry-run] .env exists but is EMPTY (0 bytes) — would back up to $backup and replace from template" }
+        if ($DryRun) { Write-Host "  [dry-run] .env exists but is EMPTY (0 bytes) - would back up to $backup and replace from template" }
         else {
             Copy-Item $envPath $backup -Force
-            Write-Warn ".env existed but was EMPTY (0 bytes) — backed up to $backup and replaced from template."
+            Write-Warn ".env existed but was EMPTY (0 bytes) - backed up to $backup and replaced from template."
             Write-Host '  (An empty .env usually means `notepad .env` ran in the wrong directory before deploy.)'
         }
     }
@@ -186,21 +186,21 @@ if ($envExists -and $envSize -gt 0) {
         $written = (Get-Item $envPath).Length
         $content = Get-Content $envPath -Raw
         if ($written -eq 0 -or $content -notmatch 'NM_CHAT_TELEGRAM_BOT_TOKEN') {
-            throw ".env verification FAILED: wrote $written bytes, placeholder keys missing. Template copy did not land — do not edit an empty .env."
+            throw ".env verification FAILED: wrote $written bytes, placeholder keys missing. Template copy did not land - do not edit an empty .env."
         }
         Write-Ok "Wrote .env from scripts/devon_ec2_env.template ($written bytes, placeholders only, verified)"
-        Write-Warn 'Fill .env with: notepad .env — from your secure store. NEVER paste secrets in chat.'
+        Write-Warn 'Fill .env with: notepad .env - from your secure store. NEVER paste secrets in chat.'
         Write-Host '  REQUIRED: one LLM key (Groq recommended) + BOTH Devon bot tokens:'
         Write-Host '    NM_CHAT_TELEGRAM_BOT_TOKEN          (Devon main bot, GATED)'
         Write-Host '    NM_CHAT_TELEGRAM_PERSONAL_BOT_TOKEN (second Devon bot, USER-ONLY)'
     }
 }
 
-# ── 4. Verify ───────────────────────────────────────────────────────────────
+# -- 4. Verify ---------------------------------------------------------------
 if (-not $SkipVerify) {
-    Write-Step '4/5 — Verify'
+    Write-Step '4/5 - Verify'
     $venvPy = Join-Path $RepoPath '.venv\Scripts\python.exe'
-    if (-not (Test-Path $venvPy)) { Write-Warn 'venv python not found — run the installer first (step 2). Verification skipped.' }
+    if (-not (Test-Path $venvPy)) { Write-Warn 'venv python not found - run the installer first (step 2). Verification skipped.' }
     elseif ($DryRun) {
         Write-Host '  [dry-run] python -m nomorals --help'
         Write-Host '  [dry-run] python -m nomorals.cli doctor'
@@ -213,20 +213,20 @@ if (-not $SkipVerify) {
         & $venvPy -m nomorals impossible examples 2>&1 | Select-Object -First 8 | ForEach-Object { Write-Host "  $_" }
         Write-Ok 'Impossible Made Possible CLI smoke works'
         Write-Host '  Singing smoke: Devon generates singing to an AUDIO FILE (EC2 has no'
-        Write-Host '  speaker). Verify with: nm music / nm sing — output is a file you'
+        Write-Host '  speaker). Verify with: nm music / nm sing - output is a file you'
         Write-Host '  send via Telegram / save to disk. No live-speaker playback on EC2.'
     }
 } else { Write-Host '  Verification skipped (-SkipVerify).' }
 
-# ── 5. Next steps ───────────────────────────────────────────────────────────
-Write-Step '5/5 — Start Devon'
+# -- 5. Next steps -----------------------------------------------------------
+Write-Step '5/5 - Start Devon'
 Write-Host '  1. notepad .env   (fill ONLY the keys you use, from your secure store)'
 Write-Host '  2. Start Devon:'
 Write-Host "       cd $RepoPath"
 Write-Host '       .\.venv\Scripts\python.exe -m nomorals'
 Write-Host '  3. Check both bots answer: main bot (gated) + second bot (user-only).'
 Write-Host '     Each bot owns its own getUpdates poller; never share one token.'
-Write-Host '  4. Singing check: ask Devon to sing — expect an audio FILE back,'
+Write-Host '  4. Singing check: ask Devon to sing - expect an audio FILE back,'
 Write-Host '     not live-speaker audio (EC2 has no speaker).'
 Write-Host ''
 Write-Host 'Devon ONLY. Nothing else on this host was installed, configured, started, or touched.' -ForegroundColor Green
