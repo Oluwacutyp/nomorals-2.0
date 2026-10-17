@@ -31,7 +31,8 @@ from ..core.logging_setup import get_logger
 from ..core.policy import Capability
 from ..core.text import safe_filename
 
-__all__ = ["detect_tts_engines", "tts", "stt", "audio_info", "register"]
+__all__ = ["detect_tts_engines", "tts", "stt", "audio_info", "register",
+           "VoiceTagger", "VOICE_TAGGER_NATIVE_ENGINES"]
 
 _log = get_logger(__name__)
 
@@ -327,6 +328,245 @@ TTS_ENGINE_TAG_SUPPORT: dict[str, dict[str, str]] = {
 }
 
 
+#: Engines whose text pipeline passes bracket tags through natively
+#: (Chatterbox turbo/nano speak [laugh]/[chuckle]/[cough]; Bark speaks
+#: its own tag vocabulary). Everything else gets tags stripped /
+#: converted by the chunker — VoiceTagger must not emit native-only
+#: tags for them. Unknown engines default to chunked (safe).
+VOICE_TAGGER_NATIVE_ENGINES: frozenset[str] = frozenset({"chatterbox", "bark"})
+
+#: Laughter cues -> [laugh] on native-tag engines. The cue words stay
+#: (never eaten); the tag is inserted AFTER them. "lol" etc. are
+#: matched whole-word only (no "lollipop" misfire).
+_LAUGH_CUES_RE = re.compile(r"\b(?:haha+|hehe+|lol|lmao|rofl|ha\s+ha)\b",
+                            re.IGNORECASE)
+
+#: Laughter emoji -> [laugh] on native-tag engines, removed on chunked
+#: engines (not speakable words; espeak would mangle them).
+_LAUGH_EMOJI: tuple[str, ...] = ("😂", "🤣", "😹")
+
+#: Hesitation words -> a comma-length pause after them. "er" is
+#: deliberately excluded (too easy to misfire on "ER" / names).
+_HESITATION_RE = re.compile(r"\b(?:um|uh|hmm)\b(?![.!?,;:])", re.IGNORECASE)
+
+#: Markdown emphasis markers stripped (the words stay): *word*, **word**,
+#: _word_. Lookarounds keep snake_case identifiers and math (2*3) intact.
+_MARKDOWN_EMPHASIS_RES = (
+    re.compile(r"(?<!\w)\*\*([^*\n]+?)\*\*(?!\w)"),
+    re.compile(r"(?<!\w)\*([^*\n]+?)\*(?!\w)"),
+    re.compile(r"(?<!\w)_([^_\n]+?)_(?!\w)"),
+)
+
+
+class VoiceTagger:
+    """Auto-apply TTS tags based on the active voice engine.
+
+    The owner writes plain text; the tagger inserts engine-appropriate
+    tags so pacing/expression happens without manual ``[pause]`` /
+    ``[laugh]`` markup:
+
+    * **Native-tag engines** (Chatterbox turbo/nano, Bark): insert
+      ``[pause:MS]`` at sentence / comma / paragraph / ellipsis /
+      em-dash boundaries (pace profile supplies the lengths),
+      ``[pause]`` after hesitation words, and ``[laugh]`` after
+      laughter cues (``haha``, ``lol``, ``😂`` ...).
+    * **Chunked engines** (espeak-ng, pico2wave, say, edge-tts,
+      OpenAI-compat, XTTS, ...): the pacing chunker already inserts
+      sentence/comma/paragraph/ellipsis/em-dash pauses, so the tagger
+      only adds what the chunker misses — hesitation pauses — plus
+      cleanup (markdown markers stripped, laughter emoji removed).
+      Sound tags are NEVER emitted here (these engines cannot laugh;
+      the cue words stay and are spoken as words).
+
+    Rules (all engines):
+
+    * Explicit user tags are PRESERVED and never duplicated: a trailing
+      auto ``[pause]`` / ``[laugh]`` is dropped when the next explicit
+      tag is the same kind.
+    * Real words are never eaten. Unknown ``[bracket text]`` is not a
+      tag and passes through untouched.
+    * CAPS emphasis is intentionally NOT auto-tagged (acronym
+      ambiguity — NASA is not shouting); ``!`` / ``?`` need no tag
+      (engines handle the intonation natively). Write explicit
+      ``[shouting]`` when shouting is meant.
+    * ``tag()`` returns ``(tagged_text, applied)`` where ``applied``
+      counts only newly inserted tags (``["pause×3", "laugh×1"]``) —
+      explicit tags are not counted.
+    """
+
+    def __init__(self, engine: str = "auto", pace: str = "natural", *,
+                 native_tags: bool | None = None) -> None:
+        profile = PACE_PROFILES.get((pace or "natural").lower())
+        if profile is None:
+            raise ToolError(
+                f"unknown pace {pace!r} — use one of "
+                f"{', '.join(sorted(PACE_PROFILES))}")
+        self.engine = (engine or "auto").lower()
+        self.pace = (pace or "natural").lower()
+        self._profile = profile
+        if native_tags is None:
+            native_tags = self.engine in VOICE_TAGGER_NATIVE_ENGINES
+        self.native_tags = bool(native_tags)
+
+    # ── public ────────────────────────────────────────────────────────
+    def tag(self, text: str) -> tuple[str, list[str]]:
+        """Insert engine-appropriate tags into plain text.
+
+        Returns ``(tagged_text, applied)``. Pure — no I/O.
+        """
+        if not (text or "").strip():
+            return text or "", []
+        in_counts = self._count_tags(text)
+        out_parts: list[str] = []
+        for kind, content in self._split_explicit(text):
+            if kind == "tag":
+                out_parts.append(content)
+                continue
+            out_parts.append(self._tag_segment(content))
+        # Strip a trailing auto [pause]/[laugh] that would duplicate the
+        # next explicit tag (the explicit tag covers the break/laugh).
+        out_parts = self._strip_trailing_dupes(out_parts)
+        tagged = "".join(out_parts)
+        # Insertions leave double spaces ("[pause:250]  word") — collapse
+        # runs of spaces (newlines untouched; TTS text is space-insensitive).
+        tagged = re.sub(r"  +", " ", tagged)
+        out_counts = self._count_tags(tagged)
+        applied = sorted(
+            f"{name}×{out_counts[name] - in_counts.get(name, 0)}"
+            for name in out_counts
+            if out_counts[name] - in_counts.get(name, 0) > 0)
+        return tagged, applied
+
+    # ── explicit-tag handling ───────────────────────────────────────────
+    @staticmethod
+    def _split_explicit(text: str) -> list[tuple[str, str]]:
+        """Split into ("text", run) / ("tag", "[name(:ms)]") pieces."""
+        parts = _STRICT_TAG_RE.split(text or "")
+        out: list[tuple[str, str]] = [("text", parts[0])]
+        i = 1
+        while i + 2 < len(parts):
+            name, ms = parts[i], parts[i + 1] if i + 1 < len(parts) else ""
+            full = f"[{name}]" if not ms else f"[{name}:{ms}]"
+            out.append(("tag", full))
+            out.append(("text", parts[i + 2] if i + 2 < len(parts) else ""))
+            i += 3
+        return out
+
+    @staticmethod
+    def _count_tags(text: str) -> dict[str, int]:
+        counts: dict[str, int] = {}
+        for m in _STRICT_TAG_RE.finditer(text or ""):
+            counts[m.group(1)] = counts.get(m.group(1), 0) + 1
+        return counts
+
+    @staticmethod
+    def _strip_trailing_dupes(parts: list[str]) -> list[str]:
+        """Drop an auto tag trailing a text piece when the next explicit
+        tag is the same kind (no duplication across the boundary)."""
+        out = list(parts)
+        for i in range(len(out) - 1):
+            if out[i + 1].startswith("[pause") or out[i + 1] in (
+                    "[laugh]", "[laughs]"):
+                kind = "pause" if out[i + 1].startswith("[pause") else "laugh"
+                if kind == "pause":
+                    # Replace with one space (the explicit tag that follows
+                    # still needs its word boundary).
+                    out[i] = re.sub(r"\s*\[pause(?::\d+)?\]\s*$", " ", out[i])
+                else:
+                    out[i] = re.sub(r"\s*\[(?:laugh|laughs)\]\s*$", " ", out[i])
+        return out
+
+    # ── per-segment tagging ─────────────────────────────────────────────
+    @staticmethod
+    def _ptag(pause_ms: int) -> str:
+        """Pause tag with surrounding spaces (callers skip zero pauses,
+        so the original punctuation stays untouched on tight)."""
+        return f" [pause:{pause_ms}] "
+
+    def _tag_segment(self, seg: str) -> str:
+        if not seg.strip():
+            return seg
+        # 1. Markdown emphasis markers stripped (words stay).
+        for rx in _MARKDOWN_EMPHASIS_RES:
+            seg = rx.sub(r"\1", seg)
+        p = self._profile
+        if self.native_tags:
+            # 2. Paragraph breaks -> paragraph pause.
+            if p["paragraph"] > 0:
+                seg = re.sub(r"\n\s*\n", self._ptag(p["paragraph"]), seg)
+            # 3. Ellipsis -> sentence pause.
+            if p["sentence"] > 0:
+                seg = re.sub(r"\.{3,}|…", self._ptag(p["sentence"]), seg)
+                # 5. Sentence ends -> sentence pause (abbrev/initial aware).
+                seg = self._insert_sentence_pauses(seg, p["sentence"])
+            if p["comma"] > 0:
+                # 4. Em-dash -> comma pause.
+                seg = re.sub(r"\s*—\s*", self._ptag(p["comma"]), seg)
+                # 6. Comma / semicolon / colon -> comma pause.
+                seg = re.sub(r"([,;:])( +)",
+                             lambda m: f"{m.group(1)}{self._ptag(p['comma'])}", seg)
+                # 7. Hesitation -> comma pause.
+                seg = _HESITATION_RE.sub(
+                    lambda m: f"{m.group(0)}{self._ptag(p['comma'])}", seg)
+            # 8. Laughter words -> [laugh] after the cue.
+            seg = _LAUGH_CUES_RE.sub(lambda m: f"{m.group(0)} [laugh]", seg)
+            # 9. Laughter emoji -> [laugh].
+            for emoji in _LAUGH_EMOJI:
+                seg = seg.replace(emoji, " [laugh] ")
+        else:
+            # Chunked engines: the pacing chunker already handles
+            # sentence/comma/paragraph/ellipsis/em-dash pauses. Only
+            # hesitation pauses + laughter-emoji cleanup are new here.
+            if p["comma"] > 0:
+                seg = _HESITATION_RE.sub(
+                    lambda m: f"{m.group(0)}{self._ptag(p['comma'])}", seg)
+            for emoji in _LAUGH_EMOJI:
+                seg = seg.replace(emoji, "")
+        # 10. Dedupe consecutive pause tags (sum) / identical sound tags.
+        return self._dedupe(seg)
+
+    def _insert_sentence_pauses(self, seg: str, pause_ms: int) -> str:
+        """Insert [pause:MS] after sentence-ending punctuation + space.
+
+        Same abbreviation / initial-chain rules as the pacing chunker:
+        "Mr. Smith" and "J. R. R. Tolkien" do not split; lowercase
+        starts ("hello. world") do. A zero pause inserts nothing.
+        """
+        if pause_ms <= 0:
+            return seg
+        out: list[str] = []
+        last = 0
+        for m in re.finditer(r"[.!?]+\s+", seg):
+            before = seg[:m.start()]
+            word = re.split(r"[\s\"'(\u201c]+", before)[-1].lower().rstrip(".")
+            if word in _PACING_ABBREV:
+                continue
+            if (len(word) == 1
+                    and re.match(r"[A-Za-z]\.\s", seg[m.end():])):
+                continue
+            out.append(seg[last:m.end()])
+            out.append(f"[pause:{pause_ms}] ")
+            last = m.end()
+        out.append(seg[last:])
+        return "".join(out)
+
+    @staticmethod
+    def _dedupe(seg: str) -> str:
+        """Collapse consecutive pause tags (sum ms) / identical sound tags."""
+        for _ in range(4):  # runs to a fixed point; 3+ in a row need >1 pass
+            merged = re.sub(
+                r"\[pause(?::(\d+))?\]\s*\[pause(?::(\d+))?\]",
+                lambda m: f"[pause:{int(m.group(1) or DEFAULT_PAUSE_MS) + int(m.group(2) or DEFAULT_PAUSE_MS)}]",
+                seg)
+            merged = re.sub(
+                r"\[(laugh|laughs|chuckle|cough|sigh)\]\s*\[\1\]",
+                r"[\1]", merged)
+            if merged == seg:
+                return seg
+            seg = merged
+        return seg
+
+
 def _escape_ssml(text: str) -> str:
     from xml.sax.saxutils import escape
 
@@ -523,6 +763,41 @@ def _tts_openai_compat(text: str, voice: str, out: Path, *, base_url: str,
         raise ToolError("TTS API returned an empty file")
 
 
+# Microsoft / edge-tts voice ids ("en-NG-EzinneNeural",
+# "en-US-AriaNeural") — language-REGION-NameNeural. The local engines
+# (espeak-ng, pico2wave, macOS say) have no such voices.
+_EDGE_VOICE_RE = re.compile(r"^[a-z]{2,3}-[A-Z]{2}-.+Neural$", re.IGNORECASE)
+# OpenAI voice names — likewise meaningless to the local engines.
+_OPENAI_VOICES = frozenset({
+    "alloy", "ash", "ballad", "cedar", "coral", "echo", "fable", "marin",
+    "nova", "onyx", "sage", "shimmer", "verse",
+})
+_LOCAL_TTS_ENGINES = frozenset({"espeak_ng", "pico2wave", "say"})
+
+
+def _voice_for_engine(engine: str, voice: str) -> str:
+    """Voice string actually valid for ``engine``.
+
+    The local engines don't understand Microsoft/edge-tts voice ids
+    or OpenAI voice names — passing one verbatim (espeak-ng's ``-v``,
+    say's ``-v``) makes the engine reject the call and the whole TTS
+    fails. The voice-note reply path used to do exactly that: its
+    default voice *is* an edge-tts id, so on an espeak-ng machine
+    every voice reply died in TTS and downgraded to text. Drop
+    foreign ids for local engines so the engine default speaks;
+    edge-tts / OpenAI-compatible engines keep their ids untouched,
+    and a voice that already looks local (``en``, ``en-gb``,
+    ``Samantha``) passes through unchanged.
+    """
+    if not voice or engine not in _LOCAL_TTS_ENGINES:
+        return voice
+    if _EDGE_VOICE_RE.match(voice) or voice.lower() in _OPENAI_VOICES:
+        _log.debug("dropping voice %r for local TTS engine %s: not a %s "
+                   "voice — using the engine default", voice, engine, engine)
+        return ""
+    return voice
+
+
 def tts(
     text: str,
     *,
@@ -536,11 +811,13 @@ def tts(
     speed: float = 1.0,
     pace: str = "natural",
     gap_ms: int = 0,
+    auto_tags: bool = True,
 ) -> dict[str, Any]:
     """Synthesize speech to a file.
 
     Returns ``{path, engine, format, bytes, seconds, speed, pace, gap_ms,
-    pauses_ms, dropped_sounds, pauses_dropped, gap_ignored}``.
+    pauses_ms, dropped_sounds, pauses_dropped, gap_ignored, auto_tags,
+    auto_tags_applied}``.
 
     Tags: ``[pause]`` / ``[pause:MS]`` insert real silence; sound tags
     (``[laugh]`` ...) are dropped — these engines cannot laugh, use
@@ -549,22 +826,19 @@ def tts(
     ``pace`` (tight | natural | slow) adds sentence/comma/paragraph
     breathing room; ``speed`` scales the speaking rate (0.25–4.0);
     ``gap_ms`` is the espeak-ng word gap (``-g``); other engines ignore it.
+
+    ``auto_tags`` (default ON): :class:`VoiceTagger` inserts
+    engine-appropriate tags from plain-text cues before synthesis
+    (hesitation pauses on every engine; sentence/comma/paragraph
+    pauses and ``[laugh]`` only where the engine renders them
+    natively). Explicit user tags are always preserved and never
+    duplicated. ``auto_tags_applied`` lists what was inserted.
     """
     text = (text or "").strip()
     if not text:
         raise ToolError("tts needs text")
     speed = max(0.25, min(4.0, float(speed)))
     gap_ms = max(0, int(gap_ms))
-    chunks, dropped_sounds = chunk_tts_text(text, pace)
-    speakable = " ".join(t for t, _ in chunks if t.strip())
-    if not speakable:
-        raise ToolError(
-            "tts needs speakable text — input was only tags "
-            f"(dropped: {', '.join(dropped_sounds) or 'none'})")
-    total_pause_ms = sum(p for _, p in chunks)
-    out_dir = Path(out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
-
     engines = detect_tts_engines()
     if engine in ("", "auto"):
         engine = engines[0] if engines else ("openai_compat" if base_url and api_key else "")
@@ -576,6 +850,23 @@ def tts(
     elif engine not in engines and engine != "openai_compat":
         available = ", ".join(engines) or "none"
         raise ToolError(f"TTS engine {engine!r} not available (found: {available})")
+    auto_tags_applied: list[str] = []
+    if auto_tags:
+        text, auto_tags_applied = VoiceTagger(engine, pace).tag(text)
+    chunks, dropped_sounds = chunk_tts_text(text, pace)
+    speakable = " ".join(t for t, _ in chunks if t.strip())
+    if not speakable:
+        raise ToolError(
+            "tts needs speakable text — input was only tags "
+            f"(dropped: {', '.join(dropped_sounds) or 'none'})")
+    total_pause_ms = sum(p for _, p in chunks)
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    # Per-engine voice handling (see _voice_for_engine): an edge-tts /
+    # OpenAI voice id must never reach a local engine's -v. /tts passes
+    # no voice, so it is unaffected by this.
+    voice = _voice_for_engine(engine, voice)
 
     ext = "mp3" if engine in {"edge_tts", "openai_compat"} else (
         "aiff" if engine == "say" else "wav")
@@ -628,6 +919,8 @@ def tts(
         "dropped_sounds": dropped_sounds,
         "pauses_dropped": pauses_dropped,
         "gap_ignored": bool(gap_ms and engine != "espeak_ng"),
+        "auto_tags": auto_tags,
+        "auto_tags_applied": auto_tags_applied,
     }
 
 
@@ -890,7 +1183,10 @@ def register(registry: Any) -> None:
             "([laugh] [cough] ...) are dropped (these engines cannot laugh — "
             "use tts_say for real laughs); emotion tags are stripped; "
             "unknown [bracket text] is preserved. pace = tight | natural | slow; "
-            "speed = speaking rate (0.25-4.0)."
+            "speed = speaking rate (0.25-4.0). auto_tags (default on) inserts "
+            "engine-appropriate tags from plain-text cues (hesitation pauses "
+            "everywhere; [laugh]/sentence pauses only where the engine "
+            "renders them); explicit tags are preserved, never duplicated."
         ),
         capability=Capability.EXEC_SHELL,
         parameters={
@@ -900,11 +1196,12 @@ def register(registry: Any) -> None:
             "speed": "float (optional, default 1.0) — speaking rate 0.25-4.0",
             "pace": "str (optional, default natural) — tight | natural | slow sentence/comma/paragraph pauses",
             "gap_ms": "int (optional, default 0) — espeak-ng word gap in ms (-g); ignored by other engines",
+            "auto_tags": "bool (optional, default true) — auto-apply engine-appropriate tags from plain-text cues",
         },
     )
     def speak(text: str, *, engine: str = "auto", voice: str = "",
               speed: float = 1.0, pace: str = "natural",
-              gap_ms: int = 0) -> dict[str, Any]:
+              gap_ms: int = 0, auto_tags: bool = True) -> dict[str, Any]:
         base, key = api_base(), api_key()
         if engine in ("auto", "") and base and key and not detect_tts_engines():
             engine = "openai_compat"
@@ -914,7 +1211,7 @@ def register(registry: Any) -> None:
             text, engine=engine, voice=voice, out_dir=audio_dir(),
             base_url=base, api_key=key,
             model=getattr(audio_settings, "stt_model", "") or "tts-1",
-            speed=speed, pace=pace, gap_ms=gap_ms,
+            speed=speed, pace=pace, gap_ms=gap_ms, auto_tags=auto_tags,
         )
 
     @registry.register(

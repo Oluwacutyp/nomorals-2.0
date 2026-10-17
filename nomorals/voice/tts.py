@@ -2837,12 +2837,32 @@ class UniversalTTS:
         with ThreadPoolExecutor(max_workers=max(1, max_workers)) as ex:
             return list(ex.map(_one, texts))
 
+    def _apply_auto_tags(self, text: str, backend: Any) -> str:
+        """Auto-apply engine-appropriate tags (VoiceTagger) — best-effort.
+
+        Never breaks synthesis: any failure returns the raw text.
+        ``native_tags`` comes from the backend's own capability flag
+        (Chatterbox turbo/nano = True; multilingual/XTTS/... = False),
+        so the tagger never assumes a backend speaks tags natively.
+        """
+        try:
+            from ..tools.audio import VoiceTagger
+
+            native = bool(getattr(backend, "supports_native_tags", False))
+            tagged, _applied = VoiceTagger(
+                getattr(backend, "name", "") or "auto", "natural",
+                native_tags=native).tag(text)
+            return tagged
+        except Exception:  # noqa: BLE001 - auto-tagging never breaks synthesis
+            return text
+
     def speak(self, tagged_text: str, voice_name: Optional[str] = None,
               out_path: str = "", mood: str = "", mood_level: int = 5,
               audience: str | None = None, *,
               speed: float = 1.0,
               exaggeration: float | None = None,
-              language: str = "") -> dict:
+              language: str = "",
+              auto_tags: bool = False) -> dict:
         """Synthesize `tagged_text` (emotion/pause tags allowed) to a WAV.
 
         ``audience`` overrides the engine's audience for this call:
@@ -2857,13 +2877,21 @@ class UniversalTTS:
         emotion exaggeration, native on Chatterbox only. ``language``:
         BCP-47 hint (``en-NG``, ``yo``) — native on Chatterbox
         multilingual (per-call ``language_id``), ignored elsewhere.
+
+        ``auto_tags`` (default OFF): auto-apply engine-appropriate tags
+        from plain-text cues via ``tools.audio.VoiceTagger`` (laughter /
+        sentence / comma / hesitation pauses where the backend renders
+        them natively, hesitation pauses + cleanup elsewhere). Explicit
+        tags are preserved, never duplicated. Off by default so existing
+        tagged callers (mood, director) keep exact behavior; opt in for
+        plain-text input. Auto-tag failures fall back to the raw text.
         """
         try:
             return self._speak_impl(tagged_text, voice_name=voice_name,
                                     out_path=out_path, mood=mood,
                                     mood_level=mood_level, audience=audience,
                                     speed=speed, exaggeration=exaggeration,
-                                    language=language)
+                                    language=language, auto_tags=auto_tags)
         except Exception:
             try:
                 from ..core.error_system import heartbeat
@@ -2877,12 +2905,15 @@ class UniversalTTS:
                     audience: str | None = None, *,
                     speed: float = 1.0,
                     exaggeration: float | None = None,
-                    language: str = "") -> dict:
+                    language: str = "",
+                    auto_tags: bool = False) -> dict:
         aud = audience or self.audience
         text = mood_to_tagged_text(tagged_text, mood, mood_level) if mood \
             else tagged_text
         voice = self._resolve_voice(voice_name, aud)
         backend = self._load_backend(audience=aud)
+        if auto_tags:
+            text = self._apply_auto_tags(text, backend)
         segments = self.tag_processor.parse(text)
         sample_rate = getattr(backend, "sample_rate", self.default_sample_rate)
 

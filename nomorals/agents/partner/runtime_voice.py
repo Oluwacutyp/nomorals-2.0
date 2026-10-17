@@ -17,20 +17,23 @@ class RuntimeVoiceMixin:
         """Speak text: synthesize with the best available engine, send the file.
 
         Options (leading key=value): speed=0.25-4.0, pace=tight|natural|slow,
-        gap=<ms> (espeak-ng word gap). Tags: [pause] / [pause:MS] insert real
-        silence; [laugh] [cough] etc. are dropped (these engines cannot laugh
-        — use /speak for real laughs); emotion tags are stripped; unknown
-        [bracket text] is kept. `/tts engines` reports which engine is in
-        use on this machine and what tags it supports.
+        gap=<ms> (espeak-ng word gap), auto=on|off (auto-apply
+        engine-appropriate tags from plain-text cues — ON by default).
+        Tags: [pause] / [pause:MS] insert real silence; [laugh] [cough] etc.
+        are dropped (these engines cannot laugh — use /speak for real
+        laughs); emotion tags are stripped; unknown [bracket text] is kept.
+        Explicit tags are always preserved, never duplicated by auto-tagging.
+        `/tts engines` reports which engine is in use on this machine and
+        what tags it supports.
         """
         import re as _re
 
         rest = (tail or "").strip()
         if rest.lower() == "engines":
             return self._tts_engines_report()
-        speed, pace, gap_ms = 1.0, "natural", 0
+        speed, pace, gap_ms, auto_tags = 1.0, "natural", 0, True
         while True:
-            m = _re.match(r"(speed|pace|gap)=(?:\"([^\"]+)\"|(\S+))\s+", rest)
+            m = _re.match(r"(speed|pace|gap|auto)=(?:\"([^\"]+)\"|(\S+))\s+", rest)
             if not m:
                 break
             val = m.group(2) or m.group(3)
@@ -38,22 +41,32 @@ class RuntimeVoiceMixin:
                 try:
                     speed = float(val)
                 except ValueError:
-                    return "usage: /tts [speed=0.25-4.0] [pace=tight|natural|slow] [gap=<ms>] <text>"
+                    return "usage: /tts [speed=0.25-4.0] [pace=tight|natural|slow] [gap=<ms>] [auto=on|off] <text>"
             elif m.group(1) == "gap":
                 try:
                     gap_ms = int(val)
                 except ValueError:
-                    return "usage: /tts [speed=0.25-4.0] [pace=tight|natural|slow] [gap=<ms>] <text>"
+                    return "usage: /tts [speed=0.25-4.0] [pace=tight|natural|slow] [gap=<ms>] [auto=on|off] <text>"
+            elif m.group(1) == "auto":
+                if val.lower() in ("on", "true", "1", "yes"):
+                    auto_tags = True
+                elif val.lower() in ("off", "false", "0", "no"):
+                    auto_tags = False
+                else:
+                    return "usage: /tts [speed=0.25-4.0] [pace=tight|natural|slow] [gap=<ms>] [auto=on|off] <text>"
             else:
                 pace = val.lower()
             rest = rest[m.end():]
         text = rest.strip()
         if not text:
-            return ("usage: /tts [speed=1.0] [pace=natural] [gap=0] <text to speak>\n"
+            return ("usage: /tts [speed=1.0] [pace=natural] [gap=0] [auto=on] <text to speak>\n"
                     "tags: [pause] / [pause:300] = silence; [laugh] etc. dropped "
-                    "(use /speak for real laughs) — /tts engines shows what works where")
+                    "(use /speak for real laughs) — /tts engines shows what works where\n"
+                    "auto-tagging is ON by default (auto=off to disable): hesitation pauses, "
+                    "laughter/sentence/comma pauses where the engine renders them")
         outcome = self.context.tools.call("speak", text=text[:4000],
-                                          speed=speed, pace=pace, gap_ms=gap_ms)
+                                          speed=speed, pace=pace, gap_ms=gap_ms,
+                                          auto_tags=auto_tags)
         if not outcome.ok:
             return f"tts failed: {getattr(outcome.error, 'message', outcome.error)}"
         info = outcome.value
@@ -61,6 +74,8 @@ class RuntimeVoiceMixin:
         if info.get("dropped_sounds"):
             note += (" — [" + "] [".join(info["dropped_sounds"]) + "] dropped "
                      "(this engine can't laugh; /speak for real laughs)")
+        if info.get("auto_tags_applied"):
+            note += " — auto-tags applied: " + ", ".join(info["auto_tags_applied"])
         if info.get("pauses_dropped"):
             note += " — pauses dropped (endpoint rejected wav format)"
         elif info.get("pauses_ms"):
@@ -98,6 +113,10 @@ class RuntimeVoiceMixin:
                 f"gap → {caps['gap']}")
         lines.append("\nreal laughs ([laugh] etc.) need Chatterbox/Bark — "
                      "use /speak, not /tts.")
+        lines.append("\nauto-tagging: ON by default for /tts "
+                     "(/tts auto=off <text> disables it) — hesitation pauses "
+                     "everywhere, laughter/sentence/comma pauses where the "
+                     "engine renders them. Explicit tags are always preserved.")
         return "\n".join(lines)
 
     def _control_stt(self, tail: str) -> str:
