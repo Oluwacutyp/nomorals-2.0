@@ -185,6 +185,11 @@ _SECRET_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     ),
     # Bearer / basic tokens anywhere in a line.
     (re.compile(r"(?i)\b(bearer|basic)\s+[A-Za-z0-9._\-+/=]{8,}"), "[REDACTED_AUTH]"),
+    # Telegram Bot API URLs embed the token in the path: bot<id>:<secret>.
+    # HTTP errors carry the full URL (e.g. "request to https://.../bot<id>:<secret>/getMe
+    # failed"), so this must be scrubbed or the token leaks into logs. Keep the
+    # bot id (not secret); redact only the secret after the colon.
+    (re.compile(r"bot(\d+):[A-Za-z0-9_\-]{20,}"), r"bot\1:***"),
     # Provider key shapes.
     (re.compile(r"\b(sk|hf|pk|ghp|gho|ghs|github_pat)_[A-Za-z0-9_\-]{12,}\b"), "[REDACTED_KEY]"),
     (re.compile(r"\b(xox[baprs]-[A-Za-z0-9\-]{10,})\b"), "[REDACTED_SLACK]"),

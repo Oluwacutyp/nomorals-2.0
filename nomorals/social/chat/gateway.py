@@ -139,6 +139,12 @@ class ChatGateway:
         if not adapters:
             raise ValueError("ChatGateway needs at least one adapter")
         self.adapters = dict(adapters)
+        #: Preflight failures by adapter name (redacted). Populated in
+        #: :meth:`start` when an adapter's preflight raises — the caller
+        #: (e.g. ``run_chat_bot``) reads this to report the ACTUAL failure
+        #: reason instead of a generic "did NOT start — set the token"
+        #: message that sends the owner chasing a token that's already set.
+        self.preflight_errors: dict[str, str] = {}
         self._known = dict(adapters)
         #: Lazy factory for hot-starting a platform that was skipped at boot
         #: (dependency installed since, credentials added, …).
@@ -224,7 +230,11 @@ class ChatGateway:
             except KeyboardInterrupt:  # noqa: E106 - re-raised; only adapter errors are swallowed
                 raise
             except Exception as exc:  # noqa: BLE001 - login failed: keep the rest
-                _log.warning("chat preflight failed for %s: %s", name, exc)
+                # scrub_secrets: the exception may carry the full request URL
+                # including a Telegram bot token (HttpClient embeds it).
+                reason = scrub_secrets(str(exc))
+                self.preflight_errors[name] = reason
+                _log.warning("chat preflight failed for %s: %s", name, reason)
                 with self._adapters_guard:
                     self.adapters.pop(name, None)
         started: list[str] = []
@@ -269,7 +279,7 @@ class ChatGateway:
             try:
                 adapter = self._adapter_builder(name)
             except Exception as exc:  # noqa: BLE001 - report, don't crash the session
-                return {"ok": False, "error": str(exc)}
+                return {"ok": False, "error": scrub_secrets(str(exc))}
         if adapter is None:
             return {"ok": False, "error": f"platform {name!r} is unknown or disabled in settings"}
         # Check-and-register is atomic under _adapters_guard: adapter.start
@@ -283,7 +293,15 @@ class ChatGateway:
                 return {"ok": False, "error": f"{name} is already running"}
             self._known[name] = adapter
             self.adapters[name] = adapter
-            started = adapter.start(handler)
+            try:
+                started = adapter.start(handler)
+            except Exception as exc:  # noqa: BLE001 - report, don't crash the session
+                # adapter.start runs preflight internally; its exception may
+                # carry a token-bearing URL — redact before it leaves here.
+                reason = scrub_secrets(str(exc))
+                self.preflight_errors[name] = reason
+                self.adapters.pop(name, None)
+                return {"ok": False, "error": reason}
         if started:
             _log.info("chat platform started on demand: %s", name)
             return {"ok": True, "platform": name}
@@ -301,7 +319,7 @@ class ChatGateway:
         try:
             adapter.stop()
         except Exception as exc:  # noqa: BLE001
-            return {"ok": False, "error": str(exc)}
+            return {"ok": False, "error": scrub_secrets(str(exc))}
         _log.info("chat platform stopped on demand: %s", name)
         return {"ok": True, "platform": name}
 

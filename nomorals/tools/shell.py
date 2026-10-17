@@ -20,8 +20,12 @@ a remote-access trojan the moment an agent is prompt-injected by a page it fetch
 from __future__ import annotations
 
 import os
-import resource
 import shutil
+
+try:
+    import resource
+except ImportError:  # Windows: no POSIX resource module; rlimits unavailable
+    resource = None  # type: ignore[assignment]
 import signal
 import subprocess
 import sys
@@ -63,28 +67,35 @@ class SandboxLimits:
 
     def preexec(self) -> None:
         """Runs in the child after fork, before exec."""
-        _set(resource.RLIMIT_CPU, self.cpu_seconds, self.cpu_seconds + 5)
-        _set(resource.RLIMIT_AS, self.address_space_mb * 1024 * 1024, self.address_space_mb * 1024 * 1024)
-        _set(resource.RLIMIT_FSIZE, self.file_size_mb * 1024 * 1024, self.file_size_mb * 1024 * 1024)
-        # RLIMIT_NPROC counts every thread of our UID machine-wide. Setting it
-        # below what this UID already runs makes even /bin/sh fail to fork
-        # ("Cannot fork") on a busy machine — so floor the ceiling above
-        # ambient usage. Fork-bomb protection is preserved: the ceiling still
-        # caps runaway forking, just never below what already exists.
-        try:
-            ambient = _uid_thread_count()
-        except Exception:  # noqa: BLE001 - /proc may be unavailable; keep the configured ceiling
-            ambient = 0
-        nproc = max(self.max_processes, ambient + 64)
-        _set(resource.RLIMIT_NPROC, nproc, nproc)
-        _set(resource.RLIMIT_CORE, 0, 0)
+        if resource is not None:
+            # Windows / non-POSIX: no rlimits available. The cwd jail and
+            # wall-clock timeout still apply; only the rlimit backstop is off.
+            _set(resource.RLIMIT_CPU, self.cpu_seconds, self.cpu_seconds + 5)
+            _set(resource.RLIMIT_AS, self.address_space_mb * 1024 * 1024, self.address_space_mb * 1024 * 1024)
+            _set(resource.RLIMIT_FSIZE, self.file_size_mb * 1024 * 1024, self.file_size_mb * 1024 * 1024)
+            # RLIMIT_NPROC counts every thread of our UID machine-wide. Setting it
+            # below what this UID already runs makes even /bin/sh fail to fork
+            # ("Cannot fork") on a busy machine — so floor the ceiling above
+            # ambient usage. Fork-bomb protection is preserved: the ceiling still
+            # caps runaway forking, just never below what already exists.
+            try:
+                ambient = _uid_thread_count()
+            except Exception:  # noqa: BLE001 - /proc may be unavailable; keep the configured ceiling
+                ambient = 0
+            nproc = max(self.max_processes, ambient + 64)
+            _set(resource.RLIMIT_NPROC, nproc, nproc)
+            _set(resource.RLIMIT_CORE, 0, 0)
         try:
             os.setsid()  # own process group, so the whole tree can be signalled
         except OSError:  # pragma: no cover - already a leader  # noqa: E103 - already documented
             pass
+        except AttributeError:  # pragma: no cover - no setsid on Windows
+            pass
 
 
 def _set(which: int, soft: int, hard: int) -> None:
+    if resource is None:  # Windows / non-POSIX: no rlimits; silently skip
+        return
     try:
         resource.setrlimit(which, (soft, hard))
     except (ValueError, OSError) as exc:  # pragma: no cover - platform limits vary

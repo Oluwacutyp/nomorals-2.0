@@ -31,7 +31,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
-from .logging_setup import get_logger
+from .logging_setup import get_logger, redact
 
 __all__ = ["LiveVerifier", "VerificationResult", "VerificationCheck",
            "check_tcp", "check_tls", "check_dns", "check_http"]
@@ -386,10 +386,11 @@ class LiveVerifier:
                         message=f"Invalid token: {data.get('description', 'unknown error')}",
                     )
         except Exception as e:
+            # redact: urllib errors carry the full request URL incl. the token
             return VerificationCheck(
                 name="Telegram Bot",
                 passed=False,
-                message=f"Failed to validate: {e}",
+                message=f"Failed to validate: {redact(str(e))}",
             )
     
     async def verify_whatsapp_bridge(self) -> VerificationCheck:

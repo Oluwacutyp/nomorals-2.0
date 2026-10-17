@@ -218,6 +218,21 @@ def _parse_retry_after(headers: Mapping[str, str] | None) -> float:
     return 1.0
 
 
+#: Telegram Bot API URLs embed the token in the path: bot<id>:<secret>.
+#: Error messages carry the URL, so every message built from a URL must
+#: pass through this first — otherwise the token leaks into logs, error
+#: journals, and CLI output. (Mirrors the logging redactor pattern; this
+#: module must not import logging_setup.)
+_BOT_TOKEN_RE = re.compile(r"bot(\d+):[A-Za-z0-9_\-]{20,}")
+
+
+def _redact_url(url: str) -> str:
+    """Scrub a Telegram bot token out of a URL (``bot<id>:***``)."""
+    if not url:
+        return url
+    return _BOT_TOKEN_RE.sub(r"bot\1:***", url)
+
+
 def http_error(status: int, body: str, url: str = "",
                headers: Mapping[str, str] | None = None) -> NoMoralsError:
     """Map an HTTP status onto the framework error hierarchy.
@@ -228,6 +243,7 @@ def http_error(status: int, body: str, url: str = "",
     these errors through unchanged, so the status survives into providers.
     """
     detail = _safe_detail(body)
+    url = _redact_url(url)
     if status == 429:
         retry_after = _parse_retry_after(headers)
         return RateLimited(f"429 from {url}: {detail}",
@@ -467,12 +483,12 @@ class HttpClient:
             reason = str(exc.reason)
             _report_proxy_failure(effective_proxy, f"URLError: {reason}")
             if "timed out" in reason.lower():
-                raise TimeoutError_(f"request to {target} timed out: {reason}", retryable=True) from exc
-            raise RequestError(f"request to {target} failed: {reason}", retryable=True) from exc
+                raise TimeoutError_(f"request to {_redact_url(target)} timed out: {reason}", retryable=True) from exc
+            raise RequestError(f"request to {_redact_url(target)} failed: {reason}", retryable=True) from exc
         except TimeoutError as exc:
             self.stats["errors"] += 1
             _report_proxy_failure(effective_proxy, "request timed out")
-            raise TimeoutError_(f"request to {target} timed out", retryable=True) from exc
+            raise TimeoutError_(f"request to {_redact_url(target)} timed out", retryable=True) from exc
         except OSError as exc:
             self.stats["errors"] += 1
             _report_proxy_failure(effective_proxy, f"OSError: {exc}")

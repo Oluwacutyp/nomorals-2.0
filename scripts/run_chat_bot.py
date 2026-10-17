@@ -244,6 +244,27 @@ def _install_console_mirror(runtime, history: _MessageHistory) -> None:
         pass
 
 
+def _telegram_bot_start_message(started: list, gateway: object | None) -> str | None:
+    """Warning when the telegram-bot adapter did not start.
+
+    Reports the ACTUAL preflight failure reason (e.g. SSL certificate
+    error), not a generic "set the token" — the token may already be set
+    and the owner would otherwise chase a token that's already there.
+    Returns None when telegram-bot started fine (no warning needed).
+    """
+    if "telegram-bot" in [str(s).lower() for s in started]:
+        return None
+    errors = getattr(gateway, "preflight_errors", None) or {}
+    reason = errors.get("telegram-bot", "")
+    if reason:
+        return f"telegram-bot adapter did NOT start: {reason}"
+    return (
+        "telegram-bot adapter did NOT start — set "
+        "NM_CHAT_TELEGRAM_BOT_ENABLED=true and "
+        "NM_CHAT_TELEGRAM_BOT_TOKEN before launching"
+    )
+
+
 def main() -> int:
     from nomorals.agents.context import build_context
     from nomorals.agents.partner_runtime import PartnerRuntime
@@ -277,12 +298,9 @@ def main() -> int:
         started = runtime.start()
         _print_banner(started)
         log.info("adapters started: %s", started)
-        if "telegram-bot" not in [str(s).lower() for s in started]:
-            log.warning(
-                "telegram-bot adapter did NOT start — set "
-                "NM_CHAT_TELEGRAM_BOT_ENABLED=true and "
-                "NM_CHAT_TELEGRAM_BOT_TOKEN before launching"
-            )
+        msg = _telegram_bot_start_message(started, getattr(runtime, "gateway", None))
+        if msg:
+            log.warning("%s", msg)
         # Console-only commands (dashboard, status, jobs, …) for the local
         # terminal adapter. Anything else flows to the brain untouched.
         # Also: rich inbound mirror + activity history for the dashboard.

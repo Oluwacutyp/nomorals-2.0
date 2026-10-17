@@ -21,6 +21,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 import urllib.error
 import urllib.request
@@ -32,6 +33,16 @@ API_BASE = os.environ.get("TELEGRAM_API_BASE", "https://api.telegram.org")
 
 class TelegramError(Exception):
     """The Bot API answered ok:false, or the transport failed."""
+
+
+#: Telegram Bot API URLs embed the token in the path (bot<id>:<secret>).
+#: Standalone template — no nomorals imports here, so the pattern is local.
+_BOT_TOKEN_RE = re.compile(r"bot(\d+):[A-Za-z0-9_\-]{20,}")
+
+
+def _redact_url(url: str) -> str:
+    """Scrub a Telegram bot token out of a URL (``bot<id>:***``)."""
+    return _BOT_TOKEN_RE.sub(r"bot\1:***", url)
 
 
 class TelegramClient:
@@ -55,9 +66,10 @@ class TelegramClient:
             with urllib.request.urlopen(req, timeout=35) as resp:
                 return json.loads(resp.read().decode("utf-8"))
         except (urllib.error.URLError, OSError) as exc:
-            raise TelegramError(f"transport failed for {url}: {exc}") from exc
+            # NEVER put the raw URL in the error: it embeds the bot token.
+            raise TelegramError(f"transport failed for {_redact_url(url)}: {exc}") from exc
         except json.JSONDecodeError as exc:
-            raise TelegramError(f"bad JSON from {url}: {exc}") from exc
+            raise TelegramError(f"bad JSON from {_redact_url(url)}: {exc}") from exc
 
     def call(self, method: str, payload: dict | None = None) -> Any:
         result = self._post(self._url(method), payload or {})
