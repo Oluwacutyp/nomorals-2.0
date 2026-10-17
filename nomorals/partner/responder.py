@@ -38,6 +38,7 @@ from .style import (
     clamp_to_budget,
     emoji_cap,
     emoji_instruction,
+    format_reply,
     humanize_emoji,
     identity_leak_check,
     length_budget,
@@ -49,6 +50,8 @@ from .style import (
     should_answer_short,
     strip_assistant_framing,
     strip_robotic,
+    style_for_chat,
+    style_prompt_lines,
 )
 
 __all__ = ["Signal", "detect_signals", "ReplyBundle", "PartnerResponder", "FALLBACK_LINES"]
@@ -545,6 +548,23 @@ class PartnerResponder:
 
         restricted = is_restricted(gate_mode)
 
+        # Mined style profile for THIS chat (audience + platform + mood +
+        # the chat's own observed messages). The prompt lines go to the
+        # model (soft layer); the same profile is enforced on the final
+        # draft below (hard layer) so the two cannot drift apart.
+        _observed = [
+            str(getattr(m, "content", "") or "")
+            for m in (history or ())
+            if getattr(m, "role", "") == "user"
+        ]
+        _style = style_for_chat(
+            audience=gate_mode,
+            platform=chat_platform,
+            mood_values=self.mood.current().values,
+            observed=_observed + [user_text],
+        )
+        _style_lines = style_prompt_lines(_style)
+
         # Dynamic voice feed: lexicon terms blended into her phrasing.
         # Catchphrases + pet names go straight into the persona's own
         # speech block (one authoritative line — the owner's static banks
@@ -617,6 +637,7 @@ class PartnerResponder:
             extra_notes=[
                 "Emoji rule: "
                 + emoji_instruction(self.persona.speech.emoji_rate, self.mood.current().values),
+                *_style_lines,
                 # Owner identity: in the owner's own DM, an identity
                 # assertion ("I'm peace", "I'm your creator", "drop the
                 # act") is always accepted warmly and immediately — never
@@ -822,6 +843,11 @@ class PartnerResponder:
             label, self.rng,
         )
         draft = clamp_to_budget(draft, budget)
+        # Mined per-chat style (hard layer): structure, emoji budget,
+        # truncation for this audience + platform + the chat's own
+        # observed messages. Runs after the texting-voice pass so the
+        # profile is the last word on shape, not the first.
+        draft = format_reply(draft, _style)
         if short and len(draft) > 32:
             # The model ignored the short burst; take the first sentence.
             first = re.split(r"(?<=[.!?…])\s+", draft, maxsplit=1)

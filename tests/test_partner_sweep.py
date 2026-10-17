@@ -483,22 +483,20 @@ class TextingVoiceTest(unittest.TestCase):
 
 
 class VoiceThemesTest(unittest.TestCase):
-    def test_known_theme(self) -> None:
-        speech = default_persona().speech
-        feral = apply_voice_theme(speech, "feral")
-        self.assertEqual(feral.emoji_rate, VOICE_THEMES["feral"]["emoji_rate"])
-        # Original untouched.
-        self.assertNotEqual(speech.emoji_rate, feral.emoji_rate)
+    # Tone presets REMOVED (2026-10-17, mined style system): VOICE_THEMES
+    # is an empty compat dict and apply_voice_theme is a passthrough.
+    # Style now comes from style_for_chat (audience + platform + mood +
+    # the chat's own observed messages). See test_partner_style_system.py.
+    def test_preset_table_is_empty(self) -> None:
+        self.assertEqual(VOICE_THEMES, {})
 
     def test_unknown_theme_passthrough(self) -> None:
         speech = default_persona().speech
         self.assertIs(apply_voice_theme(speech, "nope"), speech)
 
-    def test_all_themes_apply(self) -> None:
+    def test_known_theme_passthrough(self) -> None:
         speech = default_persona().speech
-        for name in VOICE_THEMES:
-            themed = apply_voice_theme(speech, name)
-            self.assertTrue(hasattr(themed, "emoji_rate"))
+        self.assertIs(apply_voice_theme(speech, "feral"), speech)
 
 
 # ── context ──────────────────────────────────────────────────────────────────

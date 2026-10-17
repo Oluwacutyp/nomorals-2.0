@@ -33,23 +33,32 @@ from ..core.text import approx_token_count
 __all__ = [
     "GuardVerdict",
     "IDENTITY_LEAK_PHRASES",
+    "MINED_SECTION_MARKERS",
+    "StyleMeasurement",
+    "StyleProfile",
     "VOICE_THEMES",
     "apply_texting_voice",
     "apply_voice_theme",
     "clamp_to_budget",
     "emoji_cap",
     "emoji_instruction",
+    "format_reply",
     "humanize_emoji",
     "identity_leak_check",
     "length_budget",
     "lexicon_hits",
+    "measure_style",
     "normalize_formatting",
     "parrot_check",
+    "platform_hard_cap",
+    "purposeful_emoji",
     "repair_echo",
     "should_answer_short",
     "split_messages",
     "strip_assistant_framing",
     "strip_robotic",
+    "style_for_chat",
+    "style_prompt_lines",
 ]
 
 _WORD = re.compile(r"[a-z0-9']+")
@@ -620,63 +629,535 @@ def style_block(prompt_budget_tokens: int = 0) -> dict[str, Any]:
     }
 
 
-# ── texting voice: the hard layer under the prompt's soft layer ───────────────
+# ── mined style system: dynamic, per-chat, no tone presets ─────────────────
+# Replaces the old VOICE_THEMES preset table (removed 2026-10-17: named
+# tone presets are invented voice, not mined voice). Everything below is
+# derived from three real sources — see STYLE_MINING.md at the repo root
+# for the full mining log with counts and citations:
+#
+# 1. Devon's OWN code (nomorals/social/chat/style.py, tgbot_buttons.py,
+#    action_footers.py, telegram_menu.py): emoji section headers, <code>
+#    commands, the 🎯 CTA, ━━━ dividers, progress bars, one job per
+#    screen. The marker vocabulary in MINED_SECTION_MARKERS is counted
+#    from actual usage in that code, not invented.
+# 2. Platform facts (nomorals/social/chat/platform_limits.py + the
+#    Telegram Bot API formatting docs, core.telegram.org/bots/api):
+#    per-message hard caps (TG 4096, WA 4000, Discord 2000, SMS 160),
+#    HTML on Telegram, *bold* / _italic_ / ```mono``` on WhatsApp,
+#    plain text on SMS. No inline buttons / HTML on WhatsApp.
+# 3. The chat's OWN observed messages (measure_style): median length,
+#    emoji rate, question rate, caps ratio, list rate. When a chat has
+#    history, the profile follows that chat — no preset can do that.
+#
+# What was NOT mined, honestly: no real owner messages exist anywhere
+# in this repo (fixtures and tests are synthetic), and the first-edition
+# repo (Oluwacutyp/No-morals-ai) is unreachable read-only — GitHub API
+# returns 404 unauthenticated and git prompts for credentials — so no
+# owner voice and no first-edition conventions were copied. Nothing here
+# pretends otherwise: with no observed sample, profiles fall back to the
+# audience + platform defaults below, which come from gating.py's
+# documented per-audience rules (owner = full, private = short +
+# guarded, group = shortest, no lists, no paragraphs).
 
-#: Named texting-style presets. The persona's SpeechProfile is the base;
-#: a theme is a deliberate, named variation the owner can switch between
-#: (or the system can rotate by mood). Each theme only overrides the
-#: fields it names — everything else stays the owner's configuration.
-VOICE_THEMES: dict[str, dict[str, Any]] = {
-    "default": {},
-    "dry": {
-        "emoji_rate": 0.12, "lowercase_bias": 0.75, "short_reply_chance": 0.38,
-        "catchphrases": ("ok real", "ugh", "anyway", "sure"),
-    },
-    "soft": {
-        "emoji_rate": 0.55, "lowercase_bias": 0.25, "short_reply_chance": 0.12,
-        "pet_names": ("babe", "love", "hey you", "sweetheart"),
-    },
-    "feral": {
-        "emoji_rate": 0.6, "lowercase_bias": 0.85, "short_reply_chance": 0.3,
-        "catchphrases": ("okay but hear me out", "no bc why", "lmao no"),
-        "text_speak": {"I know": "i kno", "really": "fr", "good night": "gn",
-                       "see you": "see ya", "because": "bc", "though": "tho"},
-    },
-    "poetic": {
-        "emoji_rate": 0.22, "lowercase_bias": 0.15, "short_reply_chance": 0.08,
-        "catchphrases": ("listen", "here's the thing", "okay wait"),
-    },
-    "sharp": {
-        "emoji_rate": 0.08, "lowercase_bias": 0.6, "short_reply_chance": 0.45,
-        "catchphrases": ("k", "noted", "anyway"),
-    },
+#: Section-kind -> emoji marker, counted from Devon's own output code.
+#: Only these markers may open a section header: an emoji anywhere else
+#: is decoration, not structure. Counts are uses across
+#: nomorals/social/chat + nomorals/partner (Oct 2026 mining pass):
+#: 🎮 games 19, ✅ success/done 11, 📊 stats 11, 📋 lists/tasks 11,
+#: ❌ failure/cancel 8, 🎯 next-action CTA (style.cta), 🔍 search 4,
+#: 💡 tip (style.card footer), ✨ header (style.header/menu),
+#: 🎵 music/track 4, 🎬 video 3, 🎙️ voice 5, 📖 books/reading 2,
+#: ⚠️ warning 15, 📣 announcement 4, 📌 pinned 2, 🏆 results 2.
+#: Greeting/closing patterns and owner phrasing are deliberately NOT in
+#: this table — no real owner messages were available to mine them from.
+MINED_SECTION_MARKERS: dict[str, str] = {
+    "games": "🎮",
+    "done": "✅",
+    "stats": "📊",
+    "list": "📋",
+    "failed": "❌",
+    "next": "🎯",
+    "search": "🔍",
+    "tip": "💡",
+    "header": "✨",
+    "music": "🎵",
+    "video": "🎬",
+    "voice": "🎙️",
+    "reading": "📖",
+    "warning": "⚠️",
+    "announce": "📣",
+    "pinned": "📌",
+    "results": "🏆",
 }
+
+#: Hardcoded tone presets: REMOVED. Kept as an empty dict so existing
+#: imports (``from .style import VOICE_THEMES``) do not crash; it carries
+#: no entries and :func:`apply_voice_theme` is a passthrough. Style now
+#: comes from :func:`style_for_chat`, computed per chat from audience +
+#: platform + mood + the chat's own observed messages.
+VOICE_THEMES: dict[str, dict[str, Any]] = {}
 
 
 def apply_voice_theme(speech: Any, theme: str) -> Any:
-    """Return a copy of ``speech`` with a named voice theme applied.
+    """Deprecated passthrough (tone presets removed — see above).
 
-    Unknown theme names return the speech unchanged (never raise — a guard
-    path must not break a reply over a typo in a theme name).
+    Returns ``speech`` unchanged for any ``theme``. Kept so old callers
+    do not crash; new code uses :func:`style_for_chat`.
+    """
+    return speech
+
+
+#: Fallback hard caps per platform, mirroring
+#: nomorals/social/chat/platform_limits.py (single source of truth — this
+#: table is only the fallback when that module cannot be imported).
+_PLATFORM_HARD_CAPS: dict[str, int] = {
+    "telegram": 4096,
+    "telegram-bot": 4096,
+    "telegram-personal": 4096,
+    "whatsapp": 4000,
+    "discord": 2000,
+    "sms": 160,
+    "web": 8000,
+    "local": 8000,
+}
+
+
+def platform_hard_cap(platform: str) -> int:
+    """Hard per-message cap for a platform (never raises)."""
+    try:
+        from ..social.chat.platform_limits import for_platform
+
+        return int(for_platform(platform or "telegram").max_text)
+    except Exception:  # noqa: BLE001 - fallback table is the same numbers
+        return _PLATFORM_HARD_CAPS.get(
+            (platform or "telegram").strip().lower(), 4096
+        )
+
+
+@dataclass(frozen=True)
+class StyleMeasurement:
+    """What a chat's OWN messages actually look like — measured, not assumed.
+
+    Computed by :func:`measure_style` over observed messages from that
+    chat. All rates are 0..1; ``n`` is the sample size (0 = no data).
+    """
+
+    n: int = 0
+    median_chars: float = 0.0
+    mean_chars: float = 0.0
+    emoji_per_msg: float = 0.0
+    caps_ratio: float = 0.0
+    question_rate: float = 0.0
+    exclaim_rate: float = 0.0
+    list_rate: float = 0.0
+    lowercase_ratio: float = 0.0
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "n": self.n,
+            "median_chars": round(self.median_chars, 1),
+            "mean_chars": round(self.mean_chars, 1),
+            "emoji_per_msg": round(self.emoji_per_msg, 3),
+            "caps_ratio": round(self.caps_ratio, 3),
+            "question_rate": round(self.question_rate, 3),
+            "exclaim_rate": round(self.exclaim_rate, 3),
+            "list_rate": round(self.list_rate, 3),
+            "lowercase_ratio": round(self.lowercase_ratio, 3),
+        }
+
+
+def measure_style(texts: Sequence[str] | None) -> StyleMeasurement:
+    """Measure a chat's style from its own observed messages.
+
+    No presets, no dictionaries of "how people talk": median length,
+    emoji density, caps/question/exclamation/list rates straight from
+    the sample. Empty / tiny samples return ``n=0`` measurements — the
+    caller falls back to audience + platform defaults, never to an
+    invented voice. Never raises.
     """
     try:
-        import dataclasses
-        overrides = VOICE_THEMES.get((theme or "default").lower())
-        if not overrides:
-            return speech
-        changes: dict[str, Any] = {}
-        for key, value in overrides.items():
-            if key in ("catchphrases", "pet_names") and isinstance(value, tuple):
-                changes[key] = value
-            elif key == "text_speak" and isinstance(value, dict):
-                merged = dict(getattr(speech, "text_speak", {}) or {})
-                merged.update(value)
-                changes[key] = merged
-            elif isinstance(value, (int, float)):
-                changes[key] = value
-        return dataclasses.replace(speech, **changes)
-    except Exception:  # noqa: BLE001 - theme application never breaks a reply
-        return speech
+        sample = [str(t or "") for t in (texts or []) if str(t or "").strip()]
+        if not sample:
+            return StyleMeasurement()
+        lengths = sorted(len(t) for t in sample)
+        mid = len(lengths) // 2
+        median = (
+            float(lengths[mid])
+            if len(lengths) % 2
+            else (lengths[mid - 1] + lengths[mid]) / 2.0
+        )
+        emoji_counts = [len(_EMOJI_CLUSTER.findall(t)) for t in sample]
+        caps = 0
+        total_alpha = 0
+        questions = sum(1 for t in sample if "?" in t)
+        exclaims = sum(1 for t in sample if "!" in t)
+        listed = sum(
+            1
+            for t in sample
+            if re.search(r"(?m)^\s*([-*+•–]|\d+[.)])\s+\S", t)
+        )
+        lowered = sum(1 for t in sample if t == t.lower() and any(c.isalpha() for c in t))
+        for t in sample:
+            letters = [c for c in t if c.isalpha()]
+            total_alpha += len(letters)
+            caps += sum(1 for c in letters if c.isupper())
+        return StyleMeasurement(
+            n=len(sample),
+            median_chars=median,
+            mean_chars=sum(lengths) / len(lengths),
+            emoji_per_msg=sum(emoji_counts) / len(sample),
+            caps_ratio=(caps / total_alpha) if total_alpha else 0.0,
+            question_rate=questions / len(sample),
+            exclaim_rate=exclaims / len(sample),
+            list_rate=listed / len(sample),
+            lowercase_ratio=lowered / len(sample),
+        )
+    except Exception:  # noqa: BLE001 - measurement never breaks a reply
+        return StyleMeasurement()
+
+
+@dataclass(frozen=True)
+class StyleProfile:
+    """The computed style for ONE reply in ONE chat.
+
+    Fields are numbers and booleans, never a tone name: the responder
+    formats with these, and :meth:`prompt_lines` tells the model the
+    same numbers so the soft layer and the hard layer agree.
+    """
+
+    audience: str  # "owner" | "private" | "group"
+    platform: str
+    max_chars: int  # hard cap: over this, format_reply truncates
+    target_chars: int  # soft target: aim here or shorter
+    emoji_budget: int  # max emoji clusters kept per message (0..3)
+    allow_sections: bool
+    allow_lists: bool
+    allow_markup: bool
+    measured: StyleMeasurement = StyleMeasurement()
+
+    def prompt_lines(self) -> list[str]:
+        """Style instructions for the model, in numbers, not tone words."""
+        lines = [
+            f"Reply length: aim at or under {self.target_chars} characters "
+            f"(hard cap {self.max_chars}). Short by default; longer only "
+            f"when the content needs it.",
+        ]
+        if self.emoji_budget <= 0:
+            lines.append(
+                "Emoji: none in this reply. Use words, not symbols."
+            )
+        else:
+            lines.append(
+                f"Emoji: at most {self.emoji_budget} purposeful marker(s), "
+                f"each opening a section or marking a result "
+                f"(✅ done, ❌ failed, 🎮 games, 🎵 music, 📊 stats). "
+                f"Never a row of emoji, never decoration."
+            )
+        if not self.allow_lists:
+            lines.append("Lists: none. Say it in flowing sentences.")
+        else:
+            lines.append("Lists: short ones only, when the content is a list.")
+        if not self.allow_sections:
+            lines.append("Sections: none. One short message, no headers.")
+        if not self.allow_markup:
+            lines.append("Formatting: plain text only, no markdown or HTML.")
+        if self.measured.n >= 5:
+            lines.append(
+                f"This chat's own messages run about "
+                f"{int(self.measured.median_chars)} characters "
+                f"(median of {self.measured.n}); match that pace."
+            )
+        return lines
+
+
+def style_for_chat(
+    *,
+    audience: str = "owner",
+    platform: str = "telegram",
+    mood_values: Mapping[str, float] | None = None,
+    observed: Sequence[str] | None = None,
+    content_kind: str = "chat",
+) -> StyleProfile:
+    """Compute the style profile for one reply — dynamically.
+
+    Inputs, in priority order:
+    1. **audience** (from gating: owner / private / group) — sets the
+       structural rules: groups get no sections/lists and the shortest
+       cap (gating.py: "no paragraphs, no lists, no explanations");
+       private chats get short + guarded; owner DMs get the full range.
+    2. **platform** — hard cap from platform_limits; markup off where
+       the platform cannot render it (SMS plain, WhatsApp no HTML).
+    3. **mood** — the existing :func:`length_budget` band + emoji cap
+       math; low energy shortens, high frustration zeroes emoji.
+    4. **observed** — the chat's own messages (measured). With >= 5
+       samples the target length bends toward that chat's median and
+       the emoji budget toward its emoji rate. This is the dynamic
+       part: two chats with different histories get different profiles
+       from identical audience/platform/mood.
+    5. **content_kind** — ``"structured"`` (menus, reports, results)
+       allows sections/lists and a larger target for the owner; ``"chat"``
+       (default) keeps texting discipline.
+
+    No tone names anywhere in this function: there is nothing to
+    misspell, nothing to rotate, nothing the owner cannot trace to a
+    measurement. Never raises.
+    """
+    try:
+        aud = (audience or "owner").strip().lower()
+        if aud not in ("owner", "private", "group"):
+            aud = "owner"
+        plat = (platform or "telegram").strip().lower()
+        mood = dict(mood_values or {})
+        measured = measure_style(observed)
+        hard = platform_hard_cap(plat)
+        structured = (content_kind or "chat").strip().lower() == "structured"
+
+        # Base from mood (the same band the rest of the pipeline uses).
+        _mn, mood_max = length_budget(mood)
+        base_target = mood_max
+        # Emoji budget from mood: reuse emoji_cap with the persona-neutral
+        # rate 0.5 so mood alone decides; observed data refines it below.
+        base_emoji = emoji_cap(0.5, mood)
+
+        # Audience structural rules (from gating.py's documented modes).
+        if aud == "group":
+            allow_sections, allow_lists = False, False
+            target = min(base_target, 280)
+            # Groups stay one short burst: hard cap 360 (one split_messages
+            # chunk), not the mood slack the owner gets.
+            max_chars = min(360, hard)
+            emoji_budget = min(base_emoji, 1)
+            allow_markup = plat in ("telegram", "telegram-bot", "discord", "web")
+        elif aud == "private":
+            allow_sections, allow_lists = False, True
+            target = min(base_target, 400)
+            max_chars = min(max(int(mood_max * 1.6), 400), hard)
+            emoji_budget = min(base_emoji, 2)
+            allow_markup = plat in ("telegram", "telegram-bot", "discord", "web")
+        else:  # owner
+            allow_sections = structured
+            allow_lists = True
+            target = base_target * (3 if structured else 1)
+            max_chars = min(max(int(mood_max * 1.6), target), hard)
+            emoji_budget = base_emoji
+            allow_markup = plat in ("telegram", "telegram-bot", "discord", "web")
+
+        # Observed chat history bends the numbers (needs >= 5 samples so
+        # one long message cannot yank the profile).
+        if measured.n >= 5:
+            # Target: halfway between the audience default and the chat's
+            # own median, clamped to [80, max_chars].
+            target = int(
+                max(80, min(max_chars, (target + measured.median_chars) / 2))
+            )
+            # Emoji budget: follow the chat's own density, clamped 0..3.
+            if measured.emoji_per_msg < 0.1:
+                emoji_budget = 0
+            elif measured.emoji_per_msg < 0.6:
+                emoji_budget = min(emoji_budget, 1)
+            else:
+                emoji_budget = max(emoji_budget, min(3, round(measured.emoji_per_msg)))
+            emoji_budget = max(0, min(3, emoji_budget))
+
+        # High frustration kills emoji outright (matches apply_texting_voice).
+        if float(mood.get("frustration", 10)) > 60:
+            emoji_budget = 0
+
+        # SMS is plain text, always; WhatsApp never gets HTML.
+        if plat in ("sms", "twilio"):
+            allow_markup = False
+            allow_sections = False
+            max_chars = min(max_chars, 160)
+            target = min(target, 160)
+
+        return StyleProfile(
+            audience=aud,
+            platform=plat,
+            max_chars=int(max(80, max_chars)),
+            target_chars=int(max(40, min(target, max_chars))),
+            emoji_budget=int(max(0, min(3, emoji_budget))),
+            allow_sections=bool(allow_sections),
+            allow_lists=bool(allow_lists),
+            allow_markup=bool(allow_markup),
+            measured=measured,
+        )
+    except Exception:  # noqa: BLE001 - style never breaks a reply
+        return StyleProfile(
+            audience="owner",
+            platform="telegram",
+            max_chars=640,
+            target_chars=300,
+            emoji_budget=1,
+            allow_sections=False,
+            allow_lists=True,
+            allow_markup=False,
+        )
+
+
+def style_prompt_lines(profile: StyleProfile) -> list[str]:
+    """Prompt lines for a computed profile (soft layer matches hard layer)."""
+    try:
+        return list(profile.prompt_lines())
+    except Exception:  # noqa: BLE001
+        return []
+
+
+_SECTION_HEADER = re.compile(
+    r"^\s*([" + "".join(re.escape(m) for m in MINED_SECTION_MARKERS.values()) + r"])"
+    r"\s*(?:<b>)?([^<\n]{1,60})(?:</b>)?\s*$"
+)
+_DIVIDER_LINE = re.compile(r"^\s*[─━═\-_=*·•]{4,}\s*$")
+_BULLET_LINE = re.compile(r"^\s*[-*+•–]\s+")
+_NUMBERED_LINE = re.compile(r"^\s*\d+[.)]\s+")
+
+
+def purposeful_emoji(text: str, budget: int) -> str:
+    """Keep emoji purposeful: markers and earned reactions only.
+
+    Rules (all mined — see module header):
+    * repeated runs collapse to one (``😂😂😂`` → ``😂``);
+    * past ``budget``, the extras are dropped, earliest kept (people put
+      the emoji where the feeling lands);
+    * a cluster of 3+ emoji with no words between them is decoration —
+      keep the first, drop the rest.
+    Never raises.
+    """
+    if not text:
+        return text
+    try:
+        # Collapse runs of the SAME single-codepoint emoji first: the
+        # inherited _REPEATED_EMOJI pair-regex only halves a run
+        # ("😂😂😂😂" -> "😂😂"), it does not collapse it to one.
+        out = re.sub(
+            r"([\U0001F300-\U0001FAFF\u2600-\u27BF\u2B00-\u2BFF])\1+",
+            r"\1",
+            text,
+        )
+        out = _REPEATED_EMOJI.sub(r"\1", out)
+        # Decorative run: 3+ adjacent clusters (allow one space between).
+        out = re.sub(
+            r"((?:[\U0001F300-\U0001FAFF\u2600-\u27BF\u2B00-\u2BFF\uFE0F\u200D]\s*){3,})",
+            lambda m: _EMOJI_CLUSTER.findall(m.group(0))[0]
+            if _EMOJI_CLUSTER.findall(m.group(0))
+            else "",
+            out,
+        )
+        if budget <= 0:
+            out = _EMOJI_CLUSTER.sub("", out)
+        else:
+            kept = 0
+
+            def _maybe_drop(m: re.Match[str]) -> str:
+                nonlocal kept
+                kept += 1
+                return m.group(0) if kept <= budget else ""
+
+            out = _EMOJI_CLUSTER.sub(_maybe_drop, out)
+        out = re.sub(r"[ ]{2,}", " ", out)
+        out = re.sub(r" +([,.!?…])", r"\1", out)
+        return out.strip()
+    except Exception:  # noqa: BLE001 - a guard must never break a reply
+        return text
+
+
+def _truncate_at_sentence(text: str, max_chars: int) -> str:
+    """Cut at a sentence boundary at or under ``max_chars`` + ellipsis."""
+    if len(text) <= max_chars:
+        return text
+    cut = text[:max_chars].rstrip()
+    boundary = max(cut.rfind("."), cut.rfind("!"), cut.rfind("?"))
+    if boundary > max_chars // 3:
+        return cut[: boundary + 1].rstrip()
+    # No sentence boundary worth using: cut at the last space.
+    space = cut.rfind(" ")
+    if space > max_chars // 2:
+        return cut[:space].rstrip() + "…"
+    return cut + "…"
+
+
+def format_reply(text: str, profile: StyleProfile) -> str:
+    """Apply a computed :class:`StyleProfile` to a finished draft.
+
+    The hard layer: dividers normalized (or dropped when sections are
+    off), lists flattened when lists are off, section headers kept only
+    when sections are on (and only with a mined marker), emoji held to
+    the profile budget, over-long output truncated — structured output
+    drops whole trailing sections first, then sentence-cuts, so a reply
+    never ends mid-section. Returns "" only for empty input. Never raises.
+    """
+    if not text:
+        return text
+    try:
+        lines = [ln.rstrip() for ln in str(text).splitlines()]
+        # Collapse 3+ blank lines to one blank line.
+        squashed: list[str] = []
+        blanks = 0
+        for ln in lines:
+            if not ln.strip():
+                blanks += 1
+                if blanks <= 1:
+                    squashed.append("")
+                continue
+            blanks = 0
+            squashed.append(ln)
+        lines = squashed
+
+        out_lines: list[str] = []
+        for ln in lines:
+            stripped = ln.strip()
+            if not stripped:
+                out_lines.append("")
+                continue
+            if _DIVIDER_LINE.match(stripped):
+                if profile.allow_sections:
+                    out_lines.append("━━━━━━━━━━━━━━━")
+                # else: drop divider-only lines entirely
+                continue
+            if _SECTION_HEADER.match(stripped) and not profile.allow_sections:
+                # Header line without sections: keep the words, drop the
+                # marker + any bold tags.
+                m = _SECTION_HEADER.match(stripped)
+                words = re.sub(r"</?b>", "", m.group(2)) if m else stripped
+                out_lines.append(words.strip())
+                continue
+            if not profile.allow_lists and (
+                _BULLET_LINE.match(ln) or _NUMBERED_LINE.match(ln)
+            ):
+                # Flatten list items into flowing text (group chats).
+                item = _BULLET_LINE.sub("", ln)
+                item = _NUMBERED_LINE.sub("", item)
+                out_lines.append(item.strip())
+                continue
+            out_lines.append(ln)
+        # When lists are off, flowing lines stay separate lines — the
+        # caller (split_messages) handles chunking; joining here would
+        # merge unrelated sentences into one wall.
+        out = "\n".join(out_lines).strip()
+        out = re.sub(r"\n{3,}", "\n\n", out)
+
+        # Emoji discipline after structure: markers kept within budget.
+        out = purposeful_emoji(out, profile.emoji_budget)
+
+        # Truncation: structured output drops whole trailing sections
+        # first (a reply that ends mid-section reads broken).
+        if len(out) > profile.max_chars:
+            if profile.allow_sections:
+                sections = re.split(r"(?m)(?=^━━━━━━━━━━━━━━━$)", out)
+                kept: list[str] = []
+                total = 0
+                for sec in sections:
+                    if kept and total + len(sec) > profile.max_chars:
+                        break
+                    kept.append(sec)
+                    total += len(sec)
+                candidate = "".join(kept).strip()
+                if candidate and len(candidate) >= profile.max_chars // 2:
+                    out = candidate
+            if len(out) > profile.max_chars:
+                out = _truncate_at_sentence(out, profile.max_chars)
+        return out
+    except Exception:  # noqa: BLE001 - formatting never breaks a reply
+        return text
 
 
 def apply_texting_voice(
@@ -698,8 +1179,8 @@ def apply_texting_voice(
       probability, never all of them (a substitution in every message is a
       costume);
     * **tired punctuation** — low energy drifts sentence ends toward "…";
-    * **sharp punctuation** — high frustration strips exclamation marks
-      (she doesn't exclaim when she's mad, she goes flat).
+    * **high-frustration flatness** — high frustration strips exclamation
+      marks (she doesn't exclaim when she's mad, she goes flat).
 
     Seeded RNG in, same text out. Never raises.
     """
@@ -735,7 +1216,7 @@ def apply_texting_voice(
             out = re.sub(r"\.(?=\s*$)", "…", out)
             out = re.sub(r"\!\s*$", "…", out)
 
-        # Sharp flatness: high frustration kills exclamation.
+        # High-frustration flatness: high frustration kills exclamation.
         if frustration > 60:
             out = out.replace("!", ".")
 
