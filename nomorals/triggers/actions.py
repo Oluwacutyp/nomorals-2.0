@@ -189,7 +189,7 @@ def default_run_command(argv: list[str], timeout_s: float) -> dict[str, Any]:
     """Run the argv as a subprocess; non-zero exit is a TriggerError."""
     try:
         proc = subprocess.run(
-            argv, capture_output=True, text=True, timeout=timeout_s)
+            argv, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout_s)
     except subprocess.TimeoutExpired as exc:
         raise TriggerError(
             f"command timed out after {timeout_s:g}s: "

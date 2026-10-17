@@ -512,7 +512,7 @@ class SkillEvolutionLoop:
     def _default_test_runner(cmd: list[str]) -> tuple[int, str]:
         try:
             proc = subprocess.run(
-                ["python3", *cmd], capture_output=True, text=True,
+                ["python3", *cmd], capture_output=True, text=True, encoding="utf-8", errors="replace",
                 timeout=300, cwd=str(_REPO_ROOT))
             return proc.returncode, (proc.stdout or "") + (proc.stderr or "")
         except Exception as exc:  # noqa: BLE001

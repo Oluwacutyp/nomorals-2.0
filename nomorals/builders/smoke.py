@@ -155,7 +155,7 @@ def _smoke_cli(config: RunConfig, timeout: float,
             cwd=str(config.project_dir),
             env=child_env,
             stdin=subprocess.DEVNULL,  # interactive entrypoints must not hang on our stdin
-            capture_output=True, text=True, timeout=timeout,
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout,
         )
     except subprocess.TimeoutExpired:
         return [Check("--help exits 0", False,

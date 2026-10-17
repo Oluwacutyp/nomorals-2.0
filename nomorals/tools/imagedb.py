@@ -27,6 +27,7 @@ accept either a local path or a public URL.
 from __future__ import annotations
 
 import hashlib
+import os
 import re
 import struct
 import time
@@ -299,7 +300,15 @@ def _resolve_image(context: Any, ref: str, client: HttpClient) -> tuple[Path | N
         tools = getattr(getattr(context, "settings", None), "tools", None)
         cap_mb = int(getattr(tools, "max_download_mb", 200)) if tools else 200
         name = "img-" + hashlib.blake2b(ref.encode(), digest_size=8).hexdigest()
-        media_dir = Path(getattr(getattr(context, "settings", None), "home", "~/.nomorals"))
+        # settings.home defaults to "~/.nomorals" — expand "~" or the
+        # media dir is a literal "~" folder under the CWD (Path does
+        # not expand "~" on its own). On Windows that literal folder
+        # would also be created next to the process, not under the
+        # user's profile.
+        home = os.path.expanduser(
+            str(getattr(getattr(context, "settings", None), "home",
+                        "~/.nomorals")))
+        media_dir = Path(home)
         media_dir = media_dir / "media" / "inbound"
         media_dir.mkdir(parents=True, exist_ok=True)
         target = media_dir / (name + ".bin")

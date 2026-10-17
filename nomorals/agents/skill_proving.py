@@ -278,7 +278,7 @@ def run_proof_test(test_code: str,
             proc = subprocess.run(
                 [sys.executable, "-m", "pytest", str(path), "-q",
                  "-p", "no:cacheprovider", "--no-header"],
-                cwd=tmp, env=env, capture_output=True, text=True,
+                cwd=tmp, env=env, capture_output=True, text=True, encoding="utf-8", errors="replace",
                 timeout=timeout_s)
             out = (proc.stdout or "") + (proc.stderr or "")
             passed = proc.returncode == 0

@@ -270,7 +270,7 @@ class Arena:
         for path in sorted(directory.rglob("*.py")):
             proc = subprocess.run(
                 [sys.executable, "-m", "py_compile", str(path)],
-                capture_output=True, text=True, timeout=30,
+                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30,
             )
             if proc.returncode != 0:
                 errors.append(f"{path.name}: {proc.stderr.strip().splitlines()[-1] if proc.stderr.strip() else 'syntax error'}")

@@ -852,7 +852,7 @@ class DevonAgent:
         cmd = self._test_cmd(pattern)
         try:
             proc = subprocess.run(
-                cmd, cwd=str(self.repo_root), capture_output=True, text=True,
+                cmd, cwd=str(self.repo_root), capture_output=True, text=True, encoding="utf-8", errors="replace",
                 timeout=timeout, check=False,
             )
         except subprocess.TimeoutExpired:
@@ -864,11 +864,11 @@ class DevonAgent:
     def _tool_git_status(self, args: dict[str, Any]) -> str:
         try:
             branch = subprocess.run(["git", "rev-parse", "--abbrev-ref", "HEAD"],
-                                    cwd=str(self.repo_root), capture_output=True, text=True, timeout=15)
+                                    cwd=str(self.repo_root), capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=15)
             commit = subprocess.run(["git", "rev-parse", "--short", "HEAD"],
-                                    cwd=str(self.repo_root), capture_output=True, text=True, timeout=15)
+                                    cwd=str(self.repo_root), capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=15)
             dirty = subprocess.run(["git", "status", "--porcelain"],
-                                   cwd=str(self.repo_root), capture_output=True, text=True, timeout=15)
+                                   cwd=str(self.repo_root), capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=15)
         except (OSError, subprocess.SubprocessError) as exc:
             return f"git unavailable: {exc}"
         dirty_lines = [ln for ln in (dirty.stdout or "").splitlines() if ln.strip()]
@@ -1061,11 +1061,11 @@ class DevonAgent:
         try:
             stat = subprocess.run(
                 ["git", "diff", "--stat", ref_a, ref_b] + ([path] if path else []),
-                cwd=str(self.repo_root), capture_output=True, text=True, timeout=30,
+                cwd=str(self.repo_root), capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30,
             )
             diff = subprocess.run(
                 ["git", "diff", "-U2", ref_a, ref_b] + ([path] if path else []),
-                cwd=str(self.repo_root), capture_output=True, text=True, timeout=30,
+                cwd=str(self.repo_root), capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30,
             )
         except (OSError, subprocess.SubprocessError) as exc:
             return f"git diff failed: {exc}"

@@ -188,7 +188,7 @@ class EvolutionGitController:
     # ── introspection ────────────────────────────────────────────────────
     def _run(self, *args: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run(["git", *args], cwd=self.repo_root,
-                              capture_output=True, text=True, timeout=120)
+                              capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120)
 
     def branch(self) -> str:
         result = self._run("branch", "--show-current")
@@ -996,7 +996,7 @@ class EvolutionAgent:
         if check_dirs:
             compileall = subprocess.run(
                 [sys.executable, "-m", "compileall", "-q", *check_dirs],
-                cwd=self.repo_root, capture_output=True, text=True,
+                cwd=self.repo_root, capture_output=True, text=True, encoding="utf-8", errors="replace",
                 timeout=180,
             )
             if compileall.returncode != 0:
@@ -1012,7 +1012,7 @@ class EvolutionAgent:
                  "import nomorals.agents.partner_runtime, nomorals.tools.registry;"
                  "from nomorals.tools.registry import ToolRegistry;"
                  "ToolRegistry().register_builtins();print('smoke ok')"],
-                cwd=self.repo_root, capture_output=True, text=True, timeout=120,
+                cwd=self.repo_root, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120,
             )
             if smoke.returncode != 0:
                 detail = (smoke.stderr or smoke.stdout)[-800:]
@@ -1030,7 +1030,7 @@ class EvolutionAgent:
             suite_cmd += ["-t", "."]
         suite = subprocess.run(
             suite_cmd,
-            cwd=self.repo_root, capture_output=True, text=True,
+            cwd=self.repo_root, capture_output=True, text=True, encoding="utf-8", errors="replace",
             timeout=_TEST_TIMEOUT,
         )
         # unittest reports its verdict on stderr
@@ -1322,12 +1322,12 @@ class EvolutionAgent:
                     "changes before reverting an evolution")
             result = subprocess.run(
                 ["git", "revert", "--no-edit", proposal.commit],
-                cwd=self.repo_root, capture_output=True, text=True,
+                cwd=self.repo_root, capture_output=True, text=True, encoding="utf-8", errors="replace",
                 timeout=120)
             if result.returncode == 0:
                 tail = subprocess.run(
                     ["git", "rev-parse", "--short", "HEAD"],
-                    cwd=self.repo_root, capture_output=True, text=True)
+                    cwd=self.repo_root, capture_output=True, text=True, encoding="utf-8", errors="replace")
                 out["method"] = "git revert"
                 out["revert_commit"] = tail.stdout.strip()
             else:
@@ -1335,7 +1335,7 @@ class EvolutionAgent:
                 tagged = subprocess.run(
                     ["git", "rev-parse", "--verify",
                      f"evo/{proposal.id}"],
-                    cwd=self.repo_root, capture_output=True, text=True)
+                    cwd=self.repo_root, capture_output=True, text=True, encoding="utf-8", errors="replace")
                 if tagged.returncode == 0:
                     reset = subprocess.run(
                         ["git", "reset", "--hard",
@@ -1545,7 +1545,7 @@ class EvolutionAgent:
         try:
             result = subprocess.run(["git", "status", "--porcelain"],
                                     cwd=self.repo_root, capture_output=True,
-                                    text=True, timeout=60)
+                                    text=True, encoding="utf-8", errors="replace", timeout=60)
         except (OSError, subprocess.SubprocessError):
             return False
         return result.returncode == 0 and not result.stdout.strip()

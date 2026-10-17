@@ -593,7 +593,7 @@ class PlaybackEngine:
                 proc = subprocess.run(
                     [cli, "--print", "id", "--skip-download"]
                     + _cookie_args_fn() + [f"ytsearch1:{query}"],
-                    capture_output=True, text=True, timeout=60)
+                    capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60)
             except subprocess.TimeoutExpired as exc:
                 raise ToolError("youtube search timed out") from exc
             vid = (proc.stdout or "").strip().splitlines()
@@ -662,7 +662,7 @@ class PlaybackEngine:
                     [cli, "--print", "%(id)s\t%(title)s\t%(duration)s\t"
                      "%(uploader)s", "--skip-download"]
                     + _cookie_args_fn2() + [f"ytsearch{limit}:{query}"],
-                    capture_output=True, text=True, timeout=60)
+                    capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60)
             except (subprocess.TimeoutExpired, OSError) as exc:
                 _log.info("youtube multi-search failed: %s", exc)
                 return []

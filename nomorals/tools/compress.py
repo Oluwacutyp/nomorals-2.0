@@ -46,7 +46,7 @@ def _compress_video(src: Path, dest: Path, *, crf: int = 28,
         str(dest),
     ]
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+        proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=600)
     except Exception:  # noqa: BLE001
         return False
     if proc.returncode != 0 or not dest.exists() or dest.stat().st_size == 0:

@@ -51,7 +51,7 @@ def has_libass() -> bool:
     try:
         out = subprocess.run(
             [ffmpeg_path(), "-hide_banner", "-filters"],
-            capture_output=True, text=True, timeout=30,
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30,
         ).stdout
     except (OSError, subprocess.TimeoutExpired):
         return False
@@ -123,7 +123,7 @@ def run_ffmpeg(args: list[str], *,
     try:
         proc = subprocess.Popen(
             cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            text=True, cwd=cwd, start_new_session=True,
+            text=True, encoding="utf-8", errors="replace", cwd=cwd, start_new_session=True,
         )
     except OSError as exc:
         raise MediaEditError(f"could not start ffmpeg: {exc}") from exc
@@ -188,7 +188,7 @@ def video_probe(path: str | os.PathLike[str]) -> dict[str, Any]:
             out = subprocess.run(
                 [probe_bin, "-v", "quiet", "-print_format", "json",
                  "-show_format", "-show_streams", str(p)],
-                capture_output=True, text=True, timeout=60, check=True,
+                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60, check=True,
             ).stdout
             data = json.loads(out)
             return _summarize_probe(p, data)
@@ -248,7 +248,7 @@ def _safe_float(value: Any) -> float | None:
 def _probe_via_ffmpeg(p: Path) -> dict[str, Any]:
     out = subprocess.run(
         [ffmpeg_path(), "-hide_banner", "-i", str(p)],
-        capture_output=True, text=True, timeout=60,
+        capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60,
     ).stderr
     duration = None
     m = re.search(r"Duration: (\d+):(\d+):([\d.]+)", out)

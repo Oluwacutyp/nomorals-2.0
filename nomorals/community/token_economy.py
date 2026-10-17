@@ -55,6 +55,8 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
+from ..core.text import safe_filename
+
 __all__ = [
     "TOKEN_DISCLAIMER", "TokenError", "TokenEntry", "TokenEconomy",
     "EARN_CAPS", "TRANSFER_CAPS", "DECAY_WINDOW_S", "DECAY_FACTOR",
@@ -136,7 +138,12 @@ class TokenEconomy:
     # ── persistence (optional; in-memory when no data_dir) ──────────────────
     def _path(self, name: str) -> Path:
         assert self._data_dir is not None
-        d = self._data_dir / self.group_id
+        # group_id is chat-controlled: sanitise before it becomes a
+        # directory name (a group titled "a/b" or "x:y" must not escape
+        # the data dir or raise OSError on Windows). Load/save both go
+        # through here, so the mapping stays consistent.
+        d = self._data_dir / safe_filename(str(self.group_id),
+                                           fallback="group")
         d.mkdir(parents=True, exist_ok=True)
         return d / f"{name}.json"
 

@@ -81,10 +81,10 @@ def lint(paths: list[str] | None = None,
     try:
         check = subprocess.run([*cmd, "check", *targets],
                                cwd=str(root), capture_output=True,
-                               text=True, timeout=timeout)
+                               text=True, encoding="utf-8", errors="replace", timeout=timeout)
         fmt = subprocess.run([*cmd, "format", "--check", *targets],
                              cwd=str(root), capture_output=True,
-                             text=True, timeout=timeout)
+                             text=True, encoding="utf-8", errors="replace", timeout=timeout)
     except subprocess.TimeoutExpired:
         return {"ok": False, "ruff_installed": True, "violations": [],
                 "format_ok": None,

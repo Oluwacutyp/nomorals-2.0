@@ -56,7 +56,7 @@ def probe(url: str, *, timeout: float = 60.0) -> dict[str, Any]:
                     + ytdlp_cookie_args() + [url])
             completed = subprocess.run(
                 argv,
-                capture_output=True, text=True, timeout=timeout, check=False,
+                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout, check=False,
             )
             if completed.returncode == 0:
                 return _summarize(json.loads(completed.stdout))
@@ -182,7 +182,7 @@ def _download_cli(
     if which("ffmpeg"):
         argv += ["--ffmpeg-location", which("ffmpeg") or "ffmpeg"]
     try:
-        completed = subprocess.run(argv, capture_output=True, text=True, timeout=timeout, check=False)
+        completed = subprocess.run(argv, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout, check=False)
     except subprocess.TimeoutExpired as exc:
         raise MediaError(f"download timed out after {timeout}s") from exc
     if completed.returncode != 0:

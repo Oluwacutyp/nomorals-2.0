@@ -331,7 +331,7 @@ def _audio_duration(p: Path) -> float:
         out = subprocess.run(
             ["ffprobe", "-v", "error", "-show_entries", "format=duration",
              "-of", "default=noprint_wrappers=1:nokey=1", str(p)],
-            capture_output=True, text=True, timeout=30)
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30)
         return float((out.stdout or "").strip() or 0.0)
     except Exception:  # noqa: BLE001
         return 0.0

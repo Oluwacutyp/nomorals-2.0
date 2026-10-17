@@ -35,6 +35,7 @@ import json
 import os
 import re
 import shutil
+import tempfile
 import time
 import urllib.parse
 import urllib.request
@@ -527,7 +528,9 @@ class IntegrityLedger:
                              / "integrity-ledger.jsonl")
             self.path.parent.mkdir(parents=True, exist_ok=True)
         except Exception:  # noqa: BLE001
-            self.path = Path("/tmp") / "nomorals-integrity-ledger.jsonl"
+            # tempfile.gettempdir() honours TMPDIR/TEMP/TMP on every OS;
+            # a hardcoded "/tmp" is C:\\tmp on Windows (often unwritable).
+            self.path = Path(tempfile.gettempdir()) / "nomorals-integrity-ledger.jsonl"
 
     def append(self, *, url: str, sha256: str, size_bytes: int,
                source: str = "", dest: str = "") -> bool:

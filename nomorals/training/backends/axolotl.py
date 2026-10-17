@@ -229,7 +229,7 @@ class AxolotlBackend:
             [cli, "train", str(yaml_path)],
             cwd=str(out),
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            text=True, env=env,
+            text=True, encoding="utf-8", errors="replace", env=env,
         )
         tail: list[str] = []
         assert proc.stdout is not None

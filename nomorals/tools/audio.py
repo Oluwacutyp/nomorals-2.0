@@ -29,6 +29,7 @@ from typing import Any
 from ..core.errors import ToolError
 from ..core.logging_setup import get_logger
 from ..core.policy import Capability
+from ..core.text import safe_filename
 
 __all__ = ["detect_tts_engines", "tts", "stt", "audio_info", "register"]
 
@@ -513,7 +514,9 @@ def register(registry: Any) -> None:
         engine = UniversalTTS(backend=backend_name, voices_dir=voices_dir())
         out_path = ""
         if out_name:
-            out_path = str(audio_dir() / f"{out_name}.wav")
+            # out_name is caller-controlled: sanitise before it becomes
+            # a filename ("a:b" / "x/y" raises OSError on Windows).
+            out_path = str(audio_dir() / f"{safe_filename(out_name)}.wav")
         try:
             return engine.speak(
                 text, voice_name=voice or None, out_path=out_path,
@@ -608,7 +611,7 @@ def register(registry: Any) -> None:
         if not (melody or "").strip():
             raise ToolError("voice_sing needs a melody")
         engine = UniversalTTS(backend="auto", voices_dir=voices_dir())
-        out_path = str(audio_dir() / f"{out_name or 'song'}.wav") \
+        out_path = str(audio_dir() / f"{safe_filename(out_name or 'song')}.wav") \
             if out_name else ""
         try:
             return engine.sing(melody, rvc_model=rvc_model,
@@ -637,7 +640,7 @@ def register(registry: Any) -> None:
         if not (text or "").strip():
             raise ToolError("voice_long needs text")
         engine = UniversalTTS(backend="auto", voices_dir=voices_dir())
-        out_path = str(audio_dir() / f"{out_name or 'longform'}.wav") \
+        out_path = str(audio_dir() / f"{safe_filename(out_name or 'longform')}.wav") \
             if out_name else ""
         try:
             return engine.speak_long(text, voice_name=voice or None,
@@ -672,7 +675,7 @@ def register(registry: Any) -> None:
         if not (text or "").strip():
             raise ToolError("voice_rich needs text")
         engine = UniversalTTS(backend="auto", voices_dir=voices_dir())
-        out_path = str(audio_dir() / f"{out_name or 'rich'}.wav") \
+        out_path = str(audio_dir() / f"{safe_filename(out_name or 'rich')}.wav") \
             if out_name else ""
         try:
             return engine.speak_rich(

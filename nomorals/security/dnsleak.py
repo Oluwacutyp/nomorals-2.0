@@ -112,7 +112,7 @@ def _resolvers_linux() -> list[str]:
     if shutil.which("resolvectl"):
         try:
             txt = subprocess.run(
-                ["resolvectl", "status"], capture_output=True, text=True,
+                ["resolvectl", "status"], capture_output=True, text=True, encoding="utf-8", errors="replace",
                 timeout=8).stdout
             for m in re.finditer(r"DNS Servers?:\s*([0-9a-fA-F.: ]+)", txt):
                 out.extend(s for s in m.group(1).split() if s)
@@ -121,7 +121,7 @@ def _resolvers_linux() -> list[str]:
     if not out and shutil.which("nmcli"):
         try:
             txt = subprocess.run(
-                ["nmcli", "dev", "show"], capture_output=True, text=True,
+                ["nmcli", "dev", "show"], capture_output=True, text=True, encoding="utf-8", errors="replace",
                 timeout=8).stdout
             for m in re.finditer(r"IP4\.DNS\[\d+\]:\s*(\S+)", txt):
                 out.append(m.group(1))
@@ -137,7 +137,11 @@ def _resolvers_linux() -> list[str]:
 def _resolvers_resolv_conf() -> list[str]:
     out: list[str] = []
     try:
-        with open("/etc/resolv.conf") as f:
+        # Explicit UTF-8: the platform default is cp1252 on Windows and
+        # a comment with non-ASCII bytes would otherwise raise
+        # UnicodeDecodeError. Missing on Windows/macOS — OSError → [].
+        with open("/etc/resolv.conf", encoding="utf-8",
+                  errors="replace") as f:
             for line in f:
                 parts = line.split()
                 if len(parts) >= 2 and parts[0] == "nameserver":
@@ -151,7 +155,7 @@ def _resolvers_macos() -> list[str]:
     out: list[str] = []
     try:
         txt = subprocess.run(
-            ["scutil", "--dns"], capture_output=True, text=True,
+            ["scutil", "--dns"], capture_output=True, text=True, encoding="utf-8", errors="replace",
             timeout=8).stdout
         for m in re.finditer(r"nameserver\[\d+\]\s*:\s*(\S+)", txt):
             out.append(m.group(1))
@@ -185,7 +189,7 @@ def _resolvers_windows() -> list[str]:
     if not out:
         try:
             txt = subprocess.run(
-                ["ipconfig", "/all"], capture_output=True, text=True,
+                ["ipconfig", "/all"], capture_output=True, text=True, encoding="utf-8", errors="replace",
                 timeout=10).stdout
             for m in re.finditer(
                     r"DNS Servers[.\s]*:\s*([0-9a-fA-F.:]+)", txt):

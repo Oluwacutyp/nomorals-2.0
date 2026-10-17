@@ -232,7 +232,7 @@ class LiveVerifier:
         try:
             result = subprocess.run(
                 [ytdlp_path, "--version"],
-                capture_output=True, text=True, timeout=5,
+                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=5,
             )
             version = result.stdout.strip()
             
@@ -264,7 +264,7 @@ class LiveVerifier:
         try:
             result = subprocess.run(
                 [ffmpeg_path, "-version"],
-                capture_output=True, text=True, timeout=5,
+                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=5,
             )
             
             # Parse version from first line

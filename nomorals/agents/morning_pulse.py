@@ -29,6 +29,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import tempfile
 import time
 from pathlib import Path
 from typing import Any
@@ -487,7 +488,10 @@ def _synthesize(context: Any, script: str) -> str:
     if not turns:
         return ""
 
-    workdir = Path(os.environ.get("TMPDIR", "/tmp")) / "morning-pulse"
+    # tempfile.gettempdir() honours TMPDIR/TEMP/TMP on every OS. The old
+    # os.environ.get("TMPDIR", "/tmp") ignored Windows' TEMP/TMP and fell
+    # back to "/tmp" (C:\\tmp — often unwritable) when TMPDIR is unset.
+    workdir = Path(tempfile.gettempdir()) / "morning-pulse"
     workdir.mkdir(parents=True, exist_ok=True)
     stamp = int(time.time())
     parts: list[str] = []

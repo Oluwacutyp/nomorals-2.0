@@ -190,7 +190,7 @@ def _scenes_for(video_path: str, max_moments: int = _MAX_MOMENTS
                  "-vsync", "0", pattern],
                 timeout=120, check=False,
                 stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
-                text=True)
+                text=True, encoding="utf-8", errors="replace")
         except Exception:  # noqa: BLE001
             return None, "scene extraction failed for this video."
         stamps = re.findall(r"pts_time:([\d.]+)",

@@ -83,7 +83,7 @@ def ensure_venv(project_dir: str | Path, venv_dir: str = ".venv") -> Path:
     _log.info("creating venv at %s", venv)
     proc = subprocess.run(
         [sys.executable, "-m", "venv", str(venv)],
-        capture_output=True, text=True, timeout=180)
+        capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=180)
     if proc.returncode != 0 or not python.is_file():
         raise ToolError(
             f"venv creation failed: {(proc.stderr or proc.stdout).strip()[:300]}")
@@ -199,7 +199,7 @@ def generate_lock(project_dir: str | Path, *,
     _log.info("generate_lock %s: running %s", project_dir, " ".join(cmd))
     try:
         proc = subprocess.run(cmd, cwd=str(project_dir), capture_output=True,
-                              text=True, timeout=timeout)
+                              text=True, encoding="utf-8", errors="replace", timeout=timeout)
     except (subprocess.TimeoutExpired, OSError) as exc:
         return InstallResult(status="failed",
                              detail=f"lock generation failed: {exc}",
@@ -351,7 +351,7 @@ def install_deps(project_dir: str | Path, *,
     _log.info("install_deps %s: running %s", project_dir, " ".join(cmd))
     try:
         proc = subprocess.run(
-            cmd, cwd=str(project_dir), capture_output=True, text=True,
+            cmd, cwd=str(project_dir), capture_output=True, text=True, encoding="utf-8", errors="replace",
             timeout=timeout,
         )
     except subprocess.TimeoutExpired:

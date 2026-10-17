@@ -56,7 +56,7 @@ def _run_git(args: list[str], repo: Path, *, timeout: int = _DEFAULT_TIMEOUT) ->
             [git, *args],
             cwd=str(repo),
             capture_output=True,
-            text=True,
+            text=True, encoding="utf-8", errors="replace",
             timeout=timeout,
         )
     except subprocess.TimeoutExpired as exc:

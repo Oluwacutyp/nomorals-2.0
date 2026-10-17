@@ -202,7 +202,7 @@ def convert(input_wav: str, model: RVCModel | str, *,
             ]
             if model.index:
                 cmd += ["--index", model.index]
-            r = subprocess.run(cmd, capture_output=True, text=True,
+            r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace",
                                timeout=600)
             if r.returncode != 0 or not os.path.exists(dest):
                 raise RuntimeError(
@@ -213,7 +213,7 @@ def convert(input_wav: str, model: RVCModel | str, *,
                 input_wav, model.pth, dest,
                 str(f0_up_key), str(index_rate), str(protect),
             ]
-            r = subprocess.run(cmd, capture_output=True, text=True,
+            r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace",
                                timeout=600)
             if r.returncode != 0 or not os.path.exists(dest):
                 raise RuntimeError(

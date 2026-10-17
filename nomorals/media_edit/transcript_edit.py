@@ -265,7 +265,7 @@ def detect_silences(video: str | os.PathLike[str], *,
         proc = subprocess.run(
             [ff, "-hide_banner", "-nostats", "-i", str(video),
              "-af", filt, "-f", "null", "-"],
-            capture_output=True, text=True, timeout=timeout,
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout,
             start_new_session=True)
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise MediaEditError(f"silence detection failed: {exc}") from exc

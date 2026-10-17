@@ -237,7 +237,7 @@ def matchering_master(target_path: str, reference_path: str,
                    results=[(mg.pcm16, out_path)])
     except ImportError:
         r = subprocess.run(["matchering", target_path, reference_path,
-                            out_path], capture_output=True, text=True,
+                            out_path], capture_output=True, text=True, encoding="utf-8", errors="replace",
                            timeout=600)
         if r.returncode != 0:
             raise MatcheringUnavailable(

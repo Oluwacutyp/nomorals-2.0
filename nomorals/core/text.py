@@ -586,6 +586,52 @@ def slugify(
     return slug or fallback
 
 
+# ── Windows-safe filenames ─────────────────────────────────────────────────
+
+# Windows forbids these in a file/folder name, plus control chars, a
+# trailing dot/space, and these reserved stems (any extension):
+# CON, PRN, AUX, NUL, COM1–COM9, LPT1–LPT9. A name built from user /
+# sender-controlled text (voice names, game designs, Telegram file
+# names, dataset names) must be sanitised before it becomes a path —
+# otherwise the write raises OSError on Windows (and ``/`` or ``..``
+# in the name escapes the intended directory on every OS).
+_WINDOWS_RESERVED_STEMS = frozenset(
+    {"CON", "PRN", "AUX", "NUL"}
+    | {f"COM{i}" for i in range(1, 10)}
+    | {f"LPT{i}" for i in range(1, 10)}
+)
+_FILENAME_ILLEGAL = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+
+
+def safe_filename(name: str | None, *, fallback: str = "file",
+                  limit: int = 200) -> str:
+    """Return a filesystem-safe file/folder name for *name*.
+
+    Keeps the original name (including its extension and case) whenever
+    it is already safe; otherwise replaces illegal characters with
+    ``_`` (separators included, so no traversal), strips trailing
+    dots/spaces, and prefixes reserved Windows stems (``CON`` → ``_CON``).
+    Never returns an empty string, ``.`` or ``..``. This is a *filename*
+    sanitiser, not a slugifier — display names are unchanged; only the
+    on-disk name is made safe.
+    """
+    raw = (name or "").strip()
+    # "/" and "\\" are in the illegal set below, so they become "_":
+    # "a/b", "../x" and "C:\\x" all collapse to a single safe segment
+    # with no traversal and no information loss beyond the separator.
+    raw = _FILENAME_ILLEGAL.sub("_", raw)
+    # Windows also rejects a trailing dot or space.
+    raw = raw.rstrip(". ")
+    if not raw or raw in (".", ".."):
+        return fallback
+    stem = raw.split(".", 1)[0].upper()
+    if stem in _WINDOWS_RESERVED_STEMS:
+        raw = "_" + raw
+    if len(raw) > limit:
+        raw = raw[:limit].rstrip(". ")
+    return raw or fallback
+
+
 # ── MinHash (datasketch-style near-duplicate estimation) ─────────────────────
 
 

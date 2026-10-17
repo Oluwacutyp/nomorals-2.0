@@ -266,7 +266,7 @@ def _run_tests(ctx: GoldenContext) -> dict[str, Any]:
         [sys.executable, "-m", "pytest", "test_calc.py", "-q", "--no-header"],
         cwd=str(ctx.workdir),
         capture_output=True,
-        text=True,
+        text=True, encoding="utf-8", errors="replace",
         timeout=600,
     )
     tail = "\n".join((proc.stdout + proc.stderr).strip().splitlines()[-5:])

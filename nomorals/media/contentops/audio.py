@@ -68,7 +68,7 @@ def loudness_measure(path: str | os.PathLike[str]) -> dict[str, float]:
            "-af", _loudnorm_filter(TARGET_LUFS) + ":print_format=json",
            "-f", "null", "-"]
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+        proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=300)
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise MediaEditError(f"loudness measurement failed: {exc}") from exc
     m = re.search(r"\{[^}]*\"input_i\"[^}]*\}", proc.stderr, re.S)
@@ -137,7 +137,7 @@ def voice_segments(vo_path: str | os.PathLike[str], *,
            "-af", f"silencedetect=noise={noise_db}dB:d={min_silence}",
            "-f", "null", "-"]
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+        proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=300)
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise MediaEditError(f"silencedetect failed: {exc}") from exc
     silences: list[tuple[float, float]] = []

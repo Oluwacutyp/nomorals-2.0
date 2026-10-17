@@ -190,7 +190,7 @@ def run_project_tests(result: ScaffoldResult, timeout: float = 120.0) -> BuildSt
     try:
         proc = subprocess.run(
             result.test_cmd, cwd=str(result.project_dir),
-            capture_output=True, text=True, timeout=timeout,
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout,
         )
     except subprocess.TimeoutExpired:
         return BuildStep("tests", False,

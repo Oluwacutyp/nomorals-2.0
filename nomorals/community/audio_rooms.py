@@ -31,6 +31,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import tempfile
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -295,7 +296,9 @@ class RoomStore:
             self._dir = Path(data_dir) if data_dir else _default_dir()
             self._dir.mkdir(parents=True, exist_ok=True)
         except Exception:  # noqa: BLE001
-            self._dir = Path("/tmp") / "devon_audio_rooms"
+            # tempfile.gettempdir() honours TMPDIR/TEMP/TMP on every OS;
+            # a hardcoded "/tmp" is C:\\tmp on Windows (often unwritable).
+            self._dir = Path(tempfile.gettempdir()) / "devon_audio_rooms"
 
     def _path(self, room_id: str) -> Path:
         safe = re.sub(r"[^a-zA-Z0-9_-]", "", room_id or "")[:64]

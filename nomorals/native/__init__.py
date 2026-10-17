@@ -171,7 +171,7 @@ def build(force: bool = False) -> tuple[bool, str]:
             cmd.append("-fno-semantic-interposition")
         cmd += [str(source), "-o", str(target)]
         started = time.time()
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+        proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=300)
         if proc.returncode != 0:
             detail = (proc.stderr or proc.stdout or "").strip()[-400:]
             raise RuntimeError(

@@ -848,7 +848,7 @@ class ItineraryBuilder:
             import subprocess
             out = subprocess.run(
                 ["pdftotext", pdf_path, "-"], capture_output=True,
-                text=True, timeout=30)
+                text=True, encoding="utf-8", errors="replace", timeout=30)
             if out.returncode == 0:
                 return out.stdout
         except Exception:  # noqa: BLE001

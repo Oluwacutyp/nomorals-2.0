@@ -76,10 +76,10 @@ def _git_changed_files(root: Path) -> list[str]:
     try:
         diff = subprocess.run(
             [git, "-C", str(root), "diff", "--name-only", "HEAD"],
-            capture_output=True, text=True, timeout=30)
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30)
         status = subprocess.run(
             [git, "-C", str(root), "status", "--porcelain"],
-            capture_output=True, text=True, timeout=30)
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30)
     except Exception as exc:  # noqa: BLE001 — git is best-effort here
         _log.debug("git changed-files probe failed: %s", exc)
         return []
@@ -190,7 +190,7 @@ def _run_pytest(root: Path, paths: list[str] | None,
            "-rf", *targets]
     try:
         proc = subprocess.run(cmd, cwd=str(root), capture_output=True,
-                              text=True, timeout=timeout)
+                              text=True, encoding="utf-8", errors="replace", timeout=timeout)
     except subprocess.TimeoutExpired:
         return {"ok": False, "passed": 0, "failed": [], "errors": 1,
                 "seconds": round(time.perf_counter() - t0, 2),
@@ -268,7 +268,7 @@ def _run_unittest(root: Path, paths: list[str] | None,
                 "note": "no tests directory — nothing ran"}
     try:
         proc = subprocess.run(cmd, cwd=str(root), capture_output=True,
-                              text=True, timeout=timeout)
+                              text=True, encoding="utf-8", errors="replace", timeout=timeout)
     except subprocess.TimeoutExpired:
         return {"ok": False, "passed": 0, "failed": [], "errors": 1,
                 "seconds": round(time.perf_counter() - t0, 2),

@@ -42,6 +42,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import tempfile
 import time
 import urllib.parse
 import urllib.request
@@ -655,7 +656,10 @@ class ContentAddressedCache:
                 self.root = Path.home() / ".cache" / "nomorals" / "sources"
             self.root.mkdir(parents=True, exist_ok=True)
         except Exception:  # noqa: BLE001
-            self.root = Path("/tmp") / "nomorals-sources-cache"
+            # tempfile.gettempdir() honours TMPDIR/TEMP/TMP on every OS;
+            # a hardcoded "/tmp" is C:\\tmp on Windows (often unwritable)
+            # and ignores the user's configured temp dir.
+            self.root = Path(tempfile.gettempdir()) / "nomorals-sources-cache"
             self.root.mkdir(parents=True, exist_ok=True)
 
     @staticmethod

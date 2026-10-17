@@ -377,7 +377,7 @@ def verify_tls_cert(cert_path: str, *, key_path: str = "") -> dict:
         proc = subprocess.run(
             ["openssl", "x509", "-in", cert_path, "-noout",
              "-subject", "-issuer", "-dates"],
-            capture_output=True, text=True, timeout=30)
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30)
         if proc.returncode != 0:
             out["error"] = out["error"] or (
                 f"openssl could not parse cert: {proc.stderr.strip()[:200]}")

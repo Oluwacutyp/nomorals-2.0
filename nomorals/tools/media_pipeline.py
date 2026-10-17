@@ -202,7 +202,7 @@ def compress_audio_for_send(
     cmd = ["ffmpeg", "-y", "-loglevel", "error", "-i", str(src),
            "-vn", "-c:a", "libmp3lame", "-b:a", bitrate, str(dest)]
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+        proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=600)
     except Exception as exc:  # noqa: BLE001
         dest.unlink(missing_ok=True)
         return {"ok": False, "method": "none",

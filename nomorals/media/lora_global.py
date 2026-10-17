@@ -219,7 +219,33 @@ class GenreLoRAJob:
             f"--epochs {self.params()['epochs']}",
         ])
 
+    def _argv(self) -> list[list[str]]:
+        """List-form commands for :meth:`run` (same steps as :meth:`recipe`).
+
+        List form + ``shell=False`` is required on Windows: the string
+        form goes through ``cmd.exe`` (no POSIX quoting, ``!r`` repr
+        quoting is not shell quoting), and a corpus/output path
+        containing a space or ``&`` would split or inject a command.
+        ``recipe()`` stays the human-readable string form.
+        """
+        p = self.params()
+        out = Path(self.output_dir)
+        return [
+            ["acestep-prepare", "--audio-dir", str(self.corpus_dir),
+             "--output", str(out / "dataset.json"),
+             "--custom-tag", str(self.tag)],
+            ["acestep-preprocess", "--dataset", str(out / "dataset.json"),
+             "--output", str(out / "tensors")],
+            ["acestep-train", "--dataset", str(out / "tensors"),
+             "--output", str(out / "lora"),
+             "--r", str(p["rank"]), "--alpha", str(p["alpha"]),
+             "--dropout", str(p["dropout"]),
+             "--lr", str(p["learning_rate"]),
+             "--epochs", str(p["epochs"])],
+        ]
+
     def run(self) -> dict[str, Any]:
+        import shlex
         import subprocess
         problems = self.validate()
         if problems:
@@ -229,11 +255,11 @@ class GenreLoRAJob:
         out = Path(self.output_dir)
         out.mkdir(parents=True, exist_ok=True)
         log: list[str] = []
-        for cmd in (self.recipe().splitlines()[2],
-                    self.recipe().splitlines()[3],
-                    self.recipe().splitlines()[4]):
-            r = subprocess.run(cmd, shell=True, capture_output=True,
-                               text=True, timeout=86400)
+        for argv in self._argv():
+            cmd = shlex.join(argv)
+            r = subprocess.run(argv, shell=False, capture_output=True,
+                               text=True, encoding="utf-8",
+                               errors="replace", timeout=86400)
             log.append(f"$ {cmd}\n{r.stdout[-2000:]}")
             if r.returncode != 0:
                 raise RuntimeError(f"training step failed: {cmd}\n{r.stderr[-2000:]}")

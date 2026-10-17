@@ -464,6 +464,30 @@ class LoRATrainingJob:
             f"--dropout {p['dropout']} --lr {p['learning_rate']} "
             f"--epochs {p['epochs']}")
 
+    def prepare_argv(self) -> list[str]:
+        """List form of :meth:`prepare_command` (see below)."""
+        return ["acestep-prepare", "--audio-dir", str(self.corpus_dir),
+                "--output", str(Path(self.output_dir) / "dataset.json"),
+                "--custom-tag", str(self.tag)]
+
+    def preprocess_argv(self) -> list[str]:
+        """List form of :meth:`preprocess_command`."""
+        out = Path(self.output_dir)
+        return ["acestep-preprocess", "--dataset",
+                str(out / "dataset.json"),
+                "--output", str(out / "tensors")]
+
+    def train_argv(self) -> list[str]:
+        """List form of :meth:`train_command`."""
+        p = self.params()
+        out = Path(self.output_dir)
+        return ["acestep-train", "--dataset", str(out / "tensors"),
+                "--output", str(out / "lora"),
+                "--r", str(p["rank"]), "--alpha", str(p["alpha"]),
+                "--dropout", str(p["dropout"]),
+                "--lr", str(p["learning_rate"]),
+                "--epochs", str(p["epochs"])]
+
     def recipe(self) -> str:
         return "\n".join([
             "# Afrobeats LoRA training — run these in order:",
@@ -475,6 +499,7 @@ class LoRATrainingJob:
 
     def run(self) -> dict[str, Any]:
         """Execute the pipeline. Fails closed with the recipe."""
+        import shlex
         import subprocess
         problems = self.validate()
         if problems:
@@ -485,11 +510,17 @@ class LoRATrainingJob:
         out = Path(self.output_dir)
         out.mkdir(parents=True, exist_ok=True)
         log: list[str] = []
-        for cmd in (self.prepare_command(), self.preprocess_command(),
-                    self.train_command()):
+        for argv in (self.prepare_argv(), self.preprocess_argv(),
+                     self.train_argv()):
+            # List form + shell=False: the string form goes through
+            # cmd.exe on Windows (no POSIX quoting; a path with a space
+            # or "&" would split or inject a command). The *_command()
+            # strings stay for recipe()/display.
+            cmd = shlex.join(argv)
             _log.info("lora training: %s", cmd)
-            r = subprocess.run(cmd, shell=True, capture_output=True,
-                               text=True, timeout=86400)
+            r = subprocess.run(argv, shell=False, capture_output=True,
+                               text=True, encoding="utf-8",
+                               errors="replace", timeout=86400)
             log.append(f"$ {cmd}\n{r.stdout[-2000:]}")
             if r.returncode != 0:
                 raise LoRAUnavailable(

@@ -145,7 +145,7 @@ def _cli_found_lines(exe: str, args: list[str], timeout_s: int) -> list[tuple[st
     """
     try:
         proc = subprocess.run(
-            [exe, *args], capture_output=True, text=True, timeout=timeout_s
+            [exe, *args], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout_s
         )
     except Exception as exc:  # noqa: BLE001 - CLI failed, fall back
         _log.debug("%s CLI failed: %s", exe, exc)

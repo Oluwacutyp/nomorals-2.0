@@ -545,7 +545,7 @@ class BackupManager:
                 ["git", *args],
                 cwd=str(cwd or workdir),
                 capture_output=True,
-                text=True,
+                text=True, encoding="utf-8", errors="replace",
                 timeout=300,
                 check=False,
             )

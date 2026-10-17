@@ -35,6 +35,7 @@ from .errors import (
     LoadError,
     QueryError,
 )
+from ..core.text import safe_filename
 from ..core.events import Event, global_bus
 from ..core.logging_setup import get_logger
 
@@ -72,6 +73,30 @@ _ALERT_HIGH_CARDINALITY_PCT = 90.0
 
 # Persistence file suffixes (parquet preferred when pyarrow is present).
 _PERSIST_SUFFIXES = (".parquet", ".csv", ".meta.json")
+
+
+def _validate_dataset_name(name: str) -> None:
+    """Reject dataset names that are not safe filenames.
+
+    The name is used verbatim as a filename stem (``<name>.csv`` /
+    ``<name>.parquet`` / ``<name>.meta.json``) by :meth:`Workspace._persist`,
+    :meth:`Workspace.drop` and :meth:`Workspace.rename`, so a name
+    containing ``/``, ``\\``, ``:``, or any other Windows-illegal
+    character would raise ``OSError`` on Windows (and ``../`` would
+    escape the workspace dir on every OS). Fail fast with
+    :exc:`LoadError` instead of silently renaming — the name is also the
+    in-memory key, so a silent rename would desync ``get(name)`` from
+    the file restored on restart.
+    """
+    if not isinstance(name, str) or not name.strip():
+        raise LoadError("dataset name must be a non-empty string")
+    if safe_filename(name) != name:
+        raise LoadError(
+            f"dataset name {name!r} is not a safe filename: it contains "
+            "a path separator, a Windows-illegal character "
+            "(<>:\"/\\\\|?*), a trailing dot/space, or a reserved stem "
+            "(CON/PRN/AUX/NUL/COM1-9/LPT1-9) — use letters, digits, "
+            "'-', '_', and '.' instead")
 
 
 @dataclass
@@ -287,6 +312,7 @@ class DataWorkspace:
         ``overwrite``), :exc:`LoadError` for unsupported or unreadable
         files. Fail fast — never a partial/empty dataset on error.
         """
+        _validate_dataset_name(name)
         pd = _pd()
         p = Path(path)
         if not p.is_file():
@@ -338,6 +364,7 @@ class DataWorkspace:
                    source: str = "<dataframe>",
                    overwrite: bool = False) -> Dataset:
         """Register an existing DataFrame directly (e.g., from ta/data)."""
+        _validate_dataset_name(name)
         _pd()  # fail fast if pandas is missing
         if name in self._sets and not overwrite:
             raise DatasetExists(
@@ -378,6 +405,7 @@ class DataWorkspace:
 
     def rename(self, old: str, new: str) -> Dataset:
         """Rename a dataset (in memory and on disk)."""
+        _validate_dataset_name(new)
         ds = self.get(old)
         if new in self._sets:
             raise DatasetExists(

@@ -325,7 +325,7 @@ def _audio_duration(p: Path) -> float:
         out = subprocess.run(
             ["ffprobe", "-v", "error", "-show_entries", "format=duration",
              "-of", "default=noprint_wrappers=1:nokey=1", str(p)],
-            capture_output=True, text=True, timeout=30)
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30)
         return float((out.stdout or "").strip() or 0.0)
     except Exception:  # noqa: BLE001
         return 0.0
@@ -382,7 +382,7 @@ def measure_loudness(wav_path: str) -> dict[str, Any]:
         r = subprocess.run(
             ["ffmpeg", "-hide_banner", "-i", str(p), "-map", "0:a",
              "-af", "ebur128=peak=true:framelog=quiet", "-f", "null", "-"],
-            capture_output=True, text=True, timeout=300)
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=300)
         txt = (r.stderr or "") + (r.stdout or "")
         m = re.search(r"Integrated loudness:\s*\n?\s*I:\s*([-\d.]+)\s*LUFS",
                       txt)
@@ -394,7 +394,7 @@ def measure_loudness(wav_path: str) -> dict[str, Any]:
         r = subprocess.run(
             ["ffmpeg", "-hide_banner", "-i", str(p), "-map", "0:a",
              "-af", "astats=metadata=1:reset=1", "-f", "null", "-"],
-            capture_output=True, text=True, timeout=300)
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=300)
         txt = (r.stderr or "") + (r.stdout or "")
         m = re.search(r"RMS level dB:\s*([-\d.]+)", txt)
         if m:

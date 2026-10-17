@@ -142,7 +142,7 @@ def loudness_measure(path: str | Path) -> dict[str, float]:
            "-af", _loudnorm_filter() + ":print_format=json",
            "-f", "null", "-"]
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True,
+        proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace",
                               timeout=300)
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise MediaEditError(f"loudness measurement failed: {exc}") from exc

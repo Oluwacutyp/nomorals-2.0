@@ -187,7 +187,7 @@ class Archivist:
 
     def _list7z(self, p: Path) -> dict[str, Any]:
         out = subprocess.run(
-            [self._bin7z, "l", str(p)], capture_output=True, text=True,
+            [self._bin7z, "l", str(p)], capture_output=True, text=True, encoding="utf-8", errors="replace",
             timeout=60)
         entries = []
         for line in out.stdout.splitlines():
@@ -210,7 +210,7 @@ class Archivist:
         else:
             args = ["lt", str(p)]
         out = subprocess.run(
-            [self._bin_unrar, *args], capture_output=True, text=True,
+            [self._bin_unrar, *args], capture_output=True, text=True, encoding="utf-8", errors="replace",
             timeout=60)
         entries = []
         for line in out.stdout.splitlines():
@@ -360,7 +360,7 @@ class Archivist:
         elif fmt == "7z" and self._bin7z:
             out = subprocess.run(
                 [self._bin7z, "x", f"-o{dest_root}", "-y", str(p)],
-                capture_output=True, text=True, timeout=600)
+                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=600)
             if out.returncode != 0:
                 raise ToolError(f"7z extraction failed: "
                                 f"{out.stderr[:300]}")
@@ -372,7 +372,7 @@ class Archivist:
                 cmd = [self._bin_unrar, "-o", str(dest_root), str(p)]
             else:
                 cmd = [self._bin_unrar, "x", "-y", str(p), f"{dest_root}/"]
-            out = subprocess.run(cmd, capture_output=True, text=True,
+            out = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace",
                                  timeout=600)
             if out.returncode not in (0, 1):  # 1 = warnings (ok)
                 raise ToolError(f"rar extraction failed: "

@@ -157,7 +157,7 @@ def _ffmpeg_has_filter(*names: str) -> bool:
         try:
             out = subprocess.run(
                 [exe, "-hide_banner", "-filters"],
-                capture_output=True, text=True, timeout=30).stdout
+                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30).stdout
         except (OSError, subprocess.TimeoutExpired):
             return False
         _filter_caps = {}
@@ -1966,7 +1966,7 @@ def _scene_cuts_ffmpeg(src: Path, threshold: float) -> list[float]:
         [exe, "-hide_banner", "-i", str(src), "-vf",
          f"select='gt(scene,{threshold:.3f})',showinfo",
          "-f", "null", "-"],
-        capture_output=True, text=True, timeout=600)
+        capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=600)
     cuts: list[float] = []
     import re
     # the select filter already dropped non-matching frames, so every

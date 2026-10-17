@@ -183,7 +183,7 @@ class CodeTestsVerifier:
         cmd = [self.python, "-m", "unittest", *test_ids]
         try:
             proc = subprocess.run(  # noqa: S603 - test ids come from the operator
-                cmd, capture_output=True, text=True, timeout=timeout, cwd=cwd,
+                cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout, cwd=cwd,
             )
         except subprocess.TimeoutExpired:
             return Verdict(
@@ -485,7 +485,7 @@ class GitCleanVerifier:
         try:
             proc = subprocess.run(
                 [self.git_bin, "-C", repo, "status", "--porcelain"],
-                capture_output=True, text=True, timeout=30,
+                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30,
             )
         except FileNotFoundError:
             return Verdict(passed=False, details="git not found")

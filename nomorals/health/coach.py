@@ -103,7 +103,7 @@ class HealthDataSource:
     def _run(self, *args: str) -> dict[str, Any]:
         try:
             proc = subprocess.run(
-                [self.binary, *args], capture_output=True, text=True,
+                [self.binary, *args], capture_output=True, text=True, encoding="utf-8", errors="replace",
                 timeout=self.timeout)
             if proc.returncode != 0:
                 _log.debug("health-cli failed (%s): %s",

@@ -246,7 +246,7 @@ class CheckpointStore:
              timeout: int = 60) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             ["git", *args], cwd=str(cwd),
-            capture_output=True, text=True, timeout=timeout)
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout)
 
     @staticmethod
     def _is_repo(workdir: Path) -> bool:

@@ -21,7 +21,7 @@ def _ffmpeg() -> str | None:
 
 
 def _run(cmd: list[str]) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(cmd, capture_output=True, text=True)  # noqa: S603
+    return subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")  # noqa: S603
 
 
 # ── LUTs ───────────────────────────────────────────────────────────

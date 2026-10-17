@@ -81,6 +81,7 @@ from pathlib import Path
 from typing import Any, List, Optional
 
 from .director import CANONICAL_BURSTS
+from ..core.text import safe_filename
 
 _log = logging.getLogger(__name__)
 
@@ -222,7 +223,11 @@ class VoiceLibrary:
         for (e.g. "xtts", "chatterbox") — the engine enforces audience
         licensing from it.
         """
-        dest = os.path.join(self.storage_dir, f"{name}.wav")
+        # Only the on-disk name is sanitised (a voice named "a:b" or
+        # "my/voice" must not raise OSError on Windows); the profile's
+        # display name stays exactly as given.
+        dest = os.path.join(self.storage_dir,
+                            f"{safe_filename(name, fallback='voice')}.wav")
         try:
             shutil.copy(audio_file_path, dest)
         except OSError as exc:
@@ -273,7 +278,9 @@ class VoiceLibrary:
         if profile is None:
             raise KeyError(f"unknown voice profile {name!r}")
         n = len(profile.extra_samples) + 1
-        dest = os.path.join(self.storage_dir, f"{name}_sample{n}.wav")
+        dest = os.path.join(
+            self.storage_dir,
+            f"{safe_filename(name, fallback='voice')}_sample{n}.wav")
         try:
             shutil.copy(audio_file_path, dest)
         except OSError as exc:
@@ -2185,7 +2192,7 @@ class SparkTTSBackend:
                     "--pitch", pitch or os.environ.get(
                         "SPARK_PITCH", "medium"),
                     "--speed", self._speed_word(speed)]
-        proc = subprocess.run(cmd, capture_output=True, text=True,
+        proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace",
                               timeout=600, cwd=self.repo)
         wavs = sorted(Path(tmp).glob("*.wav"))
         if proc.returncode != 0 or not wavs:

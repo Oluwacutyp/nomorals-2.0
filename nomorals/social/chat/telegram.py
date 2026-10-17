@@ -36,6 +36,7 @@ from typing import Any
 
 from ...core.errors import ValidationError
 from ...core.logging_setup import get_logger
+from ...core.text import safe_filename
 from .base import ChatAdapter, ChatKind, ChatMessage, ChatRef, IncomingHandler, MediaRef, SendResult
 from .platform_limits import for_platform
 
@@ -1170,7 +1171,9 @@ class TelegramAdapter(ChatAdapter):
             else:
                 try:
                     fname = f"tg-{int(time.time() * 1000)}-{len(media)}"
-                    path = await client.download_media(message, file=f"{self.media_dir}/{fname}")
+                    path = await client.download_media(
+                        message,
+                        file=os.path.join(self.media_dir, fname))
                     if path:
                         if not path.endswith(tuple(_MIME_HINTS)):
                             ext = os.path.splitext(str(path))[1]
@@ -2511,6 +2514,12 @@ class TelegramBotAdapter(ChatAdapter):
             return []
         if not path:
             return []
+        # fname is sender-controlled (Telegram document file_name): it
+        # can contain "../", ":", or other Windows-illegal characters.
+        # Sanitise before it becomes a path — the MediaRef keeps the
+        # original name for display.
+        orig_fname = fname
+        fname = safe_filename(fname, fallback="file")
         dest = Path(self.media_dir) / f"{file_id[:16]}_{fname}"
         try:
             dest.parent.mkdir(parents=True, exist_ok=True)
@@ -2521,7 +2530,7 @@ class TelegramBotAdapter(ChatAdapter):
         except Exception as exc:  # noqa: BLE001
             _log.debug("telegram-bot media download failed: %s", exc)
             return []
-        return [MediaRef(path=str(dest), kind=fkind, name=fname)]
+        return [MediaRef(path=str(dest), kind=fkind, name=orig_fname)]
 
     def download_file(self, file_id: str, fname: str = "audio.ogg") -> str:
         """Download a Telegram file_id to the media dir. Returns the local
@@ -2534,6 +2543,9 @@ class TelegramBotAdapter(ChatAdapter):
             path = info.get("file_path", "")
             if not path:
                 return ""
+            # fname is caller/sender-controlled: sanitise before it
+            # becomes a path (see the download branch above).
+            fname = safe_filename(fname, fallback="audio.ogg")
             dest = Path(self.media_dir) / f"{file_id[:16]}_{fname}"
             dest.parent.mkdir(parents=True, exist_ok=True)
             url = _BOT_FILE_API.format(token=self.token, path=path)

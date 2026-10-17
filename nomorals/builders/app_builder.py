@@ -1701,7 +1701,7 @@ class AppBuilder:
                 proc = subprocess.run(
                     [sys.executable, entry.name, "--help"],
                     cwd=str(app_dir), stdin=subprocess.DEVNULL,
-                    capture_output=True, text=True, timeout=30)
+                    capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30)
             except subprocess.TimeoutExpired:
                 return done(False, "--help timed out after 30s")
             except OSError as exc:
@@ -1721,7 +1721,7 @@ class AppBuilder:
             try:
                 build_proc = subprocess.run(
                     ["go", "build", "-o", str(binary), "."],
-                    cwd=str(app_dir), capture_output=True, text=True,
+                    cwd=str(app_dir), capture_output=True, text=True, encoding="utf-8", errors="replace",
                     timeout=120)
                 if build_proc.returncode != 0:
                     return done(
@@ -1730,7 +1730,7 @@ class AppBuilder:
                 run_proc = subprocess.run(
                     [str(binary), "list"], cwd=str(tmp),
                     stdin=subprocess.DEVNULL, capture_output=True,
-                    text=True, timeout=30)
+                    text=True, encoding="utf-8", errors="replace", timeout=30)
             except subprocess.TimeoutExpired:
                 return done(False, "go build/run timed out")
             except OSError as exc:
@@ -1759,7 +1759,7 @@ class AppBuilder:
             try:
                 mig = subprocess.run(
                     [sys.executable, "manage.py", "migrate", "--noinput"],
-                    cwd=str(app_dir), capture_output=True, text=True,
+                    cwd=str(app_dir), capture_output=True, text=True, encoding="utf-8", errors="replace",
                     timeout=120)
             except subprocess.TimeoutExpired:
                 return done(False, "manage.py migrate timed out after 120s")
@@ -1797,7 +1797,7 @@ class AppBuilder:
 
                     subprocess.run(
                         ["node", "--check", str(p)], capture_output=True,
-                        text=True, timeout=30, check=True)
+                        text=True, encoding="utf-8", errors="replace", timeout=30, check=True)
                     validated.append(rel)
                 elif p.suffix == ".json":
                     json.loads(p.read_text(encoding="utf-8"))
@@ -1888,7 +1888,7 @@ class AppBuilder:
                     "installed here")
             proc = subprocess.run([npm, "install", "--no-audit",
                                    "--no-fund"], cwd=app_dir,
-                                  capture_output=True, text=True, timeout=600)
+                                  capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=600)
             if proc.returncode != 0:
                 raise ToolError(
                     f"npm install failed for {slug}: "
@@ -2409,7 +2409,7 @@ def _run_server(app_dir: Path, stack: str, port: int):
         proc = subprocess.Popen(
             cmd, cwd=str(app_dir), stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
-            text=True, start_new_session=True, env=full_env)
+            text=True, encoding="utf-8", errors="replace", start_new_session=True, env=full_env)
     except OSError as exc:
         raise ToolError(f"could not spawn {' '.join(cmd)}: {exc}")
     try:
@@ -2551,7 +2551,7 @@ def _find_child_pid(app_dir: Path, cmd: list[str]) -> int | None:
     # fallback: ps(1)
     try:
         out = _sp.run(["ps", "-eo", "pid,lstart,cwd,args"],
-                      capture_output=True, text=True, timeout=10)
+                      capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=10)
     except (OSError, subprocess.TimeoutExpired):
         return None
     best2 = (0, None)

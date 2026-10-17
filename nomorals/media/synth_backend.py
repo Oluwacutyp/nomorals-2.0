@@ -270,7 +270,7 @@ def _render_fluidsynth(midi_path: str, out_path: str, soundfont: str,
     cmd = [binary, "-ni", "-g", "1.0", "-T", "wav", "-F", out_path,
            "-r", str(sample_rate), soundfont, midi_path]
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True,
+        proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace",
                               timeout=timeout)
     except subprocess.TimeoutExpired as exc:
         raise RuntimeError(

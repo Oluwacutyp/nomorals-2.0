@@ -1252,7 +1252,7 @@ def register(registry: Any) -> None:
                 proc = _sp.run(
                     [patch_bin, "-p1", "--no-backup-if-mismatch", "-i", diff_file,
                      str(target.relative_to(root))],
-                    cwd=str(root), capture_output=True, text=True, timeout=60,
+                    cwd=str(root), capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60,
                 )
             finally:
                 Path(diff_file).unlink(missing_ok=True)

@@ -61,7 +61,7 @@ class BotTest(unittest.TestCase):
         proc = subprocess.run(
             [sys.executable, str(RUN_PY), "--help"],
             stdin=subprocess.DEVNULL,
-            capture_output=True, text=True, timeout=30,
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30,
         )
         self.assertEqual(proc.returncode, 0)
         self.assertIn("$PROJECT_NAME", proc.stdout)

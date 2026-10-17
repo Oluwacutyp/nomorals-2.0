@@ -63,7 +63,7 @@ def _load() -> Any:
     try:
         proc = subprocess.run(
             [compiler, "-O2", "-shared", "-fPIC", "-o", str(out), str(_SRC)],
-            capture_output=True, text=True, timeout=120,
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120,
         )
         if proc.returncode != 0:
             return None

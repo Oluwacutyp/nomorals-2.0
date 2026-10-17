@@ -109,7 +109,7 @@ def checked_commit() -> str | None:
     try:
         out = subprocess.run(
             ["git", "rev-parse", "--short", "HEAD"],
-            cwd=str(VENDOR_ROOT), capture_output=True, text=True,
+            cwd=str(VENDOR_ROOT), capture_output=True, text=True, encoding="utf-8", errors="replace",
             timeout=10, check=False,
         )
         return out.stdout.strip() or None

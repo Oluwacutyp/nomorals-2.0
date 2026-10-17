@@ -119,7 +119,7 @@ def memory_mb() -> int:
         import subprocess
         out = subprocess.run(
             ["sysctl", "-n", "hw.memsize"], capture_output=True,
-            text=True, timeout=3)
+            text=True, encoding="utf-8", errors="replace", timeout=3)
         if out.returncode == 0 and out.stdout.strip():
             return int(int(out.stdout.strip()) / (1024.0 * 1024.0))
     except Exception:  # noqa: BLE001

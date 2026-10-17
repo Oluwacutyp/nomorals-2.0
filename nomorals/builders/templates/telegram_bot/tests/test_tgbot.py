@@ -127,7 +127,7 @@ class TelegramBotTest(unittest.TestCase):
             [sys.executable, str(RUN_PY), "--once"],
             env={**env, "PYTHONPATH": str(RUN_PY.parent)},
             stdin=subprocess.DEVNULL,
-            capture_output=True, text=True, timeout=30,
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30,
             cwd=str(RUN_PY.parent),
         )
         self.assertEqual(proc.returncode, 2)
@@ -139,7 +139,7 @@ class TelegramBotTest(unittest.TestCase):
             [sys.executable, str(RUN_PY), "--self-test"],
             env=env,
             stdin=subprocess.DEVNULL,
-            capture_output=True, text=True, timeout=30,
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30,
             cwd=str(RUN_PY.parent),
         )
         self.assertEqual(proc.returncode, 0, proc.stderr)
@@ -149,7 +149,7 @@ class TelegramBotTest(unittest.TestCase):
         proc = subprocess.run(
             [sys.executable, str(RUN_PY), "--help"],
             stdin=subprocess.DEVNULL,
-            capture_output=True, text=True, timeout=30,
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30,
             cwd=str(RUN_PY.parent),
         )
         self.assertEqual(proc.returncode, 0)

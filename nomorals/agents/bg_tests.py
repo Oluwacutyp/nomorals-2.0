@@ -71,7 +71,7 @@ class BackgroundTestRun:
             cwd=self.cwd,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
-            text=True,
+            text=True, encoding="utf-8", errors="replace",
             bufsize=1,
             start_new_session=True,  # own process group: _kill_tree is safe
         )

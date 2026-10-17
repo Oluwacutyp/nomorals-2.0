@@ -16,7 +16,7 @@ RUN_PY = Path(__file__).resolve().parent.parent / "run.py"
 def run_cli(*argv: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [sys.executable, str(RUN_PY), *argv],
-        capture_output=True, text=True, timeout=30,
+        capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30,
     )
 
 

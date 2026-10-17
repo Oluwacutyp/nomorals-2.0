@@ -96,7 +96,7 @@ def run_plugin_tests(plugin_dir: str | Path, *,
            *[str(t) for t in tests]]
     try:
         proc = subprocess.run(cmd, cwd=str(root), env=env,
-                              capture_output=True, text=True,
+                              capture_output=True, text=True, encoding="utf-8", errors="replace",
                               timeout=timeout_s)
     except subprocess.TimeoutExpired:
         raise PluginTestFailed(

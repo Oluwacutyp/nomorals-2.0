@@ -28,6 +28,7 @@ import re
 import shutil
 import sqlite3
 import subprocess
+import tempfile
 import threading
 import time
 import uuid
@@ -659,7 +660,7 @@ def _stage_synthesize(audio: str, **kw: Any) -> dict[str, Any]:
             if not text:
                 continue
             voice_ref = speakers.get(speaker)
-            out = kw.get("workdir", "/tmp")
+            out = kw.get("workdir") or tempfile.gettempdir()
             res = engine.speak(text, voice_ref=voice_ref, out_dir=out) \
                 if hasattr(engine, "speak") else None
             if res is None:
@@ -699,12 +700,12 @@ def _stage_master(audio: str, **kw: Any) -> dict[str, Any]:
         if shutil.which("ffmpeg") is None:
             return {"ok": True, "audio": audio, "lufs": None,
                     "note": "ffmpeg missing — unmastered"}
-        out = str(Path(kw.get("workdir", "/tmp"))
+        out = str(Path(kw.get("workdir") or tempfile.gettempdir())
                   / f"mastered_{uuid.uuid4().hex[:8]}.wav")
         cmd = ["ffmpeg", "-y", "-v", "error", "-i", audio,
                "-filter:a", f"loudnorm=I={target}:TP=-1.5:LRA=11",
                "-ar", "24000", "-ac", "1", out]
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+        r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=600)
         if r.returncode != 0 or not Path(out).exists():
             return {"ok": True, "audio": audio, "lufs": None,
                     "note": "mastering failed — using unmastered audio"}
@@ -747,7 +748,10 @@ class PipelineConfig:
     target_lufs: float = -16.0
     tts_backend: str = "auto"
     keyterms: bool = True              # inject user vocabulary into STT
-    workdir: str = "/tmp"
+    # Platform temp dir (tempfile.gettempdir() honours TMPDIR/TEMP/TMP).
+    # A hardcoded "/tmp" is C:\\tmp on Windows — often unwritable — and
+    # ignores the user's configured temp dir.
+    workdir: str = field(default_factory=tempfile.gettempdir)
 
     @classmethod
     def from_dict(cls, d: dict[str, Any] | None) -> "PipelineConfig":
@@ -770,7 +774,7 @@ class PipelineConfig:
                 target_lufs=float(d.get("target_lufs", -16.0)),
                 tts_backend=str(d.get("tts_backend") or "auto"),
                 keyterms=bool(d.get("keyterms", True)),
-                workdir=str(d.get("workdir") or "/tmp"),
+                workdir=str(d.get("workdir") or tempfile.gettempdir()),
             )
         except Exception:  # noqa: BLE001
             return cls()
@@ -816,7 +820,7 @@ class VoicePipeline:
             if not p.exists():
                 return {"ok": False, "stage": "input",
                         "reason": f"no such audio: {audio}"}
-            workdir = Path(cfg.workdir or "/tmp")
+            workdir = Path(cfg.workdir or tempfile.gettempdir())
             try:
                 workdir.mkdir(parents=True, exist_ok=True)
             except Exception:  # noqa: BLE001
@@ -913,7 +917,7 @@ def _pipeline_synthesizer(pipeline: VoicePipeline, cfg: PipelineConfig,
             speakers={"A": ref_wav},
             audience=cfg.audience, tts_backend=cfg.tts_backend,
             engine_registry=pipeline.registry,
-            workdir=cfg.workdir or "/tmp")
+            workdir=cfg.workdir or tempfile.gettempdir())
         return r.get("audio") if r.get("ok") else None
     except Exception:  # noqa: BLE001
         return None

@@ -620,7 +620,7 @@ def serve(project_dir: str | Path, port: int = 0, *,
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.PIPE,
-                text=True,
+                text=True, encoding="utf-8", errors="replace",
                 start_new_session=True,  # own process group: stop() kills the tree
             )
         except OSError as exc:

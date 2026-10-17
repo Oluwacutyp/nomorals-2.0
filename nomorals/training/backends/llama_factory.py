@@ -187,7 +187,7 @@ class LlamaFactoryBackend:
             [cli, "train", str(yaml_path)],
             cwd=str(out / "data"),  # dataset_info.json is read relative to cwd/data
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            text=True, env=env,
+            text=True, encoding="utf-8", errors="replace", env=env,
         )
         tail: list[str] = []
         assert proc.stdout is not None

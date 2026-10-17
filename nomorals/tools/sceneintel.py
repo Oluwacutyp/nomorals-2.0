@@ -168,7 +168,7 @@ def register(registry: Any) -> None:
                 p = subprocess.run(
                     ["ffprobe", "-v", "error", "-show_entries",
                      "format=duration", "-of", "csv=p=0", str(c)],
-                    capture_output=True, text=True, timeout=30)
+                    capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30)
                 try:
                     durs.append(float(p.stdout.strip()))
                 except ValueError:

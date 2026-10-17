@@ -506,7 +506,7 @@ class UpdateManager:
             proc = subprocess.run(
                 [self.git_bin, "-C", str(self.repo_dir), "pull", "--ff-only"],
                 capture_output=True,
-                text=True,
+                text=True, encoding="utf-8", errors="replace",
                 timeout=300,
             )
         except FileNotFoundError:
@@ -561,7 +561,7 @@ class UpdateManager:
         try:
             proc = subprocess.run(
                 [self.git_bin, "-C", str(self.repo_dir), "rev-parse", "HEAD"],
-                capture_output=True, text=True, timeout=30,
+                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30,
             )
         except (FileNotFoundError, subprocess.TimeoutExpired):
             return ""

@@ -38,7 +38,7 @@ class BisectError(RuntimeError):
 
 def _git(repo: Path, *args: str, timeout: int = 60) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        ["git", *args], cwd=repo, capture_output=True, text=True,
+        ["git", *args], cwd=repo, capture_output=True, text=True, encoding="utf-8", errors="replace",
         timeout=timeout)
 
 
@@ -46,7 +46,7 @@ def _run_test(repo: Path, test_cmd: str | list[str], timeout: float) -> str:
     """Run the test command at the current checkout; return good/bad/skip."""
     try:
         proc = subprocess.run(
-            test_cmd, cwd=repo, capture_output=True, text=True,
+            test_cmd, cwd=repo, capture_output=True, text=True, encoding="utf-8", errors="replace",
             timeout=timeout, shell=isinstance(test_cmd, str))
     except subprocess.TimeoutExpired:
         _log.warning("bisect: test command timed out — skipping commit")

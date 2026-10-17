@@ -434,7 +434,7 @@ class CodeRunner:
                  timeout: float) -> dict[str, Any]:
         t0 = time.perf_counter()
         proc = subprocess.run(
-            cmd, cwd=cwd, capture_output=True, text=True,
+            cmd, cwd=cwd, capture_output=True, text=True, encoding="utf-8", errors="replace",
             timeout=timeout)
         return {
             "exit_code": proc.returncode,

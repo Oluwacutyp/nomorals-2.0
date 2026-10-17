@@ -251,7 +251,7 @@ class ToolMaker:
             target.write_text(code, encoding="utf-8")
             proc = subprocess.run(
                 [sys.executable, "-B", "-c", _PROBE_SCRIPT, str(target)],
-                cwd=str(_REPO_ROOT), capture_output=True, text=True,
+                cwd=str(_REPO_ROOT), capture_output=True, text=True, encoding="utf-8", errors="replace",
                 timeout=60, env={**__import__("os").environ,
                                  "PYTHONPATH": str(_REPO_ROOT)},
             )

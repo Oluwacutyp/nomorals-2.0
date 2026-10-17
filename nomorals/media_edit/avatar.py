@@ -165,7 +165,7 @@ def _audio_duration_s(audio: Path) -> float:
     proc = subprocess.run(
         [ffmpeg_path().replace("ffmpeg", "ffprobe"), "-v", "quiet",
          "-print_format", "json", "-show_format", str(audio)],
-        capture_output=True, text=True, timeout=30)
+        capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30)
     try:
         dur = float(_json.loads(proc.stdout)["format"]["duration"])
         return max(0.5, dur)
@@ -232,7 +232,7 @@ def _run_latentsync(video: Path, audio: Path, out: Path) -> Path:
               steps, guidance)
     try:
         proc = subprocess.run(
-            cmd, cwd=str(repo), capture_output=True, text=True,
+            cmd, cwd=str(repo), capture_output=True, text=True, encoding="utf-8", errors="replace",
             timeout=3600)
     except OSError as exc:
         raise AvatarError(
@@ -330,7 +330,7 @@ def _run_wav2lip(video: Path, audio: Path, out: Path) -> Path:
     _log.info("avatar: running Wav2Lip")
     try:
         proc = subprocess.run(
-            cmd, cwd=str(repo), capture_output=True, text=True,
+            cmd, cwd=str(repo), capture_output=True, text=True, encoding="utf-8", errors="replace",
             timeout=3600)
     except OSError as exc:
         raise AvatarError(

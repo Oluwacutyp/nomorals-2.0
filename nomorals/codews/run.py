@@ -67,7 +67,7 @@ def _run_cmd(args: list[str], cwd: Path, timeout: int,
         merged.update(env)
     try:
         return subprocess.run(
-            args, cwd=str(cwd), capture_output=True, text=True,
+            args, cwd=str(cwd), capture_output=True, text=True, encoding="utf-8", errors="replace",
             timeout=timeout, env=merged)
     except subprocess.TimeoutExpired as exc:
         raise WorkspaceError(
@@ -96,7 +96,7 @@ def _pytest_available() -> bool:
     try:
         proc = subprocess.run(
             [sys.executable, "-m", "pytest", "--version"],
-            capture_output=True, text=True, timeout=30)
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30)
     except (OSError, subprocess.TimeoutExpired):
         return False
     return proc.returncode == 0

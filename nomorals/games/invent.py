@@ -32,6 +32,7 @@ from pathlib import Path
 from typing import Any
 
 from ..core.logging_setup import get_logger
+from ..core.text import safe_filename
 from .games.base import MultiGame, Room
 
 _log = get_logger(__name__)
@@ -86,7 +87,12 @@ def validate_design(design: dict[str, Any]) -> list[str]:
 def save_design(design: dict[str, Any]) -> Path:
     design = dict(design)
     design["invented_at"] = time.time()
-    p = invention_dir() / f"{design['name']}.json"
+    # The design name is LLM-generated ("slug" by convention, not by
+    # guarantee): sanitise before it becomes a filename — a name like
+    # "my game: part 1" or "a/b" raises OSError on Windows and escapes
+    # the directory on every OS. The design's own "name" field is kept
+    # verbatim; only the on-disk file is made safe.
+    p = invention_dir() / f"{safe_filename(design['name'], fallback='game')}.json"
     p.write_text(json.dumps(design, indent=1, ensure_ascii=False), encoding="utf-8")
     return p
 

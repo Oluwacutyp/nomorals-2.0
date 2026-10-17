@@ -506,7 +506,7 @@ def ship_manifest_to_repo(
                 proc = subprocess.run(
                     ["git", "clone", "--depth", "1", "--branch", "main",
                      f"https://github.com/{full_name}.git", str(repo_dir)],
-                    capture_output=True, text=True, timeout=120, env=env,
+                    capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120, env=env,
                 )
             cloned = proc.returncode == 0
         except Exception:  # noqa: BLE001 - fall through to fresh init
@@ -530,7 +530,7 @@ def ship_manifest_to_repo(
             ["git", "-c", "user.name=NoMorals Backup",
              "-c", "user.email=backup@localhost",
              "commit", "-m", f"backup manifest {backup_id}"],
-            cwd=str(repo_dir), capture_output=True, text=True, timeout=60,
+            cwd=str(repo_dir), capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60,
         )
         if commit.returncode != 0 and "nothing to commit" in (
             commit.stdout + commit.stderr

@@ -256,7 +256,7 @@ def _supir(img: Any, scale: float) -> Any:
                "--img_dir", str(in_dir), "--save_dir", str(out_dir)]
         _log.info("SUPIR rescue: %s", " ".join(cmd))
         proc = subprocess.run(cmd, cwd=str(test_py.parent),
-                              capture_output=True, text=True,
+                              capture_output=True, text=True, encoding="utf-8", errors="replace",
                               timeout=3600)
         if proc.returncode != 0:
             raise UpscaleError(

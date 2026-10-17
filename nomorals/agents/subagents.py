@@ -1245,7 +1245,7 @@ class Tester(Subagent):
             cmd = [sys.executable, "-c", f"import {dotted}"]
         try:
             proc = subprocess.run(cmd, cwd=str(self.project_root),
-                                  capture_output=True, text=True, timeout=60)
+                                  capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60)
         except subprocess.TimeoutExpired:
             return "collection timed out after 60s"
         except OSError as exc:

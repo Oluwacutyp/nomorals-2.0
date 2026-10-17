@@ -332,7 +332,7 @@ class CodingAgent:
              timeout: int = 60) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             ["git", *args], cwd=cwd or self._resolve("."),
-            capture_output=True, text=True, timeout=timeout)
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout)
 
     def _is_git_repo(self, workdir: Path) -> bool:
         try:
