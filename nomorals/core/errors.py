@@ -725,3 +725,37 @@ def format_error(what: str, exc: BaseException | Any, *, hint: str | None = None
     if suffix:
         out += f". {suffix}"
     return out
+
+
+def short_stt_reason(error: Any) -> str:
+    """Classify an STT failure into the short reason shown to the user.
+
+    THE single implementation (infra spec §4.2, one path per job).
+    ``nomorals.agents.partner.brain._short_stt_reason`` and
+    ``nomorals.voice.pingpong._short_stt_reason`` are aliases to this —
+    the two copies drifted before (one collapsed empty errors to a bare
+    generic) and must never diverge again.
+
+    "no STT backend" when nothing can transcribe; anything else keeps the
+    REAL underlying error (e.g. "STT API 401: {...}" /
+    "CERTIFICATE_VERIFY_FAILED") instead of collapsing to a bare
+    "STT API error". Secrets are redacted; the detail is single-line
+    and truncated.
+    """
+    raw = getattr(error, "message", None)
+    text = str(raw if raw else (error or "")).strip()
+    lowered = text.lower()
+    if ("no stt backend" in lowered or "no backend" in lowered
+            or "not installed" in lowered or "no stt" in lowered):
+        return "no STT backend"
+    if not text:
+        # Never a bare generic: an empty-message exception still names
+        # its class (spec §4.3 — never-empty reasons).
+        return f"STT API error: {exc_str(error) if isinstance(error, BaseException) else type(error).__name__}"
+    detail = " ".join(text.split())
+    detail = redact_secrets(detail)
+    if len(detail) > 300:
+        detail = detail[:300].rstrip() + "…"
+    if detail.lower().startswith("stt api"):
+        return detail
+    return f"STT API error: {detail}"

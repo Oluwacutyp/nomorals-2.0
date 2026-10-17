@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import os
 import random
-import re
 import threading
 import time
 from typing import Any, Callable
@@ -28,38 +27,10 @@ from .approvals import _key_set
 _log = get_logger(__name__)
 
 
-def _short_stt_reason(error: Any) -> str:
-    """Classify an STT failure into the short reason shown to the user.
-
-    Mirrors :func:`nomorals.voice.pingpong._short_stt_reason` (kept
-    local so this module doesn't import the voice layer): "no STT
-    backend" when nothing can transcribe; anything else keeps the REAL
-    underlying error (e.g. "STT API 401: {...}" /
-    "CERTIFICATE_VERIFY_FAILED") instead of collapsing to a bare
-    "STT API error" that hid the cause. Secrets are redacted; the
-    detail is single-line and truncated.
-    """
-    raw = getattr(error, "message", None)
-    text = str(raw if raw else (error or "")).strip()
-    lowered = text.lower()
-    if ("no stt backend" in lowered or "no backend" in lowered
-            or "not installed" in lowered or "no stt" in lowered):
-        return "no STT backend"
-    if not text:
-        # Never a bare generic: an empty-message exception still names
-        # its class (spec §4.3 — never-empty reasons).
-        from ...core.errors import exc_str as _central_exc_str
-
-        return f"STT API error: {_central_exc_str(error) if isinstance(error, BaseException) else type(error).__name__}"
-    detail = " ".join(text.split())
-    from ...core.errors import redact_secrets
-
-    detail = redact_secrets(detail)
-    if len(detail) > 300:
-        detail = detail[:300].rstrip() + "…"
-    if detail.lower().startswith("stt api"):
-        return detail
-    return f"STT API error: {detail}"
+# One STT-failure formatter (infra spec §4.2): the canonical implementation
+# lives in nomorals.core.errors.short_stt_reason; this is an alias so the
+# two former copies (brain + pingpong) can never drift again.
+from ...core.errors import short_stt_reason as _short_stt_reason
 
 
 class PartnerBrain:

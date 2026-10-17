@@ -1936,24 +1936,33 @@ class SystemTTSBackend:
     def detect() -> tuple[Optional[str], Optional[str]]:
         """(kind, executable) of the OS speech service, or (None, None).
 
-        espeak-ng/espeak FIRST on every platform — the same order the
-        /tts path (``tools/audio.py::detect_tts_engines``) uses, and
-        the engine proven working on the owner's Windows box. The
-        vocal path must not silently pick a different engine
-        (PowerShell System.Speech on win32, which has no voices on
-        Server editions and fails) when espeak-ng is installed.
-        Platform-native services (say / PowerShell) are fallbacks
-        only when no espeak is present.
+        Delegates to the ONE canonical system-TTS order
+        (``tools/audio.py::detect_tts_engines`` / ``TTS_ENGINE_ORDER``)
+        and takes the first engine this backend can actually drive
+        (espeak-ng → ``espeak``, ``say`` → ``say``). pico2wave /
+        edge_tts are in the canonical order but are driven by other
+        backends, so SystemTTS skips them. PowerShell is the win32
+        last resort ONLY when the canonical list is empty: ``/tts``
+        cannot drive PowerShell (``tools/audio.py::_tts_local``
+        rejects unknown engines), so it is a SystemTTS-only fallback,
+        not a second order — and it must never win while espeak-ng
+        is present (the G7 divergence: vocal picked PowerShell
+        System.Speech, which has no voices on Server editions).
         """
-        for candidate in ("espeak-ng", "espeak"):
-            exe = shutil.which(candidate)
-            if exe:
-                return ("espeak", exe)
-        plat = sys.platform
-        if plat == "darwin":
-            exe = shutil.which("say")
-            return ("say", exe) if exe else (None, None)
-        if plat == "win32":
+        from ..tools.audio import detect_tts_engines
+
+        for engine in detect_tts_engines():
+            if engine == "espeak_ng":
+                exe = shutil.which("espeak-ng") or shutil.which("espeak")
+                if exe:
+                    return ("espeak", exe)
+            elif engine == "say" and sys.platform == "darwin":
+                # `say` is the macOS OS service; SystemTTS drives it with
+                # macOS flags, so it only counts on darwin.
+                exe = shutil.which("say")
+                if exe:
+                    return ("say", exe)
+        if sys.platform == "win32":
             exe = shutil.which("powershell") or shutil.which("pwsh")
             return ("powershell", exe) if exe else (None, None)
         return (None, None)

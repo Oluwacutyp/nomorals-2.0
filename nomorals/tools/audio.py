@@ -635,22 +635,41 @@ _ESPEAK = "espeak-ng"
 _PICO = "pico2wave"
 _SAY = "say"
 
+#: THE canonical system-TTS engine order (infra spec §4.2 — one path per
+#: job). ``/tts`` (``tts()`` below) and the vocal path
+#: (``voice/tts.py::SystemTTSBackend.detect``) both resolve through
+#: :func:`detect_tts_engines`, which iterates this list — never a second
+#: copy of the order. espeak-ng first on every platform (proven on the
+#: owner's Windows box); platform service (``say``) next; cloud
+#: (``edge_tts``) last. PowerShell is NOT in this list: ``tts()`` cannot
+#: drive it (``_tts_local`` raises for unknown engines); it survives only
+#: as SystemTTSBackend's last-resort fallback, documented there.
+TTS_ENGINE_ORDER: tuple[str, ...] = ("espeak_ng", "pico2wave", "say", "edge_tts")
+
 
 def detect_tts_engines() -> list[str]:
-    """Which TTS engines are actually usable on this machine, in priority order."""
-    found: list[str] = []
-    if shutil.which(_ESPEAK):
-        found.append("espeak_ng")
-    if shutil.which(_PICO):
-        found.append("pico2wave")
-    if shutil.which(_SAY):
-        found.append("say")
-    try:
-        import edge_tts  # noqa: F401
+    """Which TTS engines are actually usable on this machine, in priority order.
 
-        found.append("edge_tts")
-    except ImportError:  # noqa: E103 - optional TTS backend probe
-        pass
+    Iterates :data:`TTS_ENGINE_ORDER` — the single canonical order.
+    """
+    found: list[str] = []
+    for engine in TTS_ENGINE_ORDER:
+        if engine == "espeak_ng":
+            if shutil.which(_ESPEAK):
+                found.append("espeak_ng")
+        elif engine == "pico2wave":
+            if shutil.which(_PICO):
+                found.append("pico2wave")
+        elif engine == "say":
+            if shutil.which(_SAY):
+                found.append("say")
+        elif engine == "edge_tts":
+            try:
+                import edge_tts  # noqa: F401
+
+                found.append("edge_tts")
+            except ImportError:  # noqa: E103 - optional TTS backend probe
+                pass
     return found
 
 

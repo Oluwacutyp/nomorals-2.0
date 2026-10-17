@@ -15,7 +15,6 @@ actually was a voice note.
 from __future__ import annotations
 
 import os
-import re
 import subprocess
 import tempfile
 from pathlib import Path
@@ -47,39 +46,9 @@ def has_voice_media(message: Any) -> bool:
     return False
 
 
-def _short_stt_reason(error: Any) -> str:
-    """Classify an STT failure into the short reason shown to the user.
-
-    "no STT backend" — nothing can transcribe (no backend installed /
-    configured). Anything else keeps the REAL underlying error
-    (e.g. "STT API 401: {...}" / "CERTIFICATE_VERIFY_FAILED") — the
-    previous version collapsed every failure to the bare "STT API
-    error", which hid the cause the owner needed to act on. Secrets
-    (Bearer tokens, api_key= values) are redacted; the detail is
-    single-line and truncated. Kept in sync with
-    :func:`nomorals.agents.partner.brain._short_stt_reason`.
-    """
-    raw = getattr(error, "message", None)
-    text = str(raw if raw else (error or "")).strip()
-    lowered = text.lower()
-    if ("no stt backend" in lowered or "no backend" in lowered
-            or "not installed" in lowered or "no stt" in lowered):
-        return "no STT backend"
-    if not text:
-        # Never a bare generic: an empty-message exception still names
-        # its class (spec §4.3 — never-empty reasons).
-        from ..core.errors import exc_str as _central_exc_str
-
-        return f"STT API error: {_central_exc_str(error) if isinstance(error, BaseException) else type(error).__name__}"
-    detail = " ".join(text.split())
-    from ..core.errors import redact_secrets
-
-    detail = redact_secrets(detail)
-    if len(detail) > 300:
-        detail = detail[:300].rstrip() + "…"
-    if detail.lower().startswith("stt api"):
-        return detail
-    return f"STT API error: {detail}"
+# One STT-failure formatter (infra spec §4.2): canonical implementation in
+# nomorals.core.errors.short_stt_reason; alias so the copies never drift.
+from ..core.errors import short_stt_reason as _short_stt_reason
 
 
 def _record_stt_reason(message: Any, reason: str) -> None:
