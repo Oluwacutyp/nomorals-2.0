@@ -100,7 +100,7 @@ function Write-Warn { param([string]$Text) Write-Host "WARNING: $Text" -Foregrou
 function Write-Ok   { param([string]$Text) Write-Host "OK: $Text" -ForegroundColor Green }
 
 function Invoke-Native {
-    param([string]$Exe, [string[]]$Args, [string]$OutFile, [string]$ErrFile)
+    param([string]$Exe, [string[]]$Arguments, [string]$OutFile, [string]$ErrFile)
     # Run a native exe WITHOUT PowerShell's & operator. In Windows
     # PowerShell 5.1 ANY stderr line from a native exe (even a benign
     # INFO, even with `> file 2> file` redirection) becomes a
@@ -112,7 +112,30 @@ function Invoke-Native {
     # Stderr is ALWAYS captured to $ErrFile, never silenced (2>$null
     # would hide real tracebacks) and never merged into the error
     # stream. Do not set $ErrorActionPreference to SilentlyContinue.
-    $proc = Start-Process -FilePath $Exe -ArgumentList $Args -RedirectStandardOutput $OutFile -RedirectStandardError $ErrFile -NoNewWindow -Wait -PassThru
+    #
+    # The args parameter MUST NOT be named $Args. $Args is a PowerShell
+    # automatic variable (unbound arguments). A parameter named $Args
+    # is shadowed by the automatic variable, so Start-Process received
+    # an EMPTY -ArgumentList and died with "Cannot validate argument on
+    # parameter 'ArgumentList'" even though every call site passed -Args
+    # explicitly (owner EC2 screenshot: died right after "OK: winget
+    # found"; Preflight "Python:" was blank because its Invoke-Native
+    # call failed the same way inside try/catch). $Arguments has no
+    # such collision.
+    #
+    # Defense in depth: never hand Start-Process a $null/empty
+    # collection or one containing $null/empty elements - its
+    # ValidateNotNullOrEmpty rejects those. Filter first, and omit
+    # -ArgumentList entirely when nothing remains.
+    $cleanArgs = @()
+    if ($null -ne $Arguments) {
+        foreach ($a in $Arguments) { if ($null -ne $a -and $a -ne '') { $cleanArgs += [string]$a } }
+    }
+    if ($cleanArgs.Count -eq 0) {
+        $proc = Start-Process -FilePath $Exe -RedirectStandardOutput $OutFile -RedirectStandardError $ErrFile -NoNewWindow -Wait -PassThru
+    } else {
+        $proc = Start-Process -FilePath $Exe -ArgumentList $cleanArgs -RedirectStandardOutput $OutFile -RedirectStandardError $ErrFile -NoNewWindow -Wait -PassThru
+    }
     return $proc.ExitCode
 }
 
@@ -138,7 +161,7 @@ function Get-Preflight {
     try {
         $verOut = Join-Path $env:TEMP "devon-preflight-$PID.out.txt"
         $verErr = Join-Path $env:TEMP "devon-preflight-$PID.err.txt"
-        $code = Invoke-Native -Exe 'python' -Args @('--version') -OutFile $verOut -ErrFile $verErr
+        $code = Invoke-Native -Exe 'python' -Arguments @('--version') -OutFile $verOut -ErrFile $verErr
         $pyVersion = ((Get-Content $verOut -ErrorAction SilentlyContinue) + (Get-Content $verErr -ErrorAction SilentlyContinue) | Select-Object -First 1)
         if ($null -ne $pyVersion) { $pyVersion = $pyVersion.ToString().Trim() }
     } catch { }
@@ -170,13 +193,13 @@ function Install-WingetPackage {
     # NativeCommandError on stderr under $ErrorActionPreference='Stop'.
     $listOut = Join-Path $env:TEMP "devon-winget-list-$PID.out.txt"
     $listErr = Join-Path $env:TEMP "devon-winget-list-$PID.err.txt"
-    [void](Invoke-Native -Exe 'winget' -Args @('list', '--id', $Id, '-e', '--accept-source-agreements') -OutFile $listOut -ErrFile $listErr)
+    [void](Invoke-Native -Exe 'winget' -Arguments @('list', '--id', $Id, '-e', '--accept-source-agreements') -OutFile $listOut -ErrFile $listErr)
     $present = Get-Content $listOut -ErrorAction SilentlyContinue | Select-String -SimpleMatch $Id
     if ($present) { Write-Ok "$Name already installed"; return }
     Write-Host "  Installing $Name ($Id)..."
     $instOut = Join-Path $env:TEMP "devon-winget-install-$PID.out.txt"
     $instErr = Join-Path $env:TEMP "devon-winget-install-$PID.err.txt"
-    $instCode = Invoke-Native -Exe 'winget' -Args @('install', '--id', $Id, '-e', '--accept-source-agreements', '--accept-package-agreements') -OutFile $instOut -ErrFile $instErr
+    $instCode = Invoke-Native -Exe 'winget' -Arguments @('install', '--id', $Id, '-e', '--accept-source-agreements', '--accept-package-agreements') -OutFile $instOut -ErrFile $instErr
     if ($instCode -ne 0) {
         Write-Warn "$Name install failed (winget exit $instCode); see $instErr. Continuing - Devon runs without it, re-run to retry."
     }
@@ -333,7 +356,7 @@ function Invoke-Verification {
     try {
         $helpOut = Join-Path $verifyDir 'help.out.txt'
         $helpErr = Join-Path $verifyDir 'help.err.txt'
-        $helpCode = Invoke-Native -Exe $venvPy -Args @('-m', 'nomorals', '--help') -OutFile $helpOut -ErrFile $helpErr
+        $helpCode = Invoke-Native -Exe $venvPy -Arguments @('-m', 'nomorals', '--help') -OutFile $helpOut -ErrFile $helpErr
         if ($helpCode -eq 0) {
             $helpText = (Get-Content $helpOut -TotalCount 5 -ErrorAction SilentlyContinue) -join ' '
             Write-Ok "python -m nomorals --help works: $helpText"
@@ -344,7 +367,7 @@ function Invoke-Verification {
     try {
         $docOut = Join-Path $verifyDir 'doctor.out.txt'
         $docErr = Join-Path $verifyDir 'doctor.err.txt'
-        $docCode = Invoke-Native -Exe $venvPy -Args @('-m', 'nomorals.cli', 'doctor') -OutFile $docOut -ErrFile $docErr
+        $docCode = Invoke-Native -Exe $venvPy -Arguments @('-m', 'nomorals.cli', 'doctor') -OutFile $docOut -ErrFile $docErr
         Get-Content $docOut -TotalCount 20 -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "  $_" }
         if ($docCode -ne 0) { Write-Warn "nm doctor failed (exit $docCode); see $docErr (Devon still runs; see logs)" }
     } catch { Write-Warn "nm doctor failed: $_ (Devon still runs; see logs)" }

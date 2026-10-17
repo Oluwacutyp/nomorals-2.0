@@ -229,3 +229,111 @@ def test_every_winget_call_pre_accepts_source_agreements() -> None:
                     f"in {ps1.name} (would hang on first-run prompt):\n{line}"
                 )
 
+
+def test_invoke_native_param_is_not_named_args() -> None:
+    """Invoke-Native must not name its args parameter $Args.
+
+    Regression (owner's EC2 screenshot): the installer died right
+    after "OK: winget found" with "Cannot validate argument on
+    parameter 'ArgumentList'" even though every call site passed
+    -Args explicitly, and Preflight "Python:" was blank because its
+    Invoke-Native call failed the same way inside try/catch.
+    Cause: $Args is a PowerShell automatic variable (unbound
+    arguments). A parameter named $Args is shadowed by the automatic
+    variable, so Start-Process received an EMPTY -ArgumentList.
+    The parameter must be $Arguments (or any non-automatic name).
+    Comment lines may mention $Args (they document the rule);
+    only code lines count.
+    """
+    import re
+
+    for ps1 in (
+        REPO_ROOT / "scripts" / "install_devon_windows.ps1",
+        REPO_ROOT / "scripts" / "deploy_devon_ec2_rdp.ps1",
+    ):
+        src = ps1.read_text(encoding="utf-8")
+        m = re.search(r"function Invoke-Native\s*\{(.*?)\n\}", src, re.DOTALL)
+        assert m, f"Invoke-Native not found in {ps1.name}"
+        code_lines = [
+            line
+            for line in m.group(1).splitlines()
+            if not line.strip().startswith("#")
+        ]
+        code = "\n".join(code_lines)
+        assert re.search(r"\$Args\b", code) is None, (
+            f"Invoke-Native still uses automatic $Args in {ps1.name} "
+            "(shadowed - Start-Process sees an empty -ArgumentList)"
+        )
+        assert "$Arguments" in code, (
+            f"Invoke-Native should name its args parameter $Arguments "
+            f"in {ps1.name}"
+        )
+
+
+def test_invoke_native_guards_null_empty_args() -> None:
+    """Invoke-Native must never pass $null/empty args to Start-Process.
+
+    Start-Process -ArgumentList carries ValidateNotNullOrEmpty: a
+    $null/empty collection or one containing $null/empty elements
+    throws ParameterBindingValidationException. The helper must
+    filter $null/empty elements and omit -ArgumentList entirely
+    when nothing remains - no bare `-ArgumentList $Args` or
+    `-ArgumentList $Arguments` passthrough. Comment lines excluded.
+    """
+    import re
+
+    for ps1 in (
+        REPO_ROOT / "scripts" / "install_devon_windows.ps1",
+        REPO_ROOT / "scripts" / "deploy_devon_ec2_rdp.ps1",
+    ):
+        src = ps1.read_text(encoding="utf-8")
+        m = re.search(r"function Invoke-Native\s*\{(.*?)\n\}", src, re.DOTALL)
+        assert m, f"Invoke-Native not found in {ps1.name}"
+        code_lines = [
+            line
+            for line in m.group(1).splitlines()
+            if not line.strip().startswith("#")
+        ]
+        code = "\n".join(code_lines)
+        assert "-ArgumentList $Args" not in code
+        assert "-ArgumentList $Arguments" not in code, (
+            f"Invoke-Native passes its parameter straight to "
+            f"-ArgumentList in {ps1.name} (no null-guard)"
+        )
+        assert "$null -ne" in code and "Count -eq 0" in code, (
+            f"Invoke-Native has no null/empty guard in {ps1.name}"
+        )
+        # A Start-Process line WITHOUT -ArgumentList must exist:
+        # that is the omit-the-parameter branch for empty args.
+        assert re.search(
+            r"Start-Process -FilePath \$Exe -RedirectStandardOutput",
+            code,
+        ), f"Invoke-Native never omits -ArgumentList in {ps1.name}"
+
+
+def test_no_invoke_native_call_passes_null_args() -> None:
+    """No Invoke-Native call site may pass $null / empty / -Args args."""
+    for ps1 in (
+        REPO_ROOT / "scripts" / "install_devon_windows.ps1",
+        REPO_ROOT / "scripts" / "deploy_devon_ec2_rdp.ps1",
+    ):
+        src = ps1.read_text(encoding="utf-8")
+        code_lines = [
+            line for line in src.splitlines() if not line.strip().startswith("#")
+        ]
+        for line in code_lines:
+            if "Invoke-Native" in line and "-Exe" in line:
+                assert "-Arguments " in line, (
+                    f"Invoke-Native call does not use -Arguments in "
+                    f"{ps1.name}:\n{line}"
+                )
+                assert "-Args " not in line, (
+                    f"Invoke-Native call still uses -Args (shadowed "
+                    f"automatic variable) in {ps1.name}:\n{line}"
+                )
+                assert "-Arguments $null" not in line, (
+                    f"Invoke-Native call passes bare $null in {ps1.name}:\n{line}"
+                )
+                assert "-Arguments @()" not in line, (
+                    f"Invoke-Native call passes empty array in {ps1.name}:\n{line}"
+                )

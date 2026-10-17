@@ -82,7 +82,7 @@ function Write-Warn { param([string]$Text) Write-Host "WARNING: $Text" -Foregrou
 function Write-Ok   { param([string]$Text) Write-Host "OK: $Text" -ForegroundColor Green }
 
 function Invoke-Native {
-    param([string]$Exe, [string[]]$Args, [string]$OutFile, [string]$ErrFile)
+    param([string]$Exe, [string[]]$Arguments, [string]$OutFile, [string]$ErrFile)
     # Run a native exe WITHOUT PowerShell's & operator. In Windows
     # PowerShell 5.1 ANY stderr line from a native exe (even a benign
     # INFO, even with `> file 2> file` redirection) becomes a
@@ -94,7 +94,30 @@ function Invoke-Native {
     # Stderr is ALWAYS captured to $ErrFile, never silenced (2>$null
     # would hide real tracebacks) and never merged into the error
     # stream. Do not set $ErrorActionPreference to SilentlyContinue.
-    $proc = Start-Process -FilePath $Exe -ArgumentList $Args -RedirectStandardOutput $OutFile -RedirectStandardError $ErrFile -NoNewWindow -Wait -PassThru
+    #
+    # The args parameter MUST NOT be named $Args. $Args is a PowerShell
+    # automatic variable (unbound arguments). A parameter named $Args
+    # is shadowed by the automatic variable, so Start-Process received
+    # an EMPTY -ArgumentList and died with "Cannot validate argument on
+    # parameter 'ArgumentList'" even though every call site passed -Args
+    # explicitly (owner EC2 screenshot: died right after "OK: winget
+    # found"; Preflight "Python:" was blank because its Invoke-Native
+    # call failed the same way inside try/catch). $Arguments has no
+    # such collision.
+    #
+    # Defense in depth: never hand Start-Process a $null/empty
+    # collection or one containing $null/empty elements - its
+    # ValidateNotNullOrEmpty rejects those. Filter first, and omit
+    # -ArgumentList entirely when nothing remains.
+    $cleanArgs = @()
+    if ($null -ne $Arguments) {
+        foreach ($a in $Arguments) { if ($null -ne $a -and $a -ne '') { $cleanArgs += [string]$a } }
+    }
+    if ($cleanArgs.Count -eq 0) {
+        $proc = Start-Process -FilePath $Exe -RedirectStandardOutput $OutFile -RedirectStandardError $ErrFile -NoNewWindow -Wait -PassThru
+    } else {
+        $proc = Start-Process -FilePath $Exe -ArgumentList $cleanArgs -RedirectStandardOutput $OutFile -RedirectStandardError $ErrFile -NoNewWindow -Wait -PassThru
+    }
     return $proc.ExitCode
 }
 
@@ -252,7 +275,7 @@ if (-not $SkipVerify) {
         if (-not (Test-Path $verifyDir)) { New-Item -ItemType Directory -Path $verifyDir | Out-Null }
         $helpOut = Join-Path $verifyDir 'help.out.txt'
         $helpErr = Join-Path $verifyDir 'help.err.txt'
-        $helpCode = Invoke-Native -Exe $venvPy -Args @('-m', 'nomorals', '--help') -OutFile $helpOut -ErrFile $helpErr
+        $helpCode = Invoke-Native -Exe $venvPy -Arguments @('-m', 'nomorals', '--help') -OutFile $helpOut -ErrFile $helpErr
         if ($helpCode -ne 0) {
             $tail = Get-Content $helpErr -Tail 10 -ErrorAction SilentlyContinue
             throw "VERIFY FAILED: python -m nomorals --help exited $helpCode (traceback is NOT ok). Stderr tail:`n$tail"
@@ -261,7 +284,7 @@ if (-not $SkipVerify) {
         Write-Ok 'python -m nomorals --help works'
         $docOut = Join-Path $verifyDir 'doctor.out.txt'
         $docErr = Join-Path $verifyDir 'doctor.err.txt'
-        $doctorCode = Invoke-Native -Exe $venvPy -Args @('-m', 'nomorals.cli', 'doctor') -OutFile $docOut -ErrFile $docErr
+        $doctorCode = Invoke-Native -Exe $venvPy -Arguments @('-m', 'nomorals.cli', 'doctor') -OutFile $docOut -ErrFile $docErr
         Get-Content $docOut -TotalCount 25 -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "  $_" }
         if ((Test-Path $docErr) -and (Get-Item $docErr).Length -gt 0) {
             Write-Host '  (doctor stderr, non-fatal - INFO on stderr is not an error):'
@@ -273,7 +296,7 @@ if (-not $SkipVerify) {
         Write-Ok 'nm doctor works'
         $impOut = Join-Path $verifyDir 'impossible.out.txt'
         $impErr = Join-Path $verifyDir 'impossible.err.txt'
-        $impCode = Invoke-Native -Exe $venvPy -Args @('-m', 'nomorals', 'impossible', 'examples') -OutFile $impOut -ErrFile $impErr
+        $impCode = Invoke-Native -Exe $venvPy -Arguments @('-m', 'nomorals', 'impossible', 'examples') -OutFile $impOut -ErrFile $impErr
         Get-Content $impOut -TotalCount 8 -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "  $_" }
         if ($impCode -ne 0) {
             $tail = Get-Content $impErr -Tail 10 -ErrorAction SilentlyContinue
