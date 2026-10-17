@@ -47,6 +47,7 @@ from .style import (
     repair_echo,
     split_messages,
     should_answer_short,
+    strip_assistant_framing,
     strip_robotic,
 )
 
@@ -629,6 +630,12 @@ class PartnerResponder:
             relationship_override=relationship_block_for(gate_mode) if restricted else "",
             dynamic_catchphrases=dyn_catchphrases,
             dynamic_pet_names=dyn_pet_names,
+            # Restricted (personal) chats: no connector catalog. A person
+            # in a personal chat doesn't list "services you can link, use,
+            # and act on" — that block frames Devon as an assistant and
+            # contradicts the human presence the persona block asks for.
+            # Owner chats keep it (the owner needs to know what's linkable).
+            include_capabilities=not restricted,
         )
 
         # The character gate is on unless the persona is openly an AI. An
@@ -770,6 +777,15 @@ class PartnerResponder:
             allow_identity=(self.persona.disclosure == "always"),
             extra_phrases=robotic_extra or None,
         )
+        # Presence guard (personal/restricted chats only): strip
+        # assistant/task-framed sentences ("gotcha, what do you need?",
+        # "drop it here and i'll take a look") and false limitations
+        # ("i can only reply in text"). Owner chats skip this — there
+        # Devon IS the owner's assistant and task framing is correct.
+        # An emptied draft falls through to the fallback path below,
+        # same as a stripped-to-nothing robotic draft.
+        if restricted:
+            draft = strip_assistant_framing(draft)
         if gate and (not draft or not identity_leak_check(draft).ok):
             # The rewrite never landed and the last-ditch strip could not save
             # it: shipping a leak is worse than shipping an in-character line.

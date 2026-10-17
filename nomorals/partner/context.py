@@ -51,6 +51,44 @@ class PartnerContextBuilder:
 
     # ── block renderers ──────────────────────────────────────────────────────
     @staticmethod
+    def _life_anchors_block() -> str:
+        """Devon Personal's identity anchors — always present, never shrunk.
+
+        Built from the Devon Personal identity pack's CONSTANT (bedrock)
+        facts: freelance programmer, Gunnison mountain town, outdoors.
+        These are identity, not detail — Devon IS a person with this
+        life, in every chat. Without this block, the identity only lives
+        in the relevance-gated background block, which returns [] when
+        the gate is closed (non-US, non-romantic) and shrinks FIRST under
+        prompt budget — so in personal chats Devon had no life of her
+        own in the prompt and replied like an assistant with no presence.
+
+        This block is PROTECTED (not in SHRINK_ORDER): the anchors are
+        who she is, not a detail to drop. The deeper identity facts
+        (family, relationship, finances, food) stay in the gated,
+        shrinkable background block and surface only when relevant.
+
+        Reference naturally when it fits — never dumped, never listed,
+        never a bio recitation. A person doesn't introduce herself with
+        her biography.
+        """
+        try:
+            from .background import DEVON_PERSONAL_FACTS
+        except Exception:  # noqa: BLE001 — identity pack unavailable
+            return ""
+        anchors = [f.text for f in DEVON_PERSONAL_FACTS if f.constant]
+        if not anchors:
+            return ""
+        lines = ["Your life — who you are, not a bio to recite:"]
+        lines += [f"  - {text}" for text in anchors]
+        lines.append(
+            "  Reference these naturally when they fit the conversation "
+            "(a mention of the work, Gunnison, the trails) — never dump "
+            "them, never list them, never introduce yourself with them."
+        )
+        return "\n".join(lines)
+
+    @staticmethod
     def _persona_block(
         persona: Persona,
         *,
@@ -213,6 +251,12 @@ class PartnerContextBuilder:
         #: ``post_history_instructions``): per-turn overrides that must win
         #: over the persona block when they conflict.
         post_history: str = "",
+        #: When False, the connector-capabilities block is omitted. Used
+        #: for restricted (personal) chats: a person in a personal chat
+        #: doesn't list "services you can link, use, and act on" — that
+        #: block frames Devon as an assistant and breaks human presence.
+        #: Owner chats keep it (default True).
+        include_capabilities: bool = True,
     ) -> Message:
         platform_note = PLATFORM_NOTES.get(platform, "")
         if extra_notes:
@@ -235,6 +279,9 @@ class PartnerContextBuilder:
                 dynamic_catchphrases=dynamic_catchphrases,
                 dynamic_pet_names=dynamic_pet_names,
             )),
+            # Life anchors: Devon Personal's identity, protected — the
+            # gated background block can't carry it (gate + shrink-first).
+            ("life", self._life_anchors_block()),
             ("mood", self._mood_block(mood)),
             # Restricted chats (non-owner DM / group) swap the private
             # relationship block for a neutral line — the owner's stage,
@@ -245,7 +292,7 @@ class PartnerContextBuilder:
             ("continuity", self._continuity_block(continuity_lines)),
             ("background", self._background_block(background_lines)),
             ("dialogue", self._dialogue_block(persona, mood_label)),
-            ("capabilities", self._capabilities_block()),
+            ("capabilities", self._capabilities_block() if include_capabilities else ""),
             ("platform", platform_note),
             ("output", self._output_contract(short_reply, max_chars)),
             # Post-history: always last, highest salience, never shrunk.

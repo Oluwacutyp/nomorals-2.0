@@ -104,6 +104,7 @@ from .style import (
     repair_echo,
     should_answer_short,
     split_messages,
+    strip_assistant_framing,
     strip_robotic,
 )
 
@@ -193,6 +194,7 @@ __all__ = [
     "seed_partner_lexicon",
     "should_answer_short",
     "split_messages",
+    "strip_assistant_framing",
     "strip_robotic",
     "thinking_typing_seconds",
     "typing_schedule",

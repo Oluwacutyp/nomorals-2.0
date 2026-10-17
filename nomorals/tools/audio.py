@@ -32,7 +32,8 @@ from ..core.policy import Capability
 from ..core.text import safe_filename
 
 __all__ = ["detect_tts_engines", "tts", "stt", "audio_info", "register",
-           "VoiceTagger", "VOICE_TAGGER_NATIVE_ENGINES"]
+           "VoiceTagger", "VOICE_TAGGER_NATIVE_ENGINES",
+           "wav_to_voice_ogg"]
 
 _log = get_logger(__name__)
 
@@ -982,6 +983,45 @@ def _tts_say_with_pauses(chunks: list[tuple[str, int]], voice: str, out: Path,
 
 
 # ── STT ──────────────────────────────────────────────────────────────────────
+
+
+def wav_to_voice_ogg(path: str | Path) -> tuple[str, str]:
+    """Convert a TTS audio file to OGG/Opus for voice-note bubbles.
+
+    Voice notes on WhatsApp and Telegram are OGG/Opus (``voice`` kind /
+    ``voice_note=True``), NOT WAV files. Sending the raw ``tts-*.wav``
+    as a file shows up as a document, not a playable voice-note bubble.
+
+    Returns ``(path, mime)``. When ffmpeg is missing or conversion
+    fails, returns the ORIGINAL file + its mime — the caller must say
+    so honestly (sent as a file, not a voice note), never pretend a
+    file is a voice note.
+    """
+    import os
+    import shutil
+    import subprocess
+
+    src = str(path)
+    if src.lower().endswith((".ogg", ".opus")):
+        return src, "audio/ogg"
+    mime_by_ext = {".wav": "audio/wav", ".mp3": "audio/mpeg",
+                   ".aiff": "audio/aiff", ".m4a": "audio/mp4"}
+    fallback_mime = mime_by_ext.get(os.path.splitext(src)[1].lower(),
+                                    "audio/wav")
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        return src, fallback_mime
+    ogg_path = os.path.splitext(src)[0] + ".ogg"
+    try:
+        subprocess.run(
+            [ffmpeg, "-y", "-i", src, "-c:a", "libopus", "-b:a", "64k",
+             ogg_path],
+            check=True, capture_output=True, timeout=120)
+        if os.path.isfile(ogg_path):
+            return ogg_path, "audio/ogg"
+    except Exception:  # noqa: BLE001 - caller falls back honestly
+        pass
+    return src, fallback_mime
 
 
 def _to_wav(path: Path) -> Path:

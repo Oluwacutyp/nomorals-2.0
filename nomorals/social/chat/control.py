@@ -389,7 +389,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "challenge": (0, None),    # /challenge … — photo-proof challenges + streaks + squads (#87)
     "room": (0, None),           # /room … — live audio rooms: host → speakers → hand-raise (#107)
     # new layer: voice, scheduler, db, api, vision, swarm
-    "tts": (1, None),        # /tts <text> — speak it (sends the audio file)
+    "tts": (1, None),        # /tts <text> — speak it (sends a voice note; file=on sends the file)
     "stt": (1, 5),           # /stt <path> — transcribe an audio file
     "sing": (1, None),       # /sing <melody> — sing it (C4:0.5:hello …)
     "say": (1, None),        # /say <text> — rich voice: emotion/accent/ambience
@@ -1899,8 +1899,8 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
     "spending": {"what": "spending summary vs your budgets, with a weekly digest view.",
                  "usage": "/spending [week|month]", "example": "/spending week",
                  "related": "/spend /budget"},
-    "tts": {"what": "speak text aloud and send the audio file back. Pacing: speed=0.25-4.0, pace=tight|natural|slow, gap=<ms> (espeak-ng word gap). Tags: [pause] / [pause:300] insert real silence; [laugh] [cough] etc. are dropped (this engine cannot laugh — use /speak for real laughs); emotion tags stripped. Auto-tagging is ON by default (auto=off to disable): the tagger inserts engine-appropriate tags from plain-text cues (hesitation pauses everywhere; laughter/sentence/comma pauses where the engine renders them); explicit tags are always preserved, never duplicated. /tts engines shows which engine is in use and what tags it supports.",
-            "usage": "/tts [speed=1.0] [pace=natural] [gap=0] [auto=on] <text> | /tts engines", "example": "/tts pace=slow gap=30 Hello. [pause:500] How are you?",
+    "tts": {"what": "speak text aloud and send it as a voice note (file=on sends the raw file instead). Pacing: speed=0.25-4.0, pace=tight|natural|slow, gap=<ms> (espeak-ng word gap). Tags: [pause] / [pause:300] insert real silence; [laugh] [cough] etc. are dropped (this engine cannot laugh — use /speak for real laughs); emotion tags stripped. Auto-tagging is ON by default (auto=off to disable): the tagger inserts engine-appropriate tags from plain-text cues (hesitation pauses everywhere; laughter/sentence/comma pauses where the engine renders them); explicit tags are always preserved, never duplicated. /tts engines shows which engine is in use and what tags it supports.",
+            "usage": "/tts [speed=1.0] [pace=natural] [gap=0] [auto=on] [file=off] <text> | /tts engines", "example": "/tts pace=slow gap=30 Hello. [pause:500] How are you?",
             "related": "/speak /stt /say"},
     "sing": {"what": "sing a melody with neural singing voice.",
              "usage": "/sing C4:0.5:hello D4:0.5:world",
@@ -2736,7 +2736,7 @@ LIST_ONELINERS: dict[str, str] = {
     "world": "world — a continuing town that just grows",
     "escape": "escape room — 4 locks, break out together",
     "political": "political — 3 elections, be mayor (groups)",
-    "tts": "speak text, send the audio back",
+    "tts": "speak text, send as a voice note",
     "speak": "neural voice note of your text",
     "bet": "sports bet analyst: ensemble ML odds analysis + Kelly stakes",
     "weather": "live weather, alerts, USA situations overview",

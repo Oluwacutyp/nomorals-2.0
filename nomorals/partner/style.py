@@ -48,6 +48,7 @@ __all__ = [
     "repair_echo",
     "should_answer_short",
     "split_messages",
+    "strip_assistant_framing",
     "strip_robotic",
 ]
 
@@ -101,6 +102,53 @@ IDENTITY_LEAK_PHRASES: tuple[str, ...] = (
 #: purpose — these are ordinary speech, so the strip must not touch them.
 _IDENTITY_ONLY_PHRASES: frozenset[str] = frozenset(
     ("as an ai", "as an ai assistant", "as a language model", "i'm just a program")
+)
+
+#: Sentences that frame the reply as an assistant completing a task
+#: instead of a person talking. In personal (restricted) chats Devon is a
+#: person — "Devon Personal" — not support. These patterns break human
+#: presence, so the whole sentence is removed (same rule as
+#: _ROBOTIC_PHRASES: mid-sentence amputation produces grammar soup).
+#: Distinct from _ROBOTIC_PHRASES (stock support phrases): these are
+#: task-framing patterns the model generates fresh — "gotcha, what do
+#: you need?", "drop it here and i'll take a look", "if you want me to
+#: ID it, could you upload the audio file here?". Also covers FALSE
+#: limitations: Devon CAN send voice notes (TTS), so a claim that it
+#: can only reply in text must never ship.
+ASSISTANT_FRAMING_PATTERNS: tuple[str, ...] = (
+    # Task-framed openers / offers — "how can I help" in sentence form.
+    "what do you need",
+    "how can i help",
+    "how can i assist",
+    "what can i do for you",
+    "how may i help",
+    "is there anything i can do",
+    "let me know what you need",
+    # File/clip task framing — "upload it here and I'll handle it".
+    "drop it here",
+    "upload the audio",
+    "upload it here",
+    "send it here",
+    "drop it in here",
+    "if you've got a file",
+    "if you have a file",
+    "if you want me to id",
+    "want me to id it",
+    "if you want me to identify",
+    # Assistant conditionals — "if you'd like me to [do a task]".
+    "if you want me to",
+    "if you'd like me to",
+    "would you like me to",
+    "i'll take a look",
+    # False limitations — Devon CAN send voice notes (TTS). Never claim
+    # otherwise; a person doesn't announce what they can't do, and a
+    # false "I can't" is worse than silence.
+    "i can only reply in text",
+    "i can only send text",
+    "i can't send voice notes",
+    "i can't reply with a voice note",
+    "i can't send a voice note",
+    "only reply in text",
 )
 
 #: Phrases a real person texting their partner does not say. When one appears,
@@ -314,6 +362,35 @@ def strip_robotic(
         s
         for s in sentences
         if not any(phrase in s.lower() for phrase in all_phrases)
+    ]
+    return " ".join(kept).strip()
+
+
+def strip_assistant_framing(text: str) -> str:
+    """Remove assistant/task-framed sentences (presence guard).
+
+    Applied to personal (restricted) chats, where Devon is a person —
+    "Devon Personal" — not an assistant. Sentences matching
+    :data:`ASSISTANT_FRAMING_PATTERNS` ("gotcha, what do you need?",
+    "drop it here and i'll take a look", "if you want me to ID it…",
+    "i can only reply in text…") are removed whole; the rest of the
+    reply survives. Returns ``""`` when every sentence was stripped —
+    the caller falls back to an in-character line, never ships an
+    assistant sentence.
+
+    Owner chats are NOT stripped: there Devon is the owner's assistant
+    by design, and task framing is correct there.
+    """
+    if not text:
+        return text
+    lowered = text.lower()
+    if not any(p in lowered for p in ASSISTANT_FRAMING_PATTERNS):
+        return text
+    sentences = [s for s in _SENTENCE.split(text.strip()) if s.strip()]
+    kept = [
+        s
+        for s in sentences
+        if not any(p in s.lower() for p in ASSISTANT_FRAMING_PATTERNS)
     ]
     return " ".join(kept).strip()
 

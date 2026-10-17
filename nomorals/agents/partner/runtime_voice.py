@@ -14,11 +14,16 @@ class RuntimeVoiceMixin:
 
     # ── voice: /tts /stt ─────────────────────────────────────────────────────
     def _control_tts(self, tail: str, *, chat_key: str) -> str:
-        """Speak text: synthesize with the best available engine, send the file.
+        """Speak text: synthesize with the best available engine, send a voice note.
+
+        TTS output goes out as a VOICE NOTE (OGG/Opus, voice-note bubble),
+        not as a WAV file attachment — a WAV file shows up as a document
+        on WhatsApp/Telegram, not a playable voice note.
 
         Options (leading key=value): speed=0.25-4.0, pace=tight|natural|slow,
         gap=<ms> (espeak-ng word gap), auto=on|off (auto-apply
-        engine-appropriate tags from plain-text cues — ON by default).
+        engine-appropriate tags from plain-text cues — ON by default),
+        file=on|off (file=on sends the raw file instead of a voice note).
         Tags: [pause] / [pause:MS] insert real silence; [laugh] [cough] etc.
         are dropped (these engines cannot laugh — use /speak for real
         laughs); emotion tags are stripped; unknown [bracket text] is kept.
@@ -32,8 +37,9 @@ class RuntimeVoiceMixin:
         if rest.lower() == "engines":
             return self._tts_engines_report()
         speed, pace, gap_ms, auto_tags = 1.0, "natural", 0, True
+        file_mode = False
         while True:
-            m = _re.match(r"(speed|pace|gap|auto)=(?:\"([^\"]+)\"|(\S+))\s+", rest)
+            m = _re.match(r"(speed|pace|gap|auto|file)=(?:\"([^\"]+)\"|(\S+))\s+", rest)
             if not m:
                 break
             val = m.group(2) or m.group(3)
@@ -41,29 +47,37 @@ class RuntimeVoiceMixin:
                 try:
                     speed = float(val)
                 except ValueError:
-                    return "usage: /tts [speed=0.25-4.0] [pace=tight|natural|slow] [gap=<ms>] [auto=on|off] <text>"
+                    return "usage: /tts [speed=0.25-4.0] [pace=tight|natural|slow] [gap=<ms>] [auto=on|off] [file=on|off] <text>"
             elif m.group(1) == "gap":
                 try:
                     gap_ms = int(val)
                 except ValueError:
-                    return "usage: /tts [speed=0.25-4.0] [pace=tight|natural|slow] [gap=<ms>] [auto=on|off] <text>"
+                    return "usage: /tts [speed=0.25-4.0] [pace=tight|natural|slow] [gap=<ms>] [auto=on|off] [file=on|off] <text>"
             elif m.group(1) == "auto":
                 if val.lower() in ("on", "true", "1", "yes"):
                     auto_tags = True
                 elif val.lower() in ("off", "false", "0", "no"):
                     auto_tags = False
                 else:
-                    return "usage: /tts [speed=0.25-4.0] [pace=tight|natural|slow] [gap=<ms>] [auto=on|off] <text>"
+                    return "usage: /tts [speed=0.25-4.0] [pace=tight|natural|slow] [gap=<ms>] [auto=on|off] [file=on|off] <text>"
+            elif m.group(1) == "file":
+                if val.lower() in ("on", "true", "1", "yes"):
+                    file_mode = True
+                elif val.lower() in ("off", "false", "0", "no"):
+                    file_mode = False
+                else:
+                    return "usage: /tts [speed=0.25-4.0] [pace=tight|natural|slow] [gap=<ms>] [auto=on|off] [file=on|off] <text>"
             else:
                 pace = val.lower()
             rest = rest[m.end():]
         text = rest.strip()
         if not text:
-            return ("usage: /tts [speed=1.0] [pace=natural] [gap=0] [auto=on] <text to speak>\n"
+            return ("usage: /tts [speed=1.0] [pace=natural] [gap=0] [auto=on] [file=off] <text to speak>\n"
                     "tags: [pause] / [pause:300] = silence; [laugh] etc. dropped "
                     "(use /speak for real laughs) — /tts engines shows what works where\n"
                     "auto-tagging is ON by default (auto=off to disable): hesitation pauses, "
-                    "laughter/sentence/comma pauses where the engine renders them")
+                    "laughter/sentence/comma pauses where the engine renders them\n"
+                    "sends as a voice note by default (file=on sends the raw file instead)")
         outcome = self.context.tools.call("speak", text=text[:4000],
                                           speed=speed, pace=pace, gap_ms=gap_ms,
                                           auto_tags=auto_tags)
@@ -83,6 +97,16 @@ class RuntimeVoiceMixin:
         if info.get("gap_ignored"):
             note += f" — gap ignored ({info.get('engine')} has no word-gap control)"
         chat = self._ref_from_key(chat_key)
+        # Voice-note path (default): OGG/Opus + voice-note type, so it
+        # lands as a playable bubble, not a document. file=on skips it.
+        if not file_mode:
+            voice_result = self._send_tts_voice_note(chat, info["path"])
+            if voice_result is True:
+                return (f"🎙️ voice note sent ({info.get('engine')}, {info.get('bytes', 0) // 1024} KB, "
+                        f"{info.get('seconds')}s){note}")
+            # Honest fallback: conversion/send failed — the file still
+            # goes out, but labelled as a FILE, never as a voice note.
+            note += f" — voice-note send failed ({voice_result}); sent as file instead"
         try:
             result = self.gateway.send_file(chat.platform, chat, info["path"],
                                             caption=f"[{info.get('engine')}]")
@@ -92,6 +116,39 @@ class RuntimeVoiceMixin:
         except Exception:  # noqa: BLE001 - console and other adapters
             pass
         return f"🔊 spoken ({info.get('engine')}) — saved at {info.get('path')}{note}"
+
+    def _send_tts_voice_note(self, chat: Any, audio_path: str) -> bool | str:
+        """Send TTS audio as a voice-note bubble. True on success.
+
+        Converts to OGG/Opus (WhatsApp/Telegram voice notes) and sends
+        with the voice-note type (Telegram ``voice_note=True``, WhatsApp
+        ``ptt=True``). On failure returns the reason string — the caller
+        falls back to a file send labelled honestly as a file.
+        """
+        from ...tools.audio import wav_to_voice_ogg
+
+        try:
+            ogg_path, mime = wav_to_voice_ogg(audio_path)
+        except Exception as exc:  # noqa: BLE001 - conversion is best-effort
+            return f"conversion error: {exc}"
+        if mime != "audio/ogg":
+            return "ffmpeg not available for WAV → OGG/Opus conversion"
+        try:
+            adapter = self.gateway._adapter_for(chat.platform)
+        except Exception as exc:  # noqa: BLE001 - no adapter, fall back
+            return f"no adapter: {exc}"
+        if adapter is None:
+            return f"no adapter for {chat.platform!r}"
+        try:
+            from ...social.chat.base import MediaRef
+            media = MediaRef(path=ogg_path, kind="voice", name="voice.ogg",
+                             mime="audio/ogg", voice_note=True)
+            result = adapter.send_media(chat, media)
+        except Exception as exc:  # noqa: BLE001 - fall back to file send
+            return f"send_media failed: {exc}"
+        if getattr(result, "ok", False):
+            return True
+        return str(getattr(result, "error", "adapter rejected voice note"))
 
     def _tts_engines_report(self) -> str:
         """Which /tts engine is in use here, and what tags it supports."""

@@ -33,7 +33,7 @@ music - MusicCreator: composes a REAL song from a topic — style-aware lyrics, 
 play - media player: durable queue + transport for audio.
 video - VideoFinder: finds videos across the open web — multi-engine search, ranked by video-URL confidence + relevance, enriched with oEmbed (author/thumbnail) and yt-dlp metadata (duration).
 podcast - The podcast pipeline, one call: find a video/podcast for the query, download the audio, transcribe it (OpenAI-compatible STT or whisper.cpp when available), summarize, split into titled chapters, and save the transcript.
-tts - speak text aloud and send the audio file back.
+tts - speak text aloud and send it as a voice note (file=on sends the raw file instead).
 stt - transcribe an audio file to text.
 look - screen-reader analysis of a screenshot or image URL (she actually sees the pixels).
 image - look up an image (path/URL) or generate one from a text prompt.
