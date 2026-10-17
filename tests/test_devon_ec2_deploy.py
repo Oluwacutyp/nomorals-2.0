@@ -141,6 +141,35 @@ def test_empty_env_backed_up_and_replaced_then_verified():
     assert "verification FAILED" in src
 
 
+def test_doc_working_tree_damage_recovery():
+    """Doc: scripts/ missing + many D files -> git restore . THEN pull.
+    Pull alone never restores deleted files; clean -fd must never be
+    prescribed blindly (it would delete untracked .env)."""
+    src = _text(DOC)
+    assert "git restore ." in src
+    assert "Already up to date" in src
+    assert "does NOT restore deleted" in src or "does not restore deleted" in src.lower()
+    assert "git clean -fd" in src
+    assert "Do **NOT** run `git clean -fd` blindly" in src or "Never `git clean -fd` blindly" in src
+    assert "fresh clone into an **EMPTY** directory" in src or "fresh clone into an EMPTY" in src
+
+
+def test_doc_fresh_clone_fallback():
+    """Doc: when git restore . fails or pull aborts on 'local changes would
+    be overwritten' for files that don't exist on disk, the fallback is a
+    fresh clone beside the renamed broken checkout — never clean -fd on
+    the broken checkout, never delete it until the fresh clone works."""
+    src = _text(DOC)
+    assert "git restore ." in src
+    assert "local changes would be overwritten" in src
+    assert "Fresh-clone fallback" in src
+    assert "nomorals-2.0-fresh" in src
+    assert "nomorals-2.0-broken" in src
+    assert "Rename-Item" in src
+    assert "dir scripts\\deploy*" in src
+    assert "Do **NOT** delete" in src or "do NOT delete" in src
+
+
 def test_doc_recovery_section_has_exact_commands():
     """Doc: SKIP-clone first step + Recovery section with the exact commands."""
     src = _text(DOC)

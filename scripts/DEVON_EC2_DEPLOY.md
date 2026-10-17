@@ -88,6 +88,86 @@ notepad .env
 .\.venv\Scripts\python.exe -m nomorals
 ```
 
+## Recovery — working-tree damage: `scripts/` missing / many D (deleted) files
+
+Symptoms: `git status` shows a long list of `D` (deleted) files —
+`tests/test_voice_*.py`, `tests/test_wave*.py`, `training/*`,
+`vendor/sentinel`, `workspace/*`, etc. — and
+`dir scripts\deploy*` fails with
+`Cannot find path 'C:\devon\nomorals-2.0\scripts' because it does not exist.`
+The whole `scripts/` folder is gone from the working tree. `git pull`
+says "Already up to date" at the same time — because **pull only moves
+HEAD, it does NOT restore deleted working-tree files.** Pull + missing
+script coexisting is the signature of this damage.
+
+Fix with these exact commands:
+
+```powershell
+# 1. Restore ALL deleted tracked files (this is the fix pull cannot do):
+cd C:\devon\nomorals-2.0
+git restore .
+
+# 2. THEN pull latest main:
+git pull origin main
+
+# 3. Confirm the damage is gone before running anything else:
+git status --short   # should show no long D (deleted) list
+dir scripts\deploy*  # should list deploy_devon_ec2_rdp.ps1
+```
+
+Rules:
+
+- Use `git restore .` for tracked deletions. It restores deleted
+  tracked files and leaves untracked files alone.
+- Do **NOT** run `git clean -fd` blindly — it deletes untracked files,
+  including `.env`. Never clean before checking what is untracked
+  (`git status` first, and only clean paths you have confirmed are
+  safe to delete).
+- If `git restore .` still leaves `scripts/` missing, the clone itself
+  is partial — a fresh clone into an **EMPTY** directory is the only
+  fix. Back up any filled `.env` first, then clone into an empty dir
+  and copy the backed-up `.env` back.
+
+### Fresh-clone fallback — when `git restore .` fails or pull aborts
+
+If `git restore .` fails with
+`error: pathspec '.' did not match any file(s) known to git`, or
+`git pull` aborts with
+`error: Your local changes to the following files would be overwritten by merge:`
+for files that do **not** exist on disk (they are DELETED in the working
+tree, which git counts as a "local change", so the incoming commit that
+touches those same files cannot merge) — the checkout is in a
+contradictory state (possibly sparse checkout, corrupt index, or a
+partially damaged `.git`). Do not fight it. Fresh-clone beside it:
+
+```powershell
+# 1. Rename the broken checkout aside — do NOT delete it until the
+#    fresh clone is verified working (it may hold a filled .env):
+cd C:\devon
+Rename-Item C:\devon\nomorals-2.0 C:\devon\nomorals-2.0-broken
+
+# 2. Fresh clone into an EMPTY directory:
+git clone https://github.com/Oluwacutyp/nomorals-2.0.git C:\devon\nomorals-2.0-fresh
+cd C:\devon\nomorals-2.0-fresh
+
+# 3. Confirm the damage is gone before running anything else:
+dir scripts\deploy*  # must list deploy_devon_ec2_rdp.ps1
+
+# 4. Deploy from the fresh checkout:
+.\scripts\deploy_devon_ec2_rdp.ps1
+```
+
+Rules:
+
+- Do **NOT** run `git clean -fd` on the broken checkout — it deletes
+  untracked files, including a filled `.env`.
+- Do **NOT** delete `nomorals-2.0-broken` until the fresh clone is
+  verified working AND any filled `.env` has been copied over (back up
+  the filled `.env` first, then copy it into the fresh checkout —
+  never paste secrets in chat).
+- Once the fresh clone is verified working, the broken directory can
+  be deleted.
+
 If `git pull` fails with divergent history, the script prints the exact
 recovery and stops — it does **not** auto-reset (reset discards local
 changes). Follow the printed recovery, then re-run the deploy.
@@ -185,6 +265,8 @@ is affordable. XTTS / diffusion / RVC are skipped on RDP (API fallback).
 | `notepad .env` opened an empty `.env` | It opened `.env` in the wrong directory (or an empty one). Close it, `cd C:\devon\nomorals-2.0`, re-run deploy — an empty repo `.env` is backed up to `.env.empty.bak` and replaced from the template. Delete a stray empty `C:\devon\.env` only after confirming 0 bytes. |
 | `.\.venv\Scripts\python.exe` "not recognized" | No venv — the installer never ran (deploy script never ran). Run the deploy from `C:\devon\nomorals-2.0` first. |
 | `git pull --ff-only` fails (divergent) | Script prints exact recovery and stops — it does not auto-reset. Follow the printed recovery, then re-run. |
+| `git status` shows many `D` (deleted) files / `scripts/` missing, but `git pull` says "Already up to date" | Working-tree damage — pull does NOT restore deleted files. Run `git restore .`, then `git pull origin main`. Never `git clean -fd` blindly (deletes untracked files incl. `.env`). See "Recovery — working-tree damage". |
+| `git restore .` fails (`pathspec '.' did not match`) OR pull aborts with "local changes would be overwritten" for files that don't exist on disk | Contradictory checkout — do not fight it. Fresh-clone fallback: rename broken dir to `nomorals-2.0-broken` (do NOT delete), clone into `nomorals-2.0-fresh`, verify `dir scripts\deploy*`, deploy from the fresh checkout. See "Fresh-clone fallback". |
 | `winget not found` | Install App Installer from the Microsoft Store, re-run. |
 | Python still old after install | Close + reopen PowerShell (PATH refresh). |
 | `.env` lost / wrong | Re-run deploy; existing `.env` is kept. To regenerate, back it up first, delete it, re-run. |
