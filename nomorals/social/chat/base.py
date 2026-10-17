@@ -57,9 +57,16 @@ def is_owner_chat(chat: Any, *, owner_chats: Any = (), db_is_owner: bool = False
     ``owner_chats`` is the configured ``partner.owner_chats`` key set;
     ``db_is_owner`` is the chat registry row's stored flag. The
     local/web console (``*:console``) is always the owner's own terminal.
+    A bare id in ``owner_chats`` (owner wrote ``5478650254`` without a
+    platform prefix) matches any platform whose chat id equals it —
+    the owner's Telegram user id is the same number on
+    ``telegram``/``telegram-bot``/``telegram-personal`` in DMs.
     """
     key = str(getattr(chat, "key", "") or "")
     if key and key in set(owner_chats or ()):
+        return True
+    chat_id = str(getattr(chat, "chat_id", "") or "")
+    if chat_id and chat_id in set(owner_chats or ()):
         return True
     if db_is_owner:
         return True

@@ -1001,7 +1001,13 @@ class ChatGateway:
 
 
 def parse_chat_keys(raw: str, *, platform: str = "") -> set[str]:
-    """Parse a config string like 'telegram:123, discord:456' or '123,456'."""
+    """Parse a config string like 'telegram:123, discord:456' or '123,456'.
+
+    A bare id (no colon) is kept as-is when no ``platform`` is given —
+    callers that compare against a bare chat id (``is_owner_chat``) use
+    it, and it is never silently dropped: a configured owner id must
+    not vanish because the owner wrote it without a platform prefix.
+    """
     keys: set[str] = set()
     for part in (raw or "").split(","):
         part = part.strip()
@@ -1012,6 +1018,8 @@ def parse_chat_keys(raw: str, *, platform: str = "") -> set[str]:
             keys.add(f"{p.strip()}:{cid.strip()}")
         elif platform:
             keys.add(f"{platform}:{part}")
+        else:
+            keys.add(part)
     return keys
 
 

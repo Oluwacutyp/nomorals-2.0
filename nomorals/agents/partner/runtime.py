@@ -144,6 +144,16 @@ class PartnerRuntime(
         #: otherwise (silent undercounting in /status).
         self._stats_lock = threading.Lock()
         self._owner_chats = _key_set(partner_cfg.owner_chats)
+        # Sender-id allowlist (NM_PARTNER_OWNER_SENDER_IDS): the owner's
+        # Telegram user id. The chat-key test above fails when the owner
+        # configured a bare id; the sender id is platform-independent,
+        # so it also covers the personal bot and userbot DMs where the
+        # chat key carries the adapter prefix.
+        self._owner_sender_ids = {
+            s.strip()
+            for s in str(getattr(partner_cfg, "owner_sender_ids", "") or "").split(",")
+            if s.strip()
+        }
         self._book_busy: set[str] = set()  # slugs with a book pipeline running
         self._apply_persisted_mode()
 
@@ -1880,6 +1890,13 @@ class PartnerRuntime(
         # DB-registered owner chats; fall back to the config-only check.
         meta = getattr(message, "meta", None)
         if isinstance(meta, dict) and meta.get("is_owner") is True:
+            return True
+        # Sender-id allowlist: the owner's Telegram user id, same number
+        # on every Telegram surface. Covers the personal bot and userbot,
+        # where the chat key carries an adapter prefix the owner never
+        # wrote in config. Strangers' sender ids never match.
+        sender_id = str(getattr(message, "sender_id", "") or "").strip()
+        if sender_id and sender_id in getattr(self, "_owner_sender_ids", set()):
             return True
         return is_owner_chat(message.chat, owner_chats=self._owner_chats)
 
