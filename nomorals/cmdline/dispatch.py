@@ -45,6 +45,7 @@ from .commands.inbox import _cmd_inbox
 from .commands.learn import _cmd_learn
 from .commands.legal import _cmd_legal
 from .commands.immune import _cmd_immune
+from .commands.impossible import _cmd_impossible
 from .commands.media import _cmd_media, _cmd_studio
 from .commands.memory import _cmd_memory
 from .commands.meta import _cmd_commands, _cmd_connectors, _cmd_deliver, _cmd_help, _cmd_zip
@@ -357,6 +358,7 @@ _COMMANDS: dict[str, _CommandSpec] = {
     "learn": _CommandSpec(_cmd_learn),
     "legal": _CommandSpec(_cmd_legal),
     "immune": _CommandSpec(_cmd_immune),
+    "impossible": _CommandSpec(_cmd_impossible),
     "audio": _CommandSpec(_cmd_audio),
     "room": _CommandSpec(_cmd_room),
     "briefing": _CommandSpec(_cmd_briefing),

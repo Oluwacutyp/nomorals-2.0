@@ -2631,6 +2631,19 @@ class PartnerRuntime(
                 sender=getattr(message, "sender", "") if message else "",
                 chat_key=chat_key,
             )
+        if kind == "impossible":
+            # Impossible Made Possible — owner-only, like /immune.
+            if message is not None and not self._is_operator(message):
+                return "that one's just for the owner."
+            from ...impossible.chat import control_impossible
+            return control_impossible(
+                command.tail or arg,
+                context=self.context,
+                chat=chat,
+                sender_id=getattr(message, "sender_id", "") if message else "",
+                sender=getattr(message, "sender", "") if message else "",
+                chat_key=chat_key,
+            )
         if kind == "immune":
             # Defensive immune system — owner-only, like /learn.
             if message is not None and not self._is_operator(message):

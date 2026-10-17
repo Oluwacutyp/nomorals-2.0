@@ -306,6 +306,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "tutor": (0, None),       # /tutor [guide me] <topic> | answer <text> | hint | stop | status
     "learn": (0, None),        # /learn tutor|quiz|flashcards|mastery|waec|jamb — one front door over learn/
     "immune": (0, None),      # /immune status|scan|antibodies|quarantine|disarm|arrest|fever|drift|casefile — defensive immune system (owner-only)
+    "impossible": (0, None),  # /impossible solve <problem> | status | attempt | dossier | queue | charter | lattice | examples — always-on conceive-and-solve (owner-only)
     "tour": (0, 1),         # /tour — smoke-test every command; /tour <cmd> deep-probes one
     "heal": (0, 1),         # /heal [--dry] | /heal <cmd> — self-healing loop: diagnose + auto-fix broken commands
     "ekiti": (0, None),       # /ekiti converse <text> | debate <topic> | say <text> | check "<expected>" | tones
@@ -1075,6 +1076,10 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
                 "usage": "/immune status | scan <text> | antibodies list | add <pattern> <reason> | retire <id> <reason> | test <pattern> | quarantine <artifact> | disarm <grant-id> | arrest <process-id> [system] | fever status | start <reason> <seconds> | end | drift add <tokens> <spawned> <grants> <errors> | report | casefile list | add <text> | seal <id-prefix>",
                 "example": "/immune status",
                 "related": "/heal /review"},
+    "impossible": {"what": "Impossible Made Possible — always-on cross-domain conceive-and-solve: formulate, classify, prior art, TRIZ transfer, feasibility gate, falsifier, attempt. Hardware gets a specification; software gets a build brief. Owner only.",
+                "usage": "/impossible solve <problem> [--software] [--fetch-art] | status <id> | attempt <id> | dossier <id> | queue | charter | lattice | examples",
+                "example": "/impossible solve a house that stays cool without grid power",
+                "related": "/research /code"},
     "learn": {"what": "one front door over learn/ — Socratic/direct tutoring, quiz formats, FSRS flashcards from the mistake notebook, BKT mastery, and WAEC/JAMB syllabus. Owner only.",
                 "usage": "/learn tutor [guide me] <topic> | answer <text> | hint | status | stop | /learn quiz formats | /learn flashcards due | stats | list | review <id> <1-4> | export <path> | /learn mastery [weakest] | /learn waec <subject> | waec grade <pct> | /learn jamb <subject> | jamb formats",
                 "example": "/learn tutor guide me fractions",
@@ -2001,7 +2006,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
                            "data", "evolve", "upgrade", "arena", "trial",
                            "identity", "book", "books", "features"]),
     ("memory & thinking", ["remember", "recall", "forget", "memories", "think",
-                           "benchmark", "redteam", "review", "tutor", "learn", "ekiti", "course", "health", "train", "form", "film", "graph", "route", "eta", "congestion", "immune"]),
+                           "benchmark", "redteam", "review", "tutor", "learn", "ekiti", "course", "health", "train", "form", "film", "graph", "route", "eta", "congestion", "immune", "impossible"]),
     ("money & spending", ["spend", "budget", "spending", "mandate"]),
     ("games — 41, DM + group, start them directly",
      ["game", "inventory", "equip", "unequip", "repair", "level",

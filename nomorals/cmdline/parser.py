@@ -112,6 +112,7 @@ CLI_ALIASES: dict[str, list[str]] = {
     "learn": [],
     "legal": [],
     "immune": [],
+    "impossible": [],
 
     # Shell completion scripts generated from the live parser.
     "completion": ["complete"],
@@ -3472,6 +3473,15 @@ def _parser() -> argparse.ArgumentParser:
     )
     immune.add_argument("task", nargs="*", default=[], help="verb and arguments")
     immune.add_argument("--json", action="store_true", help="Output as JSON")
+
+    # Impossible wiring: CLI mirror of the /impossible chat command.
+    impossible = sub.add_parser("impossible", aliases=CLI_ALIASES["impossible"],
+        help="Impossible Made Possible — always-on conceive-and-solve",
+        description=("nm impossible solve <problem> [--software] [--fetch-art] | status <id> | attempt <id> | dossier <id> | queue | charter | lattice | examples"),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    impossible.add_argument("task", nargs="*", default=[], help="verb and arguments")
+    impossible.add_argument("--json", action="store_true", help="Output as JSON")
 
     return parser
 
