@@ -797,10 +797,21 @@ class PartnerRuntime(
                 split_command_stack)
 
             command = parse_control(message.text)
-            _log.debug("game command check: text=%r, command=%s", 
+            _log.debug("game command check: text=%r, command=%s",
                       message.text[:40], command)
+            # /math in an outsider DM is conversation only (social_gate:
+            # games are public in groups, not in DMs). Skip the game
+            # branch entirely so the message falls through to the brain
+            # as conversation — the gate inside _control_math alone
+            # would return None and the dispatch would send nothing.
+            _math_dm_outsider = (
+                command is not None
+                and command.kind == "math"
+                and not self._is_operator(message)
+                and message.chat.kind == ChatKind.DM)
             if (command is not None
-                    and (command.kind == "game" or command.kind in GAME_COMMANDS)):
+                    and (command.kind == "game" or command.kind in GAME_COMMANDS)
+                    and not _math_dm_outsider):
                 # Stacking never includes games (interactive, stateful):
                 # a stack starting with a game is rejected explicitly
                 # instead of running its first game and silently
@@ -883,7 +894,8 @@ class PartnerRuntime(
                         reply = self._control_game(
                             verb, chat_key=message.chat.key,
                             player=self._game_player(message),
-                            kind=message.chat.kind)
+                            kind=message.chat.kind,
+                            is_owner=self._is_operator(message))
                     _log.debug("game command reply: %r", reply[:100] if reply else "")
                 except Exception as exc:  # noqa: BLE001
                     _log.exception("game command failed: %s", exc)
@@ -3294,7 +3306,22 @@ class PartnerRuntime(
             # the chat key (stable per chat) and the kind defaults to dm.
             return self._control_game(
                 command.tail or arg, chat_key=chat_key,
-                player=self._game_player_for_key(chat_key), kind="dm")
+                player=self._game_player_for_key(chat_key), kind="dm",
+                is_owner=is_owner)
+        if kind == "math":
+            # Math Class via its standalone handler (same as the
+            # any-chat game dispatch). A None return means the
+            # outsider-in-DM gate fired — an honest redirect, since
+            # handle_control has no conversation fall-through.
+            res = self._control_math(
+                command.tail or arg, chat_key,
+                player=self._game_player_for_key(chat_key),
+                kind=getattr(getattr(message, "chat", None), "kind", "dm"),
+                is_owner=is_owner)
+            if res is None:
+                return ("Math Class is a group game — play it in a group "
+                        "with /math.")
+            return res
         if kind == "npc":
             # the living cast — game-scoped via the live room in this chat
             return self._control_npc(command.tail or arg, chat_key=chat_key)

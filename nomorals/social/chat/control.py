@@ -87,6 +87,8 @@ GAME_COMMANDS = (
     "gomoku", "reversi", "checkers",
     # puzzles (gamesbooks-1.0)
     "sudoku", "anagram", "cryptogram",
+    # math class (procedural maths, adaptive tiers)
+    "math",
     # arena gear (persistent equipment)
     "inventory", "equip", "unequip", "repair", "level",
     # battle skills (learnable martial arts)
@@ -263,6 +265,8 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "backup": (0, 1),        # /backup status | verify — read-only backup health (runs need the vault, stay scheduled)
     # expansion wave
     "game": (0, 12),         # /game [list|<name>|quit|leaderboard|stats|shop|balance]
+    # math class — standalone game command (wired handler, not engine game)
+    "math": (0, None),       # /math [tier|answer <a>|leaderboard|streak|daily|duel ...|set|teach ...|upvote ...|balance]
     "npc": (0, None),        # /npc list | talk <name> <msg> | mood <name> — the living cast
     "charagent": (0, None),  # /charagent list | create | talk | play | forget — persistent agents
     "dm": (0, 2),            # /dm mood [mood] — the narrator's persona
@@ -1483,6 +1487,18 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
              "example": "/game trivia  ·  /game mafia (group)  ·  "
                         "/game leaderboard",
              "related": ""},
+    "math": {"what": "Math Class — procedurally generated maths by tier "
+                     "(easy → impossible), adaptive tiers, duels, streaks, "
+                     "teaching and a leaderboard. A game: works in groups "
+                     "for everyone, in DMs for the owner.",
+             "usage": "/math · /math easy|medium|hard|expert|master|impossible · "
+                      "/math answer <answer> · /math leaderboard · /math streak · "
+                      "/math daily · /math duel <opponent> · "
+                      "/math duel_answer <id> <round> <answer> · /math set · "
+                      "/math teach <problem_id> <explanation> · "
+                      "/math upvote <explanation_id> · /math balance",
+             "example": "/math  ·  /math answer 42  ·  /math duel @ada",
+             "related": "/game · /duel"},
     "npc": {"what": "the living cast — NPCs with personality, memory, mood "
                     "and knowledge boundaries, per game. They remember your "
                     "conversations and react to what happens.",
@@ -2305,7 +2321,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
       "2048", "snake", "connect4", "battleship",
       "blackjack", "roulette", "slots", "miniapp", "gtrip", "predict",
       "gomoku", "reversi", "checkers", "20q", "rps", "digits",
-      "sudoku", "anagram", "cryptogram", "npc", "dm", "charagent",
+      "sudoku", "anagram", "cryptogram", "math", "npc", "dm", "charagent",
       "pvp", "raid"]),
     ("voice & vision", ["tts", "speak", "stt", "voice", "look", "image", "lens",
                         "vision", "voices", "clonevoice", "sing"]),
@@ -2540,7 +2556,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
       "2048", "snake", "connect4", "battleship",
       "blackjack", "roulette", "slots", "miniapp", "gtrip", "predict",
       "gomoku", "reversi", "checkers", "20q", "rps", "digits",
-      "sudoku", "anagram", "cryptogram", "npc", "dm", "charagent",
+      "sudoku", "anagram", "cryptogram", "math", "npc", "dm", "charagent",
       "pvp", "raid"]),
     ("voice & vision",
      ["tts", "speak", "stt", "voice", "look", "image", "lens",
@@ -2696,6 +2712,7 @@ LIST_ONELINERS: dict[str, str] = {
     "miniapp": "group mini-apps: polls, shared expenses, RSVPs",
     "panel": "persistent live-data panels: track fitness, finance, … and ask questions",
     "game": "the social game engine — 41 games, DM + group + channel, with economy and leaderboards",
+    "math": "math class — adaptive maths problems, duels, streaks, leaderboard",
     "skill": "learnable battle skills — martial arts for the arena (/skill learn <name>, /skill combos)",
     "title": "earnable titles — flair with battle buffs (/title set <name>)",
     "stats": "RPG attributes — strength/stamina/mana/intelligence (/stats)",

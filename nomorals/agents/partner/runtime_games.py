@@ -47,7 +47,8 @@ class RuntimeGamesMixin:
     _delete_pending: dict[str, float] = {}
 
     def _control_game(self, tail: str, chat_key: str, *,
-                       player: Any = None, kind: str = "dm") -> str:
+                       player: Any = None, kind: str = "dm",
+                       is_owner: bool = True) -> str:
         from ..features import feature_enabled
 
         _log.debug("_control_game: tail=%r, chat_key=%s, player=%s, kind=%s",
@@ -58,6 +59,18 @@ class RuntimeGamesMixin:
         parts = (tail or "").split()
         verb = parts[0].lower() if parts else ""
         _log.debug("_control_game: verb=%r", verb)
+        if verb == "math":
+            # Math Class is a standalone handler, not an engine game —
+            # it never entered engine.list_games(). Delegate with the
+            # rest of the tail. A None return means the DM-outsider gate
+            # fired (conversation only); surface the honest redirect.
+            res = self._control_math(" ".join(parts[1:]), chat_key,
+                                     player=player, kind=kind,
+                                     is_owner=is_owner)
+            if res is None:
+                return ("Math Class is a group game — play it in a group "
+                        "with /math.")
+            return res
         engine = self._game_engine()
         live = engine.live(chat_key)
         _log.debug("_control_game: live=%s", live)
@@ -1225,6 +1238,218 @@ class RuntimeGamesMixin:
         except Exception:  # noqa: BLE001 - a game bug must never eat the chat
             _log.exception("game move failed")
             return None
+
+    # ── Math Class ─────────────────────────────────────────────────────────
+    def _math_handler(self) -> Any:
+        """ONE MathCommandHandler per process, loaded from disk.
+
+        A fresh handler per call would wipe problems, streaks,
+        leaderboards and the ledger — the exact orphan bug /math had.
+        The handler's state is saved after every command (best-effort;
+        a save failure never breaks the reply).
+        """
+        handler = getattr(self, "_math_handler_obj", None)
+        if handler is None:
+            from ...games.math_commands import MathCommandHandler
+            from ...games.math_persist import load_math_state
+
+            handler = load_math_state() or MathCommandHandler()
+            self._math_handler_obj = handler
+        return handler
+
+    def _math_save(self, handler: Any) -> None:
+        try:
+            from ...games.math_persist import save_math_state
+
+            save_math_state(handler)
+        except Exception:  # noqa: BLE001 - persistence never breaks chat
+            _log.warning("math state save failed", exc_info=True)
+
+    def _control_math(self, tail: str, chat_key: str, *,
+                      player: Any = None, kind: str = "dm",
+                      is_owner: bool = True) -> str | None:
+        """``/math`` — Math Class via the standalone handler.
+
+        Returns ``None`` for the outsider-in-DM gate (conversation
+        only, per social_gate — games are public in groups, not in
+        DMs). Callers translate None into a fall-through (chat path)
+        or an honest redirect (handle_control path).
+        """
+        from ..features import feature_enabled
+
+        if not feature_enabled(self.context, "games"):
+            return "games are off. /features games on"
+        if not is_owner and kind == "dm":
+            return None
+        handler = self._math_handler()
+        player_key = getattr(player, "key", "") or ""
+        if not player_key:
+            player_key = self._game_player_for_key(chat_key).key
+        # Verification gates math earning (credit() returns None for
+        # unverified players). A chat sender IS a verified participant
+        # — mark them so rewards aren't silently blocked.
+        try:
+            handler.economy.verify_member(player_key)
+        except Exception:  # noqa: BLE001 - verification never blocks play
+            _log.warning("math verify_member failed for %s", player_key)
+        result = handler.handle(f"/math {tail or ''}".strip(), player_key)
+        self._math_save(handler)
+        return self._render_math(result)
+
+    @staticmethod
+    def _render_math(result: Any) -> str:
+        """Render a MathCommandHandler dict to a chat reply.
+
+        Never returns empty — an unknown shape falls back to the
+        handler's own message, then to a generic line, so a new
+        result kind can never produce a silent reply.
+        """
+        if not isinstance(result, dict):
+            return "🧮 math hiccup — try /math for a new problem."
+        if not result.get("ok", False):
+            msg = (result.get("message") or result.get("error")
+                   or "math hiccup")
+            if result.get("error") == "cooldown" and result.get("wait_s") is not None:
+                msg = f"{msg} Try again in {result['wait_s']}s."
+            return f"🧮 {msg}"
+        kind = result.get("kind", "")
+
+        def _fmt_problem(problem: Any, prefix: str = "🧮") -> str:
+            if not isinstance(problem, dict):
+                return ""
+            head = (f"{prefix} [{problem.get('tier', '?')}] "
+                    f"{problem.get('topic', '')} — {problem.get('question', '')}")
+            meta = f"⏱ {problem.get('time_limit_s', 60)}s"
+            if problem.get("problem_id"):
+                meta += f" · id {problem.get('problem_id')}"
+            return f"{head}\n{meta}"
+
+        if kind == "problem":
+            lines = [_fmt_problem(result.get("problem") or {})]
+            if result.get("daily"):
+                lines[0] = lines[0].replace("🧮", "🧮 Daily challenge", 1)
+            if result.get("adaptive_tier"):
+                lines.append(f"your adaptive tier: {result['adaptive_tier']}")
+            lines.append("Answer with /math answer <your answer>.")
+            return "\n".join(lines)
+        if kind == "result":
+            lines = []
+            if result.get("correct"):
+                lines.append(f"✅ Correct! The answer was {result.get('answer')}.")
+            else:
+                lines.append(f"❌ Not quite — the answer was {result.get('answer')}.")
+            if result.get("solution"):
+                lines.append(f"Worked solution: {result['solution']}")
+            steps = result.get("solution_steps") or []
+            if steps:
+                shown = steps[:10]
+                lines.append("\n".join(f"  {i + 1}. {s}"
+                                       for i, s in enumerate(shown)))
+                if len(steps) > len(shown):
+                    lines.append(f"  … +{len(steps) - len(shown)} more steps")
+            if result.get("reward_text"):
+                lines.append(result["reward_text"])
+            reward = result.get("reward") or {}
+            if reward.get("paid"):
+                lines.append(f"+{reward.get('coins', 0)} coins, "
+                             f"+{reward.get('xp', 0)} XP")
+            if result.get("streak"):
+                lines.append(f"🔥 streak: {result['streak']}")
+            adaptive = result.get("adaptive") or {}
+            if adaptive.get("tier"):
+                lines.append(f"adaptive tier: {adaptive['tier']}")
+            if result.get("set_progress"):
+                lines.append(f"set: {result['set_progress']}")
+            if result.get("set_complete"):
+                lines.append("🏁 Set complete — nice run.")
+            if isinstance(result.get("next_problem"), dict):
+                lines.append("")
+                lines.append(_fmt_problem(result["next_problem"],
+                                          prefix="➡️ next"))
+                lines.append("Answer with /math answer <your answer>.")
+            return "\n".join(lines)
+        if kind == "leaderboard":
+            lines = ["🏆 Math leaderboard"]
+            for i, row in enumerate(result.get("leaders") or []):
+                lines.append(f"{i + 1}. {row.get('player')} — "
+                             f"{row.get('wins', 0)}W / {row.get('losses', 0)}L, "
+                             f"best streak {row.get('best_streak', 0)}")
+            you = result.get("you") or {}
+            if you:
+                lines.append(f"you: {you.get('wins', 0)}W / "
+                             f"{you.get('losses', 0)}L, best streak "
+                             f"{you.get('best_streak', 0)}")
+            if len(lines) == 1:
+                lines.append("No solvers yet — be the first with /math.")
+            return "\n".join(lines)
+        if kind == "streak":
+            return (f"🔥 streak: {result.get('streak', 0)} "
+                    f"(best {result.get('best_streak', 0)}) · "
+                    f"tier: {result.get('adaptive_tier', '?')} · "
+                    f"{result.get('wins', 0)}W / {result.get('losses', 0)}L\n"
+                    f"{result.get('next', '')}")
+        if kind == "duel":
+            lines = [f"⚔️ Duel {result.get('duel_id')} — "
+                     f"{' vs '.join(result.get('players') or [])}"]
+            for i, problem in enumerate(result.get("problems") or []):
+                lines.append(f"Round {i + 1}: {problem.get('question', '')}")
+            lines.append("Answer with /math duel_answer "
+                         f"{result.get('duel_id')} <round> <answer> — "
+                         "first correct answer wins each round.")
+            return "\n".join(lines)
+        if kind == "timed_set":
+            lines = [f"⏱ Timed set — {result.get('tier', '?')} · "
+                     f"{result.get('seconds', 300)}s for "
+                     f"{len(result.get('problems') or [])} problems"]
+            if result.get("set_progress"):
+                lines.append(f"set: {result['set_progress']}")
+            for i, problem in enumerate(result.get("problems") or []):
+                lines.append(f"{i + 1}. {problem.get('question', '')}")
+            lines.append("Answer each with /math answer <answer> — "
+                         "I'll advance through the set.")
+            return "\n".join(lines)
+        if kind == "teaching":
+            return (f"📝 {result.get('message', 'Explanation posted.')} "
+                    f"(id {result.get('explanation_id', '')})")
+        if kind == "upvote":
+            if result.get("paid"):
+                return (f"👍 Upvoted — author earned +{result.get('coins', 0)} "
+                        f"coins, +{result.get('xp', 0)} XP "
+                        f"(total upvotes: {result.get('upvotes', 0)}).")
+            return f"👍 {result.get('message', 'Upvote counted.')}"
+        if kind == "balance":
+            balance = result.get("balance") or {}
+            lines = [f"🪙 Math balance: {balance.get('coins', 0)} coins · "
+                     f"{balance.get('xp', 0)} XP"]
+            entries = result.get("entries") or []
+            for entry in entries[-5:]:
+                lines.append(f"  {entry.get('reason', '')}: "
+                             f"+{entry.get('amount_coins', 0)}c / "
+                             f"+{entry.get('amount_xp', 0)}xp")
+            if result.get("disclaimer"):
+                lines.append(result["disclaimer"])
+            return "\n".join(lines)
+        # Duel-round results carry no "kind" — they carry correct/round.
+        if "correct" in result and "round" in result:
+            if result.get("correct"):
+                lines = [f"✅ Round {result.get('round')} won!"]
+                if result.get("score"):
+                    score = result["score"]
+                    lines.append("score: " + ", ".join(
+                        f"{p} {s}" for p, s in score.items()))
+                if result.get("status") == "finished":
+                    lines.append(f"🏁 Duel finished — winner: "
+                                 f"{result.get('duel_winner') or 'tie'}")
+                if (result.get("reward") or {}).get("paid"):
+                    reward = result["reward"]
+                    lines.append(f"+{reward.get('coins', 0)} coins, "
+                                 f"+{reward.get('xp', 0)} XP")
+                return "\n".join(lines)
+            return f"❌ {result.get('message', 'Not quite.')}"
+        # Generic fallback: surface the handler's own message / fields.
+        if result.get("message"):
+            return f"🧮 {result['message']}"
+        return f"🧮 math: {kind or 'done'}"
 
     # ── NPCs & the game master ─────────────────────────────────────────────
     def _npc_gamemaster(self) -> Any:

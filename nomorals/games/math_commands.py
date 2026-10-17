@@ -81,6 +81,10 @@ class MathCommandHandler:
         self.economy = economy if economy is not None else MathEconomy()
         self._active: dict[str, str] = {}  # player -> active problem_id
         self._tier_clears: dict[str, set[str]] = {}  # player -> tiers first-cleared
+        # Timed-set tracking: player -> {"problems": [ids], "idx": int}.
+        # One active track at a time — starting a fresh problem or the
+        # daily challenge abandons the set (see _cmd_start / _cmd_daily).
+        self._sets: dict[str, dict[str, Any]] = {}
 
     # ── router ──
     def handle(self, text: str, player: str,
@@ -112,6 +116,8 @@ class MathCommandHandler:
                                 else "Daily attempt cap for this tier reached.")}
         problem = self.math.generate(player, tier, "quickfire", now=now)
         self._active[player] = problem.problem_id
+        # A fresh problem abandons any in-progress timed set.
+        self._sets.pop(player, None)
         return {"ok": True, "kind": "problem",
                 "problem": problem.public(),
                 "adaptive_tier": self.math.adaptive_tier(player),
@@ -138,6 +144,24 @@ class MathCommandHandler:
                                "solution_steps": res.get("solution_steps", []),
                                "adaptive": res.get("adaptive", {}),
                                "streak": res.get("streak", 0)}
+        # Timed-set advance: answering the current set problem moves the
+        # active pointer to the next one (or closes the set).
+        set_state = self._sets.get(player)
+        if set_state and problem_id in set_state.get("problems", []):
+            problems = list(set_state["problems"])
+            idx = problems.index(problem_id) + 1
+            if idx < len(problems):
+                set_state["idx"] = idx
+                next_id = problems[idx]
+                self._active[player] = next_id
+                next_problem = self.math.store["active"].get(next_id)
+                out["set_progress"] = f"{idx + 1}/{len(problems)}"
+                if next_problem is not None:
+                    out["next_problem"] = next_problem.public()
+            else:
+                self._sets.pop(player, None)
+                self._active.pop(player, None)
+                out["set_complete"] = True
         if res["correct"]:
             reward = self._pay(player, res["tier"], now)
             out["reward"] = reward
@@ -176,6 +200,8 @@ class MathCommandHandler:
         date_iso = args[0] if args else time.strftime("%Y-%m-%d", time.gmtime(now))
         problem = self.math.daily_challenge(date_iso)
         self._active[player] = problem.problem_id
+        # The daily challenge is its own track — it abandons a set.
+        self._sets.pop(player, None)
         # Daily problems are not in the active store (same for everyone),
         # so register this instance for grading.
         self.math.store["active"][problem.problem_id] = problem
@@ -216,8 +242,18 @@ class MathCommandHandler:
     def _cmd_set(self, player: str, args: list[str],
                  now: float) -> dict[str, Any]:
         tier = args[0] if args and args[0] in TIERS else ""
-        return {"ok": True, "kind": "timed_set",
-                **self.math.timed_set(player, tier, now=now)}
+        result = self.math.timed_set(player, tier, now=now)
+        problems = result.get("problems") or []
+        if problems:
+            # Track the set so /math answer advances through it instead
+            # of grading only the first problem and stranding the rest.
+            self._sets[player] = {
+                "problems": [p.get("problem_id", "") for p in problems],
+                "idx": 0,
+            }
+            self._active[player] = problems[0].get("problem_id", "")
+            result["set_progress"] = f"1/{len(problems)}"
+        return {"ok": True, "kind": "timed_set", **result}
 
     def _cmd_teach(self, player: str, args: list[str],
                    now: float) -> dict[str, Any]:
