@@ -136,6 +136,9 @@ class ImpossibleMadePossible:
             f"First principles: {dossier['first_principles']['rebuilt_solution']}",
             f"Falsifier: {dossier['hypothesis']['falsifier']}",
             f"Cheapest killing experiment: {dossier['hypothesis']['cheapest_killing_experiment']}",
+            f"Competing hypotheses: {len(dossier['hypothesis'].get('hypotheses', []) or [])} "
+            f"(best first: {dossier['hypothesis'].get('primary_angle', '')}; "
+            f"alternatives stay in the ledger — a failed attempt moves to the next)",
             f"Prior art: {dossier['prior_art']['summary']}",
             f"Claim id: {dossier.get('claim_id', '')}",
         ]

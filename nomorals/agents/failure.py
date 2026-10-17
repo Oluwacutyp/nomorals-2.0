@@ -260,6 +260,28 @@ class FailureAnalyzer:
             return {"id": "", "family": family, "lesson_id": "",
                     "times_seen": 0, "learned": False, "error": str(exc)}
 
+    # ── hypothesis-driven diagnosis ──────────────────────────────────────
+    def diagnose(self, case: FailureCase,
+                 evidence: dict | None = None) -> dict[str, Any]:
+        """Diagnose a failure with competing hypotheses, not a single
+        anchored cause. Generates hypotheses across layers (config,
+        routing, provider, model, gating, regression, resource), tests
+        each against ``evidence`` (hypothesis id -> verdict + detail),
+        and returns the full diagnosis: ruled out / fitting / unresolved,
+        verdict + confidence, and the next evidence to collect.
+
+        Evidence comes from the caller (log checks, probes, code reads).
+        With no evidence every hypothesis stays unresolved — the report
+        says so honestly instead of inventing a cause.
+        """
+        from .diagnose import diagnose as _diagnose, format_report as _fmt
+        result = _diagnose(case.summary or "the reported failure",
+                           evidence=evidence, error=case.error,
+                           source=case.source)
+        out = result.to_dict()
+        out["report"] = _fmt(result)
+        return out
+
     def recent_failures(self, *, limit: int = 10,
                         family: str = "") -> list[dict[str, Any]]:
         q = ("SELECT * FROM failures"
@@ -622,7 +644,10 @@ def register(registry: Any) -> None:
             "action=collect (recent failures) | record (log a failure the "
             "system just hit, auto-learn a lesson for known families) | "
             "ledger (recent raw failures) | learn (learn from all recent "
-            "failures) | analyze (analyze one failure inline) | context "
+            "failures) | analyze (analyze one failure inline) | diagnose "
+            "(competing-hypotheses diagnosis: generate hypotheses across "
+            "layers, test each against evidence, report ruled out / fitting "
+            "/ unresolved — never a single anchored cause) | context "
             "(prevention context for a task) | recent (recent lessons) | stats."
         ),
         capability="memory.write",
@@ -661,6 +686,10 @@ def register(registry: Any) -> None:
             case = FailureCase(source=source or "tool",
                                summary=query, error=error)
             return {"analysis": analyzer.analyze(case)}
+        if action == "diagnose":
+            case = FailureCase(source=source or "tool",
+                               summary=query, error=error)
+            return {"diagnosis": analyzer.diagnose(case)}
         if action == "context":
             return {"context": analyzer.prevention_context(query, limit=n)}
         if action == "stats":

@@ -76,12 +76,28 @@ class AttemptQueue:
 
     def attempt(self, claim_id: str, dossier: dict, ledger=None) -> dict:
         """Run the next cheapest attempt for a queued problem.
+        Tries the best-ranked untried hypothesis first; a failed attempt
+        moves to the next hypothesis in rank order, not back to guessing.
         Returns the attempt record + hardware spec file (if hardware) or
         software build brief. Never claims a device was built."""
         item = self.get(claim_id)
         if item is None:
             return {"ok": False, "error": f"No queued problem with id '{claim_id}'. Submit it first."}
         hyp = dossier.get("hypothesis") or {}
+        # Pick the best-ranked hypothesis not yet tried for this claim.
+        ranked = list(hyp.get("hypotheses") or [])
+        tried = list(item.get("tried_hypotheses") or [])
+        attempted_hyp = None
+        for candidate in ranked:
+            if candidate.get("angle") not in tried:
+                attempted_hyp = candidate
+                break
+        if attempted_hyp is None:
+            # All hypotheses tried: fall back to the primary (best-ranked).
+            attempted_hyp = ranked[0] if ranked else hyp
+        remaining = [c.get("angle") for c in ranked
+                     if c.get("angle") not in tried
+                     and c.get("angle") != attempted_hyp.get("angle")]
         gate = dossier.get("gate") or {}
         is_hardware = dossier.get("domain", "hardware") != "software"
         attempt_no = item["attempts"] + 1
@@ -92,7 +108,7 @@ class AttemptQueue:
                 from .human import learn_from_failure
                 lesson_hint = learn_from_failure(entry)
         if is_hardware:
-            spec = build_hardware_spec(claim_id, dossier)
+            spec = build_hardware_spec(claim_id, dossier, hypothesis=attempted_hyp)
             spec_path = self.spec_dir / f"{claim_id}_spec.md"
             spec_path.write_text(spec, encoding="utf-8")
             result = {"ok": True, "attempt": attempt_no, "kind": "hardware",
@@ -100,16 +116,20 @@ class AttemptQueue:
                       "spec_file": str(spec_path),
                       "delegation": ("Delegation brief stored in the spec. No delegation/ organ exists in-repo yet — "
                                      "status is 'awaiting delegation', not 'built'."),
-                      "next": hyp.get("cheapest_killing_experiment", ""),
+                      "hypothesis": attempted_hyp.get("angle", ""),
+                      "next": attempted_hyp.get("cheapest_killing_experiment", ""),
+                      "remaining_hypotheses": remaining,
                       "lesson_hint": lesson_hint}
         else:
             result = {"ok": True, "attempt": attempt_no, "kind": "software",
                       "action": "build brief produced — software attempt goes through builders/ with verify",
                       "build_brief": (
                           f"Build: {dossier.get('formulation', {}).get('goal_function', '')}. "
-                          f"Falsifier first: {hyp.get('falsifier', '')}. "
+                          f"Falsifier first: {attempted_hyp.get('falsifier', '')}. "
                           f"Verify with builders/verify + smoke; promote only on passing evidence."),
-                      "next": hyp.get("cheapest_killing_experiment", ""),
+                      "hypothesis": attempted_hyp.get("angle", ""),
+                      "next": attempted_hyp.get("cheapest_killing_experiment", ""),
+                      "remaining_hypotheses": remaining,
                       "lesson_hint": lesson_hint}
         data = self._load()
         for i in data.get("items", []):
@@ -117,19 +137,26 @@ class AttemptQueue:
                 i["attempts"] = attempt_no
                 i["status"] = "attempted"
                 i["updated_at"] = time.time()
+                tried_now = list(i.get("tried_hypotheses") or [])
+                angle = attempted_hyp.get("angle", "")
+                if angle and angle not in tried_now:
+                    tried_now.append(angle)
+                i["tried_hypotheses"] = tried_now
         self._save(data)
         if ledger is not None:
             ledger.record_attempt(claim_id, outcome="attempted",
                                   evidence=result.get("spec_file", result.get("build_brief", "")),
-                                  lesson=f"Attempt {attempt_no}: {result['action']}. Next: {result['next']}")
+                                  lesson=f"Attempt {attempt_no} (hypothesis: {attempted_hyp.get('angle', '')}): "
+                                         f"{result['action']}. Next: {result['next']}. "
+                                         f"Remaining hypotheses: {', '.join(remaining) or 'none'}.")
         return result
 
 
-def build_hardware_spec(claim_id: str, dossier: dict) -> str:
+def build_hardware_spec(claim_id: str, dossier: dict, hypothesis: dict | None = None) -> str:
     """Hardware specification document — the class's hardware deliverable."""
     f = dossier.get("formulation") or {}
     g = dossier.get("gate") or {}
-    hyp = dossier.get("hypothesis") or {}
+    hyp = hypothesis or dossier.get("hypothesis") or {}
     reframed = dossier.get("reframed") or {}
     transfers = dossier.get("transfer") or {}
     fp = dossier.get("first_principles") or {}
@@ -139,6 +166,7 @@ def build_hardware_spec(claim_id: str, dossier: dict) -> str:
         f"**Goal (function):** {f.get('goal_function', '')}",
         f"**Raw wish:** {f.get('raw', '')}",
         f"**Gate verdict:** {g.get('verdict', '')} — {g.get('why', '')}",
+        f"**Hypothesis attempted:** {hyp.get('angle', '')} (rank {hyp.get('rank', '')})",
         "",
         "## First principles",
         fp.get("rebuilt_solution", ""),
