@@ -23,7 +23,7 @@ PULSE_TIMEZONE = "America/Denver"
 PULSE_POLICIES = {
     "missed_fire_policy": "fire_now",
     "overlap_policy": "skip",
-    "max_runtime_s": 1800,
+    "run_timeout_s": 1800,
 }
 
 

@@ -8,6 +8,11 @@ nervous system through plain language:
 * ``weakness_dismiss`` — owner dismisses a weakness
 * ``presence_sense`` — what the system knows right now
 * ``interests`` — current interest model
+* ``__presence_heartbeat__`` — scheduler-internal heartbeat (notice,
+  prepare, surface). Registered via closure in ``register()``, NOT via
+  the ``TOOLS`` dict: the registry calls fns with no ``context`` arg,
+  and a ``context``-taking fn would fail with TypeError (the pre-existing
+  ``presence_sense`` failure mode). See ``pulse``/``briefing``.
 """
 
 from __future__ import annotations
@@ -118,3 +123,32 @@ def register(registry: Any) -> None:
             description=spec["description"],
             capability="owner",
         )
+    # Scheduler-internal heartbeat tool. The ``presence-heartbeat`` job is
+    # stored with payload_kind="tool" and payload
+    # {"tool": "__presence_heartbeat__"}, so the tool MUST exist in the
+    # tool registry — the scheduler's ``register_action`` path (see
+    # ``ensure_heartbeat_job``) targets a different scheduler class and
+    # never runs here, which is why the job failed with "unknown tool"
+    # every 30 min. Closure over ``registry.context``: ``registry.call``
+    # passes no ``context`` arg, so a ``context``-taking fn (the ``TOOLS``
+    # dict pattern) would fail with TypeError. Same pattern as
+    # ``pulse``/``briefing``. Uses the canonical ``workspace_db`` (not
+    # ``Database(workspace_dir)``) so the heartbeat shares one state
+    # store with the rest of autonomy.
+    _context = registry.context
+
+    @registry.register(
+        "__presence_heartbeat__",
+        description="Run the slow presence heartbeat: notice rising "
+        "interests, prepare surfaces, surface one due item. "
+        "Scheduler-internal; runs every ~30 min.",
+        capability="owner",
+    )
+    def _presence_heartbeat_tool() -> dict[str, Any]:
+        from ..autonomy.idle import workspace_db
+        from ..autonomy.presence import heartbeat
+
+        ws = getattr(getattr(_context, "settings", None),
+                     "workspace_dir", None) or "."
+        db = workspace_db(ws)
+        return {"ok": True, "heartbeat": heartbeat(db)}
