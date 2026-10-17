@@ -376,6 +376,39 @@ class TestSettingsWiring(unittest.TestCase):
         self.assertIn("telegram-personal", adapters)
         self.assertEqual(skipped, [])
 
+    def test_build_adapter_userbot_empty_session_defaults_to_file(self):
+        # Empty NM_CHAT_TELEGRAM_SESSION must NOT resolve to the home
+        # directory (Settings.resolve("") == home_path): the session
+        # must be a file path ending in telegram.session.
+        settings = self._settings()
+        settings.chat.telegram_session = ""
+        adapter = build_adapter(settings, "telegram")
+        self.assertIsNotNone(adapter)
+        assert adapter is not None
+        self.assertTrue(str(adapter.session_path).endswith("telegram.session"))
+        self.assertNotEqual(str(adapter.session_path), "")
+
+    def test_build_adapter_userbot_explicit_session_kept(self):
+        settings = self._settings()
+        settings.chat.telegram_session = "custom/my.session"
+        adapter = build_adapter(settings, "telegram")
+        self.assertIsNotNone(adapter)
+        assert adapter is not None
+        self.assertEqual(str(adapter.session_path), "custom/my.session")
+
+    def test_build_adapter_whatsapp_empty_outbox_defaults(self):
+        # Same empty-path trap: an explicitly-emptied outbox dir must
+        # fall back to data/chat/outbox, not resolve to the home dir.
+        settings = self._settings()
+        settings.chat.whatsapp_enabled = True
+        settings.chat.whatsapp_outbox_dir = ""
+        adapter = build_adapter(settings, "whatsapp")
+        self.assertIsNotNone(adapter)
+        assert adapter is not None
+        self.assertTrue(
+            str(adapter.outbox.path).endswith(
+                "data/chat/outbox/whatsapp.jsonl"))
+
 
 if __name__ == "__main__":
     unittest.main()

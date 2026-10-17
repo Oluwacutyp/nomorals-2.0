@@ -440,11 +440,6 @@ class TelegramAdapter(ChatAdapter):
         self._companion_bot_ids: frozenset[int] = frozenset(_ids)
         # Singular back-compat view: the first (lowest) id, or None.
         self._companion_bot_id: int | None = min(_ids) if _ids else None
-
-    @property
-    def companion_bot_ids(self) -> frozenset[int]:
-        """Both companion BotFather bot IDs (gated + personal)."""
-        return self._companion_bot_ids
         try:
             self.api_id = int(api_id)
         except (TypeError, ValueError) as exc:
@@ -481,6 +476,11 @@ class TelegramAdapter(ChatAdapter):
         #: Hard cap on the entity cache (mirrors EntityCache max; kept as
         #: a plain attribute for introspection).
         self._input_entity_cache_max = 2000
+
+    @property
+    def companion_bot_ids(self) -> frozenset[int]:
+        """Both companion BotFather bot IDs (gated + personal)."""
+        return self._companion_bot_ids
 
     def _cache_input_entity(self, chat_id: str, entity: Any) -> None:
         """Store an input entity, indexed under every key it answers to."""

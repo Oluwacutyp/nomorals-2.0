@@ -125,7 +125,12 @@ def build_adapter(settings: Any, name: str, *, on_new_member: Any = None,
             return TelegramAdapter(
                 api_id=chat.telegram_api_id,
                 api_hash=chat.telegram_api_hash,
-                session_path=settings.resolve(chat.telegram_session),
+                # Empty SESSION must fall back to the file default BEFORE
+                # resolve: Settings.resolve("") returns home_path itself
+                # (Path("") == Path(".")), and TelegramClient cannot use a
+                # directory as a SQLite session file.
+                session_path=settings.resolve(
+                    chat.telegram_session or "data/telegram.session"),
                 chat_allow=chat.telegram_chats,
                 media_dir=str(settings.resolve("data/media/telegram")),
                 media_in_groups=chat.media_in_groups,
@@ -206,7 +211,8 @@ def build_adapter(settings: Any, name: str, *, on_new_member: Any = None,
                 port=chat.whatsapp_port,
                 media_dir=str(settings.resolve("data/media/whatsapp")),
                 outbox_dir=str(settings.resolve(
-                    getattr(chat, "whatsapp_outbox_dir", "data/chat/outbox"))),
+                    getattr(chat, "whatsapp_outbox_dir", "")
+                    or "data/chat/outbox")),
             )
         except Exception as exc:  # noqa: BLE001
             raise ValueError(f"whatsapp unavailable: {exc}") from exc
