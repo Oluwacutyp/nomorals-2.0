@@ -56,7 +56,9 @@ __all__ = ["CONTROL_COMMANDS", "COMMAND_DETAILS", "ControlCommand",
            "detailed_help",
            "list_catalog", "LIST_GROUPS", "LIST_ONELINERS", "GAME_COMMANDS",
            "PUBLIC_COMMANDS", "PUBLIC_GAME_COMMANDS", "caller_may_run",
-           "public_menu_text"]
+           "public_menu_text",
+           "MAX_STACK_DEPTH", "NON_STACKABLE_COMMANDS", "STACK_DENIAL_REPLY",
+           "split_command_stack", "expand_prev_placeholders", "stack_header"]
 
 PLATFORMS = ("telegram", "discord", "whatsapp", "local")
 
@@ -694,6 +696,20 @@ _HELP_TEXT = "\n".join(
         "  — discovery —",
         "  /list [group]                           every executable command, categorized",
         "  /commands [group] | /menu [group]       aliases of /list",
+        "  — stacking: several commands, one message —",
+        "  one command per line — every line must be a full /command:",
+        '  e.g. "/status" then "/mood" then "/providers" on three lines',
+        '  runs in order, one reply per step under a "── 1/3 /status ──" header',
+        '  "{prev}" in a later step is replaced by the previous step\'s output',
+        '  ("{prev:1}" = step 1\'s); "{{prev}}" stays literal',
+        "  a step that fails, is denied, or asks for confirmation STOPS the stack",
+        "  — later steps do not run, and the stop is reported, never silent",
+        "  max 5 commands per message; games and quit/forget/restart/deploy/",
+        "  update/pull can never be stacked — send those on their own",
+        '  ";" and "&&" do NOT stack: they belong to /route, /overview, /exec,',
+        "  /py, URLs and quoted args — a newline is the only separator",
+        '  inside code fences or "quoted strings", a line is argument text,',
+        "  never a new command",
         "  /quit",
     ]
 )
@@ -739,6 +755,216 @@ def parse_control(text: str) -> ControlCommand | None:
     if max_args is not None and n > max_args:
         return ControlCommand(kind="error", arg=f"/{kind} takes at most {max_args} argument(s) — /help {kind} shows the usage")
     return ControlCommand(kind=kind, arg=arg, tail=tail)
+
+
+# ── command stacking ───────────────────────────────────────────────────────
+#: Maximum commands in one stacked message. Stacks are for quick chains
+#: (status → mood → providers), not scripts — deeper chains split into
+#: smaller stacks. Depth is enforced in ``handle_control``.
+MAX_STACK_DEPTH = 5
+
+#: Cap on a previous step's output when ``{prev}`` expands into a later
+#: step — without it, one long output feeding the next step could blow
+#: the next command's argument up without bound.
+PREV_PLACEHOLDER_MAX_CHARS = 2000
+
+#: Commands that can never appear in a stack, whatever the caller.
+#: * games (every GAME_COMMANDS kind + the game hub / npc / charagent /
+#:   dm / predict): interactive and stateful — one game per message,
+#:   and a stack must never auto-advance a game.
+#: * confirmable + lifecycle (quit/forget/restart/deploy/update/pull):
+#:   confirmation and shutdown/redeploy stay one-message-per-command;
+#:   a stack must never arm or answer a confirmation for the owner.
+#: Everything else stacks, including long-running commands (book, music,
+#: searchdeep, …) — they run in order and delay the later steps, which
+#: is the documented cost, not a silent failure.
+NON_STACKABLE_COMMANDS: frozenset[str] = frozenset({
+    *GAME_COMMANDS,
+    "game", "npc", "charagent", "dm", "predict",
+    "quit", "forget", "restart", "deploy", "update", "pull",
+})
+
+#: The exact owner-grant denial :func:`handle_control` returns. The stack
+#: runner compares against it so a denied step stops the stack instead of
+#: being mistaken for a normal step reply.
+STACK_DENIAL_REPLY = "that one's just for the owner."
+
+
+def _split_stack_lines(text: str) -> list[str]:
+    """Split ``text`` on newlines that are NOT inside a protected span.
+
+    Protected spans: fenced code blocks (``` / ~~~ runs of 3+, opened
+    mid-line or at line start), double-quoted strings, single-quoted
+    strings (a quote only opens after start/whitespace/``=(:,[{`` so
+    ``don't``/``it's`` apostrophes never open one), and inline `code`
+    spans. Newlines inside any of them are argument text, never command
+    boundaries. Unbalanced spans swallow the rest of the message — the
+    safe fallback, since the whole message then parses as one command.
+    """
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    segments: list[str] = []
+    cur: list[str] = []
+    fence: str | None = None      # "`" or "~" while inside a fence
+    quote: str | None = None      # '"' or "'" while inside quotes
+    inline = False                # inside a `...` / ``...`` span
+    i, n = 0, len(text)
+    while i < n:
+        ch = text[i]
+        if fence is not None:
+            if ch == fence:
+                j = i
+                while j < n and text[j] == ch:
+                    j += 1
+                if j - i >= 3:
+                    cur.append(text[i:j])
+                    i = j
+                    fence = None
+                    continue
+            cur.append(ch)
+            i += 1
+            continue
+        if quote is not None:
+            if ch == "\\" and quote == '"' and i + 1 < n:
+                cur.append(text[i:i + 2])
+                i += 2
+                continue
+            if ch == quote:
+                if quote == "'":
+                    nxt = text[i + 1] if i + 1 < n else ""
+                    if nxt and nxt.isalnum():
+                        # Apostrophe inside a quoted word, not a closer.
+                        cur.append(ch)
+                        i += 1
+                        continue
+                cur.append(ch)
+                quote = None
+                i += 1
+                continue
+            cur.append(ch)
+            i += 1
+            continue
+        if inline:
+            if ch == "`":
+                cur.append(ch)
+                inline = False
+                i += 1
+                continue
+            cur.append(ch)
+            i += 1
+            continue
+        # Normal text.
+        if ch in ("`", "~"):
+            j = i
+            while j < n and text[j] == ch:
+                j += 1
+            run = j - i
+            if run >= 3:
+                fence = ch
+                cur.append(text[i:j])
+                i = j
+                continue
+            if ch == "`":
+                inline = True
+                cur.append(text[i:j])
+                i = j
+                continue
+            cur.append(text[i:j])
+            i = j
+            continue
+        if ch == '"':
+            quote = '"'
+            cur.append(ch)
+            i += 1
+            continue
+        if ch == "'":
+            prev = text[i - 1] if i > 0 else ""
+            nxt = text[i + 1] if i + 1 < n else ""
+            if ((prev == "" or prev.isspace() or prev in "=(:,[{")
+                    and nxt and not nxt.isspace()):
+                quote = "'"
+                cur.append(ch)
+                i += 1
+                continue
+            cur.append(ch)
+            i += 1
+            continue
+        if ch == "\n":
+            segments.append("".join(cur))
+            cur = []
+            i += 1
+            continue
+        cur.append(ch)
+        i += 1
+    segments.append("".join(cur))
+    return [s.strip() for s in segments if s.strip()]
+
+
+def split_command_stack(text: str) -> list[str] | None:
+    """Split a stacked message into its commands, or None when it is not one.
+
+    A message is a stack iff it has 2+ non-blank lines (after removing
+    newlines inside fenced blocks / quoted strings / inline code) AND
+    every line parses as a known command via :func:`parse_control`.
+    Anything else returns None and the caller keeps the existing
+    single-command path — so multi-line single commands (``/exec`` code,
+    a ``/say`` whose second line is prose) never change behavior.
+
+    ``;`` and ``&&`` are deliberately NOT separators: they are live
+    syntax inside /route, /overview (``;;``), /exec, /py, URLs and
+    quoted args. The newline syntax is the one split that cannot
+    misfire on any of those.
+    """
+    if text is None:
+        return None
+    if not isinstance(text, str):
+        raise TypeError(
+            f"split_command_stack expects str, got {type(text).__name__}")
+    parts = _split_stack_lines(text)
+    if len(parts) < 2:
+        return None
+    for part in parts:
+        cmd = parse_control(part)
+        if cmd is None or cmd.kind == "error":
+            return None
+    return parts
+
+
+_PREV_RE = re.compile(r"\{prev(?::(\d+))?\}")
+_PREV_ESCAPE = "\x00STACK-PREV\x00"
+
+
+def expand_prev_placeholders(segment: str, outputs: list[str]) -> str:
+    """Expand ``{prev}`` / ``{prev:N}`` in a stack segment.
+
+    ``{prev}`` → the previous step's output; ``{prev:N}`` → step N's
+    output (1-based). Out-of-range references and ``{prev}`` in step 1
+    stay literal — silently emptying them would corrupt the command.
+    ``{{prev}}`` is the escape for a literal ``{prev}``. Expansions are
+    truncated to :data:`PREV_PLACEHOLDER_MAX_CHARS` so one long output
+    cannot blow up the next step's argument.
+    """
+    def _repl(m: re.Match) -> str:
+        if m.group(1) is not None:
+            idx = int(m.group(1)) - 1
+            if idx < 0 or idx >= len(outputs):
+                return m.group(0)
+            src = outputs[idx]
+        else:
+            if not outputs:
+                return m.group(0)
+            src = outputs[-1]
+        if len(src) > PREV_PLACEHOLDER_MAX_CHARS:
+            src = src[:PREV_PLACEHOLDER_MAX_CHARS] + "… (truncated)"
+        return src
+
+    seg = segment.replace("{{prev}}", _PREV_ESCAPE)
+    seg = _PREV_RE.sub(_repl, seg)
+    return seg.replace(_PREV_ESCAPE, "{prev}")
+
+
+def stack_header(index: int, total: int, kind: str) -> str:
+    """One step's header in a combined stack reply: ``── 1/3 /status ──``."""
+    return f"── {index}/{total} /{kind} ──"
 
 
 def help_text() -> str:
@@ -2100,7 +2326,34 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
     ("discovery", ["list", "commands", "menu", "help", "tour", "heal"]),
 ]
 
+#: Stacking topic page (shared by /help stack and /help stacking).
+_STACK_TOPIC_PAGE = (
+    "stacking — several commands in one message\n"
+    "  one command per line; every line must be a full /command:\n"
+    "  /status  (line 1)\n"
+    "  /mood    (line 2)\n"
+    "  runs in order; each step's reply is shown under a\n"
+    "  '── 1/2 /status ──' header.\n"
+    "  * {prev} in a later step is replaced by the previous step's\n"
+    "    output (truncated); {prev:1} = step 1's output; {{prev}}\n"
+    "    stays literal.\n"
+    "  * a step that fails, is denied, or asks for confirmation\n"
+    "    STOPS the stack — later steps do not run, and the stop is\n"
+    "    reported, never silent.\n"
+    "  * gating is checked for EVERY step before anything runs:\n"
+    "    an outsider stacking an owner-only command gets an explicit\n"
+    "    denial and nothing runs.\n"
+    "  * max 5 commands per message. Games, and quit / forget /\n"
+    "    restart / deploy / update / pull, can never be stacked.\n"
+    "  * ';' and '&&' do NOT stack — they belong to /route,\n"
+    "    /overview, /exec, /py, URLs and quoted args.\n"
+    "  * inside code fences or \"quoted strings\", a line is argument\n"
+    "    text, never a new command.")
+
+
 _TOPIC_PAGES: dict[str, str] = {
+    "stack": _STACK_TOPIC_PAGE,
+    "stacking": _STACK_TOPIC_PAGE,
     "budget": (
         "model budget — how she spends your model calls\n"
         "  default: UNLIMITED (0).  If you set a daily cap, everything "
@@ -2225,7 +2478,7 @@ def _wrap_commands(kinds: list[str], width: int = 64) -> list[str]:
 def _detailed_overview() -> str:
     lines = [
         "the full catalog — detail for any command: /help <command>",
-        "topic pages: /help budget|goals|builds|skills|missions|modes",
+        "topic pages: /help budget|goals|builds|skills|missions|modes|stack",
         "",
     ]
     for group, kinds in _HELP_GROUPS:

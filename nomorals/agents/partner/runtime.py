@@ -763,13 +763,30 @@ class PartnerRuntime(
         # through to her as text.
         if message.incoming and message.text.strip().startswith("/"):
             from ...social.chat.control import (
-                GAME_COMMANDS, caller_may_run, parse_control)
+                GAME_COMMANDS, caller_may_run, parse_control,
+                split_command_stack)
 
             command = parse_control(message.text)
             _log.debug("game command check: text=%r, command=%s", 
                       message.text[:40], command)
             if (command is not None
                     and (command.kind == "game" or command.kind in GAME_COMMANDS)):
+                # Stacking never includes games (interactive, stateful):
+                # a stack starting with a game is rejected explicitly
+                # instead of running its first game and silently
+                # dropping the rest. Stacks with a game in a later
+                # step are rejected the same way by handle_control.
+                _stacked = split_command_stack(message.text)
+                if _stacked is not None and len(_stacked) > 1:
+                    self._bump("controls")
+                    try:
+                        self.gateway.send(
+                            message.chat.platform, message.chat,
+                            "stacks can't include games — send one game "
+                            "command per message. Nothing ran.")
+                    except Exception:  # noqa: BLE001
+                        pass
+                    return
                 # Capability grant, stated explicitly: games are social,
                 # so any caller may run them (caller_may_run returns True
                 # for every game kind). The check documents the grant
@@ -2245,9 +2262,116 @@ class PartnerRuntime(
             f"Send /{kind} confirm to go ahead, or /{kind} cancel to drop it.",
             False, "")
 
+    def _run_command_stack(self, segments: list[str], chat_key: str,
+                           message: Any = None) -> str:
+        """Run a validated command stack in order; one combined reply.
+
+        Pre-validation runs FIRST: every step's kind is checked for
+        stackability, the caller's per-command grant, the SMS surface
+        and the progression lock — before anything runs. A single bad
+        step rejects the whole stack with an explicit message and
+        nothing runs, so an outsider can never smuggle an owner-only
+        command behind a public one.
+
+        Steps then run in order via :meth:`handle_control` with
+        ``_no_stack=True`` (a ``{prev}`` expansion carries the previous
+        step's output, newlines included — it must be one command's
+        argument, never fresh commands). A step that raises, is denied,
+        or asks for confirmation stops the stack: the failure is
+        reported with its step header and the remaining steps are named
+        as not run. Commands return prose, not exit codes, so a step
+        that ran and reported its own problem in its reply is shown
+        verbatim under its header and the stack continues — nothing is
+        ever silent, because every step's output is in the reply.
+        """
+        from ...social.chat.control import (
+            NON_STACKABLE_COMMANDS, STACK_DENIAL_REPLY,
+            expand_prev_placeholders, parse_control, caller_may_run)
+        from ...social.chat.sms import SMS_BLOCKED_REPLY, sms_allows
+
+        is_owner = True if message is None else self._is_operator(message)
+        platform = (chat_key or "").partition(":")[0].strip().lower()
+        parsed = []
+        for i, seg in enumerate(segments):
+            cmd = parse_control(seg)
+            if cmd is None or cmd.kind == "error":
+                return (f"stack stopped before it started — step {i + 1} "
+                        "did not parse as a command. Nothing ran.")
+            if cmd.kind in NON_STACKABLE_COMMANDS:
+                return (f"stack stopped before it started — step {i + 1} "
+                        f"/{cmd.kind} can't be stacked (games, confirmations "
+                        "and lifecycle commands go one per message). "
+                        "Nothing ran — send it on its own.")
+            if not caller_may_run(cmd.kind, is_owner):
+                return (f"stack stopped before it started — step {i + 1} "
+                        f"/{cmd.kind} is owner-only, and you're not the "
+                        "owner. Nothing ran.")
+            if platform == "sms" and not sms_allows(cmd.kind):
+                return (SMS_BLOCKED_REPLY + " — stack stopped before it "
+                        "started. Nothing ran.")
+            locked = self._progression_gate(cmd.kind, message)
+            if locked is not None:
+                return (locked + "\n— stack stopped before it started. "
+                        "Nothing ran.")
+            parsed.append(cmd)
+
+        total = len(segments)
+        outputs: list[str] = []
+        parts: list[str] = []
+        for i, (seg, cmd) in enumerate(zip(segments, parsed)):
+            expanded = expand_prev_placeholders(seg, outputs)
+            try:
+                reply = self.handle_control(
+                    expanded, chat_key, message=message, _no_stack=True)
+            except Exception as exc:  # noqa: BLE001 - one bad step stops the stack, loudly
+                parts.append(
+                    f"── {i + 1}/{total} /{cmd.kind} ──\n"
+                    f"⛔ failed: {type(exc).__name__}: {exc}")
+                if i + 1 < total:
+                    parts.append(
+                        f"— stack stopped at step {i + 1}/{total}; "
+                        f"steps {i + 2}–{total} did not run —")
+                return "\n".join(parts)
+            if reply == STACK_DENIAL_REPLY:
+                parts.append(
+                    f"── {i + 1}/{total} /{cmd.kind} ──\n"
+                    "⛔ denied — that one's just for the owner.")
+                if i + 1 < total:
+                    parts.append(
+                        f"— stack stopped at step {i + 1}/{total}; "
+                        f"steps {i + 2}–{total} did not run —")
+                return "\n".join(parts)
+            if isinstance(reply, str) and reply.startswith("⚠️ confirm:"):
+                # A bespoke confirm prompt inside a step (e.g. a
+                # multi-step subcommand): never auto-answer it, and do
+                # not echo the prompt line — the adapter turns it into
+                # Confirm/Cancel buttons for a confirmation that was
+                # never armed.
+                parts.append(
+                    f"── {i + 1}/{total} /{cmd.kind} ──\n"
+                    "⛔ needs confirmation — send it on its own, then "
+                    "answer its confirm prompt.")
+                if i + 1 < total:
+                    parts.append(
+                        f"— stack stopped at step {i + 1}/{total}; "
+                        f"steps {i + 2}–{total} did not run —")
+                return "\n".join(parts)
+            outputs.append(reply or "")
+            parts.append(
+                f"── {i + 1}/{total} /{cmd.kind} ──\n"
+                f"{reply if reply else '(no output)'}")
+        return "\n".join(parts)
+
     def handle_control(self, text: str, chat_key: str,
-                       message: Any = None) -> str:
-        """Parse + dispatch one control command. Returns the reply to send.
+                       message: Any = None, _no_stack: bool = False) -> str:
+        """Parse + dispatch one control command (or a stack). Returns the reply.
+
+        A stacked message (one command per line — see
+        ``split_command_stack``) runs its steps in order via
+        :meth:`_run_command_stack` and returns one combined reply.
+        ``_no_stack`` is set by the stack runner itself: a ``{prev}``
+        expansion may contain newlines from a previous step's output,
+        and those must never re-split into injected commands.
 
         A registered kind that has no dispatch branch can only happen through
         a code inconsistency (``parse_control`` only returns registered kinds);
@@ -2275,6 +2399,21 @@ class PartnerRuntime(
             if message is not None and not self._is_operator(message):
                 return "that one's just for the owner."
             return self._control_review("", chat_key=chat_key)
+
+        # Command stacking: one message, one command per line (see
+        # split_command_stack). Checked before the single-command parse
+        # so a stack whose first line would fail the whole-text arg
+        # count (e.g. /status followed by /mood) still stacks.
+        if not _no_stack:
+            from ...social.chat.control import (
+                MAX_STACK_DEPTH, split_command_stack)
+            _segments = split_command_stack(text)
+            if _segments is not None and len(_segments) > 1:
+                if len(_segments) > MAX_STACK_DEPTH:
+                    return (f"stack too deep: {len(_segments)} commands, "
+                            f"max is {MAX_STACK_DEPTH} — split it into "
+                            "smaller stacks. Nothing ran.")
+                return self._run_command_stack(_segments, chat_key, message)
 
         command = parse_control(text)
         if command is None:
