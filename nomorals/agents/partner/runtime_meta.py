@@ -363,6 +363,141 @@ class RuntimeMetaMixin:
                 f"again. (Feature toggles are kept: "
                 f"/chatmode status shows them.)")
 
+    def _control_style(self, command: Any, chat_key: str,
+                       message: Any = None) -> str:
+        """Inspect + tune the mined style profile (spec §3.4). Owner-only
+        (enforced by the grant check in handle_control before dispatch).
+
+        ::
+
+            /style                          show this chat's live profile
+            /style <field> <value> [target]  set an override delta
+            /style reset [target]           clear this chat's overrides
+            /style list                     every chat with overrides
+
+        Fields: emoji_cap (0..3), target_chars, max_chars,
+        sections|lists|markup (on|off). Overrides are deltas on top of
+        the mined profile — they persist, carry provenance, and reset
+        restores the mined numbers. No target sets the chat the command
+        was sent in; a target sets a remote chat by key.
+        """
+        from ...partner.style import style_for_chat
+        from ...partner.style_overrides import (
+            FIELDS, clear_overrides, get_overrides, get_overrides_detailed,
+            list_scopes, set_override)
+
+        usage = ("usage: /style  ·  /style <emoji_cap|target_chars|max_chars|"
+                 "sections|lists|markup> <value> [platform:chat_id]  ·  "
+                 "/style reset [platform:chat_id]  ·  /style list")
+        words = (command.tail or "").split()
+        sub = (words[0].lower() if words else "")
+
+        def _valid_target(target: str) -> str | None:
+            platform, _, chat_id = target.partition(":")
+            if not platform or not chat_id:
+                return f"chat keys look like telegram:123456 — {usage}"
+            return None
+
+        def _audience_for(target: str) -> str:
+            if target == chat_key and message is not None:
+                kind = str(getattr(getattr(message, "chat", None), "kind", "") or "")
+                if "group" in kind.lower() or "channel" in kind.lower():
+                    return "group"
+            return "owner"
+
+        def _profile_lines(target: str) -> str:
+            overrides = get_overrides(target)
+            profile = style_for_chat(
+                audience=_audience_for(target),
+                platform=(target.partition(":")[0] or "telegram"),
+                mood_values=self.mood.current().values
+                if hasattr(self, "mood") else None,
+                overrides=overrides)
+            detailed = get_overrides_detailed(target)
+            lines = [
+                f"style for {target} (audience: {profile.audience}):",
+                f"  emoji budget: {profile.emoji_budget}  ·  target: "
+                f"{profile.target_chars} chars  ·  hard cap: {profile.max_chars}",
+                f"  sections: {'on' if profile.allow_sections else 'off'}  ·  "
+                f"lists: {'on' if profile.allow_lists else 'off'}  ·  "
+                f"markup: {'on' if profile.allow_markup else 'off'}",
+            ]
+            if profile.measured.n >= 5:
+                lines.append(
+                    f"  measured from your own messages: median "
+                    f"{int(profile.measured.median_chars)} chars over "
+                    f"{profile.measured.n} messages")
+            if detailed:
+                lines.append("  overrides (deltas on the mined numbers):")
+                for field in sorted(detailed):
+                    rec = detailed[field]
+                    when = ""
+                    try:
+                        import datetime as _dt
+                        when = _dt.datetime.fromtimestamp(
+                            float(rec.get("set_at") or 0)).strftime(" %Y-%m-%d")
+                    except (TypeError, ValueError, OSError, OverflowError):
+                        when = ""
+                    lines.append(
+                        f"    {field} = {rec['value']} (set by {rec.get('set_by', '?')}{when})")
+                lines.append("  /style reset clears these.")
+            else:
+                lines.append("  no overrides — mined numbers in effect.")
+            lines.append(
+                "  mood + measured history bend these at reply time; "
+                "style is mined from YOUR messages only, never other people's.")
+            return "\n".join(lines)
+
+        if not words:
+            return _profile_lines(chat_key)
+        if sub == "list":
+            if len(words) > 1:
+                return f"/style list takes no target — {usage}"
+            scopes = list_scopes()
+            if not scopes:
+                return "no style overrides anywhere — mined numbers in effect."
+            lines = ["chats with style overrides:"]
+            for scope in scopes:
+                ov = get_overrides(scope)
+                lines.append(f"  {scope}: " + ", ".join(
+                    f"{k}={v}" for k, v in sorted(ov.items())))
+            return "\n".join(lines)
+        if sub == "reset":
+            if len(words) > 2:
+                return f"too many arguments — {usage}"
+            target = words[1] if len(words) > 1 else chat_key
+            if len(words) > 1:
+                err = _valid_target(target)
+                if err:
+                    return err
+            cleared = clear_overrides(target)
+            where = "this chat" if target == chat_key else target
+            return (f"overrides cleared for {where} — mined numbers back in "
+                    f"effect." if cleared else
+                    f"no overrides to clear for {where}.")
+        field_aliases = {"sections": "allow_sections", "lists": "allow_lists",
+                         "markup": "allow_markup"}
+        field = field_aliases.get(sub, sub)
+        if field not in FIELDS:
+            return (f"unknown style field {sub!r} — want one of: "
+                    f"{', '.join(sorted(list(FIELDS) + list(field_aliases)))} — {usage}")
+        if len(words) < 2:
+            return f"/style {sub} needs a value — {usage}"
+        if len(words) > 3:
+            return f"too many arguments — {usage}"
+        target = words[2] if len(words) > 2 else chat_key
+        if len(words) > 2:
+            err = _valid_target(target)
+            if err:
+                return err
+        try:
+            set_override(target, field, words[1])
+        except ValueError as exc:
+            return f"{exc} — {usage}"
+        where = "this chat" if target == chat_key else target
+        return (f"style override for {where}: {field} = {words[1]} "
+                f"(delta on the mined profile; /style reset clears it).")
+
     def _control_model(self, arg: str) -> str:
         """Live model switch — no restart.
 

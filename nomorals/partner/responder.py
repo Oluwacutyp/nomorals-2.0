@@ -536,6 +536,8 @@ class PartnerResponder:
         short_reply: bool | None = None,
         media_notes: Sequence[str] = (),
         gate_mode: str = "owner",
+        sender_name: str = "",
+        style_overrides: Mapping[str, Any] | None = None,
     ) -> ReplyBundle:
         import time as _time
 
@@ -549,19 +551,22 @@ class PartnerResponder:
         restricted = is_restricted(gate_mode)
 
         # Mined style profile for THIS chat (audience + platform + mood +
-        # the chat's own observed messages). The prompt lines go to the
-        # model (soft layer); the same profile is enforced on the final
-        # draft below (hard layer) so the two cannot drift apart.
-        _observed = [
-            str(getattr(m, "content", "") or "")
-            for m in (history or ())
-            if getattr(m, "role", "") == "user"
-        ]
+        # the OWNER's own observed messages only — never other people's
+        # messages; see observed_owner_texts, spec §3.2). The prompt
+        # lines go to the model (soft layer); the same profile is
+        # enforced on the final draft below (hard layer) so the two
+        # cannot drift apart.
+        from .style import observed_owner_texts
+
+        _observed = observed_owner_texts(
+            history, gate_mode=gate_mode, sender_name=sender_name,
+            user_text=user_text)
         _style = style_for_chat(
             audience=gate_mode,
             platform=chat_platform,
             mood_values=self.mood.current().values,
-            observed=_observed + [user_text],
+            observed=_observed,
+            overrides=style_overrides,
         )
         _style_lines = style_prompt_lines(_style)
 

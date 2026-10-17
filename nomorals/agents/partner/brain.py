@@ -33,6 +33,17 @@ _log = get_logger(__name__)
 from ...core.errors import short_stt_reason as _short_stt_reason
 
 
+def _style_overrides_for(chat_key: str) -> dict[str, Any]:
+    """This chat's style-override deltas (spec §3.4). Never raises —
+    a store failure falls back to no overrides, never breaks a reply."""
+    try:
+        from ...partner.style_overrides import get_overrides
+
+        return get_overrides(chat_key or "")
+    except Exception:  # noqa: BLE001 - style overrides never break chat
+        return {}
+
+
 class PartnerBrain:
     """All the cognition. The runtime calls :meth:`handle_message` per message."""
 
@@ -300,7 +311,7 @@ class PartnerBrain:
     # ── history ─────────────────────────────────────────────────────────────
     def _history(self, chat_key: str, limit: int) -> list[Message]:
         rows = self.context.db.query(
-            "SELECT role, content FROM messages WHERE conversation_id = ? ORDER BY created_at DESC LIMIT ?",
+            "SELECT role, content, name FROM messages WHERE conversation_id = ? ORDER BY created_at DESC LIMIT ?",
             (chat_key, limit * 2),
         )
         rows.reverse()
@@ -308,8 +319,12 @@ class PartnerBrain:
         for row in rows:
             if row["role"] not in {"user", "assistant"} or not (row["content"] or "").strip():
                 continue
-            out.append(Message.user(row["content"]) if row["role"] == "user"
-                         else Message.assistant(row["content"]))
+            # Name is carried so the style layer can tell the OWNER's own
+            # messages apart from other people's (spec §3.2: style is
+            # mined from the owner's messages only).
+            name = str(row.get("name") or "")
+            out.append(Message.user(row["content"], name=name) if row["role"] == "user"
+                         else Message.assistant(row["content"], name=name))
         return out
 
     # ── persistence ──────────────────────────────────────────────────────────
@@ -779,6 +794,8 @@ class PartnerBrain:
                 background_lines=background_lines,
                 continuity_lines=continuity,
                 media_notes=media_notes,
+                sender_name=str(getattr(message, "sender", "") or ""),
+                style_overrides=_style_overrides_for(chat.key),
             )
 
         # Persist + downstream hooks.

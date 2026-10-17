@@ -220,6 +220,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "mood": (0, 10),  # label, or several dim=NN pairs
     "mode": (1, 1),
     "chatmode": (0, 4),  # /chatmode [mode|status|list|feature <f> <on|off>] [chat_key] — per-chat mode + feature toggles (feature form takes 4 words with a target)
+    "style": (0, 3),  # /style | /style <field> <value> [target] | /style reset [target] | /style list — inspect + tune the mined style profile (owner-only)
     "model": (0, 6),  # provider + up to 5 fallback providers
     "providers": (0, 0),  # /providers — probe the whole chain, live or why not
     # /say is ONE command with three forms (single registry entry — a
@@ -1296,6 +1297,10 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
              "usage": "/chatmode [games-only|games-off|games-on|normal|status|list] [platform:chat_id]  ·  /chatmode feature <games|music|voice> <on|off> [platform:chat_id]",
              "example": "/chatmode games-off   ·   /chatmode feature music off   ·   /chatmode list",
              "related": "/status /game"},
+    "style": {"what": "inspect + tune the mined style profile for this chat — the numbers Devon replies with (emoji budget, length target, sections/lists/markup), measured from YOUR own messages, never other people's. /style shows the live profile + any overrides + where each override came from; /style <field> <value> sets an override delta (emoji_cap 0..3, target_chars, max_chars, sections/lists/markup on|off); /style reset clears this chat's overrides; /style list shows every chat with overrides. Owner-only.",
+             "usage": "/style  ·  /style <emoji_cap|target_chars|max_chars|sections|lists|markup> <value> [platform:chat_id]  ·  /style reset [platform:chat_id]  ·  /style list",
+             "example": "/style   ·   /style emoji_cap 0   ·   /style target_chars 200   ·   /style reset",
+             "related": "/chatmode /mood"},
     "model": {"what": "switch the active model live (up to 5 fallbacks); no argument shows the chain.",
               "usage": "/model [provider [fallback …]]", "example": "/model local",
               "related": "/status /providers"},
@@ -2365,7 +2370,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
                            "exness", "stripe", "content",
                            "tempmail", "checkmail", "vnumber", "checksms",
                            "browser", "paper", "backup"]),
-    ("platform control", ["start", "stop", "profile", "chatmode",
+    ("platform control", ["start", "stop", "profile", "chatmode", "style",
                           "update", "pull", "deploy", "restart"]),
     ("discovery", ["list", "commands", "menu", "help", "tour", "heal"]),
 ]
@@ -2553,7 +2558,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
     ("her day — state & control",
      ["status", "platforms", "mood", "stage", "model", "providers", "say", "power",
       "proposals", "approve", "deny", "start", "stop", "quit",
-      "mode", "chatmode", "profile", "mind",
+      "mode", "chatmode", "style", "profile", "mind",
       "spend", "budget", "spending", "mandate", "balances", "goal",
       "insights", "alert", "cost", "heal", "tour"]),
     ("search & research",
@@ -2665,6 +2670,7 @@ LIST_ONELINERS: dict[str, str] = {
     "quit": "shut the system down",
     "mode": "autonomy mode: off | suggest | auto",
     "chatmode": "per-chat mode + feature toggles: /chatmode games-only | games-off | games-on | normal | status | list | feature <games|music|voice> <on|off>",
+    "style": "mined style profile: /style shows it, /style <field> <value> tunes it, /style reset clears overrides",
     "profile": "profile-aware runtime: detected environment + every tuned knob",
     "update": "self-update from chat: gate + checkpoint + pull + restart",
     "pull": "git pull --ff-only, no restart",

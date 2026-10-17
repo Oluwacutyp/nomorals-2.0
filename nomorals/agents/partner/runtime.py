@@ -2701,6 +2701,9 @@ class PartnerRuntime(
         if kind == "chatmode":
             return self._control_chatmode(command, chat_key)
 
+        if kind == "style":
+            return self._control_style(command, chat_key, message)
+
         if kind == "model":
             return self._control_model(command.tail)
 

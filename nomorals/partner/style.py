@@ -870,6 +870,34 @@ class StyleProfile:
         return lines
 
 
+def observed_owner_texts(history: Any, *, gate_mode: str, sender_name: str,
+                        user_text: str = "") -> list[str]:
+    """The ONLY texts style may be mined from for this reply (spec §3.2).
+
+    Style is mined from the OWNER's own messages only — never from other
+    people's private messages. ``history`` user messages count only when
+    they are the owner's (sender name matches this turn's owner sender,
+    or the ``__owner__`` own-message-echo marker); the current
+    ``user_text`` counts only in owner mode (else it is a stranger's
+    message). Private/group chats get ``[]`` — the bot's public style
+    from audience defaults, never mined from members.
+    """
+    if (gate_mode or "").strip().lower() != "owner":
+        return []
+    out: list[str] = []
+    for message in (history or ()):
+        if getattr(message, "role", "") != "user":
+            continue
+        name = str(getattr(message, "name", "") or "")
+        if name and (name == (sender_name or "") or name == "__owner__"):
+            text = str(getattr(message, "content", "") or "")
+            if text.strip():
+                out.append(text)
+    if (user_text or "").strip():
+        out.append(user_text)
+    return out
+
+
 def style_for_chat(
     *,
     audience: str = "owner",
@@ -877,6 +905,7 @@ def style_for_chat(
     mood_values: Mapping[str, float] | None = None,
     observed: Sequence[str] | None = None,
     content_kind: str = "chat",
+    overrides: Mapping[str, Any] | None = None,
 ) -> StyleProfile:
     """Compute the style profile for one reply — dynamically.
 
@@ -970,7 +999,7 @@ def style_for_chat(
             max_chars = min(max_chars, 160)
             target = min(target, 160)
 
-        return StyleProfile(
+        profile = StyleProfile(
             audience=aud,
             platform=plat,
             max_chars=int(max(80, max_chars)),
@@ -981,6 +1010,13 @@ def style_for_chat(
             allow_markup=bool(allow_markup),
             measured=measured,
         )
+        # Owner overrides (deltas from the style_overrides store) win
+        # over the computed profile — tune, never re-mine.
+        if overrides:
+            from .style_overrides import apply_overrides
+
+            profile = apply_overrides(profile, dict(overrides))
+        return profile
     except Exception:  # noqa: BLE001 - style never breaks a reply
         return StyleProfile(
             audience="owner",
