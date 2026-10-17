@@ -202,10 +202,15 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "stop": (1, 1),
     "mood": (0, 10),  # label, or several dim=NN pairs
     "mode": (1, 1),
-    "chatmode": (0, 2),  # /chatmode [games-only|normal|status] [chat_key] — per-chat reply mode
+    "chatmode": (0, 4),  # /chatmode [mode|status|list|feature <f> <on|off>] [chat_key] — per-chat mode + feature toggles (feature form takes 4 words with a target)
     "model": (0, 6),  # provider + up to 5 fallback providers
     "providers": (0, 0),  # /providers — probe the whole chain, live or why not
-    "say": (2, None),
+    # /say is ONE command with three forms (single registry entry — a
+    # duplicate key here would silently discard one form): gateway send
+    # (/say platform:chat text), named-voice TTS (/say <voice> <text>),
+    # rich voice (/say [direction] [accent=…] <text>). The dispatch
+    # branch in handle_control routes on the tail shape.
+    "say": (1, None),
     "proposals": (0, 0),
     "approve": (1, 1),
     "deny": (1, 2),       # /deny <id> [reason] — reason required for upgrade tickets
@@ -317,7 +322,11 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     # wave 87: the Core Mind — manual override over natural-language routing
     "mind": (0, None),       # /mind [status|clear|<goal>] — the core mind
     "news": (0, 2),          # /news [run|status]
-    "research": (0, 2),      # /research [run [domain]|status]
+    # /research is ONE command (single registry entry — a duplicate key
+    # here would silently discard one meaning): ad-hoc web research on
+    # any topic, plus the always-on research loop (status/ideas/approve/
+    # deny/history/from/ask/docs). Legal questions live under /legal.
+    "research": (0, None),
     "code": (1, None),       # /code <what to build> — the coding bot
     "checkpoint": (0, None),  # /checkpoint [label] — snapshot the coding workdir
     "rewind": (0, 1),      # /rewind [n] — restore the nth-latest checkpoint
@@ -379,7 +388,6 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "gtrip": (0, None),        # /gtrip … — group-travel stack (polls, expenses, legs)
     "contract": (0, None),     # /contract review [type] <text> | types — letter-grade contract risk review (Nigerian playbooks)
     "legal": (0, None),        # /legal [language] <question> — plain-language legal information (EN/PCM/YO/HA/IG)
-    "research": (0, None),    # /research <legal question> — grounded RAG with confidence + traceable citations
     "contracts": (0, None),    # /contracts … — contract portfolio: obligations, renewals, SLA tracking
     "regwatch": (0, None),     # /regwatch … — regulatory change monitoring (CBN/SEC/NDPA/FIRS)
     "uprofile": (0, None),     # /uprofile … — prompt-scaffolded profiles + element-level likes (gig/community/business)
@@ -392,7 +400,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "tts": (1, None),        # /tts <text> — speak it (sends a voice note; file=on sends the file)
     "stt": (1, 5),           # /stt <path> — transcribe an audio file
     "sing": (1, None),       # /sing <melody> — sing it (C4:0.5:hello …)
-    "say": (1, None),        # /say <text> — rich voice: emotion/accent/ambience
+    # (no second "say" entry: the single entry above covers all three forms)
     "look": (1, None),       # /look <path|url> [focus] — screen-reader analysis
     "schedule": (0, None),   # /schedule add|list|rm|enable|disable|run|status
     "db": (0, None),         # /db tables | schema <t> | query <sql> | counts
@@ -1265,9 +1273,9 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
     "mode": {"what": "her autonomy level: off (asleep) | suggest (proposes, you approve) | auto (acts).",
              "usage": "/mode off|suggest|auto", "example": "/mode auto",
              "related": "/proposals /power"},
-    "chatmode": {"what": "this chat's reply mode: normal (she answers everything) | games-only (silent for normal chat, game commands still work). Owner-only; run it in the chat to set that chat. In games-only, ALL non-game messages are silenced — including voice notes (even after transcription). Game commands + in-game moves still work. /chatmode normal restores replies.",
-             "usage": "/chatmode [games-only|normal|status] [platform:chat_id]",
-             "example": "/chatmode games-only   ·   /chatmode normal telegram:123456",
+    "chatmode": {"what": "this chat's reply mode + per-chat feature toggles — the single entry point for group controls. Modes: normal (she answers everything) | games-only (silent for normal chat, game commands still work) | games-off (normal chat works, game commands refused honestly). Features: /chatmode feature <games|music|voice> <on|off> disables one feature in THIS chat only — Group A never affects Group B or DMs. Owner-only; run it in the chat to set that chat. In games-only, ALL non-game messages are silenced — including voice notes (even after transcription). Game commands + in-game moves still work. /chatmode normal restores replies. /chatmode list shows every chat with custom settings.",
+             "usage": "/chatmode [games-only|games-off|games-on|normal|status|list] [platform:chat_id]  ·  /chatmode feature <games|music|voice> <on|off> [platform:chat_id]",
+             "example": "/chatmode games-off   ·   /chatmode feature music off   ·   /chatmode list",
              "related": "/status /game"},
     "model": {"what": "switch the active model live (up to 5 fallbacks); no argument shows the chain.",
               "usage": "/model [provider [fallback …]]", "example": "/model local",
@@ -2633,7 +2641,7 @@ LIST_ONELINERS: dict[str, str] = {
     "stop": "hot-stop a platform this session",
     "quit": "shut the system down",
     "mode": "autonomy mode: off | suggest | auto",
-    "chatmode": "per-chat reply mode: /chatmode games-only | normal | status",
+    "chatmode": "per-chat mode + feature toggles: /chatmode games-only | games-off | games-on | normal | status | list | feature <games|music|voice> <on|off>",
     "profile": "profile-aware runtime: detected environment + every tuned knob",
     "update": "self-update from chat: gate + checkpoint + pull + restart",
     "pull": "git pull --ff-only, no restart",

@@ -193,50 +193,175 @@ class RuntimeMetaMixin:
         return f"autonomy: {mode}"
 
     def _control_chatmode(self, command: Any, chat_key: str) -> str:
-        """Per-chat reply mode: /chatmode [games-only|normal|status]
-        [platform:chat_id]. No target sets the chat the command was sent
-        in; a target sets a remote chat by key. Owner-only (enforced by
-        the grant check in handle_control before dispatch)."""
-        from ...partner.chat_modes import (
-            MODE_GAMES_ONLY, MODE_NORMAL, get_chat_mode, set_chat_mode)
+        """Per-chat reply mode + per-chat feature toggles — the single
+        entry point for group controls. Owner-only (enforced by the
+        grant check in handle_control before dispatch).
 
-        usage = ("usage: /chatmode [games-only|normal|status] "
-                 "[platform:chat_id]")
+        ::
+
+            /chatmode                          status for this chat
+            /chatmode status [platform:chat_id]
+            /chatmode list                     every chat with custom settings
+            /chatmode games-only [target]     silent for normal chat, games work
+            /chatmode games-off [target]      normal chat works, games refused
+            /chatmode games-on [target]       games back on (mode → normal)
+            /chatmode normal [target]         mode → normal (toggles kept)
+            /chatmode feature <games|music|voice> <on|off> [target]
+
+        No target sets the chat the command was sent in; a target sets a
+        remote chat by key. ``feature`` changes one toggle in one chat
+        only — disabling games in Group A never affects Group B or DMs.
+        """
+        from ...partner.chat_modes import (
+            FEATURES, MODE_GAMES_OFF, MODE_GAMES_ONLY, MODE_NORMAL,
+            get_chat_settings, list_chat_settings, set_chat_mode,
+            set_feature)
+
+        usage = ("usage: /chatmode [games-only|games-off|games-on|normal|"
+                 "status|list] [platform:chat_id]  ·  /chatmode feature "
+                 "<games|music|voice> <on|off> [platform:chat_id]")
         words = (command.tail or "").split()
         sub = (words[0].lower() if words else "status")
-        target = words[1] if len(words) > 1 else chat_key
-        if sub in ("games-only", "games_only", "gamesonly", "games", "quiet"):
-            mode: str | None = MODE_GAMES_ONLY
-        elif sub in ("normal", "off", "clear", "default"):
-            mode = MODE_NORMAL
-        elif sub == "status":
-            mode = None
-        else:
-            return f"unknown mode {sub!r} — {usage}"
-        if len(words) > 1:
+
+        def _valid_target(target: str) -> str | None:
             # A remote target must look like a chat key, or the set
             # would silently apply to a key nothing ever matches.
             platform, _, chat_id = target.partition(":")
             if not platform or not chat_id:
                 return f"chat keys look like telegram:123456 — {usage}"
+            return None
+
+        def _status_line(target: str) -> str:
+            settings = get_chat_settings(target)
+            mode = settings["mode"]
+            disabled = settings["disabled"]
+            where = "this chat" if target == chat_key else target
+            toggles = ", ".join(
+                f"{f} {'off' if f in disabled else 'on'}" for f in FEATURES)
+            if mode == MODE_GAMES_ONLY:
+                head = (f"{where} is games-only — normal chat stays silent "
+                        "here; game commands still work.")
+                tail = (" In games-only, ALL non-game messages are "
+                        "silenced — including voice notes (even after "
+                        "transcription). Game commands + in-game moves "
+                        "still work. /chatmode normal restores replies.")
+            elif mode == MODE_GAMES_OFF:
+                head = (f"{where} is games-off — I answer normal chat "
+                        "here, but game commands are refused.")
+                tail = " /chatmode games-on turns games back on."
+            elif disabled:
+                head = (f"{where} is normal with features off: "
+                        f"{', '.join(disabled)}.")
+                tail = " /chatmode feature <name> on turns one back on."
+            else:
+                head = f"{where} is normal — I answer everything here."
+                tail = ""
+            return f"{head} features: {toggles}.{tail}"
+
+        if sub == "list":
+            if len(words) > 1:
+                return f"/chatmode list takes no target — {usage}"
+            all_settings = list_chat_settings()
+            if not all_settings:
+                return ("no per-chat settings — every chat is normal with "
+                        "all features on.")
+            lines = ["per-chat settings:"]
+            for key in sorted(all_settings):
+                settings = all_settings[key]
+                off = settings["disabled"]
+                lines.append(
+                    f"  {key}: {settings['mode'].replace('_', '-')}"
+                    + (f" (off: {', '.join(off)})" if off else ""))
+            return "\n".join(lines)
+
+        if sub == "feature":
+            if len(words) < 3:
+                return f"/chatmode feature needs a feature and on/off — {usage}"
+            feature = words[1].lower()
+            state = words[2].lower()
+            if feature not in FEATURES:
+                return (f"unknown feature {feature!r} — want one of: "
+                        f"{', '.join(FEATURES)} — {usage}")
+            if state not in ("on", "off"):
+                return f"want on or off, got {state!r} — {usage}"
+            if len(words) > 4:
+                return f"too many arguments — {usage}"
+            target = words[3] if len(words) > 3 else chat_key
+            if len(words) > 3:
+                err = _valid_target(target)
+                if err:
+                    return err
+            set_feature(target, feature, state == "on")
+            where = "this chat" if target == chat_key else target
+            verb = "back on" if state == "on" else "off"
+            extra = ""
+            if feature == "games" and state == "off":
+                extra = (" Game commands here now get an honest refusal "
+                         "instead of running.")
+            elif feature == "games" and state == "on":
+                extra = (" Games work here again (a games-off mode is "
+                         "cleared too).")
+            return f"{feature} is {verb} in {where}.{extra}"
+
+        if sub == "status":
+            if len(words) > 2:
+                return f"too many arguments — {usage}"
+            target = words[1] if len(words) > 1 else chat_key
+            if len(words) > 1:
+                err = _valid_target(target)
+                if err:
+                    return err
+            return _status_line(target)
+
+        if sub in ("games-only", "games_only", "gamesonly", "games", "quiet"):
+            mode: str | None = MODE_GAMES_ONLY
+            mode_word = "games-only"
+        elif sub in ("games-off", "games_off", "nogames", "no-games"):
+            mode = MODE_GAMES_OFF
+            mode_word = "games-off"
+        elif sub in ("games-on", "games_on"):
+            # games-on = games back on: clear the games toggle AND any
+            # games-off mode. set_feature("games", True) does both.
+            if len(words) > 2:
+                return f"too many arguments — {usage}"
+            target = words[1] if len(words) > 1 else chat_key
+            if len(words) > 1:
+                err = _valid_target(target)
+                if err:
+                    return err
+            set_feature(target, "games", True)
+            where = "this chat" if target == chat_key else target
+            return (f"games are back on in {where} — game commands work "
+                    f"here again.")
+        elif sub in ("normal", "off", "clear", "default"):
+            mode = MODE_NORMAL
+            mode_word = "normal"
+        else:
+            return f"unknown mode {sub!r} — {usage}"
+        if len(words) > 2:
+            return f"too many arguments — {usage}"
+        target = words[1] if len(words) > 1 else chat_key
+        if len(words) > 1:
+            err = _valid_target(target)
+            if err:
+                return err
         where = "this chat" if target == chat_key else target
-        voice_note = ("In games-only, ALL non-game messages are silenced — "
-                      "including voice notes (even after transcription). "
-                      "Game commands + in-game moves still work. "
-                      "/chatmode normal restores replies.")
-        if mode is None:
-            current = get_chat_mode(target)
-            if current == MODE_GAMES_ONLY:
-                return (f"{where} is games-only — normal chat stays silent "
-                        "here; game commands still work. "
-                        "/chatmode normal to restore. " + voice_note)
-            return f"{where} is normal — I answer everything here."
         set_chat_mode(target, mode)
         if mode == MODE_GAMES_ONLY:
             return (f"{where} is now games-only — I'll stay silent for "
                     "normal chat here, but game commands still work. "
-                    "/chatmode normal to restore. " + voice_note)
-        return f"{where} is back to normal — I'll answer everything here again."
+                    "/chatmode normal to restore. In games-only, ALL "
+                    "non-game messages are silenced — including voice "
+                    "notes (even after transcription). Game commands + "
+                    "in-game moves still work.")
+        if mode == MODE_GAMES_OFF:
+            return (f"{where} is now games-off — I'll answer normal chat "
+                    "here, but game commands are refused honestly "
+                    "(never silently dropped, never run). "
+                    "/chatmode games-on turns games back on.")
+        return (f"{where} is back to normal — I'll answer everything here "
+                f"again. (Feature toggles are kept: "
+                f"/chatmode status shows them.)")
 
     def _control_model(self, arg: str) -> str:
         """Live model switch — no restart.

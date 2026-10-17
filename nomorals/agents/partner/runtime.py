@@ -12,7 +12,12 @@ from concurrent.futures import Future, ThreadPoolExecutor, wait
 from typing import Any, Callable
 from ...llm.brain import brain_for
 from ...core.logging_setup import get_logger
-from ...partner.chat_modes import is_games_only as _chat_modes_is_games_only
+from ...partner.chat_modes import (
+    feature_disabled_reply as _chat_modes_disabled_reply,
+    feature_for_command as _chat_modes_feature_for,
+    is_feature_disabled as _chat_modes_is_feature_disabled,
+    is_games_disabled as _chat_modes_is_games_disabled,
+    is_games_only as _chat_modes_is_games_only)
 from ...partner.gating import gate_decision, is_owner_chat, is_restricted
 from ...partner.presence import Presence, decide_presence, human_typing_seconds
 from ...social.chat.base import ChatKind, ChatMessage, ChatRef
@@ -602,6 +607,24 @@ class PartnerRuntime(
             ]
         else:
             self.context.extras.pop("attachments", None)
+        # Per-chat voice toggle: with voice off in this chat, an inbound
+        # voice note is refused honestly instead of transcribed — a
+        # disabled feature must not run, and transcribing it would run
+        # it. Games-only chats stay silent (their gate owns them), so
+        # the refusal never fires there. Text messages pass through:
+        # only voice notes are gated here.
+        if (message.incoming and not (message.text or "").strip()
+                and not _chat_modes_is_games_only(message.chat.key)
+                and _chat_modes_is_feature_disabled(message.chat.key, "voice")):
+            from ...voice.pingpong import has_voice_media as _has_voice_media
+            if _has_voice_media(message):
+                self._bump("replies")
+                try:
+                    self.gateway.send(message.chat.platform, message.chat,
+                                      _chat_modes_disabled_reply("voice"))
+                except Exception:  # noqa: BLE001 - honest reply is best-effort
+                    _log.exception("voice-disabled reply send failed")
+                return
         # Voice notes use the typed-intent path: if the owner's voice note
         # transcribes to a slash command, it becomes the message text so the
         # whole downstream pipeline (command parsing, routing, gating) treats
@@ -746,6 +769,12 @@ class PartnerRuntime(
                 message.chat.key, message.text,
                 player=self._game_player(message), kind=message.chat.kind)
             if move_reply is not None:
+                # Games-off / games-disabled: a live game in this chat
+                # is dead — a move or in-game command gets the honest
+                # refusal, never a game turn. Plain messages return
+                # None from the router and flow to normal chat below.
+                if _chat_modes_is_games_disabled(message.chat.key):
+                    move_reply = _chat_modes_disabled_reply("games")
                 try:
                     self.gateway.send(message.chat.platform, message.chat, move_reply)
                 except Exception:  # noqa: BLE001
@@ -812,6 +841,19 @@ class PartnerRuntime(
             if (command is not None
                     and (command.kind == "game" or command.kind in GAME_COMMANDS)
                     and not _math_dm_outsider):
+                # Per-chat games toggle: games-off / games-disabled chats
+                # refuse game commands honestly — never silently dropped,
+                # never run. /chatmode (the control plane) is not a game
+                # command, so the owner can always re-enable from here.
+                if _chat_modes_is_games_disabled(message.chat.key):
+                    self._bump("controls")
+                    try:
+                        self.gateway.send(
+                            message.chat.platform, message.chat,
+                            _chat_modes_disabled_reply("games"))
+                    except Exception:  # noqa: BLE001
+                        pass
+                    return
                 # Stacking never includes games (interactive, stateful):
                 # a stack starting with a game is rejected explicitly
                 # instead of running its first game and silently
@@ -1356,16 +1398,23 @@ class PartnerRuntime(
     def _send_reply(self, message: ChatMessage, parts: list[str]) -> None:
         # Voice-note ping-pong (outbound): the user spoke, so Devon answers
         # in voice.  Best-effort — any TTS/ffmpeg failure falls back to the
-        # normal text path below.
+        # normal text path below. Per-chat voice toggle wins: with voice
+        # off in this chat, replies stay text.
         if message.meta.get("voice_in"):
             from ..features import feature_enabled as _fe
-            if _fe(self.context, "voice") and self._send_voice_reply(message, parts):
+            if (_fe(self.context, "voice")
+                    and not _chat_modes_is_feature_disabled(
+                        message.chat.key, "voice")
+                    and self._send_voice_reply(message, parts)):
                 return
         # Voice conversation mode: chat explicitly set to voice — replies go
-        # out as voice notes even when the input was typed.
+        # out as voice notes even when the input was typed. Per-chat voice
+        # toggle wins over the mode: voice off means text replies.
         try:
             from ...voice.conversation import voice_mode_on
-            if voice_mode_on(message.chat.key):
+            if (voice_mode_on(message.chat.key)
+                    and not _chat_modes_is_feature_disabled(
+                        message.chat.key, "voice")):
                 if self._send_voice_reply(message, parts):
                     return
         except Exception:  # noqa: BLE001 - voice mode is best-effort
@@ -2476,6 +2525,20 @@ class PartnerRuntime(
         is_owner = True if message is None else self._is_operator(message)
         if not caller_may_run(kind, is_owner):
             return "that one's just for the owner."
+
+        # Per-chat feature gate: the shared choke point for every slash
+        # command that reaches dispatch — owner DM, public bot, stack
+        # steps (each re-enters here), direct handle_control calls. A
+        # disabled feature in this chat never runs; the caller gets the
+        # honest refusal, not silence and not a run. /chatmode itself is
+        # exempt (it is the control plane). message=None is an internal
+        # probe (tour/heal), not chat traffic — it bypasses the gate so
+        # probes measure the command, not the chat's toggles.
+        if message is not None and kind != "chatmode":
+            _feature = _chat_modes_feature_for(kind)
+            if (_feature is not None
+                    and _chat_modes_is_feature_disabled(chat_key, _feature)):
+                return _chat_modes_disabled_reply(_feature)
 
         # Confirm-flow gate for CONFIRMABLE commands (quit/forget):
         # bare request → prompt + store; confirm → dispatch with the

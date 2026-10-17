@@ -132,7 +132,14 @@ class ChatmodeRegistrationTest(unittest.TestCase):
         self.assertIsNotNone(parse_control("/chatmode status"))
 
     def test_too_many_args_is_error(self) -> None:
+        # The feature form takes up to 4 words (feature <f> <on|off>
+        # <target>), so a 3-word mode form parses — the handler rejects
+        # it as too many arguments — while a 5-word form fails parsing.
         cmd = parse_control("/chatmode games-only telegram:1 extra")
+        self.assertIsNotNone(cmd)
+        assert cmd is not None
+        self.assertEqual(cmd.kind, "chatmode")
+        cmd = parse_control("/chatmode feature music off telegram:1 extra")
         self.assertIsNotNone(cmd)
         assert cmd is not None
         self.assertEqual(cmd.kind, "error")
@@ -315,6 +322,339 @@ class GamesOnlyGateTest(ChatmodeCommandTest):
                     return_value=SimpleNamespace(parts=["hello back"])):
             self.runtime._process(_msg("hey how are you"))
         self.assertTrue(any("hello back" in text for _, text in gateway.sent))
+
+
+class ChatModesTogglesTest(unittest.TestCase):
+    """Per-chat feature toggles: store, consistency, backward compat."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory(prefix="nm-toggles-")
+        self.path = os.path.join(self.tmp.name, "chat_modes.json")
+        self._old = os.environ.get("NOMORALS_CHAT_MODES_PATH")
+        os.environ["NOMORALS_CHAT_MODES_PATH"] = self.path
+
+    def tearDown(self) -> None:
+        if self._old is None:
+            os.environ.pop("NOMORALS_CHAT_MODES_PATH", None)
+        else:
+            os.environ["NOMORALS_CHAT_MODES_PATH"] = self._old
+        self.tmp.cleanup()
+
+    def test_games_off_mode(self) -> None:
+        chat_modes.set_chat_mode("telegram:1", "games_off")
+        self.assertEqual(chat_modes.get_chat_mode("telegram:1"), "games_off")
+        self.assertTrue(chat_modes.is_games_off("telegram:1"))
+        self.assertTrue(chat_modes.is_games_disabled("telegram:1"))
+        self.assertFalse(chat_modes.is_games_only("telegram:1"))
+
+    def test_three_modes_distinct(self) -> None:
+        for mode in ("normal", "games_only", "games_off"):
+            chat_modes.set_chat_mode("telegram:1", mode)
+            self.assertEqual(chat_modes.get_chat_mode("telegram:1"), mode)
+        self.assertNotEqual(chat_modes.get_chat_mode("telegram:1"), "games_only")
+
+    def test_feature_toggle_round_trip(self) -> None:
+        self.assertFalse(chat_modes.is_feature_disabled("telegram:1", "music"))
+        chat_modes.set_feature("telegram:1", "music", False)
+        self.assertTrue(chat_modes.is_feature_disabled("telegram:1", "music"))
+        self.assertFalse(chat_modes.is_feature_disabled("telegram:1", "voice"))
+        chat_modes.set_feature("telegram:1", "music", True)
+        self.assertFalse(chat_modes.is_feature_disabled("telegram:1", "music"))
+        # re-enabling the last toggle prunes the entry (fully default)
+        self.assertEqual(chat_modes.list_chat_settings(), {})
+
+    def test_feature_toggle_per_chat_isolation(self) -> None:
+        chat_modes.set_feature("telegram:A", "games", False)
+        self.assertTrue(chat_modes.is_games_disabled("telegram:A"))
+        self.assertFalse(chat_modes.is_games_disabled("telegram:B"))
+        self.assertFalse(chat_modes.is_games_disabled("telegram:DM"))
+
+    def test_unknown_feature_rejected(self) -> None:
+        with self.assertRaises(ValueError):
+            chat_modes.set_feature("telegram:1", "teleport", False)
+        self.assertFalse(chat_modes.is_feature_disabled("telegram:1", "teleport"))
+
+    def test_games_only_clears_disabled_games(self) -> None:
+        chat_modes.set_feature("telegram:1", "games", False)
+        chat_modes.set_chat_mode("telegram:1", "games_only")
+        self.assertFalse(chat_modes.is_games_disabled("telegram:1"))
+
+    def test_disabling_games_drops_games_only(self) -> None:
+        chat_modes.set_chat_mode("telegram:1", "games_only")
+        chat_modes.set_feature("telegram:1", "games", False)
+        self.assertEqual(chat_modes.get_chat_mode("telegram:1"), "normal")
+        self.assertTrue(chat_modes.is_games_disabled("telegram:1"))
+
+    def test_enabling_games_clears_games_off(self) -> None:
+        chat_modes.set_chat_mode("telegram:1", "games_off")
+        chat_modes.set_feature("telegram:1", "games", True)
+        self.assertEqual(chat_modes.get_chat_mode("telegram:1"), "normal")
+        self.assertFalse(chat_modes.is_games_disabled("telegram:1"))
+
+    def test_normal_keeps_disabled_features(self) -> None:
+        chat_modes.set_feature("telegram:1", "music", False)
+        chat_modes.set_chat_mode("telegram:1", "normal")
+        self.assertTrue(chat_modes.is_feature_disabled("telegram:1", "music"))
+        self.assertEqual(chat_modes.get_chat_mode("telegram:1"), "normal")
+
+    def test_backward_compat_old_entry_without_disabled(self) -> None:
+        # Entries written before toggles existed have no "disabled" key.
+        with open(self.path, "w", encoding="utf-8") as fh:
+            import json as _json
+            _json.dump({"chats": {"telegram:1": {"mode": "games_only",
+                                                 "set_at": 1.0}}}, fh)
+        self.assertTrue(chat_modes.is_games_only("telegram:1"))
+        self.assertFalse(chat_modes.is_feature_disabled("telegram:1", "music"))
+        self.assertEqual(chat_modes.get_chat_settings("telegram:1"),
+                         {"mode": "games_only", "disabled": []})
+
+    def test_list_chat_settings(self) -> None:
+        chat_modes.set_chat_mode("telegram:A", "games_off")
+        chat_modes.set_feature("telegram:B", "voice", False)
+        chat_modes.set_chat_mode("telegram:C", "normal")
+        out = chat_modes.list_chat_settings()
+        self.assertEqual(out["telegram:A"],
+                         {"mode": "games_off", "disabled": ["games"]})
+        self.assertEqual(out["telegram:B"],
+                         {"mode": "normal", "disabled": ["voice"]})
+        self.assertNotIn("telegram:C", out)
+
+    def test_feature_for_command_mapping(self) -> None:
+        self.assertEqual(chat_modes.feature_for_command("game"), "games")
+        self.assertEqual(chat_modes.feature_for_command("hangman"), "games")
+        self.assertEqual(chat_modes.feature_for_command("music"), "music")
+        self.assertEqual(chat_modes.feature_for_command("play"), "music")
+        self.assertEqual(chat_modes.feature_for_command("tts"), "voice")
+        self.assertEqual(chat_modes.feature_for_command("voice"), "voice")
+        self.assertEqual(chat_modes.feature_for_command("sing"), "voice")
+        self.assertIsNone(chat_modes.feature_for_command("chatmode"))
+        self.assertIsNone(chat_modes.feature_for_command("status"))
+        # arena is the content arena, NOT a game — must not be gated
+        self.assertIsNone(chat_modes.feature_for_command("arena"))
+
+
+class ChatmodeTogglesCommandTest(ChatmodeCommandTest):
+    """ /chatmode games-off / games-on / feature / list via handle_control."""
+
+    def test_games_off_then_games_on(self) -> None:
+        out = self.runtime.handle_control(
+            "/chatmode games-off", "telegram:999",
+            message=_msg("/chatmode games-off", owner=True))
+        self.assertIn("games-off", out)
+        self.assertTrue(chat_modes.is_games_disabled("telegram:999"))
+        out = self.runtime.handle_control(
+            "/chatmode games-on", "telegram:999",
+            message=_msg("/chatmode games-on", owner=True))
+        self.assertIn("back on", out)
+        self.assertFalse(chat_modes.is_games_disabled("telegram:999"))
+
+    def test_feature_music_off_and_on(self) -> None:
+        out = self.runtime.handle_control(
+            "/chatmode feature music off", "telegram:999",
+            message=_msg("/chatmode feature music off", owner=True))
+        self.assertIn("music is off", out)
+        self.assertTrue(chat_modes.is_feature_disabled("telegram:999", "music"))
+        out = self.runtime.handle_control(
+            "/chatmode feature music on", "telegram:999",
+            message=_msg("/chatmode feature music on", owner=True))
+        self.assertIn("back on", out)
+        self.assertFalse(chat_modes.is_feature_disabled("telegram:999", "music"))
+
+    def test_feature_remote_target_isolated(self) -> None:
+        out = self.runtime.handle_control(
+            "/chatmode feature games off telegram:555", "telegram:999",
+            message=_msg("/chatmode feature games off telegram:555", owner=True))
+        self.assertIn("telegram:555", out)
+        self.assertTrue(chat_modes.is_games_disabled("telegram:555"))
+        self.assertFalse(chat_modes.is_games_disabled("telegram:999"))
+
+    def test_feature_unknown_feature_or_state(self) -> None:
+        out = self.runtime.handle_control(
+            "/chatmode feature teleport off", "telegram:999",
+            message=_msg("/chatmode feature teleport off", owner=True))
+        self.assertIn("unknown feature", out)
+        out = self.runtime.handle_control(
+            "/chatmode feature music sideways", "telegram:999",
+            message=_msg("/chatmode feature music sideways", owner=True))
+        self.assertIn("on or off", out)
+        self.assertFalse(chat_modes.is_feature_disabled("telegram:999", "music"))
+
+    def test_feature_non_owner_denied(self) -> None:
+        out = self.runtime.handle_control(
+            "/chatmode feature music off", "telegram:999",
+            message=_msg("/chatmode feature music off", owner=False))
+        self.assertEqual(out, "that one's just for the owner.")
+        self.assertFalse(chat_modes.is_feature_disabled("telegram:999", "music"))
+
+    def test_status_shows_mode_and_toggles(self) -> None:
+        chat_modes.set_chat_mode("telegram:999", "games_off")
+        chat_modes.set_feature("telegram:999", "music", False)
+        out = self.runtime.handle_control(
+            "/chatmode status", "telegram:999",
+            message=_msg("/chatmode status", owner=True))
+        self.assertIn("games-off", out)
+        self.assertIn("music off", out)
+        self.assertIn("games off", out)
+        self.assertIn("voice on", out)
+
+    def test_list_shows_all_custom_chats(self) -> None:
+        chat_modes.set_chat_mode("telegram:111", "games_off")
+        chat_modes.set_feature("telegram:222", "voice", False)
+        out = self.runtime.handle_control(
+            "/chatmode list", "telegram:999",
+            message=_msg("/chatmode list", owner=True))
+        self.assertIn("telegram:111", out)
+        self.assertIn("games-off", out)
+        self.assertIn("telegram:222", out)
+        self.assertIn("voice", out)
+
+    def test_list_empty(self) -> None:
+        out = self.runtime.handle_control(
+            "/chatmode list", "telegram:999",
+            message=_msg("/chatmode list", owner=True))
+        self.assertIn("no per-chat settings", out)
+
+    def test_parse_control_feature_form(self) -> None:
+        cmd = parse_control("/chatmode feature music off telegram:123")
+        self.assertIsNotNone(cmd)
+        assert cmd is not None
+        self.assertEqual(cmd.kind, "chatmode")
+        self.assertEqual(cmd.tail, "feature music off telegram:123")
+        self.assertIsNotNone(parse_control("/chatmode list"))
+        self.assertIsNotNone(parse_control("/chatmode games-off"))
+        self.assertIsNotNone(parse_control("/chatmode games-on"))
+
+
+class FeatureGateTest(ChatmodeCommandTest):
+    """Disabled features never run: honest refusal, not silence, not a run."""
+
+    def test_game_command_refused_in_games_off_chat(self) -> None:
+        chat_modes.set_chat_mode("telegram:999", "games_off")
+        gateway = self.runtime.gateway
+        assert isinstance(gateway, _RecordingGateway)
+        with mock.patch.object(
+                self.runtime, "_route_game_move", return_value=None), \
+                mock.patch.object(
+                    self.runtime, "_control_game",
+                    side_effect=AssertionError("game must not run")):
+            self.runtime._process(_msg("/game hangman"))
+        self.assertTrue(any("turned off" in text for _, text in gateway.sent))
+        self.assertTrue(any("games-on" in text for _, text in gateway.sent))
+
+    def test_game_command_refused_in_toggle_disabled_chat(self) -> None:
+        chat_modes.set_feature("telegram:999", "games", False)
+        gateway = self.runtime.gateway
+        assert isinstance(gateway, _RecordingGateway)
+        with mock.patch.object(
+                self.runtime, "_route_game_move", return_value=None), \
+                mock.patch.object(
+                    self.runtime, "_control_game",
+                    side_effect=AssertionError("game must not run")):
+            self.runtime._process(_msg("/hangman"))
+        self.assertTrue(any("turned off" in text for _, text in gateway.sent))
+
+    def test_game_command_runs_in_other_chat(self) -> None:
+        chat_modes.set_feature("telegram:111", "games", False)
+        gateway = self.runtime.gateway
+        assert isinstance(gateway, _RecordingGateway)
+        with mock.patch.object(
+                self.runtime, "_route_game_move", return_value=None), \
+                mock.patch.object(
+                    self.runtime, "_control_game",
+                    return_value="game started"):
+            self.runtime._process(_msg("/game hangman"))
+        self.assertTrue(any("game started" in text for _, text in gateway.sent))
+
+    def test_normal_chat_still_replies_in_games_off_chat(self) -> None:
+        chat_modes.set_chat_mode("telegram:999", "games_off")
+        gateway = self.runtime.gateway
+        assert isinstance(gateway, _RecordingGateway)
+        with mock.patch.object(
+                self.runtime, "_route_game_move", return_value=None), \
+                mock.patch.object(
+                    self.runtime.brain, "handle_message",
+                    return_value=SimpleNamespace(parts=["hello back"])):
+            self.runtime._process(_msg("hey how are you"))
+        self.assertTrue(any("hello back" in text for _, text in gateway.sent))
+
+    def test_game_move_refused_in_games_off_chat(self) -> None:
+        chat_modes.set_chat_mode("telegram:999", "games_off")
+        gateway = self.runtime.gateway
+        assert isinstance(gateway, _RecordingGateway)
+        with mock.patch.object(
+                self.runtime, "_route_game_move",
+                return_value="it is your move, pick a letter"):
+            self.runtime._process(_msg("e"))
+        self.assertTrue(any("turned off" in text for _, text in gateway.sent))
+        self.assertFalse(any("your move" in text for _, text in gateway.sent))
+
+    def test_music_command_refused_via_handle_control(self) -> None:
+        chat_modes.set_feature("telegram:999", "music", False)
+        out = self.runtime.handle_control(
+            "/play some song", "telegram:999",
+            message=_msg("/play some song", owner=True))
+        self.assertIn("turned off", out)
+        out = self.runtime.handle_control(
+            "/music a song about cats", "telegram:999",
+            message=_msg("/music a song about cats", owner=True))
+        self.assertIn("turned off", out)
+
+    def test_voice_command_refused_via_handle_control(self) -> None:
+        chat_modes.set_feature("telegram:999", "voice", False)
+        out = self.runtime.handle_control(
+            "/tts hello there", "telegram:999",
+            message=_msg("/tts hello there", owner=True))
+        self.assertIn("turned off", out)
+
+    def test_chatmode_still_works_when_features_disabled(self) -> None:
+        chat_modes.set_feature("telegram:999", "games", False)
+        chat_modes.set_feature("telegram:999", "music", False)
+        chat_modes.set_feature("telegram:999", "voice", False)
+        out = self.runtime.handle_control(
+            "/chatmode games-on", "telegram:999",
+            message=_msg("/chatmode games-on", owner=True))
+        self.assertIn("back on", out)
+        self.assertFalse(chat_modes.is_games_disabled("telegram:999"))
+        # music/voice toggles untouched by games-on
+        self.assertTrue(chat_modes.is_feature_disabled("telegram:999", "music"))
+
+    def test_inbound_voice_note_refused_when_voice_off(self) -> None:
+        from nomorals.social.chat.base import MediaRef
+        chat_modes.set_feature("telegram:999", "voice", False)
+        gateway = self.runtime.gateway
+        assert isinstance(gateway, _RecordingGateway)
+        voice_msg = _msg("", chat_key="telegram:999")
+        voice_msg.media = [MediaRef(path="/tmp/note.ogg", kind="voice",
+                                    mime="audio/ogg", voice_note=False)]
+        with mock.patch.object(
+                self.runtime, "_route_game_move", return_value=None):
+            self.runtime._process(voice_msg)
+        self.assertTrue(any("Voice is turned off" in text
+                            for _, text in gateway.sent))
+
+    def test_inbound_voice_note_transcribed_when_voice_on(self) -> None:
+        # Control: with voice on, the gate does not fire — the note flows
+        # to transcription (mocked) instead of an instant refusal.
+        from nomorals.social.chat.base import MediaRef
+        gateway = self.runtime.gateway
+        assert isinstance(gateway, _RecordingGateway)
+        voice_msg = _msg("", chat_key="telegram:999")
+        voice_msg.media = [MediaRef(path="/tmp/note.ogg", kind="voice",
+                                    mime="audio/ogg", voice_note=False)]
+        with mock.patch.object(
+                self.runtime, "_route_game_move", return_value=None), \
+                mock.patch.object(
+                    self.runtime.brain, "_spoken_command",
+                    return_value=""), \
+                mock.patch(
+                    "nomorals.voice.pingpong.transcribe_voice_media_with_reason",
+                    return_value=("", "no STT backend")), \
+                mock.patch.object(
+                    self.runtime.brain, "handle_message",
+                    return_value=SimpleNamespace(parts=["heard nothing"])):
+            self.runtime._process(voice_msg)
+        self.assertFalse(any("Voice is turned off" in text
+                             for _, text in gateway.sent))
 
 
 if __name__ == "__main__":
