@@ -15,6 +15,7 @@ actually was a voice note.
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import tempfile
 from pathlib import Path
@@ -50,15 +51,34 @@ def _short_stt_reason(error: Any) -> str:
     """Classify an STT failure into the short reason shown to the user.
 
     "no STT backend" — nothing can transcribe (no backend installed /
-    configured). Anything else that went wrong mid-call is an
-    "STT API error". Empty-but-successful transcripts get
-    "empty transcript" from the caller, not here.
+    configured). Anything else keeps the REAL underlying error
+    (e.g. "STT API 401: {...}" / "CERTIFICATE_VERIFY_FAILED") — the
+    previous version collapsed every failure to the bare "STT API
+    error", which hid the cause the owner needed to act on. Secrets
+    (Bearer tokens, api_key= values) are redacted; the detail is
+    single-line and truncated. Kept in sync with
+    :func:`nomorals.agents.partner.brain._short_stt_reason`.
     """
-    text = str(error or "").lower()
-    if ("no stt backend" in text or "no backend" in text
-            or "not installed" in text or "no stt" in text):
+    raw = getattr(error, "message", None)
+    text = str(raw if raw else (error or "")).strip()
+    lowered = text.lower()
+    if ("no stt backend" in lowered or "no backend" in lowered
+            or "not installed" in lowered or "no stt" in lowered):
         return "no STT backend"
-    return "STT API error"
+    if not text:
+        return "STT API error"
+    detail = " ".join(text.split())
+    detail = re.sub(r"Bearer\s+[A-Za-z0-9._\-~+/=]+", "Bearer ***",
+                    detail, flags=re.IGNORECASE)
+    detail = re.sub(r"(api[_-]?key\s*[:=]\s*)[^\s\"',;]+", r"\1***",
+                    detail, flags=re.IGNORECASE)
+    detail = re.sub(r"(Authorization\s*[:=]\s*)[^\s\"',;]+", r"\1***",
+                    detail, flags=re.IGNORECASE)
+    if len(detail) > 300:
+        detail = detail[:300].rstrip() + "…"
+    if detail.lower().startswith("stt api"):
+        return detail
+    return f"STT API error: {detail}"
 
 
 def _record_stt_reason(message: Any, reason: str) -> None:

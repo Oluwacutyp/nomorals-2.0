@@ -167,10 +167,12 @@ class TranscribeWithReasonTest(unittest.TestCase):
         self.assertEqual(msg.meta.get("stt_failure_reason"), "no STT backend")
 
     def test_api_error_reason(self) -> None:
+        # The real underlying error must survive — never collapsed to a
+        # bare "STT API error" that hides the cause.
         ctx = SimpleNamespace(tools=_FailingTools("Groq API error 500"))
         text, reason = pp.transcribe_voice_media_with_reason(
             ctx, self._media_msg())
-        self.assertEqual(reason, "STT API error")
+        self.assertEqual(reason, "STT API error: Groq API error 500")
 
     def test_exception_reason(self) -> None:
         class _Boom:
@@ -180,7 +182,7 @@ class TranscribeWithReasonTest(unittest.TestCase):
         text, reason = pp.transcribe_voice_media_with_reason(
             SimpleNamespace(tools=_Boom()), self._media_msg())
         self.assertEqual(text, "")
-        self.assertEqual(reason, "STT API error")
+        self.assertEqual(reason, "STT API error: Groq timeout")
 
     def test_empty_transcript_reason(self) -> None:
         ctx = SimpleNamespace(tools=_WorkingTools(""))
@@ -239,7 +241,9 @@ class BrainTranscribeWithReasonTest(unittest.TestCase):
         brain = self._brain(_FailingTools("Groq API error"))
         msg = _voice_msg()
         self.assertEqual("", brain._spoken_command(msg))
-        self.assertEqual(msg.meta.get("stt_failure_reason"), "STT API error")
+        # Specific reason, not the bare generic.
+        self.assertEqual(msg.meta.get("stt_failure_reason"),
+                         "STT API error: Groq API error")
 
 
 class SttFailureProcessTest(unittest.TestCase):

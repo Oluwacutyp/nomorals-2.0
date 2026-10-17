@@ -40,6 +40,24 @@ _log = get_logger(__name__)
 _TTS_TIMEOUT = 120.0
 _STT_TIMEOUT = 300.0
 
+# Audio MIME by file extension for STT uploads. Telegram voice notes are
+# .ogg Opus; sending them as application/octet-stream makes some
+# endpoints reject the part as an unknown binary type.
+_AUDIO_MIME_BY_EXT = {
+    ".ogg": "audio/ogg",
+    ".opus": "audio/ogg",
+    ".mp3": "audio/mpeg",
+    ".mpeg": "audio/mpeg",
+    ".mpga": "audio/mpeg",
+    ".wav": "audio/wav",
+    ".wave": "audio/wav",
+    ".m4a": "audio/mp4",
+    ".mp4": "audio/mp4",
+    ".webm": "audio/webm",
+    ".flac": "audio/flac",
+    ".aac": "audio/aac",
+}
+
 # ── TTS pacing + expressive tags ──────────────────────────────────────────
 # /tts goes through this module (speak tool), NOT the neural UniversalTTS
 # engine (/speak, /voice say). These engines have no native tag support, so
@@ -636,8 +654,19 @@ def detect_tts_engines() -> list[str]:
     return found
 
 
+def normalize_stt_provider(provider: str) -> str:
+    """Normalize a user-facing STT provider name to a ``detect_stt`` value.
+
+    ``api`` is what ``NM_VOICE_STT_PROVIDER=api`` means in .env: use the
+    configured OpenAI-compatible STT API endpoint. Anything unrecognized
+    falls through unchanged (``detect_stt`` returns None for it).
+    """
+    return "openai_compat" if (provider or "").strip().lower() == "api" else provider
+
+
 def detect_stt(provider: str = "auto", *, base_url: str = "", api_key: str = "") -> str | None:
     """Resolve which STT provider will actually work; None = nothing available."""
+    provider = normalize_stt_provider(provider)
     if provider and provider != "auto":
         if provider == "openai_compat":
             return "openai_compat" if (base_url or "") and (api_key or "") else None
@@ -1079,10 +1108,15 @@ def _stt_openai_compat(
     # Groq doesn't serve OpenAI's "whisper-1" — use their turbo model.
     default_model = ("whisper-large-v3-turbo" if "groq.com" in base
                      else "whisper-1")
+    # Send the real audio MIME, not application/octet-stream: some
+    # endpoints reject a voice note whose part claims a generic binary
+    # type (Telegram voice notes are .ogg Opus).
+    mime = _AUDIO_MIME_BY_EXT.get(path.suffix.lower(),
+                                 "application/octet-stream")
     response = client.post_multipart(
         f"{base}/audio/transcriptions",
         fields={"model": model or default_model, **({"language": language} if language and language != "auto" else {})},
-        files=[("file", str(path), "application/octet-stream")],
+        files=[("file", str(path), mime)],
         headers={"Authorization": f"Bearer {api_key}"},
     )
     if not response.ok:
@@ -1275,7 +1309,16 @@ def register(registry: Any) -> None:
         # downloads without opening the sandbox.
         target = safe_media_path(context, path, must_exist=True)
         base, key = api_base(), api_key()
-        if provider == "openai_compat" or (provider == "auto" and base and key):
+        # The caller's "auto" means "use the configured default": a
+        # NM_VOICE_STT_PROVIDER setting (now actually mapped) wins over
+        # the hardcoded default. "api" normalizes to openai_compat.
+        effective = provider
+        if (effective or "auto") == "auto":
+            configured = getattr(audio_settings, "stt_provider", "") or ""
+            if configured.strip() and configured.strip().lower() != "auto":
+                effective = configured
+        effective = normalize_stt_provider(effective)
+        if effective == "openai_compat" or (effective == "auto" and base and key):
             _check_net()
         # Groq doesn't serve OpenAI's whisper-1 — pick the model for
         # the endpoint (empty = let stt() choose the provider default).
@@ -1283,7 +1326,7 @@ def register(registry: Any) -> None:
         if not stt_model and "groq.com" in base:
             stt_model = "whisper-large-v3-turbo"
         return stt(
-            target, provider=provider, language=language,
+            target, provider=effective, language=language,
             base_url=base, api_key=key, model=stt_model,
         )
 

@@ -883,6 +883,16 @@ _ENV_MAP: dict[str, str] = {
     "NM_LLM_LOCAL_PORT": "llm.local_port",
     "NM_LLM_VERIFY_AT_STARTUP": "llm.verify_at_startup",
     "NM_LLAMA_CPP_URL": "llm.llama_cpp_url",
+    # Audio STT/TTS: documented in the env template as "Config key read by
+    # Devon code" but previously unmapped, so a user's .env setting
+    # (e.g. NM_VOICE_STT_PROVIDER=api) was silently ignored.
+    "NM_AUDIO_STT_API_KEY": "audio.stt_api_key",
+    "NM_AUDIO_STT_BASE_URL": "audio.stt_base_url",
+    "NM_AUDIO_TTS_VOICE": "audio.tts_voice",
+    "NM_AUDIO_VOICE_SILENCE_MS": "audio.voice_silence_ms",
+    "NM_VOICE_STT_MODEL": "audio.stt_model",
+    "NM_VOICE_STT_PROVIDER": "audio.stt_provider",
+    "NM_VOICE_TTS_ENGINE": "audio.tts_engine",
     "HF_TOKEN": "llm.hf_token",
     "NM_HF_TOKEN": "llm.hf_token",
     "NM_HF_BASE_URL": "llm.hf_base_url",

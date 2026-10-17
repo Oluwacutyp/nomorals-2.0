@@ -33,14 +33,32 @@ def _short_stt_reason(error: Any) -> str:
 
     Mirrors :func:`nomorals.voice.pingpong._short_stt_reason` (kept
     local so this module doesn't import the voice layer): "no STT
-    backend" when nothing can transcribe, "STT API error" for
-    anything else that went wrong mid-call.
+    backend" when nothing can transcribe; anything else keeps the REAL
+    underlying error (e.g. "STT API 401: {...}" /
+    "CERTIFICATE_VERIFY_FAILED") instead of collapsing to a bare
+    "STT API error" that hid the cause. Secrets are redacted; the
+    detail is single-line and truncated.
     """
-    text = str(error or "").lower()
-    if ("no stt backend" in text or "no backend" in text
-            or "not installed" in text or "no stt" in text):
+    raw = getattr(error, "message", None)
+    text = str(raw if raw else (error or "")).strip()
+    lowered = text.lower()
+    if ("no stt backend" in lowered or "no backend" in lowered
+            or "not installed" in lowered or "no stt" in lowered):
         return "no STT backend"
-    return "STT API error"
+    if not text:
+        return "STT API error"
+    detail = " ".join(text.split())
+    detail = re.sub(r"Bearer\s+[A-Za-z0-9._\-~+/=]+", "Bearer ***",
+                    detail, flags=re.IGNORECASE)
+    detail = re.sub(r"(api[_-]?key\s*[:=]\s*)[^\s\"',;]+", r"\1***",
+                    detail, flags=re.IGNORECASE)
+    detail = re.sub(r"(Authorization\s*[:=]\s*)[^\s\"',;]+", r"\1***",
+                    detail, flags=re.IGNORECASE)
+    if len(detail) > 300:
+        detail = detail[:300].rstrip() + "…"
+    if detail.lower().startswith("stt api"):
+        return detail
+    return f"STT API error: {detail}"
 
 
 class PartnerBrain:
