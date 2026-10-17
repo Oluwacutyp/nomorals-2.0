@@ -143,7 +143,7 @@ def _probe_inner(handle_control, kind: str, chat_key: str = "") -> ProbeReport:
                                      thread_name_prefix="heal") as _ex:
             fut = _ex.submit(_run)
             try:
-                fut.result(timeout=_PROBE_TIMEOUT)
+                reply = fut.result(timeout=_PROBE_TIMEOUT)
             except _cf.TimeoutError:
                 fut.cancel()
                 elapsed = _time.monotonic() - start
@@ -164,6 +164,21 @@ def _probe_inner(handle_control, kind: str, chat_key: str = "") -> ProbeReport:
     except Exception:  # noqa: BLE001 - the probe itself must never die
         return ProbeReport(broken=False, exc=None, err="", loc="",
                            elapsed=_time.monotonic() - start)
+    # Like the tour: a reply is only healthy if it is a real answer.
+    # The probe used to discard the reply, so a registered command
+    # answering "unknown command /<kind>" (dispatch gap) or nothing at
+    # all counted as healed/healthy. Both are broken — with no
+    # exception to auto-fix from (exc=None; the caller reports that).
+    _stripped = (reply or "").strip() if isinstance(reply, str) else "?"
+    if isinstance(reply, str) and _stripped.startswith("unknown command"):
+        return ProbeReport(broken=True, exc=None,
+                           err=f"dispatch gap: {reply[:100]}",
+                           loc="runtime.py:handle_control",
+                           elapsed=_time.monotonic() - start)
+    if isinstance(reply, str) and not _stripped:
+        return ProbeReport(broken=True, exc=None,
+                           err="empty reply — the command returned nothing",
+                           loc="", elapsed=_time.monotonic() - start)
     return ProbeReport(broken=False, exc=None, err="", loc="",
                        elapsed=_time.monotonic() - start)
 
@@ -749,8 +764,23 @@ def _heal_one_inner(handle_control, kind, chat_key, dry_run, res, intelligence):
         return res
 
     broken, exc, err, loc = report.broken, report.exc, report.err, report.loc
-    if not broken or exc is None:
+    if not broken:
         res.broken = False
+        return res
+    if exc is None:
+        # Reply-level failure (dispatch gap / empty reply): genuinely
+        # broken, but there is no exception to diagnose or auto-fix
+        # from — report it honestly instead of marking it healthy.
+        res.broken = True
+        res.error = err or "reply-level failure (no exception)"
+        res.location = loc
+        res.fixable = False
+        res.skip_reason = ("no exception to auto-fix from — the command "
+                           "runs but answers wrong (dispatch gap) or "
+                           "returns nothing")
+        res.suggestion = ("Check the handle_control dispatch for "
+                          f"/{kind} (is the branch wired?) and make the "
+                          "handler return a real reply, never \"\".")
         return res
     res.broken = True
     res.error = err

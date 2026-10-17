@@ -748,7 +748,8 @@ class RuntimeMetaMixin:
 
     def _tour_probe(self, kind: str, chat_key: str) -> dict:
         """One safe probe of a command. Never raises. Returns a result dict."""
-        from ...social.chat.control import CONTROL_COMMANDS, detailed_help
+        from ...social.chat.control import (
+            CONTROL_COMMANDS, GAME_START_COMMANDS, detailed_help)
 
         spec = CONTROL_COMMANDS.get(kind)
         if spec is None:
@@ -759,6 +760,21 @@ class RuntimeMetaMixin:
                     "reason": f"needs {min_args} arg(s)"}
         if kind in self._TOUR_DENYLIST:
             return {"kind": kind, "verdict": "skip", "reason": "denylisted"}
+        if kind in GAME_START_COMMANDS:
+            # Starting a game is interactive state (a live session in
+            # this chat), never a read-only probe — and the probe must
+            # not mint one. The dispatch path itself is covered by the
+            # registry test (GAME_START_COMMANDS → _control_game branch);
+            # the tour verifies the help page and reports the skip
+            # honestly instead of faking an OK.
+            try:
+                h = detailed_help(kind)
+                help_ok = bool(h) and "no help page" not in h[:60].lower()
+            except Exception:  # noqa: BLE001
+                help_ok = False
+            return {"kind": kind, "verdict": "skip",
+                    "reason": "interactive game — start it to play",
+                    "help_ok": help_ok}
 
         # Help coverage check — pure read-only.
         help_ok = True
@@ -800,6 +816,20 @@ class RuntimeMetaMixin:
         if error:
             return {"kind": kind, "verdict": "broken", "error": error,
                     "location": location, "help_ok": help_ok}
+        # A reply is only OK if it is a real answer. Two lies the tour
+        # used to bless as OK: handle_control's "unknown command"
+        # fallback for a REGISTERED kind (a dispatch-table gap), and
+        # an empty reply (nothing to send, nothing delivered — a
+        # command that returns nothing is a broken command).
+        _stripped = (reply or "").strip()
+        if _stripped.startswith("unknown command"):
+            return {"kind": kind, "verdict": "broken",
+                    "error": f"dispatch gap: {reply[:100]}",
+                    "location": "runtime.py:handle_control", "help_ok": help_ok}
+        if not _stripped:
+            return {"kind": kind, "verdict": "broken",
+                    "error": "empty reply — the command returned nothing",
+                    "location": "", "help_ok": help_ok}
         return {"kind": kind, "verdict": "ok",
                 "reply": (reply or "")[:120], "help_ok": help_ok}
 
@@ -897,12 +927,20 @@ class RuntimeMetaMixin:
                        if not a.startswith("-")), "")
 
         # /heal never probes itself or the tour (recursion), and respects
-        # the same denylist as the tour for everything else.
-        skip = frozenset(self._TOUR_DENYLIST) | {"heal"}
+        # the same denylist as the tour for everything else. Game-start
+        # commands are skipped too: probing one would START a live game
+        # in this chat — interactive state, never a safe probe.
+        from ...social.chat.control import GAME_START_COMMANDS
+        skip = (frozenset(self._TOUR_DENYLIST) | {"heal"}
+                | set(GAME_START_COMMANDS))
 
         if target:
             if target == "heal":
                 return "🩹 /heal doesn't heal itself."
+            if target in GAME_START_COMMANDS:
+                return (f"🩹 /{target} is an interactive game — probing it "
+                        "would start a live game in this chat. Start it to "
+                        "play; nothing to heal.")
             try:
                 res = heal_one(self.handle_control, target, chat_key,
                                dry_run=dry)

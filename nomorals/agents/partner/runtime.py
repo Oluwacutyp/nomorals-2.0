@@ -2470,8 +2470,8 @@ class PartnerRuntime(
         raising, so chat never dies on a dispatch-table gap.
         """
         from ...social.chat.control import (
-            CONFIRMABLE_COMMANDS, ControlCommand, caller_may_run,
-            detailed_help, parse_control, public_menu_text)
+            CONFIRMABLE_COMMANDS, ControlCommand, GAME_START_COMMANDS,
+            caller_may_run, detailed_help, parse_control, public_menu_text)
         from ..power import power_mode_for
 
         # Bare /start is a menu trigger, not the /start <platform>
@@ -2700,11 +2700,28 @@ class PartnerRuntime(
             return self._control_providers()
 
         if kind == "say":
+            # ONE branch for all three /say forms (a second
+            # `if kind == "say"` below would be unreachable — the first
+            # branch always returns). Routed on the tail shape:
+            #   [direction] / accent=… / ambient=… / room=… / emotion=…
+            #       → rich voice (_control_say)
+            #   <platform:chat> <text> → gateway send as her
+            #   <voice> <text> → named-voice TTS (_control_say_tts)
+            _tail = (command.tail or "").strip()
+            _first = _tail.split(None, 1)[0] if _tail else ""
+            _rich = _tail.startswith("[") or (
+                "=" in _first
+                and _first.split("=", 1)[0].lower()
+                in {"accent", "ambient", "room", "emotion", "direction"})
+            if _rich:
+                return self._control_say(command.tail or arg,
+                                         chat_key=chat_key)
             target, sep, payload = command.tail.partition(" ")
             payload = payload.strip()
             if not sep or not payload:
                 return ("usage: /say telegram:123 the text to send — "
-                        "or /say <voice> <text> to speak it as a voice note")
+                        "or /say <voice> <text> to speak it as a voice note — "
+                        "or /say [direction] [accent=…] <text> for rich voice")
             if ":" not in target:
                 # TTS path: /say <voice> <text> — voice names never contain ":"
                 return self._control_say_tts(target, payload, chat_key)
@@ -3363,6 +3380,21 @@ class PartnerRuntime(
         if kind == "backup":
             return self._control_backup(command.tail or arg, chat_key=chat_key)
 
+        # ── direct game-start commands (/hangman, /mafia, …) ─────────────────
+        # The any-chat path in _on_message normally intercepts these
+        # before handle_control, but handle_control stays total: direct
+        # callers (stacks, console, tour/heal) get the real game, never
+        # a lying "unknown command /<kind>". The tour skips these kinds
+        # explicitly — starting a game is interactive state, not a
+        # read-only probe.
+        if kind in GAME_START_COMMANDS:
+            return self._control_game(
+                kind + (" " + (command.tail or arg)
+                        if (command.tail or arg) else ""),
+                chat_key=chat_key,
+                player=self._game_player_for_key(chat_key), kind="dm",
+                is_owner=is_owner)
+
         # ── expansion wave ───────────────────────────────────────────────────
         if kind == "game":
             # console path: no inbound message, so the player is derived from
@@ -3576,8 +3608,9 @@ class PartnerRuntime(
             return self._control_tts(command.tail or arg, chat_key=chat_key)
         if kind == "sing":
             return self._control_sing(command.tail or arg, chat_key=chat_key)
-        if kind == "say":
-            return self._control_say(command.tail or arg, chat_key=chat_key)
+        # (no second `if kind == "say"` here: the single /say branch above
+        # routes all three forms, including rich voice via _control_say —
+        # a second branch would be unreachable dead code.)
         if kind == "stt":
             return self._control_stt(command.tail or arg)
         if kind == "look":

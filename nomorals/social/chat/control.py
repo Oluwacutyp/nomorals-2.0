@@ -55,6 +55,7 @@ __all__ = ["CONTROL_COMMANDS", "COMMAND_DETAILS", "ControlCommand",
            "parse_control", "PLATFORMS", "help_text", "help_menu", "whatsapp_menu",
            "detailed_help",
            "list_catalog", "LIST_GROUPS", "LIST_ONELINERS", "GAME_COMMANDS",
+           "GAME_START_COMMANDS",
            "PUBLIC_COMMANDS", "PUBLIC_GAME_COMMANDS", "caller_may_run",
            "public_menu_text",
            "MAX_STACK_DEPTH", "NON_STACKABLE_COMMANDS", "STACK_DENIAL_REPLY",
@@ -103,6 +104,22 @@ GAME_COMMANDS = (
     "mastery",
     # player-to-player gifting (coins, gear, items — with confirmation)
     "gift",
+)
+
+#: The GAME_COMMANDS kinds that :meth:`PartnerRuntime.handle_control`
+#: dispatches through its generic game branch (``_control_game``) rather
+#: than an explicit branch. The excluded kinds all have their own
+#: explicit ``handle_control`` branch (math, inventory/equip/unequip/
+#: repair, level, skill, title, stats, daily, mastery, gift). The
+#: any-chat path in ``_on_message`` handles ALL of GAME_COMMANDS before
+#: ``handle_control`` ever sees them; this set exists so
+#: ``handle_control`` stays total for direct callers (stacks, console,
+#: tour/heal probes) and so the tour can skip exactly these — starting
+#: a game is interactive state, never a read-only probe.
+GAME_START_COMMANDS: frozenset[str] = frozenset(
+    k for k in GAME_COMMANDS
+    if k not in {"math", "inventory", "equip", "unequip", "repair", "level",
+                 "skill", "title", "stats", "daily", "mastery", "gift"}
 )
 
 #: The public BotFather command list — the ONLY commands a non-owner
@@ -1284,10 +1301,13 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
                           "the diagnostic for a silent brain.",
                   "usage": "/providers", "example": "/providers",
                   "related": "/model /status"},
-    "say": {"what": "send a message to a chat as her, from your hands — or speak text as a voice note in a named voice.",
-            "usage": "/say <platform:chat> <text> | /say <voice> <text>",
-            "example": "/say telegram:123 hi — or — /say trump hello there",
-            "related": "/file /publish /voices /voice"},
+    # /say is ONE command with three forms (single entry — a duplicate key
+    # here would silently discard one form, and did: the rich-voice page
+    # used to shadow this one while the runtime ran the gateway form).
+    "say": {"what": "three forms: send a message to a chat as her, from your hands — speak text as a voice note in a named voice — or rich voice with direction/accent/ambience.",
+            "usage": "/say <platform:chat> <text> | /say <voice> <text> | /say [direction] [accent=…] [ambient=…] <text>",
+            "example": "/say telegram:123 hi — or — /say trump hello there — or — /say [whispers fearfully] don't go in there",
+            "related": "/file /publish /voices /voice /tts /sing"},
     "proposals": {"what": "list everything waiting for your approval: proactive actions + research upgrade proposals.",
                   "usage": "/proposals", "example": "/proposals",
                   "related": "/approve /deny /upgrade"},
@@ -1359,10 +1379,13 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
                 "usage": "/learn tutor [guide me] <topic> | answer <text> | hint | status | stop | /learn quiz formats | /learn flashcards due | stats | list | review <id> <1-4> | export <path> | /learn mastery [weakest] | /learn waec <subject> | waec grade <pct> | /learn jamb <subject> | jamb formats",
                 "example": "/learn tutor guide me fractions",
                 "related": "/tutor /course /legal"},
-    "research": {"what": "web research — one-shot swarm research on any topic with a brief back in chat, plus the always-on research loop (status/ideas/approve). For legal questions use /legal instead. Owner only.",
-                "usage": "/research <topic> | /research run <topic> | /research status | /research ideas",
+    # /research is ONE command (single entry — a duplicate key here used
+    # to shadow this page with a stale scheduled-runs page while the
+    # runtime ran the web-research handler).
+    "research": {"what": "web research — one-shot swarm research on any topic with a brief back in chat, plus the always-on research loop (status/ideas/approve/deny/history/from/ask/docs). For legal questions use /legal instead. Owner only.",
+                "usage": "/research <topic> | /research run <topic> | /research status | /research ideas [n] | /research approve <id> | /research history [n]",
                 "example": "/research agent coding",
-                "related": "/legal"},
+                "related": "/legal /news"},
     "contracts": {"what": "contract portfolio — all your contracts as one obligation tracker: renewals, notice deadlines, payments, SLA terms, all on one timeline with proactive alerts. Legal information, never legal advice; Devon is not a lawyer. Owner only.",
                 "usage": "/contracts | /contracts attention [days] | /contracts add <name> | <paste contract text> | /contracts obligations <id> | /contracts track <id> | <desc> | <YYYY-MM-DD> | /contracts done <obligation id> | /contracts sla <id> <metric> | <target> | /contracts breach <id> <metric> | [note] | /contracts timeline",
                 "example": "/contracts attention 30",
@@ -1689,9 +1712,7 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
     "news": {"what": "fetch and summarize the news feeds.",
              "usage": "/news [run|status]", "example": "/news run",
              "related": "/research"},
-    "research": {"what": "scheduled research runs: lifestyle | tech | cyber.",
-                 "usage": "/research [run [domain]|status]", "example": "/research run tech",
-                 "related": "/news /arena"},
+    # (no second "research" entry: the single entry above is the web-research page)
     "code": {"what": "the coding bot: drafts code, runs it in the sandbox, fixes until the acceptance command passes; the real file lands in her workspace.",
              "usage": "/code <what to build>", "example": "/code a todo cli in python",
              "related": "/py /devon /task"},
@@ -1914,10 +1935,7 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
              "usage": "/sing C4:0.5:hello D4:0.5:world",
              "example": "/sing C4:0.5:la E4:0.5:la G4:1:laaa",
              "related": "/tts /say"},
-    "say": {"what": "rich voice: emotion, accent, ambience, room reverb.",
-            "usage": "/say [said angrily] <text> | /say accent=british ambient=\"light rain\" <text>",
-            "example": "/say [whispers fearfully] don't go in there",
-            "related": "/tts /sing"},
+    # (no second "say" entry: the single entry above covers all three forms)
     "stt": {"what": "transcribe an audio file to text.",
             "usage": "/stt <path>", "example": "/stt /sdcard/audio/voice.ogg",
             "related": "/tts"},
@@ -2572,7 +2590,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
     ("tools & automation",
      ["schedule", "db", "api", "proxy", "workspace", "record", "macro", "file",
       "publish", "notify", "proactive", "mission", "features", "decode", "cookies", "cookielab", "cipher",
-      "monitor", "investigate", "bet", "finance", "weather", "tz", "email", "gmail", "mail", "inbox", "routine", "home", "store", "track", "untrack", "trip", "travelclient", "contract", "legal", "research", "contracts", "regwatch", "uprofile", "vnote", "match", "cgroup", "challenge", "room", "scamcheck", "passport", "truecost", "value", "valuepick", "watch", "send", "leads", "panel",
+      "monitor", "investigate", "bet", "finance", "weather", "tz", "email", "gmail", "mail", "inbox", "routine", "home", "store", "track", "untrack", "trip", "travelclient", "contract", "legal", "contracts", "regwatch", "uprofile", "vnote", "match", "cgroup", "challenge", "room", "scamcheck", "passport", "truecost", "value", "valuepick", "watch", "send", "leads", "panel",
       "connectors", "notion", "gcal", "trello", "exness", "stripe",
       "guardrails", "content",
       "tempmail", "checkmail", "vnumber", "checksms", "browser", "paper", "backup"]),
@@ -2615,16 +2633,19 @@ _LIST_GROUP_ALIASES = {
     "vision": "voice & vision",
     "tools": "tools & automation",
     "automation": "tools & automation",
-    "media": "media system — music · playback · video",
-    "music": "media system — music · playback · video",
-    "audio": "media system — music · playback · video",
+    "media": "media system — music · playback · video · podcast",
+    "music": "media system — music · playback · video · podcast",
+    "audio": "media system — music · playback · video · podcast",
     "wisdom": "wisdom keeper — corpus · history · practice",
     "games": "games — 41, DM + group, start them directly",
     "predict": "games — 41, DM + group, start them directly",
     "discovery": "discovery",
 }
 
-#: one-line "what it does" per command (kept in sync with COMMAND_DETAILS)
+#: one-line "what it does" per command. Explicit entries win; kinds with
+#: no explicit entry are backfilled from COMMAND_DETAILS by the loop
+#: after the COMMAND_DETAILS auto-fill, so the two tables stay in sync
+#: by construction.
 LIST_ONELINERS: dict[str, str] = {
     "status": "her live state — platforms, budget, goals, loop",
     "platforms": "which chat platforms are running",
@@ -2632,7 +2653,7 @@ LIST_ONELINERS: dict[str, str] = {
     "stage": "relationship stage (committed|dating|…)",
     "model": "switch the brain live: /model [provider [fallbacks]]",
     "providers": "probe every provider: live, cooling down, or why it fails",
-    "say": "send a message as her: /say platform:chat text",
+    "say": "send as her (/say platform:chat text) · voice note (/say <voice> <text>) · rich voice (/say [direction] <text>)",
     "power": "power mode on/off/status (key-gated)",
     "proposals": "actions waiting for your approval",
     "approve": "approve a pending proposal",
@@ -2662,7 +2683,7 @@ LIST_ONELINERS: dict[str, str] = {
     "searchleads": "legit paid-task platforms report",
     "money": "money-making opportunities hunter",
     "searchhist": "your recent research runs",
-    "research": "scheduled research runs (lifestyle|tech|cyber)",
+    "research": "web research on any topic + the always-on research loop (status/ideas/approve)",
     "news": "fetch + summarize the feeds",
     "osint": "read-only public-intel: reports, campaigns, graph",
     "dns": "DNS records, zero dependencies",
@@ -2856,6 +2877,27 @@ for _kind in CONTROL_COMMANDS:
                 "example": f"/{_kind}",
                 "related": "/list /help",
             }
+
+#: Normalize COMMAND_DETAILS: every page carries what/usage/example/
+#: related, so /help <command> renders the same shape for every command.
+#: Explicit non-blank values win; missing or blank fields are defaulted
+#: (a few entries carried "related": "" — an empty related line).
+for _kind in CONTROL_COMMANDS:
+    _d = COMMAND_DETAILS[_kind]
+    if not str(_d.get("related") or "").strip():
+        _d["related"] = "/list /help"
+    if not str(_d.get("usage") or "").strip():
+        _d["usage"] = f"/{_kind}"
+    if not str(_d.get("example") or "").strip():
+        _d["example"] = f"/{_kind}"
+
+#: Backfill LIST_ONELINERS from COMMAND_DETAILS so /list can never show
+#: a command without its one-liner: the two tables are one source of
+#: truth by construction, not by a comment asking humans to keep them
+#: in sync. Explicit one-liners above win; only missing kinds are filled.
+for _kind in CONTROL_COMMANDS:
+    if _kind not in LIST_ONELINERS:
+        LIST_ONELINERS[_kind] = COMMAND_DETAILS[_kind]["what"]
 
 
 def list_catalog(topic: str = "") -> str:

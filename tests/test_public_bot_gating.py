@@ -89,12 +89,17 @@ class HandleControlGrantTests(unittest.TestCase):
         self.assertTrue(out.strip())
 
     def test_stranger_game_command_not_denied_by_grant(self):
-        # Game commands are not dispatched by handle_control (the any-chat
-        # game dispatch in _process owns them), so this falls through to
-        # the "unknown command" fallback — the point is the grant itself
-        # does not deny it.
+        # Game commands ARE dispatched by handle_control (the generic
+        # GAME_START_COMMANDS game branch) as well as by the any-chat
+        # game dispatch in _process — a registered game must never fall
+        # through to the "unknown command" dispatch-gap fallback. The
+        # point here is the grant itself does not deny it: whatever the
+        # game path answers (game intro, progression lock, or
+        # "games are off"), it is a real reply, not a denial and not
+        # the unknown-command lie.
         out = self.rt.handle_control(
             "/poker", "telegram:999",
             message=_msg(STRANGER_CHAT, "/poker"))
         self.assertNotEqual(out, OWNER_DENY)
-        self.assertEqual(out, "unknown command /poker")
+        self.assertTrue(out.strip())
+        self.assertNotEqual(out, "unknown command /poker")
