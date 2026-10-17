@@ -431,6 +431,9 @@ def _fmt_desk_error(exc: Exception) -> dict[str, Any]:
 def exness_action(context: Any, action: str, **kw: Any) -> dict[str, Any]:
     """Exness desk actions. Paper-first; live is confirmation-gated."""
     from ..finance.trading_desk import DeskError, size_position
+    if not getattr(_trading_settings(context), "enabled", True):
+        return {"ok": False,
+                "error": "trading is disabled (NM_TRADING_ENABLED=0 / settings.trading.enabled=false)"}
     mode = str(kw.get("mode") or "paper").lower()
     if mode not in ("paper", "live"):
         raise bridge.SentinelError("mode must be paper|live")
@@ -615,6 +618,13 @@ def register(registry: Any) -> None:
     )
     def trading(action: str = "doctor", **kwargs: Any) -> dict[str, Any]:
         action = (action or "doctor").strip().lower()
+        # NM_TRADING_ENABLED master switch (spec §8.1): disabled refuses
+        # every trading action honestly. `doctor` (reports state) and
+        # `kill` (safety) always stay available.
+        if action not in ("doctor", "kill"):
+            if not getattr(_trading_settings(context), "enabled", True):
+                return {"ok": False,
+                        "error": "trading is disabled (NM_TRADING_ENABLED=0 / settings.trading.enabled=false)"}
         if action.startswith("exness_"):
             return exness_action(context, action, **kwargs)
         expert = FinancialExpert(context)

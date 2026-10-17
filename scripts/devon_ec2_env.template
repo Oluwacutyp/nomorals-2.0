@@ -203,10 +203,10 @@
 # NM_MEDIA_VIDEO_PRESET=
 # Config key read by Devon code.
 # NM_MEDIA_MAX_MB=
-# Config key read by Devon code.
-# NM_MUSIC_MODEL=
-# Config key read by Devon code.
-# NM_IMAGE_MODEL=
+# NOTE (2026-10-17, infra P0): NM_MUSIC_MODEL / NM_IMAGE_MODEL /
+# NM_IMAGE_PROVIDER were removed — documented but read by nothing, so
+# setting them did nothing. Re-add with a real consumer when the
+# music/image provider selection lands.
 # Config key read by Devon code.
 # NM_VOICE_STT_MODEL=
 # Config key read by Devon code.
@@ -215,8 +215,6 @@
 # NM_VOICE_STT_PROVIDER=
 # Config key read by Devon code.
 # NM_VOICE_TTS_PROVIDER=
-# Config key read by Devon code.
-# NM_IMAGE_PROVIDER=
 # Config key read by Devon code.
 # Devon never trades live. Paper only, always. These stay at paper/false.
 # NM_TRADING_ENABLED=
@@ -529,8 +527,6 @@
 # NM_CLOUD=
 # Config key read by Devon code.
 # NM_CODEBEAST_MODEL=
-# TEST-ONLY / placeholder - leave blank.
-# NM_FLOAT=
 # TEST-ONLY / placeholder - leave blank.
 # NM_FOO_BAR=
 # Config key read by Devon code.

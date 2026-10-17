@@ -88,6 +88,23 @@ def _cmd_doctor(args: argparse.Namespace, settings: Any) -> int:
                 print(f"  ✗ {entry['module']}: {entry['error']}")
     except Exception:  # noqa: BLE001 — doctor must always report
         pass
+    # Config-key status (infra spec §8.1): set / unset / direct / ignored.
+    # Ignored must be zero — a set-but-ignored NM_* key is a bug.
+    try:
+        from ...core.config import config_env_status
+        _status = config_env_status()
+        _ignored = _status["ignored"]
+        print("\nconfig keys:")
+        print(f"  set (via Settings): {len(_status['set_mapped'])}   "
+              f"set (direct-read): {len(_status['set_direct'])}   "
+              f"unset (defaults): {len(_status['unset_mapped'])}")
+        if _ignored:
+            print(f"  ✗ IGNORED (set but mapping to nothing — bug): "
+                  f"{', '.join(_ignored)}")
+        else:
+            print("  ✓ ignored: 0 — every set NM_* key maps to real behavior")
+    except Exception:  # noqa: BLE001 — doctor must always report
+        pass
     return 0
 
 

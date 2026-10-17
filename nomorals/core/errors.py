@@ -621,3 +621,107 @@ def classify(exc: BaseException) -> NoMoralsError:
     if "timed out" in lowered or "timeout" in lowered:
         return TimeoutError_(text, retryable=True)
     return NoMoralsError(text, code=f"unhandled.{type(exc).__name__.lower()}")
+
+
+# ── User-facing formatting (infra spec §4.3) ───────────────────────────────────
+# One place, never empty, secrets redacted. Every formatter that turns an
+# exception into a user-facing string goes through here.
+
+_SECRET_PATTERNS = (
+    (re.compile(r"Bearer\s+[A-Za-z0-9._\-~+/=]+", re.IGNORECASE), "Bearer ***"),
+    (re.compile(r"(api[_-]?key\s*[:=]\s*)[^\s\"',;]+", re.IGNORECASE), r"\1***"),
+    (re.compile(r"(Authorization\s*[:=]\s*)[^\s\"',;]+", re.IGNORECASE), r"\1***"),
+    (re.compile(r"\b(sk-[A-Za-z0-9_-]{8,})\b"), "sk-***"),
+    (re.compile(r"\b(ghp_[A-Za-z0-9]{8,})\b"), "ghp-***"),
+    (re.compile(r"\b(gsk_[A-Za-z0-9_-]{8,})\b"), "gsk-***"),
+    (re.compile(r"\b(xox[baprs]-[A-Za-z0-9-]{8,})\b"), "xox-***"),
+)
+
+
+def redact_secrets(text: str) -> str:
+    """Redact credential-looking values from ``text`` (idempotent)."""
+    out = text or ""
+    for pattern, replacement in _SECRET_PATTERNS:
+        out = pattern.sub(replacement, out)
+    return out
+
+
+def exc_str(exc: BaseException | None, *, context: str = "") -> str:
+    """Exception -> never-empty message for user-facing reasons.
+
+    Some exceptions carry an empty message (bare ``EOFError`` from
+    ``wave.open`` on empty bytes surfaced as "TTS vocal failed ()").
+    Fall back to the exception class name (+ context when given) so a
+    failure reason is never ``()``, never ``""``, never whitespace.
+    """
+    if exc is None:
+        return f"unknown error{(' (' + context + ')') if context else ''}"
+    msg = str(exc).strip()
+    if msg:
+        return msg
+    name = type(exc).__name__ or "unknown error"
+    if context:
+        return f"{name} ({context})"
+    return name
+
+
+def classify_user_error(exc: BaseException | Any) -> str:
+    """Deterministic user-facing error class.
+
+    auth / format / network / provider / config / bug. From the
+    exception's status/code attributes and stable message markers
+    (plus :func:`http_status_of` for framework errors) — never guessed.
+    """
+    status = http_status_of(exc) if isinstance(exc, BaseException) else None
+    if status is None:
+        raw = getattr(exc, "status", None) or getattr(exc, "status_code", None) or getattr(exc, "code", None)
+        try:
+            status = int(raw) if raw is not None else None
+        except (TypeError, ValueError):
+            status = None
+    text = (str(exc) or "").lower()
+    if status in (401, 403) or "unauthorized" in text or "invalid api key" in text or "authentication" in text:
+        return "auth"
+    if status in (400, 422) or "unsupported_audio_format" in text or ("invalid" in text and ("format" in text or "extension" in text or "mime" in text)):
+        return "format"
+    if status == 404 or "not found" in text:
+        return "config"
+    if status == 429 or "rate limit" in text or "too many requests" in text:
+        return "provider"
+    if status is not None and status >= 500:
+        return "provider"
+    if any(marker in text for marker in ("connection", "timeout", "timed out", "network", "dns", "certificate", "ssl", "unreachable", "refused")):
+        return "network"
+    if any(marker in text for marker in ("not configured", "no backend", "not installed", "missing", "unmapped", "no stt", "no tts")):
+        return "config"
+    if status is not None:
+        return "provider"
+    return "bug"
+
+
+_USER_ERROR_HINTS = {
+    "auth": "check the key for that provider",
+    "format": "the file may be misnamed or in an unsupported format",
+    "network": "check connectivity and retry",
+    "provider": "the provider failed — retry, or try another provider",
+    "config": "check the setting / key mapping",
+    "bug": "this looks like a Devon bug — the full cause is in the log",
+}
+
+
+def format_error(what: str, exc: BaseException | Any, *, hint: str | None = None) -> str:
+    """Full user-facing error shape (spec §4.3).
+
+    ``I couldn't {what} (<class>: <real cause>). <hint>`` — single line,
+    secrets redacted, never empty, never generic.
+    """
+    if isinstance(exc, BaseException):
+        cause = redact_secrets(exc_str(exc))
+    else:
+        cause = redact_secrets(str(exc or "").strip() or "unknown error")
+    kind = classify_user_error(exc)
+    suffix = hint or _USER_ERROR_HINTS.get(kind, "")
+    out = f"I couldn't {what} ({kind} — {cause})"
+    if suffix:
+        out += f". {suffix}"
+    return out

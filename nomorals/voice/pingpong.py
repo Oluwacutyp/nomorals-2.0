@@ -66,14 +66,15 @@ def _short_stt_reason(error: Any) -> str:
             or "not installed" in lowered or "no stt" in lowered):
         return "no STT backend"
     if not text:
-        return "STT API error"
+        # Never a bare generic: an empty-message exception still names
+        # its class (spec §4.3 — never-empty reasons).
+        from ..core.errors import exc_str as _central_exc_str
+
+        return f"STT API error: {_central_exc_str(error) if isinstance(error, BaseException) else type(error).__name__}"
     detail = " ".join(text.split())
-    detail = re.sub(r"Bearer\s+[A-Za-z0-9._\-~+/=]+", "Bearer ***",
-                    detail, flags=re.IGNORECASE)
-    detail = re.sub(r"(api[_-]?key\s*[:=]\s*)[^\s\"',;]+", r"\1***",
-                    detail, flags=re.IGNORECASE)
-    detail = re.sub(r"(Authorization\s*[:=]\s*)[^\s\"',;]+", r"\1***",
-                    detail, flags=re.IGNORECASE)
+    from ..core.errors import redact_secrets
+
+    detail = redact_secrets(detail)
     if len(detail) > 300:
         detail = detail[:300].rstrip() + "…"
     if detail.lower().startswith("stt api"):

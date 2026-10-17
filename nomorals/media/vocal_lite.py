@@ -37,15 +37,13 @@ _log = logging.getLogger(__name__)
 def _exc_str(exc: BaseException) -> str:
     """Exception -> never-empty message for user-facing reasons.
 
-    Some exceptions carry an empty message (bare ``EOFError`` from
-    ``wave.open`` on empty bytes is the one that bit us: it surfaced
-    as "TTS vocal failed ()", hiding the real cause). Fall back to
-    the exception class name so a failure reason is never ``()``.
+    Delegates to :func:`nomorals.core.errors.exc_str` (the single
+    never-empty formatter, spec §4.3) — kept here so existing import
+    sites (``from .vocal_lite import _exc_str``) keep working.
     """
-    msg = str(exc).strip()
-    if msg:
-        return msg
-    return type(exc).__name__ or "unknown error"
+    from ..core.errors import exc_str as _central_exc_str
+
+    return _central_exc_str(exc)
 
 
 __all__ = [
