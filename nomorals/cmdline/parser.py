@@ -299,7 +299,7 @@ def _parser() -> argparse.ArgumentParser:
 
     pulse = sub.add_parser("pulse", aliases=CLI_ALIASES["pulse"],
                            help="morning-pulse pipeline: run it now, or inspect its schedule",
-                           description="nm pulse run — run the pipeline now (news → briefing → voice → deliver)\n"
+                           description="nm pulse run — run the pipeline now (news -> briefing -> voice -> deliver)\n"
                                        "nm pulse status — scheduler job + prefs\n"
                                        "nm pulse config — time/timezone/hosts\n"
                                        "nm pulse ensure — (re)register the daily scheduler job",
@@ -530,7 +530,7 @@ def _parser() -> argparse.ArgumentParser:
     zip_cmd.add_argument("--dest", default="")
 
     deliver_cmd = sub.add_parser("deliver", aliases=CLI_ALIASES["deliver"],
-                                 help="create-and-deliver flows: generate → zip → send")
+                                 help="create-and-deliver flows: generate -> zip -> send")
     dsub = deliver_cmd.add_subparsers(dest="deliver_action")
     d_report = dsub.add_parser(
         "report",
@@ -1006,7 +1006,7 @@ def _parser() -> argparse.ArgumentParser:
     _s_json(s_outp)
 
     s_bg = studio_sub.add_parser("bg-remove", help="remove image background "
-                                 "(→ transparent PNG)")
+                                 " (-> transparent PNG)")
     s_bg.add_argument("file", help="source image (workspace-relative)")
     s_bg.add_argument("--mode", default="auto",
                       help="auto|rembg|chroma (default auto)")
@@ -1850,7 +1850,7 @@ def _parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     voice_sub = voice.add_subparsers(dest="voice_action", required=True)
-    v_call = voice_sub.add_parser("call", help="live listen→think→speak loop")
+    v_call = voice_sub.add_parser("call", help="live listen->think->speak loop")
     v_call.add_argument("--turns", type=int, default=0,
                         help="max turns (0 = until you say goodbye)")
     v_call.add_argument("--profile", default="",
@@ -2341,7 +2341,7 @@ def _parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     a_sub = audio.add_subparsers(dest="audio_action", required=True)
-    a_en = a_sub.add_parser("enhance", help="denoise (ffmpeg → Devon's own DSP)")
+    a_en = a_sub.add_parser("enhance", help="denoise (ffmpeg -> Devon's own DSP)")
     a_en.add_argument("file", help="audio file")
     a_en.add_argument("--profile", default="voice",
                       help="voice|music|light (default: voice)")
@@ -2854,7 +2854,7 @@ def _parser() -> argparse.ArgumentParser:
     train.add_argument("--backends", action="store_true",
                        help="list training backends with honest machine availability")
     train.add_argument("--run", action="store_true",
-                       help="kick off one pipeline run (collect→train→evaluate→promote)")
+                       help="kick off one pipeline run (collect->train->evaluate->promote)")
     train.add_argument("--backend", default="",
                        help="override the training backend for this run")
     train.add_argument("--base-model", default="",

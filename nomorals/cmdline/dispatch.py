@@ -107,6 +107,27 @@ from .parser import CLI_ALIASES, _parser
 _log = get_logger(__name__)
 
 
+def _ensure_console_utf8() -> None:
+    """Reconfigure stdout/stderr to UTF-8 (errors='replace') when possible.
+
+    Python on Windows defaults console stdout to the console code page
+    (usually cp1252). CLI output contains characters cp1252 cannot encode
+    (e.g. the rightwards arrow U+2192 in ``--help``), and argparse's
+    ``print_help`` then raises ``UnicodeEncodeError`` — the ``--help``
+    traceback seen on EC2. Reconfiguring up front makes every CLI write
+    safe regardless of console encoding; ``errors='replace'`` means an
+    unencodable char degrades to ``?`` instead of crashing the command.
+    Best-effort: any failure here is swallowed — a console we cannot
+    reconfigure must never break the CLI itself.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            reconfigure = getattr(stream, "reconfigure", None)
+            if callable(reconfigure):
+                reconfigure(encoding="utf-8", errors="replace")
+        except Exception:  # noqa: BLE001 - console setup must never break CLI
+            pass
+
 
 def main(argv: Sequence[str] | None = None) -> int:
     """The ``nm`` entry point.
@@ -118,6 +139,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     * ``2`` — usage error: bad arguments, unknown command.
     * ``130`` — interrupted (Ctrl-C / SIGTERM).
     """
+    # BEFORE parsing: argparse prints --help during parse_args, and that
+    # print crashes on a cp1252 console if help contains non-cp1252 chars.
+    _ensure_console_utf8()
     try:
         args = _parser().parse_args(argv)
     except SystemExit as e:

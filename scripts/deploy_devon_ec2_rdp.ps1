@@ -65,6 +65,18 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
+# -- 0. Console encoding -----------------------------------------------------
+# PowerShell 5.1 defaults the console to cp1252, and Python on Windows
+# defaults stdout to the console encoding. Any non-cp1252 char in CLI
+# output (e.g. the rightwards arrow U+2192 that used to be in --help)
+# then raises UnicodeEncodeError and --help dies with a traceback.
+# Force UTF-8 everywhere: console, Python IO, and the code page.
+# Each step is guarded: a console that cannot be reconfigured must
+# never break the deploy itself.
+$env:PYTHONIOENCODING = 'utf-8'
+try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch { }
+try { chcp 65001 | Out-Null } catch { }
+
 function Write-Step { param([string]$Text) Write-Host "`n==> $Text" -ForegroundColor Cyan }
 function Write-Warn { param([string]$Text) Write-Host "WARNING: $Text" -ForegroundColor Yellow }
 function Write-Ok   { param([string]$Text) Write-Host "OK: $Text" -ForegroundColor Green }
@@ -207,10 +219,50 @@ if (-not $SkipVerify) {
         Write-Host '  [dry-run] nm impossible examples (CLI smoke)'
         Write-Host '  [dry-run] singing smoke: writes audio FILE (no speaker on EC2)'
     } else {
-        & $venvPy -m nomorals --help | Select-Object -First 3 | ForEach-Object { Write-Host "  $_" }
+        # Verify rule: a command VERIFIES only if $LASTEXITCODE -eq 0.
+        # The old code piped straight to Select-Object and printed OK
+        # even when --help died with a UnicodeEncodeError traceback
+        # (exit code 1) - output is not success. Capture to files,
+        # check the exit code FIRST, then show the output.
+        # Never pipe a native command's 2>&1 into Select-Object: in
+        # PowerShell 5.1 a stderr line (e.g. the benign `nm doctor`
+        # INFO "native vec not built ... using pure-Python fallback")
+        # becomes a NativeCommandError. Redirect stdout/stderr to
+        # separate files instead; stderr INFO is shown, never fatal.
+        $verifyDir = Join-Path $env:TEMP "devon-verify-$PID"
+        if (-not (Test-Path $verifyDir)) { New-Item -ItemType Directory -Path $verifyDir | Out-Null }
+        $helpOut = Join-Path $verifyDir 'help.out.txt'
+        $helpErr = Join-Path $verifyDir 'help.err.txt'
+        & $venvPy -m nomorals --help > $helpOut 2> $helpErr
+        $helpCode = $LASTEXITCODE
+        if ($helpCode -ne 0) {
+            $tail = Get-Content $helpErr -Tail 10 -ErrorAction SilentlyContinue
+            throw "VERIFY FAILED: python -m nomorals --help exited $helpCode (traceback is NOT ok). Stderr tail:`n$tail"
+        }
+        Get-Content $helpOut -TotalCount 3 -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "  $_" }
         Write-Ok 'python -m nomorals --help works'
-        & $venvPy -m nomorals.cli doctor 2>&1 | Select-Object -First 25 | ForEach-Object { Write-Host "  $_" }
-        & $venvPy -m nomorals impossible examples 2>&1 | Select-Object -First 8 | ForEach-Object { Write-Host "  $_" }
+        $docOut = Join-Path $verifyDir 'doctor.out.txt'
+        $docErr = Join-Path $verifyDir 'doctor.err.txt'
+        & $venvPy -m nomorals.cli doctor > $docOut 2> $docErr
+        $doctorCode = $LASTEXITCODE
+        Get-Content $docOut -TotalCount 25 -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "  $_" }
+        if ((Test-Path $docErr) -and (Get-Item $docErr).Length -gt 0) {
+            Write-Host '  (doctor stderr, non-fatal - INFO on stderr is not an error):'
+            Get-Content $docErr -TotalCount 5 -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "  $_" }
+        }
+        if ($doctorCode -ne 0) {
+            throw "VERIFY FAILED: nm doctor exited $doctorCode."
+        }
+        Write-Ok 'nm doctor works'
+        $impOut = Join-Path $verifyDir 'impossible.out.txt'
+        $impErr = Join-Path $verifyDir 'impossible.err.txt'
+        & $venvPy -m nomorals impossible examples > $impOut 2> $impErr
+        $impCode = $LASTEXITCODE
+        Get-Content $impOut -TotalCount 8 -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "  $_" }
+        if ($impCode -ne 0) {
+            $tail = Get-Content $impErr -Tail 10 -ErrorAction SilentlyContinue
+            throw "VERIFY FAILED: nm impossible examples exited $impCode. Stderr tail:`n$tail"
+        }
         Write-Ok 'Impossible Made Possible CLI smoke works'
         Write-Host '  Singing smoke: Devon generates singing to an AUDIO FILE (EC2 has no'
         Write-Host '  speaker). Verify with: nm music / nm sing - output is a file you'
