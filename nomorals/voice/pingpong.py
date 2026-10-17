@@ -97,6 +97,17 @@ def transcribe_voice_media_with_reason(
         if kind not in _VOICE_KINDS and not mime.startswith("audio"):
             continue
         saw_voice = True
+        # A transcript an earlier stage already produced (_spoken_command
+        # runs before pingpong) is reused, never re-transcribed: a later
+        # attempt can transiently fail and lose a transcript that had
+        # already succeeded.
+        _meta = getattr(message, "meta", None)
+        if isinstance(_meta, dict):
+            _cached = _meta.get("voice_transcript")
+            if isinstance(_cached, str) and _cached.strip():
+                _record_stt_reason(message, "")
+                _meta.pop("voice_untranscribed_reason", None)
+                return _cached, ""
         path = getattr(media, "path", None)
         if not path:
             reason = "no audio file"
@@ -108,6 +119,14 @@ def transcribe_voice_media_with_reason(
                 text = ((outcome.value or {}).get("text", "") or "").strip()
                 if text:
                     _record_stt_reason(message, "")
+                    # Cache for _media_notes, which runs after this.
+                    try:
+                        _meta2 = getattr(message, "meta", None)
+                        if isinstance(_meta2, dict):
+                            _meta2["voice_transcript"] = text
+                            _meta2.pop("voice_untranscribed_reason", None)
+                    except Exception:  # noqa: BLE001 - meta bookkeeping never breaks chat
+                        pass
                     return text, ""
                 reason = "empty transcript"
             else:

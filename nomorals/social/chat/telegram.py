@@ -1216,11 +1216,39 @@ class TelegramAdapter(ChatAdapter):
                         mime = _mime_for_download(
                             str(path),
                             str(getattr(doc, "mime_type", "") or ""))
+                        # Telethon voice-note detection: a Telegram
+                        # ``voice`` message is a spoken note, never a song
+                        # clip. Telethon exposes it as message.voice, or as
+                        # a DocumentAttributeAudio with voice=True. Without
+                        # this, voice notes collapse to kind="audio" and
+                        # the brain sees a bare "audio: ..." note and can
+                        # hallucinate a music-ID reply. Defensive: any
+                        # unexpected shape falls back to the MIME kind.
+                        _is_voice = False
+                        try:
+                            _voice_attr = getattr(message, "voice", None)
+                            # Real Telethon: message.voice is a
+                            # DocumentAttributeAudio with voice=True, or
+                            # None. ``is True`` (not truthy) so a Mock's
+                            # auto-created attribute can't false-positive.
+                            if _voice_attr is not None and getattr(
+                                    _voice_attr, "voice", False) is True:
+                                _is_voice = True
+                            else:
+                                for _attr in (getattr(doc, "attributes", None)
+                                              or []):
+                                    if getattr(_attr, "voice", False) is True:
+                                        _is_voice = True
+                                        break
+                        except Exception:  # noqa: BLE001 - best-effort
+                            _is_voice = False
+                        _kind = "voice" if _is_voice else _kind_for_mime(mime)
                         media.append(
                             MediaRef(
                                 path=str(path),
                                 mime=mime,
-                                kind=_kind_for_mime(mime),
+                                kind=_kind,
+                                is_voice=_is_voice,
                             )
                         )
                 except Exception as exc:  # noqa: BLE001 - media is best-effort
@@ -2539,9 +2567,19 @@ class TelegramBotAdapter(ChatAdapter):
         elif _fid(msg.get("video")):
             file_id, fkind, fname = _fid(msg.get("video")), "video", "video.mp4"
         elif _fid(msg.get("voice")):
-            file_id, fkind, fname = _fid(msg.get("voice")), "audio", "voice.ogg"
+            # Telegram ``voice`` = a spoken voice note, NEVER a song clip.
+            # It keeps its own kind + is_voice flag so downstream routing
+            # sends it to STT and never lets the brain mistake it for a
+            # music clip to identify. (Previously it collapsed to
+            # kind="audio", indistinguishable from a music file — the
+            # brain saw a bare "audio: voice.ogg" and hallucinated a
+            # Shazam-style "what's the clip? upload the audio file" reply.)
+            file_id, fkind, fname = _fid(msg.get("voice")), "voice", "voice.ogg"
             fmime = "audio/ogg"
         elif _fid(msg.get("audio")):
+            # Telegram ``audio`` = a music/audio file (title/artist).
+            # Possible music — but music ID only ever runs on an explicit
+            # /sham request, never automatically.
             file_id, fkind, fname = _fid(msg.get("audio")), "audio", "audio.mp3"
             _mt = msg["audio"].get("mime_type", "")
             fmime = _mt if isinstance(_mt, str) and _mt else "audio/mpeg"
@@ -2556,11 +2594,18 @@ class TelegramBotAdapter(ChatAdapter):
             path = info.get("file_path", "")
         except Exception as exc:  # noqa: BLE001 - media is best-effort
             _log.debug("telegram-bot getFile failed: %s", exc)
-            return []
+            # Placeholder, NOT []: the message DID carry media. Returning
+            # [] would make downstream think there was no attachment at
+            # all, and the brain would see an empty message. With the
+            # placeholder (empty path) the STT path reports "no audio
+            # file" honestly instead of hallucinating about a clip.
+            return [MediaRef(path="", kind=fkind, name=fname, mime=fmime,
+                             is_voice=(fkind == "voice"))]
         if not media_download_allowed(kind, size, self.media_in_groups, self.media_max_mb):
             return []
         if not path:
-            return []
+            return [MediaRef(path="", kind=fkind, name=fname, mime=fmime,
+                             is_voice=(fkind == "voice"))]
         # fname is sender-controlled (Telegram document file_name): it
         # can contain "../", ":", or other Windows-illegal characters.
         # Sanitise before it becomes a path — the MediaRef keeps the
@@ -2576,9 +2621,10 @@ class TelegramBotAdapter(ChatAdapter):
             dest.write_bytes(resp.content)
         except Exception as exc:  # noqa: BLE001
             _log.debug("telegram-bot media download failed: %s", exc)
-            return []
+            return [MediaRef(path="", kind=fkind, name=orig_fname, mime=fmime,
+                             is_voice=(fkind == "voice"))]
         return [MediaRef(path=str(dest), kind=fkind, name=orig_fname,
-                         mime=fmime)]
+                         mime=fmime, is_voice=(fkind == "voice"))]
 
     def download_file(self, file_id: str, fname: str = "audio.ogg") -> str:
         """Download a Telegram file_id to the media dir. Returns the local

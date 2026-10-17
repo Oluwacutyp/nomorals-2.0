@@ -119,15 +119,31 @@ class BotApiInboundMediaTest(unittest.TestCase):
             adapter = self._adapter(tmp)
             voice = adapter._inbound_media(
                 {"voice": {"file_id": "v1"}}, ChatKind.DM)
-            self.assertEqual(voice[0].kind, "audio")
+            # Voice note keeps its own kind + flag: it is a SPOKEN
+            # message, never a song clip — never kind="audio".
+            self.assertEqual(voice[0].kind, "voice")
+            self.assertTrue(voice[0].is_voice)
             self.assertEqual(voice[0].mime, "audio/ogg")
             self.assertTrue(_stt_checks(voice[0]))
             audio = adapter._inbound_media(
                 {"audio": {"file_id": "a1", "mime_type": "audio/mpeg"}},
                 ChatKind.DM)
             self.assertEqual(audio[0].kind, "audio")
+            self.assertFalse(audio[0].is_voice)
             self.assertEqual(audio[0].mime, "audio/mpeg")
             self.assertTrue(_stt_checks(audio[0]))
+
+    def test_download_failure_returns_placeholder_not_empty(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="nm-tg-") as tmp:
+            adapter = self._adapter(tmp)
+            adapter._api = lambda name, **kw: (_ for _ in ()).throw(  # type: ignore[method-assign]
+                RuntimeError("getFile down"))
+            media = adapter._inbound_media(
+                {"voice": {"file_id": "v1"}}, ChatKind.DM)
+        self.assertEqual(len(media), 1)
+        self.assertEqual(media[0].path, "")
+        self.assertEqual(media[0].kind, "voice")
+        self.assertTrue(media[0].is_voice)
 
 
 if __name__ == "__main__":

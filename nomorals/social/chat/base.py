@@ -137,13 +137,20 @@ class MediaRef:
 
     path: str
     mime: str = ""
-    kind: str = "image"  # image | video | audio | document
+    kind: str = "image"  # image | video | audio | voice | document
     name: str = ""
     voice_note: bool = False  # True → send as a Telegram voice bubble
+    # True → this attachment IS a Telegram ``voice`` message: a spoken
+    # voice note, never a song clip. Voice notes must route to STT;
+    # music ID only ever runs on an explicit /sham request. Distinct
+    # from ``voice_note`` (outbound send-as-voice-bubble flag) — this
+    # one records what the attachment WAS on arrival.
+    is_voice: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {"path": self.path, "mime": self.mime, "kind": self.kind,
-                "name": self.name, "voice_note": self.voice_note}
+                "name": self.name, "voice_note": self.voice_note,
+                "is_voice": self.is_voice}
 
 
 @dataclass

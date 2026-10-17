@@ -1163,7 +1163,10 @@ class RuntimeMediaMixin:
         try:
             media = getattr(message, "media", None) or []
             for m in media:
-                if getattr(m, "kind", "") == "audio" and getattr(m, "path", ""):
+                # "voice" too: a voice note can carry a /sham caption,
+                # and the Bot API now marks voice notes kind="voice"
+                # instead of collapsing them to "audio".
+                if getattr(m, "kind", "") in ("audio", "voice") and getattr(m, "path", ""):
                     return str(m.path)
             # Replied-to audio (Telegram): download on demand.
             meta = getattr(message, "meta", None) or {}

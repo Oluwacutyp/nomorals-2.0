@@ -122,6 +122,13 @@ class PartnerBrain:
     def _media_notes(self, message: ChatMessage) -> list[str]:
         notes: list[str] = []
         tools = getattr(self.context, "tools", None)
+        # Aggregate across this call: a failed transcription only
+        # counts as "untranscribed" if NO media in this message
+        # produced a transcript. The guard in _generate_and_persist
+        # short-circuits on the flag this sets.
+        first_reason = ""
+        any_transcribed = bool(
+            (getattr(message, "meta", None) or {}).get("voice_transcript"))
         for media in message.media[:3]:
             if media.kind == "image" or media.mime.startswith("image/"):
                 if tools is not None:
@@ -135,18 +142,73 @@ class PartnerBrain:
                 notes.append("photo (could not see it)")
             elif media.kind == "video":
                 notes.append(f"video: {media.name or media.path}")
-            elif media.kind == "audio" or media.mime.startswith("audio/"):
+            elif media.kind == "audio" or media.kind == "voice" or media.mime.startswith("audio/"):
+                # Reuse a transcript an earlier stage already produced
+                # (_spoken_command / pingpong) — never re-transcribe a
+                # note that already transcribed, and never lose it to a
+                # transient failure on a later attempt.
+                cached = (getattr(message, "meta", None) or {}).get(
+                    "voice_transcript")
+                if cached:
+                    any_transcribed = True
+                    label = ("voice note (transcribed)"
+                             if getattr(media, "is_voice", False)
+                             or media.kind == "voice"
+                             else "audio (transcribed)")
+                    notes.append(f"{label} — {cached}")
+                    continue
                 note, reason = self._transcribe_media_note_with_reason(media)
-                if reason:
+                if note:
+                    any_transcribed = True
+                    try:
+                        meta = getattr(message, "meta", None)
+                        if isinstance(meta, dict):
+                            text = note.split("—", 1)[-1].strip()
+                            if text:
+                                meta["voice_transcript"] = text
+                    except Exception:  # noqa: BLE001 - meta bookkeeping never breaks chat
+                        pass
+                    notes.append(note)
+                elif reason:
+                    if not first_reason:
+                        first_reason = reason
                     try:
                         meta = getattr(message, "meta", None)
                         if isinstance(meta, dict):
                             meta["stt_failure_reason"] = reason
                     except Exception:  # noqa: BLE001 - meta bookkeeping never breaks chat
                         pass
-                notes.append(note or f"audio: {media.name or media.path}")
+                    # NEVER the bare "audio: <name>" fallback here: that
+                    # bare file reference is what made the model guess
+                    # the attachment was a music clip and reply "what's
+                    # the clip? upload the audio file". A voice note is
+                    # a SPOKEN message — say so explicitly, and say
+                    # what NOT to do with it.
+                    if getattr(media, "is_voice", False) or media.kind == "voice":
+                        notes.append(
+                            "voice note (spoken message — could not "
+                            f"transcribe: {reason}; this is a SPOKEN "
+                            "message, not a song; do NOT ask to identify "
+                            "it as music, do NOT ask for re-upload)")
+                    else:
+                        notes.append(
+                            "audio file (could not transcribe: "
+                            f"{reason}; do NOT assume it is music — only "
+                            "identify it if the user explicitly asked "
+                            "with /sham)")
+                else:
+                    notes.append(f"audio: {media.name or media.path}")
             else:
                 notes.append(f"file: {media.name or media.path}")
+        try:
+            meta = getattr(message, "meta", None)
+            if isinstance(meta, dict):
+                if any_transcribed:
+                    meta.pop("voice_untranscribed_reason", None)
+                elif first_reason:
+                    meta["voice_untranscribed_reason"] = first_reason
+        except Exception:  # noqa: BLE001 - meta bookkeeping never breaks chat
+            pass
         return notes
 
     def _spoken_command(self, message: ChatMessage) -> str:
@@ -165,6 +227,21 @@ class PartnerBrain:
                 continue
             note = self._transcribe_media_note(media)
             text = note.split("—", 1)[-1].strip() if "—" in note else ""
+            if text:
+                # Cache the transcript: the caller discards non-command
+                # transcripts, but pingpong and _media_notes run AFTER
+                # this and used to transcribe the same attachment again.
+                # A later transient failure lost a transcript that had
+                # already succeeded — leaving the brain with a bare
+                # "audio: ..." note and an LLM guessing music-ID.
+                try:
+                    meta = getattr(message, "meta", None)
+                    if isinstance(meta, dict):
+                        meta["voice_transcript"] = text
+                        meta.pop("stt_failure_reason", None)
+                        meta.pop("voice_untranscribed_reason", None)
+                except Exception:  # noqa: BLE001 - meta bookkeeping never breaks chat
+                    pass
             if text.startswith("/"):
                 try:
                     meta = getattr(message, "meta", None)
@@ -205,7 +282,9 @@ class PartnerBrain:
         :meth:`_spoken_command` (which must keep calling the plain
         ``_transcribe_media_note`` for compatibility) can surface it.
         """
-        if media.path is None:
+        if not getattr(media, "path", ""):
+            # None OR "" — "" is the adapter placeholder for "media
+            # arrived but the file download failed". No file, no call.
             self._last_stt_failure_reason = "no audio file"
             return "", "no audio file"
         try:
@@ -587,6 +666,29 @@ class PartnerBrain:
 
         # Media, memory, background.
         media_notes = self._media_notes(message)
+        # Deterministic guard: a voice note / audio file that could
+        # not be transcribed and carries no user text must NEVER reach
+        # the model. The model only ever saw the bare "audio: <name>"
+        # note and guessed the attachment was a music clip — producing
+        # the "hey, what's the clip? … upload the audio file" reply for
+        # a voice note it had already received. Answer honestly here,
+        # with no model call, and let the persist tail below run.
+        untranscribed_guard_parts: list[str] | None = None
+        _meta = getattr(message, "meta", None) or {}
+        if (not message.text.strip()
+                and _meta.get("voice_untranscribed_reason")
+                and not _meta.get("voice_transcript")):
+            _reason = str(_meta.get("voice_untranscribed_reason") or "")
+            _is_voice = any(
+                getattr(m, "is_voice", False)
+                or getattr(m, "kind", "") == "voice"
+                for m in (message.media or []))
+            if _is_voice:
+                untranscribed_guard_parts = [
+                    f"I couldn't transcribe that voice note ({_reason})."]
+            else:
+                untranscribed_guard_parts = [
+                    f"I couldn't transcribe that audio file ({_reason})."]
         _origin = f"chat:{message.chat.key}" if message.chat else ""
         memories = () if restricted else self.responder.recall(message.text, limit=5, origin=_origin)
         # Proactive recall: memories relevant enough to surface unprompted.
@@ -649,7 +751,7 @@ class PartnerBrain:
         # when explicitly invoked). If the loop fails, we fall back to
         # single-shot rather than dropping the reply.
         tool_loop_parts: list[str] | None = None
-        if is_owner and not restricted:
+        if untranscribed_guard_parts is None and is_owner and not restricted:
             try:
                 tool_loop_parts = self.generate_with_tools(
                     message,
@@ -665,7 +767,13 @@ class PartnerBrain:
         # Interactive budget: the provider chain behind router.chat can stall
         # for minutes; the chat thread gets INTERACTIVE_REPLY_TIMEOUT_S and
         # then an honest fallback — never a ~90s polite wait.
-        if tool_loop_parts:
+        if untranscribed_guard_parts is not None:
+            # Deterministic STT-failure reply — no model call happened.
+            from types import SimpleNamespace
+            bundle = SimpleNamespace(
+                parts=untranscribed_guard_parts, model="stt-failure",
+                degraded=False, degraded_note="")
+        elif tool_loop_parts:
             # Wrap the loop's answer in the bundle shape the tail expects.
             from types import SimpleNamespace
             bundle = SimpleNamespace(
