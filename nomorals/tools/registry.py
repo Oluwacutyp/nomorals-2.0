@@ -890,9 +890,24 @@ class ToolRegistry:
         policy = getattr(self.context, "policy", None) if self.context else None
 
         if self.enforce and spec.capability and policy is not None:
+            # Argument-bound enforcement: the policy sees the exact
+            # arguments, not just the capability string, so a
+            # confirmation for one target cannot be redirected to
+            # another, and writes to the oversight machinery itself
+            # (policy / social gate / audit / vault) require a token
+            # bound to those exact arguments. See core/oversight.py.
+            from ..core.oversight import args_digest, is_oversight_target
+
+            digest = args_digest(kwargs)
             decision = policy.check(
                 spec.capability, actor=actor, grant=grant,
-                confirmation=confirmation, context={"tool": name},
+                confirmation=confirmation,
+                context={
+                    "tool": name,
+                    "args_digest": digest,
+                    "oversight": is_oversight_target(
+                        name, spec.capability, kwargs),
+                },
             )
             if not decision.allowed:
                 self._audit(name, actor, spec.capability, "deny", kwargs, 0.0, error=decision.reason)
@@ -998,8 +1013,13 @@ class ToolRegistry:
         actor: str = "",
         title: str = "",
         timeout_s: float = 60.0,
+        args_digest: str | None = None,
     ) -> str | None:
         """Mint a confirmation token for a sensitive tool via fingerprint.
+
+        ``args_digest`` binds the minted token to the exact arguments
+        approved (see :mod:`nomorals.core.oversight`); oversight
+        actions require a bound token.
 
         Uses the biometric path when the tool requires it — either declared
         (``spec.confirm == "biometric"``) or via the policy (the capability
@@ -1029,6 +1049,7 @@ class ToolRegistry:
                 title=title or f"approve {name}",
                 timeout_s=timeout_s,
                 biometric=(biometric_available, request_biometric),
+                args_digest=args_digest,
             )
         except Exception:  # noqa: BLE001 - approval must never raise
             return None

@@ -440,8 +440,8 @@ class Policy:
         self.confirmation_ttl = confirmation_ttl
         self.progression = progression
         self._rules: list[_Rule] = []
-        # token -> (expiry_ts, capability it was minted for)
-        self._confirmations: dict[str, tuple[float, str]] = {}
+        # token -> (expiry_ts, capability it was minted for, args digest or None)
+        self._confirmations: dict[str, tuple[float, str, str | None]] = {}
         self._audit: list[dict[str, Any]] = []
         self._audit_limit = 2000
         self._lock = threading.RLock()
@@ -559,34 +559,65 @@ class Policy:
         }
 
     # -- confirmations -------------------------------------------------------
-    def issue_confirmation(self, capability: str, *, ttl: float | None = None) -> str:
+    def issue_confirmation(self, capability: str, *, ttl: float | None = None,
+                           args_digest: str | None = None) -> str:
         """Mint a single-use token authorising exactly one confirmable action.
 
         The token is bound to the capability it was minted for, so a token issued
         for ``fs.delete`` cannot be replayed to authorise ``social.bulk``.
+        With ``args_digest`` (see :mod:`nomorals.core.oversight`), the token is
+        additionally bound to the exact arguments the owner approved: it
+        authorises the same capability with the same arguments only, so an
+        approval for one file cannot be redirected to another. Unbound
+        tokens keep the legacy capability-only behavior for ordinary
+        actions; oversight-targeting actions (``context={"oversight": True}``)
+        require a bound token.
         """
         from .ids import new_short_id
 
         token = new_short_id("cfm_") + hashlib.sha256(
-            f"{capability}:{self._clock.now()}".encode()
+            f"{capability}:{args_digest or ''}:{self._clock.now()}".encode()
         ).hexdigest()[:16]
         with self._lock:
             self._confirmations[token] = (
                 self._clock.now() + (ttl or self.confirmation_ttl),
                 capability,
+                args_digest,
             )
         return token
 
-    def _consume_confirmation(self, token: str, capability: str) -> bool:
-        """Validate and consume a token. Single-use and capability-bound."""
+    def _consume_confirmation(self, token: str, capability: str,
+                              args_digest: str | None = None,
+                              *, require_bound: bool = False) -> bool:
+        """Validate and consume a token. Single-use and capability-bound,
+        and argument-bound when the token was minted with a digest.
+
+        A token presented with a non-matching digest is NOT consumed:
+        the mismatch means the token was not used for the action it
+        was minted for, so the owner's original approval stays valid
+        for the arguments they actually approved. Likewise a token
+        presented where a bound token is required (oversight actions)
+        but carrying no binding is left unconsumed for an ordinary
+        action. Only a token that authorises *this* call is consumed.
+        """
         with self._lock:
-            entry = self._confirmations.pop(token, None)
+            entry = self._confirmations.get(token)
             if entry is None:
                 return False
-            expiry, bound_capability = entry
+            expiry, bound_capability, bound_digest = entry
             if expiry < self._clock.now():
+                del self._confirmations[token]
                 return False
-            return bound_capability == capability
+            if bound_capability != capability:
+                return False
+            if bound_digest is not None and bound_digest != args_digest:
+                return False
+            if require_bound and bound_digest is None:
+                return False
+            if require_bound and bound_digest != args_digest:
+                return False
+            del self._confirmations[token]
+            return True
 
     def pending_confirmations(self) -> int:
         with self._lock:
@@ -659,6 +690,11 @@ class Policy:
         "send it", "do it now") jumps straight to execution — the
         confirmation-token gate is bypassed. Deny rules and grants still
         apply, and biometric (fingerprint) approval remains mandatory.
+        The bypass does NOT apply to oversight-targeting actions:
+        ``context={"oversight": True}`` (see
+        :mod:`nomorals.core.oversight`) forces the confirmation gate
+        even under an explicit override, and the token must be bound
+        to ``context["args_digest"]`` — the exact arguments approved.
         ``audit_kind``: optional audit-kind override for the allow record
         (used by the permission gradient's observe level).
         """
@@ -725,7 +761,13 @@ class Policy:
             # Step 4b: progression unlocks (achievement grants) — additive
             # only, consulted alongside the actor's CapabilitySet.
             granted = self._progression_grants(capability)
-        confirmable = needs_confirm or capability in Capability.CONFIRMABLE
+        # Oversight-targeting actions always go through the confirmation
+        # gate, even for capabilities that are not normally confirmable
+        # (e.g. fs.write): a write to the policy file itself is never a
+        # routine action. The gate for oversight additionally requires
+        # an argument-bound token (see _consume_confirmation).
+        oversight = bool(ctx.get("oversight"))
+        confirmable = needs_confirm or capability in Capability.CONFIRMABLE or oversight
         biometric_required = needs_biometric or capability in Capability.BIOMETRIC
 
         if not self.enforce:
@@ -752,15 +794,34 @@ class Policy:
 
         # Explicit owner instructions bypass the confirmation-token gate
         # (execute without reconfirming), but biometric fingerprint approval
-        # stays structural.
-        skip_confirmation = explicit_override and not biometric_required
+        # stays structural — and so does the oversight gate: an explicit
+        # override never authorises tampering with the oversight machinery
+        # itself, and an oversight action needs a token bound to the exact
+        # arguments approved, not a generic capability token.
+        skip_confirmation = (
+            explicit_override and not biometric_required and not oversight
+        )
         if confirmable and not skip_confirmation and (
-            not confirmation or not self._consume_confirmation(confirmation, capability)
+            not confirmation
+            or not self._consume_confirmation(
+                confirmation, capability,
+                args_digest=ctx.get("args_digest"),
+                require_bound=oversight,
+            )
         ):
+            if oversight:
+                reason = (
+                    "oversight-targeting action requires an operator "
+                    "confirmation token bound to the exact arguments "
+                    "approved"
+                )
+            else:
+                reason = reason or (
+                    f"capability {capability!r} requires an operator confirmation token"
+                )
             decision = PolicyDecision(
                 allowed=False,
-                reason=reason
-                or f"capability {capability!r} requires an operator confirmation token",
+                reason=reason,
                 capability=capability,
                 actor=actor,
                 needs_confirmation=True,
@@ -1109,6 +1170,7 @@ def approve_with_biometric(
     title: str = "",
     timeout_s: float = 60.0,
     biometric: tuple[Callable[[], Any], Callable[..., Any]] | None = None,
+    args_digest: str | None = None,
 ) -> str | None:
     """Mint a confirmation token through the fingerprint prompt.
 
@@ -1117,6 +1179,10 @@ def approve_with_biometric(
     the kernel may not import the native layer. None means no biometric
     functions were injected: return None and the caller falls back to
     the text-confirm flow (never raise, never prompt implicitly).
+
+    ``args_digest`` binds the minted token to the exact arguments
+    approved (see :meth:`Policy.issue_confirmation`); oversight
+    actions require a bound token.
 
     Returns the capability-bound single-use token when the user
     authenticates, else None (biometric unavailable, prompt denied, or any
@@ -1142,7 +1208,7 @@ def approve_with_biometric(
     if not approved:
         return None
     try:
-        return policy.issue_confirmation(capability)
+        return policy.issue_confirmation(capability, args_digest=args_digest)
     except Exception:  # noqa: BLE001 - fail closed
         return None
 
@@ -1415,6 +1481,9 @@ class PermissionGradient:
         The agent then passes the token to :meth:`Policy.check` and the
         action executes through the existing confirmation flow. Returns
         None for unknown/already-resolved proposals. Never raises.
+        When the proposal's context carries the argument digest of the
+        proposed call, the token is bound to those exact arguments, so
+        the approval cannot be redirected to a different target.
         """
         try:
             proposal = self.store.get_proposal(proposal_id)
@@ -1423,7 +1492,12 @@ class PermissionGradient:
             capability = proposal.get("capability", "")
             if not capability:
                 return None
-            token = self.policy.issue_confirmation(capability)
+            proposal_ctx = proposal.get("context") or {}
+            bound = proposal_ctx.get("args_digest")
+            token = self.policy.issue_confirmation(
+                capability,
+                args_digest=bound if isinstance(bound, str) else None,
+            )
             self.store.update_proposal(proposal_id, {"status": "approved",
                                                      "token_issued": True})
             return token
