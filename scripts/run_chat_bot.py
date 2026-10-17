@@ -247,7 +247,6 @@ def _install_console_mirror(runtime, history: _MessageHistory) -> None:
 def main() -> int:
     from nomorals.agents.context import build_context
     from nomorals.agents.partner_runtime import PartnerRuntime
-    from nomorals.console import ConsoleCommands
     from nomorals.core.config import load_settings
     from nomorals.core.logging_setup import setup_logging
 
@@ -290,6 +289,11 @@ def main() -> int:
         history = _MessageHistory()
         _install_console_mirror(runtime, history)
         try:
+            # Imported here (not at top of main): console commands are
+            # optional — if the console package ever fails to import
+            # (e.g. a Unix-only dep on Windows), the bot must still run.
+            from nomorals.console import ConsoleCommands
+
             snapshot = _build_snapshot_provider(runtime, context, boot_mono, history)
             commands = ConsoleCommands(snapshot)
             local = None

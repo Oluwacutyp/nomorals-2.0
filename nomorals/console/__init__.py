@@ -37,7 +37,13 @@ from .dashboard import (
     render_view,
 )
 from .debug import DebugHub
-from .godconsole import EventBuffer, GodConsole, InputLine
+# NOTE: ``godconsole`` is intentionally NOT imported eagerly here. It pulls
+# in the fullscreen terminal UI (termios/tty on Unix); the chat bot imports
+# this package just for ``ConsoleCommands`` and must not pay for — or crash
+# on — the fullscreen console. ``GodConsole`` / ``EventBuffer`` /
+# ``InputLine`` resolve lazily via ``__getattr__`` below (PEP 562), so
+# ``from nomorals.console import GodConsole`` still works, and
+# ``from nomorals.console import ConsoleCommands`` never touches it.
 from .palette import (
     BOX_DOUBLE,
     BOX_HEAVY,
@@ -93,6 +99,30 @@ from .widgets import (
     status,
     table,
 )
+
+_LAZY_GODCONSOLE = {"EventBuffer", "GodConsole", "InputLine"}
+
+
+def __getattr__(name: str):  # PEP 562 — lazy fullscreen console
+    if name in _LAZY_GODCONSOLE:
+        from .godconsole import EventBuffer as _EventBuffer
+        from .godconsole import GodConsole as _GodConsole
+        from .godconsole import InputLine as _InputLine
+
+        _exports = {
+            "EventBuffer": _EventBuffer,
+            "GodConsole": _GodConsole,
+            "InputLine": _InputLine,
+        }
+        value = _exports[name]
+        globals()[name] = value  # cache: import only once
+        return value
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def __dir__() -> list[str]:
+    return sorted(set(globals()) | set(__all__))
+
 
 __all__ = [
     "AVATAR",

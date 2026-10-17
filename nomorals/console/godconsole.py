@@ -30,13 +30,34 @@ from __future__ import annotations
 import io
 import os
 import queue
-import select
 import sys
-import termios
 import threading
 import time
-import tty
 from typing import Any, Callable
+
+# Unix-only stdlib modules. ``termios`` / ``tty`` do NOT exist on Windows
+# (``ModuleNotFoundError: No module named 'termios'``) and ``select`` only
+# works on sockets there. Import them guarded so this module IMPORTS
+# cleanly on Windows — the chat bot imports the console package but never
+# opens the fullscreen UI. All *uses* below check for None / fall back
+# (msvcrt on Windows, sleep-and-return-None as last resort) instead of
+# crashing. Never import these unguarded again.
+try:
+    import select
+except ImportError:  # pragma: no cover - non-Unix
+    select = None  # type: ignore[assignment]
+try:
+    import termios
+except ImportError:  # pragma: no cover - Windows has no termios
+    termios = None  # type: ignore[assignment]
+try:
+    import tty
+except ImportError:  # pragma: no cover - Windows has no tty
+    tty = None  # type: ignore[assignment]
+try:
+    import msvcrt
+except ImportError:  # pragma: no cover - non-Windows
+    msvcrt = None  # type: ignore[assignment]
 
 from .palette import (
     paint, CYAN, YELLOW, BRIGHT_CYAN, DIM, GREEN, MAGENTA, BOLD, WHITE,
@@ -508,6 +529,37 @@ class GodConsole:
         out += f"\x1b[{input_row + 1};{cursor_col + 1}H"
         return out
 
+    def _wait_key_windows(self, timeout: float) -> str | None:
+        """Windows key wait via ``msvcrt``.
+
+        ``select.select()`` cannot wait on stdin on Windows (it only works
+        on sockets), so poll ``msvcrt.kbhit()`` instead. Arrow keys arrive
+        as a ``\\x00``/``\\xe0`` prefix + code; map them to the ANSI
+        sequences the POSIX path produces so ``InputLine`` sees one shape.
+        """
+        assert msvcrt is not None
+        deadline = time.monotonic() + max(0.0, timeout)
+        while time.monotonic() < deadline:
+            try:
+                if msvcrt.kbhit():
+                    ch = msvcrt.getwch()
+                    if ch in ("\x00", "\xe0"):
+                        code = msvcrt.getwch()
+                        mapping = {
+                            "H": "\x1b[A",  # Up
+                            "P": "\x1b[B",  # Down
+                            "K": "\x1b[D",  # Left
+                            "M": "\x1b[C",  # Right
+                        }
+                        return mapping.get(code)
+                    if ch == "\r":
+                        return "\n"
+                    return ch
+            except Exception:  # noqa: BLE001 - console input is best-effort
+                return None
+            time.sleep(0.02)
+        return None
+
     def _wait_key(self, timeout: float) -> str | None:
         """Return a keypress if one arrives within ``timeout`` seconds, else None.
 
@@ -515,13 +567,19 @@ class GodConsole:
         wait again, so background events (pushed via :meth:`push_event`) and
         snapshot changes appear live without any keypress.
         """
+        if msvcrt is not None:
+            return self._wait_key_windows(timeout)
         stdin = sys.stdin
         try:
             fd = stdin.fileno()
         except (OSError, io.UnsupportedOperation):
             fd = None
         target = [fd] if fd is not None else [stdin]
-        r, _, _ = select.select(target, [], [], timeout)
+        try:
+            r, _, _ = select.select(target, [], [], timeout)
+        except Exception:  # noqa: BLE001 - select may fail on odd fds
+            time.sleep(max(0.0, timeout))
+            return None
         if not r:
             return None
         ch = stdin.read(1)
@@ -529,7 +587,10 @@ class GodConsole:
             # Escape sequence (arrows, etc.): read the rest without blocking.
             extra = ""
             while len(extra) < 8:
-                r2, _, _ = select.select(target, [], [], 0.05)
+                try:
+                    r2, _, _ = select.select(target, [], [], 0.05)
+                except Exception:  # noqa: BLE001
+                    break
                 if not r2:
                     break
                 c = stdin.read(1)
@@ -542,7 +603,10 @@ class GodConsole:
                 # and deliver it as one token.
                 body = ""
                 while True:
-                    r3, _, _ = select.select(target, [], [], 1.0)
+                    try:
+                        r3, _, _ = select.select(target, [], [], 1.0)
+                    except Exception:  # noqa: BLE001
+                        break
                     if not r3:
                         break
                     body += stdin.read(1)
@@ -612,8 +676,14 @@ class GodConsole:
                 tty_out.write(_ALT_SCREEN_ON + _HIDE_CURSOR + "\x1b[?2004h")
                 tty_out.flush()
 
-                # Raw mode once for the whole session.
+                # Raw mode once for the whole session. Skipped on
+                # platforms without termios/tty (Windows): the console
+                # still renders, it just cannot take over the terminal
+                # in raw mode, so key handling falls back to the
+                # msvcrt path in _wait_key.
                 try:
+                    if termios is None or tty is None:
+                        raise RuntimeError("no termios/tty on this platform")
                     old_attrs = termios.tcgetattr(fd)
                     tty.setraw(fd)
                     raw = True
@@ -650,7 +720,7 @@ class GodConsole:
                         if not self._handle_key(key):
                             break
                 finally:
-                    if raw and old_attrs is not None:
+                    if raw and old_attrs is not None and termios is not None:
                         termios.tcsetattr(fd, termios.TCSADRAIN, old_attrs)
 
                 # Restore: leave paste mode, alt screen, cursor.
