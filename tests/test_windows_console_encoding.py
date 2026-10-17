@@ -186,3 +186,46 @@ def test_installer_verification_uses_start_process() -> None:
     assert not bad, "executable 2>&1 native lines in installer:\n" + "\n".join(bad)
     assert "Start-Process" in installer
     assert "Invoke-Native" in installer
+
+
+def test_every_winget_call_pre_accepts_source_agreements() -> None:
+    """Every winget CLI invocation must pass --accept-source-agreements.
+
+    Regression (owner's EC2 screenshot): the installer hung at
+    "OK: winget found" for minutes because `winget list --id $Id -e`
+    did NOT pass --accept-source-agreements. On first run winget
+    prompts "Do you agree to all the source agreements?" and waits
+    for input forever - a non-interactive script must never let
+    that prompt appear. The `winget install` call already passed
+    both --accept flags; the `winget list` check did not.
+    Comment lines may mention winget (they document the rule);
+    only executable lines count. `Get-Command winget` is not a
+    winget CLI invocation (it asks PowerShell for the command path,
+    it never runs winget, so no agreement prompt can appear).
+    """
+    import re
+
+    subcommands = (
+        "list|install|search|show|upgrade|uninstall|export|import|"
+        "source|settings|features|hash|validate|download|repair|"
+        "configure|pin|completion"
+    )
+    bare_call = re.compile(r"\bwinget\s+(?:" + subcommands + r")\b")
+    native_call = re.compile(r"-Exe\s+'winget'")
+    for ps1 in (
+        REPO_ROOT / "scripts" / "install_devon_windows.ps1",
+        REPO_ROOT / "scripts" / "deploy_devon_ec2_rdp.ps1",
+    ):
+        src = ps1.read_text(encoding="utf-8")
+        code_lines = [
+            line for line in src.splitlines() if not line.strip().startswith("#")
+        ]
+        for line in code_lines:
+            if "Get-Command winget" in line:
+                continue
+            if bare_call.search(line) or native_call.search(line):
+                assert "--accept-source-agreements" in line, (
+                    f"winget invocation without --accept-source-agreements "
+                    f"in {ps1.name} (would hang on first-run prompt):\n{line}"
+                )
+

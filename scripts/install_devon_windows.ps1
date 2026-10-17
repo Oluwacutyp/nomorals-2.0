@@ -161,10 +161,25 @@ function Get-Tier {
 function Install-WingetPackage {
     param([string]$Id, [string]$Name)
     if ($DryRun) { Write-Host "  [dry-run] winget install --id $Id -e --accept-source-agreements --accept-package-agreements"; return }
-    $present = winget list --id $Id -e 2>$null | Select-String -SimpleMatch $Id
+    # EVERY winget call in a non-interactive script MUST pass
+    # --accept-source-agreements: on first run `winget list` prompts
+    # "Do you agree to all the source agreements?" and waits for input
+    # forever - the installer hung at "OK: winget found" for minutes
+    # (owner's EC2 screenshot). Run via Invoke-Native (Start-Process):
+    # a bare `winget list ... 2>$null` can still become a
+    # NativeCommandError on stderr under $ErrorActionPreference='Stop'.
+    $listOut = Join-Path $env:TEMP "devon-winget-list-$PID.out.txt"
+    $listErr = Join-Path $env:TEMP "devon-winget-list-$PID.err.txt"
+    [void](Invoke-Native -Exe 'winget' -Args @('list', '--id', $Id, '-e', '--accept-source-agreements') -OutFile $listOut -ErrFile $listErr)
+    $present = Get-Content $listOut -ErrorAction SilentlyContinue | Select-String -SimpleMatch $Id
     if ($present) { Write-Ok "$Name already installed"; return }
     Write-Host "  Installing $Name ($Id)..."
-    winget install --id $Id -e --accept-source-agreements --accept-package-agreements
+    $instOut = Join-Path $env:TEMP "devon-winget-install-$PID.out.txt"
+    $instErr = Join-Path $env:TEMP "devon-winget-install-$PID.err.txt"
+    $instCode = Invoke-Native -Exe 'winget' -Args @('install', '--id', $Id, '-e', '--accept-source-agreements', '--accept-package-agreements') -OutFile $instOut -ErrFile $instErr
+    if ($instCode -ne 0) {
+        Write-Warn "$Name install failed (winget exit $instCode); see $instErr. Continuing - Devon runs without it, re-run to retry."
+    }
 }
 
 function New-EnvFile {
