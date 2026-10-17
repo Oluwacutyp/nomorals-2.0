@@ -2450,7 +2450,7 @@ class TelegramBotAdapter(ChatAdapter):
              parse_mode: str = "") -> SendResult:
         from .action_footers import footer_for_text
         from .progress_throttle import LongOutput
-        from .tgbot_buttons import buttons_for_text
+        from .tgbot_buttons import buttons_for_text, personal_buttons_for
 
         # Long output goes out as ONE document, not 40 chunks.
         if LongOutput().route(text)[0] == "document":
@@ -2491,9 +2491,27 @@ class TelegramBotAdapter(ChatAdapter):
                 # results, …) — this is what puts [Join] [Stats] under
                 # game replies without every command handler having to
                 # know about buttons.
-                resolved = buttons if buttons is not None \
-                    else (buttons_for_text(text)
-                          or footer_for_text(text, self._last_command.get(chat.chat_id, "")))
+                if buttons is not None:
+                    resolved = buttons
+                elif self.owner_only:
+                    # Personal bot only: richer keyboards (help
+                    # categories, power controls, next-actions) first,
+                    # then the shared patterns (game results, confirm
+                    # prompts, …). The gated bot never takes this
+                    # branch — its replies are exactly as before.
+                    resolved = (
+                        personal_buttons_for(
+                            text, self._last_command.get(chat.chat_id, ""))
+                        or buttons_for_text(text)
+                        or footer_for_text(
+                            text, self._last_command.get(chat.chat_id, ""))
+                    )
+                else:
+                    resolved = (
+                        buttons_for_text(text)
+                        or footer_for_text(
+                            text, self._last_command.get(chat.chat_id, ""))
+                    )
                 if resolved:
                     keyboard = []
                     for row in resolved:

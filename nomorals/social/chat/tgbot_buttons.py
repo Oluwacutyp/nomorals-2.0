@@ -186,6 +186,148 @@ def buttons_for_text(text: str) -> Keyboard | None:
     return None
 
 
+# ── personal bot (USER-ONLY) — contextual keyboards ─────────────────────
+# The personal bot is owner-only, so its replies carry richer keyboards
+# than the gated bot's: category jumps for /help, power controls, and
+# next-actions for search/task/mission/… The gated bot NEVER sees these —
+# the adapter only calls :func:`personal_buttons_for` when
+# ``self.owner_only`` is true (see ``TelegramBotAdapter.send``).
+#
+# Rules (same as the rest of the button system):
+# * every callback is a real routable command — never a dead button;
+# * a button whose payload would exceed the 47-byte budget is OMITTED,
+#   never sent truncated (a truncated query would run the wrong query);
+# * "Power On" carries NO key — the owner key must never travel in a
+#   callback (visible in Telegram + logs). Tapping it routes to the
+#   /power handler, which replies with usage ("provide the key").
+# * replies with no sensible next action get NO keyboard (None).
+
+
+def _personal_btn(label: str, data: str) -> Button | None:
+    """One personal button, or None when its payload exceeds budget."""
+    try:
+        check_callback_data(data)
+    except ValueError:
+        return None
+    return (label, data)
+
+
+def _personal_row(*pairs: tuple[str, str]) -> list[Button]:
+    """One row of personal buttons, dropping over-budget entries."""
+    row: list[Button] = []
+    for label, data in pairs:
+        btn = _personal_btn(label, data)
+        if btn is not None:
+            row.append(btn)
+    return row
+
+
+def personal_buttons_for(text: str, last_command: str = "") -> Keyboard | None:
+    """Inline keyboard for a personal-bot reply, or None.
+
+    Keyed off the origin command (``last_command`` — the last inbound
+    ``/command`` in this chat), not fragile text matching: the same reply
+    text can follow different commands, and only the origin knows the
+    next action. Returns None when the origin has no sensible buttons —
+    the adapter then falls through to the shared ``buttons_for_text`` /
+    footer patterns (game results, confirm prompts, …).
+    """
+    origin = (last_command or "").strip()
+    kind = origin.lstrip("/").split(None, 1)[0].lower() if origin else ""
+    # Callbacks are stored WITHOUT the leading slash (the adapter re-adds
+    # it on tap); _last_command keeps the slash, so strip it once here.
+    origin_cmd = origin.lstrip("/")
+    rest = origin_cmd.split(None, 1)[1] if len(origin_cmd.split(None, 1)) > 1 else ""
+
+    # ── /help /list — category jumps ──
+    if kind in ("help", "list", "menu", "commands"):
+        from .personal_commands import PERSONAL_HELP_CATEGORIES
+
+        rows: Keyboard = []
+        row: list[Button] = []
+        for label, data in PERSONAL_HELP_CATEGORIES:
+            btn = _personal_btn(label, data)
+            if btn is None:
+                continue
+            row.append(btn)
+            if len(row) == 2:
+                rows.append(row)
+                row = []
+        if row:
+            rows.append(row)
+        return rows or None
+
+    # ── /power — controls (Power On carries NO key by design) ──
+    if kind == "power":
+        rows = [
+            _personal_row(("⚡ Power On", "power on"), ("🔌 Power Off", "power off")),
+            _personal_row(("📊 Power Status", "power status")),
+        ]
+        return [r for r in rows if r] or None
+
+    # ── /search /searchdeep — retry / deepen / save query / catalog ──
+    if kind in ("search", "searchdeep"):
+        rows: Keyboard = []
+        retry = _personal_row(("🔁 Search again", origin_cmd))
+        if kind == "search" and rest:
+            deep = _personal_row(("🔬 Deep research", f"searchdeep {rest}"))
+            if retry and deep:
+                rows.append(retry + deep)
+            elif retry:
+                rows.append(retry)
+            elif deep:
+                rows.append(deep)
+        elif retry:
+            rows.append(retry)
+        tail_pairs: list[tuple[str, str]] = []
+        if rest:
+            tail_pairs.append(("💾 Save query", f"remember {rest}"))
+        tail_pairs.append(("📋 Commands", "list"))
+        tail = _personal_row(*tail_pairs)
+        if tail:
+            rows.append(tail)
+        return rows or None
+
+    # ── task / mission — status + list ──
+    if kind == "task":
+        row = _personal_row(("📋 Task list", "task list"), ("📋 Commands", "list"))
+        return [row] if row else None
+    if kind == "mission":
+        row = _personal_row(
+            ("📊 Mission status", "mission status"),
+            ("📋 Mission list", "mission list"),
+        )
+        return [row] if row else None
+
+    # ── status / providers / model — cross-links ──
+    if kind == "status":
+        row = _personal_row(
+            ("⚡ Power status", "power status"), ("📊 Providers", "providers")
+        )
+        return [row] if row else None
+    if kind == "providers":
+        row = _personal_row(("📊 Status", "status"), ("📋 Commands", "list"))
+        return [row] if row else None
+    if kind == "model":
+        row = _personal_row(("📊 Providers", "providers"), ("📋 Commands", "list"))
+        return [row] if row else None
+
+    # ── impossible / book — queue + examples / list + status ──
+    if kind == "impossible":
+        row = _personal_row(
+            ("📋 Queue", "impossible queue"),
+            ("📖 Examples", "impossible examples"),
+        )
+        return [row] if row else None
+    if kind == "book":
+        row = _personal_row(
+            ("📋 Book list", "book list"), ("📊 Book status", "book status")
+        )
+        return [row] if row else None
+
+    return None
+
+
 # ── generic keyboard builders ─────────────────────────────────────────────
 # Button rules (verified against Bot API 10.2 practice): labels are
 # verb + object and unique within a keyboard; 1-2 buttons per row for
