@@ -30,7 +30,6 @@ from __future__ import annotations
 
 import argparse
 import contextlib
-import fcntl
 import json
 import os
 import signal
@@ -43,6 +42,7 @@ from pathlib import Path
 from typing import Any
 
 from ..core.events import Event, global_bus
+from ..core.filelock import lock_exclusive_nb, unlock as _unlock_file
 from ..core.logging_setup import get_logger
 from . import errors as _errors
 from .service import BrowserError, BrowserService, _mask_proxy
@@ -230,16 +230,13 @@ def _exclusive_lock(path: Path):
     """Serialize daemon start/stop races across CLI invocations."""
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "a+b") as fh:
-        try:
-            fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError as exc:
+        if not lock_exclusive_nb(fh.fileno()):
             raise DaemonError(
-                "another browser-daemon start/stop is in progress") from exc
+                "another browser-daemon start/stop is in progress")
         try:
             yield
         finally:
-            with contextlib.suppress(OSError):
-                fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+            _unlock_file(fh.fileno())
 
 
 def _repo_root() -> Path:
@@ -426,7 +423,9 @@ class DaemonControl:
         """SIGTERM, then SIGKILL. Returns True when force was needed."""
         if pid is None or not _pid_alive(pid):
             return False
-        for sig, wait in ((signal.SIGTERM, 5.0), (signal.SIGKILL, 3.0)):
+        # SIGKILL does not exist on Windows; SIGTERM terminates there.
+        sigkill = getattr(signal, "SIGKILL", signal.SIGTERM)
+        for sig, wait in ((signal.SIGTERM, 5.0), (sigkill, 3.0)):
             try:
                 os.kill(pid, sig)
             except (ProcessLookupError, PermissionError) as exc:

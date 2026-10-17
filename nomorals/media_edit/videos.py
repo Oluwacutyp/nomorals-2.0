@@ -157,8 +157,10 @@ def run_ffmpeg(args: list[str], *,
 def _kill_tree(proc: subprocess.Popen) -> None:
     try:
         import signal
-        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-    except (OSError, ProcessLookupError):
+        os.killpg(os.getpgid(proc.pid),
+                  getattr(signal, "SIGKILL", signal.SIGTERM))
+    except (OSError, ProcessLookupError, AttributeError):
+        # AttributeError: no killpg/getpgid/SIGKILL on Windows.
         try:
             proc.kill()
         except OSError:  # noqa: E103 - process already gone; teardown is best-effort

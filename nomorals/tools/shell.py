@@ -108,7 +108,10 @@ def _uid_thread_count() -> int:
     RLIMIT_NPROC is enforced per real UID across the whole machine, not per
     sandbox, so the sandbox ceiling must be measured against this.
     """
-    uid = os.getuid()
+    try:
+        uid = os.getuid()
+    except AttributeError:  # pragma: no cover - no getuid on Windows
+        return 0
     count = 0
     try:
         pids = os.listdir("/proc")
@@ -294,8 +297,11 @@ def run_sandboxed(
 def _kill_tree(process: subprocess.Popen) -> None:
     """Kill the whole process group. Killing only the parent orphans children."""
     try:
-        os.killpg(os.getpgid(process.pid), signal.SIGKILL)
-    except (ProcessLookupError, PermissionError, OSError):  # pragma: no cover
+        os.killpg(os.getpgid(process.pid),
+                  getattr(signal, "SIGKILL", signal.SIGTERM))
+    except (ProcessLookupError, PermissionError, OSError, AttributeError):  # pragma: no cover
+        # AttributeError: no killpg/getpgid/SIGKILL on Windows — fall through
+        # to killing just this process.
         try:
             process.kill()
         except OSError:  # noqa: E103 - process already gone

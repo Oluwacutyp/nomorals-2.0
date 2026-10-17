@@ -1940,15 +1940,17 @@ class AppBuilder:
             try:
                 import signal
 
-                os.killpg(os.getpgid(pid), signal.SIGKILL)
+                os.killpg(os.getpgid(pid),
+                          getattr(signal, "SIGKILL", signal.SIGTERM))
                 killed = True
-            except (ProcessLookupError, PermissionError, OSError):
+            except (ProcessLookupError, PermissionError, OSError, AttributeError):
+                # AttributeError: no killpg/getpgid/SIGKILL on Windows.
                 try:
                     import signal
 
-                    os.kill(pid, signal.SIGKILL)
+                    os.kill(pid, getattr(signal, "SIGKILL", signal.SIGTERM))
                     killed = True
-                except (ProcessLookupError, PermissionError, OSError):  # noqa: E103 - process already gone; kill chain is best-effort
+                except (ProcessLookupError, PermissionError, OSError, AttributeError):  # noqa: E103 - process already gone; kill chain is best-effort
                     pass
         return {"app": slug, "stopped": killed or not _pid_alive(pid),
                 "was_pid": pid}
@@ -2096,13 +2098,15 @@ class AppBuilder:
             import signal
 
             try:
-                os.killpg(os.getpgid(pid), signal.SIGKILL)
+                os.killpg(os.getpgid(pid),
+                          getattr(signal, "SIGKILL", signal.SIGTERM))
                 killed = True
-            except (ProcessLookupError, PermissionError, OSError):
+            except (ProcessLookupError, PermissionError, OSError, AttributeError):
+                # AttributeError: no killpg/getpgid/SIGKILL on Windows.
                 try:
-                    os.kill(pid, signal.SIGKILL)
+                    os.kill(pid, getattr(signal, "SIGKILL", signal.SIGTERM))
                     killed = True
-                except (ProcessLookupError, PermissionError, OSError):  # noqa: E103 - process already gone; kill chain is best-effort
+                except (ProcessLookupError, PermissionError, OSError, AttributeError):  # noqa: E103 - process already gone; kill chain is best-effort
                     pass
         return {"app": slug, "stopped": killed or not _pid_alive(pid),
                 "was_pid": pid, "url": entry.get("url", "")}
@@ -2442,15 +2446,18 @@ def _run_server(app_dir: Path, stack: str, port: int):
 
             try:
                 os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
-            except (OSError, ProcessLookupError):  # noqa: E103 - process already gone; kill is best-effort
-                pass
+            except (OSError, ProcessLookupError, AttributeError):  # noqa: E103 - process already gone; kill is best-effort. AttributeError: no killpg/getpgid on Windows.
+                with contextlib.suppress(OSError):
+                    proc.terminate()
             try:
                 proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 try:
-                    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-                except (OSError, ProcessLookupError):  # noqa: E103 - process already gone; kill is best-effort
-                    pass
+                    os.killpg(os.getpgid(proc.pid),
+                              getattr(signal, "SIGKILL", signal.SIGTERM))
+                except (OSError, ProcessLookupError, AttributeError):  # noqa: E103 - process already gone; kill is best-effort. AttributeError: no killpg/getpgid/SIGKILL on Windows.
+                    with contextlib.suppress(OSError):
+                        proc.kill()
                 proc.wait(timeout=5)
 
 

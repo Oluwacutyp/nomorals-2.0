@@ -243,7 +243,7 @@ def kill_pid(pid: int, timeout: float = 10.0) -> bool:
             return True
         time.sleep(0.2)
     try:
-        os.kill(pid, signal.SIGKILL)
+        os.kill(pid, getattr(signal, "SIGKILL", signal.SIGTERM))
     except OSError:
         return not alive()
     deadline = time.time() + timeout

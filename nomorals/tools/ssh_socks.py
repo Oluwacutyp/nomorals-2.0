@@ -275,7 +275,8 @@ class SshSocksTunnel:
                 return {"stopped": True, "note": "not running"}
             try:
                 os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
-            except (OSError, ProcessLookupError):
+            except (OSError, ProcessLookupError, AttributeError):
+                # AttributeError: no killpg/getpgid on Windows.
                 try:
                     proc.terminate()
                 except OSError:  # noqa: E103 - process already gone; teardown is best-effort
@@ -284,8 +285,10 @@ class SshSocksTunnel:
                 proc.wait(timeout=6)
             except subprocess.TimeoutExpired:
                 try:
-                    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-                except (OSError, ProcessLookupError):
+                    os.killpg(os.getpgid(proc.pid),
+                              getattr(signal, "SIGKILL", signal.SIGTERM))
+                except (OSError, ProcessLookupError, AttributeError):
+                    # AttributeError: no killpg/getpgid/SIGKILL on Windows.
                     proc.kill()
                 try:
                     proc.wait(timeout=5)

@@ -12,6 +12,7 @@ access.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import shlex
@@ -468,15 +469,20 @@ class ServeHandle:
         if self._proc.poll() is None:
             try:
                 os.killpg(os.getpgid(self._proc.pid), signal.SIGTERM)
-            except (OSError, ProcessLookupError):
-                pass
+            except (OSError, ProcessLookupError, AttributeError):
+                # AttributeError: no killpg/getpgid on Windows.
+                with contextlib.suppress(OSError):
+                    self._proc.terminate()
             try:
                 self._proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 try:
-                    os.killpg(os.getpgid(self._proc.pid), signal.SIGKILL)
-                except (OSError, ProcessLookupError):
-                    pass
+                    os.killpg(os.getpgid(self._proc.pid),
+                              getattr(signal, "SIGKILL", signal.SIGTERM))
+                except (OSError, ProcessLookupError, AttributeError):
+                    # AttributeError: no killpg/getpgid/SIGKILL on Windows.
+                    with contextlib.suppress(OSError):
+                        self._proc.kill()
                 try:
                     self._proc.wait(timeout=5)
                 except subprocess.TimeoutExpired:
@@ -616,9 +622,12 @@ def serve(project_dir: str | Path, port: int = 0, *,
         drainer.join(timeout=2.0)
         err = drainer.text().strip()
         try:
-            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-        except (OSError, ProcessLookupError):
-            pass
+            os.killpg(os.getpgid(proc.pid),
+                      getattr(signal, "SIGKILL", signal.SIGTERM))
+        except (OSError, ProcessLookupError, AttributeError):
+            # AttributeError: no killpg/getpgid/SIGKILL on Windows.
+            with contextlib.suppress(OSError):
+                proc.kill()
         return ServeError(
             message + (f"\nstderr:\n{err}" if err else " (no stderr output)"),
             stderr=err)

@@ -1498,9 +1498,11 @@ class PlaybackEngine:
         pid = int(self._state.get("player_pid", 0) or 0)
         if pid:
             try:
-                os.killpg(os.getpgid(pid), signal.SIGKILL)
-            except (ProcessLookupError, PermissionError, OSError):  # noqa: E103 - process already gone
-                pass
+                os.killpg(os.getpgid(pid),
+                          getattr(signal, "SIGKILL", signal.SIGTERM))
+            except (ProcessLookupError, PermissionError, OSError, AttributeError):  # noqa: E103 - process already gone. AttributeError: no killpg/getpgid/SIGKILL on Windows.
+                with contextlib.suppress(OSError):
+                    os.kill(pid, signal.SIGTERM)
             self._state.pop("player_pid", None)
 
     def _simple_start(self, item: dict[str, str]) -> tuple[bool, str]:

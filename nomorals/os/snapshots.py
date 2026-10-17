@@ -33,6 +33,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from ..core.filelock import lock_exclusive_nb, unlock as _unlock_file
 from ..core.logging_setup import get_logger
 
 __all__ = [
@@ -126,14 +127,12 @@ def system_state(home: Path, db_path: Path) -> dict[str, bool]:
     running = False
     lock_path = home / LOCK_FILENAME
     try:
-        import fcntl
-
         fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            fcntl.flock(fd, fcntl.LOCK_UN)
-        except BlockingIOError:
-            running = True
+            if lock_exclusive_nb(fd):
+                _unlock_file(fd)
+            else:
+                running = True
         finally:
             os.close(fd)
     except OSError:  # pragma: no cover - cannot probe; treat as unknown-safe
@@ -584,34 +583,28 @@ class SnapshotManager:
         never hangs forever behind a live server: ``--force`` overrides a
         *dirty* database, never a *running* system writing to it.
         """
-        import fcntl
-
         lock_path = self.home / LOCK_FILENAME
         self.home.mkdir(parents=True, exist_ok=True)
         fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
         deadline = time.time() + timeout
         try:
             while True:
-                try:
-                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                if lock_exclusive_nb(fd):
                     return fd
-                except BlockingIOError as err:
-                    if time.time() >= deadline:
-                        raise SnapshotRefused(
-                            "another process holds the state lock; "
-                            "stop the running system first"
-                        ) from err
-                    time.sleep(0.1)
+                if time.time() >= deadline:
+                    raise SnapshotRefused(
+                        "another process holds the state lock; "
+                        "stop the running system first"
+                    )
+                time.sleep(0.1)
         except Exception:
             os.close(fd)
             raise
 
     @staticmethod
     def _release_lock(fd: int) -> None:
-        import fcntl
-
         try:
-            fcntl.flock(fd, fcntl.LOCK_UN)
+            _unlock_file(fd)
         finally:
             os.close(fd)
 
