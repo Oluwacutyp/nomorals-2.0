@@ -22,7 +22,16 @@ One question, N angles, run at once:
   union of sources (every URL kept), the union of domains/angles, and
   the max confidence; affirmations are never merged with negations.
 * **supervision** — when the Reasoning Agent is reachable, the finished
-  synthesis gets an adversarial critique that lands in the report.
+  synthesis gets an adversarial critique. A researchable pivot from that
+  critique runs exactly one bounded follow-up pass whose findings are
+  merged and the synthesis regenerated — feedback becomes revision,
+  not a footnote.
+* **memory first** — before any worker runs, prior swarm facts for the
+  query are recalled from long-term memory; new findings that duplicate
+  them are dropped as already-known instead of re-reported.
+* **bounded retry** — a failed angle gets exactly one retry (broadened
+  query on "no search results", same angle on transient errors) before
+  it counts as failed.
 * **feeds** — the report can be filed into memory (``to_memory``), run as
   a mission, streamed to chat (``/swarm research <topic>``), or called by
   any agent through the ``research_swarm`` tool.
@@ -207,13 +216,28 @@ def _union_tag(cur: str, add: str) -> str:
 
 @dataclass
 class SwarmFinding:
-    """One concrete claim, backed by named sources."""
+    """One concrete claim, backed by named sources.
+
+    The optional ``behavior`` / ``gap`` / ``target_files`` /
+    ``failing_test`` fields are the *proposal spec*: when a finding
+    identifies a gap in Devon's own codebase, it must say exactly what
+    behavior is missing, which owning module(s) lack it, and which test
+    fails without it. Findings without a spec are research knowledge
+    (they still promote to the KG and appear in briefs) — they are
+    never turned into upgrade proposals, because a bare claim is not
+    an implementable ticket (see ``research_digest``).
+    """
 
     angle: str
     claim: str
     sources: list[dict[str, Any]] = field(default_factory=list)
     confidence: float = 0.3
     domain: str = ""  # specialist domain that produced the finding ("" = unknown)
+    behavior: str = ""  # specific behavior to implement/change ("" = none stated)
+    gap: str = ""  # what is missing/wrong in the owning module today
+    gap_evidence: str = ""  # caller-supplied file:line evidence (verified by the generator)
+    target_files: list[str] = field(default_factory=list)  # owning modules that lack the behavior
+    failing_test: str = ""  # test name/description that fails without the change
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -222,6 +246,11 @@ class SwarmFinding:
             "sources": self.sources,
             "confidence": round(self.confidence, 2),
             "domain": self.domain,
+            "behavior": self.behavior,
+            "gap": self.gap,
+            "gap_evidence": self.gap_evidence,
+            "target_files": list(self.target_files or []),
+            "failing_test": self.failing_test,
         }
 
     def evidence_urls(self) -> list[str]:
@@ -248,6 +277,16 @@ class SwarmReport:
     failed_angles: list[str] = field(default_factory=list)
     supervised: bool = False
     critique: str = ""
+    # Foundations: long-term memory consulted before researching —
+    # prior swarm FACTS recalled for this query (angle "prior memory").
+    prior_findings: list[SwarmFinding] = field(default_factory=list)
+    # New findings dropped because they duplicate a prior finding.
+    prior_overlap: int = 0
+    # Foundations: feedback-driven revision — one bounded retry per
+    # failed angle, plus at most one critique-driven pivot pass.
+    retried_angles: list[str] = field(default_factory=list)
+    recovered_angles: list[str] = field(default_factory=list)
+    pivot_angles: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -262,6 +301,11 @@ class SwarmReport:
             "supervised": self.supervised,
             "critique": self.critique,
             "synthesis": self.synthesis,
+            "prior_findings": [f.to_dict() for f in self.prior_findings],
+            "prior_overlap": self.prior_overlap,
+            "retried_angles": self.retried_angles,
+            "recovered_angles": self.recovered_angles,
+            "pivot_angles": self.pivot_angles,
         }
 
     def to_text(self, max_chars: int = 4000) -> str:
@@ -280,6 +324,16 @@ class SwarmReport:
             parts.append("key findings:\n" + "\n".join(lines))
         if self.critique:
             parts.append(f"self-critique: {self.critique[:200]}")
+        if self.prior_findings:
+            parts.append(f"(from memory: {len(self.prior_findings)} prior "
+                         f"finding(s), {self.prior_overlap} already-known "
+                         f"finding(s) skipped)")
+        if self.recovered_angles:
+            parts.append("(recovered after retry: "
+                         + ", ".join(self.recovered_angles) + ")")
+        if self.pivot_angles:
+            parts.append("(critique pivot researched: "
+                         + ", ".join(self.pivot_angles) + ")")
         text = "\n".join(parts)
         return text[:max_chars]
 
@@ -569,6 +623,16 @@ class ResearchSwarm:
                                    float(f.confidence or 0.0))
                 m.angle = _union_tag(m.angle, f.angle)
                 m.domain = _union_tag(m.domain, f.domain)
+                # a merged-in finding may carry the proposal spec the
+                # survivor lacks — keep the first non-empty spec field
+                for field_name in ("behavior", "gap", "gap_evidence",
+                                   "failing_test"):
+                    if not getattr(m, field_name, "") and getattr(
+                            f, field_name, ""):
+                        setattr(m, field_name, getattr(f, field_name))
+                if not getattr(m, "target_files", None) and getattr(
+                        f, "target_files", None):
+                    m.target_files = list(f.target_files)
                 placed = True
                 break
             if not placed:
@@ -667,30 +731,21 @@ class ResearchSwarm:
         return "\n".join(lines)
 
     # ── the run ────────────────────────────────────────────────────────────
-    def run(self, query: str, *, angles: list[str] | None = None,
-            save_memory: bool = False) -> SwarmReport:
-        started = time.time()
-        query = (query or "").strip()
-        if not query:
-            raise ValueError("swarm needs a query")
-        angle_list = list(angles) if angles else self.angles_for(query)
-        if angles:
-            # caller-supplied angles: no known domains
-            self._angle_domains = [""] * len(angle_list)
-        report = SwarmReport(query=query, angles=angle_list, workers=self.workers)
-        if not angle_list:
-            report.synthesis = "no angles to research"
-            report.seconds = time.time() - started
-            return report
+    def _run_angles(self, angle_list: list[str],
+                    domains: list[str]) -> dict[int, dict[str, Any]]:
+        """One parallel worker pass over ``angle_list``.
 
+        A dead worker is recorded as ``ok: False`` with its error — never
+        fatal to the pass. Extracted so the first pass, the bounded retry
+        pass, and the single pivot pass share exactly one execution path.
+        """
         results: dict[int, dict[str, Any]] = {}
         with ThreadPoolExecutor(max_workers=self.workers,
                                 thread_name_prefix="research-swarm") as pool:
             futures = {
                 pool.submit(
                     self._research_angle, angle, i,
-                    self._angle_domains[i]
-                    if i < len(self._angle_domains) else ""): (i, angle)
+                    domains[i] if i < len(domains) else ""): (i, angle)
                 for i, angle in enumerate(angle_list)
             }
             for future, (i, angle) in futures.items():
@@ -703,15 +758,105 @@ class ResearchSwarm:
                     _log.warning("swarm angle %r failed: %s", angle, exc)
                     results[i] = {"angle": angle, "ok": False, "error": str(exc),
                                   "findings": [], "sources": []}
+        return results
 
+    @staticmethod
+    def _merge(report: SwarmReport, results: dict[int, dict[str, Any]],
+               angle_list: list[str]) -> list[tuple[int, str, str]]:
+        """Fold one worker pass into the report.
+
+        Returns the failures as ``(index, angle, error)`` so the caller can
+        retry them with the error as feedback. Successes append findings
+        and sources; failures append nothing (they are retried, then —
+        only if still failed — recorded in ``failed_angles`` by ``run``).
+        """
+        failed: list[tuple[int, str, str]] = []
         for i in range(len(angle_list)):
             result = results.get(i, {"ok": False, "error": "missing", "findings": []})
             if not result.get("ok"):
-                report.failed_angles.append(result.get("angle", angle_list[i]))
+                failed.append((i, result.get("angle", angle_list[i]),
+                               str(result.get("error") or "")))
                 continue
             report.findings.extend(result.get("findings", []))
             report.sources.extend(result.get("sources", []))
-        # de-duplicate sources across angles
+        return failed
+
+    @staticmethod
+    def _retry_query(angle: str, error: str) -> str:
+        """The revised query for a failed angle's single retry.
+
+        "No search results" means the angle was too narrow — broaden it.
+        Anything else (timeout, exception) is treated as transient and
+        retried as-is once.
+        """
+        if "no search results" in (error or "").lower():
+            return f"{angle} overview"
+        return angle
+
+    @staticmethod
+    def _pivot_angle(pivot: str, existing_angles: list[str]) -> str:
+        """Gate a supervision pivot into a researchable angle, or "".
+
+        A pivot is researchable when it is short, carries at least two
+        content words, is not already an angle, and is not a
+        meta-instruction (``proceed`` / ``stop:`` / ``change approach:``)
+        — those name a change of approach, not a topic to research.
+        """
+        p = (pivot or "").strip()
+        if not p or len(p) > 120 or len(p) < 3:
+            return ""
+        low = p.lower()
+        if low.startswith(("proceed", "stop:", "change approach:")):
+            return ""
+        if len(_content_words(p)) < 2:
+            return ""
+        if any(p.lower() == a.lower() for a in existing_angles):
+            return ""
+        return p
+
+    @staticmethod
+    def _memory_claim(content: str) -> str:
+        """Extract the claim from a swarm fact record.
+
+        ``to_memory`` writes facts as ``[research: <query>] <claim>
+        (source: <url>)``; only that shape is a single claim. Anything
+        else (e.g. an episode summary) returns "" and is skipped.
+        """
+        m = re.match(r"^\[research:[^\]]*\]\s*(.+?)\s*(?:\(source:[^)]*\))?\s*$",
+                     (content or "").strip(), re.DOTALL)
+        return m.group(1).strip() if m else ""
+
+    def _recall_prior(self, query: str) -> list[SwarmFinding]:
+        """Recall prior swarm FACTS for this query from long-term memory.
+
+        Best-effort: memory missing, failing, or returning nothing yields
+        []. Only records the swarm itself wrote (``source`` starts with
+        ``research_swarm``) in fact shape are kept — other memories are
+        not this organ's evidence.
+        """
+        memory = getattr(self.context, "memory", None)
+        if memory is None or not hasattr(memory, "recall"):
+            return []
+        try:
+            result = memory.recall(query, limit=5)
+        except Exception as exc:  # noqa: BLE001 - memory must never break research
+            _log.debug("swarm memory recall failed: %s", exc)
+            return []
+        out: list[SwarmFinding] = []
+        for record in getattr(result, "records", None) or []:
+            source = str(getattr(record, "source", "") or "")
+            if not source.startswith("research_swarm"):
+                continue
+            claim = self._memory_claim(str(getattr(record, "content", "") or ""))
+            if claim:
+                out.append(SwarmFinding(angle="prior memory", claim=claim,
+                                        sources=[], confidence=0.5, domain=""))
+        return out
+
+    def _finalize(self, query: str, report: SwarmReport) -> None:
+        """Dedupe → conflicts → synthesis. Re-run after every pass that
+        adds findings (retry, pivot) so the synthesis always reflects the
+        full evidence."""
         seen: set[str] = set()
         unique_sources: list[dict[str, Any]] = []
         for s in report.sources:
@@ -725,17 +870,107 @@ class ResearchSwarm:
         report.findings = self.dedupe_findings(report.findings)
         report.conflicts = self._detect_conflicts(report.findings)
         report.synthesis = self._synthesize(query, report)
-        report.critique = self._supervise(query, report)
+
+    def run(self, query: str, *, angles: list[str] | None = None,
+            save_memory: bool = False) -> SwarmReport:
+        started = time.time()
+        query = (query or "").strip()
+        if not query:
+            raise ValueError("swarm needs a query")
+        angle_list = list(angles) if angles else self.angles_for(query)
+        if angles:
+            # caller-supplied angles: no known domains
+            self._angle_domains = [""] * len(angle_list)
+        domains = list(self._angle_domains[:len(angle_list)])
+        domains += [""] * max(0, len(angle_list) - len(domains))
+        report = SwarmReport(query=query, angles=angle_list, workers=self.workers)
+        if not angle_list:
+            report.synthesis = "no angles to research"
+            report.seconds = time.time() - started
+            return report
+
+        # memory first: what does the system already know about this query?
+        report.prior_findings = self._recall_prior(query)
+
+        # pass 1 — the original angles
+        failed = self._merge(
+            report, self._run_angles(angle_list, domains), angle_list)
+
+        # pass 2 — feedback-driven revision: exactly ONE retry per failed
+        # angle, with the error shaping the revised query. A retry that
+        # succeeds is relabelled under its ORIGINAL angle (domain tagging
+        # preserved); a twice-failed angle stays failed.
+        if failed:
+            retry_queries: list[str] = []
+            retry_domains: list[str] = []
+            for idx, angle, error in failed:
+                report.retried_angles.append(angle)
+                retry_queries.append(self._retry_query(angle, error))
+                retry_domains.append(domains[idx] if idx < len(domains) else "")
+            retry_results = self._run_angles(retry_queries, retry_domains)
+            for j, (idx, angle, _error) in enumerate(failed):
+                result = retry_results.get(j, {})
+                # every retry result answers for its ORIGINAL angle —
+                # relabel failures too, so failed_angles names the angle
+                # the caller asked for, not the rephrased retry query.
+                result["angle"] = angle
+                if not result.get("ok"):
+                    continue
+                report.recovered_angles.append(angle)
+                for f in result.get("findings", []):
+                    f.angle = angle
+            failed = self._merge(
+                report, retry_results,
+                [angle for _idx, angle, _err in failed])
+        report.failed_angles = [angle for _idx, angle, _err in failed]
+
+        # memory dedupe: findings already known from long-term memory are
+        # not re-reported as new — the recall above is a decision input,
+        # not a log line.
+        if report.prior_findings:
+            kept: list[SwarmFinding] = []
+            for f in report.findings:
+                if any(_same_claim(f.claim, p.claim)
+                       for p in report.prior_findings):
+                    report.prior_overlap += 1
+                else:
+                    kept.append(f)
+            report.findings = kept
+
+        self._finalize(query, report)
+
+        # supervision: the critique is now an input to revision, not a
+        # footnote. A researchable pivot earns exactly one follow-up pass
+        # (no re-supervision — no recursion), then re-finalize.
+        critique, pivot = self._supervise(query, report)
+        report.critique = critique
+        pivot_angle = self._pivot_angle(pivot, list(angle_list))
+        if pivot_angle:
+            report.pivot_angles.append(pivot_angle)
+            pivot_results = self._run_angles([pivot_angle], [""])
+            pivot_result = pivot_results.get(0, {})
+            if pivot_result.get("ok"):
+                report.findings.extend(pivot_result.get("findings", []))
+                report.sources.extend(pivot_result.get("sources", []))
+                self._finalize(query, report)
+            else:
+                report.failed_angles.append(pivot_angle)
+
         report.seconds = time.time() - started
         if save_memory:
             self.to_memory(report)
         return report
 
-    def _supervise(self, query: str, report: SwarmReport) -> str:
-        """Reasoning-Agent critique of the synthesis (best-effort)."""
+    def _supervise(self, query: str, report: SwarmReport) -> tuple[str, str]:
+        """Reasoning-Agent critique of the synthesis (best-effort).
+
+        Returns ``(critique_text, pivot)``: the text lands on the report
+        as before, and the pivot — when present — is the supervisor's
+        concrete "research this next" angle for ``run()`` to act on.
+        """
         router = getattr(self.context, "router", None)
         if router is None or not hasattr(router, "chat"):
-            return ""
+            return "", ""
         try:
             from .reasoning import ReasoningAgent
 
@@ -747,10 +982,11 @@ class ResearchSwarm:
                 parts.append("weak: " + str(verdict.get("reason", ""))[:160])
             if verdict.get("pivot"):
                 parts.append("suggested pivot: " + str(verdict["pivot"])[:160])
-            return " | ".join(parts) or "ok"
+            return (" | ".join(parts) or "ok",
+                    str(verdict.get("pivot") or ""))
         except Exception as exc:  # noqa: BLE001 - supervision is a bonus
             _log.debug("swarm supervision failed: %s", exc)
-            return ""
+            return "", ""
 
     # ── feeds ──────────────────────────────────────────────────────────────
     def to_memory(self, report: SwarmReport) -> int:
