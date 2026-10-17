@@ -1261,7 +1261,7 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
     "mode": {"what": "her autonomy level: off (asleep) | suggest (proposes, you approve) | auto (acts).",
              "usage": "/mode off|suggest|auto", "example": "/mode auto",
              "related": "/proposals /power"},
-    "chatmode": {"what": "this chat's reply mode: normal (she answers everything) | games-only (silent for normal chat, game commands still work). Owner-only; run it in the chat to set that chat.",
+    "chatmode": {"what": "this chat's reply mode: normal (she answers everything) | games-only (silent for normal chat, game commands still work). Owner-only; run it in the chat to set that chat. In games-only, ALL non-game messages are silenced — including voice notes (even after transcription). Game commands + in-game moves still work. /chatmode normal restores replies.",
              "usage": "/chatmode [games-only|normal|status] [platform:chat_id]",
              "example": "/chatmode games-only   ·   /chatmode normal telegram:123456",
              "related": "/status /game"},

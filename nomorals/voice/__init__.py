@@ -100,6 +100,7 @@ from .pingpong import (
     synthesize_voice_reply,
     to_ogg,
     transcribe_voice_media,
+    transcribe_voice_media_with_reason,
     voice_note_info,
 )
 from .rvc_bridge import (
@@ -241,6 +242,7 @@ __all__ = [
     "to_srt",
     "to_vtt",
     "transcribe_voice_media",
+    "transcribe_voice_media_with_reason",
     "verify_voice",
     "voice_note_info",
     "voice_print",

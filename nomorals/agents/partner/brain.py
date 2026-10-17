@@ -28,6 +28,21 @@ from .approvals import _key_set
 _log = get_logger(__name__)
 
 
+def _short_stt_reason(error: Any) -> str:
+    """Classify an STT failure into the short reason shown to the user.
+
+    Mirrors :func:`nomorals.voice.pingpong._short_stt_reason` (kept
+    local so this module doesn't import the voice layer): "no STT
+    backend" when nothing can transcribe, "STT API error" for
+    anything else that went wrong mid-call.
+    """
+    text = str(error or "").lower()
+    if ("no stt backend" in text or "no backend" in text
+            or "not installed" in text or "no stt" in text):
+        return "no STT backend"
+    return "STT API error"
+
+
 class PartnerBrain:
     """All the cognition. The runtime calls :meth:`handle_message` per message."""
 
@@ -72,6 +87,9 @@ class PartnerBrain:
             lexicon=self.lexicon,
         )
         self.curator_hook = curator
+        # Last STT failure reason ("" = last attempt worked). Diagnostic
+        # only — _spoken_command surfaces it onto the message meta.
+        self._last_stt_failure_reason = ""
         self._last_user_seen: dict[str, float] = {}
         # Presence (typing pace, busy gaps) gets its own rng so the mood and
         # sampling randomness stay independent and tests can seed just one.
@@ -118,7 +136,14 @@ class PartnerBrain:
             elif media.kind == "video":
                 notes.append(f"video: {media.name or media.path}")
             elif media.kind == "audio" or media.mime.startswith("audio/"):
-                note = self._transcribe_media_note(media)
+                note, reason = self._transcribe_media_note_with_reason(media)
+                if reason:
+                    try:
+                        meta = getattr(message, "meta", None)
+                        if isinstance(meta, dict):
+                            meta["stt_failure_reason"] = reason
+                    except Exception:  # noqa: BLE001 - meta bookkeeping never breaks chat
+                        pass
                 notes.append(note or f"audio: {media.name or media.path}")
             else:
                 notes.append(f"file: {media.name or media.path}")
@@ -129,6 +154,9 @@ class PartnerBrain:
 
         Returns "" when there is no audio, no transcript, or the transcript
         isn't a command — the caller leaves the message untouched.
+        On transcription failure the short reason is recorded on
+        ``message.meta["stt_failure_reason"]`` so the caller can answer
+        honestly instead of dropping the note silently.
         """
         for media in message.media or []:
             kind = str(getattr(media, "kind", "") or "")
@@ -138,7 +166,22 @@ class PartnerBrain:
             note = self._transcribe_media_note(media)
             text = note.split("—", 1)[-1].strip() if "—" in note else ""
             if text.startswith("/"):
+                try:
+                    meta = getattr(message, "meta", None)
+                    if isinstance(meta, dict):
+                        meta.pop("stt_failure_reason", None)
+                except Exception:  # noqa: BLE001 - meta bookkeeping never breaks chat
+                    pass
                 return text
+            if not note:
+                reason = getattr(self, "_last_stt_failure_reason", "")
+                if reason:
+                    try:
+                        meta = getattr(message, "meta", None)
+                        if isinstance(meta, dict):
+                            meta["stt_failure_reason"] = reason
+                    except Exception:  # noqa: BLE001 - meta bookkeeping never breaks chat
+                        pass
         return ""
 
     def _transcribe_media_note(self, media: Any) -> str:
@@ -146,19 +189,44 @@ class PartnerBrain:
 
         Best-effort — if no STT backend is configured/available this returns
         "" and the caller falls back to the plain "audio: name" note.
+        The failure reason is kept on ``self._last_stt_failure_reason``
+        (see :meth:`_transcribe_media_note_with_reason`); callers that
+        need it read it from there or use the with-reason variant.
+        """
+        note, _reason = self._transcribe_media_note_with_reason(media)
+        return note
+
+    def _transcribe_media_note_with_reason(
+            self, media: Any) -> tuple[str, str]:
+        """Transcribe one voice note. Returns ``(note, reason)`` — ``reason``
+        is "" on success, otherwise a short reason ("no STT backend" /
+        "STT API error" / "empty transcript" / "no audio file"). The
+        reason is also stored on ``self._last_stt_failure_reason`` so
+        :meth:`_spoken_command` (which must keep calling the plain
+        ``_transcribe_media_note`` for compatibility) can surface it.
         """
         if media.path is None:
-            return ""
+            self._last_stt_failure_reason = "no audio file"
+            return "", "no audio file"
         try:
             outcome = self.context.tools.call("transcribe", path=str(media.path),
                                               provider="auto")
             if not outcome.ok:
-                return ""
+                reason = _short_stt_reason(
+                    getattr(outcome, "error", "") or "STT error")
+                self._last_stt_failure_reason = reason
+                return "", reason
             text = (outcome.value or {}).get("text", "").strip()
-            return f"voice note (transcribed) — {text}" if text else ""
-        except Exception:  # noqa: BLE001 - hearing is a bonus, never a failure
+            if text:
+                self._last_stt_failure_reason = ""
+                return f"voice note (transcribed) — {text}", ""
+            self._last_stt_failure_reason = "empty transcript"
+            return "", "empty transcript"
+        except Exception as exc:  # noqa: BLE001 - hearing is a bonus, never a failure
             _log.debug("voice-note transcription failed", exc_info=True)
-            return ""
+            reason = _short_stt_reason(exc)
+            self._last_stt_failure_reason = reason
+            return "", reason
 
     # ── history ─────────────────────────────────────────────────────────────
     def _history(self, chat_key: str, limit: int) -> list[Message]:

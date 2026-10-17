@@ -574,15 +574,21 @@ class PartnerRuntime(
             except Exception:  # noqa: BLE001 - reply is best-effort
                 _log.exception("sms media reply send failed")
             return
-        # Vision flag: with it off, inbound media is dropped before the brain
-        # (no download-to-understanding pipeline, no token cost).
+        # Vision flag: with it off, inbound VISUAL media is dropped
+        # before the brain (no download-to-understanding pipeline, no
+        # token cost). Audio is NOT vision — voice notes survive so STT
+        # still runs (a vision-off chat must not silently kill voice).
         if message.media:
             from ..features import feature_enabled
 
             if not feature_enabled(self.context, "vision"):
                 import dataclasses
 
-                message = dataclasses.replace(message, media=[])
+                kept = [m for m in message.media
+                        if str(getattr(m, "kind", "") or "").lower() in ("audio", "voice")
+                        or str(getattr(m, "mime", "") or "").lower().startswith("audio")]
+                if len(kept) != len(message.media):
+                    message = dataclasses.replace(message, media=kept)
         # Prompt 09 attachment glue: with vision on, the current message's
         # image attachments are addressable as attachment:<n> by the vision
         # tool. The chat media dirs sit outside the workspace sandbox — this
@@ -616,9 +622,10 @@ class PartnerRuntime(
             from ..features import feature_enabled as _fe
             if _fe(self.context, "voice"):
                 from ...voice.pingpong import (
-                    has_voice_media, transcribe_voice_media)
+                    has_voice_media, transcribe_voice_media_with_reason)
                 if has_voice_media(message):
-                    heard = transcribe_voice_media(self.context, message)
+                    heard, _stt_reason = transcribe_voice_media_with_reason(
+                        self.context, message)
                     if heard:
                         import dataclasses
 
@@ -754,6 +761,29 @@ class PartnerRuntime(
                 _log.info("games-only: dropped non-game message in %s",
                           message.chat.key)
                 return
+        # STT failure, answered honestly — but ONLY in non-games-only
+        # chats: the games-only gate above already returned, so silence
+        # wins there and this never replies in a games-only chat. A
+        # voice note whose transcription failed (no backend, API error,
+        # empty transcript) gets ONE honest reply instead of silence
+        # or a confused brain turn. Non-voice messages never reach
+        # here with a reason recorded (only the STT paths set it).
+        if message.incoming and not message.text.strip():
+            _stt_reason = (message.meta or {}).get("stt_failure_reason", "")
+            if _stt_reason:
+                from ...voice.pingpong import has_voice_media as _has_voice
+                if _has_voice(message):
+                    self._bump("replies")
+                    _log.info("STT failed in %s: %s",
+                              message.chat.key, _stt_reason)
+                    try:
+                        self.gateway.send(
+                            message.chat.platform, message.chat,
+                            f"I couldn't transcribe that voice note "
+                            f"({_stt_reason}).")
+                    except Exception:  # noqa: BLE001 - honest reply is best-effort
+                        _log.exception("STT failure reply send failed")
+                    return
         # /game AND the direct game commands (/hangman, /mafia, …) work in
         # EVERY chat, for EVERY participant — games are social by nature, so
         # a member of any group can start and play one. These are also the

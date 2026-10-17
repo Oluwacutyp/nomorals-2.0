@@ -97,6 +97,12 @@ _MIME_HINTS = {
     ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
     ".gif": "image/gif", ".webp": "image/webp", ".mp4": "video/mp4",
     ".mkv": "video/x-matroska", ".mp3": "audio/mpeg", ".ogg": "audio/ogg",
+    # Voice-note / audio formats (Telegram voice notes are .ogg Opus;
+    # WhatsApp/iOS/Android recorders send .opus/.m4a/.wav/.aac/.amr):
+    ".m4a": "audio/mp4", ".opus": "audio/opus", ".oga": "audio/ogg",
+    ".wav": "audio/wav", ".aac": "audio/aac", ".flac": "audio/flac",
+    ".amr": "audio/amr", ".3gp": "audio/3gpp",
+    ".aiff": "audio/aiff", ".aif": "audio/aiff",
     ".pdf": "application/pdf", ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
 }
 
@@ -104,6 +110,34 @@ _MIME_HINTS = {
 def _mime_for(path: str) -> str:
     ext = os.path.splitext(path)[1].lower()
     return _MIME_HINTS.get(ext, "application/octet-stream")
+
+
+def _mime_for_download(path: str, doc_mime: str = "") -> str:
+    """MIME for a downloaded file: the extension map first, then the
+    Telegram document's own ``mime_type`` for extension-less downloads
+    (the common MTProto case — Telethon returns a bare name, which
+    otherwise lands as ``application/octet-stream`` and fails every
+    STT check even though Telegram told us it's audio)."""
+    mime = _mime_for(path)
+    if mime == "application/octet-stream" and doc_mime:
+        mime = doc_mime.lower()
+    return mime
+
+
+def _kind_for_mime(mime: str) -> str:
+    """MediaRef kind from a MIME type: audio stays audio so the STT
+    checks (``kind in ("audio", "voice")`` or ``mime.startswith("audio")``)
+    match. Previously every non-image download became ``"file"`` and
+    voice notes only survived via their mime — which the narrow MIME
+    map usually got wrong."""
+    mime = (mime or "").lower()
+    if mime.startswith("audio"):
+        return "audio"
+    if mime.startswith("image"):
+        return "image"
+    if mime.startswith("video"):
+        return "video"
+    return "file"
 
 
 def _kind_for(entity: Any) -> str:
@@ -1179,11 +1213,14 @@ class TelegramAdapter(ChatAdapter):
                             ext = os.path.splitext(str(path))[1]
                             if not ext:
                                 path = f"{path}.bin"
+                        mime = _mime_for_download(
+                            str(path),
+                            str(getattr(doc, "mime_type", "") or ""))
                         media.append(
                             MediaRef(
                                 path=str(path),
-                                mime=_mime_for(str(path)),
-                                kind="image" if _mime_for(str(path)).startswith("image") else "file",
+                                mime=mime,
+                                kind=_kind_for_mime(mime),
                             )
                         )
                 except Exception as exc:  # noqa: BLE001 - media is best-effort
@@ -2465,7 +2502,7 @@ class TelegramBotAdapter(ChatAdapter):
         """Download the largest attached file, when the gates allow it."""
         if not isinstance(msg, dict):
             return []
-        file_id, fkind, fname = "", "", ""
+        file_id, fkind, fname, fmime = "", "", "", ""
 
         def _fid(entry: Any) -> str:
             # Direct ``entry["file_id"]`` indexing used to raise
@@ -2492,12 +2529,22 @@ class TelegramBotAdapter(ChatAdapter):
             file_id, fkind = _fid(d), "document"
             _fn = d.get("file_name", "file")
             fname = _fn if isinstance(_fn, str) and _fn else "file"
+            # Bot API: audio sent as a file arrives as "document" with
+            # mime_type audio/* — previously kind="document", mime=""
+            # matched NO STT check, so the note fell through entirely.
+            _mt = d.get("mime_type", "")
+            fmime = _mt if isinstance(_mt, str) else ""
+            if fmime.lower().startswith("audio"):
+                fkind = "audio"
         elif _fid(msg.get("video")):
             file_id, fkind, fname = _fid(msg.get("video")), "video", "video.mp4"
         elif _fid(msg.get("voice")):
             file_id, fkind, fname = _fid(msg.get("voice")), "audio", "voice.ogg"
+            fmime = "audio/ogg"
         elif _fid(msg.get("audio")):
             file_id, fkind, fname = _fid(msg.get("audio")), "audio", "audio.mp3"
+            _mt = msg["audio"].get("mime_type", "")
+            fmime = _mt if isinstance(_mt, str) and _mt else "audio/mpeg"
         elif _fid(msg.get("video_note")):
             file_id, fkind, fname = _fid(msg.get("video_note")), "video", "note.mp4"
         if not file_id:
@@ -2530,7 +2577,8 @@ class TelegramBotAdapter(ChatAdapter):
         except Exception as exc:  # noqa: BLE001
             _log.debug("telegram-bot media download failed: %s", exc)
             return []
-        return [MediaRef(path=str(dest), kind=fkind, name=orig_fname)]
+        return [MediaRef(path=str(dest), kind=fkind, name=orig_fname,
+                         mime=fmime)]
 
     def download_file(self, file_id: str, fname: str = "audio.ogg") -> str:
         """Download a Telegram file_id to the media dir. Returns the local

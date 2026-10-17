@@ -220,18 +220,22 @@ class RuntimeMetaMixin:
             if not platform or not chat_id:
                 return f"chat keys look like telegram:123456 — {usage}"
         where = "this chat" if target == chat_key else target
+        voice_note = ("In games-only, ALL non-game messages are silenced — "
+                      "including voice notes (even after transcription). "
+                      "Game commands + in-game moves still work. "
+                      "/chatmode normal restores replies.")
         if mode is None:
             current = get_chat_mode(target)
             if current == MODE_GAMES_ONLY:
                 return (f"{where} is games-only — normal chat stays silent "
                         "here; game commands still work. "
-                        "/chatmode normal to restore.")
+                        "/chatmode normal to restore. " + voice_note)
             return f"{where} is normal — I answer everything here."
         set_chat_mode(target, mode)
         if mode == MODE_GAMES_ONLY:
             return (f"{where} is now games-only — I'll stay silent for "
                     "normal chat here, but game commands still work. "
-                    "/chatmode normal to restore.")
+                    "/chatmode normal to restore. " + voice_note)
         return f"{where} is back to normal — I'll answer everything here again."
 
     def _control_model(self, arg: str) -> str:

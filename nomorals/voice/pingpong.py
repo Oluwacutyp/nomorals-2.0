@@ -27,6 +27,7 @@ _log = get_logger(__name__)
 __all__ = [
     "has_voice_media",
     "transcribe_voice_media",
+    "transcribe_voice_media_with_reason",
     "synthesize_voice_reply",
     "to_ogg",
     "voice_note_info",
@@ -45,15 +46,60 @@ def has_voice_media(message: Any) -> bool:
     return False
 
 
-def transcribe_voice_media(context: Any, message: Any) -> str:
-    """Transcribe the first voice attachment.  Returns \"\" on any failure."""
+def _short_stt_reason(error: Any) -> str:
+    """Classify an STT failure into the short reason shown to the user.
+
+    "no STT backend" — nothing can transcribe (no backend installed /
+    configured). Anything else that went wrong mid-call is an
+    "STT API error". Empty-but-successful transcripts get
+    "empty transcript" from the caller, not here.
+    """
+    text = str(error or "").lower()
+    if ("no stt backend" in text or "no backend" in text
+            or "not installed" in text or "no stt" in text):
+        return "no STT backend"
+    return "STT API error"
+
+
+def _record_stt_reason(message: Any, reason: str) -> None:
+    """Record/clear the STT failure reason on ``message.meta``.
+
+    The runtime reads this to answer an untranscribable voice note
+    honestly instead of dropping it silently. Never raises.
+    """
+    try:
+        meta = getattr(message, "meta", None)
+        if isinstance(meta, dict):
+            if reason:
+                meta["stt_failure_reason"] = reason
+            else:
+                meta.pop("stt_failure_reason", None)
+    except Exception:  # noqa: BLE001 - meta bookkeeping never breaks chat
+        pass
+
+
+def transcribe_voice_media_with_reason(
+        context: Any, message: Any) -> tuple[str, str]:
+    """Transcribe the first voice attachment.
+
+    Returns ``(text, reason)`` — ``reason`` is "" on success (or when
+    there was no voice media to attempt), otherwise a short reason:
+    "no STT backend" / "STT API error" / "empty transcript" /
+    "no audio file". On failure the reason is also recorded on
+    ``message.meta["stt_failure_reason"]``; on success any stale
+    reason is cleared.
+    """
+    reason = ""
+    saw_voice = False
     for media in getattr(message, "media", None) or []:
         kind = str(getattr(media, "kind", "") or "").lower()
         mime = str(getattr(media, "mime", "") or "").lower()
         if kind not in _VOICE_KINDS and not mime.startswith("audio"):
             continue
+        saw_voice = True
         path = getattr(media, "path", None)
         if not path:
+            reason = "no audio file"
             continue
         try:
             outcome = context.tools.call("transcribe", path=str(path),
@@ -61,10 +107,24 @@ def transcribe_voice_media(context: Any, message: Any) -> str:
             if outcome.ok:
                 text = ((outcome.value or {}).get("text", "") or "").strip()
                 if text:
-                    return text
-        except Exception:  # noqa: BLE001 - hearing is a bonus, never fatal
+                    _record_stt_reason(message, "")
+                    return text, ""
+                reason = "empty transcript"
+            else:
+                reason = _short_stt_reason(
+                    getattr(outcome, "error", "") or "STT error")
+        except Exception as exc:  # noqa: BLE001 - hearing is a bonus, never fatal
             _log.debug("ping-pong transcription failed", exc_info=True)
-    return ""
+            reason = _short_stt_reason(exc)
+    if saw_voice and reason:
+        _record_stt_reason(message, reason)
+    return "", reason
+
+
+def transcribe_voice_media(context: Any, message: Any) -> str:
+    """Transcribe the first voice attachment.  Returns \"\" on any failure."""
+    text, _reason = transcribe_voice_media_with_reason(context, message)
+    return text
 
 
 def _private_voice_reply(context: Any, text: str) -> str:
