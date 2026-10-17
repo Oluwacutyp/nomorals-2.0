@@ -17,13 +17,17 @@ this class only fills in defaults when the caller didn't.
 
 from __future__ import annotations
 
+import logging
 import os
 from typing import Any
 
 from ...core.errors import ProviderError, classify
-from .openai_compat import OpenAICompatProvider
+from .openai_compat import OpenAICompatProvider, heal_model_id
 
 __all__ = ["OPENROUTER_BASE_URL", "OpenRouterProvider"]
+
+
+_log = logging.getLogger(__name__)
 
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
@@ -31,6 +35,15 @@ OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 #: ``openrouter/free`` routes to whichever free model currently has capacity —
 #: the only free id that does not rot when the :free roster churns.
 OPENROUTER_FREE_ALIAS = "openrouter/free"
+
+#: Pinned free ids the provider heals a truncated configured id onto.
+#: The live :free roster churns, so this is a near-miss table, not the
+#: roster itself — only exact near-misses (missing "b" / ":free" / both)
+#: heal here; anything else falls through to the ``openrouter/free``
+#: alias failover in ``_fallback_models``.
+OPENROUTER_KNOWN_FREE_IDS: frozenset[str] = frozenset(
+    {"qwen/qwen3-8b:free", OPENROUTER_FREE_ALIAS}
+)
 
 
 class OpenRouterProvider(OpenAICompatProvider):
@@ -55,6 +68,18 @@ class OpenRouterProvider(OpenAICompatProvider):
             or os.environ.get("OPENROUTER_API_KEY", "")
             or os.environ.get("NM_OPENROUTER_API_KEY", "")
         )
+        # Heal a truncated configured id (e.g. "qwen/qwen3-8" missing
+        # its trailing "b" and ":free") to a valid free id *before* the
+        # first attempt.  An empty configured id falls back to the
+        # ``openrouter/free`` alias (an explicit "" must not override
+        # the sane default with an invalid empty model).
+        healed = heal_model_id(
+            (model or "").strip() or OPENROUTER_FREE_ALIAS,
+            OPENROUTER_KNOWN_FREE_IDS,
+        )
+        if healed != (model or "").strip():
+            _log.info("openrouter model healed: %r -> %r", model, healed)
+        model = healed
         headers = dict(kwargs.pop("extra_headers", None) or {})
         headers.setdefault("HTTP-Referer", app_url)
         # X-Title is the long-standing name; X-OpenRouter-Title is the newer

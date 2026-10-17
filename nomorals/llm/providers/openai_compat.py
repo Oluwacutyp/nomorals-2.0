@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import base64
 import time
-from typing import Any, Sequence
+from typing import Any, Collection, Sequence
 
 from ...core.errors import ModelError, ProviderError, classify, is_not_found_error
 from ...core.http import HttpClient
@@ -23,6 +23,37 @@ from ..base import (
     short_error,
     validate_messages,
 )
+
+
+def heal_model_id(configured: str, known: Collection[str]) -> str:
+    """Heal a near-miss model id to a known-good one.
+
+    A configured id that differs from a known id only by a missing
+    trailing ``"b"`` (``openai/gpt-oss-120``), a missing ``":free"``
+    suffix (``qwen/qwen3-8b``), or both (``qwen/qwen3-8``) is almost
+    certainly a truncated copy of the known id — a hand-typed env value,
+    a chat-pasted name, a log line re-typed from memory.  Sending the
+    truncated id to the API 404s/400s every call, and the failover chain
+    only helps if it recognises the error.  Heal *before* the first
+    attempt so the name actually sent is valid.
+
+    Only exact near-misses heal: the configured id plus ``"b"``,
+    ``":free"``, or ``"b:free"`` must equal a known id.  Any other id
+    passes through untouched — a deliberately different model is never
+    second-guessed.
+    """
+    cfg = (configured or "").strip()
+    if not cfg or cfg in known:
+        return cfg
+    for candidate in (cfg + "b", cfg + ":free", cfg + "b:free"):
+        if candidate in known:
+            return candidate
+    # Missing "b" before a trailing ":free" ("qwen/qwen3-8:free").
+    if cfg.endswith(":free"):
+        stem = cfg[: -len(":free")]
+        if stem + "b:free" in known:
+            return stem + "b:free"
+    return cfg
 
 
 def _parse_usage(raw: Any) -> "Usage":
@@ -141,11 +172,28 @@ class OpenAICompatProvider(LLMProvider):
         return {"chat", "complete", "embed", "vision"}
 
     def health(self) -> bool:
+        return self.health_detail()[0]
+
+    def health_detail(self) -> tuple[bool, str]:
+        """Liveness probe plus the failure reason.
+
+        ``GET {base_url}/models`` is the cheap check; on a non-OK status
+        the reason carries the HTTP status + a short body snippet
+        (e.g. ``401: Invalid API Key``) so ``/providers`` can tell the
+        owner *why* the provider is dead instead of a bare \"failed\".
+        """
         try:
             response = self.http.get(f"{self.base_url}/models", timeout=min(10.0, self.timeout))
-            return response.ok
-        except Exception:  # noqa: BLE001 - liveness probe
-            return False
+        except Exception as exc:  # noqa: BLE001 - liveness probe
+            return False, str(exc) or exc.__class__.__name__
+        if getattr(response, "ok", False):
+            return True, ""
+        status = getattr(response, "status_code", None)
+        body = getattr(response, "text", "") or getattr(response, "body", "") or ""
+        snippet = " ".join(str(body).split())[:120]
+        if status is not None:
+            return False, f"{status}: {snippet}" if snippet else f"{status}"
+        return False, snippet or "probe request failed"
 
     def _fallback_models(self) -> list[str]:
         """Model ids to try when the configured model 404s.

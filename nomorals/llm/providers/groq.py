@@ -20,12 +20,16 @@ is exactly the failure the base class would hit at call time.
 
 from __future__ import annotations
 
+import logging
 import os
 from typing import Any
 
-from .openai_compat import OpenAICompatProvider
+from .openai_compat import OpenAICompatProvider, heal_model_id
 
 __all__ = ["GROQ_BASE_URL", "GROQ_FREE_MODELS", "GroqProvider"]
+
+
+_log = logging.getLogger(__name__)
 
 
 GROQ_BASE_URL = "https://api.groq.com/openai/v1"
@@ -73,6 +77,16 @@ class GroqProvider(OpenAICompatProvider):
             or os.environ.get("GROQ_API_KEY", "")
             or os.environ.get("NM_GROQ_API_KEY", "")
         )
+        # Heal a truncated configured id (e.g. "openai/gpt-oss-120"
+        # missing its trailing "b") to the live roster id *before* the
+        # first attempt — the truncated id 400s on every call.
+        healed = heal_model_id(
+            (model or "").strip() or "openai/gpt-oss-120b",
+            {m["id"] for m in GROQ_FREE_MODELS},
+        )
+        if healed != (model or "").strip():
+            _log.info("groq model healed: %r -> %r", model, healed)
+        model = healed
         super().__init__(
             base_url=base_url or GROQ_BASE_URL,
             api_key=key,

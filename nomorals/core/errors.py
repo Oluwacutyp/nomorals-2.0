@@ -59,8 +59,28 @@ def is_auth_error(exc: BaseException) -> bool:
 
 def is_not_found_error(exc: BaseException) -> bool:
     """404 — the URL or model id does not exist.  Terminal for this id:
-    retrying the same id is pointless, but a *different* model id may work."""
-    return http_status_of(exc) == 404
+    retrying the same id is pointless, but a *different* model id may work.
+
+    Also matches a dead model id reported with a non-404 status: Groq
+    answers an unknown model with **400** + ``model_not_found`` in the
+    body, and OpenRouter with "no endpoints found".  Status alone would
+    miss those, so the model-not-found body text counts too.  Auth
+    errors (401/403) never count — a bad key cannot be healed by
+    swapping the model.
+    """
+    status = http_status_of(exc)
+    if status == 404:
+        return True
+    if status in (401, 403):
+        return False
+    text = str(getattr(exc, "message", "") or exc).lower()
+    if "model_not_found" in text or "model not found" in text:
+        return True
+    if "model" in text and ("does not exist" in text or "unknown model" in text):
+        return True
+    if "no endpoints found" in text:
+        return True
+    return False
 
 
 def is_rate_limited_error(exc: BaseException) -> bool:
