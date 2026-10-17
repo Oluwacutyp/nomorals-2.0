@@ -93,11 +93,16 @@ class AnalysisReport:
     strategies: list[dict[str, Any]] = field(default_factory=list)
     n_strategies: int = 0
     created_at: float = 0.0
+    # Honest-partial note (spec §6.2): "" when the full requested history
+    # was available; otherwise names the shortfall, e.g.
+    # "zone book thinner than requested (1h: 729/2000 bars)".
+    bars_note: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "id": self.id, "symbol": self.symbol, "market": self.market,
             "timeframe": self.timeframe, "bars": self.bars,
+            "bars_note": self.bars_note,
             "regime_label": self.regime_label, "regime_plain": self.regime_plain,
             "bias": self.bias, "agreement": self.agreement,
             "position_now": self.position_now, "approved": self.approved,
@@ -332,9 +337,21 @@ class FinancialExpert:
             res = ta_pipeline.analyze(df)
         except ValueError as exc:
             raise bridge.SentinelError(f"analysis failed: {exc}") from exc
+        # Honest partial (spec §6.2): a thin zone book must say so in the
+        # output, never imply full history. res["bars"] is what the
+        # pipeline saw; len(df) is what the feed actually returned.
+        bars_note = ""
+        try:
+            got = len(df)
+        except TypeError:
+            got = int(res.get("bars") or 0)
+        if got < bars:
+            bars_note = (f"zone book thinner than requested "
+                         f"({timeframe}: {got}/{bars} bars)")
         out = AnalysisReport(
             id=new_id("ta"), symbol=symbol, market=market,
             timeframe=timeframe, bars=res["bars"],
+            bars_note=bars_note,
             regime_label=res["regime_label"],
             regime_plain=_regime_plain(res["regime_label"]),
             bias=res["bias"],

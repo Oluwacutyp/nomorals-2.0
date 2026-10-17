@@ -983,7 +983,9 @@ def expand_prev_placeholders(segment: str, outputs: list[str]) -> str:
                 return m.group(0)
             src = outputs[-1]
         if len(src) > PREV_PLACEHOLDER_MAX_CHARS:
-            src = src[:PREV_PLACEHOLDER_MAX_CHARS] + "… (truncated)"
+            # Spec §6.1: truncation is always noted WITH a count.
+            src = (src[:PREV_PLACEHOLDER_MAX_CHARS]
+                   + f"… (truncated, {len(src) - PREV_PLACEHOLDER_MAX_CHARS} more chars)")
         return src
 
     seg = segment.replace("{{prev}}", _PREV_ESCAPE)

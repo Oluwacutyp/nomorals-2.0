@@ -2323,20 +2323,28 @@ class PartnerRuntime(
             pending = self._pending_confirms = {}
         verb = (tail or "").strip().lower()
         if verb == "confirm":
-            stored = pending.pop(chat_key, None)
+            # Peek, don't pop: a confirm for the WRONG kind must neither
+            # authorize anything nor destroy the pending request (a
+            # mismatched "/quit confirm" after "/forget abc" used to eat
+            # the forget confirmation). Only a kind-matching confirm
+            # consumes the token — single-use, exact-bound (§5.3).
+            stored = pending.get(chat_key)
             if stored is None or stored[0] != kind:
                 return (f"nothing to confirm — send /{kind} … first, "
                         f"then /{kind} confirm within 5 minutes.", False, "")
             _, original_tail, expires_at = stored
             if expires_at < _time.time():
+                pending.pop(chat_key, None)
                 return (f"that confirmation expired — send /{kind} … again "
                         f"if you still want it.", False, "")
+            pending.pop(chat_key, None)
             return (None, True, original_tail)
         if verb == "cancel":
-            stored = pending.pop(chat_key, None)
+            stored = pending.get(chat_key)
             if stored is None or stored[0] != kind:
                 return (f"nothing to cancel — no pending /{kind}.",
                         False, "")
+            pending.pop(chat_key, None)
             return (f"cancelled — /{kind} did not run.", False, "")
         # Fresh request: /quit takes no arguments, so a non-verb tail is
         # a usage error, not a confirmable request.
