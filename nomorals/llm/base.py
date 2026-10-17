@@ -382,6 +382,13 @@ class LLMResponse:
     route_trace: list[dict[str, Any]] = field(default_factory=list)
     #: Metered USD cost of this response (estimate_cost).  0.0 = unknown/free.
     cost_usd: float = 0.0
+    #: Cost-adaptive budgeting note, e.g. "token budget 80% used …:
+    #: truncating context to 4096 tokens …".  Empty when no adaptation
+    #: applied — adaptation is always surfaced here, never silent.
+    adaptation_note: str = ""
+    #: True when the call was deferred (not executed) by the adaptive
+    #: budget because non-urgent work was over the defer threshold.
+    deferred: bool = False
 
     @property
     def ok(self) -> bool:
@@ -402,6 +409,8 @@ class LLMResponse:
             "failure_class": self.failure_class,
             "route_trace": [dict(t) for t in self.route_trace],
             "cost_usd": round(self.cost_usd, 9),
+            "adaptation_note": self.adaptation_note,
+            "deferred": self.deferred,
         }
 
 

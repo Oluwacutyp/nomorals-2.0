@@ -100,6 +100,34 @@ class BudgetSettings:
 
 
 @dataclass
+class AdaptiveBudgetSettings:
+    """Cost-adaptive token budgeting (nomorals.llm.adaptive_budget).
+
+    Daily + per-operation token/cost budgets with threshold-driven
+    adaptation (downgrade tier / truncate context / defer non-urgent
+    work) and an honest budget-exceeded block.  0 budgets == unlimited
+    (pure allow).  Env: NM_ADAPTIVE_BUDGET_TOKENS,
+    NM_ADAPTIVE_BUDGET_COST_USD, NM_ADAPTIVE_BUDGET_DOWNGRADE_AT,
+    NM_ADAPTIVE_BUDGET_TRUNCATE_AT, NM_ADAPTIVE_BUDGET_DEFER_AT,
+    NM_ADAPTIVE_BUDGET_MIN_CONTEXT_TOKENS.
+    """
+    daily_token_budget: int = 0
+    daily_cost_usd: float = 0.0
+    per_operation: dict[str, dict[str, float]] = field(default_factory=dict)
+    warn_threshold: float = 0.5
+    downgrade_threshold: float = 0.5
+    truncate_threshold: float = 0.8
+    defer_threshold: float = 0.8
+    critical_truncate_threshold: float = 0.95
+    full_context_tokens: int = 8192
+    min_context_tokens: int = 1024
+    cheap_price_cap_per_1m: float = 1.0
+    background_operations: tuple[str, ...] = (
+        "research", "background", "summarize", "judge", "index",
+    )
+
+
+@dataclass
 class ProviderSettings:
     name: str = "mock"
     base_url: str = ""
@@ -628,6 +656,8 @@ class Settings:
     backup: BackupSettings = field(default_factory=BackupSettings)
     concurrency: ConcurrencySettings = field(default_factory=ConcurrencySettings)
     budget: BudgetSettings = field(default_factory=BudgetSettings)
+    adaptive_budget: AdaptiveBudgetSettings = field(
+        default_factory=AdaptiveBudgetSettings)
     llm: LLMSettings = field(default_factory=LLMSettings)
     embedding: EmbeddingSettings = field(default_factory=EmbeddingSettings)
     memory: MemorySettings = field(default_factory=MemorySettings)
@@ -829,6 +859,12 @@ _ENV_MAP: dict[str, str] = {
     "NM_BUDGET_WALL_SECONDS": "budget.wall_seconds",
     "NM_BUDGET_TOKENS": "budget.tokens",
     "NM_BUDGET_CHILDREN": "budget.children",
+    "NM_ADAPTIVE_BUDGET_TOKENS": "adaptive_budget.daily_token_budget",
+    "NM_ADAPTIVE_BUDGET_COST_USD": "adaptive_budget.daily_cost_usd",
+    "NM_ADAPTIVE_BUDGET_DOWNGRADE_AT": "adaptive_budget.downgrade_threshold",
+    "NM_ADAPTIVE_BUDGET_TRUNCATE_AT": "adaptive_budget.truncate_threshold",
+    "NM_ADAPTIVE_BUDGET_DEFER_AT": "adaptive_budget.defer_threshold",
+    "NM_ADAPTIVE_BUDGET_MIN_CONTEXT_TOKENS": "adaptive_budget.min_context_tokens",
     "NM_LLM_PROVIDER": "llm.provider",
     "NM_LLM_FALLBACK_CHAIN": "llm.fallback_chain",
     "NM_GROQ_API_KEY": "llm.groq_api_key",

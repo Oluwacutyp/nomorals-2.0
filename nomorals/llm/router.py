@@ -19,7 +19,7 @@ import threading
 import time
 from collections import deque
 from collections.abc import Callable, Collection, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -491,6 +491,8 @@ class LLMRouter:
         cost_log_path: str | Path | None = None,
         cassette_dir: str | Path | None = None,
         replay: bool | None = None,
+        adaptive_budget: Any | None = None,
+        adaptive_config: Any | None = None,
     ) -> None:
         """Create the router.
 
@@ -499,6 +501,14 @@ class LLMRouter:
         responses instead of calling providers; None reads
         ``NM_LLM_REPLAY`` at call time. Recording is default-on
         (``NM_LLM_CASSETTE=0`` disables it).
+
+        ``adaptive_budget`` attaches a
+        :class:`nomorals.llm.adaptive_budget.AdaptiveBudget` for
+        cost-adaptive token budgeting (downgrade tier / truncate
+        context / defer non-urgent work / honest budget-exceeded
+        block); ``adaptive_config`` builds one from an
+        :class:`AdaptiveBudgetConfig`.  None = no adaptation — the
+        router behaves exactly as before.
         """
         self._providers: list[LLMProvider] = []
         self._by_name: dict[str, LLMProvider] = {}
@@ -526,8 +536,21 @@ class LLMRouter:
         self.repair_hooks = repair_hooks if repair_hooks is not None else {}
         self.repair_cooldown_seconds = cooldown_seconds
         self._last_repair_time: dict[str, float] = {}
+        # Cost-adaptive token budgeting (nomorals.llm.adaptive_budget).
+        # None = no adaptation; the router behaves exactly as before.
+        self.adaptive_budget = adaptive_budget
+        if self.adaptive_budget is None and adaptive_config is not None:
+            try:
+                from .adaptive_budget import AdaptiveBudget
+
+                self.adaptive_budget = AdaptiveBudget(adaptive_config)
+            except Exception:  # noqa: BLE001 — budget never breaks routing
+                _log.debug("adaptive budget construction failed",
+                           exc_info=True)
+                self.adaptive_budget = None
         self.stats = {"calls": 0, "failovers": 0, "failures": 0, "repairs": 0,
-                      "slo_sheds": 0, "budget_blocks": 0, "key_rotations": 0}
+                      "slo_sheds": 0, "budget_blocks": 0, "key_rotations": 0,
+                      "budget_adaptations": 0, "budget_defers": 0}
         # Latency SLO shedding (nexus-llm-router `latency-slo-shed`): when
         # set, a provider whose rolling p95 exceeds the SLO is skipped while
         # faster alternatives exist.  0 = disabled.
@@ -566,6 +589,84 @@ class LLMRouter:
         if self._cost_log_path is not None:
             return CostLog(self._cost_log_path)
         return _shared_log()
+
+    # ── cost-adaptive token budgeting ──────────────────────────────────────
+    def set_adaptive_budget(self, budget: Any | None) -> LLMRouter:
+        """Attach/detach the cost-adaptive budget.  Pass ``None`` to detach."""
+        with self._lock:
+            self.adaptive_budget = budget
+        return self
+
+    def _adaptive_decide(self, operation: str,
+                         urgency: str | None = None) -> Any | None:
+        """Adaptive verdict, or None when no budget is attached / allow."""
+        budget = self.adaptive_budget
+        if budget is None:
+            return None
+        try:
+            verdict = budget.decide(operation, urgency=urgency)
+        except Exception:  # noqa: BLE001 — budget never breaks routing
+            _log.debug("adaptive decide failed", exc_info=True)
+            return None
+        if verdict is None or verdict.action == "allow":
+            return None
+        return verdict
+
+    def _adaptive_block_response(self, verdict: Any,
+                                 operation: str) -> LLMResponse:
+        """Honest block/defer response: no call is made, and the reason
+        names the budget and the spend.  Never silent."""
+        from .failures import FailureClass
+
+        if verdict.deferred:
+            self.stats["budget_defers"] += 1
+        else:
+            self.stats["budget_blocks"] += 1
+        try:
+            if self.bus is not None:
+                self.bus.emit(
+                    "llm.budget_exceeded" if verdict.blocked
+                    else "llm.budget_deferred",
+                    operation=operation, action=verdict.action,
+                    note=verdict.note,
+                    utilisation=verdict.utilisation)
+        except Exception:  # noqa: BLE001 — telemetry never breaks routing
+            pass
+        return LLMResponse(
+            text="",
+            error=verdict.note or "budget exceeded",
+            failure_class=FailureClass.BUDGET.value,
+            deferred=bool(verdict.deferred),
+            adaptation_note=verdict.note or "",
+        )
+
+    def _adaptive_apply(self, verdict: Any, operation: str) -> None:
+        """Record + announce a downgrade/truncate adaptation (no block)."""
+        self.stats["budget_adaptations"] += 1
+        try:
+            if self.bus is not None:
+                self.bus.emit("llm.budget_adapted", operation=operation,
+                              action=verdict.action, note=verdict.note,
+                              utilisation=verdict.utilisation)
+        except Exception:  # noqa: BLE001 — telemetry never breaks routing
+            pass
+
+    def _adaptive_record(self, operation: str, response: LLMResponse) -> None:
+        """Feed one call's actuals into the adaptive ledger.  Never raises."""
+        budget = self.adaptive_budget
+        if budget is None or not getattr(response, "ok", False):
+            return
+        try:
+            usage = getattr(response, "usage", None)
+            budget.record(
+                operation,
+                prompt_tokens=int(getattr(usage, "prompt_tokens", 0) or 0),
+                completion_tokens=int(
+                    getattr(usage, "completion_tokens", 0) or 0),
+                cost_usd=float(getattr(response, "cost_usd", 0.0) or 0.0),
+            )
+        except Exception:  # noqa: BLE001 — accounting never breaks routing
+            _log.debug("adaptive record failed", exc_info=True)
 
     # ── registration ─────────────────────────────────────────────────────────
     def add(self, provider: LLMProvider, *, primary: bool = False, name: str = "") -> LLMRouter:
@@ -861,31 +962,82 @@ class LLMRouter:
         self, messages: Sequence[Message], params: SamplingParams | None = None,
         tier: str | None = None, task_kind: str = "",
         constraints: Any = None,
-        route: dict[str, Any] | None = None, **kw: Any
+        route: dict[str, Any] | None = None,
+        urgency: str | None = None, **kw: Any
     ) -> LLMResponse:
         key, replayed = self._cassette_lookup(
             "chat", task_kind, message_key(messages), params)
         if replayed is not None:
             return replayed
-        response = self._dispatch("chat", lambda p: p.chat(messages, params, **kw),
+        verdict = self._adaptive_decide("chat", urgency)
+        if verdict is not None and (verdict.blocked or verdict.deferred):
+            return self._adaptive_block_response(verdict, "chat")
+        eff_messages: Sequence[Message] = messages
+        eff_params = params
+        eff_route = route
+        fit_note = ""
+        if verdict is not None:
+            self._adaptive_apply(verdict, "chat")
+            if verdict.truncate:
+                before = len(list(messages))
+                eff_messages = verdict.apply_to_messages(
+                    list(messages), task_kind=task_kind)
+                dropped = before - len(eff_messages)
+                if dropped > 0:
+                    fit_note = f" (dropped {dropped} context turn(s))"
+            if verdict.downgrade:
+                eff_route = verdict.apply_to_route(route)
+            if verdict.truncate:
+                base = params or SamplingParams()
+                eff_params = replace(
+                    base, max_tokens=verdict.cap_completion(base.max_tokens))
+        response = self._dispatch("chat", lambda p: p.chat(eff_messages, eff_params, **kw),
                                   require="chat",
                                   tier=tier, task_kind=task_kind,
-                                  constraints=constraints, route=route)
+                                  constraints=constraints, route=eff_route,
+                                  urgency=urgency)
+        if verdict is not None:
+            response.degraded = True
+            response.adaptation_note = (verdict.note + fit_note).strip()
         self._cassette_record(key, response)
         return response
 
     def complete(self, prompt: str, params: SamplingParams | None = None,
                  tier: str | None = None, task_kind: str = "",
                  constraints: Any = None,
-                 route: dict[str, Any] | None = None, **kw: Any) -> LLMResponse:
+                 route: dict[str, Any] | None = None,
+                 urgency: str | None = None, **kw: Any) -> LLMResponse:
         key, replayed = self._cassette_lookup(
             "complete", task_kind, {"prompt": prompt}, params)
         if replayed is not None:
             return replayed
-        response = self._dispatch("complete", lambda p: p.complete(prompt, params, **kw),
+        verdict = self._adaptive_decide("complete", urgency)
+        if verdict is not None and (verdict.blocked or verdict.deferred):
+            return self._adaptive_block_response(verdict, "complete")
+        eff_prompt = prompt
+        eff_params = params
+        eff_route = route
+        if verdict is not None:
+            self._adaptive_apply(verdict, "complete")
+            if verdict.truncate and verdict.context_budget_tokens is not None:
+                from .context_fit import fit_prompt
+
+                eff_prompt = fit_prompt(prompt, verdict.context_budget_tokens,
+                                        task_kind)
+            if verdict.downgrade:
+                eff_route = verdict.apply_to_route(route)
+            if verdict.truncate:
+                base = params or SamplingParams()
+                eff_params = replace(
+                    base, max_tokens=verdict.cap_completion(base.max_tokens))
+        response = self._dispatch("complete", lambda p: p.complete(eff_prompt, eff_params, **kw),
                                   require="complete",
                                   tier=tier, task_kind=task_kind,
-                                  constraints=constraints, route=route)
+                                  constraints=constraints, route=eff_route,
+                                  urgency=urgency)
+        if verdict is not None:
+            response.degraded = True
+            response.adaptation_note = verdict.note
         self._cassette_record(key, response)
         return response
 
@@ -922,7 +1074,8 @@ class LLMRouter:
         self, image: bytes, prompt: str = "", params: SamplingParams | None = None,
         tier: str | None = None, task_kind: str = "vision",
         constraints: Any = None,
-        route: dict[str, Any] | None = None, **kw: Any
+        route: dict[str, Any] | None = None,
+        urgency: str | None = None, **kw: Any
     ) -> LLMResponse:
         payload = {"image_sha256": hashlib.sha256(image).hexdigest(),
                    "prompt": prompt}
@@ -930,6 +1083,14 @@ class LLMRouter:
             "vision", task_kind, payload, params)
         if replayed is not None:
             return replayed
+        verdict = self._adaptive_decide("vision", urgency)
+        if verdict is not None and (verdict.blocked or verdict.deferred):
+            return self._adaptive_block_response(verdict, "vision")
+        eff_route = route
+        if verdict is not None:
+            self._adaptive_apply(verdict, "vision")
+            if verdict.downgrade:
+                eff_route = verdict.apply_to_route(route)
         response = self._dispatch(
             "vision",
             lambda p: p.describe_image(image, prompt, params, **kw),
@@ -939,8 +1100,12 @@ class LLMRouter:
             tier=tier,
             task_kind=task_kind,
             constraints=constraints,
-            route=route,
+            route=eff_route,
+            urgency=urgency,
         )
+        if verdict is not None:
+            response.degraded = True
+            response.adaptation_note = verdict.note
         self._cassette_record(key, response)
         return response
 
@@ -1124,7 +1289,15 @@ class LLMRouter:
         task_kind: str = "",
         constraints: Any = None,
         route: dict[str, Any] | None = None,
+        urgency: str | None = None,
     ) -> LLMResponse:
+        # Cost-adaptive safety net: chat()/complete()/describe_image()
+        # already gated, but a direct _dispatch must still block/defer.
+        # (Downgrade/truncate are applied by the callers, which own the
+        # messages; _dispatch only enforces block/defer here.)
+        _verdict = self._adaptive_decide(operation, urgency)
+        if _verdict is not None and (_verdict.blocked or _verdict.deferred):
+            return self._adaptive_block_response(_verdict, operation)
         # Budget gate: a capped router returns a typed error instead of
         # spending.
         blocked = self._budget_block(operation)
@@ -1237,6 +1410,8 @@ class LLMRouter:
                     operation=operation,
                     path=self._cost_log_path,
                 )
+                # Cost-adaptive ledger: feed this call's actuals in.
+                self._adaptive_record(operation, response)
                 if failed:
                     # A failover happened: the response must say WHICH
                     # provider failed and WHAT fallback served it — the
@@ -1426,6 +1601,11 @@ class LLMRouter:
                 day_start = now - (now % 86400)
                 snapshot["budget"] = self._cost_log().budget_report(
                     self.daily_budget_usd, day_start)
+            except Exception:  # noqa: BLE001
+                pass
+        if self.adaptive_budget is not None:
+            try:
+                snapshot["adaptive_budget"] = self.adaptive_budget.status()
             except Exception:  # noqa: BLE001
                 pass
         return snapshot

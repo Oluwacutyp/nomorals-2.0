@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+from .adaptive_budget import (
+    Adaptation,
+    AdaptiveBudget,
+    AdaptiveBudgetConfig,
+)
 from .adjudicate import (
     Judge,
     Judgment,
@@ -94,6 +99,9 @@ from .download import (
 )
 
 __all__ = [
+    "Adaptation",
+    "AdaptiveBudget",
+    "AdaptiveBudgetConfig",
     "BenchmarkDB",
     "BenchmarkSample",
     "Brain",
