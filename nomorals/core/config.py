@@ -423,6 +423,10 @@ class PartnerSettings:
     #: master gets recognized even when the chat itself isn't an owner
     #: chat. Comma-separated. Env: NM_PARTNER_OWNER_SENDER_IDS.
     owner_sender_ids: str = ""
+    #: Owner key for `/power on <key>` (power-mode unlock). Read from
+    #: NM_PARTNER_OWNER_KEY. Empty = no env-key unlock configured (the
+    #: owner seal is the other unlock path).
+    owner_key: str = ""
     #: Every owner conversation is a fine-tune pair waiting to happen; the
     #: runtime appends them to data/training/conversations.jsonl by default
     #: (NM_PARTNER_TRAIN_COLLECT=0 turns the recorder off).
@@ -900,6 +904,7 @@ _ENV_MAP: dict[str, str] = {
     "NM_ARENA_ANTI_REPEAT_WINDOW": "arena.anti_repeat_window",
     "NM_PARTNER_PLATFORMS": "partner.platforms",
     "NM_PARTNER_OWNER_CHATS": "partner.owner_chats",
+    "NM_PARTNER_OWNER_KEY": "partner.owner_key",
     "NM_PARTNER_PERSONALITY": "partner.personality",
     "NM_PARTNER_MEMORY_ENABLED": "partner.memory_enabled",
     "NM_PARTNER_PROACTIVE": "partner.proactive",

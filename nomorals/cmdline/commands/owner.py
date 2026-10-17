@@ -12,8 +12,8 @@ from typing import Any
 
 def _cmd_owner(args: argparse.Namespace, context: Any) -> int:
     """Owner identity seal: bake / verify the passphrase proof in code."""
-    from ...core.owner import (OWNER_IDENTITIES, bake_seal, make_seal,
-                             seal_configured, verify_owner)
+    from ...core.owner import (OWNER_IDENTITIES, bake_seal, is_owner_identity,
+                             make_seal, seal_configured, verify_owner)
 
     action = args.owner_action or "whoami"
     if action == "whoami":
@@ -22,6 +22,13 @@ def _cmd_owner(args: argparse.Namespace, context: Any) -> int:
                                      else "not set — run `nm owner seal`"))
         return 0
     identity = input("identity: ").strip()
+    if action == "seal" and not is_owner_identity(identity):
+        # A seal baked under an unknown identity can never verify:
+        # verify_owner requires an ingrained identity. Reject here, before
+        # the passphrase prompts, so the owner knows why it would fail.
+        print(f"unknown identity {identity!r} — must be one of: "
+              f"{', '.join(OWNER_IDENTITIES)}", file=sys.stderr)
+        return 1
     secret = getpass.getpass("passphrase: ")
     if action == "seal":
         if not secret:
