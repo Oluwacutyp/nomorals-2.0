@@ -258,23 +258,31 @@ class RuntimeMetaMixin:
         if not names:
             return "providers: chain is empty — nothing can answer. /model to configure."
 
-        def _probe(name: str) -> tuple[str, bool, float]:
+        def _probe(name: str) -> tuple[str, bool, float, str]:
             provider = router.get(name)
             if provider is None:
-                return name, False, 0.0
+                return name, False, 0.0, "provider not registered"
             started = time.perf_counter()
             try:
-                ok = bool(provider.health())
-            except Exception:  # noqa: BLE001 - a probe must never raise
+                detail_fn = getattr(provider, "health_detail", None)
+                if callable(detail_fn):
+                    ok, detail = detail_fn()
+                    ok = bool(ok)
+                    detail = str(detail or "")
+                else:
+                    ok = bool(provider.health())
+                    detail = ""
+            except Exception as exc:  # noqa: BLE001 - a probe must never raise
                 ok = False
-            return name, ok, (time.perf_counter() - started)
+                detail = str(exc) or exc.__class__.__name__
+            return name, ok, (time.perf_counter() - started), detail
 
         # Parallel: sequential probes would cost sum(health timeouts).
-        live: dict[str, tuple[bool, float]] = {}
+        live: dict[str, tuple[bool, float, str]] = {}
         with ThreadPoolExecutor(max_workers=max(1, len(names)),
                                 thread_name_prefix="providers-probe") as pool:
-            for name, ok, elapsed in pool.map(_probe, names):
-                live[name] = (ok, elapsed)
+            for name, ok, elapsed, detail in pool.map(_probe, names):
+                live[name] = (ok, elapsed, detail)
 
         try:
             snap = router.stats_snapshot()
@@ -312,7 +320,7 @@ class RuntimeMetaMixin:
                 except Exception:  # noqa: BLE001
                     model_id = ""
             h = health.get(name) or {}
-            ok, elapsed = live.get(name, (False, 0.0))
+            ok, elapsed, probe_detail = live.get(name, (False, 0.0, ""))
             calls = int(h.get("calls") or 0)
             failures = int(h.get("failures") or 0)
             cooling = bool(h.get("cooling_down"))
@@ -322,18 +330,32 @@ class RuntimeMetaMixin:
                 state = "🧊 cooling down"
             elif ok:
                 state = f"✅ live ({elapsed:.1f}s)"
+            elif probe_detail:
+                # The live probe ran and failed — show WHY. The old
+                # "(no calls yet)" label implied the probe never ran,
+                # which hid the real failure (bad key, dead model, …).
+                state = f"⚠️ probe failed ({probe_detail[:120]})"
             elif calls and failures >= calls:
                 state = "❌ failing every call"
             elif calls:
                 state = f"⚠️ probe failed ({failures}/{calls} failed)"
             else:
-                state = "⚠️ probe failed (no calls yet)"
+                # Probe failed with no reason recorded anywhere: say
+                # so plainly instead of implying it was never tested.
+                state = "⚠️ probe failed (no detail)"
             detail = f" — {model_id}" if model_id else ""
             lines.append(f" {marker} {name}{detail}: {state}")
             if last_error:
                 short = last_error[:160] + ("…" if len(last_error) > 160 else "")
                 lines.append(f"    last error: {short}")
                 hint = _hint(last_error)
+                if hint:
+                    lines.append(f"    {hint}")
+            elif probe_detail:
+                # Zero recorded calls but the live probe just failed:
+                # the probe detail IS the error — hint from it so the
+                # owner still gets the actionable line (bad key, …).
+                hint = _hint(probe_detail)
                 if hint:
                     lines.append(f"    {hint}")
             elif calls and not failures:

@@ -6,10 +6,13 @@ recognized text is the answer. It is the floor of the vision chain — no API
 key, no model weights, no network — so a phone with ``pkg install tesseract``
 can read any screen (a chat, a terminal, a form) even fully offline.
 
-It plugs in as an ordinary :class:`LLMProvider` with the ``vision``
+It plugs in as an ordinary :class:`LLMProvider` with the ``ocr``
 capability, so the router's normal failover handles it: API vision first,
 OCR when every model is down (or when you deliberately want the verbatim
-text, which is what a screen reader most of the time).
+text, which is what a screen reader most of the time).  ``describe_image``
+accepts ``vision`` *or* ``ocr`` providers, so the OCR floor still serves
+image reads; ``chat``/``complete`` require their own capability, so the
+OCR provider is never selected for chat — it has no chat surface.
 """
 
 from __future__ import annotations
@@ -119,10 +122,25 @@ class OCRProvider(LLMProvider):
 
     @property
     def capabilities(self) -> set[str]:
-        return {"vision"}
+        # OCR only — deliberately NOT "chat": this provider has no chat
+        # surface (chat() raises).  "vision" is NOT advertised either:
+        # describe_image() accepts vision OR ocr, so the OCR floor still
+        # serves image reads without pretending to be a vision model.
+        return {"ocr"}
 
     def health(self) -> bool:
-        return ocr_binary(self.binary) is not None
+        return self.health_detail()[0]
+
+    def health_detail(self) -> tuple[bool, str]:
+        """Liveness probe plus the failure reason.
+
+        The only way this provider is dead is a missing tesseract
+        binary — say so plainly instead of a bare \"probe failed\".
+        """
+        found = ocr_binary(self.binary) is not None
+        if found:
+            return True, ""
+        return False, "tesseract binary not found (set NM_OCR_BINARY or install tesseract)"
 
     def chat(
         self, messages: Sequence[Message], params: SamplingParams | None = None, **kw: Any

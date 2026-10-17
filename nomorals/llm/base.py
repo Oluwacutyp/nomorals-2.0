@@ -452,6 +452,16 @@ class LLMProvider(abc.ABC):
         """Cheap liveness probe. Defaults to optimistic."""
         return True
 
+    def health_detail(self) -> tuple[bool, str]:
+        """Liveness probe plus the failure reason (``""`` when live).
+
+        The bool-only :meth:`health` swallows *why* a provider is dead,
+        which makes ``/providers`` output unactionable (\"probe failed\"
+        with no reason). Probes should call this and surface the reason;
+        the default derives it from :meth:`health` with no reason.
+        """
+        return self.health(), ""
+
     @property
     def capabilities(self) -> set[str]:
         return {"chat"}
