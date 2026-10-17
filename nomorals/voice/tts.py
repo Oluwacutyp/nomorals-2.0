@@ -1274,6 +1274,13 @@ class HFEndpointBackend:
         import io
         import struct as _struct
 
+        if not blob:
+            # Never let wave.open raise a bare EOFError here — its
+            # message is empty, and callers format it as "TTS vocal
+            # failed ()", hiding the real cause (TTS produced no
+            # output at all).
+            raise ValueError(
+                "empty audio bytes — TTS produced no output")
         with wave.open(io.BytesIO(blob), "rb") as wav:
             n = wav.getnframes()
             raw = wav.readframes(n)
@@ -1927,20 +1934,25 @@ class SystemTTSBackend:
 
     @staticmethod
     def detect() -> tuple[Optional[str], Optional[str]]:
-        """(kind, executable) of the OS speech service, or (None, None)."""
+        """(kind, executable) of the OS speech service, or (None, None).
+
+        espeak-ng/espeak FIRST on every platform — the same order the
+        /tts path (``tools/audio.py::detect_tts_engines``) uses, and
+        the engine proven working on the owner's Windows box. The
+        vocal path must not silently pick a different engine
+        (PowerShell System.Speech on win32, which has no voices on
+        Server editions and fails) when espeak-ng is installed.
+        Platform-native services (say / PowerShell) are fallbacks
+        only when no espeak is present.
+        """
+        for candidate in ("espeak-ng", "espeak"):
+            exe = shutil.which(candidate)
+            if exe:
+                return ("espeak", exe)
         plat = sys.platform
         if plat == "darwin":
             exe = shutil.which("say")
             return ("say", exe) if exe else (None, None)
-        # "android": Termux's Python 3.13+ implements PEP 738, so
-        # sys.platform reports "android" instead of "linux" — but it is
-        # still a Linux userland and espeak-ng works the same there.
-        if plat.startswith("linux") or plat == "android":
-            for candidate in ("espeak-ng", "espeak"):
-                exe = shutil.which(candidate)
-                if exe:
-                    return ("espeak", exe)
-            return (None, None)
         if plat == "win32":
             exe = shutil.which("powershell") or shutil.which("pwsh")
             return ("powershell", exe) if exe else (None, None)
@@ -2005,7 +2017,38 @@ class SystemTTSBackend:
         if self.lang:
             cmd += ["-v", self.lang]
         cmd.append(text)
-        return self._run(cmd).stdout
+        blob = self._run(cmd).stdout
+        if blob:
+            return blob
+        # --stdout yielded nothing (seen on Windows: 0 bytes, which
+        # used to reach _decode_wav as a bare EOFError and surface as
+        # "TTS vocal failed ()"). Retry via -w to a temp file — the
+        # exact invocation the /tts path (tools/audio.py) uses and
+        # the one proven working on the owner's box.
+        import tempfile
+
+        out = os.path.join(tempfile.gettempdir(),
+                           f"devon-system-tts-{os.getpid()}.wav")
+        cmd2 = [self._exe, "-s", "175"]
+        if self.lang:
+            cmd2 += ["-v", self.lang]
+        cmd2 += ["-w", out, text]
+        try:
+            self._run(cmd2)
+            with open(out, "rb") as fh:
+                blob = fh.read()
+        except FileNotFoundError:
+            blob = b""
+        finally:
+            try:
+                os.remove(out)
+            except OSError:
+                pass
+        if not blob:
+            raise RuntimeError(
+                "system TTS (espeak) produced no audio — "
+                "espeak-ng wrote nothing to stdout or file")
+        return blob
 
     def _via_powershell(self, text: str, voice: Optional[VoiceProfile],
                         tmp: str) -> bytes:

@@ -134,7 +134,9 @@ def perform_draft(draft: Any, context: Any = None,
         try:
             bed_path = creator._render_audio(song, workdir, with_vocals=False)
         except Exception as exc:  # noqa: BLE001
-            return {"ok": False, "reason": f"bed render failed: {exc}"}
+            from .vocal_lite import _exc_str
+            return {"ok": False,
+                    "reason": f"bed render failed: {_exc_str(exc)}"}
 
         # draft-driven vocal: contours → melody events → sung vocal
         melody = draft_melody_events(draft)
@@ -145,8 +147,9 @@ def perform_draft(draft: Any, context: Any = None,
             vr = add_vocal_track(song, str(bed_path), str(base),
                                  melody_events=melody)
         except Exception as exc:  # noqa: BLE001
+            from .vocal_lite import _exc_str
             return {"ok": True, "path": str(bed_path),
-                    "note": f"bed only — draft vocal failed: {exc}",
+                    "note": f"bed only — draft vocal failed: {_exc_str(exc)}",
                     "bed_path": str(bed_path), "draft_title": draft.title}
         if vr.get("ok"):
             return {"ok": True, "path": str(vr["path"]),

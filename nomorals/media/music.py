@@ -1701,7 +1701,8 @@ class MusicCreator:
                 song.vocal_note = str(vr.get("reason", ""))
                 _log.info("no vocal track: %s", song.vocal_note)
             except Exception as exc:  # noqa: BLE001
-                song.vocal_note = f"vocal track failed: {exc}"
+                from .vocal_lite import _exc_str
+                song.vocal_note = f"vocal track failed: {_exc_str(exc)}"
                 _log.warning("vocal track failed: %s", exc)
         return str(target)
 

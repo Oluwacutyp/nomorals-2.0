@@ -33,6 +33,21 @@ from typing import Any
 
 _log = logging.getLogger(__name__)
 
+
+def _exc_str(exc: BaseException) -> str:
+    """Exception -> never-empty message for user-facing reasons.
+
+    Some exceptions carry an empty message (bare ``EOFError`` from
+    ``wave.open`` on empty bytes is the one that bit us: it surfaced
+    as "TTS vocal failed ()", hiding the real cause). Fall back to
+    the exception class name so a failure reason is never ``()``.
+    """
+    msg = str(exc).strip()
+    if msg:
+        return msg
+    return type(exc).__name__ or "unknown error"
+
+
 __all__ = [
     "hook_lyrics",
     "chorus_regions",
@@ -223,7 +238,7 @@ def _default_tts(text: str, out_path: str) -> dict[str, Any]:
                 "sample_rate": int(res.get("sample_rate", 0) or 0)}
     except Exception as exc:  # noqa: BLE001
         return {"ok": False,
-                "reason": f"TTS vocal failed ({exc}) — vocal track skipped"}
+                "reason": f"TTS vocal failed ({_exc_str(exc)}) — vocal track skipped"}
 
 
 def _read_wav_mono(path: str) -> tuple[array, int]:
@@ -404,7 +419,7 @@ def render_hook_vocal(song: Any, workdir: str,
                 "text": hook_text}
     except Exception as exc:  # noqa: BLE001
         _log.debug("render_hook_vocal failed", exc_info=True)
-        return {"ok": False, "reason": f"vocal render failed: {exc}"}
+        return {"ok": False, "reason": f"vocal render failed: {_exc_str(exc)}"}
 
 
 def render_sung_vocal(song: Any, workdir: str, melody_events: Any,
@@ -512,7 +527,7 @@ def render_sung_vocal(song: Any, workdir: str, melody_events: Any,
                 "lines": sung, "shifted": shifted, "note": note}
     except Exception as exc:  # noqa: BLE001
         _log.debug("render_sung_vocal failed", exc_info=True)
-        return {"ok": False, "reason": f"sung vocal failed: {exc}"}
+        return {"ok": False, "reason": f"sung vocal failed: {_exc_str(exc)}"}
 
 
 def _render_hum_tone(freq: float, n: int, velocity: float,
@@ -638,7 +653,7 @@ def render_hummed_vocal(song: Any, workdir: str, melody_events: Any,
                 "note": note, "notes": len(events)}
     except Exception as exc:  # noqa: BLE001
         _log.debug("render_hummed_vocal failed", exc_info=True)
-        return {"ok": False, "reason": f"hum render failed: {exc}"}
+        return {"ok": False, "reason": f"hum render failed: {_exc_str(exc)}"}
 
 
 def mix_hum_track(bed_path: str, hum_path: str, out_path: str,
@@ -720,7 +735,7 @@ def _add_hummed_vocal(song: Any, bed_path: str, workdir: str,
                 "notes": hr.get("notes", 0)}
     except Exception as exc:  # noqa: BLE001
         _log.debug("_add_hummed_vocal failed", exc_info=True)
-        return {"ok": False, "reason": f"hum vocal failed: {exc}",
+        return {"ok": False, "reason": f"hum vocal failed: {_exc_str(exc)}",
                 "path": bed_path or ""}
 
 
@@ -822,7 +837,7 @@ def add_vocal_track(song: Any, bed_path: str, workdir: str,
                 "path": bed_path}
     except Exception as exc:  # noqa: BLE001
         _log.debug("add_vocal_track failed", exc_info=True)
-        return {"ok": False, "reason": f"vocal track failed: {exc}",
+        return {"ok": False, "reason": f"vocal track failed: {_exc_str(exc)}",
                 "path": bed_path or ""}
 
 

@@ -376,7 +376,15 @@ class RuntimeMediaMixin:
             except Exception:  # noqa: BLE001
                 pass
             if sent:
-                text += f"\n sent {' + '.join(sent)} to this chat."
+                # The sent line must reflect whether vocals are in
+                # the audio — never imply a full song when the vocal
+                # track was skipped (vocals requested, none rendered).
+                vocal_gap = ""
+                if with_vocals and not (song.vocal_path or "").strip():
+                    vocal_gap = (" (instrumental only — vocal track "
+                                 "skipped)")
+                text += (f"\n sent {' + '.join(sent)} to this chat."
+                         f"{vocal_gap}")
             else:
                 text += (f"\n audio: {song.audio_path or '(render failed)'}"
                          f"\n score: {song.score_pdf_path or '(render failed)'}")
