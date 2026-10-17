@@ -21,8 +21,34 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Sequence
 
-import numpy as np
-from PIL import Image, ImageDraw, ImageFilter
+try:
+    import numpy as np
+except ImportError:
+    np = None  # type: ignore[assignment]
+
+NUMPY_AVAILABLE = np is not None
+
+
+def _require_numpy() -> None:
+    if np is None:
+        raise MotionStudioError(
+            "nomorals.media.motion_studio.typography is unavailable: numpy is not installed "
+            "(pip install numpy)")
+
+try:
+    from PIL import Image, ImageDraw, ImageFilter
+except ImportError:
+    Image = None; ImageDraw = None; ImageFilter = None  # type: ignore[assignment]
+
+PIL_AVAILABLE = Image is not None
+
+
+def _require_pil() -> None:
+    if Image is None:
+        raise MotionStudioError(
+            "nomorals.media.motion_studio.typography is unavailable: Pillow is not installed "
+            "(pip install Pillow)")
+
 
 from ._core import (
     MotionStudioError,
@@ -217,6 +243,7 @@ class _Background:
                  colors: list[str], image: str | os.PathLike | None,
                  seed: int):
         self.w, self.h, self.kind = w, h, kind
+        _require_numpy()
         self.c0 = np.array(_hex(colors[0]), dtype=np.float32)
         self.c1 = np.array(_hex(colors[-1]), dtype=np.float32)
         self.rng = np.random.default_rng(seed)
@@ -228,6 +255,7 @@ class _Background:
         self.bvx = np.cos(ang) * 12
         self.bvy = np.sin(ang) * 9
         self.cover = None
+        _require_pil()
         if image:
             try:
                 im = Image.open(image).convert("RGB")
@@ -238,9 +266,11 @@ class _Background:
                 self.cover = None
 
     def frame(self, t: float) -> Image.Image:
+        _require_pil()
         if self.kind == "solid":
             return Image.new("RGB", (self.w, self.h),
                              tuple(int(v) for v in self.c0))
+        _require_numpy()
         if self.kind == "gradient":
             k = 0.5 + 0.5 * math.sin(t * 0.35)
             ys = np.linspace(0, 1, self.h, dtype=np.float32)[:, None, None]
@@ -357,6 +387,7 @@ class _LyricRenderer:
         size = max(10, int(self.font_size * scale))
         fnt = find_font(size) if scale != 1.0 or state == "active" else font
         tw, th = text_size(d, word.text, fnt)
+        _require_pil()
         layer = Image.new("RGBA", (tw + 20, th + 20), (0, 0, 0, 0))
         ld = ImageDraw.Draw(layer)
         ld.text((10, 10), word.text, font=fnt, fill=col + (alpha,),
@@ -393,6 +424,7 @@ class _LyricRenderer:
 
     def frame(self, i: int, t: float) -> np.ndarray:
         base = self.bg.frame(t).convert("RGBA")
+        _require_pil()
         d = ImageDraw.Draw(base, "RGBA")
         pi = self._phrase_at(t)
         phrases = self.phrases
@@ -433,6 +465,7 @@ class _LyricRenderer:
                     y += line_h
             finally:
                 self.font_size = real_size
+        _require_numpy()
         return np.asarray(base.convert("RGB"))
 
 

@@ -17,8 +17,34 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Sequence
 
-import numpy as np
-from PIL import Image, ImageDraw, ImageEnhance, ImageFilter
+try:
+    import numpy as np
+except ImportError:
+    np = None  # type: ignore[assignment]
+
+NUMPY_AVAILABLE = np is not None
+
+
+def _require_numpy() -> None:
+    if np is None:
+        raise MotionStudioError(
+            "nomorals.media.motion_studio.kenburns is unavailable: numpy is not installed "
+            "(pip install numpy)")
+
+try:
+    from PIL import Image, ImageDraw, ImageEnhance, ImageFilter
+except ImportError:
+    Image = None; ImageDraw = None; ImageEnhance = None; ImageFilter = None  # type: ignore[assignment]
+
+PIL_AVAILABLE = Image is not None
+
+
+def _require_pil() -> None:
+    if Image is None:
+        raise MotionStudioError(
+            "nomorals.media.motion_studio.kenburns is unavailable: Pillow is not installed "
+            "(pip install Pillow)")
+
 
 from ._core import (
     MotionStudioError,
@@ -88,6 +114,7 @@ def _pick_move(name: str, seed: int, index: int = 0) -> _Move:
     name = (name or "zoom_in").lower()
     if name == "auto":
         return MOVES[_AUTO_ORDER[(seed + index) % len(_AUTO_ORDER)]]
+    _require_numpy()
     if name == "random":
         rng = np.random.default_rng(seed)
         return MOVES[rng.choice(list(MOVES))]
@@ -102,6 +129,7 @@ def _load_cover(image: str | os.PathLike, size: tuple[int, int],
     p = Path(image)
     if not p.exists():
         raise MotionStudioError(f"no such image: {image}")
+    _require_pil()
     try:
         img = Image.open(p).convert("RGB")
     except Exception as exc:  # noqa: BLE001
@@ -124,6 +152,7 @@ def _crop_view(img: Image.Image, cx: float, cy: float, zoom: float,
     x = min(max(x, 0.0), max(img.width - vw, 0.0))
     y = min(max(y, 0.0), max(img.height - vh, 0.0))
     box = (int(x), int(y), int(x + vw), int(y + vh))
+    _require_pil()
     view = img.crop(box).resize((tw, th), Image.LANCZOS)
     if supersample > 1:
         view = view.resize(size, Image.LANCZOS)
@@ -133,25 +162,30 @@ def _crop_view(img: Image.Image, cx: float, cy: float, zoom: float,
 def add_grain(frame: Image.Image, amount: float = 6.0,
               rng: np.random.Generator | None = None) -> Image.Image:
     """Animated film grain — the single cheapest "cinematic" upgrade."""
+    _require_numpy()
     rng = rng or np.random.default_rng()
     arr = np.asarray(frame).astype(np.float32)
     noise = rng.normal(0.0, amount, arr.shape[:2])[..., None]
+    _require_pil()
     return Image.fromarray(np.clip(arr + noise, 0, 255).astype(np.uint8))
 
 
 def add_vignette(frame: Image.Image, strength: float = 0.42) -> Image.Image:
     w, h = frame.size
+    _require_numpy()
     ys, xs = np.mgrid[0:h, 0:w].astype(np.float32)
     dx = (xs / w - 0.5) * 2.0
     dy = (ys / h - 0.5) * 2.0
     mask = np.clip(1.0 - (dx ** 2 + dy ** 2) * strength, 0.0, 1.0)
     arr = np.asarray(frame).astype(np.float32) * mask[..., None]
+    _require_pil()
     return Image.fromarray(np.clip(arr, 0, 255).astype(np.uint8))
 
 
 def _letterbox(frame: Image.Image, ratio: float = 0.09) -> Image.Image:
     w, h = frame.size
     bar = int(h * ratio)
+    _require_pil()
     d = ImageDraw.Draw(frame)
     d.rectangle([0, 0, w, bar], fill="black")
     d.rectangle([0, h - bar, w, h], fill="black")
@@ -171,6 +205,7 @@ def kenburns(image: str | os.PathLike, out: str | os.PathLike | None = None,
     spec_move = _pick_move(move, seed)
     n = max(1, int(round(duration * fps)))
     img = _load_cover(image, size, int(defaults["supersample"]))
+    _require_numpy()
     rng = np.random.default_rng(seed)
     s0, e0 = spec_move.start, spec_move.end
 
@@ -186,6 +221,7 @@ def kenburns(image: str | os.PathLike, out: str | os.PathLike | None = None,
             frame = add_vignette(frame)
         if letterbox:
             frame = _letterbox(frame)
+        _require_numpy()
         return np.asarray(frame)
 
     out_path = Path(out) if out else new_render_path("kenburns")
@@ -227,7 +263,9 @@ def multilayer_drift(image: str | os.PathLike,
     fps = fps or float(defaults["fps"])
     n = max(1, int(round(duration * fps)))
     img = _load_cover(image, size, int(defaults["supersample"]))
+    _require_numpy()
     rng = np.random.default_rng(seed)
+    _require_pil()
     fg = img.filter(ImageFilter.GaussianBlur(6)).copy()
     fg_arr_base = np.asarray(fg).astype(np.float32)
     depth = max(0.0, min(1.0, depth))
@@ -240,6 +278,7 @@ def multilayer_drift(image: str | os.PathLike,
 
     def _frame(i: int, t: float) -> np.ndarray:
         k = _ease("smooth", i / max(n - 1, 1))
+        _require_numpy()
         bg = np.asarray(_crop_view(img, 0.5, 0.5, 1.05 + 0.18 * k,
                                    size, int(defaults["supersample"])))
         shift = int(size[0] * 0.06 * depth * (k - 0.5) * 2)
@@ -251,6 +290,7 @@ def multilayer_drift(image: str | os.PathLike,
         # near regions (high depth) show the drifting foreground
         mask = np.clip((dm - 0.45) * 2.2, 0, 1)[..., None]
         comp = bg.astype(np.float32) * (1 - mask) + fg_crop * mask
+        _require_pil()
         frame = Image.fromarray(np.clip(comp, 0, 255).astype(np.uint8))
         frame = add_grain(frame, amount=5.0, rng=rng)
         return np.asarray(add_vignette(frame))

@@ -23,8 +23,34 @@ import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
-import numpy as np
-from PIL import Image, ImageDraw, ImageEnhance, ImageFilter
+try:
+    import numpy as np
+except ImportError:
+    np = None  # type: ignore[assignment]
+
+NUMPY_AVAILABLE = np is not None
+
+
+def _require_numpy() -> None:
+    if np is None:
+        raise CameraError(
+            "nomorals.media.directed.camera is unavailable: numpy is not installed "
+            "(pip install numpy)")
+
+try:
+    from PIL import Image, ImageDraw, ImageEnhance, ImageFilter
+except ImportError:
+    Image = None; ImageDraw = None; ImageEnhance = None; ImageFilter = None  # type: ignore[assignment]
+
+PIL_AVAILABLE = Image is not None
+
+
+def _require_pil() -> None:
+    if Image is None:
+        raise CameraError(
+            "nomorals.media.directed.camera is unavailable: Pillow is not installed "
+            "(pip install Pillow)")
+
 
 
 class CameraError(RuntimeError):
@@ -40,6 +66,7 @@ class Perlin1D:
     """Seeded 1D Perlin noise. fbm() sums octaves."""
 
     def __init__(self, seed: int = 0):
+        _require_numpy()
         rng = np.random.RandomState(seed)
         self.p = np.arange(256, dtype=int)
         rng.shuffle(self.p)
@@ -108,6 +135,7 @@ def camera_path(n_frames: int, fps: float, preset: str,
     p = SHAKE_PRESETS.get(preset, SHAKE_PRESETS["handheld"])
     s = H / 1080.0
     per = [Perlin1D(seed + i) for i in range(4)]
+    _require_numpy()
     out = np.zeros((n_frames, 4))
     for i in range(n_frames):
         t = i / fps * p.freq
@@ -333,6 +361,7 @@ def camera_program_path(program: CameraProgram, n_frames: int, fps: float,
     Moves run sequentially, splitting the frames evenly; each move is
     smoothstep-eased over its window. Units match camera_path().
     """
+    _require_numpy()
     path = np.zeros((n_frames, 4))
     path[:, 3] = 1.0
     moves = program.moves
@@ -396,6 +425,7 @@ def _render_path(frames: list[Image.Image], path: np.ndarray,
     W, H = frames[0].size
     ow, oh = int(W * overscan), int(H * overscan)
     out = []
+    _require_pil()
     for img, (dx, dy, roll, zoom) in zip(frames, path):
         big = img.resize((ow, oh), Image.BICUBIC)
         cx, cy = ow / 2 + dx * overscan, oh / 2 + dy * overscan
@@ -434,6 +464,7 @@ def rolling_shutter(frame: np.ndarray, vx: float,
     The phone signature: fast pans smear diagonally.
     """
     H = frame.shape[0]
+    _require_numpy()
     rows = np.arange(H)
     shift = (rows / H - 0.5) * vx * strength
     out = np.empty_like(frame)
@@ -451,6 +482,7 @@ def phone_grade(img: Image.Image, *, sharpen: float = 120.0,
     sharpen: unsharp-mask percent. grain: gaussian noise sigma (0-255).
     hdr: 0..1 blend of lifted-shadows/compressed-highlights curve.
     """
+    _require_numpy()
     a = np.array(img).astype(np.float64)
     # HDR-ish tone curve: lift shadows, compress highlights
     if hdr > 0:
@@ -458,6 +490,7 @@ def phone_grade(img: Image.Image, *, sharpen: float = 120.0,
         lifted = norm + (1 - norm) * norm * 0.25 * hdr        # shadows up
         comp = 1 - (1 - lifted) * (1 - 0.18 * hdr)            # highlights in
         a = np.clip(comp, 0, 1) * 255.0
+    _require_pil()
     out = Image.fromarray(a.astype(np.uint8))
     if sharpen > 0:
         out = out.filter(ImageFilter.UnsharpMask(radius=2,
@@ -482,6 +515,7 @@ def phone_selfie_look(img: Image.Image, W: int | None = None,
     m = 0.06
     box = (int(w * m), int(h * m), int(w * (1 - m)), int(h * (1 - m)))
     crop = img.crop(box)
+    _require_pil()
     if W and H:
         crop = crop.resize((W, H), Image.BICUBIC)
     # front cams are softer than rear: slight blur before sharpen
@@ -492,11 +526,13 @@ def phone_selfie_look(img: Image.Image, W: int | None = None,
 # ── other camera looks ───────────────────────────────────────────────
 def cctv_look(img: Image.Image, timestamp: str = "") -> Image.Image:
     """CCTV: interlace, noise, crushed blacks, timestamp burn-in."""
+    _require_numpy()
     a = np.array(img).astype(np.float64)
     a[::2] *= 0.82  # interlace darkening
     rng = np.random.RandomState(42)
     a += rng.normal(0, 9, a.shape)
     a = np.clip(a * 0.9 - 8, 0, 255)  # crushed
+    _require_pil()
     out = Image.fromarray(a.astype(np.uint8)).convert("L").convert("RGB")
     if timestamp:
         d = ImageDraw.Draw(out)
@@ -508,6 +544,7 @@ def dashcam_look(img: Image.Image, speed: str = "") -> Image.Image:
     """Dashcam: wide barrel-ish vignette, timestamp/speed overlay."""
     w, h = img.size
     # cheap barrel: edge stretch via resize-crop trick
+    _require_pil()
     big = img.resize((int(w * 1.12), int(h * 1.12)), Image.BICUBIC)
     x0 = (big.width - w) // 2
     out = big.crop((x0, (big.height - h) // 2, x0 + w,
@@ -524,6 +561,7 @@ def cinema_look(img: Image.Image) -> Image.Image:
     w, h = img.size
     target_h = int(w / 2.39)
     y0 = (h - target_h) // 2
+    _require_pil()
     out = img.crop((0, y0, w, y0 + target_h)).resize((w, h), Image.BICUBIC)
     # letterbox bars
     bar = int(h * 0.06)
@@ -531,6 +569,7 @@ def cinema_look(img: Image.Image) -> Image.Image:
     d.rectangle([0, 0, w, bar], fill=(0, 0, 0))
     d.rectangle([0, h - bar, w, h], fill=(0, 0, 0))
     # S-curve grade (numpy LUT)
+    _require_numpy()
     lut = (np.arange(256) / 255.0)
     lut = np.clip(1 / (1 + np.exp(-8 * (lut - 0.5))) * 1.06 - 0.03, 0, 1)
     lut = (lut * 255).astype(np.uint8)
@@ -543,6 +582,7 @@ def cinema_look(img: Image.Image) -> Image.Image:
     w, h = img.size
     target_h = int(w / 2.39)
     y0 = (h - target_h) // 2
+    _require_pil()
     out = img.crop((0, y0, w, y0 + target_h)).resize((w, h), Image.BICUBIC)
     # letterbox bars
     bar = int(h * 0.06)
@@ -550,6 +590,7 @@ def cinema_look(img: Image.Image) -> Image.Image:
     d.rectangle([0, 0, w, bar], fill=(0, 0, 0))
     d.rectangle([0, h - bar, w, h], fill=(0, 0, 0))
     # S-curve grade (numpy LUT)
+    _require_numpy()
     lut = (np.arange(256) / 255.0)
     lut = np.clip(1 / (1 + np.exp(-8 * (lut - 0.5))) * 1.06 - 0.03, 0, 1)
     lut = (lut * 255).astype(np.uint8)
@@ -565,6 +606,7 @@ def _temporal_zoom(frames: list[Image.Image], z0: float, z1: float,
     if n == 0:
         return frames
     out = []
+    _require_pil()
     for i, img in enumerate(frames):
         u = i / max(1, n - 1)
         k = ease_fn(u) if ease_fn else u * u * (3 - 2 * u)
@@ -581,9 +623,11 @@ def drone_look(img: Image.Image) -> Image.Image:
     """Drone: hazy aerial grade — lifted blacks, pulled saturation,
     faint cool cast. The slow forward drift is applied at the video
     level (drone shake preset + progressive push)."""
+    _require_numpy()
     a = np.array(img).astype(np.float64)
     a = a * 0.86 + 26.0                       # lifted, hazy blacks
     a[..., 2] = np.clip(a[..., 2] + 6.0, 0, 255)  # cool cast
+    _require_pil()
     out = Image.fromarray(np.clip(a, 0, 255).astype(np.uint8))
     return ImageEnhance.Color(out).enhance(0.82)
 
@@ -591,9 +635,11 @@ def drone_look(img: Image.Image) -> Image.Image:
 def bodycam_look(img: Image.Image, timestamp: str = "") -> Image.Image:
     """Bodycam: chest-mount bounce (video level), crushed mids, heavy
     vignette, timestamp burn-in."""
+    _require_pil()
     out = ImageEnhance.Color(img).enhance(0.78)
     out = ImageEnhance.Contrast(out).enhance(1.06)
     w, h = out.size
+    _require_numpy()
     ys, xs = np.mgrid[0:h, 0:w].astype(np.float32)
     dx = (xs / w - 0.5) * 2.0
     dy = (ys / h - 0.5) * 2.0
@@ -610,7 +656,9 @@ def webcam_look(img: Image.Image, *, pump: float = 0.0,
                 seed: int = 0) -> Image.Image:
     """Webcam: fixed framing, soft upscale feel, sensor noise, and a
     slow auto-exposure pump (``pump`` in [-1, 1] drives brightness)."""
+    _require_pil()
     out = img.filter(ImageFilter.GaussianBlur(0.7))
+    _require_numpy()
     a = np.array(out).astype(np.float64) * (1.0 + 0.05 * pump)
     rng = np.random.RandomState(seed)
     a += rng.normal(0, 4.5, a.shape)
@@ -621,6 +669,7 @@ def vintage_film_look(img: Image.Image, *, seed: int = 0,
                       frame_idx: int = 0) -> Image.Image:
     """Vintage film: warm faded stock, heavy grain, scratches, gate
     weave + flicker. Deterministic per (seed, frame_idx)."""
+    _require_numpy()
     a = np.array(img).astype(np.float64)
     # faded warm stock: warm cast, lifted blacks, compressed highlights
     a[..., 0] = np.clip(a[..., 0] * 1.06 + 14.0, 0, 255)
@@ -637,6 +686,7 @@ def vintage_film_look(img: Image.Image, *, seed: int = 0,
     # gate weave: whole-frame sub-pixel jitter
     jx, jy = int(rng.randint(-2, 3)), int(rng.randint(-2, 3))
     a = np.roll(np.roll(a, jy, axis=0), jx, axis=1)
+    _require_pil()
     out = Image.fromarray(np.clip(a, 0, 255).astype(np.uint8))
     # rounded heavy vignette
     ys, xs = np.mgrid[0:h, 0:w].astype(np.float32)
@@ -655,7 +705,9 @@ def anamorphic_look(img: Image.Image) -> Image.Image:
     w, h = img.size
     target_h = int(w / 2.39)
     y0 = (h - target_h) // 2
+    _require_pil()
     frame = img.crop((0, y0, w, y0 + target_h)).resize((w, h), Image.BICUBIC)
+    _require_numpy()
     a = np.array(frame).astype(np.float64)
     # warm grade
     a[..., 0] = np.clip(a[..., 0] * 1.05 + 6.0, 0, 255)
@@ -686,10 +738,12 @@ def anamorphic_look(img: Image.Image) -> Image.Image:
 def gimbal_look(img: Image.Image) -> Image.Image:
     """Gimbal: buttery stabilized footage — gentle S-curve, clean
     saturation. The smoothness is the gimbal shake preset at video level."""
+    _require_numpy()
     lut = np.arange(256) / 255.0
     lut = np.clip(1 / (1 + np.exp(-6 * (lut - 0.5))) * 1.04 - 0.02, 0, 1)
     lut = (lut * 255).astype(np.uint8)
     a = np.array(img)
+    _require_pil()
     out = Image.fromarray(lut[a])
     return ImageEnhance.Color(out).enhance(1.06)
 
@@ -786,6 +840,7 @@ def read_frames(video: str, fps: int = 24, max_frames: int = 0) -> \
     paths = sorted(tmp.glob("f_*.png"))
     if max_frames:
         paths = paths[:max_frames]
+    _require_pil()
     return [Image.open(p).convert("RGB") for p in paths], float(fps)
 
 
@@ -812,6 +867,8 @@ def camera_look_video(video: str, look: str, out_path: str, *,
     """Apply a camera look to a whole video file. Rolling shutter included
     for phone looks (driven by the shake path's horizontal velocity)."""
     frames, _ = read_frames(video, fps=fps)
+    _require_pil()
+    _require_numpy()
     if look in ("phone_selfie", "phone"):
         W, H = frames[0].size
         path = camera_path(len(frames), fps,

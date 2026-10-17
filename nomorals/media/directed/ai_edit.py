@@ -18,8 +18,34 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import numpy as np
-from PIL import Image, ImageDraw, ImageFilter
+try:
+    import numpy as np
+except ImportError:
+    np = None  # type: ignore[assignment]
+
+NUMPY_AVAILABLE = np is not None
+
+
+def _require_numpy() -> None:
+    if np is None:
+        raise RuntimeError(
+            "nomorals.media.directed.ai_edit is unavailable: numpy is not installed "
+            "(pip install numpy)")
+
+try:
+    from PIL import Image, ImageDraw, ImageFilter
+except ImportError:
+    Image = None; ImageDraw = None; ImageFilter = None  # type: ignore[assignment]
+
+PIL_AVAILABLE = Image is not None
+
+
+def _require_pil() -> None:
+    if Image is None:
+        raise RuntimeError(
+            "nomorals.media.directed.ai_edit is unavailable: Pillow is not installed "
+            "(pip install Pillow)")
+
 
 MODELS_DIR = Path.home() / ".devon-models"
 
@@ -128,7 +154,9 @@ def background_replace(foreground: Image.Image, new_bg: Image.Image,
     bg = new_bg.resize(foreground.size).convert("RGB")
     fg = foreground.convert("RGB")
     m = mask.resize(foreground.size).convert("L")
+    _require_pil()
     m = m.filter(ImageFilter.GaussianBlur(6))
+    _require_numpy()
     fa, ba = np.array(fg).astype(np.float32), np.array(bg).astype(np.float32)
     mm = (np.array(m).astype(np.float32) / 255.0)
     # color match: shift fg mean/std toward bg in the subject region
@@ -188,6 +216,7 @@ def relight_photo(image: Image.Image, direction: str = "left",
     Real darkroom technique — honest label, not neural.
     """
     w, h = image.size
+    _require_numpy()
     yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
     if direction == "left":
         grad = 1 - xx / w
@@ -210,6 +239,7 @@ def relight_photo(image: Image.Image, direction: str = "left",
     elif warmth < 0:
         arr[..., 0] *= 1 + 0.10 * warmth
         arr[..., 2] *= 1 - 0.12 * warmth
+    _require_pil()
     return Image.fromarray(np.clip(arr, 0, 255).astype(np.uint8)), \
         f"photo-relight({direction})"
 

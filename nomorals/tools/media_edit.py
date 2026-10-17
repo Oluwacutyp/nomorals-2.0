@@ -366,8 +366,13 @@ def _resolve_studio_paths(context: Any,
         elif name == "generative_edit" and isinstance(op.get("mask"), str):
             op["mask"] = str(_sandbox(context, op["mask"]))
         elif name == "inpaint_cv" and isinstance(op.get("mask"), str):
-            from ..media_edit.cv_ops import parse_box  # noqa: PLC0415
-            if parse_box(op["mask"]) is None:  # box strings need no sandbox
+            try:
+                from ..media_edit.cv_ops import parse_box  # noqa: PLC0415
+            except ImportError:
+                parse_box = None  # type: ignore[assignment]
+            if parse_box is None or parse_box(op["mask"]) is None:
+                # box strings need no sandbox; without cv_ops we cannot
+                # tell a box from a path, so sandbox conservatively
                 op["mask"] = str(_sandbox(context, op["mask"]))
         elif name == "seamless_clone":
             if isinstance(op.get("background"), str):

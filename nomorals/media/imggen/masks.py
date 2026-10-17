@@ -20,7 +20,35 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from PIL import Image, ImageFilter
+try:
+    from PIL import Image, ImageFilter
+except ImportError:
+    Image = None; ImageFilter = None  # type: ignore[assignment]
+
+PIL_AVAILABLE = Image is not None
+
+
+def _require_pil() -> None:
+    if Image is None:
+        raise ImgGenError(
+            "nomorals.media.imggen.masks is unavailable: Pillow is not installed "
+            "(pip install Pillow)")
+
+import importlib.util as _importlib_util
+
+try:
+    NUMPY_AVAILABLE = _importlib_util.find_spec("numpy") is not None
+except ImportError:
+    # a meta-path blocker (or a broken install) raises instead of None
+    NUMPY_AVAILABLE = False
+
+
+def _require_numpy() -> None:
+    if not NUMPY_AVAILABLE:
+        raise ImgGenError(
+            "nomorals.media.imggen.masks is unavailable: numpy is not installed "
+            "(pip install numpy)")
+
 
 from . import ImgGenError
 
@@ -92,6 +120,7 @@ def box_mask(image_size: tuple[int, int], box: tuple[int, int, int, int],
     x1, y1 = min(w, x1), min(h, y1)
     if x1 <= x0 or y1 <= y0:
         raise ImgGenError(f"degenerate box {box}")
+    _require_pil()
     m = Image.new("L", (w, h), 0)
     m.paste(255, (x0, y0, x1, y1))
     if feather_radius > 0:
@@ -109,6 +138,7 @@ def point_flood_mask(image: Image.Image, point: tuple[int, int],
     Real segmentation for solid-ish objects; leaks on busy textures —
     the tier label says so.
     """
+    _require_numpy()
     import numpy as np
 
     img = image.convert("RGB")
@@ -153,6 +183,7 @@ def point_flood_mask(image: Image.Image, point: tuple[int, int],
         region[take_y, take_x] = True
         frontier_y, frontier_x = take_y, take_x
 
+    _require_pil()
     m = Image.fromarray((region * 255).astype(np.uint8), "L")
     if feather_radius > 0:
         m = m.filter(ImageFilter.GaussianBlur(feather_radius))
@@ -165,6 +196,8 @@ def _sam_mask(image: Image.Image, point=None,
     st = sam_status()
     if not st["usable"]:
         return None
+    _require_pil()
+    _require_numpy()
     try:
         import numpy as np
 
@@ -213,6 +246,7 @@ def _grabcut_mask(image: Image.Image, box, point,
     """GrabCut tier via OpenCV. None when cv2 is missing."""
     if not CV2_AVAILABLE:
         return None
+    _require_numpy()
     import numpy as np
 
     img = image.convert("RGB")
@@ -247,6 +281,7 @@ def _grabcut_mask(image: Image.Image, box, point,
     binm = np.where((gc_mask == _cv2.GC_FGD)
                     | (gc_mask == _cv2.GC_PR_FGD), 255, 0
                     ).astype(np.uint8)
+    _require_pil()
     m = Image.fromarray(binm, "L")
     if feather_radius > 0:
         m = m.filter(ImageFilter.GaussianBlur(feather_radius))
@@ -288,6 +323,7 @@ def auto_mask(image: Image.Image, *,
             "SAM checkpoint on disk — neither is available. Pass "
             "point= or box= instead.")
 
+    _require_numpy()
     for t in wanted:
         if t == "sam" and (point is not None or box is not None):
             res = _sam_mask(image, point=point, box=box)

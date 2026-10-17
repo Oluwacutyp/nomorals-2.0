@@ -27,7 +27,35 @@ import tempfile
 from pathlib import Path
 from shutil import which
 
-from PIL import Image, ImageFilter
+try:
+    from PIL import Image, ImageFilter
+except ImportError:
+    Image = None; ImageFilter = None  # type: ignore[assignment]
+
+PIL_AVAILABLE = Image is not None
+
+
+def _require_pil() -> None:
+    if Image is None:
+        raise RuntimeError(
+            "nomorals.media.directed.filler is unavailable: Pillow is not installed "
+            "(pip install Pillow)")
+
+import importlib.util as _importlib_util
+
+try:
+    NUMPY_AVAILABLE = _importlib_util.find_spec("numpy") is not None
+except ImportError:
+    # a meta-path blocker (or a broken install) raises instead of None
+    NUMPY_AVAILABLE = False
+
+
+def _require_numpy() -> None:
+    if not NUMPY_AVAILABLE:
+        raise RuntimeError(
+            "nomorals.media.directed.filler is unavailable: numpy is not installed "
+            "(pip install numpy)")
+
 
 from ...core.logging_setup import get_logger
 
@@ -54,7 +82,10 @@ def _ease(t: float) -> float:
 
 
 def _numpy_available() -> bool:
-    return importlib.util.find_spec("numpy") is not None
+    try:
+        return importlib.util.find_spec("numpy") is not None
+    except ImportError:
+        return False
 
 
 def _rife_available() -> bool:
@@ -63,8 +94,11 @@ def _rife_available() -> bool:
     Either the ``rife-ncnn-vulkan`` binary (nihui's ncnn build — the
     standard CPU/GPU route) or a pip ``rife`` package.
     """
-    return bool(which("rife-ncnn-vulkan")) or \
-        importlib.util.find_spec("rife") is not None
+    try:
+        has_rife_pkg = importlib.util.find_spec("rife") is not None
+    except ImportError:
+        has_rife_pkg = False
+    return bool(which("rife-ncnn-vulkan")) or has_rife_pkg
 
 
 def interpolation_backend() -> str:
@@ -149,6 +183,7 @@ def _rife_bridge(a: Image.Image, b: Image.Image, n: int) -> list[Image.Image]:
         check=True, capture_output=True, timeout=60)
     got = steps  # mids produced by this one pass
     frames = []
+    _require_pil()
     for i in range(1, n + 1):
         idx = min(got, max(1, round(i * (got + 1) / (n + 1))))
         img = Image.open(wd / f"o_{idx:03d}.png").convert("RGB")
@@ -169,6 +204,7 @@ def _phase_shift(a: "np.ndarray", b: "np.ndarray") -> tuple[float, float]:
     shift (worse than standing still) degrades to (0, 0), i.e. a
     plain blend.
     """
+    _require_numpy()
     import numpy as np
     fa = np.fft.fft2(a.astype(np.float64))
     fb = np.fft.fft2(b.astype(np.float64))
@@ -189,8 +225,10 @@ def _phase_shift(a: "np.ndarray", b: "np.ndarray") -> tuple[float, float]:
         # (unlike np.roll), so a wrapped-equivalent shift scores badly
         # here — exactly the tie-break we need.
         sx, sy = shift
+        _require_pil()
         moved = Image.fromarray(b).transform(
             (w, h), Image.AFFINE, (1, 0, sx, 0, 1, sy), Image.BICUBIC)
+        _require_numpy()
         diff = a.astype(np.float64) - np.asarray(moved, dtype=np.float64)
         return float((diff ** 2).mean())
 
@@ -214,6 +252,7 @@ def _motion_compensated_frames(a: Image.Image, b: Image.Image,
     a crossfade would ghost; on static frames it degenerates to a plain
     blend — exactly what it should.
     """
+    _require_numpy()
     import numpy as np
     size = a.size
     small = 64
@@ -223,6 +262,7 @@ def _motion_compensated_frames(a: Image.Image, b: Image.Image,
     sx = dx * size[0] / small
     sy = dy * size[1] / small
     out = []
+    _require_pil()
     for i in range(1, n + 1):
         t = i / (n + 1)
         # warp a forward by t*shift, b backward by (1-t)*shift, blend
@@ -243,6 +283,7 @@ def _morph_blend_frames(a: Image.Image, b: Image.Image,
     """
     size = a.size
     out = []
+    _require_pil()
     for i in range(1, n + 1):
         t = _ease(i / (n + 1))
         # scale drift: zoom 1.0 -> 1.04 across the bridge for motion feel
@@ -323,6 +364,7 @@ def fill_video_gap(video: str, t0: float, t1: float, fps: int = 24, *,
              "-ss", str(t), "-i", video, "-frames:v", "1",
              str(wd / f"b{i}.png")],
             check=True, capture_output=True, timeout=120)
+    _require_pil()
     before = Image.open(wd / "b0.png")
     after = Image.open(wd / "b1.png")
     n = max(1, int((t1 - t0) * fps))

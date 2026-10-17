@@ -8,7 +8,19 @@ tested, so keeping it small is the point.
 
 from __future__ import annotations
 
-import curses
+try:
+    import curses
+except ImportError:
+    curses = None  # type: ignore[assignment]
+
+CURSES_AVAILABLE = curses is not None
+
+
+def _require_curses() -> None:
+    if curses is None:
+        raise RuntimeError(
+            "TUI is unavailable: curses is not installed "
+            "(on Windows: pip install windows-curses)")
 import threading
 from typing import Any, Callable
 
@@ -244,6 +256,7 @@ class TuiApp:
             self.state.set_idle()
 
     def _viewport_height(self) -> int:
+        _require_curses()
         if self._screen is None:
             return 20
         return max(3, curses.LINES - 2)
@@ -251,6 +264,7 @@ class TuiApp:
     # ── drawing ──────────────────────────────────────────────────────────────
 
     def draw(self) -> None:
+        _require_curses()
         if self._screen is None:
             return
         height, width = self._screen.getmaxyx()
@@ -283,6 +297,7 @@ class TuiApp:
     # ── loop ─────────────────────────────────────────────────────────────────
 
     def run(self, screen: Any) -> None:
+        _require_curses()
         self._screen = screen
         self._running = True
         curses.curs_set(1)
@@ -322,6 +337,7 @@ class TuiApp:
 
 
 def _color_for(kind: str, theme: dict[str, int] | None = None) -> int:
+    _require_curses()
     if theme and kind in theme:
         return theme[kind]
     return {
@@ -341,7 +357,7 @@ _KEY_NAMES = {
     curses.KEY_BACKSPACE: "\x08", curses.KEY_DC: "\x1b[3~",
     curses.KEY_PPAGE: "u", curses.KEY_NPAGE: "d",
     curses.KEY_F1: "?",
-}
+} if curses is not None else {}
 
 
 def _key_name(code: int) -> str:
@@ -357,6 +373,7 @@ def run(
     theme: dict[str, int] | None = None,
 ) -> int:
     """Start the TUI. Returns 0 on clean exit."""
+    _require_curses()
     app = TuiApp(context, on_submit=on_submit, history_path=history_path, theme=theme)
     try:
         curses.wrapper(app.run)

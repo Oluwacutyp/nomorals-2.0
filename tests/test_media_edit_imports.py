@@ -4,9 +4,10 @@ Regression test for the ``cv_ops`` hard PIL import: the package ``__init__``
 imported ``cv_ops`` unguarded while ``cv_ops`` does ``from PIL import ...``
 at module top level — so ``import nomorals.media_edit`` crashed on a bare
 box without Pillow, violating the zero-mandatory-deps promise
-(``pyproject.toml`` declares ``dependencies = []``).  The import now degrades
-like ``cv_video``: the package loads, and touching ``cv_ops`` raises the
-original helpful ImportError.
+(``pyproject.toml`` declares ``dependencies = []``).  The import now
+degrades like ``cv_video``: the package loads, ``cv_ops`` loads,
+``backend_status()["pillow"]`` is False, and touching an op raises an
+honest ``MediaEditError`` naming Pillow.
 """
 
 from __future__ import annotations
@@ -38,17 +39,24 @@ class MediaEditImportTests(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stderr[-2000:])
         self.assertIn("import ok", proc.stdout)
 
-    def test_cv_ops_access_raises_import_error_without_pillow(self):
+    def test_cv_ops_imports_without_pillow_and_reports_it(self):
+        # New contract: cv_ops imports fine without Pillow, reports
+        # pillow: False, and any op raises an honest MediaEditError.
         proc = self._run(
-            "import nomorals.media_edit as me\n"
+            "from nomorals.media_edit import cv_ops as C\n"
+            "print('pillow:', C.backend_status()['pillow'])\n"
             "try:\n"
-            "    me.cv_ops\n"
+            "    C.denoise(None)\n"
             "    print('NO ERROR - BUG')\n"
-            "except ImportError as exc:\n"
-            "    print('ImportError ok:', exc)\n"
+            "except Exception as exc:\n"
+            "    print('error type:', type(exc).__name__)\n"
+            "    print('error:', exc)\n"
         )
         self.assertEqual(proc.returncode, 0, proc.stderr[-2000:])
-        self.assertIn("ImportError ok", proc.stdout)
+        self.assertIn("pillow: False", proc.stdout)
+        self.assertIn("MediaEditError", proc.stdout)
+        self.assertIn("unavailable", proc.stdout)
+        self.assertIn("Pillow", proc.stdout)
 
     def test_cv_video_names_still_degrade(self):
         # The pre-existing cv_video guard keeps working alongside the fix.

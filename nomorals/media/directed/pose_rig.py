@@ -31,8 +31,34 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
-import numpy as np
-from PIL import Image, ImageDraw
+try:
+    import numpy as np
+except ImportError:
+    np = None  # type: ignore[assignment]
+
+NUMPY_AVAILABLE = np is not None
+
+
+def _require_numpy() -> None:
+    if np is None:
+        raise RuntimeError(
+            "nomorals.media.directed.pose_rig is unavailable: numpy is not installed "
+            "(pip install numpy)")
+
+try:
+    from PIL import Image, ImageDraw
+except ImportError:
+    Image = None; ImageDraw = None  # type: ignore[assignment]
+
+PIL_AVAILABLE = Image is not None
+
+
+def _require_pil() -> None:
+    if Image is None:
+        raise RuntimeError(
+            "nomorals.media.directed.pose_rig is unavailable: Pillow is not installed "
+            "(pip install Pillow)")
+
 
 # ── keypoint layout ──────────────────────────────────────────────────
 # Body: COCO-18. Hands: MediaPipe 21-pt order each.
@@ -76,6 +102,7 @@ HAND_LIMBS = [
 
 def rest_pose() -> np.ndarray:
     """Default frontal rest pose, normalized [0,1]. Person centered."""
+    _require_numpy()
     kp = np.zeros((N_KP, 2), dtype=np.float64)
     body = {
         "nose": (0.50, 0.16), "neck": (0.50, 0.23),
@@ -180,6 +207,7 @@ def render_fingers(wrist: np.ndarray, size: float,
     state: finger -> (mcp_flex, pip_flex, dip_flex, abduct). Deterministic —
     no randomness, so frames don't jitter during blends.
     """
+    _require_numpy()
     pts = np.zeros((N_HAND, 2))
     pts[0] = wrist
     for f in FINGERS:
@@ -258,6 +286,7 @@ def _knuckle(wrist: np.ndarray, finger: str, size: float,
              spread: float, abduct: float) -> tuple[np.ndarray, float]:
     """Knuckle (MCP) position + base direction angle, matching render_fingers."""
     base = -math.pi / 2 + (_FINGER_BASE_ANG[finger] + abduct * 0.35) * spread
+    _require_numpy()
     k = np.array([wrist[0] + math.cos(base) * size * _KNUCKLE_DIST,
                   wrist[1] + math.sin(base) * size * _KNUCKLE_DIST])
     return k, base
@@ -273,6 +302,7 @@ def _tip_fk(wrist: np.ndarray, finger: str, size: float,
     k, base = _knuckle(wrist, finger, size, spread, abduct)
     curl = 0.0
     p = k.copy()
+    _require_numpy()
     for fl, mx, s in zip((mcp_f, pip_f, dip_f), maxes, segs):
         curl += fl * mx
         ang = base + curl
@@ -295,6 +325,7 @@ def finger_ik(wrist: np.ndarray, finger: str,
     """
     if finger not in FINGERS:
         raise ValueError(f"unknown finger {finger!r}; pick from {FINGERS}")
+    _require_numpy()
     wrist = np.asarray(wrist, dtype=float)
     target = np.asarray(target, dtype=float)
     k, base = _knuckle(wrist, finger, size, spread, abduct)
@@ -342,6 +373,7 @@ def finger_ik(wrist: np.ndarray, finger: str,
         t0 = base + qv[0] * mcp_max
         t1 = t0 + qv[1] * pip_max
         t2 = t1 + min(1.0, qv[1] * _DIP_COUPLING) * dip_max
+        _require_numpy()
         tip = (k + s1 * np.array([math.cos(t0), math.sin(t0)])
                + s2 * np.array([math.cos(t1), math.sin(t1)])
                + s3 * np.array([math.cos(t2), math.sin(t2)]))
@@ -408,7 +440,10 @@ class PoseTrack:
 
 
 # ── action programs: t in [0,1] → keypoints ─────────────────────────
-ActionFn = Callable[[np.ndarray, float], np.ndarray]
+if NUMPY_AVAILABLE:
+    ActionFn = Callable[[np.ndarray, float], np.ndarray]
+else:  # numpy missing: string forward refs, never evaluated
+    ActionFn = Callable[["np.ndarray", float], "np.ndarray"]
 
 
 def _act_raise_two_fingers(base: np.ndarray, t: float) -> np.ndarray:
@@ -417,6 +452,7 @@ def _act_raise_two_fingers(base: np.ndarray, t: float) -> np.ndarray:
     p2 = _phase(t, 0.30, 0.70)   # fingers extend
     hold = _phase(t, 0.70, 1.0)
     # right arm arcs up-out
+    _require_numpy()
     kp[3] = base[3] + np.array([0.03, -0.10]) * p1          # r_elbow
     wrist = base[4] + np.array([0.10, -0.30]) * p1          # r_wrist
     wrist = wrist + np.array([0.0, -0.012 * math.sin(hold * math.pi * 2)]) * hold
@@ -430,6 +466,7 @@ def _act_raise_two_fingers(base: np.ndarray, t: float) -> np.ndarray:
 def _act_wave(base: np.ndarray, t: float) -> np.ndarray:
     kp = base.copy()
     p1 = _phase(t, 0.0, 0.35)
+    _require_numpy()
     wrist = base[4] + np.array([0.06, -0.34]) * p1
     sway = math.sin(t * math.pi * 6) * 0.035 * p1 * _phase(t, 0.35, 1.0)
     wrist = wrist + np.array([sway, 0.0])
@@ -443,6 +480,7 @@ def _act_thumbs_up(base: np.ndarray, t: float) -> np.ndarray:
     kp = base.copy()
     p1 = _phase(t, 0.0, 0.45)
     p2 = _phase(t, 0.35, 0.70)
+    _require_numpy()
     wrist = base[4] + np.array([0.02, -0.22]) * p1
     kp[3] = base[3] + np.array([0.01, -0.08]) * p1
     kp[4] = wrist
@@ -454,6 +492,7 @@ def _act_point(base: np.ndarray, t: float) -> np.ndarray:
     kp = base.copy()
     p1 = _phase(t, 0.0, 0.45)
     p2 = _phase(t, 0.35, 0.70)
+    _require_numpy()
     wrist = base[4] + np.array([0.10, -0.26]) * p1
     kp[2] = base[2] + np.array([0.02, -0.04]) * p1
     kp[3] = base[3] + np.array([0.06, -0.16]) * p1
@@ -465,6 +504,7 @@ def _act_point(base: np.ndarray, t: float) -> np.ndarray:
 def _act_nod(base: np.ndarray, t: float) -> np.ndarray:
     kp = base.copy()
     amp = 0.018 * math.sin(t * math.pi * 4) * _phase(t, 0.1, 0.9)
+    _require_numpy()
     for i in (0, 14, 15, 16, 17):
         kp[i] = base[i] + np.array([0.0, amp])
     return kp
@@ -473,6 +513,7 @@ def _act_nod(base: np.ndarray, t: float) -> np.ndarray:
 def _act_shake_head(base: np.ndarray, t: float) -> np.ndarray:
     kp = base.copy()
     amp = 0.022 * math.sin(t * math.pi * 4) * _phase(t, 0.1, 0.9)
+    _require_numpy()
     for i in (0, 14, 15, 16, 17):
         kp[i] = base[i] + np.array([amp, 0.0])
     return kp
@@ -481,6 +522,7 @@ def _act_shake_head(base: np.ndarray, t: float) -> np.ndarray:
 def _act_raise_hand(base: np.ndarray, t: float) -> np.ndarray:
     kp = base.copy()
     p1 = _phase(t, 0.0, 0.5)
+    _require_numpy()
     wrist = base[4] + np.array([0.04, -0.36]) * p1
     kp[3] = base[3] + np.array([0.02, -0.14]) * p1
     kp[4] = wrist
@@ -540,6 +582,7 @@ def build_track(action: str, *, n_frames: int = 40, fps: float = 10.0,
     if fn is None:
         raise ValueError(f"unknown action {action!r}; see list_actions()")
     b = rest_pose() if base is None else base
+    _require_numpy()
     frames = np.stack([fn(b, i / max(1, n_frames - 1))
                        for i in range(n_frames)])
     return PoseTrack(frames=frames, fps=fps, action=action,
@@ -562,6 +605,7 @@ def retarget(track: PoseTrack, detected: np.ndarray) -> PoseTrack:
     for f in track.frames:
         moved = rest + (f - rest) * s + delta
         new_frames.append(moved)
+    _require_numpy()
     return PoseTrack(frames=np.stack(new_frames), fps=track.fps,
                      action=track.action, width=track.width,
                      height=track.height)
@@ -581,6 +625,8 @@ def render_pose_video(track: PoseTrack, out_path: str) -> str:
     """Render the skeleton pose video (black bg, colored limbs)."""
     W, H = track.width, track.height
     tmp = Path(tempfile.mkdtemp(prefix="posevid_"))
+    _require_pil()
+    _require_numpy()
     for i, kp in enumerate(track.frames):
         img = Image.new("RGB", (W, H), (0, 0, 0))
         d = ImageDraw.Draw(img)

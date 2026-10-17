@@ -8,8 +8,34 @@ the smooth interpolation of their surroundings. Good for small regions
 
 from __future__ import annotations
 
-import numpy as np
-from PIL import Image
+try:
+    import numpy as np
+except ImportError:
+    np = None  # type: ignore[assignment]
+
+NUMPY_AVAILABLE = np is not None
+
+
+def _require_numpy() -> None:
+    if np is None:
+        raise RuntimeError(
+            "nomorals.media.cv_ops is unavailable: numpy is not installed "
+            "(pip install numpy)")
+
+try:
+    from PIL import Image
+except ImportError:
+    Image = None  # type: ignore[assignment]
+
+PIL_AVAILABLE = Image is not None
+
+
+def _require_pil() -> None:
+    if Image is None:
+        raise RuntimeError(
+            "nomorals.media.cv_ops is unavailable: Pillow is not installed "
+            "(pip install Pillow)")
+
 
 
 def inpaint_diffuse(image: Image.Image, mask: Image.Image,
@@ -20,7 +46,9 @@ def inpaint_diffuse(image: Image.Image, mask: Image.Image,
     # work at most at 256px on the long side for speed
     scale = min(1.0, 256 / max(w, h))
     sw, sh = max(1, int(w * scale)), max(1, int(h * scale))
+    _require_pil()
     small = img.resize((sw, sh), Image.BICUBIC)
+    _require_numpy()
     m = np.array(mask.resize((sw, sh), Image.BICUBIC).convert("L")) > 127
     if not m.any():
         return img.copy()
@@ -45,5 +73,6 @@ def inpaint_diffuse(image: Image.Image, mask: Image.Image,
 
 
 def feather(mask: Image.Image, radius: int = 8) -> Image.Image:
+    _require_pil()
     from PIL import ImageFilter
     return mask.convert("L").filter(ImageFilter.GaussianBlur(radius))

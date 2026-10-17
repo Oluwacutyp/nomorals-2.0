@@ -45,7 +45,20 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, field
 
-import numpy as np
+try:
+    import numpy as np
+except ImportError:
+    np = None  # type: ignore[assignment]
+
+NUMPY_AVAILABLE = np is not None
+
+
+def _require_numpy() -> None:
+    if np is None:
+        raise ImgGenError(
+            "nomorals.media.imggen.diffusion is unavailable: numpy is not installed "
+            "(pip install numpy)")
+
 
 from . import ImgGenError
 
@@ -64,6 +77,7 @@ def linear_beta_schedule(timesteps: int,
     """Ho et al.'s linear schedule: beta_1=1e-4 ... beta_T=2e-2, T=1000."""
     if timesteps < 1:
         raise ImgGenError("timesteps must be >= 1")
+    _require_numpy()
     return np.linspace(beta_start, beta_end, timesteps, dtype=np.float64)
 
 
@@ -76,6 +90,7 @@ def cosine_beta_schedule(timesteps: int, s: float = 0.008) -> np.ndarray:
     """
     if timesteps < 1:
         raise ImgGenError("timesteps must be >= 1")
+    _require_numpy()
     steps = np.arange(timesteps + 1, dtype=np.float64)
     alphas_cumprod = np.cos(((steps / timesteps) + s) / (1 + s)
                             * math.pi / 2) ** 2
@@ -101,6 +116,7 @@ class BetaSchedule:
     sqrt_one_minus_alphas_cumprod: np.ndarray = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
+        _require_numpy()
         betas = np.asarray(self.betas, dtype=np.float64)
         if betas.shape != (self.timesteps,):
             raise ImgGenError(
@@ -120,10 +136,12 @@ class _NumpyOps:
 
     @staticmethod
     def randn_like(x: np.ndarray) -> np.ndarray:
+        _require_numpy()
         return np.random.randn(*x.shape).astype(x.dtype)
 
     @staticmethod
     def sqrt(x):  # passthrough; values already numpy
+        _require_numpy()
         return np.sqrt(x)
 
 
@@ -138,6 +156,7 @@ def _as_numpy(x):
             return x.detach().cpu().numpy(), True
     except ImportError:
         pass
+    _require_numpy()
     return np.asarray(x), False
 
 
@@ -167,6 +186,7 @@ class DDPMScheduler:
         sqrt_ab = s.sqrt_alphas_cumprod[t]
         sqrt_om = s.sqrt_one_minus_alphas_cumprod[t]
         arr, is_torch = _as_numpy(x0)
+        _require_numpy()
         if noise is None:
             if is_torch:
                 import torch
@@ -202,6 +222,7 @@ class DDPMScheduler:
         eps_a, _ = _as_numpy(eps)
 
         # Predicted x_0 from the noise estimate.
+        _require_numpy()
         x0_pred = ((arr - np.sqrt(1.0 - a_bar_t) * eps_a)
                    / np.sqrt(a_bar_t))
         # DDIM-style sigma; eta=1 matches DDPM's posterior variance.
@@ -228,6 +249,7 @@ class DDPMScheduler:
                eta: float = 0.0, seed: int | None = None):
         """Full reverse chain from pure noise. Returns array/tensor of
         ``shape`` matching the framework of the model's output."""
+        _require_numpy()
         rng = np.random.default_rng(seed)
         xt = rng.standard_normal(shape).astype(np.float64)
         ts = (list(range(self.timesteps - 1, -1, -1)) if steps is None

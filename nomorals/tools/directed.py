@@ -43,23 +43,33 @@ def register(registry: Any) -> None:
     def animate_photo(image: str, action: str, *, camera: str = "",
                       duration_s: float = 4.0,
                       workdir: str | None = None) -> dict[str, Any]:
-        from ..media.directed.motion_score import generate_track
-        from ..media.directed.animator import direct_animate, ModelUnavailable
+        try:
+            from ..media.directed.motion_score import generate_track
+            from ..media.directed.animator import (direct_animate,
+                                                   ModelUnavailable)
+        except ImportError as exc:
+            return {"ok": False,
+                    "error": f"directed animation unavailable: {exc}"}
         n_frames = max(8, int(duration_s * 10))
         try:
             track, meta = generate_track(
                 action, suggest=_suggest, n_frames=n_frames, fps=10.0)
-        except (ValueError, RuntimeError) as exc:
+        except (ValueError, RuntimeError, ImportError) as exc:
             return {"ok": False, "error": str(exc)}
         try:
             res = direct_animate(image, track, workdir=workdir)
-        except ModelUnavailable as exc:
+        except (ModelUnavailable, ImportError) as exc:
             return {"ok": False, "error": str(exc)}
         path, backend, note = res.path, res.backend, res.note
         if meta.get("notes"):
             note += " | direction notes: " + "; ".join(meta["notes"][:3])
         if camera:
-            from ..media.directed.camera import camera_look_video, LOOKS
+            try:
+                from ..media.directed.camera import (camera_look_video,
+                                                     LOOKS)
+            except ImportError as exc:
+                return {"ok": False,
+                        "error": f"camera looks unavailable: {exc}"}
             if camera not in LOOKS:
                 return {"ok": False,
                         "error": f"unknown camera look {camera!r}",
@@ -85,7 +95,11 @@ def register(registry: Any) -> None:
     )
     def camera_look(video: str, look: str, *,
                     out_path: str = "") -> dict[str, Any]:
-        from ..media.directed.camera import camera_look_video, LOOKS
+        try:
+            from ..media.directed.camera import camera_look_video, LOOKS
+        except ImportError as exc:
+            return {"ok": False,
+                    "error": f"camera looks unavailable: {exc}"}
         if look not in LOOKS:
             return {"ok": False, "error": f"unknown look {look!r}",
                     "looks": LOOKS}
@@ -105,7 +119,11 @@ def register(registry: Any) -> None:
         capability=Capability.MEDIA,
     )
     def list_actions() -> dict[str, Any]:
-        from ..media.directed.pose_rig import list_actions as _la
+        try:
+            from ..media.directed.pose_rig import list_actions as _la
+        except ImportError as exc:
+            return {"ok": False,
+                    "error": f"directed actions unavailable: {exc}"}
         return {"ok": True, "preset_examples": _la(),
                 "note": "presets are instant and offline; describe ANY "
                         "action and the brain directs it"}
@@ -154,9 +172,9 @@ def register(registry: Any) -> None:
                    direction: str = "left",
                    warmth: float = 0.0,
                    width: int = 0, height: int = 0) -> dict[str, Any]:
-        from PIL import Image as _I
-        from ..media.directed import ai_edit as _ae
         try:
+            from PIL import Image as _I
+            from ..media.directed import ai_edit as _ae
             img = _I.open(image).convert("RGB")
             mask = _I.open(mask_path).convert("L") if mask_path else None
             o = (op or "").lower().strip()
@@ -207,9 +225,8 @@ def register(registry: Any) -> None:
             import tempfile as _t
             out_path = str(_P(_t.mkdtemp(prefix="edit_")) / f"{o}.png")
             out.save(out_path)
-        except _ae.ModelUnavailable as exc:
-            return {"ok": False, "error": str(exc)}
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001 - includes ImportError
+            # and ModelUnavailable (both surface as an honest error)
             return {"ok": False, "error": str(exc)}
         return {"ok": True, "path": out_path, "op": o,
                 "backend": backend}
@@ -228,8 +245,8 @@ def register(registry: Any) -> None:
                    t0: float = 0.0, t1: float = 0.0,
                    width: int = 0, height: int = 0,
                    prompt: str = "") -> dict[str, Any]:
-        from ..media.directed import filler as _f
         try:
+            from ..media.directed import filler as _f
             k = (kind or "").lower().strip()
             if k == "extend_bg":
                 from PIL import Image as _I
@@ -257,9 +274,10 @@ def register(registry: Any) -> None:
     )
     def direct_to_timeline(shot_path: str, timeline_path: str, *,
                            at: int = -1) -> dict[str, Any]:
-        from ..media.genedit import shot_to_timeline, GenShot
-        shot = GenShot(path=shot_path, mode="directed", backend="directed")
         try:
+            from ..media.genedit import shot_to_timeline, GenShot
+            shot = GenShot(path=shot_path, mode="directed",
+                           backend="directed")
             path = shot_to_timeline(shot, timeline_path, at=at)
         except Exception as exc:  # noqa: BLE001
             return {"ok": False, "error": str(exc)}
@@ -283,15 +301,14 @@ def register(registry: Any) -> None:
     def lip_sync(video: str, audio: str, *,
                  face_box: list[float] | None = None,
                  prefer: str = "auto") -> dict[str, Any]:
-        from ..media.directed.lipsync import (
-            lip_sync as _ls, ModelUnavailable)
         try:
+            from ..media.directed.lipsync import (
+                lip_sync as _ls, ModelUnavailable)
             res = _ls(video, audio,
                       face_box=tuple(face_box) if face_box else None,
                       prefer=prefer)
-        except ModelUnavailable as exc:
-            return {"ok": False, "error": str(exc)}
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001 - includes ImportError
+            # and ModelUnavailable (both surface as an honest error)
             return {"ok": False, "error": str(exc)}
         return {"ok": True, "path": res.path, "backend": res.backend,
                 "note": res.note}
@@ -307,14 +324,18 @@ def register(registry: Any) -> None:
         capability=Capability.MEDIA,
     )
     def direct_action(action: str) -> dict[str, Any]:
-        from ..media.directed.motion_score import generate_motion_score
-        from ..media.directed.pose_rig import resolve_action
+        try:
+            from ..media.directed.motion_score import generate_motion_score
+            from ..media.directed.pose_rig import resolve_action
+        except ImportError as exc:
+            return {"ok": False,
+                    "error": f"directed actions unavailable: {exc}"}
         if resolve_action(action) is not None:
             return {"ok": True, "source": "preset",
                     "note": "preset action — parametric, instant, offline"}
         try:
             score = generate_motion_score(action, _suggest)
-        except (ValueError, RuntimeError) as exc:
+        except (ValueError, RuntimeError, ImportError) as exc:
             return {"ok": False, "error": str(exc)}
         return {"ok": True, "source": "generated", "score": score}
 
@@ -329,13 +350,12 @@ def register(registry: Any) -> None:
         capability=Capability.MEDIA,
     )
     def talk_photo(image: str, audio: str) -> dict[str, Any]:
-        from ..media.directed.lipsync import (
-            sadtaker_animate, ModelUnavailable)
         try:
+            from ..media.directed.lipsync import (
+                sadtaker_animate, ModelUnavailable)
             res = sadtaker_animate(image, audio)
-        except ModelUnavailable as exc:
-            return {"ok": False, "error": str(exc)}
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001 - includes ImportError
+            # and ModelUnavailable (both surface as an honest error)
             return {"ok": False, "error": str(exc)}
         return {"ok": True, "path": res.path, "backend": res.backend,
                 "note": res.note}
@@ -353,15 +373,14 @@ def register(registry: Any) -> None:
     def dub_video(video: str, translated_text: str, voice: str, *,
                   face_box: list[float] | None = None,
                   prefer: str = "auto") -> dict[str, Any]:
-        from ..media.directed.lipsync import (
-            dub_video as _dub, ModelUnavailable)
         try:
+            from ..media.directed.lipsync import (
+                dub_video as _dub, ModelUnavailable)
             res = _dub(video, translated_text, voice,
                        face_box=tuple(face_box) if face_box else None,
                        prefer=prefer)
-        except ModelUnavailable as exc:
-            return {"ok": False, "error": str(exc)}
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001 - includes ImportError
+            # and ModelUnavailable (both surface as an honest error)
             return {"ok": False, "error": str(exc)}
         return {"ok": True, "path": res.path, "backend": res.backend,
                 "note": res.note}

@@ -240,7 +240,12 @@ def _cmd_studio(args: argparse.Namespace, context: Any) -> int:
                 ops=[{"op": "panorama", "images": list(args.images),
                       "mode": args.mode}])
         elif action == "backends":
-            from ...media_edit.cv_ops import backend_status
+            try:
+                from ...media_edit.cv_ops import backend_status
+            except ImportError as exc:
+                print(f"media-edit backends unavailable: {exc}",
+                      file=sys.stderr)
+                return 1
             result = backend_status()
             if as_json:
                 print(json.dumps(result, indent=2, default=str))

@@ -20,7 +20,12 @@ def _cmd_tui(args: argparse.Namespace, context: Any) -> int:
         _dispatch_tui_command(context, state, text)
 
     app = TuiApp(context, state=state, on_submit=on_submit)
-    import curses
+    try:
+        import curses
+    except ImportError:
+        print("TUI unavailable: curses is not installed "
+              "(on Windows: pip install windows-curses)", file=sys.stderr)
+        return 1
 
     try:
         curses.wrapper(app.run)

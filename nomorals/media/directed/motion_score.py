@@ -27,7 +27,20 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
-import numpy as np
+try:
+    import numpy as np
+except ImportError:
+    np = None  # type: ignore[assignment]
+
+NUMPY_AVAILABLE = np is not None
+
+
+def _require_numpy() -> None:
+    if np is None:
+        raise RuntimeError(
+            "nomorals.media.directed.motion_score is unavailable: numpy is not installed "
+            "(pip install numpy)")
+
 
 from .pose_rig import (
     BODY_NAMES, N_KP, R_HAND, L_HAND, PoseTrack, rest_pose,
@@ -515,6 +528,7 @@ def _two_bone_ik(hip: np.ndarray, target: np.ndarray,
     derived from the rest pose). Returns the knee position.
     """
     d = target - hip
+    _require_numpy()
     dist = float(np.linalg.norm(d))
     dc = min(max(dist, abs(l1 - l2) * 1.001 + 1e-9), (l1 + l2) * 0.999)
     u = d / (dist + 1e-9)
@@ -532,6 +546,7 @@ def _knee_pole(base: np.ndarray, hip: str, knee: str,
     h, k, an = (base[_BODY_IDX[hip]], base[_BODY_IDX[knee]],
                 base[_BODY_IDX[ankle]])
     d = an - h
+    _require_numpy()
     dist = float(np.linalg.norm(d)) + 1e-9
     u = d / dist
     proj = h + u * float(np.dot(k - h, u))
@@ -579,6 +594,7 @@ def compile_score(score: dict[str, Any], *, n_frames: int = 40,
         "right": {"fingers": finger_state_from_pose("fist"), "spread": 1.0},
         "left": {"fingers": finger_state_from_pose("fist"), "spread": 1.0},
     }
+    _require_numpy()
     root_pos = np.zeros(2)
     root_scale = 1.0
     # foot planting: side -> planted ankle world position (or None)
@@ -586,6 +602,7 @@ def compile_score(score: dict[str, Any], *, n_frames: int = 40,
     prev_plant_spec: dict[str, bool] = {"left": False, "right": False}
 
     def _seg(a: str, c: str) -> float:
+        _require_numpy()
         return float(np.linalg.norm(b[_BODY_IDX[c]] - b[_BODY_IDX[a]]))
 
     leg_len = {
@@ -828,6 +845,7 @@ _BODY_SEGMENTS = [
 def _guard_stretch(kp: np.ndarray, rest: np.ndarray) -> tuple[np.ndarray, list[str]]:
     """Pull overstretched limb segments back toward rest length."""
     notes: list[str] = []
+    _require_numpy()
     for a, b in _BODY_SEGMENTS:
         ia, ib = _BODY_IDX[a], _BODY_IDX[b]
         rest_len = float(np.linalg.norm(rest[ib] - rest[ia])) + 1e-9

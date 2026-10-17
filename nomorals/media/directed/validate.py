@@ -20,7 +20,20 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-import numpy as np
+try:
+    import numpy as np
+except ImportError:
+    np = None  # type: ignore[assignment]
+
+NUMPY_AVAILABLE = np is not None
+
+
+def _require_numpy() -> None:
+    if np is None:
+        raise RuntimeError(
+            "nomorals.media.directed.validate is unavailable: numpy is not installed "
+            "(pip install numpy)")
+
 
 from .motion_score import _BODY_IDX, _MAX_TRAVEL, _parse_phase, HAND_POSES, EASE_FUNCS
 from .pose_rig import BODY_NAMES, FINGERS, PoseTrack, rest_pose
@@ -74,6 +87,7 @@ def validate_score(score: dict) -> ValidationReport:
     prev_t1: float | None = None
     seen_windows: list[tuple[float, float, str]] = []
 
+    _require_numpy()
     for pi, praw in enumerate(phases):
         tag = f"phase[{pi}]"
         if not isinstance(praw, dict):
@@ -174,6 +188,7 @@ def _check_root_move(rm, mtag: str, dur: float, rep: ValidationReport) -> None:
             or not all(_is_num(v) for v in to)):
         rep.deduct(6, f"{mtag}: bad root target {to!r}", error=True)
         return
+    _require_numpy()
     mag = float(np.hypot(to[0], to[1]))
     if mag > 0.35:
         rep.deduct(8, f"{mtag}: root travel {mag:.2f} > 0.35/phase "
@@ -240,6 +255,7 @@ def validate_track(track: PoseTrack, score: dict) -> ValidationReport:
     """
     rep = ValidationReport()
     fr = track.frames
+    _require_numpy()
     if not np.all(np.isfinite(fr)):
         rep.deduct(30, "track contains NaN/inf keypoints", error=True)
         return rep

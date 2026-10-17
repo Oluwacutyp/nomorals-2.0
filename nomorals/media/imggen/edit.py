@@ -40,6 +40,31 @@ __all__ = [
 # here so edit.py is the single entry point for all editing ops.
 from .masks import auto_mask  # noqa: E402
 
+import importlib.util as _importlib_util
+
+try:
+    PIL_AVAILABLE = _importlib_util.find_spec("PIL") is not None
+except ImportError:
+    PIL_AVAILABLE = False
+try:
+    NUMPY_AVAILABLE = _importlib_util.find_spec("numpy") is not None
+except ImportError:
+    NUMPY_AVAILABLE = False
+
+
+def _require_pil() -> None:
+    if not PIL_AVAILABLE:
+        raise ImgGenError(
+            "nomorals.media.imggen.edit is unavailable: Pillow is not installed "
+            "(pip install Pillow)")
+
+
+def _require_numpy() -> None:
+    if not NUMPY_AVAILABLE:
+        raise ImgGenError(
+            "nomorals.media.imggen.edit is unavailable: numpy is not installed "
+            "(pip install numpy)")
+
 
 def _need_torch() -> None:
     if not TORCH_AVAILABLE:
@@ -52,9 +77,11 @@ def _need_torch() -> None:
 def _pil_to_tensor(img, size: tuple[int, int], device: str):
     """PIL → normalized torch tensor. Torch-only; call after _need_torch."""
     import torch
+    _require_pil()
     from PIL import Image
 
     img = img.convert("RGB").resize(size, Image.BILINEAR)
+    _require_numpy()
     import numpy as np
 
     arr = np.asarray(img).astype("float32") / 127.5 - 1.0
@@ -63,6 +90,7 @@ def _pil_to_tensor(img, size: tuple[int, int], device: str):
 
 def feather_mask(mask, radius: int = 8):
     """Gaussian-feather a binary/L mask to hide inpaint seams."""
+    _require_pil()
     from PIL import ImageFilter
 
     m = mask.convert("L")
@@ -135,6 +163,7 @@ def img2img(pipeline, image, prompt: str,
             f"got {strength!r}")
     _need_torch()
     import torch
+    _require_pil()
     from PIL import Image
 
     from .pipeline import PipelineConfig
@@ -164,6 +193,7 @@ def img2img(pipeline, image, prompt: str,
     if cfg.seed is not None:
         g.manual_seed(cfg.seed)
 
+    _require_numpy()
     if cfg.sampler == "ddim":
         import numpy as np
 
@@ -201,6 +231,7 @@ def inpaint(pipeline, image, mask, prompt: str,
     """
     _need_torch()
     import torch
+    _require_pil()
     from PIL import Image
 
     from .pipeline import PipelineConfig
@@ -214,6 +245,7 @@ def inpaint(pipeline, image, mask, prompt: str,
     x0 = _pil_to_tensor(image, (w, h), device)
     m = feather_mask(mask.resize((w, h), Image.BILINEAR),
                      radius=feather)
+    _require_numpy()
     import numpy as np
 
     m_t = (torch.from_numpy(np.asarray(m).astype("float32") / 255.0)
@@ -270,7 +302,9 @@ def _cv2_available() -> bool:
 def _inpaint_cv2(image, mask, method: str):
     """OpenCV Telea/NS inpaint. Real classical algorithm, non-neural."""
     import cv2
+    _require_numpy()
     import numpy as np
+    _require_pil()
     from PIL import Image
 
     img = image.convert("RGB")
@@ -298,6 +332,7 @@ def _voronoi_seed(arr: "np.ndarray", hole: "np.ndarray") -> "np.ndarray":
     texture of their nearest intact neighbour instead of collapsing
     to a gray mean.
     """
+    _require_numpy()
     import numpy as np
 
     h, w = hole.shape
@@ -314,6 +349,7 @@ def _voronoi_seed(arr: "np.ndarray", hole: "np.ndarray") -> "np.ndarray":
         nonlocal dist, val
         cand_d = [dist]
         cand_v = [val]
+        _require_numpy()
         for dy, dx, wt in shifts:
             d = np.roll(np.roll(dist, dy, axis=0), dx, axis=1) + wt
             v = np.roll(np.roll(val, dy, axis=0), dx, axis=1)
@@ -344,7 +380,9 @@ def _inpaint_numpy(image, mask, *, iters: int = 150,
     Real classical inpainting. Quality label is honest: smooth
     interpolation, not neural synthesis.
     """
+    _require_numpy()
     import numpy as np
+    _require_pil()
     from PIL import Image
 
     img = image.convert("RGB")
@@ -438,8 +476,10 @@ def edge_extend_fill(image, left: int = 0, right: int = 0,
     Used as the seed for :func:`outpaint_cpu` and as the canvas for
     neural outpainting.
     """
+    _require_pil()
     from PIL import Image
 
+    _require_numpy()
     import numpy as np
 
     img = image.convert("RGB")
@@ -455,6 +495,7 @@ def edge_extend_fill(image, left: int = 0, right: int = 0,
         if n <= 0:
             return None
         grad = edge - inner  # per-pixel outward gradient estimate
+        _require_numpy()
         decay = np.exp(-np.arange(1, n + 1) / 12.0)
         if axis == 1:
             base = np.repeat(edge[:, None, :], n, axis=1)
@@ -498,7 +539,9 @@ def pyramid_blend(a, b, mask, levels: int = 4):
     ``a``). Blends each frequency band separately so seams vanish
     without ghosting — the classic seam-killer for outpaint borders.
     """
+    _require_numpy()
     import numpy as np
+    _require_pil()
     from PIL import Image, ImageFilter
 
     a_arr = np.asarray(a.convert("RGB")).astype(np.float64)
@@ -520,6 +563,7 @@ def pyramid_blend(a, b, mask, levels: int = 4):
 
     def _tent_blur(img):
         # Separable 3-tap [1,2,1]/4 blur on axes 0/1, edge-replicated.
+        _require_numpy()
         k = np.array([1.0, 2.0, 1.0]) / 4.0
         pad = [(1, 1), (1, 1)] + [(0, 0)] * (img.ndim - 2)
         p = np.pad(img, pad, mode="edge")
@@ -535,6 +579,7 @@ def pyramid_blend(a, b, mask, levels: int = 4):
         # 2x nearest upsample + tent blur ≈ bilinear, energy
         # preserving (no gain factor needed). Odd parent dims were
         # cropped on the way down; replicate the edge to cover them.
+        _require_numpy()
         up = np.repeat(np.repeat(img, 2, axis=0), 2, axis=1)
         up = _tent_blur(up)
         up = up[:shape[0], :shape[1]]
@@ -570,6 +615,7 @@ def seam_metric(image, seam_x: int, window: int = 6) -> float:
     around the seam against the interior baseline. 1.0 ≈ invisible
     (seam looks like the rest of the image); higher = more visible.
     """
+    _require_numpy()
     import numpy as np
 
     arr = np.asarray(image.convert("L")).astype(np.float64)
@@ -601,6 +647,7 @@ def outpaint_cpu(image, prompt: str = "", left: int = 0,
     — honest: structure is extrapolated, no new content is
     synthesized (non-neural).
     """
+    _require_pil()
     from PIL import Image, ImageFilter
 
     from .masks import box_mask
@@ -654,6 +701,7 @@ def outpaint(pipeline, image, prompt: str,
     disappears even when the model drifts in tone.
     """
     _need_torch()
+    _require_pil()
     from PIL import Image
 
     from .pipeline import PipelineConfig

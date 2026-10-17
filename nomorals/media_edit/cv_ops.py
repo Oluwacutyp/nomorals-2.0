@@ -34,7 +34,20 @@ import os
 from pathlib import Path
 from typing import Any
 
-from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageMath, ImageOps, ImageStat
+try:
+    from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageMath, ImageOps, ImageStat
+except ImportError:
+    Image = None; ImageChops = None; ImageDraw = None; ImageFilter = None; ImageMath = None; ImageOps = None; ImageStat = None  # type: ignore[assignment]
+
+PIL_AVAILABLE = Image is not None
+
+
+def _require_pillow() -> None:
+    if Image is None:
+        raise MediaEditError(
+            "nomorals.media_edit.cv_ops is unavailable: Pillow is not installed "
+            "(pip install Pillow)")
+
 
 from .images import MediaEditError
 from ..core.logging_setup import get_logger
@@ -48,6 +61,7 @@ def _imagemath_eval(expression, _imagemath_dict=None, **kwargs):
     Pillow 12 removed ``ImageMath.eval``; ``unsafe_eval`` is its direct
     replacement (same expression language). Older Pillow keeps ``eval``.
     """
+    _require_pillow()
     fn = getattr(ImageMath, "eval", None) or ImageMath.unsafe_eval
     if _imagemath_dict is not None:
         return fn(expression, **_imagemath_dict)
@@ -180,7 +194,7 @@ def backend_status() -> dict[str, Any]:
         "opencv": cv2_available(),
         "scikit_image": skimage_available(),
         "numpy": _np() is not None,
-        "pillow": True,
+        "pillow": PIL_AVAILABLE,
         "selected": {op: _backend_for(op) for op in ops},
     }
 
@@ -205,6 +219,7 @@ def _to_pil(arr: Any, np: Any) -> Any:
     arr = np.asarray(arr)
     if arr.dtype != np.uint8:
         arr = np.clip(arr, 0, 255).astype(np.uint8)
+    _require_pillow()
     if arr.ndim == 2:
         return Image.fromarray(arr, mode="L")
     if arr.ndim == 3 and arr.shape[2] == 3:
@@ -235,6 +250,7 @@ def _load_aux(aux: Any, name: str) -> Any:
     """PIL image | path | bytes -> PIL RGB image."""
     from .images import load_image  # noqa: PLC0415
 
+    _require_pillow()
     if isinstance(aux, Image.Image):
         return aux
     if isinstance(aux, (str, os.PathLike)):
@@ -304,6 +320,7 @@ def _denoise_skimage(arr: Any, np: Any, strength: float) -> Any:
 
 def _denoise_pillow(img: Any, strength: float) -> Any:
     size = 3 if strength <= 12 else 5
+    _require_pillow()
     return img.filter(ImageFilter.MedianFilter(size=size))
 
 
@@ -320,6 +337,7 @@ def denoise(img: Any, strength: float = 10.0,
     filter). ``strength`` maps to the filter's h / sigmaColor.
     Alpha channel is preserved untouched.
     """
+    _require_pillow()
     if method not in ("nlmeans", "bilateral"):
         raise MediaEditError(
             f"denoise method must be 'nlmeans' or 'bilateral', "
@@ -375,6 +393,7 @@ def edge_detect(img: Any, low: float = 100.0, high: float = 200.0,
         gray = _gray_array(img, np)
         return _to_pil(_edges_skimage(gray, np, low, high), np)
     _log.debug("edge_detect: falling back to Pillow FIND_EDGES")
+    _require_pillow()
     return img.convert("L").filter(ImageFilter.FIND_EDGES)
 
 
@@ -385,6 +404,7 @@ def edge_detect(img: Any, low: float = 100.0, high: float = 200.0,
 def _mask_array(img_size: tuple[int, int], mask: Any, np: Any) -> Any:
     """Build a uint8 (0/255) damage mask from PIL/path/bytes/"l,t,r,b"."""
     box = parse_box(mask)
+    _require_pillow()
     if box is not None:
         l, t, r, b = box
         w, h = img_size
@@ -407,6 +427,7 @@ def _mask_pil(img_size: tuple[int, int], mask: Any,
               op: str = "mask") -> Any:
     """PIL version of :func:`_mask_array` for the no-numpy fallback path."""
     box = parse_box(mask)
+    _require_pillow()
     if box is not None:
         l, t, r, b = box
         w, h = img_size
@@ -444,6 +465,7 @@ def inpaint_cv(img: Any, mask: Any, method: str = "telea",
     ``"telea"`` (fast marching, default) or ``"ns"`` (Navier-Stokes;
     OpenCV backend only — other backends ignore it).
     """
+    _require_pillow()
     if method not in ("telea", "ns"):
         raise MediaEditError(
             f"inpaint_cv method must be 'telea' or 'ns', got {method!r}")
@@ -534,6 +556,7 @@ def seamless_clone(img: Any, background: Any, *,
     _log.debug("seamless_clone: Pillow feathered-paste fallback")
     bw, bh = bg_img.size
     center = (bw // 2, bh // 2) if isinstance(position, str) else position
+    _require_pillow()
     if mask is not None:
         mask_img = _mask_pil(fg.size, mask, op="seamless_clone")
     elif fg.mode in ("RGBA", "LA", "PA"):
@@ -563,6 +586,7 @@ def sharpen_advanced(img: Any, amount: float = 1.0,
         raise MediaEditError("sharpen_advanced sigma must be > 0")
     rgb, alpha = _split_alpha(img)
     cv2, ski, np = _cv2(), _ski(), _np()
+    _require_pillow()
     if cv2 is not None and np is not None:
         arr = _rgb_array(rgb, np).astype(np.float32)
         blurred = cv2.GaussianBlur(arr, (0, 0), float(sigma))
@@ -610,6 +634,7 @@ def _cartoonize_cv2(arr: Any, cv2: Any, downscale_steps: int,
 
 def _cartoonize_pillow(img: Any) -> Any:
     """Pillow approximation: median smoothing + posterize + ink edges."""
+    _require_pillow()
     smooth = img.filter(ImageFilter.MedianFilter(size=5))
     smooth = ImageOps.posterize(smooth, bits=4)
     edges = (img.convert("L").filter(ImageFilter.FIND_EDGES)
@@ -626,6 +651,7 @@ def cartoonize(img: Any, downscale_steps: int = 2,
     adaptive-threshold edges) > Pillow (median smoothing + posterize +
     edge multiply).
     """
+    _require_pillow()
     rgb, alpha = _split_alpha(img)
     cv2, np = _cv2(), _np()
     if cv2 is not None and np is not None:
@@ -650,6 +676,7 @@ def _sketch_numpy(gray: Any, blurred: Any, np: Any, shade: float) -> Any:
 def _pencil_sketch_pillow(img: Any, blur_sigma: float,
                           shade: float) -> Any:
     """Pillow-only dodge blend: invert + blur + ImageMath dodge."""
+    _require_pillow()
     from PIL import ImageMath  # noqa: PLC0415
 
     gray = img.convert("L")
@@ -673,6 +700,7 @@ def pencil_sketch(img: Any, blur_sigma: float = 21.0,
     if blur_sigma <= 0:
         raise MediaEditError("pencil_sketch blur_sigma must be > 0")
     cv2, np = _cv2(), _np()
+    _require_pillow()
     if np is not None:
         gray = _gray_array(img, np)
         inv = 255 - gray
@@ -751,6 +779,7 @@ def _perspective_pillow(img: Any, src: Any, out_w: int, out_h: int,
     else:
         coeffs = _perspective_coeffs_pillow(
             [tuple(map(float, p)) for p in src], dst)
+    _require_pillow()
     return img.transform((out_w, out_h), Image.Transform.PERSPECTIVE,
                          coeffs, resample=Image.Resampling.BICUBIC)
 
@@ -772,6 +801,7 @@ def perspective_transform(img: Any, corners: Any | None = None,
     is found). ``width``/``height`` set the output size; when omitted
     they are derived from the corner geometry.
     """
+    _require_pillow()
     rgb, alpha = _split_alpha(img)
     cv2, np = _cv2(), _np()
     if corners is None:
@@ -857,6 +887,7 @@ def grabcut_segment(img: Any,
     (portrait-mode background blur), or ``"white"``. ``iterations`` is
     used by the OpenCV backend only.
     """
+    _require_pillow()
     cv2, np = _cv2(), _np()
     if background not in ("transparent", "blur", "white"):
         raise MediaEditError(
@@ -960,6 +991,7 @@ def rescale_ski(img: Any, scale: float = 2.0, order: int = 3,
     _log.debug("rescale_ski: falling back to Pillow LANCZOS")
     w, h = rgb.size
     new = (max(1, int(round(w * scale))), max(1, int(round(h * scale))))
+    _require_pillow()
     out = rgb.resize(new, resample=Image.Resampling.LANCZOS)
     if alpha is not None:
         out = _reattach_alpha(
@@ -1009,6 +1041,7 @@ def _exposure_pillow(img: Any, mode: str, gamma: float) -> Any:
         return img.point(_log_lut() * 3)
     # adaptive without skimage/cv2: global equalization per channel
     r, g, b = img.split()
+    _require_pillow()
     return Image.merge("RGB", (ImageOps.equalize(r), ImageOps.equalize(g),
                                ImageOps.equalize(b)))
 
@@ -1034,6 +1067,7 @@ def exposure_adjust(img: Any, mode: str = "adaptive",
     or ``"adaptive"`` (local contrast — the heavy lifter for washed-out
     photos).
     """
+    _require_pillow()
     if mode not in ("gamma", "log", "adaptive"):
         raise MediaEditError(
             f"exposure_adjust mode must be 'gamma', 'log' or 'adaptive', "
@@ -1092,6 +1126,7 @@ def match_histograms(img: Any, reference: Any) -> Any:
     ``reference``: PIL image, file path, or bytes (e.g. a grade still).
     Powerful for consistent looks across a shoot; keeps alpha.
     """
+    _require_pillow()
     rgb, alpha = _split_alpha(img)
     ref = _load_aux(reference, "reference")
     ski, np = _ski(), _np()
@@ -1163,6 +1198,7 @@ def adaptive_threshold(img: Any, method: str = "sauvola",
     ``"niblack"``, or ``"otsu"`` (global fallback). ``window`` is the
     neighborhood size (odd).
     """
+    _require_pillow()
     if method not in ("sauvola", "niblack", "otsu"):
         raise MediaEditError(
             f"adaptive_threshold method must be 'sauvola', 'niblack' or "
@@ -1223,6 +1259,7 @@ def _draw_corners(rgb: Any, points: list[tuple[int, int]],
                   color: tuple[int, int, int] = (255, 0, 0)) -> Any:
     """Draw corner markers with ImageDraw (no OpenCV)."""
     out = rgb.copy()
+    _require_pillow()
     d = ImageDraw.Draw(out)
     for x, y in points:
         d.ellipse([x - 4, y - 4, x + 4, y + 4], outline=color, width=2)
@@ -1263,6 +1300,7 @@ def orb_features(img: Any, n: int = 500,
     pts = _detect_corners(rgb, n, None, np)
     if draw:
         return _reattach_alpha(_draw_corners(rgb, pts), alpha)
+    _require_pillow()
     canvas = Image.new("RGB", rgb.size, (0, 0, 0))
     d = ImageDraw.Draw(canvas)
     for x, y in pts:
@@ -1276,6 +1314,7 @@ def orb_count(img: Any, n: int = 500) -> int:
     Backends (best first): OpenCV ORB > numpy Harris > Pillow
     edge-maxima. Always works.
     """
+    _require_pillow()
     if n < 1:
         raise MediaEditError("orb_count n must be >= 1")
     cv2, np = _cv2(), _np()
@@ -1310,6 +1349,7 @@ def kmeans_quantize(img: Any, k: int = 8, attempts: int = 3) -> Any:
             _rgb_array(rgb, np).shape).astype(np.uint8)
         return _reattach_alpha(_to_pil(out, np), alpha)
     _log.debug("kmeans_quantize: falling back to Pillow MEDIANCUT")
+    _require_pillow()
     q = rgb.quantize(colors=int(k), method=Image.Quantize.MEDIANCUT)
     return _reattach_alpha(q.convert("RGB"), alpha)
 
@@ -1333,6 +1373,7 @@ def deblur(img: Any, psf_size: int = 5, method: str = "wiener",
     maps to iteration count x10). ``method`` is used by the
     scikit-image backend; the fallback ignores it.
     """
+    _require_pillow()
     if method not in ("wiener", "richardson_lucy"):
         raise MediaEditError(
             f"deblur method must be 'wiener' or 'richardson_lucy', "
@@ -1380,6 +1421,7 @@ def superpixels(img: Any, n_segments: int = 100, compactness: float = 10.0,
     With ``overlay`` the segment boundaries are drawn in red on the
     image; otherwise each superpixel is filled with its mean color.
     """
+    _require_pillow()
     if n_segments < 2:
         raise MediaEditError("superpixels n_segments must be >= 2")
     ski, np = _ski(), _np()
@@ -1430,6 +1472,7 @@ def white_balance(img: Any, method: str = "grayworld") -> Any:
         raise MediaEditError(
             f"white_balance method must be 'grayworld' or 'maxwhite', "
             f"got {method!r}")
+    _require_pillow()
     from PIL import ImageStat  # noqa: PLC0415
 
     rgb, alpha = _split_alpha(img)
@@ -1460,6 +1503,7 @@ def auto_levels(img: Any, cutoff: float = 0.5) -> Any:
     if not 0 <= cutoff < 50:
         raise MediaEditError("auto_levels cutoff must be 0..<50")
     rgb, alpha = _split_alpha(img)
+    _require_pillow()
     out = ImageOps.autocontrast(rgb, cutoff=float(cutoff))
     return _reattach_alpha(out, alpha)
 
@@ -1484,6 +1528,7 @@ def _color_transfer_numpy(arr: Any, ref_arr: Any, np: Any) -> Any:
 
 def _color_transfer_pillow(img: Any, ref: Any) -> Any:
     """Reinhard transfer in Pillow LAB space (no numpy needed)."""
+    _require_pillow()
     from PIL import ImageStat  # noqa: PLC0415
 
     src = img.convert("LAB")
@@ -1508,6 +1553,7 @@ def color_transfer(img: Any, reference: Any) -> Any:
     (LAB mode + per-channel LUT). ``reference``: PIL image, file path,
     or bytes. Keeps alpha.
     """
+    _require_pillow()
     rgb, alpha = _split_alpha(img)
     ref = _load_aux(reference, "reference")
     cv2, np = _cv2(), _np()
@@ -1539,6 +1585,7 @@ def panorama(img: Any, images: list[Any] | None = None,
     or ``"scans"`` (OpenCV backend only — the fallback always stitches
     side-by-side).
     """
+    _require_pillow()
     if mode not in ("panorama", "scans"):
         raise MediaEditError(
             f"panorama mode must be 'panorama' or 'scans', got {mode!r}")
@@ -1593,6 +1640,7 @@ def retouch_smooth(img: Any, radius: float = 8.0,
         raise MediaEditError("retouch_smooth radius must be > 0")
     rgb, alpha = _split_alpha(img)
     cv2, np = _cv2(), _np()
+    _require_pillow()
     if cv2 is not None and np is not None:
         arr = _rgb_array(rgb, np).astype(np.float32)
         d = max(3, int(radius * 3) | 1)
@@ -1640,6 +1688,7 @@ def tone_map(img: Any, method: str = "mantiuk",
     and ``saturation`` are used by the OpenCV backend; the Pillow
     fallback ignores them.
     """
+    _require_pillow()
     if method not in ("mantiuk", "drago", "reinhard"):
         raise MediaEditError(
             f"tone_map method must be 'mantiuk', 'drago' or 'reinhard', "
@@ -1675,6 +1724,7 @@ def detail_enhance(img: Any, sigma_s: float = 10.0,
     ``sigma_s``/``sigma_r`` are used by the OpenCV backend; the
     fallback maps them to an unsharp-mask strength.
     """
+    _require_pillow()
     cv2, np = _cv2(), _np()
     if cv2 is None or np is None:
         _log.debug("detail_enhance: unsharp-mask fallback")
@@ -1697,6 +1747,7 @@ def stylize(img: Any, sigma_s: float = 60.0,
     ``sigma_s``/``sigma_r`` are used by the OpenCV backend; the
     fallback ignores them.
     """
+    _require_pillow()
     cv2, np = _cv2(), _np()
     if cv2 is None or np is None:
         _log.debug("stylize: Pillow watercolor fallback")
@@ -1733,6 +1784,7 @@ def clarity(img: Any, amount: float = 0.5, radius: float = 24.0) -> Any:
         return _reattach_alpha(
             _clarity_pillow(rgb, float(amount), float(radius)), alpha)
     arr = _rgb_array(rgb, np).astype(np.float32)
+    _require_pillow()
     if cv2 is not None:
         d = max(3, int(radius) | 1)
         base = cv2.bilateralFilter(arr, d, radius * 3, radius)
@@ -1764,6 +1816,7 @@ def _shadow_highlight_pillow(img: Any, shadows: float,
                              highlights: float) -> Any:
     lum = img.convert("L")
     out = img
+    _require_pillow()
     if shadows:
         lift = img.point(lambda v: min(255, int(v * (1 + shadows))))
         mask = lum.point(lambda v: int(255 * (1 - v / 255) ** 2))
@@ -1782,6 +1835,7 @@ def shadow_highlight(img: Any, shadows: float = 0.3,
     Backends (best first): numpy luminance-weighted gain maps > Pillow
     (masked composite). ``shadows``/``highlights`` in 0..1.
     """
+    _require_pillow()
     if not 0 <= shadows <= 1 or not 0 <= highlights <= 1:
         raise MediaEditError(
             "shadow_highlight shadows/highlights must be 0..1")
@@ -1822,6 +1876,7 @@ def dehaze(img: Any, omega: float = 0.95, t0: float = 0.1) -> Any:
     haze formation model per pixel. Dramatic on landscapes, foggy
     streets, underwater shots.
     """
+    _require_pillow()
     if not 0 < omega <= 1:
         raise MediaEditError("dehaze omega must be 0<omega<=1")
     np = _np()
@@ -1904,6 +1959,7 @@ def seam_carve(img: Any, width: int | None = None,
     > pure-Python dynamic programming (slower, exact — always works).
     Pillow/OpenCV have no equivalent.
     """
+    _require_pillow()
     rgb, alpha = _split_alpha(img)
     w, h = rgb.size
     tw = int(width) if width else w
@@ -1960,6 +2016,7 @@ def tilt_shift(img: Any, focus_center: float = 0.5,
         raise MediaEditError("tilt_shift focus_size must be 0<..<=1")
     rgb, alpha = _split_alpha(img)
     w, h = rgb.size
+    _require_pillow()
     band = Image.new("L", (w, h), 0)
     d = ImageDraw.Draw(band)
     c = int(h * focus_center)
@@ -2008,6 +2065,7 @@ def selective_color(img: Any, hue: float = 0.0, hue_width: float = 30.0,
         return lut
 
     mask = h_band.point(_dist_lut())
+    _require_pillow()
     if keep_saturation != 1.0:
         from PIL import ImageEnhance  # noqa: PLC0415
 
@@ -2038,6 +2096,7 @@ def _split_tone_pillow(img: Any, shadows: tuple, highlights: tuple,
                        strength: float) -> Any:
     lum = img.convert("L")
     out = img
+    _require_pillow()
     s_solid = Image.new("RGB", img.size, tuple(int(c) for c in shadows))
     h_solid = Image.new("RGB", img.size, tuple(int(c) for c in highlights))
     s_mask = lum.point(lambda v: int(255 * (1 - v / 255) * strength))
@@ -2055,6 +2114,7 @@ def split_tone(img: Any, shadows: tuple[int, int, int] = (30, 60, 120),
     Backends (best first): numpy luminance-weighted blend > Pillow
     masked composite. The teal-and-orange blockbuster look lives here.
     """
+    _require_pillow()
     if not 0 <= strength <= 1:
         raise MediaEditError("split_tone strength must be 0..1")
     rgb, alpha = _split_alpha(img)
@@ -2110,6 +2170,7 @@ def apply_curves(img: Any, points: list[tuple[int, int]] | None = None,
                 f"got {p!r}")
     rgb, alpha = _split_alpha(img)
     lut = _curves_lut([(int(x), int(y)) for x, y in pts])
+    _require_pillow()
     if channel == "rgb":
         out = rgb.point(lut * 3)
     else:
@@ -2191,6 +2252,7 @@ def apply_cube_lut(img: Any, lut: Any) -> Any:
     Backends (best first): numpy (vectorized trilinear) > pure-Python
     trilinear (slower, exact). Always works.
     """
+    _require_pillow()
     np = _np()
     rgb, alpha = _split_alpha(img)
     if np is None:
@@ -2232,6 +2294,7 @@ def replace_background(img: Any, background: Any,
     """
     cutout = grabcut_segment(img, rect=rect, background="transparent")
     bg_img = _load_aux(background, "background").convert("RGB")
+    _require_pillow()
     if bg_img.size != cutout.size:
         bg_img = bg_img.resize(cutout.size,
                                resample=Image.Resampling.LANCZOS)
@@ -2269,6 +2332,7 @@ def _box_cutout(img, alpha, rect, background):
     t, b = max(0, min(t, h - 1)), max(0, min(b, h))
     if not (l < r and t < b):
         raise MediaEditError(f"grabcut_segment: invalid rect {rect!r}")
+    _require_pillow()
     mask = Image.new("L", (w, h), 0)
     ImageDraw.Draw(mask).rectangle([l, t, r, b], fill=255)
     mask = mask.filter(ImageFilter.GaussianBlur(8))
@@ -2296,6 +2360,7 @@ def _inpaint_pillow(img, mask):
     dmg = mask.convert("L").point(lambda v: 255 if v > 0 else 0)
     if dmg.getbbox() is None:
         return rgb
+    _require_pillow()
     known = ImageChops.invert(dmg)
     work = rgb.copy()
     for _ in range(max(rgb.size)):
@@ -2346,6 +2411,7 @@ def _local_threshold_map_pillow(gray, method, block_size, c):
     """
     window = block_size if block_size % 2 else block_size + 1
     rad = window // 2
+    _require_pillow()
     mean = gray.filter(ImageFilter.BoxBlur(rad))
     hi = gray.point([(i >> 4) ** 2 for i in range(256)])
     lo = gray.point([(i & 15) ** 2 for i in range(256)])
@@ -2391,6 +2457,7 @@ def _harris_corners_pillow(gray, n):
     """Corner detection on Pillow alone: local maxima of the edge map,
     greedily thinned so no two corners sit within 5px."""
     w, h = gray.size
+    _require_pillow()
     edge = gray.filter(ImageFilter.FIND_EDGES)
     mx = edge.filter(ImageFilter.MaxFilter(7))
     peaks = ImageChops.difference(edge, mx).point(
@@ -2460,6 +2527,7 @@ def _superpixels_grid(img, n_segments, overlay, color):
     w, h = rgb.size
     cell = max(4, int((w * h / max(1, n_segments)) ** 0.5))
     out = rgb.copy()
+    _require_pillow()
     d = ImageDraw.Draw(out)
     for x in range(cell, w, cell):
         d.line([(x, 0), (x, h)], fill=color)
@@ -2473,6 +2541,7 @@ def _superpixels_cc(img, n_segments, np, overlay, color):
     followed by connected-component labeling (8-connectivity flood fill)
     of equal-color regions."""
     rgb = img.convert("RGB")
+    _require_pillow()
     small = rgb.resize((128, 128), Image.Resampling.BILINEAR)
     q = small.quantize(
         colors=min(256, max(2, n_segments * 2)),
@@ -2584,6 +2653,7 @@ def _match_hist_pillow(img, ref):
                 j += 1
             lut[i] = j
         bands.append(ch.point(lut))
+    _require_pillow()
     return Image.merge("RGB", bands)
 
 
@@ -2597,6 +2667,7 @@ def _dehaze_pillow(img, omega=0.95, t0=0.1):
     rgb = img.convert("RGB")
     w, h = rgb.size
     r, g, b = rgb.split()
+    _require_pillow()
     dark = ImageChops.darker(ImageChops.darker(r, g), b).filter(
         ImageFilter.MinFilter(15)
     )
@@ -2690,6 +2761,7 @@ def _seam_carve_python(img, target_w, target_h):
         rows = [list(r) for r in zip(*rows)]
         gray = [list(r) for r in zip(*gray)]
         h -= 1
+    _require_pillow()
     out = Image.new("RGB", (len(rows[0]), len(rows)))
     out.putdata([p for row in rows for p in row])
     return out
@@ -2775,6 +2847,7 @@ def _cube_lut_python(img, size, lut, dmin, dmax):
             )
             ch.append(int(min(255, max(0, round(v * 255)))))
         out.append((ch[0], ch[1], ch[2]))
+    _require_pillow()
     res = Image.new("RGB", (w, h))
     res.putdata(out)
     return res
@@ -2842,6 +2915,7 @@ def _estimate_shift_sad(a_img, b_img):
     Returns the (dx, 0) paste offset for ``b`` in full-resolution px.
     """
     sw = 48
+    _require_pillow()
     sa = a_img.resize(
         (sw, max(1, int(a_img.height * sw / a_img.width))),
         Image.Resampling.BILINEAR,
@@ -2900,6 +2974,7 @@ def _panorama_pillow(images, np):
     offs = [(x - minx, y - miny) for x, y in offs]
     W = max(x + im.width for (x, y), im in zip(offs, images))
     H = max(y + im.height for (x, y), im in zip(offs, images))
+    _require_pillow()
     canvas = Image.new("RGB", (W, H), (0, 0, 0))
     x0, y0 = offs[0]
     canvas.paste(images[0].convert("RGB"), (x0, y0))
@@ -2932,6 +3007,7 @@ def _panorama_pillow(images, np):
 def _clarity_pillow(img, amount, radius):
     """Local-contrast clarity on Pillow alone (integer ImageMath)."""
     rgb = img.convert("RGB")
+    _require_pillow()
     base = rgb.filter(ImageFilter.GaussianBlur(radius))
     k = int(round(amount * 100))
     out = []
@@ -2951,6 +3027,7 @@ def _retouch_pillow(img, radius, amount):
     the low band is smoothed toward a stronger blur, then recombined.
     """
     rgb = img.convert("RGB")
+    _require_pillow()
     low = rgb.filter(ImageFilter.GaussianBlur(radius))
     slow = low.filter(ImageFilter.GaussianBlur(radius * 0.75))
     blended = Image.blend(low, slow, amount)
@@ -2970,6 +3047,7 @@ def _stylize_pillow(img):
     """Watercolor stylization on Pillow alone: median smoothing +
     posterization with soft dark edges blended back in."""
     rgb = img.convert("RGB")
+    _require_pillow()
     sm = rgb.filter(ImageFilter.MedianFilter(7))
     sm = ImageOps.posterize(sm, 5).filter(ImageFilter.GaussianBlur(1.2))
     edge = rgb.convert("L").filter(ImageFilter.FIND_EDGES)
@@ -2991,6 +3069,7 @@ def _tonemap_pillow(img):
             for v in range(256)
         ]
         out.append(ch.point(lut))
+    _require_pillow()
     return Image.merge("RGB", out)
 
 
@@ -3005,6 +3084,7 @@ def _seamless_clone_pillow(src, dst, center, mask_img, mix):
     dw, dh = dst.size
     cx, cy = (int(v) for v in center)
     x0, y0 = cx - sw // 2, cy - sh // 2
+    _require_pillow()
     layer = Image.new("RGB", (dw, dh), (0, 0, 0))
     layer.paste(src.convert("RGB"), (x0, y0))
     full_mask = Image.new("L", (dw, dh), 0)

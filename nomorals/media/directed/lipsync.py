@@ -22,8 +22,34 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
-import numpy as np
-from PIL import Image
+try:
+    import numpy as np
+except ImportError:
+    np = None  # type: ignore[assignment]
+
+NUMPY_AVAILABLE = np is not None
+
+
+def _require_numpy() -> None:
+    if np is None:
+        raise RuntimeError(
+            "nomorals.media.directed.lipsync is unavailable: numpy is not installed "
+            "(pip install numpy)")
+
+try:
+    from PIL import Image
+except ImportError:
+    Image = None  # type: ignore[assignment]
+
+PIL_AVAILABLE = Image is not None
+
+
+def _require_pil() -> None:
+    if Image is None:
+        raise RuntimeError(
+            "nomorals.media.directed.lipsync is unavailable: Pillow is not installed "
+            "(pip install Pillow)")
+
 
 MODELS_DIR = Path.home() / ".devon-models"
 
@@ -451,6 +477,7 @@ def audio_features(audio: str, fps: float,
         [ff, "-hide_banner", "-loglevel", "error", "-y", "-i", audio,
          "-ac", "1", "-ar", "16000", "-f", "f32le", wav],
         check=True, capture_output=True, timeout=300)
+    _require_numpy()
     raw = np.fromfile(wav, dtype=np.float32)
     sr = 16000
     win = max(1, int(sr / fps))
@@ -510,6 +537,8 @@ def _warp_mouth(frame_arr: np.ndarray,
                        * (1.0 - 0.15 * lip_round)))
     if new_w == rw and new_h == rh:
         return frame_arr
+    _require_pil()
+    _require_numpy()
     warped = np.array(
         Image.fromarray(region).resize((new_w, new_h), Image.BICUBIC))
     canvas = frame_arr.copy()
@@ -564,6 +593,8 @@ def envelope_warp_sync(video: str, audio: str,
     my0 = y0 + int((y1 - y0) * 0.55)
     my1 = y1
     out_frames = []
+    _require_pil()
+    _require_numpy()
     for img, op, shape in zip(frames, openness, shapes):
         if op < 0.02:
             out_frames.append(img)

@@ -19,8 +19,34 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Iterable, Sequence
 
-import numpy as np
-from PIL import Image, ImageDraw, ImageFont
+try:
+    import numpy as np
+except ImportError:
+    np = None  # type: ignore[assignment]
+
+NUMPY_AVAILABLE = np is not None
+
+
+def _require_numpy() -> None:
+    if np is None:
+        raise MotionStudioError(
+            "nomorals.media.motion_studio._core is unavailable: numpy is not installed "
+            "(pip install numpy)")
+
+try:
+    from PIL import Image, ImageDraw, ImageFont
+except ImportError:
+    Image = None; ImageDraw = None; ImageFont = None  # type: ignore[assignment]
+
+PIL_AVAILABLE = Image is not None
+
+
+def _require_pil() -> None:
+    if Image is None:
+        raise MotionStudioError(
+            "nomorals.media.motion_studio._core is unavailable: Pillow is not installed "
+            "(pip install Pillow)")
+
 
 from ...core.logging_setup import get_logger
 from ...core.profiles import get_profile_kind
@@ -176,6 +202,7 @@ def find_font(size: int, name: str = "") -> ImageFont.FreeTypeFont | ImageFont.I
     if key in _FONT_CACHE:
         return _FONT_CACHE[key]
     candidates = ([name] if name else []) + list(_FONT_CANDIDATES)
+    _require_pil()
     for cand in candidates:
         try:
             font = ImageFont.truetype(cand, size)
@@ -259,6 +286,8 @@ def encode_frames(frames: Iterable[np.ndarray], out_path: str | os.PathLike,
             "-pix_fmt", pix_fmt, "-movflags", "+faststart", str(out)]
     proc = subprocess.Popen(cmd, stdin=subprocess.PIPE,
                             stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    _require_pil()
+    _require_numpy()
     try:
         assert proc.stdin is not None
         assert proc.stderr is not None
@@ -317,6 +346,7 @@ def decode_audio_mono(path: str | os.PathLike, sr: int = 22050) -> np.ndarray:
         raise MotionStudioError(f"no such audio file: {path}")
     fd, tmp = tempfile.mkstemp(prefix="motion-audio-", suffix=".wav")
     os.close(fd)
+    _require_numpy()
     try:
         run_ffmpeg(["-i", str(p), "-vn", "-ar", str(sr), "-ac", "1",
                     "-c:a", "pcm_s16le", tmp], timeout=180.0)

@@ -18,8 +18,34 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
-import numpy as np
-from PIL import Image
+try:
+    import numpy as np
+except ImportError:
+    np = None  # type: ignore[assignment]
+
+NUMPY_AVAILABLE = np is not None
+
+
+def _require_numpy() -> None:
+    if np is None:
+        raise RuntimeError(
+            "nomorals.media.directed.animator is unavailable: numpy is not installed "
+            "(pip install numpy)")
+
+try:
+    from PIL import Image
+except ImportError:
+    Image = None  # type: ignore[assignment]
+
+PIL_AVAILABLE = Image is not None
+
+
+def _require_pil() -> None:
+    if Image is None:
+        raise RuntimeError(
+            "nomorals.media.directed.animator is unavailable: Pillow is not installed "
+            "(pip install Pillow)")
+
 
 from .pose_rig import PoseTrack, render_pose_video
 
@@ -107,6 +133,7 @@ def _displacement_field(kp0: np.ndarray, kp1: np.ndarray, W: int, H: int,
     upsampled to full resolution. Vertices far from any motion stay put —
     background doesn't swim.
     """
+    _require_numpy()
     delta = (kp1 - kp0) * np.array([W, H])  # normalized -> px
     gx = np.linspace(0, W, grid + 1)
     gy = np.linspace(0, H, grid + 1)
@@ -122,6 +149,7 @@ def _displacement_field(kp0: np.ndarray, kp1: np.ndarray, W: int, H: int,
     dx = (w * delta[None, None, :, 0]).sum(axis=2) / wsum[:, :, 0]
     dy = (w * delta[None, None, :, 1]).sum(axis=2) / wsum[:, :, 0]
     # bilinear upsample to full res via PIL (float mode)
+    _require_pil()
     dx_full = np.array(Image.fromarray(
         dx.astype(np.float32), mode="F").resize((W, H), Image.BILINEAR))
     dy_full = np.array(Image.fromarray(
@@ -133,6 +161,7 @@ def _bilinear_sample(arr: np.ndarray, sx: np.ndarray,
                      sy: np.ndarray) -> np.ndarray:
     """Vectorized bilinear sample of HxWxC array at float coords."""
     H, W = arr.shape[:2]
+    _require_numpy()
     sx = np.clip(sx, 0, W - 1.001)
     sy = np.clip(sy, 0, H - 1.001)
     x0 = sx.astype(int)
@@ -155,11 +184,13 @@ def _mesh_for_frame(base_img: Image.Image, kp0: np.ndarray, kp1: np.ndarray,
     """Warp base_img toward keypoint motion. Returns the warped frame."""
     W, H = base_img.size
     dx, dy = _displacement_field(kp0, kp1, W, H, grid=grid, radius=radius)
+    _require_numpy()
     ys, xs = np.mgrid[0:H, 0:W].astype(np.float64)
     sx = xs - dx * strength
     sy = ys - dy * strength
     arr = np.array(base_img)
     out = _bilinear_sample(arr, sx, sy).astype(np.uint8)
+    _require_pil()
     return Image.fromarray(out)
 
 
@@ -186,6 +217,7 @@ def estimate_depth(image: Image.Image,
     W, H = image.size
     # work small, then upsample — the map must be smooth
     sw, sh = 64, 64
+    _require_numpy()
     ys, xs = np.mgrid[0:sh, 0:sw].astype(np.float64)
     # bottom nearer + gentle center pull
     depth = 0.35 + 0.45 * (ys / sh)
@@ -200,6 +232,7 @@ def estimate_depth(image: Image.Image,
         splat = np.exp(-d2 / (2 * (sw * 0.06) ** 2)).max(axis=2)
         depth = np.maximum(depth, splat * 0.95 + 0.05)
     depth = np.clip(depth, 0, 1)
+    _require_pil()
     big = Image.fromarray((depth * 255).astype(np.uint8)).resize(
         (W, H), Image.BILINEAR)
     return np.array(big).astype(np.float64) / 255.0
@@ -220,7 +253,9 @@ def depth_aware_warp(base_img: Image.Image, kp0: np.ndarray, kp1: np.ndarray,
     W, H = base_img.size
     if depth is None:
         depth = estimate_depth(base_img, kp0)
+    _require_numpy()
     depth = np.asarray(depth, dtype=np.float64)
+    _require_pil()
     if depth.shape != (H, W):
         depth = np.array(Image.fromarray(
             (np.clip(depth, 0, 1) * 255).astype(np.uint8)
@@ -277,6 +312,7 @@ def warp_animate(image: str, track: PoseTrack, *,
     ff = _ffmpeg()
     if not ff:
         raise RuntimeError("ffmpeg not found — warp animator needs ffmpeg")
+    _require_pil()
     base = Image.open(image).convert("RGB")
     W, H = base.size
     wd = Path(workdir) if workdir else Path(tempfile.mkdtemp(prefix="warp_"))

@@ -25,7 +25,35 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-from PIL import Image
+try:
+    from PIL import Image
+except ImportError:
+    Image = None  # type: ignore[assignment]
+
+PIL_AVAILABLE = Image is not None
+
+
+def _require_pil() -> None:
+    if Image is None:
+        raise RuntimeError(
+            "nomorals.media.videogen.consistency is unavailable: Pillow is not installed "
+            "(pip install Pillow)")
+
+import importlib.util as _importlib_util
+
+try:
+    NUMPY_AVAILABLE = _importlib_util.find_spec("numpy") is not None
+except ImportError:
+    # a meta-path blocker (or a broken install) raises instead of None
+    NUMPY_AVAILABLE = False
+
+
+def _require_numpy() -> None:
+    if not NUMPY_AVAILABLE:
+        raise RuntimeError(
+            "nomorals.media.videogen.consistency is unavailable: numpy is not installed "
+            "(pip install numpy)")
+
 
 from ...core.logging_setup import get_logger
 
@@ -83,11 +111,13 @@ def boundary_frames(a_path: str | os.PathLike,
     t_last = max(0.0, dur_a - 2.0 / max(1.0, fps_a))
     fa = _grab_frame(a_path, t_last, width=width, out=str(wd / "a.png"))
     fb = _grab_frame(b_path, 0.0, width=width, out=str(wd / "b.png"))
+    _require_pil()
     return (Image.open(fa).convert("RGB"), Image.open(fb).convert("RGB"))
 
 
 def _hist_corr(a: "np.ndarray", b: "np.ndarray") -> float:
     """Per-channel histogram correlation, averaged (0..1)."""
+    _require_numpy()
     import numpy as np
     corrs = []
     for c in range(3):
@@ -110,10 +140,13 @@ def _edge_sim(a: "np.ndarray", b: "np.ndarray") -> float:
     Sobel via numpy slicing (no scipy): keeps the metric on the
     dependency-free spine.
     """
+    _require_numpy()
     import numpy as np
+    _require_pil()
     from PIL import Image as _I
 
     def grad_mag(g: "np.ndarray") -> "np.ndarray":
+        _require_numpy()
         p = np.pad(g, 1, mode="edge")
         gx = (p[:-2, 2:] + 2 * p[1:-1, 2:] + p[2:, 2:]
               - p[:-2, :-2] - 2 * p[1:-1, :-2] - p[2:, :-2])
@@ -138,6 +171,7 @@ def boundary_metric(a: Image.Image, b: Image.Image) -> dict[str, float]:
     Returns ``{"color_shift", "hist_corr", "edge_sim", "score"}`` —
     ``score`` 0..1, 1 = seamless.
     """
+    _require_numpy()
     import numpy as np
     size = (160, 160)
     aa = np.asarray(a.resize(size).convert("RGB"), dtype=np.float64)
@@ -162,6 +196,7 @@ def reinhard_match(src: Image.Image, ref: Image.Image,
                    *, strength: float = 1.0) -> Image.Image:
     """Reinhard color transfer: match ``src``'s per-channel mean/std to
     ``ref``'s. ``strength`` 0..1 blends between original and matched."""
+    _require_numpy()
     import numpy as np
     s = np.clip(float(strength), 0.0, 1.0)
     if s <= 0.0:
@@ -178,6 +213,7 @@ def reinhard_match(src: Image.Image, ref: Image.Image,
         out[..., c] = ch + (rm * s + sm * (1.0 - s))
     # when s < 1 the matched frame is blended back toward the original
     matched = np.clip(out, 0, 255).astype(np.uint8)
+    _require_pil()
     if s >= 1.0:
         return Image.fromarray(matched)
     orig = np.asarray(src.convert("RGB"), dtype=np.float64)
@@ -205,6 +241,7 @@ def _grade_head(clip: str, ref_frame: Image.Image, *,
     if not frames:
         raise RuntimeError(f"no frames decoded from {clip}")
     n_grade = min(head_frames, len(frames))
+    _require_pil()
     for j in range(n_grade):
         strength = 1.0 - j / max(1, n_grade)
         img = Image.open(frames[j]).convert("RGB")
@@ -235,6 +272,7 @@ def consistency_pass(clips: list[str], *,
     wd.mkdir(parents=True, exist_ok=True)
     adjusted = [clips[0]]
     boundaries: list[dict] = []
+    _require_pil()
     for i in range(1, len(clips)):
         entry: dict = {"a": i - 1, "b": i}
         try:

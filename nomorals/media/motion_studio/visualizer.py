@@ -20,8 +20,34 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Sequence
 
-import numpy as np
-from PIL import Image, ImageDraw, ImageFilter
+try:
+    import numpy as np
+except ImportError:
+    np = None  # type: ignore[assignment]
+
+NUMPY_AVAILABLE = np is not None
+
+
+def _require_numpy() -> None:
+    if np is None:
+        raise MotionStudioError(
+            "nomorals.media.motion_studio.visualizer is unavailable: numpy is not installed "
+            "(pip install numpy)")
+
+try:
+    from PIL import Image, ImageDraw, ImageFilter
+except ImportError:
+    Image = None; ImageDraw = None; ImageFilter = None  # type: ignore[assignment]
+
+PIL_AVAILABLE = Image is not None
+
+
+def _require_pil() -> None:
+    if Image is None:
+        raise MotionStudioError(
+            "nomorals.media.motion_studio.visualizer is unavailable: Pillow is not installed "
+            "(pip install Pillow)")
+
 
 from ._core import (
     MotionStudioError,
@@ -125,6 +151,7 @@ def analyze_audio(audio: str | os.PathLike, fps: float,
     hop = _ANALYSIS_SR / fps
     win = 2048
 
+    _require_numpy()
     bands = np.zeros((n_frames, _N_BANDS), dtype=np.float32)
     energy = np.zeros(n_frames, dtype=np.float32)
     wave = np.zeros((n_frames, 256), dtype=np.float32)
@@ -203,6 +230,7 @@ class _Engine:
         self.w, self.h = w, h
         self.bg, self.c1, self.c2, self.c3 = (_hex(c) for c in palette[:4])
         self.a = analysis
+        _require_numpy()
         self.rng = np.random.default_rng(seed)
         self.images = [self._load_cover(p) for p in images[:3]]
         # particle state
@@ -217,6 +245,7 @@ class _Engine:
         self.pcol = self.rng.integers(0, 3, n)
 
     def _load_cover(self, p) -> Image.Image | None:
+        _require_pil()
         try:
             img = Image.open(p).convert("RGB")
             s = max(self.w / img.width, self.h / img.height)
@@ -226,11 +255,13 @@ class _Engine:
             return None
 
     def _base(self) -> tuple[Image.Image, ImageDraw.ImageDraw]:
+        _require_pil()
         img = Image.new("RGB", (self.w, self.h), self.bg)
         return img, ImageDraw.Draw(img, "RGBA")
 
     def _band_slice(self, i: int, n: int) -> np.ndarray:
         b = self.a.bands[min(i, self.a.n_frames - 1)]
+        _require_numpy()
         idx = np.linspace(0, len(b) - 1, n).astype(int)
         return b[idx]
 
@@ -262,6 +293,7 @@ class _BarsEngine(_Engine):
         # energy glow line
         e = float(self.a.energy[min(i, self.a.n_frames - 1)])
         d.line([0, self.h - 4, self.w * e, self.h - 4], fill=self.c1, width=4)
+        _require_numpy()
         return np.asarray(img)
 
 
@@ -295,6 +327,7 @@ class _ParticlesEngine(_Engine):
             d.ellipse([self.w / 2 - rad, self.h * 0.7 - rad,
                        self.w / 2 + rad, self.h * 0.7 + rad],
                       fill=self.c1 + (int(30 * low),))
+        _require_numpy()
         return np.asarray(img)
 
 
@@ -306,6 +339,7 @@ class _TunnelEngine(_Engine):
         pulse = _beat_pulse(t, self.a.beats)
         depth = 14
         cols = [self.c1, self.c2, self.c3]
+        _require_numpy()
         for r_ in range(depth, 0, -1):
             k = r_ / depth
             # each ring samples a different slice of the waveform → tunnel flight
@@ -334,6 +368,7 @@ class _CoverEngine(_Engine):
         img, d = self._base()
         pulse = _beat_pulse(t, self.a.beats)
         e = float(self.a.energy[min(i, self.a.n_frames - 1)])
+        _require_pil()
         if self.images and self.images[0] is not None:
             cover = self.images[0]
             zoom = 1.0 + 0.10 * e + 0.10 * pulse
@@ -363,6 +398,7 @@ class _CoverEngine(_Engine):
         if pulse > 0.75:
             d.rectangle([0, 0, self.w, self.h], outline=self.c3 + (int(200 * pulse),),
                         width=10)
+        _require_numpy()
         return np.asarray(img)
 
 

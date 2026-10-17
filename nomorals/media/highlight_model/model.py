@@ -17,7 +17,20 @@ from __future__ import annotations
 import json
 import os
 
-import numpy as np
+try:
+    import numpy as np
+except ImportError:
+    np = None  # type: ignore[assignment]
+
+NUMPY_AVAILABLE = np is not None
+
+
+def _require_numpy() -> None:
+    if np is None:
+        raise RuntimeError(
+            "nomorals.media.highlight_model.model is unavailable: numpy is not installed "
+            "(pip install numpy)")
+
 
 N_FEATURES = 8
 HIDDEN = 16  # 8*16 + 16 + 16*1 + 1 = 161 params. Tiny on purpose.
@@ -39,6 +52,7 @@ class HighlightMLP:
         return self.W1 is not None
 
     def _init_random(self, seed: int = 0) -> None:
+        _require_numpy()
         rng = np.random.default_rng(seed)
         self.W1 = rng.normal(0, 0.5, (N_FEATURES, HIDDEN)).astype(np.float32)
         self.b1 = np.zeros(HIDDEN, dtype=np.float32)
@@ -49,10 +63,12 @@ class HighlightMLP:
         """x: (n, 8) → (n,) scores in 0-1."""
         if not self.loaded:
             raise RuntimeError("no weights loaded")
+        _require_numpy()
         h = np.maximum(0, x @ self.W1 + self.b1)  # ReLU
         return 1.0 / (1.0 + np.exp(-(h @ self.W2 + self.b2).ravel()))  # sigmoid
 
     def score(self, features: list[list[float]]) -> list[float]:
+        _require_numpy()
         x = np.asarray(features, dtype=np.float32)
         if x.ndim == 1:
             x = x.reshape(1, -1)
@@ -60,12 +76,14 @@ class HighlightMLP:
 
     def save(self, path: str) -> None:
         assert self.loaded
+        _require_numpy()
         np.savez(path,
                  W1=self.W1, b1=self.b1, W2=self.W2, b2=self.b2,
                  meta=json.dumps({"n_features": N_FEATURES,
                                   "hidden": HIDDEN}))
 
     def load(self, path: str) -> None:
+        _require_numpy()
         d = np.load(path, allow_pickle=True)
         self.W1 = d["W1"]
         self.b1 = d["b1"]

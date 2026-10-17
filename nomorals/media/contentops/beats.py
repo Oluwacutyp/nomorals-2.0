@@ -25,7 +25,20 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-import numpy as np
+try:
+    import numpy as np
+except ImportError:
+    np = None  # type: ignore[assignment]
+
+NUMPY_AVAILABLE = np is not None
+
+
+def _require_numpy() -> None:
+    if np is None:
+        raise MediaEditError(
+            "nomorals.media.contentops.beats is unavailable: numpy is not installed "
+            "(pip install numpy)")
+
 
 from ...media_edit.videos import MediaEditError, ffmpeg_path, run_ffmpeg
 from ...core.logging_setup import get_logger
@@ -52,6 +65,7 @@ def _decode_mono(path: str | os.PathLike[str], sr: int = _SR) -> np.ndarray:
         raise MediaEditError(f"no such audio file: {path}")
     fd, tmp = tempfile.mkstemp(prefix="beats-", suffix=".wav")
     os.close(fd)
+    _require_numpy()
     try:
         run_ffmpeg(["-i", str(p), "-vn", "-ar", str(sr), "-ac", "1",
                     "-c:a", "pcm_s16le", tmp],
@@ -74,9 +88,13 @@ def _decode_mono(path: str | os.PathLike[str], sr: int = _SR) -> np.ndarray:
 
 def beats_available() -> dict[str, Any]:
     """Which beat-detection backend is usable right now."""
+    try:
+        has_librosa = importlib.util.find_spec("librosa") is not None
+    except ImportError:
+        has_librosa = False
     return {
-        "librosa": importlib.util.find_spec("librosa") is not None,
-        "numpy_fallback": True,
+        "librosa": has_librosa,
+        "numpy_fallback": NUMPY_AVAILABLE,
     }
 
 
@@ -95,6 +113,7 @@ def _beats_librosa(y: np.ndarray, sr: int) -> list[float] | None:
         import librosa  # type: ignore[import-not-found]
     except ImportError:
         return None
+    _require_numpy()
     try:
         beat_track = getattr(getattr(librosa, "beat", None), "beat_track", None)
         frames_to_time = getattr(librosa, "frames_to_time", None)
@@ -126,6 +145,7 @@ def _onset_envelope(y: np.ndarray, sr: int,
     An energy gate kills noise-floor flux spikes in near-silent regions.
     """
     pad = n_fft // 2
+    _require_numpy()
     yp = np.pad(y, (pad, pad))
     win = np.hanning(n_fft)
     n_frames = 1 + (len(yp) - n_fft) // hop
@@ -151,6 +171,7 @@ def _estimate_period(env: np.ndarray, sr: int, hop: int,
                      min_bpm: float, max_bpm: float) -> float:
     """Autocorrelation tempo estimate → period in seconds (0.0 = none)."""
     e = env - env.mean()
+    _require_numpy()
     if not np.any(e):
         return 0.0
     ac = np.correlate(e, e, mode="full")[len(e) - 1:]
@@ -194,6 +215,7 @@ def _estimate_period(env: np.ndarray, sr: int, hop: int,
 
 def _onset_peaks(env: np.ndarray) -> np.ndarray:
     """Local-maximum onset peak frame indices above median+std."""
+    _require_numpy()
     thr = float(np.median(env) + env.std())
     peaks = [i for i in range(1, len(env) - 1)
              if env[i] > thr and env[i] >= env[i - 1] and env[i] > env[i + 1]]
@@ -208,6 +230,7 @@ def _score_grid(times: np.ndarray, env: np.ndarray, sr: int, hop: int,
     Score = (number of grid points landing on real onset energy, then total
     onset energy) — the count dominates so grids don't stretch into silence.
     """
+    _require_numpy()
     grid = np.arange(phase, dur, period)
     t = phase
     while True:  # extend the grid backwards too
@@ -234,6 +257,7 @@ def _beats_numpy(y: np.ndarray, sr: int,
     if p0 <= 0:
         return 0.0, []
     peaks = _onset_peaks(env)
+    _require_numpy()
     thr = float(np.median(env) + env.std())
     support_floor = max(thr * 0.75, 0.15)
 
@@ -323,6 +347,7 @@ def detect_beats_full(audio_path: str | os.PathLike[str], *,
     beats: list[float] | None = None
     if backend in ("auto", "librosa"):
         beats = _beats_librosa(y, sr)
+    _require_numpy()
     if beats is not None:
         used = "librosa"
         bpm = 0.0
