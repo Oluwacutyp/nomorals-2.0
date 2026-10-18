@@ -43,6 +43,7 @@ __all__ = [
     "emoji_cap",
     "emoji_instruction",
     "format_reply",
+    "format_reply_detailed",
     "humanize_emoji",
     "identity_leak_check",
     "length_budget",
@@ -1194,6 +1195,56 @@ def format_reply(text: str, profile: StyleProfile) -> str:
         return out
     except Exception:  # noqa: BLE001 - formatting never breaks a reply
         return text
+
+
+def format_reply_detailed(
+    text: str, profile: StyleProfile,
+) -> tuple[str, str]:
+    """``format_reply`` plus the overflow it would have discarded.
+
+    Returns ``(preview, overflow)``: the preview is exactly what
+    :func:`format_reply` returns (unchanged behaviour), and the overflow
+    is every dropped trailing section / tail, so a caller can attach it
+    as details/a document instead of silently losing important content
+    to a length budget (seam F). When nothing was dropped the overflow
+    is ``""``. The preview ends with an explicit
+    ``[… +N chars in full details]`` marker whenever overflow exists.
+    """
+    preview = format_reply(text, profile)
+    if not text or len(preview) >= len(str(text).strip()):
+        return preview, ""
+    original = str(text)
+    # Dropped content = the sections of the original that do not appear
+    # in the preview. Match on section headers first (structured output),
+    # then fall back to "everything past the preview's tail".
+    kept_headers = set(re.findall(r"(?m)^#{1,3}\s+(.+)$", preview))
+    kept_headers |= set(re.findall(r"(?m)^\*\*(.+?)\*\*$", preview))
+    sections = re.split(r"(?m)(?=^━━━━━━━━━━━━━━━$)", original)
+    dropped: list[str] = []
+    for sec in sections:
+        headers = set(re.findall(r"(?m)^#{1,3}\s+(.+)$", sec))
+        headers |= set(re.findall(r"(?m)^\*\*(.+?)\*\*$", sec))
+        if headers and headers.isdisjoint(kept_headers):
+            dropped.append(sec)
+    if dropped:
+        overflow = "\n".join(s.strip() for s in dropped if s.strip())
+    else:
+        # Unstructured tail: the preview is a sentence-cut of the
+        # original, so the remainder starts where the preview's tail
+        # stops matching. Conservative fallback — the full original
+        # minus the preview's longest common prefix.
+        common = 0
+        for a, b in zip(original, preview):
+            if a != b:
+                break
+            common += 1
+        overflow = original[common:].strip()
+    overflow = overflow.strip()
+    if not overflow:
+        return preview, ""
+    # The marker is metadata about the overflow, not content to budget.
+    marker = f"\n[… +{len(overflow):,} chars in full details]"
+    return preview + marker, overflow
 
 
 def apply_texting_voice(

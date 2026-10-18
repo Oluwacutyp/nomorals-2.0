@@ -228,10 +228,15 @@ class SendResult:
     message_id: str = ""
     error: str = ""
     seconds: float = 0.0
+    #: True when durability was requested but no outbox was available, so
+    #: the send went direct without a receipt. Degradation is reported
+    #: ON the result — never only in a log line the caller never sees.
+    delivery_degraded: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {"ok": self.ok, "platform": self.platform, "message_id": self.message_id,
-                "error": self.error, "seconds": round(self.seconds, 3)}
+                "error": self.error, "seconds": round(self.seconds, 3),
+                "delivery_degraded": self.delivery_degraded}
 
 
 class ChatAdapter(ABC):

@@ -329,6 +329,22 @@ class ChatGateway:
         _log.info("chat platform stopped on demand: %s", name)
         return {"ok": True, "platform": name}
 
+    @property
+    def delivery_mode(self) -> str:
+        """Effective delivery mode for substantive sends.
+
+        ``durable`` — sends go through the outbox (row first, receipt
+        after); ``direct`` — durability off by construction;
+        ``durable-requested-unavailable`` — durability was requested
+        but no outbox exists (no db), so sends go direct and carry
+        ``delivery_degraded=True`` on their result.
+        """
+        if self.outbox is not None:
+            return "durable"
+        if self.durable_outbox:
+            return "durable-requested-unavailable"
+        return "direct"
+
     def status(self) -> dict[str, Any]:
         out: dict[str, Any] = {}
         with self._adapters_guard:
@@ -346,6 +362,7 @@ class ChatGateway:
             }
         with self._stats_lock:
             out["_stats"] = dict(self.stats)
+        out["_delivery_mode"] = self.delivery_mode
         return out
 
     def _pending_total(self) -> int:
@@ -832,6 +849,12 @@ class ChatGateway:
             _log.warning(
                 "gateway.send: durable requested for %s but no outbox "
                 "(no db) — sending direct", chat.key)
+            degraded = self._send_direct(
+                platform, chat, text, ordered=ordered, reply_to=reply_to,
+                buttons=buttons, reply_keyboard=reply_keyboard,
+                parse_mode=parse_mode)
+            degraded.delivery_degraded = True
+            return degraded
         return self._send_direct(
             platform, chat, text, ordered=ordered, reply_to=reply_to,
             buttons=buttons, reply_keyboard=reply_keyboard,

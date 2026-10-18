@@ -19,7 +19,10 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from typing import Any, Callable
 
-from ..core.errors import CapabilityDenied, NotFound, ToolError, ToolNotFound, classify
+from ..core.errors import (
+    CapabilityDenied, NotFound, ToolError, ToolNotFound, ValidationError,
+    classify,
+)
 from ..core.ids import new_id
 from ..core.logging_setup import get_logger
 from ..core.policy import CapabilitySet
@@ -283,6 +286,19 @@ def _format_params(schema: dict[str, Any]) -> str:
     return ", ".join(parts)
 
 
+@dataclass
+class _IdempotencyRecord:
+    """One durable idempotent effect: who ran what, with which args."""
+
+    tool: str
+    key: str
+    actor: str
+    args_digest: str
+    tool_version: str
+    outcome: Outcome[Any]
+    created_at: float = 0.0
+
+
 class ToolRegistry:
     """Registers, gates, dispatches, and audits tool calls."""
 
@@ -301,10 +317,19 @@ class ToolRegistry:
         self._health: dict[str, ToolHealth] = {}
         self._health_probes: dict[str, tuple[Callable[[], Any], float]] = {}
         self._deprecated_warned: set[str] = set()
-        # Idempotency cache: (tool name, idempotency_key) -> Outcome.
-        # Bounded so a long-lived registry can't grow without limit.
-        self._idempotency_cache: dict[tuple[str, str], Outcome[Any]] = {}
+        # Idempotency records: (tool name, idempotency_key) -> record.
+        # Bound to (actor, argument digest, tool version) so a reused key
+        # can never return an unrelated old result, and persisted to the
+        # db when one is available so a restart keeps the protection.
+        # Bounded in memory so a long-lived registry can't grow unbounded.
+        self._idempotency_records: dict[tuple[str, str], _IdempotencyRecord] = {}
         self._idempotency_limit = 512
+        # In-flight reservations: (tool, key) -> event set on completion.
+        # A concurrent duplicate waits for the owner's result instead of
+        # executing a second time.
+        self._idempotency_inflight: dict[tuple[str, str], threading.Event] = {}
+        self._idempotency_cond = threading.Condition(threading.Lock())
+        self._idempotency_db_ready = False
 
     # ── registration ─────────────────────────────────────────────────────────
     def register(
@@ -842,7 +867,7 @@ class ToolRegistry:
         return bool(result), "" if result else "probe returned falsy"
 
     # ── dispatch ─────────────────────────────────────────────────────────────
-    def call(
+    def _call_inner(
         self,
         name: str,
         /,
@@ -850,16 +875,12 @@ class ToolRegistry:
         actor: str = "system",
         capabilities: CapabilitySet | None = None,
         confirmation: str | None = None,
-        idempotency_key: str | None = None,
         **kwargs: Any,
     ) -> Outcome[Any]:
         """Check the capability, run the tool, and audit the call.
 
-        ``idempotency_key`` makes a call safely repeatable: when given,
-        a previous successful result for the same (tool, key) is
-        returned from the cache instead of re-executing — the MCP
-        two-step rule for destructive work (preview, then commit with a
-        key so a retry can't double-apply).
+        Idempotency lives in :meth:`call` (the wrapper); this core
+        always executes.
         """
         # Reject extra positional arguments with a proper error outcome
         if args:
@@ -871,12 +892,6 @@ class ToolRegistry:
         spec = self._tools.get(name)
         if spec is None:
             return Err(ToolNotFound(_unknown_tool_message(name, self._tools)))
-        if idempotency_key:
-            cached = self._idempotency_cache.get((name, idempotency_key))
-            if cached is not None:
-                self._audit(name, actor, spec.capability, "allow", kwargs,
-                            0.0, ok=True)
-                return cached
         if spec.deprecated and name not in self._deprecated_warned:
             with self._lock:
                 self._deprecated_warned.add(name)
@@ -937,10 +952,7 @@ class ToolRegistry:
         elapsed = time.perf_counter() - started
         self._audit(name, actor, spec.capability, "allow", kwargs, elapsed, ok=True)
         self._bump_stats(calls=1, seconds=elapsed)
-        outcome: Outcome[Any] = Ok(_maybe_truncate(result, spec.max_result_chars))
-        if idempotency_key:
-            self._remember_idempotent(name, idempotency_key, outcome)
-        return outcome
+        return Ok(_maybe_truncate(result, spec.max_result_chars))
 
     def _record_failure_ledger(self, tool: str, message: str,
                                 detail: str) -> None:
@@ -979,14 +991,260 @@ class ToolRegistry:
             for key, delta in deltas.items():
                 self.stats[key] = self.stats.get(key, 0.0) + delta
 
-    def _remember_idempotent(self, name: str, key: str,
-                             outcome: Outcome[Any]) -> None:
-        """Cache a successful idempotent result (bounded)."""
+    # -- idempotency: durable effect contract --
+    @staticmethod
+    def _args_digest(kwargs: dict[str, Any]) -> str:
+        try:
+            from ..core.oversight import args_digest
+
+            return args_digest(kwargs)
+        except Exception:  # noqa: BLE001 - digest must never break dispatch
+            try:
+                canon = json.dumps(kwargs or {}, sort_keys=True, default=str)
+            except Exception:  # noqa: BLE001
+                canon = repr(kwargs or {})
+            return hashlib.sha256(canon.encode("utf-8")).hexdigest()
+
+    def _idempotency_table(self) -> bool:
+        """Create the durable record table once. False when no db."""
+        if self._idempotency_db_ready:
+            return True
+        db = getattr(self.context, "db", None) if self.context else None
+        if db is None:
+            return False
+        try:
+            db.execute(
+                "CREATE TABLE IF NOT EXISTS idempotency_records ("
+                "tool TEXT NOT NULL, key TEXT NOT NULL, actor TEXT NOT NULL,"
+                " args_digest TEXT NOT NULL, tool_version TEXT NOT NULL,"
+                " outcome_json TEXT NOT NULL, ts REAL NOT NULL,"
+                " PRIMARY KEY (tool, key))")
+            self._idempotency_db_ready = True
+            return True
+        except Exception:  # noqa: BLE001 - durability is best-effort
+            return False
+
+    def _idempotency_load(self, name: str, key: str) -> _IdempotencyRecord | None:
+        """Memory first, then the durable table (restart recovery)."""
+        rec = self._idempotency_records.get((name, key))
+        if rec is not None:
+            return rec
+        if not self._idempotency_table():
+            return None
+        db = getattr(self.context, "db", None)
+        try:
+            row = db.query_one(
+                "SELECT * FROM idempotency_records WHERE tool = ? AND key = ?",
+                (name, key))
+        except Exception:  # noqa: BLE001
+            return None
+        if not row:
+            return None
+        try:
+            outcome: Outcome[Any] = Ok(json.loads(row["outcome_json"]))
+        except Exception:  # noqa: BLE001 - a corrupt row is a miss
+            return None
+        rec = _IdempotencyRecord(
+            tool=name, key=key, actor=str(row["actor"]),
+            args_digest=str(row["args_digest"]),
+            tool_version=str(row["tool_version"]),
+            outcome=outcome, created_at=float(row["ts"] or 0.0))
         with self._lock:
-            self._idempotency_cache[(name, key)] = outcome
-            while len(self._idempotency_cache) > self._idempotency_limit:
-                self._idempotency_cache.pop(
-                    next(iter(self._idempotency_cache)))
+            self._idempotency_records[(name, key)] = rec
+        return rec
+
+    def _idempotency_store(self, rec: _IdempotencyRecord) -> None:
+        """Persist a successful idempotent result (memory + db)."""
+        with self._lock:
+            self._idempotency_records[(rec.tool, rec.key)] = rec
+            while len(self._idempotency_records) > self._idempotency_limit:
+                self._idempotency_records.pop(
+                    next(iter(self._idempotency_records)))
+        if self._idempotency_table():
+            db = getattr(self.context, "db", None)
+            try:
+                db.execute(
+                    "INSERT OR REPLACE INTO idempotency_records "
+                    "(tool, key, actor, args_digest, tool_version,"
+                    " outcome_json, ts) VALUES (?,?,?,?,?,?,?)",
+                    (rec.tool, rec.key, rec.actor, rec.args_digest,
+                     rec.tool_version,
+                     json.dumps(rec.outcome.value, default=str),
+                     rec.created_at))
+            except Exception:  # noqa: BLE001 - durability is best-effort
+                pass
+
+    def _idempotency_replay(
+        self, name: str, key: str, actor: str, digest: str,
+    ) -> Outcome[Any] | None:
+        """Replay / reject for a stored record. None = no record (miss)."""
+        rec = self._idempotency_load(name, key)
+        if rec is None:
+            return None
+        if rec.actor != actor:
+            return Err(ValidationError(
+                f"idempotency key {key!r} for tool {name!r} belongs to "
+                f"another actor; result retrieval needs that actor's "
+                f"authorization"))
+        if rec.args_digest != digest:
+            return Err(ValidationError(
+                f"idempotency key {key!r} for tool {name!r} was already used "
+                f"with different arguments (conflict) — refusing to return "
+                f"an unrelated result or re-execute"))
+        return rec.outcome
+
+    def _idempotency_acquire(self, name: str, key: str) -> bool:
+        """Reserve (tool, key) for this caller. True = we own it.
+
+        A concurrent duplicate waits for the owner's completion instead
+        of executing twice. The wait is bounded: a pathological stall
+        degrades to executing rather than deadlocking.
+        """
+        slot = (name, key)
+        with self._idempotency_cond:
+            while slot in self._idempotency_inflight:
+                event = self._idempotency_inflight[slot]
+                waited = self._idempotency_cond.wait_for(
+                    lambda: slot not in self._idempotency_inflight,
+                    timeout=120.0)
+                if not waited:
+                    _log.warning(
+                        "idempotency: waited out for %s %r; executing anyway",
+                        name, key)
+                    return True
+                _ = event
+            self._idempotency_inflight[slot] = threading.Event()
+            return True
+
+    def _idempotency_release(self, name: str, key: str) -> None:
+        slot = (name, key)
+        with self._idempotency_cond:
+            event = self._idempotency_inflight.pop(slot, None)
+            if event is not None:
+                event.set()
+            self._idempotency_cond.notify_all()
+
+    def _emit_tool_call(self, *, name: str, actor: str, digest: str,
+                        ok: bool, seconds: float, error: str = "",
+                        phase: str) -> None:
+        """Publish a ``tool.call`` bus event (timeline/replay join key).
+
+        Best-effort: a broken bus must never break tool execution.
+        Correlation ids ride along so replay can join this call to its
+        request/run/mission.
+        """
+        try:
+            from ..core.correlation import current_correlation
+            from ..core.events import Event, global_bus
+
+            corr = current_correlation()
+            global_bus.publish(Event(
+                topic="tool.call",
+                data={
+                    "tool": name, "actor": actor, "args_digest": digest,
+                    "ok": ok, "seconds": round(seconds, 3), "error": error,
+                    "phase": phase,
+                    "request_id": corr.get("request_id", ""),
+                    "run_id": corr.get("run_id", ""),
+                    "mission_id": corr.get("mission_id", ""),
+                    "correlation_id": corr.get("run_id", "")
+                    or corr.get("request_id", ""),
+                },
+                source="nomorals.tools.registry"))
+        except Exception:  # noqa: BLE001 - events never break tools
+            _log.debug("tool.call event failed", exc_info=True)
+
+    def call(
+        self,
+        name: str,
+        /,
+        *args: Any,
+        actor: str = "system",
+        capabilities: CapabilitySet | None = None,
+        confirmation: str | None = None,
+        idempotency_key: str | None = None,
+        **kwargs: Any,
+    ) -> Outcome[Any]:
+        """Check the capability, run the tool, and audit the call.
+
+        ``idempotency_key`` makes a call safely repeatable: a previous
+        successful result for the same (tool, key, actor, argument
+        digest, tool version) is returned instead of re-executing —
+        the MCP two-step rule for destructive work (preview, then commit
+        with a key so a retry can't double-apply). Reuse with different
+        arguments is a conflict error, never a stale replay; reuse by a
+        different actor is denied. Concurrent duplicates execute once:
+        the second caller waits for the owner's result. Successful
+        results persist to the db when one is available, so a restart
+        keeps the protection.
+        """
+        # Reject extra positional arguments with a proper error outcome
+        if args:
+            return Err(ToolError(
+                f"call() takes 1 positional argument but {1 + len(args)} were given; "
+                f"pass tool parameters as keywords"
+            ))
+        spec = self._tools.get(name)
+        if spec is None:
+            return Err(ToolNotFound(_unknown_tool_message(name, self._tools)))
+        if not idempotency_key:
+            started = time.perf_counter()
+            self._emit_tool_call(name=name, actor=actor, digest="",
+                                 ok=True, seconds=0.0, phase="start")
+            outcome = self._call_inner(
+                name, actor=actor, capabilities=capabilities,
+                confirmation=confirmation, **kwargs)
+            elapsed = time.perf_counter() - started
+            self._emit_tool_call(
+                name=name, actor=actor, digest=self._args_digest(kwargs),
+                ok=bool(getattr(outcome, "ok", False)), seconds=elapsed,
+                error="" if getattr(outcome, "ok", False)
+                else str(getattr(getattr(outcome, "error", None),
+                                 "message", "") or ""),
+                phase="finish")
+            return outcome
+
+        digest = self._args_digest(kwargs)
+        hit = self._idempotency_replay(name, idempotency_key, actor, digest)
+        if hit is not None:
+            if hit.ok:
+                self._audit(name, actor, spec.capability, "allow", kwargs,
+                            0.0, ok=True)
+            return hit
+        # Reserve: a concurrent duplicate waits for our result.
+        self._idempotency_acquire(name, idempotency_key)
+        try:
+            # A waiter that found the slot freed re-checks: the owner
+            # may have stored a result (replay) or failed (execute).
+            hit = self._idempotency_replay(name, idempotency_key, actor,
+                                           digest)
+            if hit is not None:
+                if hit.ok:
+                    self._audit(name, actor, spec.capability, "allow", kwargs,
+                                0.0, ok=True)
+                return hit
+            started = time.perf_counter()
+            self._emit_tool_call(name=name, actor=actor, digest=digest,
+                                 ok=True, seconds=0.0, phase="start")
+            outcome = self._call_inner(
+                name, actor=actor, capabilities=capabilities,
+                confirmation=confirmation, **kwargs)
+            elapsed = time.perf_counter() - started
+            self._emit_tool_call(
+                name=name, actor=actor, digest=digest,
+                ok=bool(getattr(outcome, "ok", False)), seconds=elapsed,
+                error="" if getattr(outcome, "ok", False)
+                else str(getattr(getattr(outcome, "error", None),
+                                 "message", "") or ""),
+                phase="finish")
+        finally:
+            self._idempotency_release(name, idempotency_key)
+        if outcome.ok:
+            self._idempotency_store(_IdempotencyRecord(
+                tool=name, key=idempotency_key, actor=actor,
+                args_digest=digest, tool_version=spec.version,
+                outcome=outcome, created_at=time.time()))
+        return outcome
 
     def call_many(self, calls: list[tuple[str, dict[str, Any]]],
                   *, max_workers: int = 1, **common: Any) -> list[Outcome[Any]]:

@@ -34,12 +34,44 @@ import hashlib
 import json
 import logging
 import re
+import threading
 import time
+import uuid
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
 from dataclasses import dataclass, field
 from typing import Any, Callable, Sequence
 
 _log = logging.getLogger(__name__)
+
+#: Max characters of a tool result shown to the model in one observation.
+_OBSERVATION_LIMIT = 4000
+#: Bounded remainder store: full results behind truncated observations.
+#: Keyed ``rem-<hex>``; oldest entries evicted past the cap so a long run
+#: cannot grow memory without bound.
+_REMAINDER_LIMIT = 64
+_REMAINDER_STORE: dict[str, str] = {}
+_REMAINDER_LOCK = threading.Lock()
+
+#: A timeout never means "the tool stopped" — the tool may still finish
+#: and change the world. Observations and results carry this marker so no
+#: caller blind-replays a timed-out call.
+OUTCOME_UNKNOWN_MARKER = "outcome_unknown"
+
+
+def store_remainder(full_text: str) -> str:
+    """Retain a full result behind a truncated observation; returns its key."""
+    key = f"rem-{uuid.uuid4().hex[:16]}"
+    with _REMAINDER_LOCK:
+        _REMAINDER_STORE[key] = full_text
+        while len(_REMAINDER_STORE) > _REMAINDER_LIMIT:
+            _REMAINDER_STORE.pop(next(iter(_REMAINDER_STORE)))
+    return key
+
+
+def retrieve_remainder(key: str) -> str | None:
+    """Fetch a full result previously stored by :func:`store_remainder`."""
+    with _REMAINDER_LOCK:
+        return _REMAINDER_STORE.get(key)
 
 #: The model emits tool calls as fenced JSON blocks. One or more per turn.
 _TOOL_FENCE_RE = re.compile(
@@ -81,6 +113,9 @@ class ToolLoopResult:
     model: str = ""
     ok: bool = True
     error: str = ""
+    #: Correlation ids joining this turn to its request (Batch 2).
+    request_id: str = ""
+    run_id: str = ""
 
 
 @dataclass
@@ -278,6 +313,63 @@ class ToolCallingLoop:
         self.parallel_per_turn = bool(parallel_per_turn)
         self._pool = ThreadPoolExecutor(
             max_workers=4, thread_name_prefix="tool-loop")
+        #: Timed-out calls whose tool may still finish: call signature →
+        #: record. :meth:`reconcile_unknown` surfaces late completions so
+        #: the loop never blind-replays them.
+        self._unknown_outcomes: dict[str, dict[str, Any]] = {}
+        self._unknown_lock = threading.Lock()
+
+    def unknown_outcomes(self) -> list[dict[str, Any]]:
+        """Timed-out calls still unresolved (outcome unknown)."""
+        with self._unknown_lock:
+            return [dict(v) for v in self._unknown_outcomes.values()]
+
+    def reconcile_unknown(self) -> list[dict[str, Any]]:
+        """Collect late completions of timed-out calls.
+
+        Returns one record per newly finished call (with its result
+        text); still-running calls stay in :meth:`unknown_outcomes`.
+        """
+        done: list[dict[str, Any]] = []
+        with self._unknown_lock:
+            for sig, rec in list(self._unknown_outcomes.items()):
+                fut = rec.get("_future")
+                try:
+                    finished = bool(fut is not None and fut.done())
+                except Exception:  # noqa: BLE001 - a dead future is not done
+                    finished = False
+                if not finished:
+                    continue
+                try:
+                    rec["result"] = str(fut.result(timeout=0))
+                    rec["status"] = "completed_late"
+                except Exception as exc:  # noqa: BLE001 - late failure is data
+                    rec["result"] = f"[late error] {exc}"
+                    rec["status"] = "failed_late"
+                rec.pop("_future", None)
+                done.append({k: v for k, v in rec.items()
+                             if not k.startswith("_")})
+                del self._unknown_outcomes[sig]
+        return done
+
+    def _register_unknown(self, call: ToolCall, fut: Any) -> None:
+        with self._unknown_lock:
+            self._unknown_outcomes[_call_signature(call)] = {
+                "tool": call.name,
+                "args": dict(call.args),
+                "status": OUTCOME_UNKNOWN_MARKER,
+                "started_at": time.time(),
+                "_future": fut,
+            }
+
+    def _unknown_message(self, call: ToolCall) -> str:
+        return (
+            f"[tool error] '{call.name}' timed out after "
+            f"{self.tool_timeout_s:.0f}s. Outcome UNKNOWN "
+            f"({OUTCOME_UNKNOWN_MARKER}): "
+            f"the tool may still finish — do not retry blindly; "
+            f"reconcile via unknown_outcomes() before re-issuing."
+        )
 
     def _emit(self, kind: str, iteration: int = 0, tool_name: str = "",
               detail: str = "") -> None:
@@ -465,8 +557,12 @@ class ToolCallingLoop:
             return fut.result(timeout=self.tool_timeout_s)
         except FuturesTimeout:
             self._note_tool_weakness(call.name, "timeout")
-            return (f"[tool error] '{call.name}' timed out after "
-                    f"{self.tool_timeout_s:.0f}s.")
+            try:
+                fut.cancel()  # no-op once running: the tool may still finish
+            except Exception:  # noqa: BLE001 - cancellation is best-effort
+                pass
+            self._register_unknown(call, fut)
+            return self._unknown_message(call)
         except Exception as exc:  # noqa: BLE001 — execution must not kill the loop
             self._note_tool_weakness(call.name, f"crashed: {exc}")
             return f"[tool error] '{call.name}' crashed: {exc}"
@@ -510,14 +606,22 @@ class ToolCallingLoop:
         ]
         for call, _ in pending:
             self._emit("tool_start", iteration=iteration, tool_name=call.name)
+        # ONE absolute deadline for the whole parallel turn — not a fresh
+        # timeout per future, which could consume N × timeout overall.
+        deadline = time.monotonic() + self.tool_timeout_s
         out = []
         for call, fut in pending:
+            remaining = max(0.0, deadline - time.monotonic())
             try:
-                obs = fut.result(timeout=self.tool_timeout_s)
+                obs = fut.result(timeout=remaining)
             except FuturesTimeout:
                 self._note_tool_weakness(call.name, "timeout")
-                obs = (f"[tool error] '{call.name}' timed out after "
-                       f"{self.tool_timeout_s:.0f}s.")
+                try:
+                    fut.cancel()
+                except Exception:  # noqa: BLE001 - best-effort
+                    pass
+                self._register_unknown(call, fut)
+                obs = self._unknown_message(call)
             except Exception as exc:  # noqa: BLE001
                 self._note_tool_weakness(call.name, f"crashed: {exc}")
                 obs = f"[tool error] '{call.name}' crashed: {exc}"
@@ -548,30 +652,77 @@ class ToolCallingLoop:
 
     @staticmethod
     def _render_value(value: Any, _depth: int = 0) -> str:
-        """Render a tool result for the model. Bounded, never raises."""
+        """Render a tool result for the model. Bounded, never raises.
+
+        Truncation is NEVER silent and NEVER produces fragmentary JSON:
+
+        * dicts over the limit become a valid-JSON envelope with
+          ``_complete: false``, the key list, a per-key preview, and a
+          ``_remainder`` handle whose full text
+          :func:`retrieve_remainder` returns;
+        * strings over the limit keep their head plus an explicit
+          ``[…truncated …]`` marker naming the remainder handle;
+        * lists keep the ``… (N more)`` tail they already had.
+        """
         if _depth > 3:
             return "…"
         if value is None:
             return "(no output)"
         if isinstance(value, str):
-            return value[:4000] if len(value) > 4000 else value or "(empty)"
+            if len(value) <= _OBSERVATION_LIMIT:
+                return value or "(empty)"
+            key = store_remainder(value)
+            return (
+                f"{value[:_OBSERVATION_LIMIT]}\n"
+                f"[…truncated: showing {_OBSERVATION_LIMIT:,} of "
+                f"{len(value):,} chars — complete=false — "
+                f"retrieve remainder {key} for the full result]"
+            )
         if isinstance(value, (int, float, bool)):
             return str(value)
         if isinstance(value, dict):
             try:
-                text = json.dumps(value, indent=1, default=str)
+                text = json.dumps(value, indent=1, default=str,
+                                  ensure_ascii=False)
             except Exception:
-                return str(value)[:4000]
-            return text[:4000]
+                return ToolCallingLoop._render_value(
+                    str(value), _depth + 1)
+            if len(text) <= _OBSERVATION_LIMIT:
+                return text
+            key = store_remainder(text)
+            preview: dict[str, Any] = {}
+            for k, v in value.items():
+                rendered = ToolCallingLoop._render_value(v, _depth + 1)
+                preview[str(k)] = (
+                    rendered[:200] + "…" if len(rendered) > 200
+                    else rendered)
+                if len(json.dumps(preview, default=str,
+                                  ensure_ascii=False)) > 1500:
+                    break
+            envelope = {
+                "_complete": False,
+                "_truncated": True,
+                "_total_chars": len(text),
+                "_remainder": key,
+                "_keys": sorted(str(k) for k in value),
+                "_preview": preview,
+            }
+            return json.dumps(envelope, indent=1, default=str,
+                              ensure_ascii=False)
         if isinstance(value, (list, tuple)):
             items = [ToolCallingLoop._render_value(v, _depth + 1)
                      for v in list(value)[:20]]
             tail = f"\n… ({len(value) - 20} more)" if len(value) > 20 else ""
             return "\n".join(items) + tail
         try:
-            return str(value)[:4000]
+            return ToolCallingLoop._render_value(str(value), _depth + 1)
         except Exception:
             return "(unprintable result)"
+
+    @staticmethod
+    def retrieve_remainder(key: str) -> str | None:
+        """Fetch a full result stored behind a truncated observation."""
+        return retrieve_remainder(key)
 
     def run(
         self,
@@ -583,6 +734,8 @@ class ToolCallingLoop:
         persona_extra: str = "",
         loop_ctx: dict[str, Any] | None = None,
         history: Sequence[Any] = (),
+        request_id: str = "",
+        run_id: str = "",
     ) -> ToolLoopResult:
         """Run the loop until the model answers or budgets run out.
 
@@ -590,7 +743,38 @@ class ToolCallingLoop:
         (memories, chat profile, continuity). ``actor`` is "owner" or
         "outsider" — enforced at execution. ``loop_ctx`` carries platform,
         chat key, and owner identity to tools that read it.
+        ``request_id`` / ``run_id`` join this turn to the caller's
+        request (correlation); generated when omitted.
         """
+        from ...core.correlation import (
+            correlation_context,
+            new_request_id,
+            new_run_id,
+        )
+        from ...llm.base import Message
+
+        request_id = request_id or new_request_id()
+        run_id = run_id or new_run_id()
+        with correlation_context(request_id=request_id, run_id=run_id):
+            return self._run_inner(
+                goal, context_lines=context_lines, actor=actor,
+                capabilities=capabilities, persona_extra=persona_extra,
+                loop_ctx=loop_ctx, history=history,
+                request_id=request_id, run_id=run_id)
+
+    def _run_inner(
+        self,
+        goal: str,
+        *,
+        context_lines: Sequence[str] = (),
+        actor: str = "owner",
+        capabilities: Any = None,
+        persona_extra: str = "",
+        loop_ctx: dict[str, Any] | None = None,
+        history: Sequence[Any] = (),
+        request_id: str = "",
+        run_id: str = "",
+    ) -> ToolLoopResult:
         from ...llm.base import Message
 
         started = time.time()
@@ -638,7 +822,7 @@ class ToolCallingLoop:
                     answer="", ok=False,
                     error=f"model call failed on iteration {iteration}: {exc}",
                     iterations=iteration - 1, trace=trace,
-                    tools_used=tools_used)
+                    tools_used=tools_used, request_id=request_id, run_id=run_id)
 
             model_name = getattr(resp, "model", "") or model_name
             if not getattr(resp, "ok", False):
@@ -650,7 +834,8 @@ class ToolCallingLoop:
                     error=f"model failed on iteration {iteration}: {err}",
                     iterations=iteration - 1, trace=trace,
                     tools_used=tools_used, degraded=True,
-                    degrade_note=f"model error: {err}")
+                    degrade_note=f"model error: {err}",
+                    request_id=request_id, run_id=run_id)
 
             text = getattr(resp, "text", "") or ""
             all_calls = parse_tool_calls(text)
@@ -694,7 +879,8 @@ class ToolCallingLoop:
                     degrade_note=(f"stall: '{stall.name}' repeated "
                                   f"{_STALL_REPEATS}x consecutively"),
                     model=model_name, ok=False,
-                    error="stall: repeated identical tool call")
+                    error="stall: repeated identical tool call",
+                    request_id=request_id, run_id=run_id)
                 self._emit("final", iteration=iteration, detail="stalled")
                 return result
 
@@ -731,7 +917,8 @@ class ToolCallingLoop:
                 f"iteration budget ({self.max_iterations}) exhausted; "
                 f"used: {', '.join(tools_used) or 'none'}"),
             model=model_name, ok=False,
-            error="iteration budget exhausted")
+            error="iteration budget exhausted",
+            request_id=request_id, run_id=run_id)
         self._emit("final", iteration=self.max_iterations,
                    detail="budget exhausted")
         return result

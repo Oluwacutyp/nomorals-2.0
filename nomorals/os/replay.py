@@ -14,10 +14,10 @@ original mission's artifacts in the artifact graph. It refuses without
 ``confirm=True`` and refuses to redrive a mission that is still running.
 
 Tool calls: the H2 timeline persists the ``mission.*``, ``artifact.*``,
-``session.*`` and ``task.*`` bus families. There is no ``tool.call`` bus
-topic yet, so per-tool invocations appear under task activity only when a
-sibling emits ``task.*`` events for them — replay surfaces whatever the
-timeline actually recorded rather than inventing tool calls.
+``session.*``, ``task.*`` and ``tool.call`` bus families — the registry
+publishes one ``tool.call`` event per invocation (start + finish) with
+the run's correlation ids, so replay can show exactly which tools ran
+for a mission instead of inferring them from task activity.
 """
 
 from __future__ import annotations
@@ -88,6 +88,7 @@ class MissionReplay:
     covered_to: float | None = None
     transitions: list[dict[str, Any]] = field(default_factory=list)
     tasks: list[dict[str, Any]] = field(default_factory=list)
+    tool_calls: list[dict[str, Any]] = field(default_factory=list)
     artifacts: list[dict[str, Any]] = field(default_factory=list)
     verifications: list[dict[str, Any]] = field(default_factory=list)
     redrives: list[dict[str, Any]] = field(default_factory=list)
@@ -101,6 +102,7 @@ class MissionReplay:
             "covered_to": self.covered_to,
             "transitions": self.transitions,
             "tasks": self.tasks,
+            "tool_calls": self.tool_calls,
             "artifacts": self.artifacts,
             "verifications": self.verifications,
             "redrives": self.redrives,
@@ -283,6 +285,20 @@ def replay_mission(timeline: Any, mission_id: str,
                 "type": str(data.get("type") or ""),
                 "creator": str(data.get("creator") or ""),
             })
+        elif topic == "tool.call":
+            # Start + finish share (tool, args_digest, run); collapse the
+            # pair into one entry carrying the finish verdict.
+            if data.get("phase") == "finish":
+                report.tool_calls.append({
+                    "ts": ts,
+                    "tool": str(data.get("tool") or ""),
+                    "actor": str(data.get("actor") or ""),
+                    "ok": bool(data.get("ok", False)),
+                    "seconds": data.get("seconds"),
+                    "error": str(data.get("error") or ""),
+                    "run_id": str(data.get("run_id") or ""),
+                    "request_id": str(data.get("request_id") or ""),
+                })
         elif topic.startswith("task."):
             report.tasks.append({
                 "ts": ts,

@@ -90,6 +90,14 @@ def _scalar(value: Any) -> str:
     if isinstance(value, bool):
         return "yes" if value else "no"
     if isinstance(value, float):
+        # Never collapse a nonzero number to zero: values outside the
+        # "human" band keep their full repr (1e-06, not 0.00 → "0").
+        # NaN/inf also survive via repr instead of a format crash.
+        if value == 0.0:
+            return "0"
+        if abs(value) < 0.01 or abs(value) >= 1e15 or value != value \
+                or value in (float("inf"), float("-inf")):
+            return repr(value)
         return f"{value:.2f}".rstrip("0").rstrip(".")
     text = str(value)
     text = " ".join(text.split())

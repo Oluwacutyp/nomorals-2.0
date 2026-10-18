@@ -39,7 +39,8 @@ Consumes the H2 event topic contract:
 * ``trigger.added`` / ``trigger.fired`` / ``trigger.removed`` /
   ``trigger.enabled`` / ``trigger.disabled`` — {trigger_id, name, action}
 * plus any other ``mission.*`` / ``artifact.*`` / ``session.*`` /
-  ``task.*`` / ``document.*`` / ``browser.*`` / ``codews.*`` /
+  ``task.*`` / ``tool.call`` / ``document.*`` / ``browser.*`` /
+  ``codews.*`` /
   ``wisdom.*`` / ``connector.*`` / ``datasci.*`` / ``plugin.*`` /
   ``mesh.*`` / ``sync.*`` / ``power.*`` / ``stream.*`` / ``search.*`` /
   ``trigger.*`` topics the siblings emit.
@@ -68,7 +69,7 @@ _log = logging.getLogger(__name__)
 
 #: Bus topic patterns the timeline subscribes to (async delivery).
 TIMELINE_PATTERNS: tuple[str, ...] = (
-    "mission.*", "artifact.*", "session.*", "task.*",
+    "mission.*", "artifact.*", "session.*", "task.*", "tool.call",
     "document.*", "browser.*", "codews.*",
     "wisdom.*", "connector.*", "datasci.*", "plugin.*", "mesh.*",
     "sync.*", "power.*", "stream.*", "search.*", "trigger.*",

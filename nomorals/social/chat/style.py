@@ -21,11 +21,15 @@ Usage::
 
 from __future__ import annotations
 
+import contextvars
 import html
+from contextlib import contextmanager
+from typing import Iterator
 
 __all__ = [
     "section", "cmd", "cta", "bar", "bold", "escape",
-    "THEMES", "set_theme", "current_theme", "header", "quote", "kv",
+    "THEMES", "set_theme", "current_theme", "theme_context",
+    "header", "quote", "kv",
     "stat_line", "card", "table", "sparkline", "tag",
     "render_menu", "menu_section", "menu_item", "menu_divider",
 ]
@@ -77,6 +81,13 @@ THEMES: dict[str, dict[str, object]] = {
 
 _theme: str = "rich"
 
+#: Per-chat / per-task theme override. ``set_theme`` still sets the
+#: process-wide default; :func:`theme_context` scopes a theme to one
+#: chat's render without letting concurrent chats change each other's
+#: shared global (seam F).
+_THEME_CTX: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "chat_theme", default="")
+
 
 def set_theme(name: str) -> str:
     """Switch the output theme. Returns the previous theme."""
@@ -87,18 +98,34 @@ def set_theme(name: str) -> str:
 
 
 def current_theme() -> str:
-    return _theme
+    """Active theme: the scoped override wins over the process default."""
+    scoped = _THEME_CTX.get()
+    return scoped if scoped in THEMES else _theme
+
+
+@contextmanager
+def theme_context(name: str) -> Iterator[str]:
+    """Scope a theme to the current context (one chat / one render).
+
+    The process default is untouched, and concurrent chats on other
+    threads/tasks keep their own theme.
+    """
+    token = _THEME_CTX.set(name if name in THEMES else "rich")
+    try:
+        yield current_theme()
+    finally:
+        _THEME_CTX.reset(token)
 
 
 def _theme_cfg() -> dict[str, object]:
-    return THEMES.get(_theme, THEMES["rich"])
+    return THEMES.get(current_theme(), THEMES["rich"])
 
 
 def _markup(text: str, tag_name: str) -> str:
     cfg = _theme_cfg()
     if not cfg.get("markup"):
         return text
-    if _theme in ("terminal",):
+    if current_theme() in ("terminal",):
         return text
     if tag_name == "b":
         return f"<b>{text}</b>"

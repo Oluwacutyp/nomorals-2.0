@@ -13,11 +13,13 @@ Design rules (from the mining pass):
 
 from __future__ import annotations
 
+import contextvars
 import os
 import shutil
 import sys
+from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Iterable, Iterator, Mapping, Sequence
 
 __all__ = [
     "THEMES",
@@ -33,6 +35,7 @@ __all__ = [
     "styled_box",
     "styled_table",
     "supports_color",
+    "theme_context",
     "theme_names",
 ]
 
@@ -107,6 +110,13 @@ THEMES: dict[str, Theme] = {
 
 _ACTIVE: dict[str, Theme] = {"theme": THEMES["ember"]}
 
+#: Per-context theme override (same seam-F fix as chat style):
+#: ``set_theme`` still switches the process-wide default, while
+#: :func:`theme_context` scopes a theme to one render so concurrent
+#: surfaces never change each other's palette mid-render.
+_THEME_CTX: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "core_theme", default="")
+
 
 def theme_names() -> list[str]:
     return sorted(THEMES)
@@ -121,7 +131,22 @@ def set_theme(name: str) -> Theme:
 
 
 def active_theme() -> Theme:
+    scoped = _THEME_CTX.get()
+    if scoped in THEMES:
+        return THEMES[scoped]
     return _ACTIVE["theme"]
+
+
+@contextmanager
+def theme_context(name: str) -> Iterator[Theme]:
+    """Scope a theme to the current context; process default untouched."""
+    if name not in THEMES:
+        raise ValueError(f"unknown theme {name!r}; choose from {theme_names()}")
+    token = _THEME_CTX.set(name)
+    try:
+        yield THEMES[name]
+    finally:
+        _THEME_CTX.reset(token)
 
 
 def supports_color(stream: Any = None) -> bool:

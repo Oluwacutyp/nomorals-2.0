@@ -189,6 +189,11 @@ class PartnerRuntime(
                 us_chats=us_chats,
                 adapter_builder=self._build_adapter,
                 session_bridge=self._session_bridge,
+                # Ordinary chat path gets durable delivery (row first,
+                # receipt after) whenever a db exists; without a db the
+                # gateway reports durable-requested-unavailable and each
+                # send carries delivery_degraded=True (seam A).
+                durable_outbox=True,
             )
 
         # Tools that deliver files into chats (file_send, report_publish)
@@ -2084,6 +2089,14 @@ class PartnerRuntime(
                 "fights": len(self.brain.relationship.fights),
             },
             "platforms": self.gateway.status(),
+            # Effective delivery mode (seam A): durable / direct /
+            # durable-requested-unavailable — visible here, not just
+            # in a log line.
+            "delivery": {
+                "mode": self.gateway.delivery_mode,
+                "durable_outbox": bool(self.gateway.durable_outbox),
+                "outbox": self.gateway.outbox is not None,
+            },
             "autonomy": self._autonomy.status() if self._autonomy else "off",
             # Dynamic lexicon voice feed: per-category term counts so the
             # owner can see what the feed is working with (deeper inspection

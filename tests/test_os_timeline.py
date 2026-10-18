@@ -66,7 +66,7 @@ class TimelineRecordTests(unittest.TestCase):
     def test_subscribed_patterns(self):
         self.assertEqual(
             set(TIMELINE_PATTERNS),
-            {"mission.*", "artifact.*", "session.*", "task.*",
+            {"mission.*", "artifact.*", "session.*", "task.*", "tool.call",
              "document.*", "browser.*", "codews.*",
              "wisdom.*", "connector.*", "datasci.*", "plugin.*", "mesh.*",
              "sync.*", "power.*", "stream.*", "search.*", "trigger.*"})
