@@ -81,6 +81,11 @@ def ensure_schema(db: Any) -> None:
     for ddl in (
         "ALTER TABLE knowledge_gaps ADD COLUMN priority REAL NOT NULL DEFAULT 0",
         "ALTER TABLE knowledge_gaps ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0",
+        # Agency adequacy (AUTONOMY_THAT_ACTS §3): preserve unresolved
+        # subquestions / contradictions instead of dropping them when a
+        # gap stays open. Empty JSON when nothing is unresolved.
+        "ALTER TABLE knowledge_gaps ADD COLUMN unresolved TEXT NOT NULL DEFAULT '[]'",
+        "ALTER TABLE knowledge_gaps ADD COLUMN contradictions TEXT NOT NULL DEFAULT '[]'",
     ):
         try:
             db.execute(ddl)
@@ -443,15 +448,24 @@ class ResearchOrgan:
             try:
                 deep = research_deep(
                     gap["question"], rctx, llm_fn=llm_fn, max_queries=4)
-                answered = bool((deep.synthesis or "").strip())
+                # ADEQUACY GATE (agency): a nonempty synthesis is NOT
+                # proof. Resolve only on evidence-supported coverage +
+                # no contradictions + consuming task can proceed.
+                # Unresolved subquestions/contradictions are preserved
+                # on the row so the next run continues, not restarts.
+                from ..agency.adequacy import assess_gap_adequacy
+                verdict = assess_gap_adequacy(deep, gap)
+                answered = verdict.adequate
                 status = ("resolved" if answered
                           else "stalled" if attempts >= self._MAX_GAP_ATTEMPTS
                           else "open")
                 self.db.execute(
                     "UPDATE knowledge_gaps SET status = ?, resolved_ts = ?,"
-                    " attempts = ? WHERE id = ?",
+                    " attempts = ?, unresolved = ?, contradictions = ?"
+                    " WHERE id = ?",
                     (status, time.time() if answered else 0,
-                     attempts, gap["id"]))
+                     attempts, json.dumps(verdict.unresolved_subquestions),
+                     json.dumps(verdict.contradictions), gap["id"]))
                 if answered:
                     report.gaps_resolved += 1
                     # INTEGRATE (MAIL loop): the answer is stored back as

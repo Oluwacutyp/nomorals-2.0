@@ -172,9 +172,20 @@ def test_tick_resolves_gap(monkeypatch):
     organ = autonomy.ResearchOrgan(_ctx(db))
     organ.note_gap("what is qlora?")
 
+    # Adequacy gate (agency): a paragraph alone does NOT close a gap —
+    # resolution needs >=2 distinct source domains with real findings.
     class FakeDeep:
-        synthesis = "QLoRA is quantized LoRA."
-        findings = []
+        synthesis = "QLoRA is quantized LoRA. [a] [b]"
+        findings = [
+            pl.ResearchFinding(job_id="g", title="QLoRA paper",
+                               url="https://arxiv.example/qlora",
+                               snippet="quantized LoRA"),
+            pl.ResearchFinding(job_id="g", title="QLoRA guide",
+                               url="https://docs.example/qlora",
+                               snippet="quantized LoRA training"),
+        ]
+        conflicts = []
+        needs_clarification = False
 
     monkeypatch.setattr(pl, "research_deep",
                         lambda q, rctx, llm_fn=None, **kw: FakeDeep())
@@ -185,6 +196,28 @@ def test_tick_resolves_gap(monkeypatch):
     from nomorals import organs
     events = organs.drain(db, "brain")
     assert any(e["kind"] == "gap.answered" for e in events)
+
+
+def test_tick_paragraph_alone_keeps_gap_open(monkeypatch):
+    """Regression: nonempty synthesis with no evidence must NOT resolve."""
+    from nomorals.research import autonomy
+    from nomorals.research import pipeline as pl
+    db = _fake_db()
+    organ = autonomy.ResearchOrgan(_ctx(db))
+    organ.note_gap("what is qlora?")
+
+    class FakeDeep:
+        synthesis = "QLoRA is quantized LoRA."
+        findings = []  # no evidence — fluent paragraph only
+        conflicts = []
+        needs_clarification = False
+
+    monkeypatch.setattr(pl, "research_deep",
+                        lambda q, rctx, llm_fn=None, **kw: FakeDeep())
+    monkeypatch.setattr(pl, "_router_llm_fn", lambda router: None)
+    report = organ.tick()
+    assert report.gaps_resolved == 0
+    assert len(organ.open_gaps()) == 1
 
 
 # ── wisdom organ ─────────────────────────────────────────────────────

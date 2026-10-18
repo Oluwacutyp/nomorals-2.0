@@ -1809,6 +1809,17 @@ class PartnerRuntime(
                 except Exception as exc:  # noqa: BLE001 - optional
                     _log.warning("autonomy nervous system not started: %s",
                                  exc)
+                # Agency layer (nomorals/agency): initiative backlog +
+                # boot reconcile (lease recovery, missed-check coalesce,
+                # idempotent watch re-registration). Best-effort: agency
+                # must never break boot. Deliberation/execution run via
+                # the existing scheduler facade + idle coordinator.
+                try:
+                    from ...agency.wiring import boot_agency
+                    self._agency = boot_agency(self.context.db)
+                except Exception as exc:  # noqa: BLE001 - optional
+                    _log.warning("agency layer not started: %s", exc)
+                    self._agency = None
                 # Trigger engine (nomorals/triggers): the automation layer
                 # that lets systems wake each other.  Message-source
                 # triggers evaluate inbound chat via message_hook (wired
