@@ -305,18 +305,18 @@ class TestResolverWiring:
         assert out.downloadable is False
 
     def test_text_chain_includes_new_sources(self):
-        # The chain tries netnaija before the proven globals and
-        # boomplay (metadata-only) after them.
+        # The chain tries netnaija before the proven globals.
+        # Boomplay is NOT in the chain: JS SPA shell, plain-HTTP
+        # search returns no results (verified 2026-10-18).
         from nomorals.media import resolver as res_mod
         import inspect
         src = inspect.getsource(res_mod.SourceResolver._resolve_text)
         assert "netnaija-search" in src
-        assert "boomplay-search" in src
+        assert "boomplay-search" not in src
         nn = src.index("netnaija-search")
         sc = src.index("soundcloud-search")
         yt = src.index("youtube-search")
-        bp = src.index("boomplay-search")
-        assert nn < sc < yt < bp
+        assert nn < sc < yt
 
     def test_url_chain_tries_audiomack_first(self):
         from nomorals.media import resolver as res_mod

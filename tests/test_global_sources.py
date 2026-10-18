@@ -33,8 +33,10 @@ SIX_REGIONS = {"americas", "europe", "asia", "africa", "middle_east",
 
 
 class PlayGlobalCoverageTests(unittest.TestCase):
-    def test_chain_has_sixteen_sources(self):
-        self.assertGreaterEqual(len(MUSIC_SEARCH_SOURCES), 16,
+    def test_chain_has_fifteen_verified_sources(self):
+        # Was sixteen: Boomplay removed 2026-10-18 — its search page
+        # is a JS SPA shell and plain-HTTP search returns no results.
+        self.assertGreaterEqual(len(MUSIC_SEARCH_SOURCES), 15,
                                 MUSIC_SEARCH_SOURCES)
 
     def test_new_global_sources_present(self):

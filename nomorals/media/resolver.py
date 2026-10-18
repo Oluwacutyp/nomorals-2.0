@@ -39,6 +39,7 @@ from typing import Any, Callable
 
 from ..core.logging_setup import get_logger
 from ..tools.media import probe
+from .cookies import BOT_COOKIE_HELP, YTDLP_INSTALL_HELP
 
 _log = get_logger(__name__)
 
@@ -47,14 +48,34 @@ __all__ = [
     "ResolvedAudio",
     "ResolutionError",
     "YT_DLP_HINT",
+    "ytdlp_available",
 ]
 
 
-YT_DLP_HINT = (
-    "yt-dlp is not installed — `pip install yt-dlp` (Termux: "
-    "`pip install yt-dlp`) unlocks YouTube, SoundCloud, Bandcamp, "
-    "Audiomack and 1000+ other sites"
-)
+#: Install hint, single-sourced from cookies.py (official yt-dlp docs) —
+#: never a second, drifted copy.
+YT_DLP_HINT = YTDLP_INSTALL_HELP
+
+
+def ytdlp_available() -> bool:
+    """Is yt-dlp actually usable here — Python module OR CLI on PATH?
+
+    Verified, not guessed: the failure hint must never claim "not
+    installed" when yt-dlp just ran and hit a bot check. Callers that
+    need a fast answer in tests monkeypatch this name on the module.
+    """
+    import importlib.util
+    import shutil
+
+    try:
+        if importlib.util.find_spec("yt_dlp") is not None:
+            return True
+    except Exception:  # noqa: BLE001 — a broken spec lookup is "not found"
+        pass
+    try:
+        return shutil.which("yt-dlp") is not None
+    except Exception:  # noqa: BLE001
+        return False
 
 #: Every text-search source /play tries, in chain order — single source
 #: of truth, imported from sources.py so the count is testable.
@@ -202,7 +223,6 @@ class SourceResolver:
             self._wikimedia_search_many,
             self._itunes_search_many,
             self._deezer_search_many,
-            self._boomplay_search_many,
         ):
             try:
                 out.extend(fn(q, limit))
@@ -463,8 +483,16 @@ class SourceResolver:
 
     @staticmethod
     def _finalize_failure(result: ResolvedAudio) -> ResolvedAudio:
+        # Hint classification from VERIFIED facts, never substring
+        # matches: a bot-check error contains "yt-dlp" in its GitHub
+        # FAQ URL, which must NOT read as "yt-dlp not installed".
         blob = " ".join(result.errors).lower()
-        if "yt-dlp" in blob or "yt_dlp" in blob:
+        if ("not a bot" in blob or "confirm you're not a bot" in blob
+                or "sign in to confirm" in blob):
+            # yt-dlp RAN and hit a bot check — the fix is cookies.
+            result.hint = BOT_COOKIE_HELP
+        elif not ytdlp_available() and ("yt-dlp" in blob or "yt_dlp" in blob):
+            # yt-dlp verified missing AND an error says so — install hint.
             result.hint = YT_DLP_HINT
         elif not result.hint:
             result.hint = \
@@ -511,8 +539,10 @@ class SourceResolver:
         # MANY sources, in chain order (see MUSIC_SEARCH_SOURCES).
         # Downloadable/full-track sources first; regional blogs before
         # globals; 30s-preview APIs (iTunes/Deezer) only after every
-        # full-track source; metadata-only (MusicBrainz, Boomplay) +
-        # Spotify last.  GLOBAL coverage: Nigeria/Africa is one region
+        # full-track source; metadata-only (MusicBrainz) + Spotify
+        # last. Boomplay is NOT in this chain: its search page is a
+        # JS SPA shell and plain-HTTP search returns no results
+        # (verified 2026-10-18).  GLOBAL coverage: Nigeria/Africa is one region
         # among many — the chain spans worldwide catalogs (YouTube
         # Music, MusicBrainz, Openverse, Wikimedia, iTunes, Deezer).
         # One source failing never ends the search — the chain keeps
@@ -543,7 +573,6 @@ class SourceResolver:
                 query, "ITunesSource", "itunes")),
             ("deezer-search", lambda: self._s_preview_search(
                 query, "DeezerSource", "deezer")),
-            ("boomplay-search", lambda: self._s_boomplay_search(query)),
             ("spotify-search", lambda: self._s_spotify_search(query)),
         ])
 
@@ -690,7 +719,11 @@ class SourceResolver:
         the only signal there)."""
         tr = tr or {}
         policy = str(tr.get("policy") or "").upper()
-        if policy and policy != "ALLOW":
+        # Only the hard preview policies count: MONETIZE is a full
+        # stream (the real stream URL is the only preview-only proof,
+        # checked by the adapter's stream_url). Treating MONETIZE as
+        # preview-only discards real full tracks.
+        if policy in _PREVIEW_POLICIES:
             return f"policy={policy}"
         if tr.get("preview") or tr.get("preview_url"):
             return "preview flag set"
@@ -748,7 +781,9 @@ class SourceResolver:
             raise ResolutionError("soundcloud-search",
                                   "SoundCloud adapter not wired")
         try:
-            tracks = adapter.search_tracks(query, limit=1)
+            # Fetch up to 5 and skip preview-only ones: fetching exactly
+            # 1 fails the whole strategy when the first hit is a clip.
+            tracks = adapter.search_tracks(query, limit=5)
         except Exception as exc:  # noqa: BLE001
             raise ResolutionError("soundcloud-search",
                                   f"search failed: {exc}") from exc
@@ -756,7 +791,13 @@ class SourceResolver:
             raise ResolutionError(
                 "soundcloud-search",
                 f"no SoundCloud results for {query!r}")
-        return self._track_result(tracks[0], "SoundCloud search")
+        playable = [t for t in tracks if not self._preview_reason(t or {})]
+        if not playable:
+            raise ResolutionError(
+                "soundcloud-search",
+                f"all {len(tracks)} SoundCloud search results are "
+                "preview-only; trying full-track sources")
+        return self._track_result(playable[0], "SoundCloud search")
 
     # ── strategies: yt-dlp (the dynamic universal path) ───────────────
 
@@ -921,7 +962,12 @@ class SourceResolver:
                              source_name="NetNaija search")
 
     def _s_boomplay_search(self, query: str) -> ResolvedAudio:
-        """Boomplay text search — metadata only (protected streams)."""
+        """Boomplay text search — metadata only (protected streams).
+
+        NOT in the active chains (removed 2026-10-18): Boomplay search
+        is a JS SPA shell and plain-HTTP search returns no results.
+        Kept callable + tested for a future browser-backed search.
+        """
         from .sources import BoomplaySource  # lazy: same layer
 
         cands = BoomplaySource().search(query, limit=5)

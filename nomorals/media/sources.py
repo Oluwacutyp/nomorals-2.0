@@ -363,12 +363,16 @@ class NetNaijaSource(BaseScrapeSource):
 class BoomplaySource(AudioSource):
     """Boomplay — massive in Nigeria/Africa.
 
-    Honest limitation (verified 2026-10-09): there is no official public
-    API, no yt-dlp extractor, and streams are protected.  This source
-    provides *search metadata only* — like Spotify, candidates are
-    clearly marked non-downloadable so the chain (and the user) knows
-    exactly what to expect.  Useful for discovery ("what's hot on
-    Boomplay"), not for file delivery.
+    Honest limitation (verified 2026-10-09, re-verified 2026-10-18):
+    there is no official public API, no yt-dlp extractor, and streams
+    are protected.  Worse, the search page is a JS SPA shell
+    (placeholder ``songName: Unknown``, zero result links via plain
+    HTTP) and its autocomplete endpoint ``/searchItem`` 500s without
+    a browser session — so plain-HTTP text search returns NO results
+    and this source is NOT in the active chain (removed 2026-10-18).
+    The class + resolver method stay, tested, for a future
+    browser-backed search. Re-add to the chain only when a live
+    check returns real candidates.
     """
 
     name = "boomplay"
@@ -653,17 +657,21 @@ class ArchiveOrgSource(AudioSource):
     _SEARCH = "https://archive.org/advancedsearch.php"
     _META = "https://archive.org/metadata/{ident}"
 
+    def search_url(self, query: str, limit: int = 8) -> str:
+        """The advancedsearch URL this source fetches (registry probe)."""
+        return (self._SEARCH + "?q="
+                + urllib.parse.quote_plus(
+                    f"title:({(query or '').strip()}) AND mediatype:audio")
+                + "&fl[]=identifier&fl[]=title&fl[]=creator"
+                + f"&rows={max(1, min(limit, 20))}&output=json")
+
     def search(self, query: str, limit: int = 8) -> list[SourceCandidate]:
         q = (query or "").strip()
         if not q:
             return []
         try:
             import json as _json
-            url = (self._SEARCH + "?q="
-                   + urllib.parse.quote_plus(
-                       f"title:({q}) AND mediatype:audio")
-                   + "&fl[]=identifier&fl[]=title&fl[]=creator"
-                   + f"&rows={max(1, min(limit, 20))}&output=json")
+            url = self.search_url(q, limit=limit)
             raw = self._get(url)
             if not raw:
                 return []
@@ -724,11 +732,16 @@ class BandcampSource(AudioSource):
     name = "bandcamp"
     _SEARCH = "https://bandcamp.com/search"
 
+    def search_url(self, query: str) -> str:
+        """The search URL this source fetches (registry probe)."""
+        return (f"{self._SEARCH}?q="
+                f"{urllib.parse.quote_plus((query or '').strip())}")
+
     def search(self, query: str, limit: int = 8) -> list[SourceCandidate]:
         q = (query or "").strip()
         if not q:
             return []
-        html = self._get(f"{self._SEARCH}?q={urllib.parse.quote_plus(q)}")
+        html = self._get(self.search_url(q))
         if not html:
             return []
         out: list[SourceCandidate] = []
@@ -771,7 +784,6 @@ SOURCE_CHAIN: list[tuple[str, AudioSource]] = [
     ("netnaija-search", NetNaijaSource()),
     ("notjustok-search", NotJustOkSource()),
     ("tooxclusive-search", TooXclusiveSource()),
-    ("boomplay-search", BoomplaySource()),
     ("bandcamp-search", BandcampSource()),
     ("archiveorg-search", ArchiveOrgSource()),
     ("musicbrainz-search", MusicBrainzSource()),
@@ -804,7 +816,6 @@ MUSIC_SEARCH_SOURCES: tuple[str, ...] = (
     "wikimedia-search",
     "itunes-search",
     "deezer-search",
-    "boomplay-search",
     "spotify-search",
 )
 
@@ -833,7 +844,6 @@ MUSIC_SOURCE_REGIONS: dict[str, str] = {
     "wikimedia-search": "global",
     "itunes-search": "global",
     "deezer-search": "global",
-    "boomplay-search": "africa",
     "spotify-search": "global",
 }
 

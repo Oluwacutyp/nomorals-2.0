@@ -167,9 +167,12 @@ class NkiriSource(BaseFilmScrape):
     name = "nkiri"
     _BASE = "https://nkiri.com"
 
+    def search_url(self, query: str) -> str:
+        """The search URL this source fetches (registry probe)."""
+        return f"{self._BASE}/?s={urllib.parse.quote_plus(query)}"
+
     def search(self, query: str, limit: int = 8) -> list[FilmCandidate]:
-        html = self._get(
-            f"{self._BASE}/?s={urllib.parse.quote_plus(query)}")
+        html = self._get(self.search_url(query))
         if not html:
             return []
         out: list[FilmCandidate] = []
@@ -210,10 +213,13 @@ class FzMoviesSource(BaseFilmScrape):
     name = "fzmovies"
     _BASE = "https://fzmovies.net"
 
+    def search_url(self, query: str) -> str:
+        """The primary search URL this source fetches (registry probe)."""
+        return (f"{self._BASE}/search.php?searchname="
+                f"{urllib.parse.quote_plus(query)}")
+
     def search(self, query: str, limit: int = 8) -> list[FilmCandidate]:
-        html = self._get(
-            f"{self._BASE}/search.php?searchname="
-            f"{urllib.parse.quote_plus(query)}")
+        html = self._get(self.search_url(query))
         if not html:
             # try alternate search path
             html = self._get(

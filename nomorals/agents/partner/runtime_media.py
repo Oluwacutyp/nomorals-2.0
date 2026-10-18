@@ -580,12 +580,16 @@ class RuntimeMediaMixin:
                         from ...media.play_service import PlayService
                         detail = PlayService(
                             self.context).explain_failure(resolution)
+                        # explain_failure already includes "hint: ..." —
+                        # appending resolution.hint again would print the
+                        # hint body twice.
+                        hint = ""
                     except Exception:  # noqa: BLE001
                         detail = ("tried: "
                                   + ("; ".join(resolution.attempts)
                                      or "no strategies"))
-                    hint = (f"\n{resolution.hint}"
-                            if resolution.hint else "")
+                        hint = (f"\n{resolution.hint}"
+                                if resolution.hint else "")
                     return (f"couldn't find {rest[:80]!r} —\n{detail}{hint}")
                 added = []
                 for r in (resolution, *resolution.extra_tracks):

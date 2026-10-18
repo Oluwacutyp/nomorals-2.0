@@ -217,7 +217,7 @@ def test_missing_ytdlp_gives_install_hint(monkeypatch, tmp_path):
     out = SourceResolver(_ctx(str(tmp_path))).resolve(
         "https://example.com/some-track")
     assert not out.ok
-    assert "pip install yt-dlp" in out.hint
+    assert 'pip install -U "yt-dlp[default]"' in out.hint
     assert out.hint == YT_DLP_HINT
 
 
@@ -263,7 +263,7 @@ def test_unknown_title_fails_all_strategies_honestly(monkeypatch, tmp_path):
     for name in ("workspace-scan", "soundcloud-search",
                  "youtube-search", "spotify-search"):
         assert name in tried, tried
-    assert "pip install yt-dlp" in out.hint
+    assert 'pip install -U "yt-dlp[default]"' in out.hint
 
 
 # ── Spotify: honest, no extraction ────────────────────────────────────

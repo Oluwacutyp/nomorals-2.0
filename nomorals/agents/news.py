@@ -12,10 +12,12 @@
   one-liners otherwise. Never invents a headline it didn't read.
 * **Digest** — top N items per source, delivered through the notifier.
 
-Feed URLs in the original set were live-fetched and verified 2026-10-01.
-Feeds added 2026-10-17 (marked below) are well-known public RSS endpoints
-but were NOT individually live-verified from the build sandbox — a dead
-one shows up honestly in ``errors`` and never kills the digest.
+Every feed URL was live-fetched and classified 2026-10-18 (see
+``docs/source-verification-2026-10-18.md``): 9 dead feeds removed
+(404 / 200-but-HTML), 7 verified-live replacements added. Feeds that
+answer bot-wall / 5xx / connection-reset from the verifier network are
+kept — they work from other networks — and ``agency.sourcehealth``
+re-checks them at runtime with a circuit breaker.
 The legacy wire services (Reuters/AP/AFP/…) no longer publish public RSS,
 so ``wires`` carries the working global aggregators instead.
 
@@ -83,11 +85,10 @@ FEED_CATEGORIES: dict[str, tuple[tuple[str, str], ...]] = {
     ),
     "africa": (
         ("BBC Africa", "https://feeds.bbci.co.uk/news/world/africa/rss.xml"),
-        ("Al Jazeera Africa", "https://www.aljazeera.com/xml/rss/africa.xml"),
         ("Joy Online", "https://joyonline.org/feed/"),
         ("Nation Africa", "https://nation.africa/feed"),
-        ("News24", "https://www.news24.com/feed"),
         ("Nairaland", "https://www.nairaland.com/feed"),
+        ("AfricaNews", "https://www.africanews.com/feed/rss"),
     ),
     "business": (
         ("BBC Business", "https://feeds.bbci.co.uk/news/business/rss.xml"),
@@ -96,7 +97,8 @@ FEED_CATEGORIES: dict[str, tuple[tuple[str, str], ...]] = {
         ("CoinDesk", "https://www.coindesk.com/arc/outboundfeeds/rss/"),
         ("MarketWatch", "https://feeds.marketwatch.com/marketwatch/topstories/"),
         ("CNBC", "https://www.cnbc.com/id/100003114/device/rss/rss.html"),
-        ("Yahoo Finance", "https://finance.yahoo.com/news/rssindex"),
+        ("The Hindu Business", "https://www.thehindu.com/business/feeder/default.rss"),
+        ("FT Markets", "https://www.ft.com/rss/home"),
     ),
     "science": (
         ("BBC Science", "https://feeds.bbci.co.uk/news/science_and_environment/rss.xml"),
@@ -112,8 +114,7 @@ FEED_CATEGORIES: dict[str, tuple[tuple[str, str], ...]] = {
         ("Sky Sports", "https://www.skysports.com/rss/12040"),
         ("Complete Sports", "https://www.completesports.com/feed/"),
         ("ESPN", "https://www.espn.com/espn/rss/news"),
-        ("Goal", "https://www.goal.com/en/rss"),
-        ("Bleacher Report", "https://bleacherreport.com/articles/feed"),
+        ("ESPN FC", "https://www.espn.com/espn/rss/soccer/news"),
     ),
     "usa": (
         ("CNN", "http://rss.cnn.com/rss/edition.rss"),
@@ -140,21 +141,20 @@ FEED_CATEGORIES: dict[str, tuple[tuple[str, str], ...]] = {
         ("Channel News Asia",
          "https://www.channelnewsasia.com/api/v1/rss-outbound-feed?_format=xml"),
         ("Japan Times", "https://www.japantimes.co.jp/news/feed/"),
-        ("Korea Herald", "http://www.koreaherald.com/rss"),
         ("SCMP", "https://www.scmp.com/rss/91/feed"),
         ("Times of India", "https://timesofindia.indiatimes.com/rssfeedstopstories.cms"),
-        ("Dawn", "https://www.dawn.com/rss"),
+        ("Geo News", "https://www.geo.tv/rss/1/0"),
     ),
     "latam": (
         ("El País", "https://feeds.elpais.com/mrss-s/pages/ep/site/elpais.com/portada"),
         ("G1", "https://g1.globo.com/rss/g1/"),
         ("Clarín", "https://www.clarin.com/rss/lo-ultimo/"),
-        ("El Universal", "https://www.eluniversal.com.mx/rss.xml"),
     ),
     "middle_east": (
         ("Arab News", "https://www.arabnews.com/rss.xml"),
         ("Times of Israel", "https://www.timesofisrael.com/feed/"),
-        ("Al Arabiya", "https://www.alarabiya.net/rss.xml"),
+        ("Middle East Eye", "https://www.middleeasteye.net/rss"),
+        ("Al Monitor", "https://www.al-monitor.com/rss"),
     ),
     "oceania": (
         ("ABC Australia", "https://www.abc.net.au/news/feed/1"),
@@ -364,7 +364,15 @@ class NewsAgent:
         feeds = self._feeds()
         for source, url in feeds:
             try:
-                response = self._client.get(url)
+                # RSS Accept headers: several feeds (CBS, ESPN, PBS,
+                # Engadget — verified 2026-10-18) reject the generic
+                # Accept with 406/202/403 but serve 200 + items when
+                # asked for RSS explicitly.
+                response = self._client.get(url, headers={
+                    "Accept": "application/rss+xml, "
+                              "application/atom+xml, "
+                              "application/xml;q=0.9, text/xml;q=0.8",
+                })
                 items = parse_feed(response.text)
             except Exception as exc:  # noqa: BLE001 - one dead feed must not kill the digest
                 errors.append(f"{source}: {exc}")

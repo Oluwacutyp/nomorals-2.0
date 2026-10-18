@@ -32,7 +32,11 @@ class PlayManySourcesTests(unittest.TestCase):
         self.assertIn("archiveorg-search", MUSIC_SEARCH_SOURCES)
         self.assertIn("itunes-search", MUSIC_SEARCH_SOURCES)
         self.assertIn("deezer-search", MUSIC_SEARCH_SOURCES)
-        self.assertIn("boomplay-search", MUSIC_SEARCH_SOURCES)
+        # Boomplay is NOT in the active chain: its search page is a JS
+        # SPA shell and plain-HTTP search returns no results
+        # (verified 2026-10-18). Class + resolver method stay for a
+        # future browser-backed search.
+        self.assertNotIn("boomplay-search", MUSIC_SEARCH_SOURCES)
         self.assertIn("spotify-search", MUSIC_SEARCH_SOURCES)
 
     def test_unknown_title_tries_all_sources(self):
@@ -158,7 +162,7 @@ class NewsManySourcesTests(unittest.TestCase):
                 ("Punch", "https://example.com/punch.xml"),
                 ("Dead Feed", "https://example.com/dead.xml")]), \
              mock.patch.object(agent, "_client") as client:
-            def _get(url):
+            def _get(url, *args, **kwargs):
                 if "dead" in url:
                     raise RuntimeError("feed down")
                 return SimpleNamespace(text=feed_xml)

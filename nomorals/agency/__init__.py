@@ -27,6 +27,17 @@ themselves. It adds:
   + reconciled end-of-day agenda.
 * :mod:`nomorals.agency.supervision` — boot reconcile: lease recovery,
   missed-check coalescing, idempotent watch re-registration.
+* :mod:`nomorals.agency.expansion` — second-wave autonomy: the REST
+  of the repo (media, code, books, games, commerce, health, travel,
+  property, legal, finance, learn, marketing, community, characters,
+  documents, datasci, sourcehealth) on the SAME scheduler and stores
+  as the core systems — one capacity pool, no parallel system.
+* :mod:`nomorals.agency.sourcehealth` — per-source live verification
+  + circuit breaker. A source that doesn't work is worse than no
+  source: only verified-live sources belong in an active chain.
+* :mod:`nomorals.agency.sources_registry` — the single-sourced
+  registry of every verifiable source, collected from the real
+  modules that own the lists (no duplicated URL lists).
 
 Invariant (enforced in :class:`InitiativeStore`): every nonterminal
 initiative has an executable next action, a timed wake-up, or a
@@ -48,15 +59,21 @@ from .supervision import BootSupervisor
 from .knowledge import KnowledgeStore
 from .rotation import RotationScheduler, SystemSlot, WorkResult
 from .systems import ActiveSystems, SYSTEM_NAMES, SYSTEM_WEIGHTS
+from .expansion import ExpansionSystems, EXPANSION_SYSTEMS, EXPANSION_WEIGHTS
+from .sourcehealth import SourceHealth, SourceRecord, SourceSpec, check_one
+from .sources_registry import collect as collect_sources, spec_by_key
 
 __all__ = [
     "Initiative", "InitiativeStore", "DeliberationLoop",
     "assess_gap_adequacy", "Claim", "ThreeDeltas", "digest",
     "WaitRecord", "PlanTracker", "STOP_REASONS",
-    "LEAD_TRANSITIONS", "GIG_POST_SUBMISSION", "advance_lead",
-    "score_gig", "evaluate_deal", "classify_weather_item",
-    "cluster_news", "now_view", "since_view", "why_view",
-    "reconciled_agenda", "BootSupervisor",
+    "LEAD_TRANSITIONS", "GIG_POST_SUBMISSION", "advance_lead", "score_gig",
+    "evaluate_deal", "classify_weather_item", "cluster_news",
+    "now_view", "since_view", "why_view", "reconciled_agenda",
+    "BootSupervisor",
     "KnowledgeStore", "RotationScheduler", "SystemSlot", "WorkResult",
     "ActiveSystems", "SYSTEM_NAMES", "SYSTEM_WEIGHTS",
+    "ExpansionSystems", "EXPANSION_SYSTEMS", "EXPANSION_WEIGHTS",
+    "SourceHealth", "SourceRecord", "SourceSpec", "check_one",
+    "collect_sources", "spec_by_key",
 ]
