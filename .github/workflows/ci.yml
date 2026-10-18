@@ -1,0 +1,160 @@
+# CI for nomorals-2.0.
+#
+# What runs on every push / PR:
+#   - lint: the repo's own linter (ruff, per [tool.ruff] in pyproject.toml).
+#   - layering: tests/test_layering.py — the architecture contract.
+#   - error_scan: nomorals.tools.error_scan over the package.
+#   - offline unit suite: `python3 -m unittest discover -s tests` with
+#     NM_RUN_INTEGRATION unset, so only the offline tiers run.
+#
+# Advisory (never blocks): secret-scan. It is grep-based, runs with
+# continue-on-error, and exits 0 by design — hygiene signal for the operator,
+# not a gate on their pushes.
+#
+# Deliberately OMITTED: Termux / aarch64.
+#   GitHub has no first-party aarch64 Termux runner, and third-party
+#   emulation actions (userland/proot Android images) are flaky enough that a
+#   green badge would be theater, not verification. The Termux deploy path is
+#   covered by docs/TERMUX_DEPLOY.md, scripts/termux/start_termux.sh, and the
+#   `termux` settings profile in nomorals/core/config.py. Revisit if a
+#   self-hosted ARM runner becomes available.
+
+name: ci
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+  workflow_dispatch:
+
+jobs:
+  ci:
+    name: "CI (py${{ matrix.python-version }})"
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # NOTE: pyproject.toml sets requires-python >= 3.11, so 3.10 is out.
+        python-version: ["3.11", "3.12"]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # NOTE: vendor/sentinel is a PRIVATE submodule — the runner cannot
+      # fetch it (no credentials for it). Tests that need the real bridge
+      # skip gracefully when it is absent; the absent-submodule behavior
+      # itself is still tested. Do NOT add a fetch step here: it fails.
+
+      # NOTE: the `runner` context is NOT available in job-level `env`
+      # (GitHub fails the whole run at evaluation time, 0s, no jobs), so
+      # TMPDIR is exported here via $GITHUB_ENV instead of a job-level env:.
+      - name: Point TMPDIR at the runner temp dir
+        run: echo "TMPDIR=${{ runner.temp }}" >> "$GITHUB_ENV"
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install system dependencies (ffmpeg for video tests)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ffmpeg
+
+      - name: Install package + dev tooling
+        run: |
+          python3 -m pip install --upgrade pip
+          # The offline suite exercises optional-acceleration paths for real
+          # (numpy/pandas/Pillow/yt-dlp), so CI installs them to match a real
+          # dev checkout; pyyaml is for the workflow self-check below;
+          # python-docx/openpyxl are for the document-engine tests. None
+          # are added to the package's own extras on purpose: the package
+          # keeps zero mandatory dependencies.
+          python3 -m pip install -e ".[dev,fast,media,media-edit]" \
+            "pandas>=2" "pyyaml>=6" "python-docx>=1.1" "openpyxl>=3.1"
+
+      - name: Validate this workflow parses
+        run: python3 -c "import yaml; yaml.safe_load(open('.github/workflows/ci.yml'))"
+
+      # Lint (ruff) is ADVISORY until the lint-debt paydown: the repo carries
+      # ~3,990 pre-existing findings (measured 2026-10-02), so a hard gate
+      # would be red on day one and train everyone to ignore CI. New code
+      # must still be ruff-clean (Wave J files are). Flip to a hard gate
+      # after the paydown wave.
+      - name: Lint (ruff — advisory until lint-debt paydown)
+        continue-on-error: true
+        run: ruff check nomorals/ tests/
+
+      - name: Layering contract
+        run: python3 -m unittest tests.test_layering
+
+      - name: Error scan
+        run: python3 -m nomorals.tools.error_scan nomorals/
+
+      - name: Collection gate (a broken test import must fail CI)
+        run: |
+          # Under `unittest discover` a broken test import degrades to one
+          # error and the rest of the suite still runs — which is how the
+          # stale `_confidence` import hid for days. This gate fails fast:
+          # any collection error makes CI red before the suite runs.
+          python3 -m pytest tests --collect-only -q
+
+      - name: Offline unit suite (NM_RUN_INTEGRATION unset)
+        # Enforced budget: measured ~59 min on 2026-10-14 (docs/SUITE_RUNTIME.md).
+        timeout-minutes: 90
+        run: |
+          if [ -n "${NM_RUN_INTEGRATION:-}" ]; then
+            echo "NM_RUN_INTEGRATION is set on the runner; refusing to run the offline suite with it" >&2
+            exit 1
+          fi
+          # NB: GitHub runs this under `bash -e`; capture the exit code with
+          # `||` so a failing suite doesn't skip the failure report below.
+          python3 -m unittest discover -s tests > /tmp/suite.log 2>&1 || CODE=$?
+          echo "=== SUITE SUMMARY ==="
+          grep -E "^(Ran|OK|FAILED)" /tmp/suite.log || true
+          echo "=== FAILURES (first 30) ==="
+          grep -E "^(FAIL|ERROR):" /tmp/suite.log | head -30 || true
+          exit ${CODE:-0}
+
+  # ── Advisory hygiene: informational only. continue-on-error + an explicit
+  # exit 0 mean this job can NEVER block the operator's push, even if every
+  # pattern below matches. It exists to catch an accidental credential commit
+  # early, not to gate merges.
+  secret-scan:
+    name: "secret-scan (advisory — never blocks)"
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # NOTE: vendor/sentinel is private — the runner cannot fetch it.
+      # (Skipped here; nothing secret lives in the submodule checkout.)
+
+      - name: Grep for committed secrets (advisory)
+        run: |
+          set +e
+          # gitleaks when the runner happens to have it, plain grep otherwise.
+          if command -v gitleaks >/dev/null 2>&1; then
+            gitleaks detect --source . --no-git -v || true
+          else
+            grep -rEni --exclude-dir=.git --exclude-dir=__pycache__ --exclude='*.pyc' \
+              -e 'sk-[A-Za-z0-9]{20,}' \
+              -e 'ghp_[A-Za-z0-9]{36}' \
+              -e 'gho_[A-Za-z0-9]{36}' \
+              -e 'AKIA[0-9A-Z]{16}' \
+              -e 'xox[baprs]-[A-Za-z0-9-]{10,}' \
+              -e '-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----' \
+              -e "(api[_-]?key|client[_-]?secret|auth[_-]?token)[\"']?[[:space:]]*[:=][[:space:]]*[\"'][A-Za-z0-9_.~/+-]{16,}['\"]" \
+              . > /tmp/secret_hits.txt || true
+            if [ -s /tmp/secret_hits.txt ]; then
+              echo "::warning::advisory secret-scan found possible committed secrets:"
+              cat /tmp/secret_hits.txt
+            else
+              echo "advisory secret-scan: no hits"
+            fi
+          fi
+          exit 0  # advisory by design — never fails the run
