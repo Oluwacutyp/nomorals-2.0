@@ -604,6 +604,12 @@ class RuntimeMetaMixin:
         """Inspect + tune the mined style profile (spec §3.4). Owner-only
         (enforced by the grant check in handle_control before dispatch).
 
+        The profile drives OUTPUT styling (core.output_style: command /
+        tool / game / scheduled outputs) — conversational replies keep
+        the persona's own voice and are NOT reformatted by the style
+        system (owner correction 2026-10-17: style was meant for
+        outputs, not normal chats).
+
         ::
 
             /style                          show this chat's live profile

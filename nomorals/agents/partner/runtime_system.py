@@ -603,7 +603,9 @@ class RuntimeSystemMixin:
         outcome = self.context.tools.call("api_call", connector=name, params=params)
         if not outcome.ok:
             return f"api failed: {getattr(outcome.error, 'message', outcome.error)}"
-        return f"{name}:\n" + json.dumps(outcome.value, default=str, indent=1)[:4000]
+        from ...core.tool_render import render_tool_value
+
+        return f"{name}:\n" + render_tool_value(outcome.value)
 
     # ── connector management: /connectors ────────────────────────────────
     def _connectors_vault(self) -> Any:

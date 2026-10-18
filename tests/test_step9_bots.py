@@ -26,22 +26,22 @@ class TestTelegramMenu(unittest.TestCase):
             self.assertNotIn(owner_only, kinds)
 
 
-class TestActionFooters(unittest.TestCase):
-    def test_tool_footer_retry_expand_next(self):
-        from nomorals.social.chat.action_footers import tool_result_footer
-        kb = tool_result_footer("/game trivia")
-        flat = [b for row in kb for b in row]
-        by_label = {label: data for label, data in flat}
-        self.assertEqual(by_label["🔁 Retry"], "game trivia")
-        self.assertEqual(by_label["🔍 Expand"], "help game")
-        self.assertEqual(by_label["⏭️ Next"], "list")
-        self.assertNotIn("💾 Save", by_label)
-        self.assertNotIn("📤 Send", by_label)
+class TestAdaptiveButtonsReplaceFooters(unittest.TestCase):
+    def test_command_result_gets_retry_only_no_filler(self):
+        from nomorals.social.chat.adaptive_buttons import adaptive_buttons_for
 
-    def test_footer_for_plain_text_is_none(self):
-        from nomorals.social.chat.action_footers import footer_for_text
-        self.assertIsNone(footer_for_text("just chatting", "/game trivia"))
-        self.assertIsNone(footer_for_text("✅ done", ""))
+        kb = adaptive_buttons_for(output_kind="command",
+                                  origin_command="/game trivia")
+        flat = [b for row in kb for b in row]
+        self.assertEqual(flat, [("🔁 Retry", "/game trivia")])
+
+    def test_plain_text_gets_no_buttons(self):
+        from nomorals.social.chat.adaptive_buttons import adaptive_buttons_for
+
+        self.assertIsNone(adaptive_buttons_for(text="just chatting"))
+        self.assertIsNone(adaptive_buttons_for(text="✅ done"))
+        self.assertIsNone(adaptive_buttons_for(
+            output_kind="tool", origin_command=""))
 
 
 class TestSingleConsumer(unittest.TestCase):

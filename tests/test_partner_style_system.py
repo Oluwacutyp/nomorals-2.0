@@ -233,7 +233,14 @@ class FakeRouter:
 
 
 class ResponderWiringTest(unittest.TestCase):
-    """The reply path actually uses the style system (not a library)."""
+    """The reply path does NOT use the output style system.
+
+    Owner correction (2026-10-17): style was meant for OUTPUTS — the
+    results that are not normal chats — not for normal chats.
+    Conversational replies keep the persona's own voice passes; the
+    style system's hard reformat (format_reply) applies to outputs
+    only (core.output_style).
+    """
 
     def _responder(self, replies: list[str]) -> PartnerResponder:
         persona = default_persona()
@@ -242,20 +249,20 @@ class ResponderWiringTest(unittest.TestCase):
             Relationship(), None, None, rng=random.Random(0),
         )
 
-    def test_group_reply_has_no_lists_or_emoji_spam(self) -> None:
-        draft = (
-            "🎮 GAMES\n- play mafia\n- play trivia\n"
-            "🎉🎉🎉 so much fun 🎉🎉 " + ("This is a long group ramble. " * 30)
-        )
+    def test_group_reply_not_restyled_by_output_style(self) -> None:
+        # format_reply would DROP the "----" divider line for a group
+        # chat (sections off) and strip the 🎮 section marker. The
+        # responder must NOT do that to a normal chat: style is for
+        # outputs.
+        draft = "🎮 GAMES\n----\nwe play mafia tonight"
         r = self._responder([draft])
         bundle = r.respond(
             chat_platform="telegram", user_text="what games?",
             gate_mode="group",
         )
         text = " ".join(bundle.parts)
-        self.assertNotIn("- play", text)
-        self.assertLessEqual(text.count("🎉"), 1)
-        self.assertLessEqual(len(text), 280 + 360)  # group cap + split slack
+        self.assertIn("mafia", text)
+        self.assertIn("----", text)
 
     def test_owner_reply_keeps_content(self) -> None:
         r = self._responder(["Done — the report is ready."])

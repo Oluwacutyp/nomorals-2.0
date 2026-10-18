@@ -38,7 +38,6 @@ from .style import (
     clamp_to_budget,
     emoji_cap,
     emoji_instruction,
-    format_reply,
     humanize_emoji,
     identity_leak_check,
     length_budget,
@@ -50,8 +49,6 @@ from .style import (
     should_answer_short,
     strip_assistant_framing,
     strip_robotic,
-    style_for_chat,
-    style_prompt_lines,
 )
 
 __all__ = ["Signal", "detect_signals", "ReplyBundle", "PartnerResponder", "FALLBACK_LINES"]
@@ -550,25 +547,18 @@ class PartnerResponder:
 
         restricted = is_restricted(gate_mode)
 
-        # Mined style profile for THIS chat (audience + platform + mood +
-        # the OWNER's own observed messages only — never other people's
-        # messages; see observed_owner_texts, spec §3.2). The prompt
-        # lines go to the model (soft layer); the same profile is
-        # enforced on the final draft below (hard layer) so the two
-        # cannot drift apart.
-        from .style import observed_owner_texts
-
-        _observed = observed_owner_texts(
-            history, gate_mode=gate_mode, sender_name=sender_name,
-            user_text=user_text)
-        _style = style_for_chat(
-            audience=gate_mode,
-            platform=chat_platform,
-            mood_values=self.mood.current().values,
-            observed=_observed,
-            overrides=style_overrides,
-        )
-        _style_lines = style_prompt_lines(_style)
+        # NOTE: the mined style profile (style_for_chat / format_reply)
+        # is NOT applied to conversational replies. The owner's
+        # correction (2026-10-17): style was meant for OUTPUTS — the
+        # results that are not normal chats (command / tool / game /
+        # scheduled outputs, rendered by core.output_style) — not for
+        # normal chats. Conversational replies keep the persona's own
+        # voice passes below (normalize_formatting / humanize_emoji /
+        # apply_texting_voice / clamp_to_budget) plus the gating
+        # prompt (gate_block). The ``style_overrides`` parameter is
+        # accepted for backward compatibility; output styling reads
+        # overrides at the output site.
+        _ = style_overrides
 
         # Dynamic voice feed: lexicon terms blended into her phrasing.
         # Catchphrases + pet names go straight into the persona's own
@@ -642,7 +632,6 @@ class PartnerResponder:
             extra_notes=[
                 "Emoji rule: "
                 + emoji_instruction(self.persona.speech.emoji_rate, self.mood.current().values),
-                *_style_lines,
                 # Owner identity: in the owner's own DM, an identity
                 # assertion ("I'm peace", "I'm your creator", "drop the
                 # act") is always accepted warmly and immediately — never
@@ -848,11 +837,8 @@ class PartnerResponder:
             label, self.rng,
         )
         draft = clamp_to_budget(draft, budget)
-        # Mined per-chat style (hard layer): structure, emoji budget,
-        # truncation for this audience + platform + the chat's own
-        # observed messages. Runs after the texting-voice pass so the
-        # profile is the last word on shape, not the first.
-        draft = format_reply(draft, _style)
+        # (No style-system reformat here: format_reply belongs to
+        # OUTPUTS — see the note at the top of respond().)
         if short and len(draft) > 32:
             # The model ignored the short burst; take the first sentence.
             first = re.split(r"(?<=[.!?…])\s+", draft, maxsplit=1)

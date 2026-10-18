@@ -53,7 +53,7 @@ class FakeGateway:
             raise RuntimeError("status exploded")
         return {p: {"running_in_session": True} for p in self.live}
 
-    def send(self, platform, chat_ref, text):
+    def send(self, platform, chat_ref, text, **kw):
         if self.fail_send:
             raise RuntimeError("send exploded")
         self.sent.append((platform, chat_ref.chat_id, text))

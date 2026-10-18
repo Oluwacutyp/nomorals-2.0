@@ -250,6 +250,8 @@ class Notifier:
         critical: bool = False,
         channels: list[str] | None = None,
         proactive_check: bool = True,
+        output_kind: str | None = None,
+        output_meta: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Persist an alert and best-effort deliver it. Never raises.
 
@@ -272,6 +274,13 @@ class Notifier:
         hours.  A held send is still stored — with ``delivery_state``
         ``"disabled"`` / ``"held-quiet-hours"`` — so the owner can see
         what didn't go out and why.
+
+        ``output_kind`` / ``output_meta`` describe the output being
+        pushed (e.g. ``"scheduled"`` + ``{"job": "memory-consolidation"}``)
+        so delivery attaches ADAPTIVE buttons about that output. A push
+        has no triggering command, so without these it gets NO buttons
+        (explicit empty) — never stale Retry/Expand/Next inherited
+        from an old command.
         """
         if self.db is not None:
             # DEDUPE CHOKE POINT — every proactive send funnels through
@@ -321,7 +330,9 @@ class Notifier:
                                  delivery_state=STATE_PENDING, nid=nid)
             result["attempts"] = []
             return result
-        outcome = self._deliver(kind, title, body, channels=channels)
+        outcome = self._deliver(kind, title, body, channels=channels,
+                                output_kind=output_kind,
+                                output_meta=output_meta)
         reached = outcome.delivered
         if reached:
             result = self._store(kind, title, body, delivered=1,
@@ -418,7 +429,9 @@ class Notifier:
                 "channel": channel}
 
     def _deliver(self, kind: str, title: str, body: str,
-                 channels: list[str] | None = None) -> DeliveryOutcome:
+                 channels: list[str] | None = None,
+                 output_kind: str | None = None,
+                 output_meta: dict[str, Any] | None = None) -> DeliveryOutcome:
         """Send to the owner's resolved channels.  Never raises.
 
         Returns a :class:`DeliveryOutcome` — one attempt record per
@@ -437,9 +450,39 @@ class Notifier:
         ``channels`` restricts delivery to the named platforms
         (``["telegram"]`` matches the ``telegram``/``telegram-bot``
         family); ``None`` delivers to all resolved owner channels.
+
+        Buttons: a push has no triggering command, so it NEVER inherits
+        buttons from the last inbound command. When ``output_kind`` is
+        given (or derivable — a ``"schedule"`` push carries its job in
+        the title), delivery attaches ADAPTIVE buttons about that
+        output; otherwise it sends explicit NO buttons (``[]``), so the
+        adapter cannot fall through to stale origin buttons.
         """
         from ..social.chat.base import ChatRef
         from ..social.chat.gateway import resolve_owner_targets
+
+        # Adaptive buttons for this push — computed once, attached to
+        # every channel send. [] = explicitly no buttons.
+        buttons: list[list[tuple[str, str]]] = []
+        try:
+            from ..social.chat.adaptive_buttons import adaptive_buttons_for
+
+            _okind = output_kind
+            _ometa = output_meta
+            if _okind is None and kind == "schedule":
+                # Redelivery path: the stored row carries no
+                # output_meta, but the title names the job
+                # ("✅ scheduled: <job>"). Derive it.
+                _okind = "scheduled"
+                _ometa = {"job": title.split("scheduled:", 1)[-1].strip()
+                          .lstrip("✅❌ ").strip()}
+            if _okind is not None:
+                _kb = adaptive_buttons_for(output_kind=_okind,
+                                           payload=_ometa,
+                                           text=body or "")
+                buttons = _kb if _kb else []
+        except Exception:  # noqa: BLE001 - buttons never break delivery
+            buttons = []
 
         outcome = DeliveryOutcome()
         if self.gateway is None:
@@ -516,10 +559,30 @@ class Notifier:
                     f"session")
                 continue
             try:
-                result = self.gateway.send(
-                    target.platform,
-                    ChatRef(platform=target.platform, chat_id=target.chat_id),
-                    text)
+                # Explicit buttons (adaptive, or [] for none) — the
+                # adapter must NOT derive buttons from the last inbound
+                # command for a push.
+                try:
+                    result = self.gateway.send(
+                        target.platform,
+                        ChatRef(platform=target.platform,
+                                chat_id=target.chat_id),
+                        text, buttons=buttons)
+                except TypeError as exc:
+                    # A gateway whose send() predates the buttons kwarg
+                    # (minimal doubles, older adapters): buttons are an
+                    # enhancement, never a delivery requirement — retry
+                    # plain rather than failing the push. Any other
+                    # TypeError re-raises into the failure path below.
+                    if "buttons" not in str(exc):
+                        raise
+                    _log.debug("notifier: gateway.send rejects buttons — "
+                               "retrying plain")
+                    result = self.gateway.send(
+                        target.platform,
+                        ChatRef(platform=target.platform,
+                                chat_id=target.chat_id),
+                        text)
             except Exception as exc:  # noqa: BLE001 - one dead channel skips
                 attempt["state"] = ATTEMPT_FAILED
                 attempt["error"] = f"send raised: {exc}"[:300]

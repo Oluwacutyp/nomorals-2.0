@@ -3976,10 +3976,16 @@ class PartnerRuntime(
     # ── power layer: network / proxy / gen / osint / record / macro ──────────
 
     def _tool_reply(self, tool: str, chat_key: str, **kwargs: Any) -> str:
-        """Run one tool and stream its JSON back to the chat (or the error)."""
+        """Run one tool and stream its styled output back to the chat.
+
+        Human-readable (header + structured ``key: value`` lines), never
+        a raw JSON dump.
+        """
+        from ...core.output_style import render_output
+
         outcome = self.context.tools.call(tool, **kwargs)
         chat = self._ref_from_key(chat_key)
         if not outcome.ok:
             return f"{tool} failed: {getattr(outcome.error, 'message', outcome.error)}"
-        text = json.dumps(outcome.value, default=str, indent=1)
+        text = render_output(kind="tool", title=tool, payload=outcome.value)
         return self._send_long_checked(chat.platform, chat, text[:6000])

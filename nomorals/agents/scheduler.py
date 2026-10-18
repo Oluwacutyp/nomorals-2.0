@@ -1626,10 +1626,22 @@ class Scheduler:
             alert = False  # the message itself already went out
         if alert:
             try:
+                # The alert body is the job's own rendered summary
+                # (already human-readable — see _run_tool). Cut at a
+                # line boundary, never mid-line, and pass the job
+                # through so the push gets ADAPTIVE buttons about
+                # that job (Recall / Jobs / Re-run), never the stale
+                # Retry/Expand/Next from an old command.
+                body_lines = summary.splitlines()
+                body = "\n".join(body_lines[:40])
+                if len(body_lines) > 40:
+                    body += f"\n… (+{len(body_lines) - 40} more lines)"
                 self.notifier.publish(
                     "schedule",
                     f"{'✅' if ok else '❌'} scheduled: {job_name}",
-                    summary[:1500],
+                    body,
+                    output_kind="scheduled",
+                    output_meta={"job": job_name, "ok": ok},
                 )
             except Exception:  # noqa: BLE001
                 _log.debug("scheduler notification failed")
@@ -1676,8 +1688,16 @@ class Scheduler:
         if not outcome.ok:
             raise RuntimeError(f"tool {tool} failed: {getattr(outcome.error, 'message', outcome.error)}")
         value = outcome.value
-        text = value if isinstance(value, str) else json.dumps(value, default=str)
-        return f"{tool}: {text[:1500]}"
+        # Human-readable, never a raw JSON dump: a dict result reaches
+        # the owner as ``key: value`` lines (bounded at 30 lines so a
+        # big result stays a summary, not a wall).
+        if isinstance(value, str):
+            text = value
+        else:
+            from ..core.tool_render import render_tool_value
+
+            text = render_tool_value(value, max_lines=30)
+        return f"{tool}:\n{text}"
 
     def _run_command(self, payload: dict[str, Any]) -> str:
         command = str(payload.get("command") or "").strip()

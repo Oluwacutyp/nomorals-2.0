@@ -2027,9 +2027,18 @@ class TelegramBotAdapter(ChatAdapter):
         self._seen_inbound: set[tuple[str, str]] = set()
         # Single getUpdates consumer: lockfile path (see single_consumer).
         self._lock_path = lock_path
-        # Last inbound /command per chat — the origin command for the
-        # auto action footer on tool results (Retry re-runs it).
+        # Last inbound /command per chat — the origin command for
+        # origin-derived buttons on a command result (Retry re-runs
+        # it). Only trusted when the last inbound message in the chat
+        # WAS that command (see ``_last_inbound_was_command``): a
+        # scheduled push must never inherit buttons from a stale
+        # command the owner typed earlier.
         self._last_command: dict[str, str] = {}
+        # Whether the last inbound message in each chat was a
+        # ``/command`` (True) or plain chat (False). Origin-derived
+        # buttons only attach when this is True — a chat reply never
+        # inherits Retry for an old command.
+        self._last_inbound_was_command: dict[str, bool] = {}
         # Progress-edit throttle (edit-in-place ~1/3s, only on change).
         from .progress_throttle import ProgressThrottler
         self._progress = ProgressThrottler()
@@ -2292,9 +2301,14 @@ class TelegramBotAdapter(ChatAdapter):
         text = msg.get("text") or msg.get("caption") or ""
         if not isinstance(text, str):
             text = str(text)
-        # Remember the origin command per chat: the auto action footer
-        # on tool results re-runs exactly this command on Retry.
-        if text.strip().startswith("/"):
+        # Track the origin per chat: whether the last inbound message
+        # WAS a /command, and if so which one. Origin-derived buttons
+        # (Retry) only attach to a reply when the last inbound message
+        # was that command — a chat reply never inherits buttons from
+        # an old command, and a scheduled push never inherits any.
+        _is_cmd = text.strip().startswith("/")
+        self._last_inbound_was_command[chat_id] = _is_cmd
+        if _is_cmd:
             self._last_command[chat_id] = text.strip()
         mentioned = False
         if kind != ChatKind.DM and self._bot_username:
@@ -2463,11 +2477,17 @@ class TelegramBotAdapter(ChatAdapter):
         _title = chat.get("title", "") or who
         if not isinstance(_title, str):
             _title = str(_title)
+        _cb_text = data if data.startswith("/") else f"/{data}"
+        # A button tap is a synthetic /command: the reply to it earns
+        # origin-derived buttons for THAT command, not for whatever
+        # the owner last typed.
+        self._last_inbound_was_command[chat_id] = True
+        self._last_command[chat_id] = _cb_text
         message = ChatMessage(
             chat=ChatRef(platform=self.name, chat_id=chat_id, kind=kind,
                          title=_title, peer=who),
             incoming=True,
-            text=data if data.startswith("/") else f"/{data}",
+            text=_cb_text,
             sender=who,
             sender_id=str(sender.get("id", "") or ""),
             sender_username=str(sender.get("username") or ""),
@@ -2693,29 +2713,13 @@ class TelegramBotAdapter(ChatAdapter):
             _log.debug("telegram-bot: edit_progress failed: %s", exc)
             return None
 
-    def send_with_footer(self, chat: ChatRef, text: str, *,
-                         origin_command: str, save_command: str = "",
-                         send_command: str = "", reply_to: str = "") -> SendResult:
-        """Send with the standard action footer (Retry/Expand/Save/Send/Next).
-
-        For callers that know the origin command and the save/send
-        destinations. Generic replies use :meth:`send`, which attaches
-        the auto footer (Retry/Expand/Next) when the text looks like a
-        tool result and the origin command is known for the chat.
-        """
-        from .action_footers import tool_result_footer
-        return self.send(chat, text, reply_to=reply_to,
-                         buttons=tool_result_footer(origin_command,
-                                                    save_command=save_command,
-                                                    send_command=send_command))
-
     def send(self, chat: ChatRef, text: str, *, reply_to: str = "",
              buttons: list[list[tuple[str, str]]] | None = None,
              reply_keyboard: list[list[str]] | None = None,
              parse_mode: str = "") -> SendResult:
-        from .action_footers import footer_for_text
+        from .adaptive_buttons import adaptive_buttons_for
         from .progress_throttle import LongOutput
-        from .tgbot_buttons import buttons_for_text, personal_buttons_for
+        from .tgbot_buttons import personal_buttons_for
 
         # Long output goes out as ONE document, not 40 chunks.
         if LongOutput().route(text)[0] == "document":
@@ -2752,31 +2756,34 @@ class TelegramBotAdapter(ChatAdapter):
                 # Inline keyboard: [[(label, callback_data), ...], ...]
                 # Callback data is HMAC-signed to prevent spoofing.
                 # When the caller passes no explicit buttons, derive
-                # contextual ones from the reply text (game menus,
-                # results, …) — this is what puts [Join] [Stats] under
-                # game replies without every command handler having to
-                # know about buttons.
+                # adaptive ones from the output (kind + content) — see
+                # adaptive_buttons. The origin command only counts
+                # when the last inbound message in this chat WAS that
+                # command: a chat reply never inherits Retry for an
+                # old command, and a scheduled push (which passes
+                # explicit buttons via the Notifier) never reaches
+                # this branch at all.
                 if buttons is not None:
                     resolved = buttons
-                elif self.owner_only:
-                    # Personal bot only: richer keyboards (help
-                    # categories, power controls, next-actions) first,
-                    # then the shared patterns (game results, confirm
-                    # prompts, …). The gated bot never takes this
-                    # branch — its replies are exactly as before.
-                    resolved = (
-                        personal_buttons_for(
-                            text, self._last_command.get(chat.chat_id, ""))
-                        or buttons_for_text(text)
-                        or footer_for_text(
-                            text, self._last_command.get(chat.chat_id, ""))
-                    )
                 else:
-                    resolved = (
-                        buttons_for_text(text)
-                        or footer_for_text(
-                            text, self._last_command.get(chat.chat_id, ""))
+                    fresh_origin = (
+                        self._last_command.get(chat.chat_id, "")
+                        if self._last_inbound_was_command.get(chat.chat_id)
+                        else ""
                     )
+                    if self.owner_only:
+                        # Personal bot only: richer keyboards (help
+                        # categories, power controls, next-actions)
+                        # first, then adaptive content/origin buttons.
+                        # The gated bot never takes this branch.
+                        resolved = (
+                            personal_buttons_for(text, fresh_origin)
+                            or adaptive_buttons_for(
+                                origin_command=fresh_origin, text=text)
+                        )
+                    else:
+                        resolved = adaptive_buttons_for(
+                            origin_command=fresh_origin, text=text)
                 if resolved:
                     keyboard = []
                     for row in resolved:
