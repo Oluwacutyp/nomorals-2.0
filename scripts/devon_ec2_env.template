@@ -270,6 +270,15 @@
 
 # Data root: db, blobs, models, backups, logs. Default ~/.nomorals.
 # NM_HOME=
+# Geographic places (weather/news defaults). NOT the data home above.
+# Home place, e.g. "Lagos, Nigeria". Default: Lagos, Nigeria.
+# NM_HOME_PLACE=
+# Work place, e.g. "Abuja". Default: empty.
+# NM_WORK_PLACE=
+# Extra places, comma-separated, e.g. "Kano,Port Harcourt". Default: empty.
+# NM_PLACES=
+# Locale for place defaults, e.g. ng | gh | ke | za | us | gb | in.
+# NM_LOCALE=
 # workstation | laptop | termux. EC2 RDP: workstation.
 # NM_PROFILE=
 # Config key read by Devon code.
@@ -308,6 +317,14 @@
 # NM_BUDGET_TOKENS=
 # Max child agents. Default 256.
 # NM_BUDGET_CHILDREN=
+# Cost-adaptive token budgeting (0 budgets == unlimited). Defaults: tokens 0,
+# cost USD 0.0, downgrade 0.5, truncate 0.8, defer 0.8, min context 1024.
+# NM_ADAPTIVE_BUDGET_TOKENS=
+# NM_ADAPTIVE_BUDGET_COST_USD=
+# NM_ADAPTIVE_BUDGET_DOWNGRADE_AT=
+# NM_ADAPTIVE_BUDGET_TRUNCATE_AT=
+# NM_ADAPTIVE_BUDGET_DEFER_AT=
+# NM_ADAPTIVE_BUDGET_MIN_CONTEXT_TOKENS=
 # API bind host. Default 127.0.0.1 (localhost only).
 # NM_API_HOST=
 # API port. Default 8731.
@@ -507,6 +524,10 @@
 # NM_ARENA_RESEARCH_PAGES=
 # Config key read by Devon code.
 # NM_AUTONOMY_DAILY_MODEL_CALLS=
+# 0 = autonomy off (nm autonomy off). Default: on.
+# NM_AUTONOMY_ENABLED=
+# Placeholder-example key used in config.py docs; no setting reads it.
+# NM_FLOAT=
 # Config key read by Devon code.
 # NM_BROWSER_PLAYWRIGHT=
 # Config key read by Devon code.

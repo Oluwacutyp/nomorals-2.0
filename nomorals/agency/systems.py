@@ -37,6 +37,7 @@ from typing import Any, Callable
 
 from .initiatives import Initiative, InitiativeStore
 from .knowledge import KnowledgeStore
+from .checker import Checker
 from .rotation import RotationScheduler, SystemSlot, WorkResult
 from .deliberation import DeliberationLoop
 from .domains import LEAD_TRANSITIONS, social_next_action
@@ -68,7 +69,8 @@ class ActiveSystems:
                  wisdom_organ: Any | None = None,
                  impossible: Any | None = None,
                  adapters: dict[str, Any] | None = None,
-                 authority: Any | None = None) -> None:
+                 authority: Any | None = None,
+                 checker: Any | None = None) -> None:
         self.db = db
         self.store = store or InitiativeStore(db)
         self.knowledge = knowledge or KnowledgeStore(db)
@@ -86,6 +88,11 @@ class ActiveSystems:
         #: Standing authority (AgencyAuthority) — consulted at
         #: execution time, never widened by this layer.
         self.authority = authority
+        #: Maker-checker (a SEPARATE verifier, never the worker):
+        #: every proposed completion is independently re-read here
+        #: before it is allowed to complete. Defaults to a real
+        #: :class:`Checker`; inject a fake only in tests.
+        self.checker = checker if checker is not None else Checker()
         #: Durable proactive detector state (survives restarts).
         self._proactive_state = load_proactive_state(db)
         #: Execution hints keyed by initiative dedupe_key. Hints only:
@@ -95,6 +102,35 @@ class ActiveSystems:
 
     def _persist_state(self) -> None:
         save_proactive_state(self.db, self._proactive_state)
+
+    def _complete_verified(self, it: Initiative, system: str, *,
+                           stop_reason: str, verification: dict[str, Any],
+                           now: float) -> WorkResult:
+        """Maker-checker gate for a proposed completion.
+
+        The handler proposes (``stop_reason`` + claimed
+        ``verification``); the CHECKER — a separate code path that
+        re-reads the world — decides. Pass → the initiative completes
+        with the checker's checks recorded. Fail → the initiative
+        ADVANCES with a ``maker-checker rejected`` blocker: the work
+        is NOT completed, the discrepancy is visible, and the next
+        turn can retry. The worker never grades its own work.
+        """
+        check = self.checker.verify(
+            system, verification, adapters=self.adapters, db=self.db)
+        if check.passed:
+            merged = dict(verification)
+            merged["maker_checker"] = {"passed": True,
+                                       "checks": list(check.checks)}
+            self.store.complete(it.id, stop_reason=stop_reason,
+                                verification=merged)
+            return WorkResult(useful=True, work_key=f"{system}:{it.id}")
+        self.store.advance(
+            it.id, next_review_at=now + 3600,
+            blocker=f"maker-checker rejected: {check.reason}",
+            evidence=f"completion claim rejected: "
+                     f"{str(verification)[:400]}")
+        return WorkResult(useful=False, work_key=f"{system}:{it.id}")
 
     def names(self) -> list[str]:
         return list(SYSTEM_NAMES)
@@ -259,6 +295,13 @@ class ActiveSystems:
         if name == "digestion":
             return self._tick_digestion(now)
         if name == "research" and self._research_organ is not None:
+            # Per-trigger handlers FIRST: a pending research trigger
+            # (a specific gap / a specific due watch) gets its own
+            # handler, not a generic organ tick. The generic tick is
+            # only the fallback when no trigger is pending.
+            triggers = self._trigger_initiatives("research")
+            if triggers:
+                return self._work_trigger(triggers[0], now)
             try:
                 report = self._research_organ.tick()
                 if getattr(report, "gaps_resolved", 0) or getattr(report, "findings", 0):
@@ -271,6 +314,11 @@ class ActiveSystems:
                 pass
             return WorkResult(useful=False)
         if name == "wisdom" and self._wisdom_organ is not None:
+            # Per-trigger handler first (a specific ingest-queue
+            # trigger), generic tick only as fallback.
+            triggers = self._trigger_initiatives("wisdom")
+            if triggers:
+                return self._work_trigger(triggers[0], now)
             try:
                 report = self._wisdom_organ.tick(budget_seconds=budget_s)
                 if report.get("ingested"):
@@ -338,15 +386,17 @@ class ActiveSystems:
             f"attempted impossible claim {claim_id}: "
             f"{str(result)[:400]}",
             source="agency:impossible")
-        # Complete the matching trigger initiative with verification.
+        # Complete the matching trigger initiative — through the
+        # maker-checker gate, not the worker's own say-so.
         for it in self._trigger_initiatives("impossible"):
             payload = self._trigger_payloads.get(it.dedupe_key, {})
             if payload.get("claim_id", claim_id) == claim_id:
-                self.store.complete(
-                    it.id, stop_reason="impossible claim attempted",
+                return self._complete_verified(
+                    it, "impossible",
+                    stop_reason="impossible claim attempted",
                     verification={"claim_id": claim_id,
-                                  "attempt": str(result)[:1000]})
-                break
+                                  "attempt": str(result)[:1000]},
+                    now=now)
         return WorkResult(useful=True, work_key=f"impossible:{int(now)}")
 
     def _tick_weather_baseline(self, now: float) -> list[Any]:
@@ -434,13 +484,144 @@ class ActiveSystems:
             return self._work_leads_trigger(it, payload, now)
         if name == "gigs":
             return self._work_gigs_trigger(it, payload, now)
-        # Research / wisdom / impossible / digestion / planner triggers
-        # are worked by their organ ticks, not per-trigger handlers:
-        # note the trigger, keep the lifecycle moving.
+        if name == "research":
+            return self._work_research_trigger(it, payload, now)
+        if name == "wisdom":
+            return self._work_wisdom_trigger(it, payload, now)
+        # Impossible / digestion / planner triggers are worked by their
+        # organ ticks, not per-trigger handlers: note the trigger, keep
+        # the lifecycle moving.
         self.store.advance(it.id, next_review_at=now + 3600,
                             evidence=f"{name} trigger noted; organ tick "
                                      "handles execution")
         return WorkResult(useful=True, work_key=f"{name}:{it.id}")
+
+    def _work_research_trigger(self, it: Initiative, payload: dict,
+                               now: float) -> WorkResult:
+        """Per-trigger research handlers: one handler per trigger kind.
+
+        * ``new_gap`` → ``organ.investigate_gap(gap_id)`` (that gap
+          only, not a generic tick over the open list).
+        * ``watch_due`` → ``organ.run_watch(watch_id)`` (that watch
+          only, cadence bypassed because the trigger IS the due-ness).
+        Organs without the per-trigger method fall back to a generic
+        tick. The investigated result is deposited as knowledge, and
+        completion goes through the maker-checker gate.
+        """
+        organ = self._research_organ
+        if organ is None:
+            self.store.advance(it.id, next_review_at=now + 3600,
+                                blocker="no research organ injected")
+            return WorkResult(useful=False, work_key=f"research:{it.id}")
+        gap = payload.get("gap") or {}
+        watch = payload.get("watch") or {}
+        try:
+            if gap and callable(getattr(organ, "investigate_gap", None)):
+                result = organ.investigate_gap(
+                    gap.get("id", gap.get("gap_id", "")))
+                gap_id = str(result.get("gap_id", gap.get("id", "")))
+                self.knowledge.deposit(
+                    "research",
+                    f"gap {gap_id} investigated: "
+                    f"status={result.get('status')}; "
+                    f"{str(result.get('synthesis', ''))[:400]}",
+                    source="agency:research")
+                return self._complete_verified(
+                    it, "research",
+                    stop_reason=f"research gap {gap_id} investigated: "
+                                f"{result.get('status')}",
+                    verification={"gap_id": gap_id,
+                                  "status": result.get("status"),
+                                  "synthesis": str(result.get(
+                                      "synthesis", ""))[:500]},
+                    now=now)
+            if watch and callable(getattr(organ, "run_watch", None)):
+                result = organ.run_watch(
+                    watch.get("id", watch.get("watch_id", "")))
+                watch_id = str(result.get("watch_id", watch.get("id", "")))
+                self.knowledge.deposit(
+                    "research",
+                    f"watch {watch_id} run: {result.get('findings', 0)} "
+                    f"findings, {result.get('delivered', 0)} delivered",
+                    source="agency:research")
+                return self._complete_verified(
+                    it, "research",
+                    stop_reason=f"research watch {watch_id} run: "
+                                f"{result.get('status')}",
+                    verification={"gap_id": watch_id,
+                                  "watch_id": watch_id,
+                                  "findings": result.get("findings", 0),
+                                  "status": result.get("status")},
+                    now=now)
+        except Exception as exc:  # noqa: BLE001 - per-trigger failure
+            self.store.advance(it.id, next_review_at=now + 3600,
+                                blocker=f"research trigger work failed: {exc}")
+            return WorkResult(useful=False, work_key=f"research:{it.id}")
+        # No per-trigger method on this organ (or no gap/watch in the
+        # payload): fall back to a generic tick and note the trigger.
+        try:
+            report = organ.tick()
+            self.knowledge.deposit(
+                "research",
+                f"research tick (fallback for trigger {it.dedupe_key}): "
+                f"{getattr(report, 'gaps_resolved', 0)} gaps resolved, "
+                f"{getattr(report, 'findings', 0)} findings",
+                source="agency:research")
+        except Exception:  # noqa: BLE001
+            pass
+        self.store.advance(it.id, next_review_at=now + 3600,
+                            evidence="research trigger noted; organ tick "
+                                     "handles execution (no per-trigger "
+                                     "method)")
+        return WorkResult(useful=True, work_key=f"research:{it.id}")
+
+    def _work_wisdom_trigger(self, it: Initiative, payload: dict,
+                             now: float) -> WorkResult:
+        """Per-trigger wisdom handler: ``ingest_queue`` →
+        ``organ.ingest_next()`` (exactly one pending item), not a
+        generic tick. Falls back to a generic tick when the organ has
+        no per-item method."""
+        organ = self._wisdom_organ
+        if organ is None:
+            self.store.advance(it.id, next_review_at=now + 3600,
+                                blocker="no wisdom organ injected")
+            return WorkResult(useful=False, work_key=f"wisdom:{it.id}")
+        try:
+            if callable(getattr(organ, "ingest_next", None)):
+                result = organ.ingest_next() or {}
+                ingested = list(result.get("ingested") or [])
+                self.knowledge.deposit(
+                    "wisdom", f"wisdom ingested {ingested} (trigger)",
+                    source="agency:wisdom")
+                if not ingested:
+                    self.store.advance(it.id, next_review_at=now + 3600,
+                                       evidence="wisdom ingest trigger: "
+                                               "nothing pending")
+                    return WorkResult(useful=True,
+                                      work_key=f"wisdom:{it.id}")
+                return self._complete_verified(
+                    it, "wisdom",
+                    stop_reason=f"wisdom ingested {ingested}",
+                    verification={"ingested": ingested},
+                    now=now)
+        except Exception as exc:  # noqa: BLE001 - per-trigger failure
+            self.store.advance(it.id, next_review_at=now + 3600,
+                                blocker=f"wisdom trigger work failed: {exc}")
+            return WorkResult(useful=False, work_key=f"wisdom:{it.id}")
+        try:
+            report = organ.tick(budget_seconds=60.0)
+            self.knowledge.deposit(
+                "wisdom",
+                f"wisdom tick (fallback for trigger {it.dedupe_key}): "
+                f"ingested {report.get('ingested')}",
+                source="agency:wisdom")
+        except Exception:  # noqa: BLE001
+            pass
+        self.store.advance(it.id, next_review_at=now + 3600,
+                            evidence="wisdom trigger noted; organ tick "
+                                     "handles execution (no per-item "
+                                     "method)")
+        return WorkResult(useful=True, work_key=f"wisdom:{it.id}")
 
     def _work_deals_trigger(self, it: Initiative, payload: dict,
                             now: float) -> WorkResult:
@@ -475,13 +656,42 @@ class ActiveSystems:
             source="agency:deals")
         if evaluation.get("is_saving"):
             amount = float(observed.get("landed_price", 0) or 0)
+            # Purchase path (adapter with an executor): COMPLETE the
+            # purchase when authority allows — don't just report
+            # readiness. The executor itself re-gates policy + mandate;
+            # a denial comes back as a blocker, never a silent buy.
+            if callable(getattr(adapter, "execute_purchase", None)):
+                res = adapter.execute_purchase(need, observed,
+                                               authority=self.authority)
+                if res.get("purchased"):
+                    receipt = res.get("receipt") or {}
+                    order = receipt.get("order_id", "") or ""
+                    return self._complete_verified(
+                        it, "deals",
+                        stop_reason=f"deal purchased: order {order}",
+                        verification={"product": product, "need": need,
+                                      "observed": observed,
+                                      "evaluation": evaluation,
+                                      "purchased": True, "receipt": receipt},
+                        now=now)
+                blocker = res.get("blocker") or res.get("reason") \
+                    or "purchase not completed"
+                self.store.advance(
+                    it.id, next_review_at=now + 3600, blocker=blocker,
+                    evidence=f"saving verified; purchase blocked: "
+                             f"{res.get('reason', blocker)}")
+                return WorkResult(useful=True, work_key=f"deals:{it.id}")
+            # Legacy path (adapter without an executor, e.g. a test
+            # double): verify + report readiness, never buy.
             if self.authority is not None \
                     and self.authority.can_spend(amount):
-                self.store.complete(
-                    it.id, stop_reason="deal verified: saving within mandate",
-                    verification={"product": product, "observed": observed,
-                                  "evaluation": evaluation})
-                return WorkResult(useful=True, work_key=f"deals:{it.id}")
+                return self._complete_verified(
+                    it, "deals",
+                    stop_reason="deal verified: saving within mandate",
+                    verification={"product": product, "need": need,
+                                  "observed": observed,
+                                  "evaluation": evaluation},
+                    now=now)
             reason = self.authority.spend_reason(amount) \
                 if self.authority is not None else \
                 "no authority configured — cannot verify spending"
@@ -489,11 +699,11 @@ class ActiveSystems:
                 it.id, next_review_at=now + 3600,
                 blocker=f"saving verified but {reason} (no purchase made)")
             return WorkResult(useful=True, work_key=f"deals:{it.id}")
-        self.store.complete(
-            it.id, stop_reason="deal checked: not a saving",
-            verification={"product": product, "observed": observed,
-                          "evaluation": evaluation})
-        return WorkResult(useful=True, work_key=f"deals:{it.id}")
+        return self._complete_verified(
+            it, "deals", stop_reason="deal checked: not a saving",
+            verification={"product": product, "need": need,
+                          "observed": observed, "evaluation": evaluation},
+            now=now)
 
     def _work_weather_trigger(self, it: Initiative, payload: dict,
                               now: float) -> WorkResult:
@@ -515,11 +725,12 @@ class ActiveSystems:
             f"{len(alerts)} alerts — "
             + "; ".join(a.get("text", "") for a in alerts)[:300],
             source="agency:weather")
-        self.store.complete(
-            it.id, stop_reason="weather change briefed",
-            verification={"place": place, "days": len(snap.get("days") or []),
-                          "alerts": alerts})
-        return WorkResult(useful=True, work_key=f"weather:{it.id}")
+        return self._complete_verified(
+            it, "weather", stop_reason="weather change briefed",
+            verification={"place": place,
+                          "days": len(snap.get("days") or []),
+                          "alerts": len(alerts)},
+            now=now)
 
     def _work_news_trigger(self, it: Initiative, payload: dict,
                            now: float) -> WorkResult:
@@ -535,11 +746,11 @@ class ActiveSystems:
             f"news digest: {len(clusters)} story clusters; "
             f"digest keys: {', '.join(sorted(digest.keys())[:8])}",
             source="agency:news")
-        self.store.complete(
-            it.id, stop_reason="news digest deposited",
+        return self._complete_verified(
+            it, "news", stop_reason="news digest deposited",
             verification={"clusters": len(clusters),
-                          "digest_keys": sorted(digest.keys())[:8]})
-        return WorkResult(useful=True, work_key=f"news:{it.id}")
+                          "digest_keys": sorted(digest.keys())[:8]},
+            now=now)
 
     def _work_social_trigger(self, it: Initiative, payload: dict,
                              now: float) -> WorkResult:
@@ -550,15 +761,17 @@ class ActiveSystems:
             return WorkResult(useful=False, work_key=f"social:{it.id}")
         backlog = adapter.backlog() or {}
         if backlog.get("stop_signal"):
-            self.store.complete(
-                it.id, stop_reason="social silence honoured (stop signal)",
-                verification={"backlog": backlog})
-            return WorkResult(useful=True, work_key=f"social:{it.id}")
+            return self._complete_verified(
+                it, "social",
+                stop_reason="social silence honoured (stop signal)",
+                verification={"backlog": backlog, "silence": "stop_signal"},
+                now=now)
         if not backlog.get("cadence_ok", True):
-            self.store.complete(
-                it.id, stop_reason="social silence honoured (cadence closed)",
-                verification={"backlog": backlog})
-            return WorkResult(useful=True, work_key=f"social:{it.id}")
+            return self._complete_verified(
+                it, "social",
+                stop_reason="social silence honoured (cadence closed)",
+                verification={"backlog": backlog, "silence": "cadence"},
+                now=now)
         action = social_next_action(
             unanswered=int(backlog.get("unanswered", 0) or 0),
             promised_replies=int(backlog.get("promised_replies", 0) or 0),
@@ -572,11 +785,10 @@ class ActiveSystems:
             self.knowledge.deposit(
                 "social", f"social published {len(published)} due posts",
                 source="agency:social")
-            self.store.complete(
-                it.id, stop_reason="social action published",
-                verification={"draft": draft,
-                              "published": len(published)})
-            return WorkResult(useful=True, work_key=f"social:{it.id}")
+            return self._complete_verified(
+                it, "social", stop_reason="social action published",
+                verification={"draft": draft, "published": len(published)},
+                now=now)
         if decision is not None:
             blocker = ("post needs approval: "
                        f"{decision.reason} "
@@ -612,10 +824,11 @@ class ActiveSystems:
             self.knowledge.deposit(
                 "leads", f"quiet lead {lead.get('lead_id', '')} followed up",
                 source="agency:leads")
-            self.store.complete(
-                it.id, stop_reason="quiet lead followed up (draft held)",
-                verification={"lead": lead, "follow_up": res})
-            return WorkResult(useful=True, work_key=f"leads:{it.id}")
+            return self._complete_verified(
+                it, "leads",
+                stop_reason="quiet lead followed up (draft held)",
+                verification={"lead": lead, "follow_up": res},
+                now=now)
         current = str(lead.get("stage", lead.get("status", "discovered")))
         nxt_options = [t for t in LEAD_TRANSITIONS.get(current, frozenset())
                        if t != "lost"]
@@ -630,18 +843,53 @@ class ActiveSystems:
                                 blocker=f"lead advance failed: "
                                         f"{res.get('error', res)}")
             return WorkResult(useful=False, work_key=f"leads:{it.id}")
-        # Contact step has no DM-send executor: the next action is a
+        self.knowledge.deposit(
+            "leads",
+            f"lead {lead.get('lead_id', '')} advanced "
+            f"{current} → {nxt_options[0]}",
+            source="agency:leads")
+        # Contact step: the DM-send executor sends the OWNER-APPROVED
+        # draft when authority allows (``payload["approved_draft"]``
+        # or a default lead draft), and the completion is
+        # maker-checker verified against the store. Without an
+        # executor on the adapter, the legacy blocker path stands.
+        if callable(getattr(adapter, "send_dm", None)):
+            approved = payload.get("approved_draft")
+            draft = str(approved or
+                        f"Hi {lead.get('name', '') or lead.get('lead_id', '')}"
+                        " — following up on your enquiry.")
+            # An owner-approved draft is the trial pattern: the owner
+            # explicitly approved THIS draft, so the send goes through
+            # the explicit-override path (deny/grant/biometric still
+            # apply). A default draft is autonomous → confirmable gate.
+            sent = adapter.send_dm(lead, draft=draft,
+                                   authority=self.authority,
+                                   explicit=bool(approved))
+            if sent.get("sent"):
+                return self._complete_verified(
+                    it, "leads", stop_reason="lead contacted: DM sent",
+                    verification={"lead": lead, "sent": True,
+                                  "store_status": "dmed",
+                                  "evidence": sent.get("evidence", {})},
+                    now=now)
+            reason = str(sent.get("reason", "DM not sent"))
+            proposal = sent.get("proposal_id") or ""
+            self.store.advance(
+                it.id, next_review_at=now + 3600,
+                next_action=f"send approved DM draft for lead "
+                            f"{lead.get('lead_id', '')}",
+                blocker=f"DM send blocked: {reason}"
+                        + (f" (proposal {proposal})" if proposal else ""),
+                evidence=f"lead advanced {current} → {nxt_options[0]}; "
+                         f"draft held: {draft}")
+            return WorkResult(useful=True, work_key=f"leads:{it.id}")
+        # No DM-send executor on this adapter: the next action is a
         # DM draft held for owner approval, recorded as a blocker.
         self.store.advance(
             it.id, next_review_at=now + 3600,
             next_action=f"send approved DM draft for lead {lead.get('lead_id', '')}",
             blocker="DM send needs owner-approved draft (no DM executor)",
             evidence=f"lead advanced {current} → {nxt_options[0]}")
-        self.knowledge.deposit(
-            "leads",
-            f"lead {lead.get('lead_id', '')} advanced "
-            f"{current} → {nxt_options[0]}",
-            source="agency:leads")
         return WorkResult(useful=True, work_key=f"leads:{it.id}")
 
     def _work_gigs_trigger(self, it: Initiative, payload: dict,
@@ -660,10 +908,10 @@ class ActiveSystems:
             self.knowledge.deposit(
                 "gigs", f"gig follow-up drafted for {gig_id}",
                 source="agency:gigs")
-            self.store.complete(
-                it.id, stop_reason="gig follow-up drafted",
-                verification={"gig_id": gig_id, "draft": draft})
-            return WorkResult(useful=True, work_key=f"gigs:{it.id}")
+            return self._complete_verified(
+                it, "gigs", stop_reason="gig follow-up drafted",
+                verification={"gig_id": gig_id, "draft": draft},
+                now=now)
         opp = dict(payload.get("opp") or {})
         if not opp:
             opps = adapter.scan() or []
@@ -681,10 +929,10 @@ class ActiveSystems:
             f"({score.get('recommendation', '')}), draft "
             f"{draft.get('status', '')}",
             source="agency:gigs")
-        self.store.complete(
-            it.id, stop_reason="gig scored + drafted",
-            verification={"opp": opp, "score": score, "draft": draft})
-        return WorkResult(useful=True, work_key=f"gigs:{it.id}")
+        return self._complete_verified(
+            it, "gigs", stop_reason="gig scored + drafted",
+            verification={"opp": opp, "score": score, "draft": draft},
+            now=now)
 
     # ── rotation cycle ─────────────────────────────────────────────
     def run_cycle(self, *, budget_s: float = 600.0,

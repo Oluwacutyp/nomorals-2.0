@@ -385,6 +385,21 @@ class PolicyDecision:
         return "\n".join(lines)
 
 
+def ensure_policy_rules_schema(db: Any) -> None:
+    """Create the durable ``policy_rules`` / ``policy_grants`` tables."""
+    db.execute(
+        "CREATE TABLE IF NOT EXISTS policy_rules ("
+        " capability TEXT NOT NULL,"
+        " effect TEXT NOT NULL,"
+        " note TEXT NOT NULL DEFAULT '',"
+        " priority INTEGER NOT NULL DEFAULT 10,"
+        " conditional INTEGER NOT NULL DEFAULT 0,"
+        " PRIMARY KEY (capability, effect, priority))")
+    db.execute(
+        "CREATE TABLE IF NOT EXISTS policy_grants ("
+        " capability TEXT NOT NULL PRIMARY KEY)")
+
+
 @dataclass
 class _Rule:
     capability: str
@@ -503,6 +518,116 @@ class Policy:
                 }
                 for r in self._rules
             ]
+
+    # -- durable rules (scheduled shifts use the SAME policy) --------
+    def rules_to_dict(self) -> list[dict[str, Any]]:
+        """Serializable rule rows. Conditional rules (``when`` callables)
+        are flagged ``conditional: True`` and carry no condition —
+        a Python callable cannot be serialized, so a conditional rule
+        is in-memory-only and is NOT restored by :meth:`rules_from_dict`.
+        """
+        with self._lock:
+            return [
+                {
+                    "capability": r.capability,
+                    "effect": r.effect,
+                    "note": r.note,
+                    "priority": r.priority,
+                    "conditional": r.when is not None,
+                }
+                for r in self._rules
+            ]
+
+    def rules_from_dict(self, rows: list[dict[str, Any]]) -> int:
+        """Replace this policy's rules with ``rows`` (unconditional only).
+
+        Returns the number of conditional rules skipped (they cannot be
+        restored from storage — their ``when`` callable lives only in
+        the process that created them). Callers that need conditional
+        rules must re-add them in-process after loading.
+        """
+        skipped = 0
+        with self._lock:
+            self._rules.clear()
+            for row in rows or []:
+                if row.get("conditional"):
+                    skipped += 1
+                    continue
+                self._rules.append(_Rule(
+                    str(row.get("capability", "")),
+                    str(row.get("effect", "allow")),
+                    str(row.get("note", "")),
+                    int(row.get("priority", 10)), None))
+            self._rules.sort(key=lambda r: -r.priority)
+        return skipped
+
+    # -- durable grants (the other half of standing authority) ----
+    def grant(self, *capabilities: str) -> Policy:
+        """Confer capabilities on this policy's default grant.
+
+        A rule alone never grants: ``allow("social.post")`` sets the
+        gradient LEVEL (act_silent, no confirmation) while the GRANT
+        is what confers the capability (see :meth:`check` — an
+        allow-rule without a grant still denies). Standing authority
+        is therefore rules + grants, and both persist (see
+        :meth:`save_rules`). Returns self for chaining.
+        """
+        with self._lock:
+            self.default_grant = self.default_grant.union(
+                CapabilitySet.of(*capabilities))
+        return self
+
+    def list_grants(self) -> list[str]:
+        """Capability patterns in this policy's default grant."""
+        with self._lock:
+            return sorted(self.default_grant.patterns)
+
+    def save_rules(self, db: Any) -> None:
+        """Persist this policy's rules + grants to ``db``.
+
+        Tables: ``policy_rules`` (rules) and ``policy_grants`` (the
+        default grant). Scheduled shifts load the same rows, so an
+        allow-rule + grant the owner set interactively applies to
+        scheduled work too — no weaker default-deny shadow for
+        background runs.
+        """
+        ensure_policy_rules_schema(db)
+        db.execute("DELETE FROM policy_rules")
+        for row in self.rules_to_dict():
+            db.execute(
+                "INSERT INTO policy_rules"
+                " (capability, effect, note, priority, conditional)"
+                " VALUES (?, ?, ?, ?, ?)",
+                (row["capability"], row["effect"], row["note"],
+                 row["priority"], 1 if row["conditional"] else 0))
+        db.execute("DELETE FROM policy_grants")
+        for cap in self.list_grants():
+            db.execute(
+                "INSERT INTO policy_grants (capability) VALUES (?)", (cap,))
+
+    def load_rules(self, db: Any) -> int:
+        """Load persisted rules + grants into this policy (replacing
+        current rules and the default grant). Returns the number of
+        conditional rules skipped. Missing table / empty tables = no
+        rules, no grants (default-deny stands)."""
+        ensure_policy_rules_schema(db)
+        try:
+            rows = db.query(
+                "SELECT capability, effect, note, priority, conditional"
+                " FROM policy_rules ORDER BY priority DESC")
+        except Exception:  # noqa: BLE001 - unreadable table = no rules
+            rows = []
+        skipped = self.rules_from_dict([dict(r) for r in (rows or [])])
+        try:
+            grant_rows = db.query(
+                "SELECT capability FROM policy_grants")
+        except Exception:  # noqa: BLE001 - unreadable table = no grants
+            grant_rows = []
+        with self._lock:
+            self.default_grant = CapabilitySet.of(
+                *(str(r.get("capability", "")) for r in (grant_rows or [])
+                  if r.get("capability")))
+        return skipped
 
     def _add(self, rule: _Rule) -> Policy:
         with self._lock:

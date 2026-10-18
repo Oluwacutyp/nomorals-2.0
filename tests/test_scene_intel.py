@@ -42,11 +42,15 @@ def test_character_reel_empty():
 
 def test_film_sources_import():
     from nomorals.media.film_sources import (
-        FILM_CHAIN, search_films, NetNaijaMoviesSource, NkiriSource,
-        FzMoviesSource)
-    assert len(FILM_CHAIN) == 3
+        FILM_CHAIN, search_films, ArchiveOrgFilmSource,
+        NetNaijaMoviesSource, NkiriSource, FzMoviesSource)
+    # Archive.org (verified-live) leads the chain, then the 3 mined
+    # sources (bot-blocked/unverifiable from the verifier network,
+    # kept for the owner's network).
+    assert len(FILM_CHAIN) == 4
     names = {s.name for s in FILM_CHAIN}
-    assert names == {"netnaija-movies", "nkiri", "fzmovies"}
+    assert names == {"archiveorg", "netnaija-movies", "nkiri", "fzmovies"}
+    assert isinstance(FILM_CHAIN[0], ArchiveOrgFilmSource)
 
 
 def test_film_search_offline():

@@ -183,6 +183,13 @@ LAYERS: dict[str, int] = {
     # cli.py): an entry point like cli itself, so L7 — it may import
     # anything, and nothing in the layer stack may import it.
     "cmdline": 7,
+    # backup/ is backup orchestration (coordinator/ship/snapshot/verify/
+    # protect/report): an L5 service organ beside agents — it imports
+    # core (L1), storage (L2), memory (L3), scheduler (L4), and agents
+    # (L5, same layer) only. The one builders (L7) import it had
+    # (``_split_archive``) moved INTO backup/protect, with builders
+    # re-exporting it. Importers: partner runtime (L5) + tests.
+    "backup": 5,
 }
 
 #: Modules that sit outside the layer stack and may be imported by anything.
@@ -272,6 +279,26 @@ MODULE_PINS: dict[str, int] = {
     # stays L4; the full foundation-vs-composition split is T1.6.
     "nomorals.tools.autonomy": 5,
     "nomorals.tools.finance": 5,
+    # ── Fix-17: agency composition modules + os application services.
+    # agency/ is otherwise L0 (SHARED) — the agency layer must not
+    # import organs — but these three modules ARE the composition
+    # layer: sources_registry composes the L3–L5 organs into one
+    # registry, __init__ re-exports the composed surface, and wiring
+    # boots the agency for the runtime. Pinning them at L5 (the
+    # composition layer) is the honest assignment: the rest of
+    # agency/ stays L0, and nothing below L5 imports these three
+    # (importers: partner runtime L5, tools/autonomy L5, agency
+    # internals). Pinning agents/partner/runtime to L6 instead was
+    # rejected: agents/partner/__init__ (L5) imports .runtime.
+    "nomorals.agency.sources_registry": 5,
+    "nomorals.agency.__init__": 5,
+    "nomorals.agency.wiring": 5,
+    # os.snapshots / os.update are application services (snapshot +
+    # transactional update managers), not control-plane primitives:
+    # they import core (L1) + storage (L2) + tools (L4) only, and are
+    # used by the partner runtime (L5) + cmdline (L7). L5.
+    "nomorals.os.snapshots": 5,
+    "nomorals.os.update": 5,
 }
 
 #: Grandfathered upward imports.  Each entry is an (importer, target) dotted

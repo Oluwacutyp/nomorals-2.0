@@ -8,14 +8,28 @@ Mined sources (Nigerian context, per user):
 - NetNaija movies (thenetnaija.net) — WordPress ?s= search, post pages
 - Nkiri.com — Nollywood/Hollywood/Korean, direct links
 - FzMovies — mobile-friendly direct download links
+- Internet Archive (archive.org) — public-domain / licensed films,
+  JSON API, verified-live 2026-10-18 (see below) — FIRST in the chain
+  because it is the only source verified-live from the verifier
+  network.
 
-All marked UNVERIFIED until live-tested — these sites change markup and
-geo-block non-NG networks (same caveat as the audio NetNaija source).
+Verification status, 2026-10-18 (SourceHealth probes from the
+verifier network):
+- archive.org — VERIFIED LIVE (HTTP 200, real movie docs).
+- netnaija-movies — bot-blocked (HTTP 403) from the verifier network.
+  NOT dead: the block is evidence about the verifier network (a
+  datacenter IP), not about the site. Kept in the chain: it may work
+  from the owner's (residential/Nigerian) network.
+- nkiri / fzmovies — unverifiable (transport errors) from the verifier
+  network. Same caveat: NOT dead, kept in the chain for the owner's
+  network. Re-verify from a residential/Nigerian path before relying
+  on them.
 """
 
 from __future__ import annotations
 
 import abc
+import json
 import re
 import urllib.parse
 from dataclasses import dataclass, field
@@ -30,6 +44,7 @@ __all__ = [
     "FilmCandidate",
     "FilmSource",
     "BaseFilmScrape",
+    "ArchiveOrgFilmSource",
     "NetNaijaMoviesSource",
     "NkiriSource",
     "FzMoviesSource",
@@ -56,6 +71,8 @@ class FilmSource(abc.ABC):
     """One film strategy. Never raises."""
 
     name: str = "film-base"
+    #: Registry probe kind: "html-posts" for scrapers, "json" for APIs.
+    search_kind: str = "html-posts"
 
     @abc.abstractmethod
     def search(self, query: str, limit: int = 8) -> list[FilmCandidate]:
@@ -263,7 +280,77 @@ class FzMoviesSource(BaseFilmScrape):
         return candidate.url
 
 
+class ArchiveOrgFilmSource(FilmSource):
+    """Internet Archive films — JSON API, verified-live 2026-10-18.
+
+    Searches ``mediatype:(movies)`` via ``advancedsearch.php`` and
+    resolves a download URL from the item's metadata (first MPEG4 /
+    .mp4 file). Public-domain / licensed films only — the honest,
+    always-reachable film source in the chain.
+    """
+
+    name = "archiveorg"
+    search_kind = "json"
+    _BASE = "https://archive.org"
+
+    def search_url(self, query: str) -> str:
+        q = (f"title:({query}) AND mediatype:(movies)")
+        return (f"{self._BASE}/advancedsearch.php?q="
+                f"{urllib.parse.quote_plus(q)}"
+                f"&fl[]=identifier&fl[]=title&fl[]=year"
+                f"&fl[]=description&rows=50&page=1&output=json")
+
+    def search(self, query: str, limit: int = 8) -> list[FilmCandidate]:
+        raw = self._get(self.search_url(query))
+        if not raw:
+            return []
+        try:
+            docs = (json.loads(raw).get("response", {}) or {}).get(
+                "docs", []) or []
+        except Exception:  # noqa: BLE001 - malformed JSON = no results
+            return []
+        out: list[FilmCandidate] = []
+        for doc in docs:
+            ident = str(doc.get("identifier", "") or "")
+            title = str(doc.get("title", "") or "")
+            if not ident or not title:
+                continue
+            out.append(FilmCandidate(
+                source=self.name, title=title,
+                year=str(doc.get("year", "") or ""),
+                url=f"{self._BASE}/details/{ident}",
+                extra={"identifier": ident,
+                       "description": str(doc.get("description", ""))[:300]}))
+            if len(out) >= limit:
+                break
+        return out
+
+    def download_url(self, candidate: FilmCandidate) -> str:
+        if candidate.direct_url:
+            return candidate.direct_url
+        ident = (candidate.extra or {}).get("identifier") or ""
+        if not ident and candidate.url:
+            ident = candidate.url.rstrip("/").rsplit("/", 1)[-1]
+        if not ident:
+            return candidate.url
+        raw = self._get(f"{self._BASE}/metadata/{ident}")
+        if not raw:
+            return candidate.url
+        try:
+            files = (json.loads(raw).get("files", []) or [])
+        except Exception:  # noqa: BLE001 - malformed metadata
+            return candidate.url
+        for f in files:
+            name = str(f.get("name", "") or "")
+            fmt = str(f.get("format", "") or "")
+            if name.lower().endswith(".mp4") or "MPEG4" in fmt:
+                return (f"{self._BASE}/download/{ident}/"
+                        f"{urllib.parse.quote(name)}")
+        return candidate.url
+
+
 FILM_CHAIN: list[FilmSource] = [
+    ArchiveOrgFilmSource(),
     NetNaijaMoviesSource(),
     NkiriSource(),
     FzMoviesSource(),

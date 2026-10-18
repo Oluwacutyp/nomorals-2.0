@@ -14,12 +14,13 @@ from __future__ import annotations
 from typing import Any
 
 from .adapters import AgencyAuthority, build_adapters
+from .expansion import ExpansionSystems
 from .initiatives import InitiativeStore
 from .supervision import BootSupervisor
 from .systems import ActiveSystems
 
 __all__ = [
-    "boot_agency", "ensure_agency_shift_job",
+    "boot_agency", "ensure_agency_shift_job", "run_scheduled_expansion",
     "AGENCY_SHIFT_JOB", "AGENCY_SHIFT_TOOL", "AGENCY_SHIFT_SPEC",
 ]
 
@@ -59,6 +60,40 @@ def ensure_agency_shift_job(scheduler: Any, *,
                              {"tool": AGENCY_SHIFT_TOOL})
     except Exception:  # noqa: BLE001 - scheduling is best-effort
         return None
+
+
+def run_scheduled_expansion(db: Any, *, organs: dict[str, Any] | None = None,
+                            authority: Any | None = None,
+                            explicit_go_aheads: Any | None = None,
+                            registry_collect: Any | None = None,
+                            registry_fetcher: Any = None,
+                            budget_s: float = 600.0,
+                            now: float | None = None) -> dict[str, Any]:
+    """Run one scheduled expansion cycle (the SourceHealth entrypoint).
+
+    This is the scheduler/daemon entrypoint for expansion: the
+    ``agency-shift`` job calls it after the core ``work_shift``, so
+    SourceHealth actually re-verifies sources on schedule — not just
+    as an existing-but-never-called tick. Defaults wire the real
+    registry collector (``sources_registry.collect``) and the real
+    ``SourceHealth``; callers may inject fakes for tests. Expansion
+    organs run under standing authority (gated actions go through
+    the trial-pattern gate).
+    """
+    from .sourcehealth import SourceHealth
+
+    if registry_collect is None:
+        from .sources_registry import collect as _collect
+
+        def registry_collect() -> list:
+            specs, _ = _collect()
+            return specs
+    systems = ExpansionSystems(
+        db=db, organs=organs, source_health=SourceHealth(db),
+        registry_collect=registry_collect, registry_fetcher=registry_fetcher,
+        authority=authority, explicit_go_aheads=explicit_go_aheads)
+    systems.seed_initiatives(now=now)
+    return systems.run_cycle(budget_s=budget_s, now=now)
 
 
 def boot_agency(db: Any, *, now: float | None = None,

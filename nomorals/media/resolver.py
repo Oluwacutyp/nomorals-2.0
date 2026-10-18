@@ -538,11 +538,10 @@ class SourceResolver:
                       result: ResolvedAudio) -> ResolvedAudio:
         # MANY sources, in chain order (see MUSIC_SEARCH_SOURCES).
         # Downloadable/full-track sources first; regional blogs before
-        # globals; 30s-preview APIs (iTunes/Deezer) only after every
-        # full-track source; metadata-only (MusicBrainz) + Spotify
-        # last. Boomplay is NOT in this chain: its search page is a
-        # JS SPA shell and plain-HTTP search returns no results
-        # (verified 2026-10-18).  GLOBAL coverage: Nigeria/Africa is one region
+        # globals; metadata-only (Boomplay, MusicBrainz) + 30s-preview
+        # APIs (iTunes/Deezer) + Spotify last. Boomplay is back in the
+        # chain via browser-backed search (verified live 2026-10-18).
+        # GLOBAL coverage: Nigeria/Africa is one region
         # among many — the chain spans worldwide catalogs (YouTube
         # Music, MusicBrainz, Openverse, Wikimedia, iTunes, Deezer).
         # One source failing never ends the search — the chain keeps
@@ -561,6 +560,7 @@ class SourceResolver:
             ("youtube-music-search",
              lambda: self._s_youtube_music_search(query)),
             ("archiveorg-search", lambda: self._s_archiveorg_search(query)),
+            ("boomplay-search", lambda: self._s_boomplay_search(query)),
             ("musicbrainz-search", lambda: self._s_metadata_search(
                 query, "MusicBrainzSource", "musicbrainz",
                 "MusicBrainz metadata only — no audio; find the track "
@@ -964,9 +964,9 @@ class SourceResolver:
     def _s_boomplay_search(self, query: str) -> ResolvedAudio:
         """Boomplay text search — metadata only (protected streams).
 
-        NOT in the active chains (removed 2026-10-18): Boomplay search
-        is a JS SPA shell and plain-HTTP search returns no results.
-        Kept callable + tested for a future browser-backed search.
+        In the active chain since 2026-10-18: browser-backed SPA
+        search (session cookies + browser headers) returns real
+        candidates where plain-HTTP search returned none.
         """
         from .sources import BoomplaySource  # lazy: same layer
 

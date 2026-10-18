@@ -152,24 +152,11 @@ class DeliveryReport:
         }
 
 
-def _split_archive(archive: Path, split_mb: float) -> list[Path]:
-    """Split ``archive`` into ``split_mb``-sized ``.partNN`` pieces.
-
-    Chat platforms cap file uploads (Telegram bots: 50MB) — multi-part
-    archives are the honest answer, not silent truncation.
-    """
-    chunk = int(split_mb * 1024 * 1024)
-    data = archive.read_bytes()
-    if len(data) <= chunk:
-        return [archive]
-    parts: list[Path] = []
-    total = (len(data) + chunk - 1) // chunk
-    for i in range(total):
-        piece = archive.with_name(f"{archive.name}.part{i:02d}of{total:02d}")
-        piece.write_bytes(data[i * chunk:(i + 1) * chunk])
-        parts.append(piece)
-    _log.info("split %s into %d parts of ~%.1fMB", archive.name, total, split_mb)
-    return parts
+# The one split format lives in backup.protect (backup is its other
+# user; backup is L5, builders is L7 — importing it from here would be
+# an upward import). Re-exported so ``builders.deliver._split_archive``
+# keeps working for existing importers.
+from ..backup.protect import _split_archive  # noqa: E402,F401
 
 
 def zip_project(project_dir: str | Path,

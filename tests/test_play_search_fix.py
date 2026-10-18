@@ -103,6 +103,24 @@ def test_ytdlp_available_detects_module_and_cli(monkeypatch):
     assert ytdlp_available() is False
 
 
+def test_resolver_imports_clean_in_isolated_process():
+    """Regression for the 'pre-existing collection error': the resolver
+    module — and ``ytdlp_available`` — must import in a FRESH
+    interpreter, independent of test-collection order or whatever
+    other test files did to ``sys.modules``. A collection error here
+    means the import itself is order-dependent, not the test."""
+    import subprocess
+    import sys
+
+    out = subprocess.run(
+        [sys.executable, "-c",
+         "from nomorals.media.resolver import ytdlp_available;"
+         " print(ytdlp_available())"],
+        capture_output=True, text=True, timeout=120)
+    assert out.returncode == 0, out.stderr[-2000:]
+    assert out.stdout.strip() in ("True", "False")
+
+
 def test_install_help_is_official_not_invented():
     assert YTDLP_INSTALL_HELP == YT_DLP_HINT
     assert "winget install --source winget --id yt-dlp.yt-dlp" in YTDLP_INSTALL_HELP

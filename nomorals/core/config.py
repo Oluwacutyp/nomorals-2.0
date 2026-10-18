@@ -26,6 +26,7 @@ from .errors import ConfigError
 
 __all__ = [
     "Settings",
+    "LocationSettings",
     "get_settings",
     "load_settings",
     "reset_settings",
@@ -650,10 +651,29 @@ class HubSettings:
     request_timeout: float = 15.0
 
 @dataclass
+class LocationSettings:
+    """The owner's geographic places (NOT the data home).
+
+    ``Settings.home`` is the DATA home (``~/.nomorals``) — it is never
+    a place. These are the places weather, news-local, and travel
+    features default to when the caller does not configure places
+    explicitly. Defaults: the owner lives in Lagos, Nigeria.
+    Env: ``NM_HOME_PLACE``, ``NM_WORK_PLACE``, ``NM_PLACES``
+    (comma-separated), ``NM_LOCALE``.
+    """
+
+    home_place: str = "Lagos, Nigeria"
+    work_place: str = ""
+    places: list[str] = field(default_factory=list)
+    locale: str = "ng"
+
+
+@dataclass
 class Settings:
     """Root configuration object."""
 
     home: str = "~/.nomorals"
+    location: LocationSettings = field(default_factory=LocationSettings)
     profile: str = "workstation"
     debug: bool = False
     offline: bool = False
@@ -851,6 +871,10 @@ _ENV_PREFIX = "NM_"
 #: Map of env var -> dotted config path, for the non-obvious ones.
 _ENV_MAP: dict[str, str] = {
     "NM_HOME": "home",
+    "NM_HOME_PLACE": "location.home_place",
+    "NM_WORK_PLACE": "location.work_place",
+    "NM_PLACES": "location.places",
+    "NM_LOCALE": "location.locale",
     "NM_PROFILE": "profile",
     "NM_DEBUG": "debug",
     "NM_OFFLINE": "offline",

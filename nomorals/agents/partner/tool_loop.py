@@ -298,6 +298,7 @@ class ToolCallingLoop:
         max_tool_calls_per_turn: int = 5,
         on_event: Callable[[ToolLoopEvent], None] | None = None,
         parallel_per_turn: bool = False,
+        isolated_tools: Any | None = None,
     ) -> None:
         self.llm = llm
         self.registry = registry
@@ -313,6 +314,16 @@ class ToolCallingLoop:
         self.parallel_per_turn = bool(parallel_per_turn)
         self._pool = ThreadPoolExecutor(
             max_workers=4, thread_name_prefix="tool-loop")
+        #: Tools that run in an ISOLATED CHILD PROCESS (see
+        #: :mod:`nomorals.core.process_isolation`) instead of the
+        #: thread pool, so a timeout SIGKILLs them — forcible
+        #: termination with a KNOWN outcome (dead), never unknown.
+        #: A tool is isolated when its name is here OR its spec
+        #: metadata sets ``process_isolated=True``. Thread-based
+        #: tools keep cooperative cancellation + unknown-outcome
+        #: recording (unchanged).
+        self.isolated_tools: frozenset[str] = frozenset(
+            isolated_tools or ())
         #: Timed-out calls whose tool may still finish: call signature →
         #: record. :meth:`reconcile_unknown` surfaces late completions so
         #: the loop never blind-replays them.
@@ -549,7 +560,19 @@ class ToolCallingLoop:
         capabilities: Any = None,
         loop_ctx: dict[str, Any] | None = None,
     ) -> str:
-        """Run one tool call with timeout. Never raises — failures are text."""
+        """Run one tool call with timeout. Never raises — failures are text.
+
+        Process-isolated tools (name in ``isolated_tools`` or spec
+        metadata ``process_isolated``) run in a forked child: a
+        timeout SIGKILLs the child, so the outcome is KNOWN (dead) —
+        no unknown-outcome record, no still-running tool. Thread
+        tools keep the cooperative path (cancel is best-effort, the
+        outcome stays UNKNOWN and is recorded for reconciliation).
+        """
+        if self._is_isolated(call.name):
+            return self._execute_isolated(
+                call, actor=actor, capabilities=capabilities,
+                loop_ctx=loop_ctx)
         fut = self._pool.submit(
             self._invoke, call, actor=actor, capabilities=capabilities,
             loop_ctx=loop_ctx)
@@ -564,6 +587,61 @@ class ToolCallingLoop:
             self._register_unknown(call, fut)
             return self._unknown_message(call)
         except Exception as exc:  # noqa: BLE001 — execution must not kill the loop
+            self._note_tool_weakness(call.name, f"crashed: {exc}")
+            return f"[tool error] '{call.name}' crashed: {exc}"
+
+    def _is_isolated(self, name: str) -> bool:
+        """True when this tool runs in a child process (forcible kill)."""
+        if name in self.isolated_tools:
+            return True
+        try:
+            spec = self.registry.get(name)
+        except Exception:  # noqa: BLE001 - unknown tool = not isolated
+            return False
+        metadata = getattr(spec, "metadata", None) or {}
+        return bool(metadata.get("process_isolated"))
+
+    def _execute_isolated(self, call: ToolCall, *, actor: str,
+                          capabilities: Any = None,
+                          loop_ctx: dict[str, Any] | None = None) -> str:
+        """Run one tool call in a forked child process. Never raises."""
+        from ...core.process_isolation import run_isolated
+
+        result = run_isolated(
+            self._invoke, call, actor=actor, capabilities=capabilities,
+            loop_ctx=loop_ctx, timeout_s=self.tool_timeout_s)
+        if result.status == "ok":
+            return str(result.value)
+        if result.status == "error":
+            self._note_tool_weakness(call.name, f"crashed: {result.error}")
+            return f"[tool error] '{call.name}' crashed: {result.error}"
+        if result.status == "timeout-killed":
+            self._note_tool_weakness(call.name, "timeout-killed")
+            return (f"[tool error] '{call.name}' timed out after "
+                    f"{self.tool_timeout_s:.0f}s and its process was "
+                    f"KILLED (forcible termination — outcome KNOWN: "
+                    f"dead, no side effects after the kill). Do NOT "
+                    f"re-issue blindly: check state first.")
+        if result.status == "crashed":
+            self._note_tool_weakness(call.name, f"crashed: {result.error}")
+            return (f"[tool error] '{call.name}' process crashed: "
+                    f"{result.error}")
+        # not-supported (no fork): fall back to the cooperative thread
+        # path — same unknown-outcome semantics as any thread tool.
+        fut = self._pool.submit(
+            self._invoke, call, actor=actor, capabilities=capabilities,
+            loop_ctx=loop_ctx)
+        try:
+            return fut.result(timeout=self.tool_timeout_s)
+        except FuturesTimeout:
+            self._note_tool_weakness(call.name, "timeout")
+            try:
+                fut.cancel()
+            except Exception:  # noqa: BLE001 - best-effort
+                pass
+            self._register_unknown(call, fut)
+            return self._unknown_message(call)
+        except Exception as exc:  # noqa: BLE001
             self._note_tool_weakness(call.name, f"crashed: {exc}")
             return f"[tool error] '{call.name}' crashed: {exc}"
 

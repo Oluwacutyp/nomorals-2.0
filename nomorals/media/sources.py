@@ -361,33 +361,156 @@ class NetNaijaSource(BaseScrapeSource):
 # ── Boomplay ──────────────────────────────────────────────────────────────
 
 class BoomplaySource(AudioSource):
-    """Boomplay — massive in Nigeria/Africa.
+    """Boomplay — massive in Nigeria/Africa. Browser-backed search.
 
-    Honest limitation (verified 2026-10-09, re-verified 2026-10-18):
-    there is no official public API, no yt-dlp extractor, and streams
-    are protected.  Worse, the search page is a JS SPA shell
-    (placeholder ``songName: Unknown``, zero result links via plain
-    HTTP) and its autocomplete endpoint ``/searchItem`` 500s without
-    a browser session — so plain-HTTP text search returns NO results
-    and this source is NOT in the active chain (removed 2026-10-18).
-    The class + resolver method stay, tested, for a future
-    browser-backed search. Re-add to the chain only when a live
-    check returns real candidates.
+    Honest limitation: there is no official public API, no yt-dlp
+    extractor, and streams are protected (candidates are metadata
+    only — open in the Boomplay app). The search page is a JS SPA
+    shell, so plain-HTTP text search returns NO results (verified
+    2026-10-09, re-verified 2026-10-18).
+
+    The working path (verified live 2026-10-18) is the BROWSER path:
+    the same requests a real browser makes to the SPA endpoints —
+    a session-cookie visit to the homepage (sets ``JSESSIONID`` /
+    ``imei`` / ``songLibraryNumStr``), then GET
+    ``/search/music/<query>`` with a browser UA + ``Referer`` +
+    ``X-Requested-With: XMLHttpRequest``. The returned HTML carries
+    real ``songWrap`` buttons whose ``data-data`` payload splits on
+    ``@+#`` into ``[0]=song id, [4]=title, [5]=artist``. Back in the
+    active chain since the browser-backed search returns real
+    candidates (verified live: "Burna Boy" → 10 keywords via
+    ``/searchItem``; "Last Last" → 7 songs; "Asake" → 12; "Davido"
+    → 12).
     """
 
     name = "boomplay"
+    _BASE = "https://www.boomplay.com"
     _SEARCH = "https://www.boomplay.com/search"
+    _DATA_SEP = "@+#"
+    #: ``(url) -> html`` — injectable (tests / a real browser fetch).
+    #: Class-level so tests can patch it on the class; None = the
+    #: default browser-session fetch.
+    _browser_fetch: Any = None
+
+    def __init__(self, fetcher: Any | None = None) -> None:
+        if fetcher is not None:
+            self._browser_fetch = fetcher
+        self._opener: Any = None
+
+    # ── browser-session fetch (cookie jar + browser headers) ────
+    def _session_fetch(self, url: str) -> str:
+        """GET ``url`` the way the SPA does: session cookies + browser
+        headers. First call visits the homepage to collect cookies
+        (``JSESSIONID``, ``imei``, ``songLibraryNumStr``). Never raises."""
+        import http.cookiejar
+        import urllib.request
+
+        try:
+            if self._opener is None:
+                jar = http.cookiejar.CookieJar()
+                self._opener = urllib.request.build_opener(
+                    urllib.request.HTTPCookieProcessor(jar))
+                # Homepage visit: collect the session cookies the SPA
+                # endpoints require.
+                try:
+                    req = urllib.request.Request(
+                        self._BASE + "/", headers={
+                            "User-Agent": BROWSER_UA,
+                            "Accept": "text/html,application/xhtml+xml"})
+                    with self._opener.open(req, timeout=_HTTP_TIMEOUT) as resp:
+                        resp.read()
+                except Exception:  # noqa: BLE001 - cookies best-effort
+                    pass
+            req = urllib.request.Request(url, headers={
+                "User-Agent": BROWSER_UA,
+                "Accept": "text/html,application/xhtml+xml,application/xml",
+                "Referer": self._BASE + "/",
+                "X-Requested-With": "XMLHttpRequest"})
+            with self._opener.open(req, timeout=_HTTP_TIMEOUT) as resp:
+                return resp.read().decode("utf-8", errors="replace")
+        except Exception as exc:  # noqa: BLE001 — never raises
+            _log.info("boomplay: browser fetch failed for %s: %s",
+                      url[:80], exc)
+            return ""
+
+    # ── parsing ───────────────────────────────────────────────────
+    @classmethod
+    def _parse_song_wrap(cls, html: str,
+                         limit: int) -> list[SourceCandidate]:
+        """Parse SPA ``songWrap`` buttons: ``data-data`` payloads split
+        on ``@+#`` → ``[0]=song id, [4]=title, [5]=artist``. Falls
+        back to ``songName``/``singerName`` + ``data-id`` markup."""
+        out: list[SourceCandidate] = []
+        seen: set[str] = set()
+        for m in re.finditer(r'data-data="([^"]+)"', html, re.S | re.I):
+            parts = m.group(1).split(cls._DATA_SEP)
+            if len(parts) < 6:
+                continue
+            song_id = parts[0].strip()
+            title = BaseScrapeSource._clean(parts[4])
+            artist = BaseScrapeSource._clean(parts[5])
+            if not song_id.isdigit() or len(title) < 2 or not artist:
+                continue
+            if song_id in seen:
+                continue
+            seen.add(song_id)
+            out.append(SourceCandidate(
+                source="boomplay", title=title, artist=artist,
+                url=f"https://www.boomplay.com/songs/{song_id}",
+                downloadable=False,
+                extra={"note": "Boomplay streams are protected — "
+                               "open in the Boomplay app",
+                       "boomplay_id": song_id}))
+            if len(out) >= limit:
+                return out
+        if out:
+            return out
+        # Fallback: songName/singerName text + a nearby data-id.
+        for m in re.finditer(
+                r'data-id="(\d+)"[^>]*>.*?'
+                r'class="songName"[^>]*>([^<]+)<.*?'
+                r'class="singerName"[^>]*>([^<]+)<',
+                html, re.S | re.I):
+            song_id, title, artist = (m.group(1),
+                                      BaseScrapeSource._clean(m.group(2)),
+                                      BaseScrapeSource._clean(m.group(3)))
+            if song_id in seen or len(title) < 2:
+                continue
+            seen.add(song_id)
+            out.append(SourceCandidate(
+                source="boomplay", title=title, artist=artist,
+                url=f"https://www.boomplay.com/songs/{song_id}",
+                downloadable=False,
+                extra={"note": "Boomplay streams are protected — "
+                               "open in the Boomplay app",
+                       "boomplay_id": song_id}))
+            if len(out) >= limit:
+                break
+        return out
 
     def search(self, query: str, limit: int = 8) -> list[SourceCandidate]:
         q = (query or "").strip()
         if not q:
             return []
         try:
+            # Browser-backed SPA search (the working path).
+            fetch = self._browser_fetch or self._session_fetch
+            html = fetch(
+                f"{self._BASE}/search/music/{urllib.parse.quote(q)}")
+            out = self._parse_song_wrap(html or "", limit)
+            if out:
+                _log.info("boomplay: %d browser-backed candidates for %r",
+                          len(out), q)
+                return out
+        except Exception as exc:  # noqa: BLE001 — never raises
+            _log.info("boomplay: browser search failed for %r: %s", q, exc)
+        try:
+            # Plain-HTTP fallback (legacy path; usually empty for SPA).
             html = self._get(
                 f"{self._SEARCH}?q={urllib.parse.quote_plus(q)}")
             if not html:
                 return []
-            out: list[SourceCandidate] = []
+            out = []
             # Boomplay song pages: /songs/<id>_<slug>
             seen: set[str] = set()
             for m in re.finditer(
@@ -811,6 +934,7 @@ MUSIC_SEARCH_SOURCES: tuple[str, ...] = (
     "youtube-search",
     "youtube-music-search",
     "archiveorg-search",
+    "boomplay-search",
     "musicbrainz-search",
     "openverse-search",
     "wikimedia-search",
@@ -839,6 +963,7 @@ MUSIC_SOURCE_REGIONS: dict[str, str] = {
     "youtube-search": "global",
     "youtube-music-search": "global",
     "archiveorg-search": "global",
+    "boomplay-search": "africa",
     "musicbrainz-search": "global",
     "openverse-search": "global",
     "wikimedia-search": "global",

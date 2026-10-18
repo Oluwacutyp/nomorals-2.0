@@ -13,7 +13,18 @@ from nomorals.core.command_inventory import inventory
 
 class TestCommandInventory(unittest.TestCase):
     def test_inventory_is_total_and_overlap_resolves(self):
-        inv = inventory()
+        # The inventory lives in core (L1) and imports nothing, so the
+        # command sets are injected by the caller (this test owns the
+        # surfaces it audits).
+        from nomorals.cmdline.dispatch import _COMMANDS
+        from nomorals.social.chat.control import (
+            CONTROL_COMMANDS, GAME_COMMANDS, PUBLIC_COMMANDS,
+        )
+
+        inv = inventory(
+            cli_commands=set(_COMMANDS),
+            chat_commands=(set(PUBLIC_COMMANDS) | set(GAME_COMMANDS)
+                           | set(CONTROL_COMMANDS)))
         self.assertGreater(len(inv["cli_commands"]), 50)
         self.assertGreater(len(inv["chat_commands"]), 100)
         # Every chat command is classified: overlap, chat-only, or cli-only.

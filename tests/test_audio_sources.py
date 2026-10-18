@@ -73,6 +73,15 @@ _BOOMPLAY_SEARCH_HTML = """
 </body></html>
 """
 
+#: SPA /search/music/ payload: songWrap buttons with data-data
+#: fields split on @+# → [0]=song id, [4]=title, [5]=artist.
+_BOOMPLAY_SONG_WRAP_HTML = """
+<html><body>
+<button data-id="211634092" data-data="211634092@+#5@+#10039@+#https://x/img.jpg@+#Last Last@+#Burna Boy@+#tok@+#03:42@+#OMS@+#0@+#tok2@+#Album@+#https://x/cover.jpg@+#https://x/artist.jpg@+#1777640@+#1777431@+#0"></button>
+<button data-id="998877665" data-data="998877665@+#5@+#10040@+#https://x/img2.jpg@+#Rush@+#Ayra Starr@+#tok@+#03:10@+#OMS@+#0@+#tok2@+#Album@+#https://x/cover2.jpg@+#https://x/artist2.jpg@+#1777641@+#1777432@+#0"></button>
+</body></html>
+"""
+
 
 # ── AudiomackSource ───────────────────────────────────────────────────
 
@@ -204,26 +213,45 @@ class TestNetNaijaSource:
 
 class TestBoomplaySource:
     def test_search_metadata(self):
+        # Browser-backed SPA search: songWrap data-data payloads.
         src = BoomplaySource()
-        with patch.object(BoomplaySource, "_get",
-                          return_value=_BOOMPLAY_SEARCH_HTML):
+        with patch.object(BoomplaySource, "_browser_fetch",
+                          return_value=_BOOMPLAY_SONG_WRAP_HTML):
+            cands = src.search("burna", limit=5)
+        assert len(cands) == 2
+        assert cands[0].title == "Last Last"
+        assert cands[0].artist == "Burna Boy"
+        assert cands[0].url == "https://www.boomplay.com/songs/211634092"
+        # honestly non-downloadable
+        assert all(c.downloadable is False for c in cands)
+
+    def test_search_legacy_plain_http_fallback(self):
+        # Plain-HTTP fallback still parses /songs/ href links when the
+        # browser fetch comes back empty.
+        src = BoomplaySource()
+        with patch.object(BoomplaySource, "_browser_fetch",
+                          return_value=""), \
+                patch.object(BoomplaySource, "_get",
+                             return_value=_BOOMPLAY_SEARCH_HTML):
             cands = src.search("burna", limit=5)
         assert len(cands) == 2
         assert cands[0].title == "Last Last"
         assert cands[0].url == "https://www.boomplay.com/songs/211634092_last-last"
-        # honestly non-downloadable
-        assert all(c.downloadable is False for c in cands)
 
     def test_search_empty(self):
         src = BoomplaySource()
         assert src.search("") == []
-        with patch.object(BoomplaySource, "_get", return_value=""):
+        with patch.object(BoomplaySource, "_browser_fetch",
+                          return_value=""), \
+                patch.object(BoomplaySource, "_get", return_value=""):
             assert src.search("x") == []
 
     def test_search_never_raises(self):
         src = BoomplaySource()
-        with patch.object(BoomplaySource, "_get",
-                          side_effect=Exception("boom")):
+        with patch.object(BoomplaySource, "_browser_fetch",
+                          side_effect=Exception("boom")), \
+                patch.object(BoomplaySource, "_get",
+                             side_effect=Exception("boom")):
             assert src.search("x") == []
 
     def test_download_url_empty(self):
@@ -306,17 +334,22 @@ class TestResolverWiring:
 
     def test_text_chain_includes_new_sources(self):
         # The chain tries netnaija before the proven globals.
-        # Boomplay is NOT in the chain: JS SPA shell, plain-HTTP
-        # search returns no results (verified 2026-10-18).
+        # Boomplay is BACK in the chain (browser-backed search,
+        # verified live 2026-10-18) after archiveorg, before the
+        # metadata-only sources.
         from nomorals.media import resolver as res_mod
         import inspect
         src = inspect.getsource(res_mod.SourceResolver._resolve_text)
         assert "netnaija-search" in src
-        assert "boomplay-search" not in src
+        assert "boomplay-search" in src
         nn = src.index("netnaija-search")
         sc = src.index("soundcloud-search")
         yt = src.index("youtube-search")
         assert nn < sc < yt
+        ao = src.index("archiveorg-search")
+        bp = src.index("boomplay-search")
+        mb = src.index("musicbrainz-search")
+        assert ao < bp < mb
 
     def test_url_chain_tries_audiomack_first(self):
         from nomorals.media import resolver as res_mod

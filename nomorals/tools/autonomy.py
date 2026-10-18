@@ -125,6 +125,25 @@ TOOLS = {
 }
 
 
+def _gradient_for_shift(db: Any) -> Any:
+    """Permission gradient for a SCHEDULED shift.
+
+    Loads the DURABLE policy allow-rules from ``db`` (see
+    ``Policy.save_rules`` / ``Policy.load_rules``), so a scheduled
+    shift runs under the SAME authority as interactive use — not a
+    weaker default-deny shadow. Missing/empty table = no persisted
+    rules = default-deny stands (never a widened grant).
+    """
+    from ..core.policy import PermissionGradient, Policy
+
+    policy = Policy()
+    try:
+        policy.load_rules(db)
+    except Exception:  # noqa: BLE001 - unreadable rules = default-deny
+        pass
+    return PermissionGradient(policy)
+
+
 def register(registry: Any) -> None:
     for name, spec in TOOLS.items():
         registry.register(
@@ -202,8 +221,7 @@ def register(registry: Any) -> None:
             return SocialManager(_context) if _context is not None else None
 
         def _gradient():
-            from ..core.policy import PermissionGradient, Policy
-            return PermissionGradient(Policy())
+            return _gradient_for_shift(db)
 
         def _mandate_check():
             from ..finance.mandate import MandateStore, check_mandate
@@ -240,6 +258,33 @@ def register(registry: Any) -> None:
 
         graph_factory, graph_execute, graph_compile = _try(_graph_fns) or (
             None, None, None)
+
+        def _relationships():
+            from ..social.relationships import RelationshipTracker
+            return RelationshipTracker(
+                path=str(ws) + "/data/social_relationships.json")
+
+        def _draft_queue():
+            from ..social.drafts import DraftQueue
+            return DraftQueue()
+
+        def _dm_sender(gateway):
+            # The real DM-send channel: the chat gateway's send path.
+            # None when no gateway is wired — sends then block honestly.
+            if gateway is None:
+                return None
+
+            def _send(platform, contact, body):
+                try:
+                    res = gateway.send(platform, contact, body)
+                    return bool(getattr(res, "ok", False))
+                except Exception:  # noqa: BLE001 - send failure = not sent
+                    return False
+
+            return _send
+
+        settings = getattr(_context, "settings", None)
+        gateway = getattr(_context, "gateway", None)
         adapters = build_adapters(
             weather=_try(_weather), news_agent=_try(_news_agent),
             social_manager=_try(_social_manager),
@@ -248,10 +293,19 @@ def register(registry: Any) -> None:
             payout_extractor=_try(_payout_extractor),
             opp_factory=_try(_opp_factory),
             graph_factory=graph_factory, graph_execute_fn=graph_execute,
-            graph_compile_fn=graph_compile)
+            graph_compile_fn=graph_compile, settings=settings,
+            gateway=gateway, relationships=_try(_relationships),
+            draft_queue=_try(_draft_queue), dm_sender=_dm_sender(gateway))
         authority = AgencyAuthority(
             gradient=_try(_gradient), grant=None,
             mandate_check=_try(_mandate_check))
         systems = ActiveSystems(db=db, adapters=adapters,
                                 authority=authority)
-        return {"ok": True, "shift": systems.work_shift()}
+        shift = systems.work_shift()
+        # Expansion runs on the SAME schedule: SourceHealth actually
+        # re-verifies sources every shift (the scheduler entrypoint).
+        from ..agency.wiring import run_scheduled_expansion
+
+        expansion = _try(
+            lambda: run_scheduled_expansion(db, authority=authority))
+        return {"ok": True, "shift": shift, "expansion": expansion}

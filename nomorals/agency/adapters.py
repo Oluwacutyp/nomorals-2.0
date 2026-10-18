@@ -30,7 +30,8 @@ from .domains import (
 __all__ = [
     "AgencyAuthority", "DealsAdapter", "WeatherAdapter", "NewsAdapter",
     "SocialAdapter", "LeadsAdapter", "GigsAdapter", "PlannerAdapter",
-    "LEAD_STORE_MAP", "build_adapters",
+    "LEAD_STORE_MAP", "build_adapters", "default_social_inbox",
+    "places_from_settings",
 ]
 
 #: Agency lifecycle stage → LeadStore coarse status. Stages that share
@@ -96,6 +97,7 @@ class AgencyAuthority:
     CAP_POST = "social.post"
     CAP_DM = "social.dm"
     CAP_SUBMIT = "gig.submit"
+    CAP_PURCHASE = "commerce.purchase"
 
     gradient: Any = None
     grant: Any = None
@@ -131,9 +133,27 @@ class AgencyAuthority:
         return self.check(self.CAP_POST,
                           draft=draft or "autonomous social post")
 
-    def may_dm(self, *, draft: str = "") -> Any:
-        """Autonomous DM decision (``social.dm`` is confirmable)."""
-        return self.check(self.CAP_DM, draft=draft or "autonomous DM")
+    def may_dm(self, *, draft: str = "", explicit: bool = False) -> Any:
+        """DM decision. ``social.dm`` is confirmable: autonomous sends
+        need a confirmation token (gradient denies without one), while
+        ``explicit=True`` is the trial pattern — the owner explicitly
+        approved THIS draft, so the confirmation gate is bypassed
+        (deny rules, grants, and biometric still apply)."""
+        return self.check(self.CAP_DM, draft=draft or "autonomous DM",
+                          explicit_override=explicit)
+
+    def may_purchase(self, *, amount: float = 0.0,
+                     draft: str = "") -> Any:
+        """Purchase decision: policy gate for ``commerce.purchase``.
+
+        This is the POLICY half of a purchase (the gradient / allow
+        rules). The MANDATE half is :meth:`spend_decision` — a purchase
+        executes only when BOTH allow (see
+        :meth:`DealsAdapter.execute_purchase`).
+        """
+        return self.check(self.CAP_PURCHASE,
+                          draft=draft or f"purchase of {amount:.2f}",
+                          context={"amount": amount})
 
     def may_submit(self, gig_id: str, *, explicit: bool = False,
                    draft: str = "") -> Any:
@@ -192,14 +212,85 @@ class DealsAdapter:
     """Universal deals engine (need → exact product → landed vs
     historical → verdict). ``integrations/naija_deals.py`` is ONE
     regional adapter that can sit behind ``hunter`` — never the
-    organizing axis. Never purchases: ``check_need`` verifies and
-    reports readiness / blockers; buying needs a mandate + executor
-    the owner approves."""
+    organizing axis. ``check_need`` verifies and reports readiness /
+    blockers; ``execute_purchase`` COMPLETES a purchase through the
+    injected ``purchase_executor`` — but only when standing authority
+    allows (policy gate AND payment mandate). Without authority, or
+    without an executor, it returns a blocker and buys nothing."""
 
     def __init__(self, hunter: Any | None = None,
-                 price_check: Any | None = None) -> None:
+                 price_check: Any | None = None,
+                 purchase_executor: Any | None = None) -> None:
         self.hunter = hunter
         self.price_check = price_check
+        #: ``(need, observed) -> dict`` — the real checkout channel.
+        #: Must return ``{"purchased": True, "receipt": {...}}`` on
+        #: success; anything without a receipt is NOT a purchase.
+        #: Injected by the caller (higher layer); None = no channel.
+        self.purchase_executor = purchase_executor
+
+    def execute_purchase(self, need: dict[str, Any],
+                         observed: dict[str, Any], *,
+                         authority: Any | None = None) -> dict[str, Any]:
+        """Complete a purchase for a verified saving, when authorized.
+
+        Gates, in order: (1) policy — ``authority.may_purchase``;
+        (2) mandate — ``authority.can_spend(amount)``; (3) executor —
+        a checkout channel must be injected. Every denial returns
+        ``{"purchased": False, ...}`` with the reason — never a
+        silent buy, never a fabricated receipt. A receipt is required:
+        an executor that reports success without receipt evidence is
+        treated as NOT purchased.
+        """
+        amount = float(observed.get("landed_price",
+                                    observed.get("price", 0)) or 0)
+        if authority is not None:
+            may = getattr(authority, "may_purchase", None)
+            if callable(may):
+                decision = may(amount=amount, draft=(
+                    f"purchase {need.get('product', '')} "
+                    f"for {amount:.2f}"))
+                if not getattr(decision, "allowed", False):
+                    return {"purchased": False,
+                            "reason": getattr(
+                                decision, "reason",
+                                "purchase not allowed by policy"),
+                            "proposal_id": getattr(
+                                decision, "proposal_id", "") or None,
+                            "blocker": "purchase blocked by policy"}
+            if not authority.can_spend(amount):
+                return {"purchased": False,
+                        "reason": authority.spend_reason(amount),
+                        "blocker": "purchase blocked: no payment mandate"}
+        elif self.purchase_executor is not None:
+            return {"purchased": False,
+                    "reason": "no authority configured — cannot spend",
+                    "blocker": "purchase blocked: no authority"}
+        if self.purchase_executor is None:
+            return {"purchased": False,
+                    "reason": "no purchase executor injected — no "
+                              "checkout channel configured for this vendor",
+                    "blocker": "purchase blocked: no purchase executor"}
+        try:
+            result = self.purchase_executor(dict(need), dict(observed))
+        except Exception as exc:  # noqa: BLE001 - executor failure = no buy
+            return {"purchased": False, "error": str(exc),
+                    "blocker": f"purchase executor failed: {exc}"}
+        if not isinstance(result, dict) or not result.get("purchased"):
+            return {"purchased": False,
+                    "reason": str((result or {}).get(
+                        "reason", "executor did not complete a purchase")),
+                    "blocker": "purchase not completed by executor",
+                    "executor_result": result}
+        receipt = result.get("receipt")
+        if not receipt:
+            return {"purchased": False,
+                    "reason": "executor reported success without receipt "
+                              "evidence — treated as not purchased",
+                    "blocker": "purchase blocked: no receipt evidence",
+                    "executor_result": result}
+        return {"purchased": True, "receipt": receipt,
+                "amount": amount, "product": need.get("product", "")}
 
     @staticmethod
     def _as_dicts(items: Any) -> list[dict[str, Any]]:
@@ -302,13 +393,80 @@ class DealsAdapter:
 
 # ── Weather ────────────────────────────────────────────────────────
 
+def _as_place_list(value: Any) -> list[str]:
+    """Coerce a settings place value to a list of place-name strings."""
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value.strip()] if value.strip() else []
+    if isinstance(value, dict):
+        out: list[str] = []
+        for key in ("home_place", "work_place", "location", "places"):
+            out.extend(_as_place_list(value.get(key)))
+        return out
+    if isinstance(value, (list, tuple, set)):
+        out = []
+        for item in value:
+            out.extend(_as_place_list(item))
+        return out
+    label = getattr(value, "name", None) or getattr(value, "label", None)
+    if isinstance(label, str) and label.strip():
+        return [label.strip()]
+    return []
+
+
+def places_from_settings(settings: Any) -> list[str]:
+    """Default weather places derived from user settings (duck-typed).
+
+    Reads, in order: ``settings.location`` (``places`` + ``home_place``
+    + ``work_place``), then ``settings`` itself (``places`` /
+    ``home_place`` / ``work_place`` / ``location``). ``settings.home``
+    is the DATA home (``~/.nomorals``) — never a place — and is
+    deliberately NOT read. Returns [] when nothing is configured, so
+    the caller falls through to the next derivation source. Never
+    raises, never fabricates a place.
+    """
+    if settings is None:
+        return []
+    out: list[str] = []
+    location = getattr(settings, "location", None)
+    if location is not None and location is not settings:
+        out.extend(_as_place_list(getattr(location, "places", None)))
+        out.extend(_as_place_list(getattr(location, "home_place", None)))
+        out.extend(_as_place_list(getattr(location, "work_place", None)))
+    out.extend(_as_place_list(getattr(settings, "places", None)))
+    out.extend(_as_place_list(getattr(settings, "home_place", None)))
+    out.extend(_as_place_list(getattr(settings, "work_place", None)))
+    loc = getattr(settings, "location", None)
+    if isinstance(loc, (str, list, tuple)):
+        out.extend(_as_place_list(loc))
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for place in out:
+        if place and place not in seen:
+            seen.add(place)
+            deduped.append(place)
+    return deduped
+
+
 class WeatherAdapter:
-    """Real ``agents/weather.py`` forecasts + official warnings."""
+    """Real ``agents/weather.py`` forecasts + official warnings.
+
+    Default places derive from user settings (home/work/location
+    config) when not explicitly configured — basic function never
+    requires manual config. Derivation order: explicit ``places`` →
+    ``settings`` (home/work/location) → ``places_provider`` callable
+    → the organ's own ``default_place`` → [] (no source at all).
+    """
 
     def __init__(self, weather: Any | None = None,
-                 places: list[str] | None = None) -> None:
+                 places: list[str] | None = None,
+                 settings: Any | None = None,
+                 places_provider: Any | None = None) -> None:
         self._weather = weather
         self._places = list(places or [])
+        self._settings = settings
+        self._places_provider = places_provider
 
     def _organ(self) -> Any:
         # The organ is INJECTED by the caller (higher layer) — the
@@ -317,7 +475,23 @@ class WeatherAdapter:
         return self._weather
 
     def places(self) -> list[str]:
-        return list(self._places)
+        if self._places:
+            return list(self._places)
+        derived = places_from_settings(self._settings)
+        if derived:
+            return derived
+        if self._places_provider is not None:
+            try:
+                provided = self._places_provider()
+            except Exception:  # noqa: BLE001 - provider failure = no places
+                provided = None
+            if provided:
+                return _as_place_list(provided)
+        organ = self._organ()
+        default = getattr(organ, "default_place", None) if organ else None
+        if isinstance(default, str) and default.strip():
+            return [default.strip()]
+        return []
 
     def snapshot(self, place: str) -> dict[str, Any]:
         """One place: forecast days + classified alerts (no network lies).
@@ -396,6 +570,103 @@ class NewsAdapter:
 
 # ── Social ─────────────────────────────────────────────────────────
 
+def _iter_relationships(relationships: Any) -> list[Any]:
+    """Relationships from any tracker shape (duck-typed, never raises)."""
+    if relationships is None:
+        return []
+    try:
+        if callable(getattr(relationships, "all", None)):
+            return list(relationships.all() or [])
+        if callable(getattr(relationships, "top_contacts", None)):
+            return list(relationships.top_contacts(1000) or [])
+        store = getattr(relationships, "_rels", None)
+        if isinstance(store, dict):
+            return list(store.values())
+        if isinstance(relationships, (list, tuple)):
+            return list(relationships)
+    except Exception:  # noqa: BLE001 - tracker failure = no relationships
+        pass
+    return []
+
+
+def default_social_inbox(*, manager: Any | None = None,
+                         gateway: Any | None = None,
+                         relationships: Any | None = None,
+                         draft_queue: Any | None = None) -> Any:
+    """Default DM/triage source from the REAL social organs.
+
+    No injected ``inbox`` needed: the backlog is derived from
+    actually-wired state —
+    * **unanswered** — relationship-tracker contacts whose
+      ``last_inbound`` is newer than ``last_outbound`` (they messaged
+      last and are still waiting), plus triage-log entries needing
+      attention when the manager exposes one;
+    * **promised_replies** — pending drafts in the real
+      ``DraftQueue`` (a draft held for approval IS a promised reply);
+    * **milestones** — contacts due for reconnect per the tracker
+      (``due_for_reconnect``), i.e. relationship milestones to honour;
+    * **stop_signal / cadence_ok** — from the gateway when it exposes
+      them, else the honest defaults (no signal, cadence open).
+
+    Returns a zero-arg callable with the ``backlog()`` contract, so it
+    drops into :class:`SocialAdapter` exactly like an injected inbox.
+    Never raises; an organ that exposes nothing contributes nothing.
+    """
+    def _inbox() -> dict[str, Any]:
+        unanswered = 0
+        milestones = 0
+        try:
+            for rel in _iter_relationships(relationships):
+                last_in = float(getattr(rel, "last_inbound", 0) or 0)
+                last_out = float(getattr(rel, "last_outbound", 0) or 0)
+                if last_in > last_out:
+                    unanswered += 1
+        except Exception:  # noqa: BLE001 - never raises
+            pass
+        try:
+            due = getattr(relationships, "due_for_reconnect", None)
+            if callable(due):
+                milestones += len(due() or [])
+        except Exception:  # noqa: BLE001
+            pass
+        promised = 0
+        queue = draft_queue
+        if queue is None and manager is not None:
+            queue = getattr(manager, "draft_queue", None) or getattr(
+                manager, "drafts", None)
+        try:
+            if queue is not None and callable(getattr(queue, "pending", None)):
+                promised += len(queue.pending() or [])
+        except Exception:  # noqa: BLE001
+            pass
+        if manager is not None:
+            try:
+                triage = getattr(manager, "triage_log", None)
+                if triage is not None and callable(
+                        getattr(triage, "digest", None)):
+                    digest = triage.digest() or {}
+                    needs = digest.get("needs_attention") or []
+                    unanswered += len(needs)
+            except Exception:  # noqa: BLE001
+                pass
+        stop_signal = False
+        cadence_ok = True
+        if gateway is not None:
+            try:
+                stop_signal = bool(getattr(gateway, "stop_signal", False))
+                cadence = getattr(gateway, "cadence_ok", None)
+                if cadence is not None:
+                    cadence_ok = bool(cadence() if callable(cadence)
+                                      else cadence)
+            except Exception:  # noqa: BLE001
+                pass
+        return {"unanswered": unanswered, "promised_replies": promised,
+                "milestones": milestones, "stop_signal": stop_signal,
+                "cadence_ok": cadence_ok}
+
+    return _inbox
+
+
 class SocialAdapter:
     """Real social executors (posting, community, DM handling).
 
@@ -403,14 +674,28 @@ class SocialAdapter:
     (``due()`` / ``run_due()``). ``inbox`` is an injected callable
     returning the unanswered / promised / milestone backlog
     (``{"unanswered", "promised_replies", "milestones",
-    "stop_signal", "cadence_ok"}``) — no default DM source is
-    fabricated. Drafts are built, never sent, without authority.
+    "stop_signal", "cadence_ok"}``). When no inbox is injected, the
+    default is derived from the real organs
+    (:func:`default_social_inbox` — relationships tracker, draft
+    queue, triage log), never fabricated. Drafts are built, never
+    sent, without authority.
     """
 
     def __init__(self, manager: Any | None = None,
-                 inbox: Any | None = None) -> None:
+                 inbox: Any | None = None,
+                 gateway: Any | None = None,
+                 relationships: Any | None = None,
+                 draft_queue: Any | None = None) -> None:
         self.manager = manager
-        self.inbox = inbox
+        self.gateway = gateway
+        self.relationships = relationships
+        self.draft_queue = draft_queue
+        if inbox is not None:
+            self.inbox = inbox
+        else:
+            self.inbox = default_social_inbox(
+                manager=manager, gateway=gateway,
+                relationships=relationships, draft_queue=draft_queue)
 
     def backlog(self) -> dict[str, Any]:
         if self.inbox is None:
@@ -474,8 +759,13 @@ class SocialAdapter:
 class LeadsAdapter:
     """Real ``social/leads.py`` capture / qualification / funnel."""
 
-    def __init__(self, store: Any | None = None) -> None:
+    def __init__(self, store: Any | None = None,
+                 dm_sender: Any | None = None) -> None:
         self.store = store
+        #: ``(platform, contact, body) -> bool`` — the real DM-send
+        #: channel (the chat gateway's send path, injected by the
+        #: caller). None = no DM channel configured: sends block.
+        self.dm_sender = dm_sender
 
     @staticmethod
     def _lead_dict(lead: Any) -> dict[str, Any]:
@@ -548,6 +838,62 @@ class LeadsAdapter:
                 "mirrored": mirrored,
                 "draft": draft or f"follow-up for {lead.get('name', lead_id)}",
                 "sent": False}
+
+    def send_dm(self, lead: dict[str, Any], *,
+                draft: str = "", authority: Any | None = None,
+                explicit: bool = False) -> dict[str, Any]:
+        """Send the owner-approved DM draft for a lead, when authorized.
+
+        The contact step's executor. Gates: (1) ``authority.may_dm``
+        when an authority is given — ``explicit=True`` means the
+        owner approved THIS draft (trial pattern: the confirmation
+        gate is bypassed, deny/grant/biometric still apply); without
+        it, a confirmable capability denies and the draft stays held;
+        (2) a ``dm_sender`` channel must be injected. On a successful
+        send the store status moves to ``dmed`` and the result
+        carries the sent evidence (platform / contact / draft) —
+        never a bare claim.
+        """
+        lead_id = str(lead.get("lead_id", ""))
+        platform = str(lead.get("platform", ""))
+        contact = str(lead.get("contact", ""))
+        text = draft or f"Hi {lead.get('name', '') or lead_id} — following up."
+        if authority is not None:
+            may_dm = getattr(authority, "may_dm", None)
+            if callable(may_dm):
+                try:
+                    decision = may_dm(draft=text, explicit=explicit)
+                except TypeError:
+                    decision = may_dm(draft=text)
+                if not getattr(decision, "allowed", False):
+                    return {"lead_id": lead_id, "sent": False,
+                            "reason": getattr(
+                                decision, "reason",
+                                "DM not allowed by authority"),
+                            "proposal_id": getattr(
+                                decision, "proposal_id", "") or None,
+                            "draft": text}
+        if self.dm_sender is None:
+            return {"lead_id": lead_id, "sent": False,
+                    "reason": "no DM sender injected — no DM channel "
+                              "configured",
+                    "draft": text}
+        if not contact:
+            return {"lead_id": lead_id, "sent": False,
+                    "reason": "lead has no contact to DM",
+                    "draft": text}
+        try:
+            sent = bool(self.dm_sender(platform, contact, text))
+        except Exception as exc:  # noqa: BLE001 - sender failure = not sent
+            return {"lead_id": lead_id, "sent": False,
+                    "reason": f"DM sender failed: {exc}", "draft": text}
+        if not sent:
+            return {"lead_id": lead_id, "sent": False,
+                    "reason": "DM sender reported failure", "draft": text}
+        mirrored = self.set_store_status(lead_id, "dmed") if lead_id else False
+        return {"lead_id": lead_id, "sent": True, "mirrored": mirrored,
+                "evidence": {"platform": platform, "contact": contact,
+                             "draft": text}}
 
 
 # ── Gigs ───────────────────────────────────────────────────────────
@@ -796,7 +1142,14 @@ def build_adapters(*, hunter: Any | None = None,
                    graph_compile_fn: Any | None = None,
                    graph_factory: Any | None = None,
                    places: list[str] | None = None,
-                   inbox: Any | None = None) -> dict[str, Any]:
+                   inbox: Any | None = None,
+                   settings: Any | None = None,
+                   places_provider: Any | None = None,
+                   gateway: Any | None = None,
+                   relationships: Any | None = None,
+                   draft_queue: Any | None = None,
+                   dm_sender: Any | None = None,
+                   purchase_executor: Any | None = None) -> dict[str, Any]:
     """Assemble adapters from INJECTED organs. Never raises, never imports.
 
     Layering (ARCHITECTURE.md §1): the agency layer is L0 — it must
@@ -808,12 +1161,18 @@ def build_adapters(*, hunter: Any | None = None,
     — it never fabricates organ output.
     """
     return {
-        "deals": DealsAdapter(hunter=hunter),
+        "deals": DealsAdapter(hunter=hunter,
+                              purchase_executor=purchase_executor),
         "weather": WeatherAdapter(weather=weather,
-                                  places=list(places or [])),
+                                  places=list(places or []),
+                                  settings=settings,
+                                  places_provider=places_provider),
         "news": NewsAdapter(agent=news_agent),
-        "social": SocialAdapter(manager=social_manager, inbox=inbox),
-        "leads": LeadsAdapter(store=leads_store),
+        "social": SocialAdapter(manager=social_manager, inbox=inbox,
+                                gateway=gateway,
+                                relationships=relationships,
+                                draft_queue=draft_queue),
+        "leads": LeadsAdapter(store=leads_store, dm_sender=dm_sender),
         "gigs": GigsAdapter(hunter=opp_hunter, applier=applier,
                             payout_extractor=payout_extractor,
                             opp_factory=opp_factory),

@@ -371,56 +371,82 @@ class ResearchOrgan:
                 except Exception as exc:  # noqa: BLE001
                     _log.warning("bad gap directive: %s", exc)
 
-    def _run_due_watches(self, report: OrganTickReport, now: float) -> None:
+    def run_watch(self, watch_id: Any) -> dict[str, Any]:
+        """Run ONE watch by id, NOW — the per-trigger handler.
+
+        A due-watch trigger means the watch is due, so the cadence
+        gate is bypassed (the trigger itself is the due-ness proof).
+        Returns ``{"watch_id", "findings", "delivered", "status"}``.
+        """
+        watches = {str(w["id"]): w for w in self.list_watches()}
+        watch = watches.get(str(watch_id))
+        if watch is None:
+            return {"watch_id": watch_id, "findings": 0, "delivered": 0,
+                    "status": "not-found"}
+        report = OrganTickReport()
+        result = self._run_one_watch(watch, report, time.time())
+        return {"watch_id": watch_id, "findings": result["findings"],
+                "delivered": result["delivered"],
+                "status": result["status"]}
+
+    def _run_one_watch(self, watch: dict[str, Any],
+                       report: OrganTickReport, now: float) -> dict[str, Any]:
+        """Run one watch job (shared by tick and :meth:`run_watch`)."""
         from .pipeline import run_job, assess_worth, deliver
         rctx = self._rctx()
+        job = self._job_for_watch(watch)
+        errors: list[str] = []
+        delivered = skipped = 0
+        try:
+            findings = run_job(job, rctx)
+            report.watches_run += 1
+            report.findings += len(findings)
+            for finding in findings:
+                try:
+                    assessment = assess_worth(finding, rctx)
+                except Exception as exc:  # noqa: BLE001
+                    errors.append(f"assess: {exc}"[:120])
+                    skipped += 1
+                    continue
+                # Learned source quality: every assessment teaches the
+                # organ which domains are worth its time.
+                self.record_source_quality(finding.url, assessment.worth)
+                self._maybe_forward_to_wisdom(finding)
+                if not assessment.worth:
+                    skipped += 1
+                    continue
+                try:
+                    deliver(finding, assessment, rctx)
+                    delivered += 1
+                except Exception as exc:  # noqa: BLE001
+                    errors.append(f"deliver: {exc}"[:120])
+                    skipped += 1
+            report.delivered += delivered
+            status = (f"ok d={delivered} s={skipped}"
+                      if not errors else f"errors: {errors[0][:100]}")
+        except Exception as exc:  # noqa: BLE001
+            status = f"failed: {exc}"[:200]
+            _log.warning("research watch %s failed: %s", watch["id"], exc)
+            findings = []
+        # Record the run even on failure — a broken watch must not hot-loop.
+        self.db.execute(
+            "INSERT INTO research_job_state (job_id, last_run, last_status)"
+            " VALUES (?, ?, ?)"
+            " ON CONFLICT(job_id) DO UPDATE SET"
+            " last_run = excluded.last_run,"
+            " last_status = excluded.last_status",
+            (watch["id"], now, status))
+        return {"findings": len(findings), "delivered": delivered,
+                "status": status}
+
+    def _run_due_watches(self, report: OrganTickReport, now: float) -> None:
         for watch in self.list_watches():
             if not watch["enabled"]:
                 continue
             if now - self._last_run(watch["id"]) < \
                     float(watch["cadence_hours"]) * 3600.0:
                 continue
-            job = self._job_for_watch(watch)
-            errors: list[str] = []
-            delivered = skipped = 0
-            try:
-                findings = run_job(job, rctx)
-                report.watches_run += 1
-                report.findings += len(findings)
-                for finding in findings:
-                    try:
-                        assessment = assess_worth(finding, rctx)
-                    except Exception as exc:  # noqa: BLE001
-                        errors.append(f"assess: {exc}"[:120])
-                        skipped += 1
-                        continue
-                    # Learned source quality: every assessment teaches the
-                    # organ which domains are worth its time.
-                    self.record_source_quality(finding.url, assessment.worth)
-                    self._maybe_forward_to_wisdom(finding)
-                    if not assessment.worth:
-                        skipped += 1
-                        continue
-                    try:
-                        deliver(finding, assessment, rctx)
-                        delivered += 1
-                    except Exception as exc:  # noqa: BLE001
-                        errors.append(f"deliver: {exc}"[:120])
-                        skipped += 1
-                report.delivered += delivered
-                status = (f"ok d={delivered} s={skipped}"
-                          if not errors else f"errors: {errors[0][:100]}")
-            except Exception as exc:  # noqa: BLE001
-                status = f"failed: {exc}"[:200]
-                _log.warning("research watch %s failed: %s", watch["id"], exc)
-            # Record the run even on failure — a broken watch must not hot-loop.
-            self.db.execute(
-                "INSERT INTO research_job_state (job_id, last_run, last_status)"
-                " VALUES (?, ?, ?)"
-                " ON CONFLICT(job_id) DO UPDATE SET"
-                " last_run = excluded.last_run,"
-                " last_status = excluded.last_status",
-                (watch["id"], now, status))
+            self._run_one_watch(watch, report, now)
 
     def _maybe_forward_to_wisdom(self, finding: Any) -> None:
         """Esoteric findings belong in the corpus, not just a briefing."""
@@ -436,60 +462,99 @@ class ResearchOrgan:
     #: a gap that fails this many research attempts stops being retried.
     _MAX_GAP_ATTEMPTS = 3
 
-    def _work_gaps(self, report: OrganTickReport) -> None:
+    def investigate_gap(self, gap_id: Any) -> dict[str, Any]:
+        """Investigate ONE gap by id — the per-trigger handler.
+
+        Returns ``{"gap_id", "status", "synthesis", "unresolved",
+        "contradictions"}`` where ``status`` is the row's status after
+        the investigation (``resolved`` / ``open`` / ``stalled``).
+        A gap that is already resolved reports back without re-running.
+        """
+        row = self.db.query_one(
+            "SELECT id, question, context, ts, priority, attempts, status"
+            " FROM knowledge_gaps WHERE id = ?", (gap_id,))
+        if row is None:
+            return {"gap_id": gap_id, "status": "not-found",
+                    "synthesis": "", "unresolved": [], "contradictions": []}
+        gap = dict(row)
+        if str(gap.get("status", "")) in ("resolved", "stalled"):
+            return {"gap_id": gap_id, "status": str(gap["status"]),
+                    "synthesis": "", "unresolved": [], "contradictions": []}
+        report = OrganTickReport()
+        deep = self._work_one_gap(gap, report)
+        after = self.db.query_one(
+            "SELECT status, unresolved, contradictions"
+            " FROM knowledge_gaps WHERE id = ?", (gap_id,))
+        status = str((after or {}).get("status", "open"))
+        try:
+            unresolved = json.loads((after or {}).get("unresolved") or "[]")
+            contradictions = json.loads(
+                (after or {}).get("contradictions") or "[]")
+        except Exception:  # noqa: BLE001 - malformed stored JSON
+            unresolved, contradictions = [], []
+        synthesis = str(getattr(deep, "synthesis", "") or "")
+        return {"gap_id": gap_id, "status": status, "synthesis": synthesis,
+                "unresolved": unresolved, "contradictions": contradictions}
+
+    def _work_one_gap(self, gap: dict[str, Any],
+                      report: OrganTickReport) -> Any | None:
+        """Investigate one gap row (shared by tick and :meth:`investigate_gap`)."""
         from .pipeline import research_deep, _router_llm_fn
-        gaps = self.open_gaps(limit=3)  # conservative: 3 per tick max
-        if not gaps:
-            return
         rctx = self._rctx()
         llm_fn = _router_llm_fn(getattr(self.context, "router", None))
+        attempts = int(gap.get("attempts", 0) or 0) + 1
+        try:
+            deep = research_deep(
+                gap["question"], rctx, llm_fn=llm_fn, max_queries=4)
+            # ADEQUACY GATE (agency): a nonempty synthesis is NOT
+            # proof. Resolve only on evidence-supported coverage +
+            # no contradictions + consuming task can proceed.
+            # Unresolved subquestions/contradictions are preserved
+            # on the row so the next run continues, not restarts.
+            from ..agency.adequacy import assess_gap_adequacy
+            verdict = assess_gap_adequacy(deep, gap)
+            answered = verdict.adequate
+            status = ("resolved" if answered
+                      else "stalled" if attempts >= self._MAX_GAP_ATTEMPTS
+                      else "open")
+            self.db.execute(
+                "UPDATE knowledge_gaps SET status = ?, resolved_ts = ?,"
+                " attempts = ?, unresolved = ?, contradictions = ?"
+                " WHERE id = ?",
+                (status, time.time() if answered else 0,
+                 attempts, json.dumps(verdict.unresolved_subquestions),
+                 json.dumps(verdict.contradictions), gap["id"]))
+            if answered:
+                report.gaps_resolved += 1
+                # INTEGRATE (MAIL loop): the answer is stored back as
+                # learned knowledge, not just emitted — the gap
+                # genuinely closes instead of rotting in a table.
+                self._integrate_gap_answer(gap, deep)
+                # The answer also goes back to the brain as an event so
+                # it can act on it immediately.
+                _bus.emit(self.db, "research", "brain", "gap.answered", {
+                    "question": gap["question"],
+                    "synthesis": deep.synthesis[:2000],
+                    "citations": [
+                        {"title": f.title, "url": f.url}
+                        for f in (deep.findings or [])[:5]],
+                })
+                report.events_emitted += 1
+            return deep
+        except Exception as exc:  # noqa: BLE001
+            self.db.execute(
+                "UPDATE knowledge_gaps SET attempts = ?,"
+                " status = CASE WHEN ? >= ? THEN 'stalled' ELSE status END"
+                " WHERE id = ?",
+                (attempts, attempts, self._MAX_GAP_ATTEMPTS, gap["id"]))
+            _log.warning("gap research failed for %s: %s",
+                         gap["question"][:60], exc)
+            return None
+
+    def _work_gaps(self, report: OrganTickReport) -> None:
+        gaps = self.open_gaps(limit=3)  # conservative: 3 per tick max
         for gap in gaps:
-            attempts = int(gap.get("attempts", 0) or 0) + 1
-            try:
-                deep = research_deep(
-                    gap["question"], rctx, llm_fn=llm_fn, max_queries=4)
-                # ADEQUACY GATE (agency): a nonempty synthesis is NOT
-                # proof. Resolve only on evidence-supported coverage +
-                # no contradictions + consuming task can proceed.
-                # Unresolved subquestions/contradictions are preserved
-                # on the row so the next run continues, not restarts.
-                from ..agency.adequacy import assess_gap_adequacy
-                verdict = assess_gap_adequacy(deep, gap)
-                answered = verdict.adequate
-                status = ("resolved" if answered
-                          else "stalled" if attempts >= self._MAX_GAP_ATTEMPTS
-                          else "open")
-                self.db.execute(
-                    "UPDATE knowledge_gaps SET status = ?, resolved_ts = ?,"
-                    " attempts = ?, unresolved = ?, contradictions = ?"
-                    " WHERE id = ?",
-                    (status, time.time() if answered else 0,
-                     attempts, json.dumps(verdict.unresolved_subquestions),
-                     json.dumps(verdict.contradictions), gap["id"]))
-                if answered:
-                    report.gaps_resolved += 1
-                    # INTEGRATE (MAIL loop): the answer is stored back as
-                    # learned knowledge, not just emitted — the gap
-                    # genuinely closes instead of rotting in a table.
-                    self._integrate_gap_answer(gap, deep)
-                    # The answer also goes back to the brain as an event so
-                    # it can act on it immediately.
-                    _bus.emit(self.db, "research", "brain", "gap.answered", {
-                        "question": gap["question"],
-                        "synthesis": deep.synthesis[:2000],
-                        "citations": [
-                            {"title": f.title, "url": f.url}
-                            for f in (deep.findings or [])[:5]],
-                    })
-                    report.events_emitted += 1
-            except Exception as exc:  # noqa: BLE001
-                self.db.execute(
-                    "UPDATE knowledge_gaps SET attempts = ?,"
-                    " status = CASE WHEN ? >= ? THEN 'stalled' ELSE status END"
-                    " WHERE id = ?",
-                    (attempts, attempts, self._MAX_GAP_ATTEMPTS, gap["id"]))
-                _log.warning("gap research failed for %s: %s",
-                             gap["question"][:60], exc)
+            self._work_one_gap(gap, report)
 
     def _integrate_gap_answer(self, gap: dict[str, Any], deep: Any) -> None:
         """Store a resolved gap's answer in memory as a learned fact."""

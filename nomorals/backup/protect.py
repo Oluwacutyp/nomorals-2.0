@@ -189,15 +189,39 @@ def decrypt_file(src: Path, dest: Path, key: bytes) -> Path:
     return dest
 
 
-def split_encrypted(path: Path, *, max_bytes: int = SPLIT_BYTES) -> list[Path]:
-    """Split a protected file into <= ``max_bytes`` parts via deliver.py.
+def _split_archive(archive: Path, split_mb: float) -> list[Path]:
+    """Split ``archive`` into ``split_mb``-sized ``.partNN`` pieces.
 
-    Delegates to :func:`nomorals.builders.deliver._split_archive` — the
-    existing splitter — so there is exactly one split format in the
-    codebase. Returns ``[path]`` unchanged when it already fits.
+    Chat platforms cap file uploads (Telegram bots: 50MB) — multi-part
+    archives are the honest answer, not silent truncation.
+
+    This is THE one split format in the codebase: it used to live in
+    ``builders.deliver`` and ``backup`` imported it from there (an
+    upward import — backup is L5, builders is L7). It moved here
+    (backup is its other user) and ``builders.deliver`` re-exports it,
+    so ``builders.deliver._split_archive`` still exists.
     """
-    from ..builders.deliver import _split_archive
+    chunk = int(split_mb * 1024 * 1024)
+    data = archive.read_bytes()
+    if len(data) <= chunk:
+        return [archive]
+    parts: list[Path] = []
+    total = (len(data) + chunk - 1) // chunk
+    for i in range(total):
+        piece = archive.with_name(f"{archive.name}.part{i:02d}of{total:02d}")
+        piece.write_bytes(data[i * chunk:(i + 1) * chunk])
+        parts.append(piece)
+    _log.info("split %s into %d parts of ~%.1fMB", archive.name, total,
+              split_mb)
+    return parts
 
+
+def split_encrypted(path: Path, *, max_bytes: int = SPLIT_BYTES) -> list[Path]:
+    """Split a protected file into <= ``max_bytes`` parts.
+
+    Uses the single :func:`_split_archive` format. Returns ``[path]``
+    unchanged when it already fits.
+    """
     return _split_archive(path, max_bytes / (1024 * 1024))
 
 

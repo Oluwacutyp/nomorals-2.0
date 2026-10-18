@@ -286,6 +286,63 @@ class WisdomOrgan:
         manifest = getattr(keeper.corpus, "_manifest", {}) or {}
         return [e for e in manifest.values() if not e.ingested_at]
 
+    def ingest_next(self) -> dict[str, Any]:
+        """Ingest exactly ONE pending item — the per-trigger handler.
+
+        Manifest seeds first (the standing corpus commitment), then
+        one queued research-fed row. Returns
+        ``{"ingested": [slug]}`` (empty when nothing is pending).
+        """
+        from .ingestor import ArchiveIngestor
+        keeper = self._keeper()
+        ingestor = ArchiveIngestor(self.context)
+        pending = self._pending_manifest()
+        if pending:
+            slug = self._ingest_one_manifest(ingestor, pending[0])
+            return {"ingested": [slug] if slug else []}
+        rows = self.db.query(
+            "SELECT id, url, title, tradition FROM wisdom_ingest_queue"
+            " WHERE status = 'queued' ORDER BY queued_at ASC LIMIT 1")
+        if rows:
+            slug = self._ingest_one_queue_row(ingestor, rows[0])
+            return {"ingested": [slug] if slug else []}
+        return {"ingested": []}
+
+    def _ingest_one_manifest(self, ingestor: Any, entry: Any) -> str:
+        """Ingest one manifest entry; returns its slug or '' on failure."""
+        try:
+            ingestor.ingest_entry(entry)
+            _log.info("wisdom ingested: %s", entry.slug)
+            return str(entry.slug)
+        except Exception as exc:  # noqa: BLE001
+            _log.warning("wisdom ingest failed for %s: %s", entry.slug, exc)
+            return ""
+
+    def _ingest_one_queue_row(self, ingestor: Any,
+                              row: dict[str, Any]) -> str:
+        """Ingest one queued row; returns its slug or '' on failure."""
+        qid = int(row["id"])
+        try:
+            from .corpus import ManifestEntry
+            import hashlib
+            slug = "q-" + hashlib.sha256(
+                row["url"].encode()).hexdigest()[:10]
+            entry = ManifestEntry(
+                slug=slug, title=row["title"],
+                tradition=row["tradition"] or "research",
+                canon_status="reference", source_url=row["url"])
+            ingestor.ingest_entry(entry)
+            self.db.execute(
+                "UPDATE wisdom_ingest_queue SET status='done', done_at=?"
+                " WHERE id = ?", (time.time(), qid))
+            return slug
+        except Exception as exc:  # noqa: BLE001
+            self.db.execute(
+                "UPDATE wisdom_ingest_queue SET status='failed', error=?"
+                " WHERE id = ?", (str(exc)[:300], qid))
+            _log.warning("wisdom queue ingest failed: %s", exc)
+            return ""
+
     def _ingest_pending(self, report: dict[str, Any],
                         deadline: float) -> None:
         from .ingestor import ArchiveIngestor, IngestError
@@ -295,13 +352,9 @@ class WisdomOrgan:
         for entry in self._pending_manifest():
             if time.time() >= deadline:
                 break
-            try:
-                ingestor.ingest_entry(entry)
-                report["ingested"].append(entry.slug)
-                _log.info("wisdom ingested: %s", entry.slug)
-            except Exception as exc:  # noqa: BLE001
-                _log.warning("wisdom ingest failed for %s: %s",
-                             entry.slug, exc)
+            slug = self._ingest_one_manifest(ingestor, entry)
+            if slug:
+                report["ingested"].append(slug)
         # Then the research-fed queue.
         rows = self.db.query(
             "SELECT id, url, title, tradition FROM wisdom_ingest_queue"
@@ -309,26 +362,9 @@ class WisdomOrgan:
         for row in rows or []:
             if time.time() >= deadline:
                 break
-            qid = int(row["id"])
-            try:
-                from .corpus import ManifestEntry
-                import hashlib
-                slug = "q-" + hashlib.sha256(
-                    row["url"].encode()).hexdigest()[:10]
-                entry = ManifestEntry(
-                    slug=slug, title=row["title"],
-                    tradition=row["tradition"] or "research",
-                    canon_status="reference", source_url=row["url"])
-                ingestor.ingest_entry(entry)
-                self.db.execute(
-                    "UPDATE wisdom_ingest_queue SET status='done', done_at=?"
-                    " WHERE id = ?", (time.time(), qid))
+            slug = self._ingest_one_queue_row(ingestor, row)
+            if slug:
                 report["ingested"].append(slug)
-            except Exception as exc:  # noqa: BLE001
-                self.db.execute(
-                    "UPDATE wisdom_ingest_queue SET status='failed', error=?"
-                    " WHERE id = ?", (str(exc)[:300], qid))
-                _log.warning("wisdom queue ingest failed: %s", exc)
 
     # ── digest (extractive — no model needed) ─────────────────────────
 

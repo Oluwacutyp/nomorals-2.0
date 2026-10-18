@@ -141,7 +141,8 @@ def _collect_film(specs: list[SourceSpec], errors: list[str]) -> None:
             getattr(inst, "_BASE", "")
         specs.append(SourceSpec(
             key=f"film:{inst.name}", category="film", name=inst.name,
-            url=url, kind="html-posts"))
+            url=url,
+            kind=str(getattr(inst, "search_kind", "html-posts"))))
 
 
 def _collect_weather(specs: list[SourceSpec], errors: list[str]) -> None:

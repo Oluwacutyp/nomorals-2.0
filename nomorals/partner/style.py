@@ -1197,6 +1197,30 @@ def format_reply(text: str, profile: StyleProfile) -> str:
         return text
 
 
+def _norm_text(s: str) -> str:
+    """Normalization for subtraction: case + whitespace insensitive."""
+    return re.sub(r"\s+", " ", s).strip().lower()
+
+
+def _unstructured_overflow(original: str, preview: str) -> str:
+    """Overflow for unstructured text: original minus preview, by sentence.
+
+    Deterministic rule: split the original into sentences (on
+    sentence terminators and line breaks); a sentence whose
+    normalized form appears in the normalized preview is already
+    shown and is dropped; every other sentence goes to the overflow
+    WHOLE — including a sentence the preview cut mid-way (its head
+    may duplicate the preview's tail; duplication is safe,
+    discarding is not). Result: any original sentence not present in
+    the preview lands in the overflow — nothing is silently lost.
+    """
+    preview_norm = _norm_text(preview)
+    chunks = [c.strip() for c in
+              re.split(r"(?<=[.!?…])\s+|\n+", original) if c.strip()]
+    missing = [c for c in chunks if _norm_text(c) not in preview_norm]
+    return "\n".join(missing).strip()
+
+
 def format_reply_detailed(
     text: str, profile: StyleProfile,
 ) -> tuple[str, str]:
@@ -1229,16 +1253,14 @@ def format_reply_detailed(
     if dropped:
         overflow = "\n".join(s.strip() for s in dropped if s.strip())
     else:
-        # Unstructured tail: the preview is a sentence-cut of the
-        # original, so the remainder starts where the preview's tail
-        # stops matching. Conservative fallback — the full original
-        # minus the preview's longest common prefix.
-        common = 0
-        for a, b in zip(original, preview):
-            if a != b:
-                break
-            common += 1
-        overflow = original[common:].strip()
+        # Unstructured tail: subtract, sentence by sentence, what the
+        # preview already contains (see _unstructured_overflow). NOT
+        # longest-common-prefix: the preview is a REFORMATTED
+        # version of the original (header markers stripped, dividers
+        # dropped, lists flattened), so it is usually not a prefix of
+        # the original at all — LCP returned the entire original as
+        # "overflow" (everything duplicated) or cut at a wrong offset.
+        overflow = _unstructured_overflow(original, preview)
     overflow = overflow.strip()
     if not overflow:
         return preview, ""

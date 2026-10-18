@@ -32,11 +32,9 @@ class PlayManySourcesTests(unittest.TestCase):
         self.assertIn("archiveorg-search", MUSIC_SEARCH_SOURCES)
         self.assertIn("itunes-search", MUSIC_SEARCH_SOURCES)
         self.assertIn("deezer-search", MUSIC_SEARCH_SOURCES)
-        # Boomplay is NOT in the active chain: its search page is a JS
-        # SPA shell and plain-HTTP search returns no results
-        # (verified 2026-10-18). Class + resolver method stay for a
-        # future browser-backed search.
-        self.assertNotIn("boomplay-search", MUSIC_SEARCH_SOURCES)
+        # Boomplay is BACK in the active chain: browser-backed SPA
+        # search returns real candidates (verified live 2026-10-18).
+        self.assertIn("boomplay-search", MUSIC_SEARCH_SOURCES)
         self.assertIn("spotify-search", MUSIC_SEARCH_SOURCES)
 
     def test_unknown_title_tries_all_sources(self):

@@ -67,7 +67,9 @@ class ExpansionSystems:
                  organs: dict[str, Any] | None = None,
                  source_health: SourceHealth | None = None,
                  registry_collect: Callable[[], list] | None = None,
-                 registry_fetcher: Any = None) -> None:
+                 registry_fetcher: Any = None,
+                 authority: Any | None = None,
+                 explicit_go_aheads: Any | None = None) -> None:
         self.db = db
         self.store = store or InitiativeStore(db)
         self.knowledge = knowledge or KnowledgeStore(db)
@@ -80,6 +82,15 @@ class ExpansionSystems:
         self._source_health = source_health
         self._registry_collect = registry_collect
         self._registry_fetcher = registry_fetcher
+        #: Standing authority (trial pattern): an expansion organ that
+        #: performs a GATED action must go through this authority.
+        #: None = fail closed — gated organs never run without one.
+        self.authority = authority
+        #: Explicit go-aheads for THIS run (trial ``--yes`` pattern):
+        #: action ids (``f"{system}:{capability}"``) the owner has
+        #: explicitly confirmed, so the tick may proceed. A go-ahead
+        #: covers that action only — never a blanket permission.
+        self.explicit_go_aheads = frozenset(explicit_go_aheads or ())
 
     def names(self) -> list[str]:
         return list(EXPANSION_SYSTEMS)
@@ -146,6 +157,61 @@ class ExpansionSystems:
             return self._system_initiative(name) is not None
         return self._system_initiative(name) is not None
 
+    # ── gated actions go through standing authority ─────────────
+    @staticmethod
+    def _gated_capabilities(organ: Any) -> list[str]:
+        """Capabilities this organ's tick performs (duck-typed).
+
+        An organ declares them via ``gated_capability`` (one string)
+        or ``gated_capabilities()`` / ``gated_capabilities`` (many).
+        No declaration = no gated actions = no gate.
+        """
+        caps: list[str] = []
+        single = getattr(organ, "gated_capability", None)
+        if isinstance(single, str) and single:
+            caps.append(single)
+        many = getattr(organ, "gated_capabilities", None)
+        if callable(many):
+            try:
+                many = many()
+            except Exception:  # noqa: BLE001 - declaration failure = none
+                many = None
+        if isinstance(many, (list, tuple, set, frozenset)):
+            caps.extend(str(c) for c in many if c)
+        return caps
+
+    def _authority_allows(self, name: str, capability: str, *,
+                          now: float) -> tuple[bool, str, str]:
+        """Consult standing authority for one gated action.
+
+        Returns ``(allowed, reason, proposal_id)``. The trial pattern:
+        the action id is ``f"{system}:{capability}"``; an explicit
+        go-ahead for THAT action id (owner confirmed this exact
+        action) is passed as ``explicit_override``. No authority
+        configured = fail closed (denied).
+        """
+        action_id = f"{name}:{capability}"
+        if self.authority is None:
+            return False, "gated action requires standing authority", ""
+        check = getattr(self.authority, "check", None)
+        if not callable(check):
+            return False, "authority has no check() method", ""
+        context = {"action_id": action_id, "system": name,
+                   "capability": capability}
+        try:
+            decision = check(
+                capability, explicit_override=(
+                    action_id in self.explicit_go_aheads),
+                draft=f"expansion {name}: {capability}", context=context)
+        except TypeError:
+            # Authority without the trial-pattern kwarg (e.g. a plain
+            # AgencyAuthority): go-ahead maps to a direct check.
+            decision = check(capability, draft=f"expansion {name}: "
+                             f"{capability}", context=context)
+        return (bool(getattr(decision, "allowed", False)),
+                str(getattr(decision, "reason", "") or ""),
+                str(getattr(decision, "proposal_id", "") or ""))
+
     # ── one unit of work per system ────────────────────────────────
     def tick(self, name: str, *, budget_s: float = 60.0,
              now: float | None = None) -> WorkResult:
@@ -154,6 +220,25 @@ class ExpansionSystems:
             return self._tick_sourcehealth(now)
         organ = self._organs.get(name)
         if organ is not None and callable(getattr(organ, "tick", None)):
+            # Gated organs: the tick must pass standing authority
+            # BEFORE it runs. Denied = no organ work, blocker +
+            # proposal recorded, watch advanced. The organ never runs
+            # on a denied gate.
+            for capability in self._gated_capabilities(organ):
+                allowed, reason, proposal_id = self._authority_allows(
+                    name, capability, now=now)
+                if not allowed:
+                    text = (f"gated action {capability} blocked: {reason}"
+                            + (f" (proposal {proposal_id})"
+                               if proposal_id else ""))
+                    self.knowledge.deposit(
+                        name, text, source=f"agency:{name}")
+                    it = self._system_initiative(name)
+                    if it is not None:
+                        self.store.advance(
+                            it.id, next_review_at=now + 3600, blocker=text,
+                            evidence=text)
+                    return WorkResult(useful=False)
             try:
                 report = organ.tick()
                 done = _report_done(report)

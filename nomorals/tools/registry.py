@@ -8,6 +8,8 @@ which is the minimum bar for leaving an autonomous system running unattended.
 
 from __future__ import annotations
 
+from .typed_encoding import _decode_typed, _encode_typed
+
 import fnmatch
 import hashlib
 import inspect
@@ -1041,7 +1043,8 @@ class ToolRegistry:
         if not row:
             return None
         try:
-            outcome: Outcome[Any] = Ok(json.loads(row["outcome_json"]))
+            outcome: Outcome[Any] = Ok(
+                _decode_typed(json.loads(row["outcome_json"])))
         except Exception:  # noqa: BLE001 - a corrupt row is a miss
             return None
         rec = _IdempotencyRecord(
@@ -1069,7 +1072,7 @@ class ToolRegistry:
                     " outcome_json, ts) VALUES (?,?,?,?,?,?,?)",
                     (rec.tool, rec.key, rec.actor, rec.args_digest,
                      rec.tool_version,
-                     json.dumps(rec.outcome.value, default=str),
+                     json.dumps(_encode_typed(rec.outcome.value)),
                      rec.created_at))
             except Exception:  # noqa: BLE001 - durability is best-effort
                 pass
