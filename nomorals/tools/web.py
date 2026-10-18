@@ -419,6 +419,8 @@ def _html_to_markdown(html: str) -> str:
 #: Every search engine web_search aggregates, in order.  All are keyless
 #: HTML endpoints — no API key, no account.  The list is single-sourced
 #: so tests can count it (owner rule: MANY sources, never 1–2).
+#: GLOBAL: no engine URL carries a region pin (no cc=/gl=/hl=/region=
+#: params) — results are worldwide, never one country.
 _SEARCH_ENGINES: tuple[str, ...] = (
     "duckduckgo",
     "duckduckgo-lite",
@@ -428,6 +430,8 @@ _SEARCH_ENGINES: tuple[str, ...] = (
     "yahoo",
     "startpage",
     "yandex",
+    "brave",
+    "qwant",
 )
 
 #: Host fragments that mark a link as the engine's own chrome, not a
@@ -436,6 +440,7 @@ _ENGINE_CHROME_HOSTS = (
     "duckduckgo.com", "lite.duckduckgo.com", "bing.com", "mojeek.com",
     "ecosia.org", "search.yahoo.com", "yahoo.com", "startpage.com",
     "yandex.com", "yandex.ru", "microsoft.com", "msn.com",
+    "search.brave.com", "brave.com", "qwant.com",
 )
 
 
@@ -449,6 +454,8 @@ def _engine_url(engine: str, encoded: str) -> str:
         "yahoo": f"https://search.yahoo.com/search?p={encoded}",
         "startpage": f"https://www.startpage.com/sp/search?query={encoded}",
         "yandex": f"https://yandex.com/search/?text={encoded}",
+        "brave": f"https://search.brave.com/search?q={encoded}",
+        "qwant": f"https://www.qwant.com/?q={encoded}&t=web",
     }[engine]
 
 
@@ -462,6 +469,8 @@ def _engine_parser(engine: str) -> Any:
         "yahoo": _parse_generic,
         "startpage": _parse_generic,
         "yandex": _parse_generic,
+        "brave": _parse_generic,
+        "qwant": _parse_generic,
     }[engine]
 
 

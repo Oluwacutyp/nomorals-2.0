@@ -187,7 +187,7 @@ class SourceResolver:
         if not q:
             return out
         limit = max(1, min(int(limit or 8), 25))
-        # Nigerian sources first, then globals, previews + metadata last.
+        # Regional blogs first (direct MP3s), then the global catalogs.
         for fn in (
             self._netnaija_search_many,
             self._notjustok_search_many,
@@ -195,7 +195,11 @@ class SourceResolver:
             self._soundcloud_search_many,
             self._bandcamp_search_many,
             self._youtube_search_many,
+            self._youtube_music_search_many,
             self._archiveorg_search_many,
+            self._musicbrainz_search_many,
+            self._openverse_search_many,
+            self._wikimedia_search_many,
             self._itunes_search_many,
             self._deezer_search_many,
             self._boomplay_search_many,
@@ -250,6 +254,65 @@ class SourceResolver:
                 kind="youtube",
                 source_name="YouTube search (yt-dlp)"))
         return out
+
+    def _youtube_music_search_many(self, query: str,
+                                   limit: int) -> list[ResolvedAudio]:
+        """YouTube Music candidates (yt-dlp ``ytmsearch``).
+
+        YouTube Music's catalog carries the K-pop, J-pop, Latin and
+        regional music plain YouTube search misses.
+        """
+        from .playback import PlaybackEngine  # lazy: same layer
+
+        out: list[ResolvedAudio] = []
+        for row in PlaybackEngine._youtube_search_many(
+                query, limit, prefix="ytmsearch"):
+            title = row.get("title") or query
+            out.append(ResolvedAudio(
+                ok=True,
+                path_or_url=PlaybackEngine._youtube_watch_url(
+                    row["video_id"]),
+                title=title,
+                artist=row.get("uploader") or "",
+                duration=row.get("duration") or 0.0,
+                kind="youtube-music",
+                source_name="YouTube Music search (yt-dlp)"))
+        return out
+
+    def _api_source_search_many(self, query: str, limit: int,
+                                cls_name: str, kind: str, label: str,
+                                downloadable: bool) -> list[ResolvedAudio]:
+        """Candidates from a keyless JSON-API source class in sources.py."""
+        import importlib
+
+        mod = importlib.import_module("nomorals.media.sources")
+        cls = getattr(mod, cls_name)
+        out: list[ResolvedAudio] = []
+        for c in cls().search(query, limit=limit):
+            out.append(ResolvedAudio(
+                ok=True, path_or_url=c.direct_url or c.url,
+                title=c.title, artist=c.artist, duration=c.duration,
+                kind=kind, source_name=label, downloadable=downloadable,
+                hint=str((c.extra or {}).get("note") or "")))
+        return out
+
+    def _musicbrainz_search_many(self, query: str,
+                                 limit: int) -> list[ResolvedAudio]:
+        return self._api_source_search_many(
+            query, limit, "MusicBrainzSource", "musicbrainz",
+            "MusicBrainz search", downloadable=False)
+
+    def _openverse_search_many(self, query: str,
+                               limit: int) -> list[ResolvedAudio]:
+        return self._api_source_search_many(
+            query, limit, "OpenverseSource", "openverse",
+            "Openverse search", downloadable=True)
+
+    def _wikimedia_search_many(self, query: str,
+                               limit: int) -> list[ResolvedAudio]:
+        return self._api_source_search_many(
+            query, limit, "WikimediaSource", "wikimedia",
+            "Wikimedia Commons search", downloadable=True)
 
     def _netnaija_search_many(self, query: str,
                              limit: int) -> list[ResolvedAudio]:
@@ -446,9 +509,12 @@ class SourceResolver:
     def _resolve_text(self, query: str,
                       result: ResolvedAudio) -> ResolvedAudio:
         # MANY sources, in chain order (see MUSIC_SEARCH_SOURCES).
-        # Downloadable/full-track sources first; Nigerian blogs before
+        # Downloadable/full-track sources first; regional blogs before
         # globals; 30s-preview APIs (iTunes/Deezer) only after every
-        # full-track source; metadata-only (Boomplay) + Spotify last.
+        # full-track source; metadata-only (MusicBrainz, Boomplay) +
+        # Spotify last.  GLOBAL coverage: Nigeria/Africa is one region
+        # among many — the chain spans worldwide catalogs (YouTube
+        # Music, MusicBrainz, Openverse, Wikimedia, iTunes, Deezer).
         # One source failing never ends the search — the chain keeps
         # going through ALL of them.
         return self._run_chain(result, [
@@ -462,7 +528,17 @@ class SourceResolver:
              lambda: self._s_soundcloud_search(query)),
             ("bandcamp-search", lambda: self._s_bandcamp_search(query)),
             ("youtube-search", lambda: self._s_youtube_search(query)),
+            ("youtube-music-search",
+             lambda: self._s_youtube_music_search(query)),
             ("archiveorg-search", lambda: self._s_archiveorg_search(query)),
+            ("musicbrainz-search", lambda: self._s_metadata_search(
+                query, "MusicBrainzSource", "musicbrainz",
+                "MusicBrainz metadata only — no audio; find the track "
+                "via the full-track sources")),
+            ("openverse-search", lambda: self._s_blog_search(
+                query, "OpenverseSource", "openverse")),
+            ("wikimedia-search", lambda: self._s_blog_search(
+                query, "WikimediaSource", "wikimedia")),
             ("itunes-search", lambda: self._s_preview_search(
                 query, "ITunesSource", "itunes")),
             ("deezer-search", lambda: self._s_preview_search(
@@ -773,6 +849,43 @@ class SourceResolver:
             path_or_url=PlaybackEngine._youtube_watch_url(video_id),
             title=query, kind="youtube",
             source_name="YouTube search (yt-dlp)")
+
+    def _s_youtube_music_search(self, query: str) -> ResolvedAudio:
+        """YouTube Music search (yt-dlp ``ytmsearch1:``)."""
+        from .playback import PlaybackEngine  # lazy: same layer
+
+        try:
+            video_id = PlaybackEngine._youtube_search_id(
+                query, prefix="ytmsearch")
+        except Exception as exc:  # noqa: BLE001 — carries the
+            # yt-dlp install hint when yt-dlp is missing
+            raise ResolutionError("youtube-music-search", str(exc)) from exc
+        video_id = str(video_id or "")
+        if not _YT_ID_RE.match(video_id):
+            raise ResolutionError("youtube-music-search",
+                                  f"no YouTube Music results for {query!r}")
+        return ResolvedAudio(
+            ok=True,
+            path_or_url=PlaybackEngine._youtube_watch_url(video_id),
+            title=query, kind="youtube-music",
+            source_name="YouTube Music search (yt-dlp)")
+
+    def _s_metadata_search(self, query: str, cls_name: str,
+                           kind: str, note: str) -> ResolvedAudio:
+        """Metadata-only sources (MusicBrainz): discovery, no audio."""
+        import importlib
+
+        mod = importlib.import_module("nomorals.media.sources")
+        cls = getattr(mod, cls_name)
+        cands = cls().search(query, limit=5)
+        if not cands:
+            raise ResolutionError(
+                f"{kind}-search", f"no {cls_name} results for {query!r}")
+        c = cands[0]
+        return ResolvedAudio(
+            ok=True, path_or_url=c.url, title=c.title, artist=c.artist,
+            kind=kind, source_name=f"{cls_name} search",
+            downloadable=False, hint=note)
 
     def _s_audiomack_url(self, url: str) -> ResolvedAudio:
         """First-class Audiomack URLs — yt-dlp's audiomack extractor

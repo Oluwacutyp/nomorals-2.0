@@ -54,9 +54,15 @@ __all__ = [
     "BandcampSource",
     "NotJustOkSource",
     "TooXclusiveSource",
+    "MusicBrainzSource",
+    "OpenverseSource",
+    "WikimediaSource",
     "SOURCE_CHAIN",
     "BROWSER_UA",
     "MUSIC_SEARCH_SOURCES",
+    "MUSIC_SOURCE_REGIONS",
+    "GLOBAL_REGIONS",
+    "music_covered_regions",
 ]
 
 #: User-Agent that looks like a real phone browser — download blogs and
@@ -521,6 +527,118 @@ class DeezerSource(_JsonApiSource):
         return out
 
 
+class MusicBrainzSource(_JsonApiSource):
+    """MusicBrainz — keyless, worldwide metadata catalog.
+
+    The largest open music database (recordings from every country,
+    every language).  Metadata only — no audio files — so candidates
+    are marked non-downloadable, like Boomplay: useful for discovery
+    ("what is this track / who made it"), and the chain then finds the
+    audio through a full-track source.
+    """
+
+    name = "musicbrainz"
+
+    def search_url(self, query: str) -> str:
+        return ("https://musicbrainz.org/ws/2/recording/?query=recording:"
+                + urllib.parse.quote_plus(query)
+                + "&fmt=json&limit=8")
+
+    def parse(self, payload: Any, query: str) -> list[SourceCandidate]:
+        out: list[SourceCandidate] = []
+        for row in (payload or {}).get("recordings") or []:
+            if not isinstance(row, dict):
+                continue
+            title = str(row.get("title") or "")
+            artist = ""
+            credits = row.get("artist-credit") or []
+            if credits and isinstance(credits[0], dict):
+                artist = str((credits[0].get("artist") or {}).get("name")
+                             or credits[0].get("name") or "")
+            if not title:
+                continue
+            mbid = str(row.get("id") or "")
+            out.append(SourceCandidate(
+                source=self.name, title=title, artist=artist,
+                url=f"https://musicbrainz.org/recording/{mbid}" if mbid
+                else "",
+                downloadable=False,
+                extra={"note": "MusicBrainz metadata only — no audio; "
+                               "find the track via the full-track sources"}))
+        return out
+
+
+class OpenverseSource(_JsonApiSource):
+    """Openverse — keyless CC-licensed audio from across the web.
+
+    api.openverse.org aggregates openly licensed audio (ccMixter,
+    Jamendo, Freesound, Wikimedia and more) from every region.  The
+    ``url`` field is the direct audio file — full downloadable files,
+    not previews.  Anonymous (no key) requests are rate-limited but
+    work; a key only raises the limit.
+    """
+
+    name = "openverse"
+
+    def search_url(self, query: str) -> str:
+        return ("https://api.openverse.org/v1/audio/?q="
+                + urllib.parse.quote_plus(query) + "&page_size=8")
+
+    def parse(self, payload: Any, query: str) -> list[SourceCandidate]:
+        out: list[SourceCandidate] = []
+        for row in (payload or {}).get("results") or []:
+            if not isinstance(row, dict):
+                continue
+            title = str(row.get("title") or "")
+            creator = str(row.get("creator") or "")
+            direct = str(row.get("url") or "")
+            landing = str(row.get("foreign_landing_url") or "")
+            if not title and not direct:
+                continue
+            out.append(SourceCandidate(
+                source=self.name, title=title or query, artist=creator,
+                url=direct or landing, direct_url=direct,
+                downloadable=bool(direct),
+                extra={"note": "CC-licensed audio via Openverse"}))
+        return out
+
+
+class WikimediaSource(_JsonApiSource):
+    """Wikimedia Commons — keyless, freely licensed audio worldwide.
+
+    The Commons MediaWiki API searches audio files (music, spoken
+    word, field recordings) uploaded from every country.  Candidates
+    point at the direct file URL — full downloadable files.
+    """
+
+    name = "wikimedia"
+
+    def search_url(self, query: str) -> str:
+        return ("https://commons.wikimedia.org/w/api.php?"
+                "action=query&generator=search&gsrsearch=filetype%3Aaudio+"
+                + urllib.parse.quote_plus(query)
+                + "&gsrnamespace=6&gsrlimit=8&prop=imageinfo"
+                "&iiprop=url%7Csize%7Cmime&format=json")
+
+    def parse(self, payload: Any, query: str) -> list[SourceCandidate]:
+        out: list[SourceCandidate] = []
+        pages = ((payload or {}).get("query") or {}).get("pages") or {}
+        for page in pages.values():
+            if not isinstance(page, dict):
+                continue
+            info = (page.get("imageinfo") or [{}])[0]
+            mime = str(info.get("mime") or "")
+            url = str(info.get("url") or "")
+            if not mime.startswith("audio/") or not url:
+                continue
+            title = str(page.get("title") or "").split(":", 1)[-1]
+            out.append(SourceCandidate(
+                source=self.name, title=title or query,
+                url=url, direct_url=url, downloadable=True,
+                extra={"note": "Freely licensed audio via Wikimedia Commons"}))
+        return out
+
+
 class ArchiveOrgSource(AudioSource):
     """Internet Archive audio — keyless, FULL downloadable files.
 
@@ -646,7 +764,7 @@ class TooXclusiveSource(NetNaijaSource):
 
 # ── the chain ─────────────────────────────────────────────────────────────
 
-#: Text-search priority for /play.  Nigerian sources first (direct MP3s
+#: Text-search priority for /play.  Regional blogs first (direct MP3s
 #: beat metadata), proven globals next, metadata-only last.
 #: Each entry: (strategy name, source instance or None for legacy paths).
 SOURCE_CHAIN: list[tuple[str, AudioSource]] = [
@@ -656,11 +774,15 @@ SOURCE_CHAIN: list[tuple[str, AudioSource]] = [
     ("boomplay-search", BoomplaySource()),
     ("bandcamp-search", BandcampSource()),
     ("archiveorg-search", ArchiveOrgSource()),
+    ("musicbrainz-search", MusicBrainzSource()),
+    ("openverse-search", OpenverseSource()),
+    ("wikimedia-search", WikimediaSource()),
     ("itunes-search", ITunesSource()),
     ("deezer-search", DeezerSource()),
-    # soundcloud-search / youtube-search / spotify-search stay on their
-    # existing paths in resolver.py (API adapters + yt-dlp) — they are
-    # proven and this module does not duplicate them.
+    # soundcloud-search / youtube-search / youtube-music-search /
+    # spotify-search stay on their existing paths in resolver.py (API
+    # adapters + yt-dlp) — they are proven and this module does not
+    # duplicate them.
     # audiomack is URL-first-class (no keyless text search exists).
 ]
 
@@ -675,9 +797,53 @@ MUSIC_SEARCH_SOURCES: tuple[str, ...] = (
     "soundcloud-search",
     "bandcamp-search",
     "youtube-search",
+    "youtube-music-search",
     "archiveorg-search",
+    "musicbrainz-search",
+    "openverse-search",
+    "wikimedia-search",
     "itunes-search",
     "deezer-search",
     "boomplay-search",
     "spotify-search",
 )
+
+#: The six world regions coverage is measured against.  Nigeria/Africa
+#: is ONE region among many, not the focus — the owner rule is GLOBAL
+#: coverage: every region gets sources.
+GLOBAL_REGIONS: tuple[str, ...] = (
+    "americas", "europe", "asia", "africa", "middle_east", "oceania",
+)
+
+#: Region each /play source covers.  "global" = a worldwide catalog
+#: (covers every region in GLOBAL_REGIONS).  "local" = the owner's own
+#: files, not a region at all.
+MUSIC_SOURCE_REGIONS: dict[str, str] = {
+    "workspace-scan": "local",
+    "netnaija-search": "africa",
+    "notjustok-search": "africa",
+    "tooxclusive-search": "africa",
+    "soundcloud-search": "global",
+    "bandcamp-search": "global",
+    "youtube-search": "global",
+    "youtube-music-search": "global",
+    "archiveorg-search": "global",
+    "musicbrainz-search": "global",
+    "openverse-search": "global",
+    "wikimedia-search": "global",
+    "itunes-search": "global",
+    "deezer-search": "global",
+    "boomplay-search": "africa",
+    "spotify-search": "global",
+}
+
+
+def music_covered_regions() -> set[str]:
+    """World regions /play covers: "global" expands to every region."""
+    out: set[str] = set()
+    for region in MUSIC_SOURCE_REGIONS.values():
+        if region == "global":
+            out.update(GLOBAL_REGIONS)
+        elif region in GLOBAL_REGIONS:
+            out.add(region)
+    return out

@@ -251,7 +251,8 @@ def test_unknown_title_fails_all_strategies_honestly(monkeypatch, tmp_path):
     # unit test — the query is supposed to match nothing.
     from nomorals.media import sources as _src
     for _cls in ("NetNaijaSource", "NotJustOkSource", "TooXclusiveSource",
-                 "BandcampSource", "ArchiveOrgSource", "ITunesSource",
+                 "BandcampSource", "ArchiveOrgSource", "MusicBrainzSource",
+                 "OpenverseSource", "WikimediaSource", "ITunesSource",
                  "DeezerSource", "BoomplaySource"):
         monkeypatch.setattr(getattr(_src, _cls), "search",
                             lambda self, q, limit=8: [])
@@ -278,7 +279,23 @@ def test_spotify_url_is_honest_not_downloadable():
     assert out.downloadable is False
 
 
-def test_spotify_search_only_when_linked():
+def test_spotify_search_only_when_linked(monkeypatch):
+    # Earlier-chain web sources must not leak live results into this
+    # unit test — Spotify (unlinked) is the strategy under test.
+    from nomorals.media import sources as _src
+    for _cls in ("NetNaijaSource", "NotJustOkSource", "TooXclusiveSource",
+                 "BandcampSource", "ArchiveOrgSource", "MusicBrainzSource",
+                 "OpenverseSource", "WikimediaSource", "ITunesSource",
+                 "DeezerSource", "BoomplaySource"):
+        monkeypatch.setattr(getattr(_src, _cls), "search",
+                            lambda self, q, limit=8: [])
+    monkeypatch.setattr(
+        "nomorals.media.playback.PlaybackEngine._youtube_search_id",
+        classmethod(lambda cls, q, prefix="ytsearch": (_ for _ in ()).throw(
+            RuntimeError("youtube search needs yt-dlp"))))
+    monkeypatch.setattr(
+        "nomorals.media.playback.PlaybackEngine._youtube_search_many",
+        classmethod(lambda cls, q, limit=8, prefix="ytsearch": []))
     out = SourceResolver(_ctx("/nope")).resolve("some obscure title xyz")
     # spotify adapter is None → strategy fails, recorded honestly
     assert any("spotify-search" in a for a in out.attempts)
@@ -295,7 +312,8 @@ def test_spotify_search_works_when_linked(monkeypatch, tmp_path):
     # unit test — Spotify is the intended winner here.
     from nomorals.media import sources as _src
     for _cls in ("NetNaijaSource", "NotJustOkSource", "TooXclusiveSource",
-                 "BandcampSource", "ArchiveOrgSource", "ITunesSource",
+                 "BandcampSource", "ArchiveOrgSource", "MusicBrainzSource",
+                 "OpenverseSource", "WikimediaSource", "ITunesSource",
                  "DeezerSource", "BoomplaySource"):
         monkeypatch.setattr(getattr(_src, _cls), "search",
                             lambda self, q, limit=8: [])

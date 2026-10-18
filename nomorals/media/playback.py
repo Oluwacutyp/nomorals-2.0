@@ -549,8 +549,12 @@ class PlaybackEngine:
         return f"https://www.youtube.com/watch?v={video_id}"
 
     @classmethod
-    def _youtube_search_id(cls, query: str) -> str:
-        """Top YouTube video id for a query (yt-dlp ``ytsearch1:``).
+    def _youtube_search_id(cls, query: str, prefix: str = "ytsearch") -> str:
+        """Top video id for a query (yt-dlp ``<prefix>1:``).
+
+        ``prefix="ytsearch"`` searches YouTube; ``prefix="ytmsearch"``
+        searches YouTube Music — the catalog that carries K-pop,
+        J-pop, Latin and regional music YouTube search misses.
 
         Raises ToolError naming the missing dependency when yt-dlp is
         absent — never a silent empty result.
@@ -578,7 +582,7 @@ class PlaybackEngine:
                 _opts.update(_cookie_opts_fn())
                 with contextlib.redirect_stderr(io.StringIO()):
                     with yt_dlp.YoutubeDL(_opts) as ydl:
-                        info = ydl.extract_info(f"ytsearch1:{query}",
+                        info = ydl.extract_info(f"{prefix}1:{query}",
                                                 download=False)
             except Exception as exc:  # noqa: BLE001
                 raise ToolError(f"youtube search failed: {exc}") from exc
@@ -592,7 +596,7 @@ class PlaybackEngine:
                 from .cookies import ytdlp_cookie_args as _cookie_args_fn
                 proc = subprocess.run(
                     [cli, "--print", "id", "--skip-download"]
-                    + _cookie_args_fn() + [f"ytsearch1:{query}"],
+                    + _cookie_args_fn() + [f"{prefix}1:{query}"],
                     capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60)
             except subprocess.TimeoutExpired as exc:
                 raise ToolError("youtube search timed out") from exc
@@ -614,9 +618,9 @@ class PlaybackEngine:
         return str(d)
 
     @classmethod
-    def _youtube_search_many(cls, query: str,
-                             limit: int = 8) -> list[dict[str, Any]]:
-        """Top N YouTube results for a query (yt-dlp ``ytsearchN:``).
+    def _youtube_search_many(cls, query: str, limit: int = 8,
+                             prefix: str = "ytsearch") -> list[dict[str, Any]]:
+        """Top N results for a query (yt-dlp ``<prefix>N:``).
 
         Returns [{video_id, title, duration, uploader}].  Empty list when
         yt-dlp is missing or the search fails — never raises.
@@ -644,7 +648,7 @@ class PlaybackEngine:
                 _opts2.update(_cookie_opts_fn2())
                 with contextlib.redirect_stderr(io.StringIO()):
                     with yt_dlp.YoutubeDL(_opts2) as ydl:
-                        info = ydl.extract_info(f"ytsearch{limit}:{query}",
+                        info = ydl.extract_info(f"{prefix}{limit}:{query}",
                                                 download=False)
                 entries = (info or {}).get("entries") or []
             except Exception as exc:  # noqa: BLE001
@@ -661,7 +665,7 @@ class PlaybackEngine:
                 proc = subprocess.run(
                     [cli, "--print", "%(id)s\t%(title)s\t%(duration)s\t"
                      "%(uploader)s", "--skip-download"]
-                    + _cookie_args_fn2() + [f"ytsearch{limit}:{query}"],
+                    + _cookie_args_fn2() + [f"{prefix}{limit}:{query}"],
                     capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60)
             except (subprocess.TimeoutExpired, OSError) as exc:
                 _log.info("youtube multi-search failed: %s", exc)

@@ -18,6 +18,10 @@ but were NOT individually live-verified from the build sandbox — a dead
 one shows up honestly in ``errors`` and never kills the digest.
 The legacy wire services (Reuters/AP/AFP/…) no longer publish public RSS,
 so ``wires`` carries the working global aggregators instead.
+
+Coverage is GLOBAL, not Nigeria-limited: Nigeria/Africa is ONE region
+among many. Every region — Americas, Europe, Asia, Africa, Middle East,
+Oceania — has its own outlets in the default digest (see FEED_REGIONS).
 """
 
 from __future__ import annotations
@@ -33,8 +37,9 @@ from ..core.ids import new_id
 from ..core.http import HttpClient
 from .search.engine import SearchEngine
 
-__all__ = ["DEFAULT_FEEDS", "FEED_CATEGORIES", "feeds_for", "NewsAgent",
-           "parse_feed"]
+__all__ = ["DEFAULT_FEEDS", "DEFAULT_CATEGORIES", "FEED_CATEGORIES",
+           "FEED_REGIONS", "NEWS_GLOBAL_REGIONS", "feeds_for",
+           "news_covered_regions", "NewsAgent", "parse_feed"]
 
 #: Sane keyless defaults when settings.news.feeds is empty.
 #: Categorized so callers can subscribe by interest (``feeds_for``);
@@ -122,6 +127,10 @@ FEED_CATEGORIES: dict[str, tuple[tuple[str, str], ...]] = {
         ("The Guardian", "https://www.theguardian.com/world/rss"),
         ("Sky News", "https://feeds.skynews.com/feeds/rss/home.xml"),
         ("Euronews", "https://www.euronews.com/rss"),
+        ("Le Monde", "https://www.lemonde.fr/rss/une.xml"),
+        ("Der Spiegel", "https://www.spiegel.de/international/index.rss"),
+        ("RTÉ", "https://www.rte.ie/rss/news.xml"),
+        ("NOS", "https://feeds.nos.nl/nosnieuwsalgemeen"),
     ),
     "asia": (
         ("Straits Times", "https://www.straitstimes.com/news/world/rss.xml"),
@@ -130,6 +139,32 @@ FEED_CATEGORIES: dict[str, tuple[tuple[str, str], ...]] = {
         ("The Diplomat", "https://thediplomat.com/feed/"),
         ("Channel News Asia",
          "https://www.channelnewsasia.com/api/v1/rss-outbound-feed?_format=xml"),
+        ("Japan Times", "https://www.japantimes.co.jp/news/feed/"),
+        ("Korea Herald", "http://www.koreaherald.com/rss"),
+        ("SCMP", "https://www.scmp.com/rss/91/feed"),
+        ("Times of India", "https://timesofindia.indiatimes.com/rssfeedstopstories.cms"),
+        ("Dawn", "https://www.dawn.com/rss"),
+    ),
+    "latam": (
+        ("El País", "https://feeds.elpais.com/mrss-s/pages/ep/site/elpais.com/portada"),
+        ("G1", "https://g1.globo.com/rss/g1/"),
+        ("Clarín", "https://www.clarin.com/rss/lo-ultimo/"),
+        ("El Universal", "https://www.eluniversal.com.mx/rss.xml"),
+    ),
+    "middle_east": (
+        ("Arab News", "https://www.arabnews.com/rss.xml"),
+        ("Times of Israel", "https://www.timesofisrael.com/feed/"),
+        ("Al Arabiya", "https://www.alarabiya.net/rss.xml"),
+    ),
+    "oceania": (
+        ("ABC Australia", "https://www.abc.net.au/news/feed/1"),
+        ("Sydney Morning Herald", "https://www.smh.com.au/rss/feed.xml"),
+        ("Stuff", "https://www.stuff.co.nz/rss"),
+    ),
+    "americas": (
+        ("CBC Top Stories", "https://www.cbc.ca/cmlink/rss-topstories"),
+        ("La Nación", "https://www.lanacion.com.ar/arc/outboundfeeds/rss/"),
+        ("Folha de S.Paulo", "https://feeds.folha.uol.com.br/emcimadahora/rss091.xml"),
     ),
     "entertainment": (
         ("BBC Entertainment", "https://feeds.bbci.co.uk/news/entertainment_and_arts/rss.xml"),
@@ -167,9 +202,56 @@ def feeds_for(*categories: str) -> list[tuple[str, str]]:
 
 #: world + tech + business + regional spread (usa/europe/asia/nigeria/
 #: africa) + entertainment — the general default digest.
+DEFAULT_CATEGORIES: tuple[str, ...] = (
+    "world", "tech", "business", "usa", "europe", "asia", "nigeria",
+    "africa", "latam", "middle_east", "oceania", "americas",
+    "entertainment", "wires",
+)
+
+#: Sane keyless defaults when settings.news.feeds is empty.
+#: Categorized so callers can subscribe by interest (``feeds_for``);
+#: ``DEFAULT_FEEDS`` is the general-interest flattening.
 DEFAULT_FEEDS: tuple[tuple[str, str], ...] = tuple(
-    feeds_for("world", "tech", "business", "usa", "europe", "asia",
-              "nigeria", "africa", "entertainment", "wires"))
+    feeds_for(*DEFAULT_CATEGORIES))
+
+#: The six world regions coverage is measured against.  Nigeria/Africa
+#: is ONE region among many — the owner rule is GLOBAL coverage.
+NEWS_GLOBAL_REGIONS: tuple[str, ...] = (
+    "americas", "europe", "asia", "africa", "middle_east", "oceania",
+)
+
+#: Region each feed category covers.  "global" = worldwide outlets
+#: (covers every region in NEWS_GLOBAL_REGIONS).
+FEED_REGIONS: dict[str, str] = {
+    "world": "global",
+    "tech": "global",
+    "nigeria": "africa",
+    "africa": "africa",
+    "business": "global",
+    "science": "global",
+    "sports": "global",
+    "usa": "americas",
+    "europe": "europe",
+    "asia": "asia",
+    "entertainment": "global",
+    "wires": "global",
+    "latam": "americas",
+    "middle_east": "middle_east",
+    "oceania": "oceania",
+    "americas": "americas",
+}
+
+
+def news_covered_regions(categories: tuple[str, ...] | None = None) -> set[str]:
+    """World regions the default digest covers: "global" expands to all."""
+    out: set[str] = set()
+    for cat in (categories if categories is not None else DEFAULT_CATEGORIES):
+        region = FEED_REGIONS.get(cat)
+        if region == "global":
+            out.update(NEWS_GLOBAL_REGIONS)
+        elif region in NEWS_GLOBAL_REGIONS:
+            out.add(region)
+    return out
 
 _TAG = re.compile(r"<[^>]+>")
 

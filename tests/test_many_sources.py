@@ -47,6 +47,9 @@ class PlayManySourcesTests(unittest.TestCase):
              mock.patch("nomorals.media.sources.TooXclusiveSource.search", return_value=[]), \
              mock.patch("nomorals.media.sources.BandcampSource.search", return_value=[]), \
              mock.patch("nomorals.media.sources.ArchiveOrgSource.search", return_value=[]), \
+             mock.patch("nomorals.media.sources.MusicBrainzSource.search", return_value=[]), \
+             mock.patch("nomorals.media.sources.OpenverseSource.search", return_value=[]), \
+             mock.patch("nomorals.media.sources.WikimediaSource.search", return_value=[]), \
              mock.patch("nomorals.media.sources.ITunesSource.search", return_value=[]), \
              mock.patch("nomorals.media.sources.DeezerSource.search", return_value=[]), \
              mock.patch("nomorals.media.sources.BoomplaySource.search", return_value=[]):
@@ -88,6 +91,12 @@ class PlayManySourcesTests(unittest.TestCase):
                         return_value=[]), \
              mock.patch("nomorals.media.sources.ArchiveOrgSource.search",
                         return_value=[]), \
+             mock.patch("nomorals.media.sources.MusicBrainzSource.search",
+                        return_value=[]), \
+             mock.patch("nomorals.media.sources.OpenverseSource.search",
+                        return_value=[]), \
+             mock.patch("nomorals.media.sources.WikimediaSource.search",
+                        return_value=[]), \
              mock.patch("nomorals.media.sources.ITunesSource.search",
                         return_value=[]), \
              mock.patch("nomorals.media.sources.DeezerSource.search",
@@ -97,6 +106,8 @@ class PlayManySourcesTests(unittest.TestCase):
              mock.patch.object(SourceResolver, "_soundcloud_search_many",
                                return_value=[]), \
              mock.patch.object(SourceResolver, "_youtube_search_many",
+                               return_value=[]), \
+             mock.patch.object(SourceResolver, "_youtube_music_search_many",
                                return_value=[]):
             out = SourceResolver(ctx).search_candidates("goodbye", limit=8)
         self.assertTrue(any(r.source_name == "NetNaija search" for r in out))
