@@ -192,6 +192,22 @@ class RuntimeMetaMixin:
             return f"mode set to {mode} (agent switch failed: {exc})"
         return f"autonomy: {mode}"
 
+    def _control_agent(self, arg: str, chat_key: str = "") -> str:
+        """``/agent ...`` — the selectable agent modes for this chat.
+
+        Adaptive learns from outcomes, autonomous self-initiates,
+        planning plans first and replans on failure.  Modes combine
+        (``/agent adaptive+planning``) and persist per chat, so the
+        CLI (``nm agent ...``) and chat see the same set.
+        """
+        from ..modes import AgentModes
+
+        try:
+            return AgentModes().apply_command(arg or "", chat_key or "")
+        except Exception as exc:  # noqa: BLE001 - a mode switch never kills chat
+            _log.warning("agent mode switch failed: %s", exc)
+            return f"agent command failed: {exc}"
+
     def _control_chatmode(self, command: Any, chat_key: str) -> str:
         """Per-chat reply mode + per-chat feature toggles — the single
         entry point for group controls. Owner-only (enforced by the

@@ -2818,6 +2818,9 @@ class PartnerRuntime(
         if kind == "mode":
             return self._control_mode(arg)
 
+        if kind == "agent":
+            return self._control_agent(command.tail or arg, chat_key)
+
         if kind == "chatmode":
             return self._control_chatmode(command, chat_key)
 

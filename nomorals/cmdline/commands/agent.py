@@ -39,6 +39,23 @@ def _cmd_run(args: argparse.Namespace, context: Any) -> int:
     return 0 if result.ok else 1
 
 
+def _cmd_agent(args: argparse.Namespace, context: Any) -> int:
+    """``nm agent ...`` — select / inspect agent modes for a chat.
+
+    ``nm agent planning`` / ``nm agent adaptive+planning`` /
+    ``nm agent +autonomous`` / ``nm agent -planning`` / ``nm agent status``
+    / ``nm agent off`` / ``nm agent tick`` — per-chat defaults persist in
+    the agent-modes store, so chat and CLI see the same mode set.
+    """
+    from ...agents.modes import AgentModes
+
+    agent = AgentModes()
+    chat_key = getattr(args, "chat", "") or "cli"
+    tail = " ".join(getattr(args, "mode_args", []) or [])
+    print(agent.apply_command(tail, chat_key))
+    return 0
+
+
 def _cmd_ask(args: argparse.Namespace, context: Any) -> int:
     from ...llm.base import Message, SamplingParams
 

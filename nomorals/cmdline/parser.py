@@ -340,6 +340,15 @@ def _parser() -> argparse.ArgumentParser:
     agent.add_argument("--max-steps", type=int, default=8)
     agent.add_argument("--no-reflect", action="store_true")
 
+    modes = sub.add_parser(
+        "agent",
+        help="agent modes: adaptive | autonomous | planning (combinable)")
+    modes.add_argument("mode_args", nargs="*",
+                       help="e.g. adaptive, autonomous+planning, +planning, "
+                            "-adaptive, status, off, tick")
+    modes.add_argument("--chat", default="cli",
+                       help="chat key whose default to set (default: cli)")
+
     ask = sub.add_parser("ask", aliases=CLI_ALIASES["ask"],
                          help="single-turn chat with the active model")
     ask.add_argument("prompt", nargs="+")

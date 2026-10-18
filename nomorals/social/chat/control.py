@@ -16,6 +16,7 @@ Commands:
     /mood energy=20 frustration=70   force dimensions directly
     /mood reset                  back to the persona's baselines
     /mode  off|suggest|auto      switch the autonomy mode, live
+    /agent adaptive|autonomous|planning   switch the agent modes (combinable, per chat)
     /model [provider [fallback]] switch the model live (no restart, persists)
     /say <platform:chat> text    send a message as her, through the gateway
     /proposals                   pending autonomous messages
@@ -219,6 +220,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "stop": (1, 1),
     "mood": (0, 10),  # label, or several dim=NN pairs
     "mode": (1, 1),
+    "agent": (0, None),  # /agent [adaptive|autonomous|planning|+x|-x|status|off|tick]
     "chatmode": (0, 4),  # /chatmode [mode|status|list|feature <f> <on|off>] [chat_key] — per-chat mode + feature toggles (feature form takes 4 words with a target)
     "style": (0, 3),  # /style | /style <field> <value> [target] | /style reset [target] | /style list — inspect + tune the mined style profile (owner-only)
     "doctor": (0, 0),  # /doctor — system health: registry + config + stores + adapters + providers (owner-only)
@@ -1294,7 +1296,11 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
              "related": "/stage"},
     "mode": {"what": "her autonomy level: off (asleep) | suggest (proposes, you approve) | auto (acts).",
              "usage": "/mode off|suggest|auto", "example": "/mode auto",
-             "related": "/proposals /power"},
+             "related": "/proposals /power /agent"},
+    "agent": {"what": "her agent modes — a combinable set, per chat: adaptive (learns from outcomes and adjusts), autonomous (self-initiates work without being poked), planning (plans first, verifies each step, replans on failure). Bare /agent shows the chat's modes.",
+              "usage": "/agent adaptive|autonomous|planning · /agent adaptive+planning · /agent +autonomous · /agent -planning · /agent status · /agent off · /agent tick",
+              "example": "/agent adaptive+planning",
+              "related": "/mode /mind"},
     "chatmode": {"what": "this chat's reply mode + per-chat feature toggles — the single entry point for group controls. Modes: normal (she answers everything) | games-only (silent for normal chat, game commands still work) | games-off (normal chat works, game commands refused honestly) | quiet (never messages first here, replies when addressed). Features: /chatmode feature <games|music|voice|images|proactive> <on|off> disables one feature in THIS chat only — Group A never affects Group B or DMs. Per-game: /chatmode feature games.<game> <on|off>. Turning games off while a game is live ends it honestly (scores kept). Voice off = text replies only, voice notes still transcribe. Owner-only; run it in the chat to set that chat. In games-only, ALL non-game messages are silenced — including voice notes (even after transcription). Game commands + in-game moves still work. /chatmode normal restores replies. /chatmode list shows every chat with custom settings.",
              "usage": "/chatmode [games-only|games-off|games-on|quiet|normal|status|list] [platform:chat_id]  ·  /chatmode feature <games|music|voice|images|proactive|games.<game>> <on|off> [platform:chat_id]",
              "example": "/chatmode games-off   ·   /chatmode feature music off   ·   /chatmode quiet   ·   /chatmode feature games.chess off   ·   /chatmode list",
@@ -2337,7 +2343,7 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
 _HELP_GROUPS: list[tuple[str, list[str]]] = [
     ("her day", ["status", "platforms", "proposals", "approve", "deny",
                  "mood", "stage", "model", "providers", "say", "power", "quit",
-                 "mode", "mind"]),
+                 "mode", "agent", "mind"]),
     ("search & research", ["search", "searchdeep", "searchleads",
                            "money",
                            "searchhist", "research", "news", "osint",
@@ -2568,7 +2574,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
     ("her day — state & control",
      ["status", "platforms", "mood", "stage", "model", "providers", "say", "power",
       "proposals", "approve", "deny", "start", "stop", "quit",
-      "mode", "chatmode", "style", "doctor", "profile", "mind",
+      "mode", "agent", "chatmode", "style", "doctor", "profile", "mind",
       "spend", "budget", "spending", "mandate", "balances", "goal",
       "insights", "alert", "cost", "heal", "tour"]),
     ("search & research",
@@ -2679,6 +2685,7 @@ LIST_ONELINERS: dict[str, str] = {
     "stop": "hot-stop a platform this session",
     "quit": "shut the system down",
     "mode": "autonomy mode: off | suggest | auto",
+    "agent": "agent modes: adaptive | autonomous | planning (combinable)",
     "chatmode": "per-chat mode + feature toggles: /chatmode games-only | games-off | games-on | quiet | normal | status | list | feature <games|music|voice|images|proactive|games.<game>> <on|off>",
     "style": "mined style profile: /style shows it, /style <field> <value> tunes it, /style reset clears overrides",
     "doctor": "system health: registry + config + stores + adapters + providers",

@@ -558,6 +558,7 @@ def _llm_intent_interpret(text: str, context: Any = None) -> Intent | None:
             "research": ("research", 0.85, "research_swarm", "LLM interpreted as research intent"),
             "build": ("build", 0.85, "coding", "LLM interpreted as build intent"),
             "status": ("status", 0.85, "mind", "LLM interpreted as status intent"),
+            "mode": ("mode", 0.9, "modes", "LLM interpreted as agent-mode switch"),
         }
         if kind in kind_map:
             k, conf, route, why = kind_map[kind]
@@ -1228,6 +1229,23 @@ def _mission_intent(text: str) -> Intent | None:
     return None
 
 
+def _mode_intent(text: str) -> Intent | None:
+    """Agent-mode switch ("use planning mode", "go autonomous", "adapt to me").
+
+    The mode set is per chat and combinable — "autonomous and planning"
+    switches both on.  Plain mentions ("I like planning my day") do not
+    match: ``parse_mode_phrase`` only fires on activation phrasing.
+    """
+    from .modes import parse_mode_phrase
+
+    modes = parse_mode_phrase(text)
+    if not modes:
+        return None
+    return Intent("mode", 0.9, target=" ".join(sorted(modes)), action="set",
+                  route="modes",
+                  why=f"agent-mode switch: {', '.join(sorted(modes))}")
+
+
 def _status_intent(text: str) -> Intent | None:
     if _RE_STATUS.match(text):
         return Intent("status", 0.8, route="mind", why="system status intent")
@@ -1302,7 +1320,7 @@ def understand(text: str, *, live_game: str | None = None) -> list[Intent]:
                _book_intent, _music_intent, _play_media_intent,
                _research_intent, _account_intent, _email_intent, _build_intent,
                _finance_intent, _image_intent, _video_intent, _avatar_intent,
-               _transcript_edit_intent):
+               _transcript_edit_intent, _mode_intent):
         if fn is _game_intent:
             it = fn(text, live_game)
         else:
@@ -1843,6 +1861,7 @@ class CoreMind:
             "avatar": self._dispatch_avatar,
             "finance_log": self._dispatch_finance_log,
             "finance_summary": self._dispatch_finance_summary,
+            "mode": self._dispatch_mode,
         }.get(intent.kind)
         if fn is None:
             self._job_done(job_id, True, "no route — treated as chat")
@@ -2317,6 +2336,27 @@ class CoreMind:
             lines.append(f"  [{row.get('status', '?')}] {row.get('id', '')[:8]} "
                          f"{str(row.get('text', ''))[:70]}")
         return "\n".join(lines)
+
+    def _dispatch_mode(self, intent: Intent, job_id: str, chat_key: str,
+                       message: Any) -> str | None:
+        """Agent-mode switch from natural language ("use planning mode").
+
+        In chat, this goes through the same ``/agent`` control path as
+        the slash command, so the per-chat default persists identically.
+        Without a runtime (CLI/tests) it applies the switch directly.
+        """
+        target = (intent.target or "").strip()
+        if self.runtime is not None and hasattr(self.runtime,
+                                                "handle_control"):
+            return self.runtime.handle_control(f"/agent {target}", chat_key,
+                                               message)
+        from .modes import AgentModes, normalize_modes
+
+        modes = normalize_modes(target)
+        if not modes:
+            return None
+        AgentModes().set_modes(chat_key, modes)
+        return f"agent modes: {', '.join(sorted(modes))}"
 
     def _dispatch_status(self, intent: Intent, job_id: str, chat_key: str,
                          message: Any) -> str:

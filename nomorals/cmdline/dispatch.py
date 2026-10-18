@@ -10,7 +10,7 @@ from typing import Any, NamedTuple
 
 from ..core.logging_setup import RedactionFilter, get_logger, setup_logging
 from . import style as _style
-from .commands.agent import _cmd_ask, _cmd_run
+from .commands.agent import _cmd_agent, _cmd_ask, _cmd_run
 from .commands.autonomy import _cmd_autonomy
 from .commands.backup import _cmd_backup
 from .commands.benchmark import _cmd_benchmark
@@ -301,6 +301,7 @@ _COMMANDS: dict[str, _CommandSpec] = {
     "pulse": _CommandSpec(_cmd_pulse),
     "run": _CommandSpec(_cmd_run),
     "ask": _CommandSpec(_cmd_ask),
+    "agent": _CommandSpec(_cmd_agent),
     "backup": _CommandSpec(_cmd_backup),
     "golden": _CommandSpec(_cmd_golden),
     "missions": _CommandSpec(_cmd_missions),
