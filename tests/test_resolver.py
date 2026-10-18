@@ -214,10 +214,13 @@ def test_missing_ytdlp_gives_install_hint(monkeypatch, tmp_path):
             "could not probe: install yt-dlp for site extraction")
 
     monkeypatch.setattr(resolver, "probe", fake_probe)
+    # Deterministic: the install hint fires only when yt-dlp is
+    # VERIFIED missing (not from an error substring).
+    monkeypatch.setattr(resolver, "ytdlp_available", lambda: False)
     out = SourceResolver(_ctx(str(tmp_path))).resolve(
         "https://example.com/some-track")
     assert not out.ok
-    assert "pip install yt-dlp" in out.hint
+    assert 'pip install -U "yt-dlp[default]"' in out.hint
     assert out.hint == YT_DLP_HINT
 
 
@@ -242,6 +245,7 @@ def test_unknown_title_fails_all_strategies_honestly(monkeypatch, tmp_path):
         raise AssertionError("probe must not run for titles")
 
     monkeypatch.setattr(resolver, "probe", fake_probe)
+    monkeypatch.setattr(resolver, "ytdlp_available", lambda: False)
     monkeypatch.setattr(
         PlaybackEngine, "_youtube_search_id",
         classmethod(lambda cls, q: (_ for _ in ()).throw(
@@ -254,7 +258,7 @@ def test_unknown_title_fails_all_strategies_honestly(monkeypatch, tmp_path):
     for name in ("workspace-scan", "soundcloud-search",
                  "youtube-search", "spotify-search"):
         assert name in tried, tried
-    assert "pip install yt-dlp" in out.hint
+    assert 'pip install -U "yt-dlp[default]"' in out.hint
 
 
 # ── Spotify: honest, no extraction ────────────────────────────────────

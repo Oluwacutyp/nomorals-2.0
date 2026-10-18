@@ -23,17 +23,50 @@ __all__ = [
     "is_bot_detection_error",
     "cookies_status",
     "BOT_COOKIE_HELP",
+    "YTDLP_INSTALL_HELP",
     "COOKIES_ENV",
 ]
 
 #: Env var override — path to a Netscape-format cookies file.
 COOKIES_ENV = "YTDLP_COOKIES"
 
-#: 2-line user-facing help when YouTube bot-blocks a download.
+#: Install help for yt-dlp, grounded in the official yt-dlp docs
+#: (https://github.com/yt-dlp/yt-dlp/wiki/Installation) — never
+#: invented. YouTube also needs ffmpeg to merge its separate
+#: audio+video formats (official FAQ: "Do I need any other programs?").
+YTDLP_INSTALL_HELP = (
+    "yt-dlp is not installed — install it (official docs: "
+    "https://github.com/yt-dlp/yt-dlp/wiki/Installation): "
+    "`python3 -m pip install -U \"yt-dlp[default]\"` "
+    "(Windows: `py -m pip install -U \"yt-dlp[default]\"` or "
+    "`winget install --source winget --id yt-dlp.yt-dlp`; "
+    "Termux: `pkg install python python-pip`, then "
+    "`pip install -U \"yt-dlp[default]\"`). "
+    "YouTube also needs ffmpeg to merge audio+video formats."
+)
+
+#: 3-line user-facing help when YouTube bot-blocks a download.
+#: Grounded in the official yt-dlp FAQ ("How do I pass cookies to
+#: yt-dlp?", https://github.com/yt-dlp/yt-dlp/wiki/FAQ) — never
+#: invented. The cookies file must be Mozilla/Netscape format (first
+#: line `# Netscape HTTP Cookie File`), CRLF newlines on Windows, LF
+#: on Unix; HTTP 400 with --cookies means bad newline format.
+#: WARNING from the same FAQ: the old "Get cookies.txt" Chrome
+#: extension (without "LOCALLY") was reported as malware and removed
+#: from the Chrome Web Store — uninstall it if present.
 BOT_COOKIE_HELP = (
-    "YouTube is blocking automated downloads. Export your YouTube cookies: "
-    "open youtube.com in your browser, use a cookie-exporter extension to save "
-    "as Netscape format to ~/.nomorals/youtube-cookies.txt, then retry."
+    "YouTube is blocking automated requests (bot check). Pass your own "
+    "browser cookies to yt-dlp: easiest is "
+    "`yt-dlp --cookies-from-browser chrome`, or export once with "
+    "`yt-dlp --cookies-from-browser chrome --cookies cookies.txt` and "
+    "then use `--cookies cookies.txt`. The cookies file must be "
+    "Mozilla/Netscape format (first line `# Netscape HTTP Cookie File`), "
+    "CRLF newlines on Windows, LF on Unix. Or use the 'Get cookies.txt "
+    "LOCALLY' (Chrome) / 'cookies.txt' (Firefox) extension — uninstall "
+    "the old 'Get cookies.txt' extension, it was reported as malware. "
+    "Devon looks for the file at ~/.nomorals/youtube-cookies.txt or "
+    "$YTDLP_COOKIES. Details: "
+    "https://github.com/yt-dlp/yt-dlp/wiki/FAQ#how-do-i-pass-cookies-to-yt-dlp"
 )
 
 #: Markers (case-insensitive) that identify YouTube's bot check.

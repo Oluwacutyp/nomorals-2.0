@@ -576,6 +576,9 @@ class RuntimeMediaMixin:
                 if not resolution.ok:
                     # Step 6: never a dead end — tried + why + hint via
                     # PlayService (pure formatting, no extra network).
+                    # explain_failure ALREADY appends "hint: ..." — do
+                    # NOT append resolution.hint again here (that
+                    # printed the hint twice).
                     try:
                         from ...media.play_service import PlayService
                         detail = PlayService(
@@ -584,9 +587,7 @@ class RuntimeMediaMixin:
                         detail = ("tried: "
                                   + ("; ".join(resolution.attempts)
                                      or "no strategies"))
-                    hint = (f"\n{resolution.hint}"
-                            if resolution.hint else "")
-                    return (f"couldn't find {rest[:80]!r} —\n{detail}{hint}")
+                    return (f"couldn't find {rest[:80]!r} —\n{detail}")
                 added = []
                 for r in (resolution, *resolution.extra_tracks):
                     added.append(engine._enqueue(
