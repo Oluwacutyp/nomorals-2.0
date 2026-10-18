@@ -1197,6 +1197,121 @@ class RuntimeMediaMixin:
             pass
         return ""
 
+    def _control_musicnote(self, tail: str, chat_key: str = "") -> str:
+        """ /musicnote find | create — answer the music voice-note ask.
+
+        The ask (owner-only) stashes the clip in
+        :data:`nomorals.voice.music_note.PENDING` when it goes out;
+        tapping a button consumes the entry (a double-tap can never
+        run Find/Create twice). Find runs the /sham music-ID path on
+        the stashed clip; Create runs LLM-first production seeded by
+        the clip's tempo/key/feel. Never raises.
+        """
+        from ...voice import music_note as _music_note
+
+        action = (tail or "").strip().split()[0].lower() if (tail or "").strip() else ""
+        if action not in ("find", "create"):
+            return ("usage: /musicnote find | create — tap Find to identify "
+                    "the song in your voice note, or Create to produce a "
+                    "new song from it.")
+        entry = _music_note.PENDING.take(chat_key)
+        if entry is None:
+            return ("no music voice note waiting — send a music voice note "
+                    "first, then tap Find or Create.")
+        path = str(entry.get("path") or "")
+        heard = str(entry.get("heard") or "")
+        try:
+            if action == "find":
+                from ...social.chat.base import (
+                    ChatKind, ChatMessage, ChatRef, MediaRef)
+                platform, _, cid = (chat_key or "").partition(":")
+                msg = ChatMessage(
+                    chat=ChatRef(platform=platform or "telegram",
+                                 chat_id=cid or "0", kind=ChatKind.DM),
+                    incoming=True, text="", sender="owner",
+                    media=[MediaRef(path=path, kind="voice",
+                                    mime="audio/ogg",
+                                    name=(path.rsplit("/", 1)[-1] or "note.ogg"))])
+                return self._sham_identify(msg)
+            return self._musicnote_produce(path, heard, chat_key)
+        except Exception as exc:  # noqa: BLE001 - never raises
+            return f"couldn't run /musicnote {action} ({exc})"
+
+    def _musicnote_produce(self, path: str, heard: str,
+                           chat_key: str = "") -> str:
+        """Produce a NEW original song seeded by a music voice note.
+
+        The clip's tempo/key (from the fingerprint analyzer) seed the
+        Producer profile; the result is a new composition in that
+        lane, never a copy of the clip. The production is recorded in
+        taste memory, indexed for future /sham, and delivered as
+        audio. Never raises.
+        """
+        from ...media.producer import Producer, describe_to_profile
+        from ...media.taste import load_taste
+
+        # Seed tempo/key from the clip — analysis failure falls back
+        # to a driving default, never to a crash.
+        seed_note = (heard or "").strip() or "music from your voice note"
+        prof = describe_to_profile(f"{seed_note} driving electronic")
+        try:
+            from ...audio.fingerprint import analyze as _analyze
+            a = _analyze(path) if path else None
+            if a is not None and getattr(a, "ok", False):
+                tempo = float(getattr(a, "tempo_bpm", 0.0) or 0.0)
+                tconf = float(getattr(a, "tempo_confidence", 0.0) or 0.0)
+                if tempo > 0 and tconf >= 0.15:
+                    prof.bpm = tempo
+                key = str(getattr(a, "key", "") or "").strip()
+                kconf = float(getattr(a, "key_confidence", 0.0) or 0.0)
+                if key and kconf >= 0.55:
+                    # Analyzer keys look like "C" or "A minor" — split
+                    # a trailing mode word off when present.
+                    parts = key.split()
+                    prof.key = parts[0]
+                    if len(parts) > 1 and parts[1].lower() in (
+                            "major", "minor"):
+                        prof.mode = parts[1].lower()
+        except Exception:  # noqa: BLE001 - seed is a bonus, not the path
+            pass
+        try:
+            producer = Producer(self.context)
+            res = producer.produce_from_profile(
+                prof,
+                source_note=f"seeded by your music voice note ({seed_note}).")
+            if not res.get("ok"):
+                return f"couldn't produce: {res.get('reason', '?')}"
+            ref_profile = res.get("profile")
+            if ref_profile is not None:
+                try:
+                    store = load_taste(getattr(self, "context", None))
+                    store.record_production(ref_profile, source="musicnote",
+                                            ref=seed_note)
+                except Exception:  # noqa: BLE001 - taste is a bonus
+                    pass
+            try:
+                if res.get("path"):
+                    from ...audio.fingerprint import index_own
+                    index_own(res["path"], title=str(res.get("title", "")),
+                              artist="Devon")
+            except Exception:  # noqa: BLE001 - indexing is a bonus
+                pass
+            lines = [f"🎛 produced from your voice note: {res['title']} — "
+                     f"{res['bpm']:g} BPM, {res['key']} {res['mode']}"]
+            lines.append(res["notes"])
+            text = "\n".join(lines)
+            chat = self._ref_from_key(chat_key) if chat_key else None
+            if chat is not None and res.get("path"):
+                try:
+                    self.gateway.send_file(
+                        chat.platform, f"{chat.platform}:{chat.chat_id}",
+                        res["path"], caption=f"🎛 {res['title']} (original)")
+                except Exception:  # noqa: BLE001
+                    pass
+            return text
+        except Exception as exc:  # noqa: BLE001 - never raises
+            return f"couldn't produce: {exc}"
+
     def _produce_hook(self, message: Any) -> str | None:
         """NL music production for the owner DM (non-slash only).
 
