@@ -27,6 +27,12 @@ themselves. It adds:
   + reconciled end-of-day agenda.
 * :mod:`nomorals.agency.supervision` — boot reconcile: lease recovery,
   missed-check coalescing, idempotent watch re-registration.
+* :mod:`nomorals.agency.adapters` — real organ adapters for the domain
+  loops (deals / weather / news / social / leads / gigs / planner),
+  organs injected by the caller, never imported (agency is L0).
+* :mod:`nomorals.agency.proactive` — proactive triggers: systems
+  notice events / changes / silence and initiate work through the
+  initiative lifecycle + rotation, with durable dedupe state.
 * :mod:`nomorals.agency.expansion` — second-wave autonomy: the REST
   of the repo (media, code, books, games, commerce, health, travel,
   property, legal, finance, learn, marketing, community, characters,
@@ -59,6 +65,12 @@ from .supervision import BootSupervisor
 from .knowledge import KnowledgeStore
 from .rotation import RotationScheduler, SystemSlot, WorkResult
 from .systems import ActiveSystems, SYSTEM_NAMES, SYSTEM_WEIGHTS
+from .adapters import (
+    AgencyAuthority, DealsAdapter, WeatherAdapter, NewsAdapter,
+    SocialAdapter, LeadsAdapter, GigsAdapter, PlannerAdapter,
+    build_adapters,
+)
+from .proactive import Trigger, fire_triggers, scan_proactive
 from .expansion import ExpansionSystems, EXPANSION_SYSTEMS, EXPANSION_WEIGHTS
 from .sourcehealth import SourceHealth, SourceRecord, SourceSpec, check_one
 from .sources_registry import collect as collect_sources, spec_by_key
@@ -73,6 +85,9 @@ __all__ = [
     "BootSupervisor",
     "KnowledgeStore", "RotationScheduler", "SystemSlot", "WorkResult",
     "ActiveSystems", "SYSTEM_NAMES", "SYSTEM_WEIGHTS",
+    "AgencyAuthority", "DealsAdapter", "WeatherAdapter", "NewsAdapter",
+    "SocialAdapter", "LeadsAdapter", "GigsAdapter", "PlannerAdapter",
+    "build_adapters", "Trigger", "fire_triggers", "scan_proactive",
     "ExpansionSystems", "EXPANSION_SYSTEMS", "EXPANSION_WEIGHTS",
     "SourceHealth", "SourceRecord", "SourceSpec", "check_one",
     "collect_sources", "spec_by_key",

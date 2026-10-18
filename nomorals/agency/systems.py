@@ -15,14 +15,20 @@ Wiring is honest, not decorative:
 
 * When a real organ is injected (``research_organ`` = a
   ``ResearchOrgan``, ``wisdom_organ`` = a ``WisdomOrgan``,
-  ``impossible`` = an ``ImpossibleMadePossible``), ``has_work`` reads
-  its REAL queue (open gaps / ingest queue / impossible queue) and
-  ``tick`` runs its REAL ``tick()`` / queue work.
+  ``impossible`` = an ``ImpossibleMadePossible``, or an ``adapters``
+  dict of real organ adapters), ``has_work`` reads REAL queues and
+  ``tick`` runs REAL organ work.
 * Without an injected organ, the system works its initiative
   lifecycle (standing watch checks + knowledge deposits) and reports
   the organ as unavailable — it never fabricates organ output.
 * A system with no useful work stands down: ``has_work`` False means
   the rotation never picks it and it consumes no budget.
+
+Proactive (human-worker) behavior: systems don't wait to be poked.
+``scan_proactive`` observes every system through its adapter, turns
+triggers into initiatives, and the rotation then WORKS them —
+``work_shift`` is observe → see what needs doing → do it → verify →
+follow through → look for the next thing, with no prompt.
 """
 from __future__ import annotations
 
@@ -33,6 +39,11 @@ from .initiatives import Initiative, InitiativeStore
 from .knowledge import KnowledgeStore
 from .rotation import RotationScheduler, SystemSlot, WorkResult
 from .deliberation import DeliberationLoop
+from .domains import LEAD_TRANSITIONS, social_next_action
+from .proactive import (
+    detect_triggers, fire_triggers, load_proactive_state,
+    save_proactive_state,
+)
 
 __all__ = ["ActiveSystems", "SYSTEM_NAMES", "SYSTEM_WEIGHTS"]
 
@@ -55,7 +66,9 @@ class ActiveSystems:
                  knowledge: KnowledgeStore | None = None,
                  research_organ: Any | None = None,
                  wisdom_organ: Any | None = None,
-                 impossible: Any | None = None) -> None:
+                 impossible: Any | None = None,
+                 adapters: dict[str, Any] | None = None,
+                 authority: Any | None = None) -> None:
         self.db = db
         self.store = store or InitiativeStore(db)
         self.knowledge = knowledge or KnowledgeStore(db)
@@ -67,6 +80,21 @@ class ActiveSystems:
         self._research_organ = research_organ
         self._wisdom_organ = wisdom_organ
         self._impossible = impossible
+        #: Real organ adapters, keyed by system name (+ "planner").
+        #: Organ-less adapters degrade to empty observations.
+        self.adapters = dict(adapters or {})
+        #: Standing authority (AgencyAuthority) — consulted at
+        #: execution time, never widened by this layer.
+        self.authority = authority
+        #: Durable proactive detector state (survives restarts).
+        self._proactive_state = load_proactive_state(db)
+        #: Execution hints keyed by initiative dedupe_key. Hints only:
+        #: handlers re-derive from live adapter state when missing
+        #: (payloads don't survive a restart).
+        self._trigger_payloads: dict[str, dict[str, Any]] = {}
+
+    def _persist_state(self) -> None:
+        save_proactive_state(self.db, self._proactive_state)
 
     def names(self) -> list[str]:
         return list(SYSTEM_NAMES)
@@ -95,6 +123,12 @@ class ActiveSystems:
                 return it
         return None
 
+    def _trigger_initiatives(self, name: str) -> list[Initiative]:
+        out = [it for it in self.store.list_active()
+               if it.objective == name
+               and it.kind == "evidence_opportunity"]
+        return sorted(out, key=lambda i: i.created_at)
+
     # ── real-organ queue checks (honest has_work) ──────────────────
     def _organ_pending(self, name: str) -> int:
         try:
@@ -117,26 +151,111 @@ class ActiveSystems:
             return 0
         return 0
 
+    def _adapter_pending(self, name: str) -> int:
+        """Cheap pending-work read from an injected adapter (guarded)."""
+        adapter = self.adapters.get(name)
+        if adapter is None:
+            return 0
+        try:
+            if name == "deals":
+                return len(adapter.check_alerts() or [])
+            if name == "weather":
+                return len(adapter.places() or [])
+            if name == "leads":
+                return len(adapter.live_leads() or [])
+            if name == "gigs":
+                return len(adapter.follow_ups_due() or [])
+            if name == "planner":
+                return len(adapter.pending_graphs() or [])
+        except Exception:  # noqa: BLE001 - adapter failure = no work
+            return 0
+        return 0
+
     def has_work(self, name: str) -> bool:
         if name in ("research", "wisdom", "impossible"):
             if self._organ_pending(name) > 0:
                 return True
+        if self._trigger_initiatives(name):
+            return True
+        if self._adapter_pending(name) > 0:
+            return True
         return self._system_initiative(name) is not None
+
+    # ── proactive: observe → initiate ──────────────────────────────
+    def _detector_source(self, name: str) -> Any:
+        if name in ("deals", "weather", "news", "social", "leads", "gigs",
+                    "planner"):
+            return self.adapters.get(name)
+        if name == "research":
+            if self._research_organ is not None:
+                return self._research_organ
+            try:
+                rows = self.db.query(
+                    "SELECT id FROM knowledge_gaps WHERE status='open' "
+                    "LIMIT 50") or []
+                return {"gaps": [{"id": r.get("id", "")} for r in rows],
+                        "watches": []}
+            except Exception:  # noqa: BLE001
+                return {"gaps": [], "watches": []}
+        if name == "wisdom":
+            if self._wisdom_organ is not None:
+                return self._wisdom_organ
+            try:
+                rows = self.db.query(
+                    "SELECT id FROM wisdom_ingest_queue "
+                    "WHERE status='queued' LIMIT 50") or []
+                return {"queued": len(rows)}
+            except Exception:  # noqa: BLE001
+                return {"queued": 0}
+        if name == "impossible":
+            return self._impossible
+        if name == "digestion":
+            return {"knowledge_count": self.knowledge.count()}
+        if name == "planner":
+            return {"initiatives": self.store.list_active()}
+        return None
+
+    def _detector_places(self, name: str) -> list[str]:
+        if name != "weather":
+            return []
+        adapter = self.adapters.get("weather")
+        if adapter is None:
+            return []
+        try:
+            return list(adapter.places() or [])
+        except Exception:  # noqa: BLE001
+            return []
+
+    def scan_proactive(self, *, now: float | None = None) -> list[Any]:
+        """Observe every system, turn triggers into initiatives."""
+        now = time.time() if now is None else now
+        fired_all = []
+        for name in SYSTEM_NAMES:
+            triggers = detect_triggers(
+                name, self._detector_source(name), self._proactive_state,
+                now=now, places=self._detector_places(name))
+            if not triggers:
+                continue
+            fired = fire_triggers(self.store, triggers, now)
+            for t in triggers:
+                self._trigger_payloads[t.dedupe_key] = t.payload
+            fired_all.extend(triggers)
+        self._persist_state()
+        return fired_all
 
     # ── one unit of work per system ────────────────────────────────
     def tick(self, name: str, *, budget_s: float = 60.0,
              now: float | None = None) -> WorkResult:
         now = time.time() if now is None else now
+        try:
+            return self._tick_inner(name, budget_s=budget_s, now=now)
+        finally:
+            self._persist_state()
+
+    def _tick_inner(self, name: str, *, budget_s: float,
+                    now: float) -> WorkResult:
         if name == "planner":
-            chosen = DeliberationLoop(self.store).choose(now=now, capacity=3)
-            if chosen:
-                self.knowledge.deposit(
-                    "planner",
-                    f"deliberation chose {len(chosen)} initiatives: "
-                    + ", ".join(c.outcome for c in chosen)[:400],
-                    source="agency:planner")
-                return WorkResult(useful=True, work_key=f"planner:{int(now)}")
-            return WorkResult(useful=False)
+            return self._tick_planner(now, budget_s)
         if name == "digestion":
             return self._tick_digestion(now)
         if name == "research" and self._research_organ is not None:
@@ -162,10 +281,114 @@ class ActiveSystems:
             except Exception:  # noqa: BLE001
                 pass
             return WorkResult(useful=False)
-        # Generic standing-watch turn: check the system's initiative,
-        # deposit what was observed, advance its wake-up. This is real
-        # bookkeeping work (a checked watch), never fabricated output.
-        it = self._system_initiative(name)
+        if name == "impossible" and self._impossible is not None:
+            return self._tick_impossible(now)
+        if name in SYSTEM_NAMES:
+            return self._tick_domain(name, now)
+        # Unknown system: standing-watch bookkeeping only.
+        return self._tick_standing_watch(name, now)
+
+    def _tick_planner(self, now: float, budget_s: float) -> WorkResult:
+        # A pending plan graph is real work: execute ONE first.
+        adapter = self.adapters.get("planner")
+        if adapter is not None:
+            try:
+                graphs = adapter.pending_graphs() or []
+            except Exception:  # noqa: BLE001
+                graphs = []
+            if graphs:
+                try:
+                    result = adapter.execute_graph(graphs[0])
+                except Exception as exc:  # noqa: BLE001
+                    result = {"completed": [], "failed": [str(exc)],
+                              "attempts": 0}
+                self.knowledge.deposit(
+                    "planner",
+                    f"plan graph executed: {len(result.get('completed', []))} "
+                    f"completed, {len(result.get('failed', []))} failed",
+                    source="agency:planner")
+                return WorkResult(useful=True, work_key=f"planner:{int(now)}")
+        # Else deliberation: choose the next initiatives to work.
+        chosen = DeliberationLoop(self.store).choose(now=now, capacity=3)
+        if chosen:
+            self.knowledge.deposit(
+                "planner",
+                f"deliberation chose {len(chosen)} initiatives: "
+                + ", ".join(c.outcome for c in chosen)[:400],
+                source="agency:planner")
+            return WorkResult(useful=True, work_key=f"planner:{int(now)}")
+        return WorkResult(useful=False)
+
+    def _tick_impossible(self, now: float) -> WorkResult:
+        try:
+            queued = self._impossible.queue_list(status="queued") or []
+        except Exception:  # noqa: BLE001
+            queued = []
+        if not queued:
+            return self._tick_standing_watch("impossible", now)
+        claim = queued[0]
+        claim_id = str(claim.get("id", "") if isinstance(claim, dict)
+                       else getattr(claim, "id", ""))
+        try:
+            result = self._impossible.attempt(claim_id)
+        except Exception as exc:  # noqa: BLE001
+            result = {"ok": False, "error": str(exc)}
+        self.knowledge.deposit(
+            "impossible",
+            f"attempted impossible claim {claim_id}: "
+            f"{str(result)[:400]}",
+            source="agency:impossible")
+        # Complete the matching trigger initiative with verification.
+        for it in self._trigger_initiatives("impossible"):
+            payload = self._trigger_payloads.get(it.dedupe_key, {})
+            if payload.get("claim_id", claim_id) == claim_id:
+                self.store.complete(
+                    it.id, stop_reason="impossible claim attempted",
+                    verification={"claim_id": claim_id,
+                                  "attempt": str(result)[:1000]})
+                break
+        return WorkResult(useful=True, work_key=f"impossible:{int(now)}")
+
+    def _tick_weather_baseline(self, now: float) -> list[Any]:
+        """Weather first-sight: deposit baselines (no trigger yet)."""
+        triggers = detect_triggers(
+            "weather", self._detector_source("weather"),
+            self._proactive_state, now=now,
+            places=self._detector_places("weather"))
+        for t in triggers:
+            self._trigger_payloads[t.dedupe_key] = t.payload
+        return triggers
+
+    def _tick_domain(self, name: str, now: float) -> WorkResult:
+        # Work the oldest trigger initiative first (follow-through).
+        triggers = self._trigger_initiatives(name)
+        if triggers:
+            return self._work_trigger(triggers[0], now)
+        # None pending: observe now — a new trigger may initiate work.
+        if name == "weather":
+            fresh = self._tick_weather_baseline(now)
+        else:
+            fresh = detect_triggers(
+                name, self._detector_source(name), self._proactive_state,
+                now=now, places=self._detector_places(name))
+            for t in fresh:
+                self._trigger_payloads[t.dedupe_key] = t.payload
+        if fresh:
+            fired = fire_triggers(self.store, fresh, now)
+            return self._work_trigger(fired[0], now)
+        return self._tick_standing_watch(name, now)
+
+    def _tick_standing_watch(self, name: str, now: float) -> WorkResult:
+        # Generic standing-watch turn: check the system's standing
+        # initiative, deposit what was observed, advance its wake-up.
+        # Real bookkeeping (a checked watch), never fabricated output.
+        it = None
+        for cand in self.store.list_active():
+            if cand.objective == name and cand.kind == "standing":
+                it = cand
+                break
+        if it is None:
+            it = self._system_initiative(name)
         if it is None:
             return WorkResult(useful=False)
         deposited = self.knowledge.deposit(
@@ -186,16 +409,296 @@ class ActiveSystems:
             f"{it.evidence[:400]}", source="agency:digestion")
         return WorkResult(useful=deposited, work_key=f"digestion:{it.id}")
 
+    # ── working one trigger initiative ─────────────────────────────
+    def _work_trigger(self, it: Initiative, now: float) -> WorkResult:
+        try:
+            return self._work_trigger_inner(it, now)
+        except Exception as exc:  # noqa: BLE001 - trigger work never crashes
+            self.store.advance(
+                it.id, next_review_at=now + 3600,
+                blocker=f"trigger work failed: {exc}")
+            return WorkResult(useful=False, work_key=f"{it.objective}:{it.id}")
+
+    def _work_trigger_inner(self, it: Initiative, now: float) -> WorkResult:
+        name = it.objective
+        payload = self._trigger_payloads.get(it.dedupe_key) or {}
+        if name == "deals":
+            return self._work_deals_trigger(it, payload, now)
+        if name == "weather":
+            return self._work_weather_trigger(it, payload, now)
+        if name == "news":
+            return self._work_news_trigger(it, payload, now)
+        if name == "social":
+            return self._work_social_trigger(it, payload, now)
+        if name == "leads":
+            return self._work_leads_trigger(it, payload, now)
+        if name == "gigs":
+            return self._work_gigs_trigger(it, payload, now)
+        # Research / wisdom / impossible / digestion / planner triggers
+        # are worked by their organ ticks, not per-trigger handlers:
+        # note the trigger, keep the lifecycle moving.
+        self.store.advance(it.id, next_review_at=now + 3600,
+                            evidence=f"{name} trigger noted; organ tick "
+                                     "handles execution")
+        return WorkResult(useful=True, work_key=f"{name}:{it.id}")
+
+    def _work_deals_trigger(self, it: Initiative, payload: dict,
+                            now: float) -> WorkResult:
+        adapter = self.adapters.get("deals")
+        if adapter is None:
+            self.store.advance(it.id, next_review_at=now + 3600,
+                                blocker="no deals adapter injected")
+            return WorkResult(useful=False, work_key=f"deals:{it.id}")
+        alert = payload.get("alert") or {}
+        if not alert:
+            alerts = adapter.check_alerts() or []
+            alert = alerts[0] if alerts else {}
+        product = str(alert.get("product", alert.get("query", "")))
+        if not product:
+            self.store.advance(it.id, next_review_at=now + 3600,
+                                blocker="deal trigger has no product")
+            return WorkResult(useful=False, work_key=f"deals:{it.id}")
+        need: dict[str, Any] = dict(alert.get("need") or {})
+        need.setdefault("product", product)
+        need.setdefault("needed", True)
+        for key in ("shipping", "fees", "historical_low"):
+            if key in alert:
+                need.setdefault(key, alert[key])
+        result = adapter.check_need(need)
+        evaluation = result.get("evaluation") or {}
+        observed = result.get("observed") or {}
+        self.knowledge.deposit(
+            "deals",
+            f"deal check {product}: {evaluation.get('reason', '')} "
+            f"(landed {observed.get('landed_price')}, "
+            f"historical low {observed.get('historical_low')})",
+            source="agency:deals")
+        if evaluation.get("is_saving"):
+            amount = float(observed.get("landed_price", 0) or 0)
+            if self.authority is not None \
+                    and self.authority.can_spend(amount):
+                self.store.complete(
+                    it.id, stop_reason="deal verified: saving within mandate",
+                    verification={"product": product, "observed": observed,
+                                  "evaluation": evaluation})
+                return WorkResult(useful=True, work_key=f"deals:{it.id}")
+            reason = self.authority.spend_reason(amount) \
+                if self.authority is not None else \
+                "no authority configured — cannot verify spending"
+            self.store.advance(
+                it.id, next_review_at=now + 3600,
+                blocker=f"saving verified but {reason} (no purchase made)")
+            return WorkResult(useful=True, work_key=f"deals:{it.id}")
+        self.store.complete(
+            it.id, stop_reason="deal checked: not a saving",
+            verification={"product": product, "observed": observed,
+                          "evaluation": evaluation})
+        return WorkResult(useful=True, work_key=f"deals:{it.id}")
+
+    def _work_weather_trigger(self, it: Initiative, payload: dict,
+                              now: float) -> WorkResult:
+        adapter = self.adapters.get("weather")
+        place = str(payload.get("place", ""))
+        if not place:
+            places = self._detector_places("weather")
+            place = places[0] if places else ""
+        if adapter is None or not place:
+            self.store.advance(it.id, next_review_at=now + 3600,
+                                blocker="no weather adapter / place configured")
+            return WorkResult(useful=False, work_key=f"weather:{it.id}")
+        snap = adapter.snapshot(place) or {}
+        alerts = snap.get("alerts") or []
+        self.knowledge.deposit(
+            "weather",
+            f"weather briefing for {place}: "
+            f"{len(snap.get('days') or [])} forecast days, "
+            f"{len(alerts)} alerts — "
+            + "; ".join(a.get("text", "") for a in alerts)[:300],
+            source="agency:weather")
+        self.store.complete(
+            it.id, stop_reason="weather change briefed",
+            verification={"place": place, "days": len(snap.get("days") or []),
+                          "alerts": alerts})
+        return WorkResult(useful=True, work_key=f"weather:{it.id}")
+
+    def _work_news_trigger(self, it: Initiative, payload: dict,
+                           now: float) -> WorkResult:
+        adapter = self.adapters.get("news")
+        if adapter is None:
+            self.store.advance(it.id, next_review_at=now + 3600,
+                                blocker="no news adapter injected")
+            return WorkResult(useful=False, work_key=f"news:{it.id}")
+        digest = adapter.fetch_digest() or {}
+        clusters = adapter.clusters() or []
+        self.knowledge.deposit(
+            "news",
+            f"news digest: {len(clusters)} story clusters; "
+            f"digest keys: {', '.join(sorted(digest.keys())[:8])}",
+            source="agency:news")
+        self.store.complete(
+            it.id, stop_reason="news digest deposited",
+            verification={"clusters": len(clusters),
+                          "digest_keys": sorted(digest.keys())[:8]})
+        return WorkResult(useful=True, work_key=f"news:{it.id}")
+
+    def _work_social_trigger(self, it: Initiative, payload: dict,
+                             now: float) -> WorkResult:
+        adapter = self.adapters.get("social")
+        if adapter is None:
+            self.store.advance(it.id, next_review_at=now + 3600,
+                                blocker="no social adapter injected")
+            return WorkResult(useful=False, work_key=f"social:{it.id}")
+        backlog = adapter.backlog() or {}
+        if backlog.get("stop_signal"):
+            self.store.complete(
+                it.id, stop_reason="social silence honoured (stop signal)",
+                verification={"backlog": backlog})
+            return WorkResult(useful=True, work_key=f"social:{it.id}")
+        if not backlog.get("cadence_ok", True):
+            self.store.complete(
+                it.id, stop_reason="social silence honoured (cadence closed)",
+                verification={"backlog": backlog})
+            return WorkResult(useful=True, work_key=f"social:{it.id}")
+        action = social_next_action(
+            unanswered=int(backlog.get("unanswered", 0) or 0),
+            promised_replies=int(backlog.get("promised_replies", 0) or 0),
+            milestones=int(backlog.get("milestones", 0) or 0),
+            stop_signal=False, cadence_ok=True)
+        draft = adapter.draft_for(action)
+        decision = self.authority.may_post(draft=str(draft)) \
+            if self.authority is not None else None
+        if decision is not None and decision.allowed:
+            published = adapter.publish_due() or []
+            self.knowledge.deposit(
+                "social", f"social published {len(published)} due posts",
+                source="agency:social")
+            self.store.complete(
+                it.id, stop_reason="social action published",
+                verification={"draft": draft,
+                              "published": len(published)})
+            return WorkResult(useful=True, work_key=f"social:{it.id}")
+        if decision is not None:
+            blocker = ("post needs approval: "
+                       f"{decision.reason} "
+                       f"(proposal {getattr(decision, 'proposal_id', '') or '—'})")
+        else:
+            blocker = "no authority configured — draft held, nothing sent"
+        self.store.advance(it.id, next_review_at=now + 3600,
+                            blocker=blocker,
+                            evidence=f"draft ready: {draft}")
+        self.knowledge.deposit(
+            "social", f"social draft held for approval: {action}",
+            source="agency:social")
+        return WorkResult(useful=True, work_key=f"social:{it.id}")
+
+    def _work_leads_trigger(self, it: Initiative, payload: dict,
+                            now: float) -> WorkResult:
+        adapter = self.adapters.get("leads")
+        if adapter is None:
+            self.store.advance(it.id, next_review_at=now + 3600,
+                                blocker="no leads adapter injected")
+            return WorkResult(useful=False, work_key=f"leads:{it.id}")
+        lead = dict(payload.get("lead") or {})
+        if not lead:
+            live = adapter.live_leads() or []
+            lead = live[0] if live else {}
+        if not lead:
+            self.store.advance(it.id, next_review_at=now + 3600,
+                                blocker="lead trigger has no lead")
+            return WorkResult(useful=False, work_key=f"leads:{it.id}")
+        kind = it.dedupe_key.split(":")[1] if ":" in it.dedupe_key else ""
+        if "quiet" in it.dedupe_key or kind == "quiet":
+            res = adapter.follow_up(lead)
+            self.knowledge.deposit(
+                "leads", f"quiet lead {lead.get('lead_id', '')} followed up",
+                source="agency:leads")
+            self.store.complete(
+                it.id, stop_reason="quiet lead followed up (draft held)",
+                verification={"lead": lead, "follow_up": res})
+            return WorkResult(useful=True, work_key=f"leads:{it.id}")
+        current = str(lead.get("stage", lead.get("status", "discovered")))
+        nxt_options = [t for t in LEAD_TRANSITIONS.get(current, frozenset())
+                       if t != "lost"]
+        if not nxt_options:
+            self.store.complete(
+                it.id, stop_reason=f"lead {current}: no forward transition",
+                verification={"lead": lead})
+            return WorkResult(useful=True, work_key=f"leads:{it.id}")
+        res = adapter.advance(lead, nxt_options[0])
+        if res.get("status") != "advanced":
+            self.store.advance(it.id, next_review_at=now + 3600,
+                                blocker=f"lead advance failed: "
+                                        f"{res.get('error', res)}")
+            return WorkResult(useful=False, work_key=f"leads:{it.id}")
+        # Contact step has no DM-send executor: the next action is a
+        # DM draft held for owner approval, recorded as a blocker.
+        self.store.advance(
+            it.id, next_review_at=now + 3600,
+            next_action=f"send approved DM draft for lead {lead.get('lead_id', '')}",
+            blocker="DM send needs owner-approved draft (no DM executor)",
+            evidence=f"lead advanced {current} → {nxt_options[0]}")
+        self.knowledge.deposit(
+            "leads",
+            f"lead {lead.get('lead_id', '')} advanced "
+            f"{current} → {nxt_options[0]}",
+            source="agency:leads")
+        return WorkResult(useful=True, work_key=f"leads:{it.id}")
+
+    def _work_gigs_trigger(self, it: Initiative, payload: dict,
+                           now: float) -> WorkResult:
+        adapter = self.adapters.get("gigs")
+        if adapter is None:
+            self.store.advance(it.id, next_review_at=now + 3600,
+                                blocker="no gigs adapter injected")
+            return WorkResult(useful=False, work_key=f"gigs:{it.id}")
+        if "followup" in it.dedupe_key:
+            gig_id = str(payload.get("gig_id", ""))
+            if not gig_id:
+                due = adapter.follow_ups_due() or []
+                gig_id = str(due[0].get("gig_id", "")) if due else ""
+            draft = adapter.follow_up_draft(gig_id) if gig_id else {}
+            self.knowledge.deposit(
+                "gigs", f"gig follow-up drafted for {gig_id}",
+                source="agency:gigs")
+            self.store.complete(
+                it.id, stop_reason="gig follow-up drafted",
+                verification={"gig_id": gig_id, "draft": draft})
+            return WorkResult(useful=True, work_key=f"gigs:{it.id}")
+        opp = dict(payload.get("opp") or {})
+        if not opp:
+            opps = adapter.scan() or []
+            opp = opps[0] if opps else {}
+        if not opp:
+            self.store.advance(it.id, next_review_at=now + 3600,
+                                blocker="gig trigger has no opportunity")
+            return WorkResult(useful=False, work_key=f"gigs:{it.id}")
+        score = adapter.score(opp)
+        draft = adapter.draft(opp)
+        self.knowledge.deposit(
+            "gigs",
+            f"gig scored {opp.get('title', opp.get('id', ''))}: "
+            f"expected_net {score.get('expected_net')} "
+            f"({score.get('recommendation', '')}), draft "
+            f"{draft.get('status', '')}",
+            source="agency:gigs")
+        self.store.complete(
+            it.id, stop_reason="gig scored + drafted",
+            verification={"opp": opp, "score": score, "draft": draft})
+        return WorkResult(useful=True, work_key=f"gigs:{it.id}")
+
     # ── rotation cycle ─────────────────────────────────────────────
     def run_cycle(self, *, budget_s: float = 600.0,
-                  now: float | None = None) -> dict[str, Any]:
-        """One rotation cycle: fair turns for every system with work.
+                  now: float | None = None,
+                  scan_first: bool = True) -> dict[str, Any]:
+        """One rotation cycle: proactive scan first, then fair turns.
 
         Urgent = planner when an overdue-critical initiative exists.
         Systems with no useful work stand down (no budget, no
         manufactured work). Duplicate work keys are claimed first.
         """
         now = time.time() if now is None else now
+        if scan_first:
+            self.scan_proactive(now=now)
         self.scheduler.cycles_run += 1
         alloc = self.scheduler.allocate_cycle(total_budget=budget_s)
         urgent: set[str] = set()
@@ -226,3 +729,18 @@ class ActiveSystems:
                 "useful_turns": useful, "stood_down": stood_down,
                 "knowledge_items": self.knowledge.count(),
                 "preemptions": self.scheduler.preemptions}
+
+    def work_shift(self) -> dict[str, Any]:
+        """One human-worker shift: observe → do → verify → next thing.
+
+        No prompt, no owner poke: scan for triggers, run a rotation
+        cycle that works them, report what happened.
+        """
+        now = time.time()
+        triggers = self.scan_proactive(now=now)
+        cycle = self.run_cycle(now=now, scan_first=False)
+        self._persist_state()
+        return {"triggers_fired": len(triggers),
+                "triggers": [f"{t.system}:{t.kind}" for t in triggers],
+                "cycle": cycle,
+                "knowledge_items": self.knowledge.count()}

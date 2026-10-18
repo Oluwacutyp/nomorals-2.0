@@ -13,6 +13,16 @@ nervous system through plain language:
   the ``TOOLS`` dict: the registry calls fns with no ``context`` arg,
   and a ``context``-taking fn would fail with TypeError (the pre-existing
   ``presence_sense`` failure mode). See ``pulse``/``briefing``.
+* ``__agency_shift__`` — scheduler-internal agency shift (observe →
+  see what needs doing → do it → verify → follow through, no prompt).
+  Same closure pattern. Builds ``ActiveSystems`` with REAL organs
+  injected into the L0 agency layer (this module is pinned L5, so it
+  may import L1–L5) and runs ``work_shift()``. Scheduled shifts run
+  under default-deny policy (observe/draft/propose, never silent
+  outbound): the persistent ``MandateStore`` DOES apply to scheduled
+  shifts, but ``Policy`` allow-rules do not persist, so silent
+  posting needs the runtime's configured ``AgencyAuthority``, not a
+  scheduled shift.
 """
 
 from __future__ import annotations
@@ -152,3 +162,96 @@ def register(registry: Any) -> None:
                      "workspace_dir", None) or "."
         db = workspace_db(ws)
         return {"ok": True, "heartbeat": heartbeat(db)}
+
+    @registry.register(
+        "__agency_shift__",
+        description="Run one agency worker shift: observe every system, "
+        "fire proactive triggers, work them through the rotation, "
+        "verify. Scheduler-internal; runs every ~30 min.",
+        capability="owner",
+    )
+    def _agency_shift_tool() -> dict[str, Any]:
+        # Real organs are constructed HERE (this module is pinned L5,
+        # so it may import L1–L5) and INJECTED into the L0 agency
+        # layer — the agency layer itself never imports organs
+        # (ARCHITECTURE.md §1 layering). Each construction is
+        # best-effort: a missing organ yields an organ-less adapter
+        # (empty observations, refused actions), never a crash.
+        import functools
+
+        from ..agency.adapters import AgencyAuthority, build_adapters
+        from ..agency.systems import ActiveSystems
+        from ..autonomy.idle import workspace_db
+
+        def _try(fn):
+            try:
+                return fn()
+            except Exception:  # noqa: BLE001 - organ unavailable
+                return None
+
+        ws = getattr(getattr(_context, "settings", None),
+                     "workspace_dir", None) or "."
+        db = workspace_db(ws)
+
+        def _news_agent():
+            from ..agents.news import NewsAgent
+            return NewsAgent(_context)
+
+        def _social_manager():
+            from ..social.manager import SocialManager
+            return SocialManager(_context) if _context is not None else None
+
+        def _gradient():
+            from ..core.policy import PermissionGradient, Policy
+            return PermissionGradient(Policy())
+
+        def _mandate_check():
+            from ..finance.mandate import MandateStore, check_mandate
+            return functools.partial(check_mandate, MandateStore())
+
+        def _weather():
+            from ..agents.weather import Weather
+            return Weather()
+
+        def _leads_store():
+            from ..social.leads import LeadStore
+            return LeadStore()
+
+        def _opp_hunter():
+            from ..agents.opportunities import OpportunityHunter
+            return OpportunityHunter()
+
+        def _applier():
+            from ..agents.gig_applier import GigApplier
+            return GigApplier()
+
+        def _payout_extractor():
+            from ..agents.opportunities import extract_payout_usd
+            return extract_payout_usd
+
+        def _opp_factory():
+            from ..agents.opportunities import Opportunity
+            return Opportunity.from_dict
+
+        def _graph_fns():
+            from ..planning.graph_missions import (
+                PlanGraph, execute_graph, plan_authoring)
+            return PlanGraph.from_dict, execute_graph, plan_authoring
+
+        graph_factory, graph_execute, graph_compile = _try(_graph_fns) or (
+            None, None, None)
+        adapters = build_adapters(
+            weather=_try(_weather), news_agent=_try(_news_agent),
+            social_manager=_try(_social_manager),
+            leads_store=_try(_leads_store),
+            opp_hunter=_try(_opp_hunter), applier=_try(_applier),
+            payout_extractor=_try(_payout_extractor),
+            opp_factory=_try(_opp_factory),
+            graph_factory=graph_factory, graph_execute_fn=graph_execute,
+            graph_compile_fn=graph_compile)
+        authority = AgencyAuthority(
+            gradient=_try(_gradient), grant=None,
+            mandate_check=_try(_mandate_check))
+        systems = ActiveSystems(db=db, adapters=adapters,
+                                authority=authority)
+        return {"ok": True, "shift": systems.work_shift()}

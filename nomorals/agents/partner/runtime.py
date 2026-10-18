@@ -1821,7 +1821,9 @@ class PartnerRuntime(
                 # the existing scheduler facade + idle coordinator.
                 try:
                     from ...agency.wiring import boot_agency
-                    self._agency = boot_agency(self.context.db)
+                    self._agency = boot_agency(
+                        self.context.db,
+                        scheduler=getattr(self, "_scheduler", None))
                 except Exception as exc:  # noqa: BLE001 - optional
                     _log.warning("agency layer not started: %s", exc)
                     self._agency = None
