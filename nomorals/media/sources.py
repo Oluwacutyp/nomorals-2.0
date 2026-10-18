@@ -48,8 +48,15 @@ __all__ = [
     "AudiomackSource",
     "NetNaijaSource",
     "BoomplaySource",
+    "ITunesSource",
+    "DeezerSource",
+    "ArchiveOrgSource",
+    "BandcampSource",
+    "NotJustOkSource",
+    "TooXclusiveSource",
     "SOURCE_CHAIN",
     "BROWSER_UA",
+    "MUSIC_SEARCH_SOURCES",
 ]
 
 #: User-Agent that looks like a real phone browser — download blogs and
@@ -402,6 +409,241 @@ class BoomplaySource(AudioSource):
         return ""  # protected streams — honestly undownloadable
 
 
+# ── keyless JSON music APIs (no key, no account) ───────────────────────
+
+class _JsonApiSource(AudioSource):
+    """Base for keyless JSON search APIs: GET → parse JSON → candidates.
+
+    Subclasses declare ``search_url`` + ``parse``.  Never raises; any
+    transport/parse failure degrades to [] so the chain keeps moving.
+    """
+
+    name = "json-api"
+
+    def search_url(self, query: str) -> str:
+        raise NotImplementedError
+
+    def parse(self, payload: Any, query: str) -> list[SourceCandidate]:
+        raise NotImplementedError
+
+    def search(self, query: str, limit: int = 8) -> list[SourceCandidate]:
+        q = (query or "").strip()
+        if not q:
+            return []
+        try:
+            import json as _json
+            raw = self._get(self.search_url(q))
+            if not raw:
+                return []
+            payload = _json.loads(raw)
+        except Exception as exc:  # noqa: BLE001 — never raises
+            _log.info("%s: search failed for %r: %s", self.name, q, exc)
+            return []
+        try:
+            out = self.parse(payload, q)
+        except Exception as exc:  # noqa: BLE001
+            _log.info("%s: parse failed for %r: %s", self.name, q, exc)
+            return []
+        _log.info("%s: %d candidates for %r", self.name, len(out), q)
+        return out[:limit]
+
+
+class ITunesSource(_JsonApiSource):
+    """iTunes Search API — keyless, official Apple endpoint.
+
+    Returns 30-second preview MP3s (``previewUrl``) + the store page
+    (``trackViewUrl``).  Previews are real downloadable files but only
+    30s — candidates carry that in ``extra`` so the resolver treats
+    them as last-resort (full tracks first, previews only when nothing
+    else hit).
+    """
+
+    name = "itunes"
+
+    def search_url(self, query: str) -> str:
+        return ("https://itunes.apple.com/search?term="
+                + urllib.parse.quote_plus(query)
+                + "&media=music&limit=10")
+
+    def parse(self, payload: Any, query: str) -> list[SourceCandidate]:
+        out: list[SourceCandidate] = []
+        for row in (payload or {}).get("results") or []:
+            if not isinstance(row, dict):
+                continue
+            preview = str(row.get("previewUrl") or "")
+            page = str(row.get("trackViewUrl") or "")
+            title = str(row.get("trackName") or "")
+            artist = str(row.get("artistName") or "")
+            if not title and not preview:
+                continue
+            out.append(SourceCandidate(
+                source=self.name, title=title or query, artist=artist,
+                url=page or preview, direct_url=preview,
+                duration=float(row.get("trackTimeMillis") or 0) / 1000.0
+                if row.get("trackTimeMillis") else 0.0,
+                downloadable=bool(preview),
+                extra={"preview_only": True,
+                       "note": "iTunes 30-second preview"}))
+        return out
+
+
+class DeezerSource(_JsonApiSource):
+    """Deezer public search API — keyless, no account.
+
+    Same shape as iTunes: 30-second preview MP3s (``preview``) + the
+    track page (``link``).  Previews are last-resort in the resolver.
+    """
+
+    name = "deezer"
+
+    def search_url(self, query: str) -> str:
+        return ("https://api.deezer.com/search?q="
+                + urllib.parse.quote_plus(query))
+
+    def parse(self, payload: Any, query: str) -> list[SourceCandidate]:
+        out: list[SourceCandidate] = []
+        for row in (payload or {}).get("data") or []:
+            if not isinstance(row, dict):
+                continue
+            preview = str(row.get("preview") or "")
+            page = str(row.get("link") or "")
+            title = str(row.get("title") or "")
+            artist = str((row.get("artist") or {}).get("name") or "")
+            if not title and not preview:
+                continue
+            out.append(SourceCandidate(
+                source=self.name, title=title or query, artist=artist,
+                url=page or preview, direct_url=preview,
+                duration=float(row.get("duration") or 0),
+                downloadable=bool(preview),
+                extra={"preview_only": True,
+                       "note": "Deezer 30-second preview"}))
+        return out
+
+
+class ArchiveOrgSource(AudioSource):
+    """Internet Archive audio — keyless, FULL downloadable files.
+
+    Search hits the ``advancedsearch`` JSON endpoint (title + mediatype
+    audio).  Candidates point at the details page; ``download_url``
+    resolves via the metadata API to the first real audio file
+    (mp3/ogg/flac/m4a) — never guessed, the file list comes from the
+    archive itself.
+    """
+
+    name = "archiveorg"
+    _SEARCH = "https://archive.org/advancedsearch.php"
+    _META = "https://archive.org/metadata/{ident}"
+
+    def search(self, query: str, limit: int = 8) -> list[SourceCandidate]:
+        q = (query or "").strip()
+        if not q:
+            return []
+        try:
+            import json as _json
+            url = (self._SEARCH + "?q="
+                   + urllib.parse.quote_plus(
+                       f"title:({q}) AND mediatype:audio")
+                   + "&fl[]=identifier&fl[]=title&fl[]=creator"
+                   + f"&rows={max(1, min(limit, 20))}&output=json")
+            raw = self._get(url)
+            if not raw:
+                return []
+            docs = (( _json.loads(raw) or {}).get("response") or {}
+                    ).get("docs") or []
+        except Exception as exc:  # noqa: BLE001
+            _log.info("archiveorg: search failed for %r: %s", q, exc)
+            return []
+        out: list[SourceCandidate] = []
+        for doc in docs:
+            if not isinstance(doc, dict):
+                continue
+            ident = str(doc.get("identifier") or "")
+            if not ident:
+                continue
+            title = str(doc.get("title") or ident)
+            artist = str(doc.get("creator") or "")
+            out.append(SourceCandidate(
+                source=self.name, title=title, artist=artist,
+                url=f"https://archive.org/details/{ident}",
+                extra={"identifier": ident,
+                       "note": "Internet Archive — full file, free"}))
+        return out
+
+    def download_url(self, candidate: SourceCandidate) -> str:
+        ident = (candidate.extra or {}).get("identifier") or ""
+        if not ident:
+            return ""
+        try:
+            import json as _json
+            raw = self._get(self._META.format(ident=ident))
+            if not raw:
+                return ""
+            files = (_json.loads(raw) or {}).get("files") or []
+        except Exception as exc:  # noqa: BLE001
+            _log.info("archiveorg: metadata failed for %s: %s", ident, exc)
+            return ""
+        for f in files:
+            if not isinstance(f, dict):
+                continue
+            name = str(f.get("name") or "")
+            if name.lower().endswith((".mp3", ".ogg", ".flac", ".m4a",
+                                       ".opus", ".wav")):
+                return (f"https://archive.org/download/{ident}/"
+                        + urllib.parse.quote(name))
+        return ""
+
+
+class BandcampSource(AudioSource):
+    """Bandcamp search — HTML, keyless.  Full-track streams via yt-dlp.
+
+    Bandcamp pages are server-rendered search results; candidates point
+    at the album/track page and yt-dlp's bandcamp extractor handles
+    download.  Honest: if the markup changes, this returns [] and the
+    chain moves on.
+    """
+
+    name = "bandcamp"
+    _SEARCH = "https://bandcamp.com/search"
+
+    def search(self, query: str, limit: int = 8) -> list[SourceCandidate]:
+        q = (query or "").strip()
+        if not q:
+            return []
+        html = self._get(f"{self._SEARCH}?q={urllib.parse.quote_plus(q)}")
+        if not html:
+            return []
+        out: list[SourceCandidate] = []
+        seen: set[str] = set()
+        for m in re.finditer(
+                r'href="(https?://[a-z0-9.-]+\.bandcamp\.com/(?:album|track)/[^"]+)"[^>]*>(.*?)</a',
+                html, re.S | re.I):
+            url = m.group(1)
+            title = BaseScrapeSource._clean(re.sub(r"<[^>]+>", "", m.group(2)))
+            if len(title) < 3 or url in seen:
+                continue
+            seen.add(url)
+            out.append(SourceCandidate(source=self.name, title=title, url=url))
+            if len(out) >= limit:
+                break
+        _log.info("bandcamp: %d candidates for %r", len(out), q)
+        return out
+
+
+class NotJustOkSource(NetNaijaSource):
+    """NotJustOk — Nigerian music/news blog (WordPress ?s= search)."""
+
+    name = "notjustok"
+    _BASE = "https://notjustok.com"
+
+
+class TooXclusiveSource(NetNaijaSource):
+    """TooXclusive — Nigerian music/charts blog (WordPress ?s= search)."""
+
+    name = "tooxclusive"
+    _BASE = "https://tooxclusive.com"
+
+
 # ── the chain ─────────────────────────────────────────────────────────────
 
 #: Text-search priority for /play.  Nigerian sources first (direct MP3s
@@ -409,9 +651,33 @@ class BoomplaySource(AudioSource):
 #: Each entry: (strategy name, source instance or None for legacy paths).
 SOURCE_CHAIN: list[tuple[str, AudioSource]] = [
     ("netnaija-search", NetNaijaSource()),
+    ("notjustok-search", NotJustOkSource()),
+    ("tooxclusive-search", TooXclusiveSource()),
     ("boomplay-search", BoomplaySource()),
+    ("bandcamp-search", BandcampSource()),
+    ("archiveorg-search", ArchiveOrgSource()),
+    ("itunes-search", ITunesSource()),
+    ("deezer-search", DeezerSource()),
     # soundcloud-search / youtube-search / spotify-search stay on their
     # existing paths in resolver.py (API adapters + yt-dlp) — they are
     # proven and this module does not duplicate them.
     # audiomack is URL-first-class (no keyless text search exists).
 ]
+
+#: Every text-search source /play tries, in chain order.  The resolver
+#: builds its chain from this list so the count is single-sourced and
+#: testable — the owner rule is MANY sources, never 1–2.
+MUSIC_SEARCH_SOURCES: tuple[str, ...] = (
+    "workspace-scan",
+    "netnaija-search",
+    "notjustok-search",
+    "tooxclusive-search",
+    "soundcloud-search",
+    "bandcamp-search",
+    "youtube-search",
+    "archiveorg-search",
+    "itunes-search",
+    "deezer-search",
+    "boomplay-search",
+    "spotify-search",
+)

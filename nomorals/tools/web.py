@@ -1,8 +1,11 @@
 """Web tools: fetch, search, extract, and download.
 
-Search is multi-engine: DuckDuckGo's HTML endpoints stay primary and Bing's
-HTML search is an automatic fallback whenever DDG returns nothing or errors —
-DDG's scrapes break often enough that a lone-engine search is a coin flip.
+Search is multi-engine and AGGREGATING: every engine is tried and its
+results merged + deduped — never break on the first engine with results
+(the old behaviour meant a search effectively used ONE source).  Engines:
+DuckDuckGo HTML, DDG lite, Bing, Mojeek, Ecosia, Yahoo, Startpage,
+Yandex.  One engine failing or returning nothing never ends the search;
+the chain continues through ALL of them.
 
 Fetch detects the page charset (Content-Type header first, then ``<meta>``)
 instead of blindly assuming UTF-8. ``web_extract`` adds readability-style
@@ -186,35 +189,20 @@ def register(registry: Any) -> None:
 
     @registry.register(
         "web_search",
-        description="Search the web (DuckDuckGo primary, Bing automatic fallback; no API key) and return ranked links.",
+        description="Search the web across MANY engines (DuckDuckGo, DDG lite, Bing, Mojeek, Ecosia, Yahoo, Startpage, Yandex — all aggregated + deduped; no API key) and return ranked links.",
         capability=Capability.NET_OUT,
     )
     def web_search(query: str, *, max_results: int = 8, site: str = "", freshness: str = "") -> dict[str, Any]:
         needle = f"{query} site:{site}" if site else query
-        encoded = urllib.parse.quote_plus(needle)
-        results: list[dict[str, str]] = []
-        engines_used: list[str] = []
-        for engine, endpoint, parser in (
-            ("duckduckgo", f"https://html.duckduckgo.com/html/?q={encoded}", _parse_results),
-            ("duckduckgo-lite", f"https://lite.duckduckgo.com/lite/?q={encoded}", _parse_results),
-            ("bing", f"https://www.bing.com/search?q={encoded}&count=10", _parse_bing),
-        ):
-            try:
-                response = search_client.get(endpoint)
-            except Exception as exc:  # noqa: BLE001 - try the next engine
-                _log.debug("search engine %s failed: %s", engine, classify(exc).message)
-                continue
-            got = parser(response.text)
-            if got:
-                engines_used.append(engine)
-                results.extend(got)
-                break  # primary engine hit: no need to consult the fallback
-            _log.debug("search engine %s returned no results; falling back", engine)
+        results, engines_used, engines_failed = _run_engines(
+            search_client, needle)
         results = _dedupe_results(results)
         return {
             "query": needle,
             "count": len(results[:max_results]),
             "engines": engines_used,
+            "engines_tried": list(_SEARCH_ENGINES),
+            "engines_failed": engines_failed,
             "results": results[:max_results],
         }
 
@@ -428,6 +416,86 @@ def _html_to_markdown(html: str) -> str:
 
 # ── search ───────────────────────────────────────────────────────────────────
 
+#: Every search engine web_search aggregates, in order.  All are keyless
+#: HTML endpoints — no API key, no account.  The list is single-sourced
+#: so tests can count it (owner rule: MANY sources, never 1–2).
+_SEARCH_ENGINES: tuple[str, ...] = (
+    "duckduckgo",
+    "duckduckgo-lite",
+    "bing",
+    "mojeek",
+    "ecosia",
+    "yahoo",
+    "startpage",
+    "yandex",
+)
+
+#: Host fragments that mark a link as the engine's own chrome, not a
+#: result — the generic parser drops these.
+_ENGINE_CHROME_HOSTS = (
+    "duckduckgo.com", "lite.duckduckgo.com", "bing.com", "mojeek.com",
+    "ecosia.org", "search.yahoo.com", "yahoo.com", "startpage.com",
+    "yandex.com", "yandex.ru", "microsoft.com", "msn.com",
+)
+
+
+def _engine_url(engine: str, encoded: str) -> str:
+    return {
+        "duckduckgo": f"https://html.duckduckgo.com/html/?q={encoded}",
+        "duckduckgo-lite": f"https://lite.duckduckgo.com/lite/?q={encoded}",
+        "bing": f"https://www.bing.com/search?q={encoded}&count=10",
+        "mojeek": f"https://www.mojeek.com/search?q={encoded}",
+        "ecosia": f"https://www.ecosia.org/search?q={encoded}",
+        "yahoo": f"https://search.yahoo.com/search?p={encoded}",
+        "startpage": f"https://www.startpage.com/sp/search?query={encoded}",
+        "yandex": f"https://yandex.com/search/?text={encoded}",
+    }[engine]
+
+
+def _engine_parser(engine: str) -> Any:
+    return {
+        "duckduckgo": _parse_results,
+        "duckduckgo-lite": _parse_results,
+        "bing": _parse_bing,
+        "mojeek": _parse_mojeek,
+        "ecosia": _parse_generic,
+        "yahoo": _parse_generic,
+        "startpage": _parse_generic,
+        "yandex": _parse_generic,
+    }[engine]
+
+
+def _run_engines(client: Any, needle: str) -> tuple[
+        list[dict[str, str]], list[str], list[str]]:
+    """Run ALL engines, merge results.  One engine failing or returning
+    nothing never ends the search — the chain continues through all of
+    them.  Returns (results, engines_with_results, engines_failed)."""
+    encoded = urllib.parse.quote_plus(needle)
+    results: list[dict[str, str]] = []
+    used: list[str] = []
+    failed: list[str] = []
+    for engine in _SEARCH_ENGINES:
+        try:
+            response = client.get(_engine_url(engine, encoded))
+        except Exception as exc:  # noqa: BLE001 - try the next engine
+            _log.debug("search engine %s failed: %s", engine,
+                       classify(exc).message)
+            failed.append(engine)
+            continue
+        try:
+            got = _engine_parser(engine)(response.text)
+        except Exception as exc:  # noqa: BLE001 - a parser bug must not
+            # kill the other engines
+            _log.debug("search engine %s parser failed: %s", engine, exc)
+            failed.append(engine)
+            continue
+        if got:
+            used.append(engine)
+            results.extend(got)
+        else:
+            _log.debug("search engine %s returned no results", engine)
+    return results, used, failed
+
 
 def _normalize_url(url: str) -> str:
     """Canonical form for dedupe: scheme + lowercased host + bare path."""
@@ -524,6 +592,44 @@ def _parse_mojeek(markup: str) -> list[dict[str, str]]:
         if parsed.scheme not in {"http", "https"} or not parsed.netloc or not title:
             continue
         out.append({"url": href, "title": title, "snippet": ""})
+    return out
+
+
+def _parse_generic(markup: str) -> list[dict[str, str]]:
+    """Generic result parser for engines without a dedicated parser
+    (Ecosia, Yahoo, Startpage, Yandex).
+
+    Extracts outbound <a> links with real titles, dropping the engine's
+    own chrome (nav, ads, search-internal links) by host.  Defensive by
+    design: an engine that changes markup yields [] for that engine,
+    never a crash, and the other engines still contribute.
+    """
+    out: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for match in re.finditer(
+        r'(?is)<a[^>]+href="([^"]+)"[^>]*>(.*?)</a>', markup or ""
+    ):
+        href = html.unescape(match.group(1)).strip()
+        title = html.unescape(_TAGS.sub("", match.group(2))).strip()
+        title = re.sub(r"\s+", " ", title)
+        if href.startswith("//"):
+            href = "https:" + href
+        if href.startswith("/"):
+            continue  # relative link — engine-internal, not a result
+        parsed = urllib.parse.urlparse(href)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            continue
+        host = parsed.netloc.lower()
+        if any(chrome in host for chrome in _ENGINE_CHROME_HOSTS):
+            continue
+        if len(title) < 10 or len(title) > 300:
+            continue
+        if href in seen:
+            continue
+        seen.add(href)
+        out.append({"url": href, "title": title, "snippet": ""})
+        if len(out) >= 20:
+            break
     return out
 
 

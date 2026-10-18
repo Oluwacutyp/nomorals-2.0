@@ -576,9 +576,6 @@ class RuntimeMediaMixin:
                 if not resolution.ok:
                     # Step 6: never a dead end — tried + why + hint via
                     # PlayService (pure formatting, no extra network).
-                    # explain_failure ALREADY appends "hint: ..." — do
-                    # NOT append resolution.hint again here (that
-                    # printed the hint twice).
                     try:
                         from ...media.play_service import PlayService
                         detail = PlayService(
@@ -587,7 +584,9 @@ class RuntimeMediaMixin:
                         detail = ("tried: "
                                   + ("; ".join(resolution.attempts)
                                      or "no strategies"))
-                    return (f"couldn't find {rest[:80]!r} —\n{detail}")
+                    hint = (f"\n{resolution.hint}"
+                            if resolution.hint else "")
+                    return (f"couldn't find {rest[:80]!r} —\n{detail}{hint}")
                 added = []
                 for r in (resolution, *resolution.extra_tracks):
                     added.append(engine._enqueue(
@@ -597,6 +596,13 @@ class RuntimeMediaMixin:
                 out = (f"queued {len(added)} (queue {queue_len}):\n"
                        + "\n".join(f"  - {a.get('title') or a['path']}"
                                    for a in added))
+                # Sources tried — visible, so the user sees MANY sources
+                # were consulted, not 1–2.  Attempts already record
+                # every strategy in order (failed + the winner).
+                tried = [a for a in (resolution.attempts or [])]
+                if tried:
+                    out += ("\nsources tried "
+                            f"({len(tried)}): " + "; ".join(tried))
                 # Chat context: SEND the audio file instead of local mpv.
                 # Nobody hears the server's speakers — the user gets the track.
                 if action == "play" and chat is not None:
@@ -1190,109 +1196,6 @@ class RuntimeMediaMixin:
         except Exception:  # noqa: BLE001 - best-effort
             pass
         return ""
-
-    def _control_musicnote(self, tail: str, chat_key: str = "") -> str:
-        """ /musicnote find | create — answer the music voice-note ask.
-
-        The ask's buttons (``🔍 Find this music`` / ``🎵 Create a
-        song``) arrive here as synthetic commands. The pending clip
-        was stashed when the ask went out; the tap consumes it, so a
-        double-tap can never run twice.
-
-        * ``find`` — the explicit /sham music-ID path on the stashed
-          clip (local fingerprint memory → AudD → honest ears).
-        * ``create`` — music production from the clip: the clip's
-          own sound (tempo/key/feel) seeds a NEW original song —
-          never a copy of the clip's melody.
-
-        Owner-only (the grant check in ``handle_control`` denies
-        non-owners). Never raises.
-        """
-        from types import SimpleNamespace
-
-        from ...voice.music_note import PENDING
-
-        try:
-            action = ((tail or "").strip().split() or [""])[0].lower()
-            if action not in ("find", "create"):
-                return ("usage: /musicnote find | create — answer the "
-                        "music voice-note ask (tap 🔍 Find this music "
-                        "or 🎵 Create a song on the ask).")
-            pending = PENDING.take(chat_key)
-            if pending is None:
-                return ("no music voice note waiting — send a music "
-                        "voice note first, then tap Find or Create on "
-                        "the ask (it stays open for 10 minutes).")
-            path = str(pending.get("path") or "")
-            heard = str(pending.get("heard") or "")
-            if not path:
-                return ("that music note has no audio file any more — "
-                        "send it again.")
-            if action == "find":
-                synth = SimpleNamespace(
-                    media=[SimpleNamespace(kind="voice", path=path)],
-                    meta={})
-                return self._sham_identify(synth)
-            return self._musicnote_produce(path, heard, chat_key)
-        except Exception as exc:  # noqa: BLE001 - never raises
-            return f"couldn't do that ({exc})"
-
-    def _musicnote_produce(self, path: str, heard: str,
-                           chat_key: str = "") -> str:
-        """Produce a NEW original song from a music voice note.
-
-        The clip seeds the composition (its tempo/key/feel, via
-        ``heard``) — the same LLM-first Producer path ``/produce``
-        uses for a description. The result is an original piece,
-        delivered as audio to this chat, and indexed into Devon's
-        local recognition memory. Never raises.
-        """
-        try:
-            from ...media.composer_llm import compose_song_spec
-            from ...media.producer import Producer
-            from ...media.taste import load_taste
-
-            desc = ("a new original song inspired by this music voice "
-                    "note")
-            if heard:
-                desc += f" ({heard})"
-            desc += (" — same energy and feel, but an original "
-                     "composition, never a copy of the clip's melody")
-            spec = compose_song_spec(self.context, desc)
-            res = Producer(self.context).produce_from_spec(spec)
-            if not res.get("ok"):
-                return f"couldn't produce: {res.get('reason', '?')}"
-            try:
-                store = load_taste(getattr(self, "context", None))
-                profile = res.get("profile")
-                if profile is not None:
-                    store.record_production(profile, source="voice-note",
-                                            ref=desc)
-            except Exception:  # noqa: BLE001 - taste bookkeeping is a bonus
-                pass
-            try:
-                if res.get("path"):
-                    from ...audio.fingerprint import index_own
-                    index_own(res["path"], title=str(res.get("title", "")),
-                              artist="Devon")
-            except Exception:  # noqa: BLE001 - indexing is a bonus
-                pass
-            lines = [f"🎛 produced from your voice note: "
-                     f"{res['title']} — {res['bpm']:g} BPM, "
-                     f"{res['key']} {res['mode']}"]
-            lines.append(res["notes"])
-            chat = self._ref_from_key(chat_key) if chat_key else None
-            if chat is not None and res.get("path"):
-                try:
-                    self.gateway.send_file(
-                        chat.platform, f"{chat.platform}:{chat.chat_id}",
-                        res["path"],
-                        caption=f"🎛 {res['title']} (original)")
-                except Exception:  # noqa: BLE001
-                    pass
-            return "\n".join(lines)
-        except Exception as exc:  # noqa: BLE001 - never raises
-            return f"produce error: {exc}"
 
     def _produce_hook(self, message: Any) -> str | None:
         """NL music production for the owner DM (non-slash only).

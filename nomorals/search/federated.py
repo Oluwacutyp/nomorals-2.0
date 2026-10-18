@@ -35,9 +35,11 @@ Failure semantics: empty query, unknown source, unknown type, or an
 unparseable date raises immediately. A source that is unavailable (not
 ingested, empty, unwired) is skipped with a note in
 ``SearchResponse.sources_skipped`` — never a crash. A source that
-*errors* mid-search raises ``SearchError`` naming the source (fail
-fast, with the real error chained). Zero hits is not silent: the
-response records exactly which sources were searched.
+*errors* mid-search is ALSO skipped with its real error recorded in
+``sources_skipped`` — one bad source never kills the whole search; the
+chain continues through ALL sources and returns what the healthy ones
+found. Zero hits is not silent: the response records exactly which
+sources were searched and which failed.
 """
 
 from __future__ import annotations
@@ -129,14 +131,12 @@ def _search_one(
     since_ts: float | None,
     before_ts: float | None,
 ) -> list[SearchResult]:
-    """Search one already-probed source. A mid-search error raises
-    ``SearchError`` naming the source (fail fast, real cause chained)."""
-    try:
-        return adapter.search(
-            query, limit=per_source, since=since_ts, before=before_ts
-        )
-    except Exception as exc:
-        raise SearchError(f"source {name!r} failed: {exc}") from exc
+    """Search one already-probed source.  Errors propagate to the
+    caller, which records them per-source and keeps going (one bad
+    source never kills the whole search)."""
+    return adapter.search(
+        query, limit=per_source, since=since_ts, before=before_ts
+    )
 
 
 def _resolve_weights(
@@ -269,25 +269,36 @@ def federated_search(
             thread_name_prefix="search",
         ) as pool:
             futures = {name: pool.submit(_run, name) for name in searchable}
-            # Collect in canonical order: the first error in source order
-            # is the one that surfaces, exactly like the sequential path.
+            # Collect in canonical order.  A failing source is recorded
+            # in sources_skipped and the rest still contribute — one
+            # bad source never kills the whole search.
             for name in searchable:
                 try:
                     t0 = time.perf_counter()
                     hits = futures[name].result()
                     response.timings[name] = time.perf_counter() - t0
-                except Exception:
-                    for f in futures.values():
-                        f.cancel()
-                    raise
+                except Exception as exc:
+                    response.sources_skipped[name] = (
+                        f"error: {exc}")
+                    _log.info("federated: source %r failed, continuing: %s",
+                              name, exc)
+                    continue
                 per_source_hits.append(hits)
                 hit_source_names.append(name)
                 response.sources_searched.append(name)
     else:
         for name in searchable:
             t0 = time.perf_counter()
-            per_source_hits.append(_run(name))
+            try:
+                hits = _run(name)
+            except Exception as exc:
+                response.sources_skipped[name] = f"error: {exc}"
+                response.timings[name] = time.perf_counter() - t0
+                _log.info("federated: source %r failed, continuing: %s",
+                          name, exc)
+                continue
             response.timings[name] = time.perf_counter() - t0
+            per_source_hits.append(hits)
             hit_source_names.append(name)
             response.sources_searched.append(name)
 

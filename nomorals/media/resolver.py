@@ -34,17 +34,11 @@ from __future__ import annotations
 
 import os
 import re
-import shutil
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from ..core.logging_setup import get_logger
 from ..tools.media import probe
-from .cookies import (
-    BOT_COOKIE_HELP,
-    YTDLP_INSTALL_HELP,
-    is_bot_detection_error,
-)
 
 _log = get_logger(__name__)
 
@@ -53,15 +47,19 @@ __all__ = [
     "ResolvedAudio",
     "ResolutionError",
     "YT_DLP_HINT",
-    "ytdlp_available",
 ]
 
 
-#: Install hint — the official yt-dlp install steps (see
-#: nomorals/media/cookies.py). Shown ONLY when yt-dlp is genuinely
-#: missing (see ``ytdlp_available``); never from a substring match on
-#: an error message.
-YT_DLP_HINT = YTDLP_INSTALL_HELP
+YT_DLP_HINT = (
+    "yt-dlp is not installed — `pip install yt-dlp` (Termux: "
+    "`pip install yt-dlp`) unlocks YouTube, SoundCloud, Bandcamp, "
+    "Audiomack and 1000+ other sites"
+)
+
+#: Every text-search source /play tries, in chain order — single source
+#: of truth, imported from sources.py so the count is testable.
+#: Owner rule: MANY sources, never 1–2.
+from .sources import MUSIC_SEARCH_SOURCES as PLAY_TEXT_STRATEGY_NAMES  # noqa: E402
 
 _AUDIO_EXTS = (
     ".mp3", ".wav", ".flac", ".ogg", ".m4a", ".opus",
@@ -79,46 +77,11 @@ _YT_ID_RE = re.compile(r"[A-Za-z0-9_\-]{11}\Z")
 
 #: SoundCloud api-v2 ``policy`` values that are NOT full streams.
 #: "ALLOW" (or empty — yt-dlp probes carry no policy) means full audio.
-#: "MONETIZE" is deliberately NOT here: a monetized track still serves
-#: a full stream — only the final stream URL decides preview-only
-#: (the adapter's ``stream_url`` raises on a ``/preview/`` URL).
-#: Treating MONETIZE as preview-only discarded real full tracks.
 _PREVIEW_POLICIES = {"PREVIEW", "SNIP", "BLOCK", "DENY"}
-
-#: Error-text signals that yt-dlp is genuinely missing (as opposed to
-#: a bot check whose message merely links github.com/yt-dlp/yt-dlp).
-#: The install hint fires ONLY when one of these is present AND
-#: ``ytdlp_available()`` is False — never from a bare "yt-dlp"
-#: substring match.
-_MISSING_YTDLP_MARKERS = (
-    "not installed",
-    "needs yt-dlp",
-    "install yt-dlp",
-    "could not probe",
-    "no module named yt_dlp",
-    "no module named 'yt_dlp'",
-)
 
 _SPOTIFY_URI_KINDS = (
     "track", "album", "playlist", "episode", "show", "artist",
 )
-
-
-def ytdlp_available() -> bool:
-    """Is yt-dlp actually present (module or CLI)? Verified, never
-    assumed from an error message — a bot-check error can mention
-    yt-dlp's docs URL while yt-dlp itself is installed and running."""
-    try:
-        import importlib.util
-
-        if importlib.util.find_spec("yt_dlp") is not None:
-            return True
-    except Exception:  # noqa: BLE001 — detection must never break callers
-        pass
-    try:
-        return shutil.which("yt-dlp") is not None
-    except Exception:  # noqa: BLE001
-        return False
 
 
 class ResolutionError(Exception):
@@ -213,33 +176,36 @@ class SourceResolver:
                           limit: int = 8) -> list[ResolvedAudio]:
         """All text-search candidates for a pick-list — no auto-picking.
 
-        Runs the downloadable text strategies (SoundCloud search,
-        YouTube search) and returns every usable candidate, deduped by
-        (title, artist), best first.  Never raises; empty list on total
-        failure.
+        Runs EVERY downloadable text strategy (all of
+        MUSIC_SEARCH_SOURCES that can return candidates) and returns
+        every usable candidate, deduped by (title, artist), best first.
+        One source failing never kills the others.  Never raises; empty
+        list on total failure.
         """
         out: list[ResolvedAudio] = []
         q = (query or "").strip()
         if not q:
             return out
         limit = max(1, min(int(limit or 8), 25))
-        try:
-            out.extend(self._soundcloud_search_many(q, limit))
-        except Exception as exc:  # noqa: BLE001 — one source dying
-            # must not kill the other
-            _log.info("resolver candidates: soundcloud failed: %s", exc)
-        try:
-            out.extend(self._netnaija_search_many(q, limit))
-        except Exception as exc:  # noqa: BLE001
-            _log.info("resolver candidates: netnaija failed: %s", exc)
-        try:
-            out.extend(self._youtube_search_many(q, limit))
-        except Exception as exc:  # noqa: BLE001
-            _log.info("resolver candidates: youtube failed: %s", exc)
-        try:
-            out.extend(self._boomplay_search_many(q, limit))
-        except Exception as exc:  # noqa: BLE001
-            _log.info("resolver candidates: boomplay failed: %s", exc)
+        # Nigerian sources first, then globals, previews + metadata last.
+        for fn in (
+            self._netnaija_search_many,
+            self._notjustok_search_many,
+            self._tooxclusive_search_many,
+            self._soundcloud_search_many,
+            self._bandcamp_search_many,
+            self._youtube_search_many,
+            self._archiveorg_search_many,
+            self._itunes_search_many,
+            self._deezer_search_many,
+            self._boomplay_search_many,
+        ):
+            try:
+                out.extend(fn(q, limit))
+            except Exception as exc:  # noqa: BLE001 — one source dying
+                # must not kill the others
+                _log.info("resolver candidates: %s failed: %s",
+                          getattr(fn, "__name__", "?"), exc)
         seen: set[tuple[str, str]] = set()
         deduped: list[ResolvedAudio] = []
         for r in out:
@@ -311,6 +277,83 @@ class SourceResolver:
                      "Boomplay app"))
         return out
 
+    def _blog_search_many(self, query: str, limit: int,
+                          cls_name: str, kind: str,
+                          label: str) -> list[ResolvedAudio]:
+        import importlib
+
+        mod = importlib.import_module("nomorals.media.sources")
+        cls = getattr(mod, cls_name)
+        out: list[ResolvedAudio] = []
+        for c in cls().search(query, limit=limit):
+            out.append(ResolvedAudio(
+                ok=True, path_or_url=c.url, title=c.title,
+                artist=c.artist, kind=kind, source_name=label))
+        return out
+
+    def _notjustok_search_many(self, query: str,
+                               limit: int) -> list[ResolvedAudio]:
+        return self._blog_search_many(query, limit, "NotJustOkSource",
+                                      "notjustok", "NotJustOk search")
+
+    def _tooxclusive_search_many(self, query: str,
+                                 limit: int) -> list[ResolvedAudio]:
+        return self._blog_search_many(query, limit, "TooXclusiveSource",
+                                      "tooxclusive", "TooXclusive search")
+
+    def _bandcamp_search_many(self, query: str,
+                              limit: int) -> list[ResolvedAudio]:
+        from .sources import BandcampSource  # lazy: same layer
+
+        out: list[ResolvedAudio] = []
+        for c in BandcampSource().search(query, limit=limit):
+            out.append(ResolvedAudio(
+                ok=True, path_or_url=c.url, title=c.title,
+                artist=c.artist, kind="bandcamp",
+                source_name="Bandcamp search"))
+        return out
+
+    def _archiveorg_search_many(self, query: str,
+                                limit: int) -> list[ResolvedAudio]:
+        from .sources import ArchiveOrgSource  # lazy: same layer
+
+        src = ArchiveOrgSource()
+        out: list[ResolvedAudio] = []
+        for c in src.search(query, limit=limit):
+            out.append(ResolvedAudio(
+                ok=True, path_or_url=c.url, title=c.title,
+                artist=c.artist, kind="archiveorg",
+                source_name="Internet Archive search"))
+        return out
+
+    def _preview_search_many(self, query: str, limit: int,
+                             cls_name: str, kind: str,
+                             label: str) -> list[ResolvedAudio]:
+        import importlib
+
+        mod = importlib.import_module("nomorals.media.sources")
+        cls = getattr(mod, cls_name)
+        out: list[ResolvedAudio] = []
+        for c in cls().search(query, limit=limit):
+            if not (c.extra or {}).get("preview_only"):
+                continue
+            out.append(ResolvedAudio(
+                ok=True, path_or_url=c.direct_url or c.url,
+                title=c.title, artist=c.artist, kind=kind,
+                source_name=label,
+                hint=str((c.extra or {}).get("note") or "")))
+        return out
+
+    def _itunes_search_many(self, query: str,
+                            limit: int) -> list[ResolvedAudio]:
+        return self._preview_search_many(query, limit, "ITunesSource",
+                                         "itunes", "iTunes search (30s preview)")
+
+    def _deezer_search_many(self, query: str,
+                            limit: int) -> list[ResolvedAudio]:
+        return self._preview_search_many(query, limit, "DeezerSource",
+                                         "deezer", "Deezer search (30s preview)")
+
     # ── chain machinery ───────────────────────────────────────────────
 
     def _run_chain(self, result: ResolvedAudio,
@@ -357,23 +400,9 @@ class SourceResolver:
 
     @staticmethod
     def _finalize_failure(result: ResolvedAudio) -> ResolvedAudio:
-        """Pick the failure hint from VERIFIED facts, never from a
-        substring match on an error message.
-
-        The old code fired the install hint on any "yt-dlp" substring —
-        which matched the github.com/yt-dlp URL inside a YouTube
-        bot-check error, telling the owner yt-dlp was "not installed"
-        when it had just run. Now: install hint only when yt-dlp is
-        genuinely missing AND an error says so; bot-check errors get
-        the cookies help; anything else gets the generic hint.
-        """
-        blob = " ".join(result.errors)
-        blob_low = blob.lower()
-        if (not ytdlp_available()
-                and any(m in blob_low for m in _MISSING_YTDLP_MARKERS)):
+        blob = " ".join(result.errors).lower()
+        if "yt-dlp" in blob or "yt_dlp" in blob:
             result.hint = YT_DLP_HINT
-        elif is_bot_detection_error(blob):
-            result.hint = BOT_COOKIE_HELP
         elif not result.hint:
             result.hint = \
                 "tried every source — check the title/URL and try again"
@@ -416,19 +445,102 @@ class SourceResolver:
 
     def _resolve_text(self, query: str,
                       result: ResolvedAudio) -> ResolvedAudio:
-        # Downloadable sources first; Spotify last — it can only play on
-        # a linked device, never produce a file for chat.  Nigerian
-        # sources (NetNaija) get priority for direct MP3s; Boomplay is
-        # metadata-only (protected streams) so it sits with Spotify.
+        # MANY sources, in chain order (see MUSIC_SEARCH_SOURCES).
+        # Downloadable/full-track sources first; Nigerian blogs before
+        # globals; 30s-preview APIs (iTunes/Deezer) only after every
+        # full-track source; metadata-only (Boomplay) + Spotify last.
+        # One source failing never ends the search — the chain keeps
+        # going through ALL of them.
         return self._run_chain(result, [
             ("workspace-scan", lambda: self._s_workspace_scan(query)),
             ("netnaija-search", lambda: self._s_netnaija_search(query)),
+            ("notjustok-search", lambda: self._s_blog_search(
+                query, "NotJustOkSource", "notjustok")),
+            ("tooxclusive-search", lambda: self._s_blog_search(
+                query, "TooXclusiveSource", "tooxclusive")),
             ("soundcloud-search",
              lambda: self._s_soundcloud_search(query)),
+            ("bandcamp-search", lambda: self._s_bandcamp_search(query)),
             ("youtube-search", lambda: self._s_youtube_search(query)),
+            ("archiveorg-search", lambda: self._s_archiveorg_search(query)),
+            ("itunes-search", lambda: self._s_preview_search(
+                query, "ITunesSource", "itunes")),
+            ("deezer-search", lambda: self._s_preview_search(
+                query, "DeezerSource", "deezer")),
             ("boomplay-search", lambda: self._s_boomplay_search(query)),
             ("spotify-search", lambda: self._s_spotify_search(query)),
         ])
+
+    def _s_blog_search(self, query: str, cls_name: str,
+                       kind: str) -> ResolvedAudio:
+        import importlib
+
+        mod = importlib.import_module("nomorals.media.sources")
+        cls = getattr(mod, cls_name)
+        cands = cls().search(query, limit=5)
+        if not cands:
+            raise ResolutionError(
+                f"{kind}-search", f"no {cls_name} results for {query!r}")
+        c = cands[0]
+        _log.info("resolver: %s hit -> %s", kind, c.title[:60])
+        return ResolvedAudio(ok=True, path_or_url=c.url, title=c.title,
+                             artist=c.artist, kind=kind,
+                             source_name=f"{cls_name} search")
+
+    def _s_bandcamp_search(self, query: str) -> ResolvedAudio:
+        from .sources import BandcampSource  # lazy: same layer
+
+        cands = BandcampSource().search(query, limit=5)
+        if not cands:
+            raise ResolutionError(
+                "bandcamp-search", f"no Bandcamp results for {query!r}")
+        c = cands[0]
+        return ResolvedAudio(ok=True, path_or_url=c.url, title=c.title,
+                             artist=c.artist, kind="bandcamp",
+                             source_name="Bandcamp search")
+
+    def _s_archiveorg_search(self, query: str) -> ResolvedAudio:
+        from .sources import ArchiveOrgSource  # lazy: same layer
+
+        src = ArchiveOrgSource()
+        cands = src.search(query, limit=5)
+        if not cands:
+            raise ResolutionError(
+                "archiveorg-search",
+                f"no Internet Archive results for {query!r}")
+        c = cands[0]
+        return ResolvedAudio(ok=True, path_or_url=c.url, title=c.title,
+                             artist=c.artist, kind="archiveorg",
+                             source_name="Internet Archive search")
+
+    def _s_preview_search(self, query: str, cls_name: str,
+                          kind: str) -> ResolvedAudio:
+        """30s-preview APIs (iTunes/Deezer): last-resort only.
+
+        The candidate is a real preview MP3, but only 30s — the chain
+        reaches here only after every full-track source failed, and
+        the hint says so honestly.
+        """
+        import importlib
+
+        mod = importlib.import_module("nomorals.media.sources")
+        cls = getattr(mod, cls_name)
+        cands = cls().search(query, limit=5)
+        if not cands:
+            raise ResolutionError(
+                f"{kind}-search", f"no {cls_name} results for {query!r}")
+        c = cands[0]
+        if not (c.extra or {}).get("preview_only"):
+            raise ResolutionError(
+                f"{kind}-search", f"{cls_name} returned no preview for {query!r}")
+        out = ResolvedAudio(
+            ok=True, path_or_url=c.direct_url or c.url, title=c.title,
+            artist=c.artist, kind=kind,
+            source_name=f"{cls_name} search (30s preview)")
+        out.hint = str((c.extra or {}).get("note") or
+                       "30-second preview only — full track not found "
+                       "on any source")
+        return out
 
     # ── strategies: local ─────────────────────────────────────────────
 
@@ -497,15 +609,12 @@ class SourceResolver:
     @classmethod
     def _preview_reason(cls, tr: Any) -> str:
         """Why this SoundCloud track dict is preview-only, or "" when
-        it's a full stream. Only the hard preview policies count.
-        ``MONETIZE`` (and unknown policies) do NOT count: a monetized
-        track still serves a full stream — the final stream URL is the
-        only thing that can prove preview-only (the adapter's
-        ``stream_url`` raises on a ``/preview/`` URL), and discarding
-        on policy alone threw away real full tracks."""
+        it's a full stream. Checks the api-v2 ``policy`` AND explicit
+        preview flags (yt-dlp probes carry no policy, so the flag is
+        the only signal there)."""
         tr = tr or {}
         policy = str(tr.get("policy") or "").upper()
-        if policy in _PREVIEW_POLICIES:
+        if policy and policy != "ALLOW":
             return f"policy={policy}"
         if tr.get("preview") or tr.get("preview_url"):
             return "preview flag set"
@@ -558,17 +667,12 @@ class SourceResolver:
         return first
 
     def _s_soundcloud_search(self, query: str) -> ResolvedAudio:
-        """SoundCloud text search — skips genuinely preview-only
-        tracks instead of failing on the first one. The old code
-        fetched exactly 1 track and failed the whole strategy when it
-        was preview-only, even when the next result was a full track.
-        """
         adapter = self._soundcloud
         if adapter is None:
             raise ResolutionError("soundcloud-search",
                                   "SoundCloud adapter not wired")
         try:
-            tracks = adapter.search_tracks(query, limit=5)
+            tracks = adapter.search_tracks(query, limit=1)
         except Exception as exc:  # noqa: BLE001
             raise ResolutionError("soundcloud-search",
                                   f"search failed: {exc}") from exc
@@ -576,17 +680,7 @@ class SourceResolver:
             raise ResolutionError(
                 "soundcloud-search",
                 f"no SoundCloud results for {query!r}")
-        previewed = 0
-        for tr in tracks:
-            if self._preview_reason(tr or {}):
-                previewed += 1
-                continue
-            return self._track_result(tr, "SoundCloud search")
-        raise ResolutionError(
-            "soundcloud-search",
-            f"all {len(tracks)} SoundCloud results for {query!r} are "
-            f"preview-only ({previewed} skipped); trying full-track "
-            f"sources")
+        return self._track_result(tracks[0], "SoundCloud search")
 
     # ── strategies: yt-dlp (the dynamic universal path) ───────────────
 
@@ -669,15 +763,7 @@ class SourceResolver:
             video_id = PlaybackEngine._youtube_search_id(query)
         except Exception as exc:  # noqa: BLE001 — carries the
             # yt-dlp install hint when yt-dlp is missing
-            err = str(exc)
-            if is_bot_detection_error(err):
-                # Name the real fix (cookies) instead of letting the
-                # raw yt-dlp dump stand — and never let this be
-                # misread as "yt-dlp not installed".
-                raise ResolutionError(
-                    "youtube-search",
-                    f"YouTube bot check — {BOT_COOKIE_HELP}") from exc
-            raise ResolutionError("youtube-search", err) from exc
+            raise ResolutionError("youtube-search", str(exc)) from exc
         video_id = str(video_id or "")
         if not _YT_ID_RE.match(video_id):
             raise ResolutionError("youtube-search",

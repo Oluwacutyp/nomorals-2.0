@@ -1,14 +1,21 @@
 """News system: a news sub-agent + a summarizer sub-agent.
 
-* **Fetcher** — keyless RSS feeds (43 across world / tech / nigeria /
-  business / science / sports / usa / europe / asia / wires — see
-  ``FEED_CATEGORIES``) over the proxy-aware search client, robots-aware,
-  deduped by URL in ``news_items``.
+* **Fetcher** — keyless RSS feeds (60+ across world / tech / nigeria /
+  africa / business / science / sports / usa / europe / asia / wires /
+  entertainment — see ``FEED_CATEGORIES``) over the proxy-aware search
+  client, robots-aware, deduped by URL + normalized title in
+  ``news_items``.  MANY sources, never 1–2: every run fetches ALL
+  default feeds, one dead feed never kills the digest, and the result
+  reports ``sources_tried`` / ``sources_ok`` / per-source counts so the
+  user sees the breadth.
 * **Summarizer** — model-sourced when a live model is answering, extractive
   one-liners otherwise. Never invents a headline it didn't read.
 * **Digest** — top N items per source, delivered through the notifier.
 
-Every URL in ``FEED_CATEGORIES`` was live-fetched and verified 2026-10-01.
+Feed URLs in the original set were live-fetched and verified 2026-10-01.
+Feeds added 2026-10-17 (marked below) are well-known public RSS endpoints
+but were NOT individually live-verified from the build sandbox — a dead
+one shows up honestly in ``errors`` and never kills the digest.
 The legacy wire services (Reuters/AP/AFP/…) no longer publish public RSS,
 so ``wires`` carries the working global aggregators instead.
 """
@@ -39,6 +46,10 @@ FEED_CATEGORIES: dict[str, tuple[tuple[str, str], ...]] = {
         ("NPR News", "https://feeds.npr.org/1001/rss.xml"),
         ("DW", "https://rss.dw.com/rdf/rss-en-all"),
         ("France 24", "https://www.france24.com/en/rss"),
+        ("CBC World", "https://www.cbc.ca/cmlink/rss-world"),
+        ("ABC News", "https://abcnews.go.com/abcnews/topstories"),
+        ("CBS News", "https://www.cbsnews.com/latest/rss/main"),
+        ("NBC News", "https://feeds.nbcnews.com/nbcnews/public/news"),
     ),
     "tech": (
         ("BBC Tech", "https://feeds.bbci.co.uk/news/technology/rss.xml"),
@@ -47,6 +58,10 @@ FEED_CATEGORIES: dict[str, tuple[tuple[str, str], ...]] = {
         ("TechCrunch", "https://techcrunch.com/feed/"),
         ("Ars Technica", "https://arstechnica.com/feed/"),
         ("MIT Tech Review", "https://www.technologyreview.com/feed/"),
+        ("Wired", "https://www.wired.com/feed/rss"),
+        ("Engadget", "https://www.engadget.com/rss.xml"),
+        ("Gizmodo", "https://gizmodo.com/rss"),
+        ("9to5Google", "https://9to5google.com/feed/"),
     ),
     "nigeria": (
         ("Punch", "https://rss.punchng.com/v1/category/latest_news"),
@@ -55,30 +70,53 @@ FEED_CATEGORIES: dict[str, tuple[tuple[str, str], ...]] = {
         ("Channels TV", "https://www.channelstv.com/feed/"),
         ("Sahara Reporters", "https://saharareporters.com/rss.xml"),
         ("TechCabal", "https://techcabal.com/feed/"),
+        ("Guardian NG", "https://guardian.ng/feed/"),
+        ("Daily Trust", "https://dailytrust.com/feed/"),
+        ("TheCable", "https://www.thecable.ng/feed"),
+        ("Leadership", "https://leadership.ng/feed/"),
+        ("BusinessDay", "https://businessday.ng/feed/"),
+    ),
+    "africa": (
+        ("BBC Africa", "https://feeds.bbci.co.uk/news/world/africa/rss.xml"),
+        ("Al Jazeera Africa", "https://www.aljazeera.com/xml/rss/africa.xml"),
+        ("Joy Online", "https://joyonline.org/feed/"),
+        ("Nation Africa", "https://nation.africa/feed"),
+        ("News24", "https://www.news24.com/feed"),
+        ("Nairaland", "https://www.nairaland.com/feed"),
     ),
     "business": (
         ("BBC Business", "https://feeds.bbci.co.uk/news/business/rss.xml"),
         ("Business Insider", "https://feeds.businessinsider.com/custom/all"),
         ("Nairametrics", "https://nairametrics.com/feed/"),
         ("CoinDesk", "https://www.coindesk.com/arc/outboundfeeds/rss/"),
+        ("MarketWatch", "https://feeds.marketwatch.com/marketwatch/topstories/"),
+        ("CNBC", "https://www.cnbc.com/id/100003114/device/rss/rss.html"),
+        ("Yahoo Finance", "https://finance.yahoo.com/news/rssindex"),
     ),
     "science": (
         ("BBC Science", "https://feeds.bbci.co.uk/news/science_and_environment/rss.xml"),
         ("ScienceDaily", "https://www.sciencedaily.com/rss/all.xml"),
         ("New Scientist", "https://www.newscientist.com/feed/"),
         ("NASA", "https://www.nasa.gov/news-release/feed/"),
+        ("Nature", "https://www.nature.com/nature.rss"),
+        ("Quanta", "https://www.quantamagazine.org/feed/"),
     ),
     "sports": (
         ("BBC Sport", "https://feeds.bbci.co.uk/sport/rss.xml"),
         ("CBS Sports", "https://www.cbssports.com/rss/headlines/"),
         ("Sky Sports", "https://www.skysports.com/rss/12040"),
         ("Complete Sports", "https://www.completesports.com/feed/"),
+        ("ESPN", "https://www.espn.com/espn/rss/news"),
+        ("Goal", "https://www.goal.com/en/rss"),
+        ("Bleacher Report", "https://bleacherreport.com/articles/feed"),
     ),
     "usa": (
         ("CNN", "http://rss.cnn.com/rss/edition.rss"),
         ("NYT", "https://rss.nytimes.com/services/xml/rss/nyt/HomePage.xml"),
         ("PBS NewsHour", "https://www.pbs.org/newshour/feeds/rss/headlines"),
         ("Washington Post", "https://feeds.washingtonpost.com/rss/national"),
+        ("Fox News", "http://feeds.foxnews.com/foxnews/latest"),
+        ("USA Today", "https://rssfeeds.usatoday.com/usatoday-NewsTopStories"),
     ),
     "europe": (
         ("The Guardian", "https://www.theguardian.com/world/rss"),
@@ -93,6 +131,12 @@ FEED_CATEGORIES: dict[str, tuple[tuple[str, str], ...]] = {
         ("Channel News Asia",
          "https://www.channelnewsasia.com/api/v1/rss-outbound-feed?_format=xml"),
     ),
+    "entertainment": (
+        ("BBC Entertainment", "https://feeds.bbci.co.uk/news/entertainment_and_arts/rss.xml"),
+        ("Variety", "https://variety.com/feed/"),
+        ("Hollywood Reporter", "https://www.hollywoodreporter.com/feed/"),
+        ("Deadline", "https://deadline.com/feed/"),
+    ),
     # The legacy wires (Reuters/AP/AFP/…) publish no public RSS any more;
     # verified dead/walled 2026-10-01. These are the working global
     # wire-style aggregators.
@@ -100,6 +144,8 @@ FEED_CATEGORIES: dict[str, tuple[tuple[str, str], ...]] = {
         ("Google News", "https://news.google.com/rss?hl=en-US&gl=US&ceid=US:en"),
         ("Google News World",
          "https://news.google.com/rss/topics/CAAqJggKIiBDQkFTRWdvSUwyMHZNRGx1YlY4U0FtVnVHZ0pWVXlnQVAB?hl=en-US&gl=US&ceid=US%3Aen"),
+        ("Google News Nigeria",
+         "https://news.google.com/rss?hl=en-NG&gl=NG&ceid=NG:en"),
     ),
 }
 
@@ -119,11 +165,11 @@ def feeds_for(*categories: str) -> list[tuple[str, str]]:
     return out
 
 
-#: world + tech + business + regional spread (usa/europe/asia/nigeria) —
-#: the general default digest.
+#: world + tech + business + regional spread (usa/europe/asia/nigeria/
+#: africa) + entertainment — the general default digest.
 DEFAULT_FEEDS: tuple[tuple[str, str], ...] = tuple(
     feeds_for("world", "tech", "business", "usa", "europe", "asia",
-              "nigeria"))
+              "nigeria", "africa", "entertainment", "wires"))
 
 _TAG = re.compile(r"<[^>]+>")
 
@@ -231,16 +277,40 @@ class NewsAgent:
         cap = max(1, min(cap, 40))
         fetched: list[dict[str, str]] = []
         errors: list[str] = []
-        for source, url in self._feeds():
+        per_source: dict[str, int] = {}
+        sources_ok: list[str] = []
+        feeds = self._feeds()
+        for source, url in feeds:
             try:
                 response = self._client.get(url)
                 items = parse_feed(response.text)
             except Exception as exc:  # noqa: BLE001 - one dead feed must not kill the digest
                 errors.append(f"{source}: {exc}")
                 continue
+            sources_ok.append(source)
+            per_source[source] = len(items)
             for it in items:
                 it["source"] = source
                 fetched.append(it)
+
+        # Dedupe by URL AND by normalized title — the same story carried
+        # by 6 outlets must not flood the digest as 6 "different" items.
+        seen_urls: set[str] = set()
+        seen_titles: set[str] = set()
+        deduped: list[dict[str, str]] = []
+        for it in fetched:
+            url_key = (it.get("url") or "").strip().lower().rstrip("/")
+            title_key = re.sub(r"\W+", " ", (it.get("title") or "").lower()).strip()
+            if url_key and url_key in seen_urls:
+                continue
+            if title_key and title_key in seen_titles:
+                continue
+            if url_key:
+                seen_urls.add(url_key)
+            if title_key:
+                seen_titles.add(title_key)
+            deduped.append(it)
+        fetched = deduped
 
         fresh: list[dict[str, str]] = []
         for it in fetched:
@@ -283,6 +353,11 @@ class NewsAgent:
             "fresh": len(fresh),
             "errors": errors,
             "digest": digest,
+            # Visible breadth: the user sees HOW MANY sources were tried
+            # and which ones answered — never a silent 1–2.
+            "sources_tried": len(feeds),
+            "sources_ok": sources_ok,
+            "per_source": per_source,
         }
         if self.notifier is not None and top:
             self.notifier.publish("news", f"news digest — {len(top)} new items", digest[:3500])

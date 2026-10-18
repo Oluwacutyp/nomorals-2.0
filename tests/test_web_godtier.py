@@ -135,15 +135,20 @@ class WebGodtierTests(unittest.TestCase):
         self.assertEqual(result["count"], 2)
 
     def test_no_fallback_when_ddg_hits(self):
+        # AGGREGATE contract (owner rule: MANY sources, never 1–2):
+        # every engine is tried and results merged + deduped — DDG
+        # hitting no longer stops the other engines.
         def get(url, **kwargs):
             if "bing.com" in url:
                 return _resp(text=BING_HTML)
             return _resp(text=DDG_HTML)
         self.client.get.side_effect = get
         result = self._call("web_search", query="x")
-        self.assertEqual(result["engines"], ["duckduckgo"])
+        self.assertIn("duckduckgo", result["engines"])
+        self.assertIn("bing", result["engines"])
         urls = [r["url"] for r in result["results"]]
         self.assertIn("https://example.com/alpha", urls)
+        self.assertEqual(urls.count("https://example.com/beta"), 1)  # deduped
 
     def test_search_timeout_is_short(self):
         timeouts = [c.kwargs.get("timeout") for c in self.MockClient.call_args_list]

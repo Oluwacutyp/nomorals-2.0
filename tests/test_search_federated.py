@@ -123,12 +123,19 @@ class FederatedTests(unittest.TestCase):
         resp = federated_search("q", limit=5, adapters=_adapters(memory=mem))
         self.assertEqual(resp.total, 5)
 
-    def test_source_error_fails_fast_with_name(self):
+    def test_source_error_skipped_not_fatal(self):
+        # One bad source never kills the whole search (owner rule):
+        # its error is recorded in sources_skipped, the healthy
+        # sources still contribute.
         bad = FakeAdapter(boom=RuntimeError("db gone"))
         bad.name = "memory"
-        with self.assertRaises(SearchError) as cm:
-            federated_search("q", adapters=_adapters(memory=bad))
-        self.assertIn("'memory'", str(cm.exception))
+        good = FakeAdapter(hits=[_hit("books", "book", "m1", 1.0)])
+        good.name = "books"
+        resp = federated_search(
+            "q", adapters=_adapters(memory=bad, books=good))
+        self.assertIn("memory", resp.sources_skipped)
+        self.assertIn("db gone", resp.sources_skipped["memory"])
+        self.assertEqual([h.source for h in resp.hits], ["books"])
 
     # ── fail-fast inputs ──
     def test_empty_query(self):

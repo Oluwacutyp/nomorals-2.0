@@ -148,11 +148,13 @@ class NewsFeedTests(unittest.TestCase):
         # no URL may appear twice anywhere in the table
         urls = [u for _, u in feeds_for()]
         self.assertEqual(len(urls), len(set(urls)))
-        # DEFAULT_FEEDS is the world+tech+business+regional flattening
+        # DEFAULT_FEEDS is the world+tech+business+regional+africa+
+        # entertainment+wires flattening
         from nomorals.agents.news import DEFAULT_FEEDS
         self.assertEqual(list(DEFAULT_FEEDS),
                          feeds_for("world", "tech", "business", "usa",
-                                   "europe", "asia", "nigeria"))
+                                   "europe", "asia", "nigeria", "africa",
+                                   "entertainment", "wires"))
 
     def test_feeds_for(self):
         from nomorals.agents.news import feeds_for

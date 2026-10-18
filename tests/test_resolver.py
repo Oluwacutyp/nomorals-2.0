@@ -214,13 +214,10 @@ def test_missing_ytdlp_gives_install_hint(monkeypatch, tmp_path):
             "could not probe: install yt-dlp for site extraction")
 
     monkeypatch.setattr(resolver, "probe", fake_probe)
-    # Deterministic: the install hint fires only when yt-dlp is
-    # VERIFIED missing (not from an error substring).
-    monkeypatch.setattr(resolver, "ytdlp_available", lambda: False)
     out = SourceResolver(_ctx(str(tmp_path))).resolve(
         "https://example.com/some-track")
     assert not out.ok
-    assert 'pip install -U "yt-dlp[default]"' in out.hint
+    assert "pip install yt-dlp" in out.hint
     assert out.hint == YT_DLP_HINT
 
 
@@ -245,12 +242,19 @@ def test_unknown_title_fails_all_strategies_honestly(monkeypatch, tmp_path):
         raise AssertionError("probe must not run for titles")
 
     monkeypatch.setattr(resolver, "probe", fake_probe)
-    monkeypatch.setattr(resolver, "ytdlp_available", lambda: False)
     monkeypatch.setattr(
         PlaybackEngine, "_youtube_search_id",
         classmethod(lambda cls, q: (_ for _ in ()).throw(
             RuntimeError("youtube search needs yt-dlp"))))
     sc = FakeSoundCloud(tracks=[])  # search finds nothing
+    # Earlier-chain web sources must not leak live results into this
+    # unit test — the query is supposed to match nothing.
+    from nomorals.media import sources as _src
+    for _cls in ("NetNaijaSource", "NotJustOkSource", "TooXclusiveSource",
+                 "BandcampSource", "ArchiveOrgSource", "ITunesSource",
+                 "DeezerSource", "BoomplaySource"):
+        monkeypatch.setattr(getattr(_src, _cls), "search",
+                            lambda self, q, limit=8: [])
     out = SourceResolver(_ctx(str(tmp_path)),
                          soundcloud=sc).resolve("xyqz totally unknown 999")
     assert not out.ok
@@ -258,7 +262,7 @@ def test_unknown_title_fails_all_strategies_honestly(monkeypatch, tmp_path):
     for name in ("workspace-scan", "soundcloud-search",
                  "youtube-search", "spotify-search"):
         assert name in tried, tried
-    assert 'pip install -U "yt-dlp[default]"' in out.hint
+    assert "pip install yt-dlp" in out.hint
 
 
 # ── Spotify: honest, no extraction ────────────────────────────────────
@@ -280,14 +284,27 @@ def test_spotify_search_only_when_linked():
     assert any("spotify-search" in a for a in out.attempts)
 
 
-def test_spotify_search_works_when_linked(tmp_path):
+def test_spotify_search_works_when_linked(monkeypatch, tmp_path):
     sp = FakeSpotify(tracks=[{
         "uri": "spotify:track:abc",
         "name": "Linked Song",
         "artists": [{"name": "Some Artist"}],
         "id": "abc",
     }])
-    out = SourceResolver(_ctx(str(tmp_path)), spotify=sp).resolve(
+    # Earlier-chain web sources must not leak live results into this
+    # unit test — Spotify is the intended winner here.
+    from nomorals.media import sources as _src
+    for _cls in ("NetNaijaSource", "NotJustOkSource", "TooXclusiveSource",
+                 "BandcampSource", "ArchiveOrgSource", "ITunesSource",
+                 "DeezerSource", "BoomplaySource"):
+        monkeypatch.setattr(getattr(_src, _cls), "search",
+                            lambda self, q, limit=8: [])
+    monkeypatch.setattr(
+        "nomorals.media.playback.PlaybackEngine._youtube_search_id",
+        classmethod(lambda cls, q: (_ for _ in ()).throw(
+            RuntimeError("youtube search needs yt-dlp"))))
+    out = SourceResolver(_ctx(str(tmp_path)), spotify=sp,
+                         soundcloud=FakeSoundCloud(tracks=[])).resolve(
         "linked song")
     assert out.ok
     assert out.kind == "spotify"

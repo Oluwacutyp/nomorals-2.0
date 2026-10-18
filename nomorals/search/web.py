@@ -86,8 +86,9 @@ _USER_AGENT = "DevonSearch/1.0 (nomorals federated web search; +https://github.c
 class WebBackendError(SearchError):
     """A web-search backend failed (transport, auth, quota, bad payload).
 
-    ``federated_search`` wraps this as ``SearchError("source %r failed:
-    ...")`` — fail fast, naming the source, with the real cause chained.
+    ``federated_search`` records this per-source in
+    ``sources_skipped`` and keeps going — one bad source never kills
+    the whole search.
     """
 
 

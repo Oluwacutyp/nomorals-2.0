@@ -74,8 +74,13 @@ class RuntimeLiveMixin:
             if not report["ok"]:
                 errs = "; ".join(report["errors"][:3])
                 return f"news run got nothing readable ({report['items']} items)" + (f" — {errs}" if errs else "")
+            tried = report.get("sources_tried", 0)
+            ok_srcs = report.get("sources_ok") or []
+            src_line = (f"sources: {len(ok_srcs)}/{tried} feeds answered "
+                        f"({', '.join(ok_srcs[:12])}"
+                        f"{'…' if len(ok_srcs) > 12 else ''})")
             return (f"news digest — {report['items']} new items (of {report['fresh']} fresh) "
-                    f"— delivered where a channel is live.\n\n{report['digest'][:3000]}")
+                    f"— delivered where a channel is live.\n{src_line}\n\n{report['digest'][:3000]}")
         return "usage: /news [run [n]|status]"
 
     # ── always-on research ───────────────────────────────────────────────────
