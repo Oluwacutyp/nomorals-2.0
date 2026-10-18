@@ -517,6 +517,87 @@ class PartnerRuntime(
             return True
         return False
 
+    def _handle_music_voice_note(self, message: ChatMessage) -> bool:
+        """Music voice-note intercept. Returns True when consumed.
+
+        A bare voice note whose transcription already failed may have
+        failed because it contains MUSIC, not speech — STT on a song
+        returns an empty transcript. The caller runs this before the
+        honest STT-failure reply, or a music note would get "couldn't
+        transcribe" and never reach the ask.
+
+        * Music + OWNER → send the Find/Create ask with inline
+          buttons, remember the clip as this chat's pending music
+          note, consume the message (no brain turn, no STT reply).
+          The ask IS the gate: no production runs until the owner
+          taps Create.
+        * Music + NON-OWNER DM → NO ask, NO buttons. The note is
+          re-presented to the brain as music context and the message
+          falls through to normal conversation — Devon decides her
+          own reply (voice or text) from there.
+        * Not music → False: the STT-failure reply below runs as usual.
+
+        Owner gating uses :meth:`_is_operator` (owner identity —
+        meta / sender-id allowlist / owner chats), never chat type
+        alone. Never raises; any failure means "not music".
+        """
+        try:
+            from ...voice import music_note as _music_note
+            from ...voice.pingpong import has_voice_media as _has_voice
+        except Exception:  # noqa: BLE001 - detection is a bonus, never fatal
+            return False
+        try:
+            if not _has_voice(message):
+                return False
+            # Only notes transcription already failed on: a transcribed
+            # note is speech by definition, and this hook must never
+            # re-examine (or delay) the normal speech path.
+            if not (message.meta or {}).get("stt_failure_reason"):
+                return False
+            path = ""
+            for media in message.media or []:
+                kind = str(getattr(media, "kind", "") or "")
+                mime = str(getattr(media, "mime", "") or "")
+                if (kind in ("audio", "voice") or mime.startswith("audio")) \
+                        and getattr(media, "path", ""):
+                    path = str(media.path)
+                    break
+            if not path:
+                return False
+            found = _music_note.detect_music(path)
+            if not found.get("is_music"):
+                return False
+            heard = str(found.get("heard") or "")
+            if self._is_operator(message):
+                _music_note.PENDING.remember(message.chat.key, path, heard)
+                try:
+                    self._bump("replies")
+                    self.gateway.send(
+                        message.chat.platform, message.chat,
+                        _music_note.ASK_TEXT,
+                        buttons=_music_note.ask_buttons())
+                except Exception:  # noqa: BLE001 - ask send is best-effort
+                    _log.exception("music voice-note ask send failed")
+                return True
+            # Non-owner: no ask, no buttons — Devon decides. Stamp the
+            # clip as music (so the brain's _media_notes presents it
+            # as music context, never as untranscribed speech), clear
+            # the STT reason (so the STT-failure reply below does not
+            # fire), and give the brain a bracketed description to
+            # react to. voice_in stays unset: a voice reply is her
+            # choice via the normal voice-mode rules, never forced.
+            try:
+                message.meta["music_note"] = {"path": path, "heard": heard}
+                message.meta.pop("stt_failure_reason", None)
+                message.meta.pop("voice_untranscribed_reason", None)
+                message.text = _music_note.music_context_text(heard)
+            except Exception:  # noqa: BLE001 - meta bookkeeping never breaks chat
+                pass
+            return False
+        except Exception:  # noqa: BLE001 - detection failure means "not music"
+            _log.debug("music voice-note detection failed", exc_info=True)
+            return False
+
     def _process(self, message: ChatMessage) -> None:
         self._bump("messages")
         # Autonomy: every inbound message resets the idle clock and feeds
@@ -781,6 +862,20 @@ class PartnerRuntime(
                 _log.info("games-only: dropped non-game message in %s",
                           message.chat.key)
                 return
+        # Music voice note (owner: Find/Create ask; non-owner: music
+        # context, Devon decides). A voice note whose transcription
+        # failed may have failed because it contains MUSIC, not
+        # speech — STT on a song returns an empty transcript. Check
+        # BEFORE the honest STT-failure reply below, or a music note
+        # would get "couldn't transcribe" and never reach the ask.
+        # Games-only chats never reach here (their gate returned
+        # above), so the ask stays silent there like every reply.
+        if message.incoming and not message.text.strip():
+            try:
+                if self._handle_music_voice_note(message):
+                    return
+            except Exception:  # noqa: BLE001 - music detection never eats chat
+                _log.exception("music voice-note hook failed")
         # STT failure, answered honestly — but ONLY in non-games-only
         # chats: the games-only gate above already returned, so silence
         # wins there and this never replies in a games-only chat. A
@@ -3343,6 +3438,13 @@ class PartnerRuntime(
         if kind == "sham":
             return self._control_sham(command.tail or arg, chat_key=chat_key,
                                       message=message)
+        if kind == "musicnote":
+            # The music voice-note ask's buttons (owner-only — the
+            # grant check above already denied non-owners). The
+            # pending clip was stashed when the ask went out; the tap
+            # consumes it.
+            return self._control_musicnote(command.tail or arg,
+                                           chat_key=chat_key)
         if kind == "fix":
             return self._control_fix(command.tail or arg)
 

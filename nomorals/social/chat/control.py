@@ -505,6 +505,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "dislike": (0, None),    # /dislike [notes…] — last production missed
     "cookies": (0, 1),       # /cookies [check] — YouTube cookie file status/setup
     "sham": (0, 0),          # /sham — reply to audio/voice note to identify the song
+    "musicnote": (1, 1),     # /musicnote find|create — answer the music voice-note ask (owner-only)
     "fix": (1, None),        # /fix <code> [lang] [--rounds N] — run until the model gets it green
 }
 
@@ -2318,6 +2319,10 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
                 "usage": "/sham",
                 "example": "/sham (reply to a voice note)",
                 "related": "/play"},
+    "musicnote": {"what": "Answer the music voice-note ask — Find this music (identify the song) or Create a song (produce a new song from it). Owner-only; the ask's buttons call this.",
+                "usage": "/musicnote find | create",
+                "example": "/musicnote find",
+                "related": "/sham · /music"},
     "fix": {"what": "CI loop: runs the code in the sandbox, and while it fails the "
                     "model rewrites it and it runs again, until exit 0 (or the "
                     "expected text appears in stdout). Reports every round — exit "
@@ -2365,7 +2370,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
     ("decoding & crypto", ["decode", "cookies", "cookielab", "structure", "cipher",
                            "monitor", "investigate"]),
     ("media system", ["music", "distribute", "play", "video", "hub", "podcast", "dj", "produce", "like", "dislike", "cookies",
-                      "download", "shorts", "caption", "imggen", "sham"]),
+                      "download", "shorts", "caption", "imggen", "sham", "musicnote"]),
     ("execution · archives · builders", ["exec", "zip", "apps", "fix", "deliver"]),
     ("tools & automation", ["schedule", "db", "api", "connectors", "notion",
                             "gcal", "trello", "proxy", "workspace", "record",
@@ -2579,7 +2584,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
     ("media system — music · playback · video · podcast",
      ["music", "play", "video", "hub", "podcast", "zip", "audio", "overview", "character", "audiobook",
       "distribute", "dj", "download", "produce", "like", "dislike",
-      "shorts", "caption", "imggen", "sham"]),
+      "shorts", "caption", "imggen", "sham", "musicnote"]),
     ("memory & thinking",
      ["remember", "recall", "forget", "memories", "think", "benchmark", "redteam",
       "review", "tutor", "learn", "ekiti", "course", "health", "train", "form", "film", "graph", "route", "eta", "congestion",
@@ -2856,6 +2861,7 @@ LIST_ONELINERS: dict[str, str] = {
     "produce": "compose original music, taste-aware: /produce [spotify-url|vibe words…]",
     "rewind": "restore a coding checkpoint: /rewind [n]",
     "sham": "reply to an audio/voice note to identify the song: /sham",
+    "musicnote": "answer the music voice-note ask: /musicnote find | create",
     "sing": "sing a melody: /sing <melody> (C4:0.5:hello …)",
     "stripe": "Stripe payments: /stripe balance|customers|charges|link",
     "tour": "smoke-test every command: /tour | /tour <cmd> deep-probes one",

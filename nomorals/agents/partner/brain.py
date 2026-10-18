@@ -144,6 +144,27 @@ class PartnerBrain:
             elif media.kind == "video":
                 notes.append(f"video: {media.name or media.path}")
             elif media.kind == "audio" or media.kind == "voice" or media.mime.startswith("audio/"):
+                # Music voice note (non-owner path — the owner got the
+                # Find/Create ask in the runtime instead and never
+                # reaches here): the runtime already detected music in
+                # this clip and stamped it on the meta. Do NOT
+                # re-transcribe it (STT already failed with an empty
+                # transcript) and do NOT label it SPOKEN — it IS music,
+                # and the model gets it as context to decide its own
+                # reply from. This note counts as handled, never as
+                # "untranscribed", so the guard below never fires on it.
+                music_note = (getattr(message, "meta", None) or {}).get(
+                    "music_note") or {}
+                if (isinstance(music_note, dict)
+                        and music_note.get("path")
+                        and str(music_note.get("path")) == str(media.path)):
+                    any_transcribed = True
+                    notes.append(
+                        "voice note — music playing "
+                        f"({music_note.get('heard') or 'no description'}; "
+                        "use it as context for the reply — do NOT ask "
+                        "what it is, do NOT ask to identify it)")
+                    continue
                 # Reuse a transcript an earlier stage already produced
                 # (_spoken_command / pingpong) — never re-transcribe a
                 # note that already transcribed, and never lose it to a

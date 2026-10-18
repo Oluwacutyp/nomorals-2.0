@@ -108,6 +108,19 @@ def _game_buttons(payload: dict[str, Any] | None) -> Keyboard | None:
     return [r for r in rows if r] or None
 
 
+def _music_ask_buttons() -> Keyboard | None:
+    """Buttons for the music voice-note ask: Find vs Create.
+
+    Both callbacks are real routable commands (``/musicnote find`` /
+    ``/musicnote create``) — the pending clip lives in the per-chat
+    store, so the callbacks need no payload and stay well inside the
+    47-byte budget.
+    """
+    row = _row(("🔍 Find this music", "musicnote find"),
+               ("🎵 Create a song", "musicnote create"))
+    return [row] if row else None
+
+
 def _memory_buttons() -> Keyboard | None:
     """Buttons for a memory output: the memory-system commands.
 
@@ -143,8 +156,8 @@ def adaptive_buttons_for(
     """Inline keyboard for an output, or None when nothing is relevant.
 
     ``output_kind`` is the output's kind (``"scheduled"`` / ``"search"``
-    / ``"game"`` / ``"memory"`` / ``"command"`` / ``"tool"``) with
-    ``payload`` its structured content. ``origin_command`` is the
+    / ``"game"`` / ``"memory"`` / ``"music-ask"`` / ``"command"`` /
+    ``"tool"``) with ``payload`` its structured content. ``origin_command`` is the
     command that produced this output, when the caller knows it
     (a command result). ``text`` is the output text, used for the
     content-pattern fallback (game results, play pick-lists, confirm
@@ -162,6 +175,8 @@ def adaptive_buttons_for(
         return _game_buttons(payload)
     if kind == "memory":
         return _memory_buttons()
+    if kind == "music-ask":
+        return _music_ask_buttons()
     if kind in ("command", "tool"):
         return _retry_only(origin_command)
 
