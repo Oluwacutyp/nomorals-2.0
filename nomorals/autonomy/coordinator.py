@@ -500,7 +500,11 @@ class IdleCoordinator:
             from ..memory.manager import MemoryManager
             # MemoryManager takes a context carrying .db, not a bare db.
             manager = MemoryManager(_NS(db=db, settings=None))
-            report = manager.consolidate()
+            # Additive only: the destructive consolidate() deletes
+            # memories, so it stays explicit/human-invoked — the owner's
+            # "forget only on explicit command" rule. An idle tick must
+            # never delete on its own.
+            report = manager.consolidate_additive()
             out.update({"ok": True,
                         "seconds": round(time.time() - t0, 1),
                         "episodes": report.get("episodes"),

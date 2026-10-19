@@ -500,7 +500,12 @@ class MemoryManager:
                 self._index_text(record_id, content)
         self.stats["remembered"] += 1
         if self.repo.count() >= self.consolidate_every and (now - self._last_consolidation) > 60:
-            self.consolidate()
+            # ADDITIVE only: the destructive consolidate() (simhash dedupe
+            # + forget_below) deletes memories, so it stays explicit and
+            # human-invoked — the owner's "forget only on explicit
+            # command" rule. The automatic path distils durable facts
+            # without deleting anything.
+            self.consolidate_additive()
         return record_id
 
     def remember_many(
@@ -1168,6 +1173,12 @@ class MemoryManager:
         re-run never distils the same episode twice. The distilled fact links
         back via ``metadata.distilled_ids``. Never raises.
         """
+        # Re-entrancy guard FIRST: this method calls remember() internally
+        # to store distilled facts, and remember() re-triggers the
+        # automatic consolidation check — without the guard that recurses
+        # until the interpreter gives up. (The destructive consolidate()
+        # already guards this way at its own start.)
+        self._last_consolidation = time.time()
         started = time.perf_counter()
         report: dict[str, Any] = {
             "mode": "additive", "episodes": 0, "batches": 0,

@@ -279,7 +279,9 @@ class MemoryAgent(RoleAgent):
             return {"results": memory.recall(spec.get("query", ""), limit=int(spec.get("limit", 8)))}
         if action == "remember":
             return {"id": memory.remember(spec.get("content", ""), kind=spec.get("kind", "episode"))}
-        return memory.consolidate()
+        # Additive: the destructive consolidate() deletes memories, so it
+        # is explicit/human-invoked only — a role task never deletes.
+        return memory.consolidate_additive()
 
 
 class CriticAgent(RoleAgent):
@@ -333,7 +335,9 @@ class ReflectionAgent(RoleAgent):
         if memory is None:
             return {"lessons": []}
         self.check_cancelled()
-        return memory.consolidate()
+        # Additive: reflection distils lessons without deleting the
+        # episodes they came from — "forget only on explicit command".
+        return memory.consolidate_additive()
 
 
 #: role name → class, for dynamic spawning.
