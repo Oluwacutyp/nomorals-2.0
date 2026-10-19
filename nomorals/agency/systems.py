@@ -60,6 +60,16 @@ SYSTEM_WEIGHTS = {
     "news": 0.8, "social": 0.7, "gigs": 1.0,
 }
 
+#: Blocker markers the leads handler sets ONLY after a successful
+#: stage advance (see ``_work_leads_trigger``). When one is present,
+#: the lead was already advanced on a previous turn and the trigger
+#: is waiting on the DM step — a retry must resume there, never
+#: advance the lead a second time.
+_LEADS_DM_WAIT_MARKERS = (
+    "DM send needs owner-approved draft",
+    "DM send blocked:",
+)
+
 
 class ActiveSystems:
     def __init__(self, *, db: Any, store: InitiativeStore | None = None,
@@ -159,10 +169,23 @@ class ActiveSystems:
                 return it
         return None
 
-    def _trigger_initiatives(self, name: str) -> list[Initiative]:
-        out = [it for it in self.store.list_active()
-               if it.objective == name
-               and it.kind == "evidence_opportunity"]
+    def _trigger_initiatives(self, name: str,
+                             now: float | None = None) -> list[Initiative]:
+        # Only actionable triggers: fresh ones (never worked) plus
+        # backed-off ones whose wake-up has arrived. A trigger the code
+        # itself advanced with a future next_review_at is NOT re-worked
+        # early — otherwise every blocked/failed trigger is retried on
+        # every pick and the backoff the handlers set is meaningless.
+        # ``now`` defaults to wall-clock; tick paths pass their own.
+        now = time.time() if now is None else now
+        out = []
+        for it in self.store.list_active():
+            if it.objective != name or it.kind != "evidence_opportunity":
+                continue
+            if (it.last_action_at > 0 and it.next_review_at
+                    and it.next_review_at > now):
+                continue
+            out.append(it)
         return sorted(out, key=lambda i: i.created_at)
 
     # ── real-organ queue checks (honest has_work) ──────────────────
@@ -299,7 +322,7 @@ class ActiveSystems:
             # (a specific gap / a specific due watch) gets its own
             # handler, not a generic organ tick. The generic tick is
             # only the fallback when no trigger is pending.
-            triggers = self._trigger_initiatives("research")
+            triggers = self._trigger_initiatives("research", now)
             if triggers:
                 return self._work_trigger(triggers[0], now)
             try:
@@ -316,7 +339,7 @@ class ActiveSystems:
         if name == "wisdom" and self._wisdom_organ is not None:
             # Per-trigger handler first (a specific ingest-queue
             # trigger), generic tick only as fallback.
-            triggers = self._trigger_initiatives("wisdom")
+            triggers = self._trigger_initiatives("wisdom", now)
             if triggers:
                 return self._work_trigger(triggers[0], now)
             try:
@@ -388,7 +411,7 @@ class ActiveSystems:
             source="agency:impossible")
         # Complete the matching trigger initiative — through the
         # maker-checker gate, not the worker's own say-so.
-        for it in self._trigger_initiatives("impossible"):
+        for it in self._trigger_initiatives("impossible", now):
             payload = self._trigger_payloads.get(it.dedupe_key, {})
             if payload.get("claim_id", claim_id) == claim_id:
                 return self._complete_verified(
@@ -411,7 +434,7 @@ class ActiveSystems:
 
     def _tick_domain(self, name: str, now: float) -> WorkResult:
         # Work the oldest trigger initiative first (follow-through).
-        triggers = self._trigger_initiatives(name)
+        triggers = self._trigger_initiatives(name, now)
         if triggers:
             return self._work_trigger(triggers[0], now)
         # None pending: observe now — a new trigger may initiate work.
@@ -837,17 +860,27 @@ class ActiveSystems:
                 it.id, stop_reason=f"lead {current}: no forward transition",
                 verification={"lead": lead})
             return WorkResult(useful=True, work_key=f"leads:{it.id}")
-        res = adapter.advance(lead, nxt_options[0])
-        if res.get("status") != "advanced":
-            self.store.advance(it.id, next_review_at=now + 3600,
-                                blocker=f"lead advance failed: "
-                                        f"{res.get('error', res)}")
-            return WorkResult(useful=False, work_key=f"leads:{it.id}")
-        self.knowledge.deposit(
-            "leads",
-            f"lead {lead.get('lead_id', '')} advanced "
-            f"{current} → {nxt_options[0]}",
-            source="agency:leads")
+        res = None
+        # Idempotency: when the blocker is one of the DM-wait markers,
+        # this handler already advanced the lead on a previous turn.
+        # Resume at the contact step below — never advance twice for
+        # one trigger (the retry re-derives from the stale trigger
+        # payload, so a blind re-advance would push the lead another
+        # stage with no DM ever sent).
+        already_advanced = bool(it.blocker) and it.blocker.startswith(
+            _LEADS_DM_WAIT_MARKERS)
+        if not already_advanced:
+            res = adapter.advance(lead, nxt_options[0])
+            if res.get("status") != "advanced":
+                self.store.advance(it.id, next_review_at=now + 3600,
+                                    blocker=f"lead advance failed: "
+                                            f"{res.get('error', res)}")
+                return WorkResult(useful=False, work_key=f"leads:{it.id}")
+            self.knowledge.deposit(
+                "leads",
+                f"lead {lead.get('lead_id', '')} advanced "
+                f"{current} → {nxt_options[0]}",
+                source="agency:leads")
         # Contact step: the DM-send executor sends the OWNER-APPROVED
         # draft when authority allows (``payload["approved_draft"]``
         # or a default lead draft), and the completion is

@@ -15,10 +15,15 @@ nervous system through plain language:
   ``presence_sense`` failure mode). See ``pulse``/``briefing``.
 * ``__agency_shift__`` — scheduler-internal agency shift (observe →
   see what needs doing → do it → verify → follow through, no prompt).
-  Same closure pattern. Builds ``ActiveSystems`` with REAL organs
-  injected into the L0 agency layer (this module is pinned L5, so it
-  may import L1–L5) and runs ``work_shift()``. Scheduled shifts run
-  under default-deny policy (observe/draft/propose, never silent
+  Same closure pattern. Builds ``ActiveSystems`` with real organ
+  ADAPTERS injected into the L0 agency layer (this module is pinned
+  L5, so it may import L1–L5) and runs ``work_shift()``. The
+  research/wisdom/impossible organs are deliberately NOT constructed
+  here: their ticks do heavyweight work (web research, corpus
+  ingest, claim attempts) that a scheduled job should not silently
+  start — those systems run organ-less, work their initiative
+  lifecycles, and record honest "no organ injected" blockers.
+  Scheduled shifts run under default-deny policy (observe/draft/propose, never silent
   outbound): the persistent ``MandateStore`` DOES apply to scheduled
   shifts, but ``Policy`` allow-rules do not persist, so silent
   posting needs the runtime's configured ``AgencyAuthority``, not a
