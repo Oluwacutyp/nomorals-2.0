@@ -775,7 +775,7 @@ class PlaybackEngine:
                 if path and os.path.isfile(path):
                     return {"ok": True, "path": path, "title": title}
                 return {"ok": False, "reason": f"file not found: {path}"}
-            if kind == "youtube":
+            if kind in ("youtube", "youtube-music"):
                 try:
                     path = self._youtube_audio(item)
                 except Exception as exc:  # noqa: BLE001

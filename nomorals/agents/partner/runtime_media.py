@@ -1157,7 +1157,7 @@ class RuntimeMediaMixin:
                     return (out + suffix
                             + f"\n▶ sent “{dl_title}” to this chat.")
                 except Exception as exc:  # noqa: BLE001
-                    return (out + suffix + "\nhad the file ({path}) "
+                    return (out + suffix + f"\nhad the file ({path}) "
                             f"but couldn't send it: {exc}")
             reason = str(dl.get("reason", "unknown error"))
             if dl.get("youtube_fallback_attempted"):
@@ -1176,6 +1176,10 @@ class RuntimeMediaMixin:
                 youtube_bot_blocked = True
             outcomes[name] = f"download blocked ({reason[:120]})"
         tried = self._format_tried_list(search_attempts, outcomes)
+        # Total failure: the pre-enqueued first pick never downloaded —
+        # drop its queue row like the single-send path does, so the
+        # durable queue doesn't keep a broken item.
+        self._drop_matching_queued(engine, first_item)
         msg = (out + f"\nsources tried ({len(tried)}): "
                + "; ".join(tried))
         msg += f"\ncouldn't download {title!r} from any source."
