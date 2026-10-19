@@ -260,7 +260,7 @@ class RuntimeWisdomMixin:
                 "the 47-text starter library (public-domain scriptures, "
                 "hermetic, gnostic, and wisdom texts), then ask again.")
         return self._send_long_checked(
-            chat.platform, chat, "\n".join(lines).strip()[:6000])
+            chat.platform, chat, "\n".join(lines).strip())
 
     def _control_wisdom_practice(self, keeper, rest: str, *,
                                  chat_key: str, chat) -> str:
@@ -351,4 +351,4 @@ class RuntimeWisdomMixin:
         for e in out["timeline_context"][:10]:
             lines.append(f"  {e['start']}: {e['title']} — {e.get('summary', '')}")
         return self._send_long_checked(
-            chat.platform, chat, "\n".join(lines).strip()[:6000])
+            chat.platform, chat, "\n".join(lines).strip())

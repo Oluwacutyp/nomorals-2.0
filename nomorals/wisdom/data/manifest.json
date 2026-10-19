@@ -62,7 +62,7 @@
       "title": "The Gospel of Philip",
       "tradition": "christian-gnostic",
       "translator": "Wesley W. Isenberg",
-      "notes": "mirror unreachable 2026-10-02: gnosis.org blocked from this network, archive.org copies are lending-restricted; kept original URL for retry"
+      "notes": "mirror unreachable 2026-10-02: gnosis.org blocked from this network. 2026-10-19: archive.org 'Gospel Of Philip 2004' scan is the copyrighted Leloup/Inner Traditions (2004) edition — not usable; Mattison public-domain translation exists but is login-walled on academia.edu; kept original URL for retry"
     },
     {
       "canon_status": "gnostic",
@@ -249,11 +249,11 @@
       "canon_status": "canon",
       "license": "public-domain",
       "slug": "zohar-selections",
-      "source_url": "https://www.sacred-texts.com/jud/zdm/index.htm",
+      "source_url": "https://archive.sacred-texts.com/jud/zdm/index.htm",
       "title": "The Zohar (selections)",
       "tradition": "judaism",
       "translator": "Denison Ross",
-      "notes": "mirror unreachable 2026-10-02: sacred-texts.com blocked from this network; archive.org copy (in.ernet.dli.2015.220627) returns HTTP 500; no other English mirror found; kept original URL"
+      "notes": "mirror switched 2026-10-19: www.sacred-texts.com blocked from this network; now uses ISTA's own archive.sacred-texts.com mirror (same text, verified HTTP 200)"
     },
     {
       "canon_status": "canon",
@@ -335,7 +335,7 @@
       "title": "The Philokalia (selections)",
       "tradition": "christianity",
       "translator": "Palmer, Sherrard & Ware",
-      "notes": "mirror unreachable 2026-10-02: sacred-texts.com blocked from this network; archive.org copy (philokaliacompl00gehp) is access-restricted (401); kept original URL for retry"
+      "notes": "mirror unreachable 2026-10-02: sacred-texts.com blocked from this network; archive.org copy (philokaliacompl00gehp) is access-restricted (401). 2026-10-19: only other full text found is the copyrighted Palmer/Ware translation — not usable; kept original URL for retry"
     },
     {
       "canon_status": "esoteric",
@@ -386,11 +386,11 @@
       "canon_status": "apocrypha",
       "license": "public-domain",
       "slug": "gospel-of-mary",
-      "source_url": "https://www.gnosis.org/library/marygosp.htm",
+      "source_url": "https://www.gospels.net/mary",
       "title": "The Gospel of Mary",
       "tradition": "christian-gnostic",
-      "translator": "Karen L. King",
-      "notes": "mirror unreachable 2026-10-02: gnosis.org blocked from this network, archive.org copies are lending-restricted; kept original URL for retry"
+      "translator": "Mark M. Mattison (public domain)",
+      "notes": "mirror switched 2026-10-19: gnosis.org blocked from this network; now uses gospels.net (Mattison public-domain translation, verified HTTP 200)"
     },
     {
       "canon_status": "eastern",

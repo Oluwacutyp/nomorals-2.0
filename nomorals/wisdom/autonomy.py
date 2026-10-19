@@ -330,7 +330,7 @@ class WisdomOrgan:
             entry = ManifestEntry(
                 slug=slug, title=row["title"],
                 tradition=row["tradition"] or "research",
-                canon_status="reference", source_url=row["url"])
+                canon_status="secondary", source_url=row["url"])
             ingestor.ingest_entry(entry)
             self.db.execute(
                 "UPDATE wisdom_ingest_queue SET status='done', done_at=?"
@@ -411,14 +411,14 @@ class WisdomOrgan:
                 continue
             for p in ans.passages:
                 key = (p.work or "") + "::" + (p.snippet or "")[:80]
-                if slug in (p.work or "") and key not in seen:
+                if p.slug == slug and key not in seen:
                     seen[key] = p
         passages = list(seen.values())
         if not passages:
             # Fall back: ask for the work by slug directly.
             try:
                 ans = keeper.ask(slug.replace("-", " "), top=25, mode="keyword")
-                passages = [p for p in ans.passages if slug in (p.work or "")]
+                passages = [p for p in ans.passages if p.slug == slug]
             except Exception:  # noqa: BLE001
                 passages = []
         if not passages:
@@ -681,11 +681,8 @@ class WisdomOrgan:
         by_tradition: dict[str, list[dict[str, Any]]] = {}
         for p in ans.passages[:top * 2]:
             manifest = getattr(keeper.corpus, "_manifest", {}) or {}
-            tradition = ""
-            for slug, entry in manifest.items():
-                if slug in (p.work or ""):
-                    tradition = entry.tradition
-                    break
+            entry = manifest.get(getattr(p, "slug", "") or "")
+            tradition = entry.tradition if entry is not None else ""
             by_tradition.setdefault(tradition or "unknown", []).append({
                 "work": p.work, "section": p.section,
                 "snippet": (p.snippet or "").strip()[:600],
@@ -693,11 +690,11 @@ class WisdomOrgan:
             })
         # Shared-concept notes: which traditions' digests link together.
         notes: list[str] = []
-        seen_slugs = {p.work for p in ans.passages[:top]}
-        for work in list(seen_slugs)[:4]:
-            for link in self.links_for(work or "", limit=3):
+        seen_slugs = {p.slug for p in ans.passages[:top] if p.slug}
+        for slug in list(seen_slugs)[:4]:
+            for link in self.links_for(slug, limit=3):
                 notes.append(
-                    f"{work} ↔ {link['work']} share: "
+                    f"{slug} ↔ {link['work']} share: "
                     f"{', '.join(link['shared_terms'][:6])}")
         return {
             "query": query,
