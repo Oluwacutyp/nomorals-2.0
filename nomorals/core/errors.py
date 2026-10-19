@@ -749,9 +749,14 @@ def short_stt_reason(error: Any) -> str:
             or "not installed" in lowered or "no stt" in lowered):
         return "no STT backend"
     if not text:
-        # Never a bare generic: an empty-message exception still names
-        # its class (spec §4.3 — never-empty reasons).
-        return f"STT API error: {exc_str(error) if isinstance(error, BaseException) else type(error).__name__}"
+        # Never a bare generic for a REAL exception: an empty-message
+        # exception still names its class (spec §4.3 — never-empty
+        # reasons). But a non-exception with no text has no class worth
+        # naming — "str"/"NoneType" would be noise, not information —
+        # so those stay the bare generic the caller asked for.
+        if isinstance(error, BaseException):
+            return f"STT API error: {exc_str(error)}"
+        return "STT API error"
     detail = " ".join(text.split())
     detail = redact_secrets(detail)
     if len(detail) > 300:

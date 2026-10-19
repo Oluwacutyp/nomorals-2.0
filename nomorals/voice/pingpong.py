@@ -31,6 +31,8 @@ __all__ = [
     "synthesize_voice_reply",
     "to_ogg",
     "voice_note_info",
+    "get_cached_transcript",
+    "cache_transcript",
 ]
 
 _VOICE_KINDS = ("audio", "voice")
@@ -49,6 +51,52 @@ def has_voice_media(message: Any) -> bool:
 # One STT-failure formatter (infra spec §4.2): canonical implementation in
 # nomorals.core.errors.short_stt_reason; alias so the copies never drift.
 from ..core.errors import short_stt_reason as _short_stt_reason
+
+
+def get_cached_transcript(meta: Any, path: str) -> str | None:
+    """Transcript cached for this exact media path, or None.
+
+    The transcript cache is keyed per media path: two voice notes in
+    one message must never share a transcript (the old single
+    ``meta["voice_transcript"]`` string let the last note's words
+    overwrite the first's). The legacy single key is kept as a
+    fallback for single-media messages.
+    """
+    if not isinstance(meta, dict):
+        return None
+    by_path = meta.get("voice_transcripts")
+    if isinstance(by_path, dict):
+        text = by_path.get(str(path or ""))
+        if isinstance(text, str) and text.strip():
+            return text
+    legacy = meta.get("voice_transcript")
+    if isinstance(legacy, str) and legacy.strip():
+        return legacy
+    return None
+
+
+def cache_transcript(meta: Any, path: str, text: str) -> None:
+    """Cache a transcript under its media path (+ legacy single key).
+
+    ``meta["voice_transcripts"]`` is ``{path: text}``; the legacy
+    ``meta["voice_transcript"]`` keeps the FIRST transcript (the
+    single-media fast path and older readers). Never raises.
+    """
+    try:
+        if not isinstance(meta, dict):
+            return
+        clean = (text or "").strip()
+        if not clean:
+            return
+        by_path = meta.get("voice_transcripts")
+        if not isinstance(by_path, dict):
+            by_path = {}
+            meta["voice_transcripts"] = by_path
+        by_path[str(path or "")] = clean
+        if not meta.get("voice_transcript"):
+            meta["voice_transcript"] = clean
+    except Exception:  # noqa: BLE001 - meta bookkeeping never breaks chat
+        pass
 
 
 def _record_stt_reason(message: Any, reason: str) -> None:
@@ -90,15 +138,16 @@ def transcribe_voice_media_with_reason(
         # A transcript an earlier stage already produced (_spoken_command
         # runs before pingpong) is reused, never re-transcribed: a later
         # attempt can transiently fail and lose a transcript that had
-        # already succeeded.
+        # already succeeded. Keyed per media path — two voice notes in
+        # one message keep their own transcripts.
+        path = getattr(media, "path", None)
         _meta = getattr(message, "meta", None)
         if isinstance(_meta, dict):
-            _cached = _meta.get("voice_transcript")
-            if isinstance(_cached, str) and _cached.strip():
+            _cached = get_cached_transcript(_meta, path)
+            if _cached:
                 _record_stt_reason(message, "")
                 _meta.pop("voice_untranscribed_reason", None)
                 return _cached, ""
-        path = getattr(media, "path", None)
         if not path:
             reason = "no audio file"
             continue
@@ -109,11 +158,12 @@ def transcribe_voice_media_with_reason(
                 text = ((outcome.value or {}).get("text", "") or "").strip()
                 if text:
                     _record_stt_reason(message, "")
-                    # Cache for _media_notes, which runs after this.
+                    # Cache for _media_notes, which runs after this —
+                    # keyed by path so a second note keeps its own words.
+                    _meta2 = getattr(message, "meta", None)
+                    cache_transcript(_meta2, path, text)
                     try:
-                        _meta2 = getattr(message, "meta", None)
                         if isinstance(_meta2, dict):
-                            _meta2["voice_transcript"] = text
                             _meta2.pop("voice_untranscribed_reason", None)
                     except Exception:  # noqa: BLE001 - meta bookkeeping never breaks chat
                         pass

@@ -168,9 +168,13 @@ class PartnerBrain:
                 # Reuse a transcript an earlier stage already produced
                 # (_spoken_command / pingpong) — never re-transcribe a
                 # note that already transcribed, and never lose it to a
-                # transient failure on a later attempt.
-                cached = (getattr(message, "meta", None) or {}).get(
-                    "voice_transcript")
+                # transient failure on a later attempt. Keyed per media
+                # path: two voice notes in one message keep their own
+                # transcripts instead of sharing the last one.
+                from ...voice.pingpong import \
+                    get_cached_transcript as _get_cached
+                cached = _get_cached(
+                    getattr(message, "meta", None), getattr(media, "path", ""))
                 if cached:
                     any_transcribed = True
                     label = ("voice note (transcribed)"
@@ -182,14 +186,11 @@ class PartnerBrain:
                 note, reason = self._transcribe_media_note_with_reason(media)
                 if note:
                     any_transcribed = True
-                    try:
-                        meta = getattr(message, "meta", None)
-                        if isinstance(meta, dict):
-                            text = note.split("—", 1)[-1].strip()
-                            if text:
-                                meta["voice_transcript"] = text
-                    except Exception:  # noqa: BLE001 - meta bookkeeping never breaks chat
-                        pass
+                    from ...voice.pingpong import \
+                        cache_transcript as _cache_t
+                    _cache_t(getattr(message, "meta", None),
+                             getattr(media, "path", ""),
+                             note.split("—", 1)[-1].strip())
                     notes.append(note)
                 elif reason:
                     if not first_reason:
@@ -250,16 +251,21 @@ class PartnerBrain:
             note = self._transcribe_media_note(media)
             text = note.split("—", 1)[-1].strip() if "—" in note else ""
             if text:
-                # Cache the transcript: the caller discards non-command
-                # transcripts, but pingpong and _media_notes run AFTER
-                # this and used to transcribe the same attachment again.
-                # A later transient failure lost a transcript that had
-                # already succeeded — leaving the brain with a bare
-                # "audio: ..." note and an LLM guessing music-ID.
+                # Cache the transcript keyed by media path: the caller
+                # discards non-command transcripts, but pingpong and
+                # _media_notes run AFTER this and used to transcribe the
+                # same attachment again. A later transient failure lost
+                # a transcript that had already succeeded — leaving the
+                # brain with a bare "audio: ..." note and an LLM
+                # guessing music-ID. Per-path so two notes in one
+                # message never share a transcript.
                 try:
+                    from ...voice.pingpong import \
+                        cache_transcript as _cache_t2
+                    _cache_t2(getattr(message, "meta", None),
+                              getattr(media, "path", ""), text)
                     meta = getattr(message, "meta", None)
                     if isinstance(meta, dict):
-                        meta["voice_transcript"] = text
                         meta.pop("stt_failure_reason", None)
                         meta.pop("voice_untranscribed_reason", None)
                 except Exception:  # noqa: BLE001 - meta bookkeeping never breaks chat
