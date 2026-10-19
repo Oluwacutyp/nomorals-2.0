@@ -572,11 +572,22 @@ def _deliver_text(context: Any, text: str) -> bool:
 
 
 def _deliver_audio(context: Any, audio_path: str) -> bool:
-    """Deliver the voice note via the live gateway.  Never raises."""
+    """Deliver the voice note via the live gateway.  Never raises.
+
+    Target resolution and the proactive gate are the SAME machinery the
+    text path (Notifier) uses: ``resolve_owner_targets`` (bare numeric
+    owner-chat IDs resolve by id-shape — the old naive ``platform:id``
+    split silently skipped them, so the voice note never delivered while
+    the text did) and ``proactive_allowed`` per chat (a chat in quiet
+    mode / with proactive off holds the text briefing — the voice note
+    must not bypass that gate).
+    """
     if not audio_path or not os.path.isfile(audio_path):
         return False
     try:
         from ..social.chat.base import ChatRef, MediaRef
+        from ..social.chat.gateway import resolve_owner_targets
+        from ..partner.chat_modes import proactive_allowed
         from .notifier import resolve_gateway
         gateway = resolve_gateway(context)
         if gateway is None:
@@ -591,13 +602,32 @@ def _deliver_audio(context: Any, audio_path: str) -> bool:
         settings = getattr(context, "settings", None)
         partner = getattr(settings, "partner", None)
         raw = getattr(partner, "owner_chats", "") or ""
+        try:
+            status = gateway.status() or {}
+        except Exception:  # noqa: BLE001 - a broken status() must not kill delivery
+            status = {}
+        registry_lookup = getattr(gateway, "platforms_for_chat_id", None)
+        try:
+            targets = resolve_owner_targets(
+                raw, status=status, registry_lookup=registry_lookup)
+        except Exception:  # noqa: BLE001 - resolution must never break delivery
+            _log.warning("morning-pulse: owner target resolution failed",
+                         exc_info=True)
+            targets = []
         reached = 0
-        for key in raw.split(","):
-            plat, _, cid = key.strip().partition(":")
+        for target in targets:
+            plat, cid = target.platform, target.chat_id
             if not (plat and cid):
                 continue
+            # Per-chat proactive toggle / quiet mode: the text path holds
+            # these sends — the voice note obeys the same gate.
+            if not proactive_allowed(f"{plat}:{cid}"):
+                _log.info("morning-pulse: voice note skipped for %s:%s — "
+                          "proactive messages are off for this chat "
+                          "(quiet mode / /chatmode feature proactive off)",
+                          plat, cid)
+                continue
             try:
-                status = gateway.status()
                 if not status.get(plat, {}).get("running_in_session"):
                     continue
                 adapter = gateway._adapter_for(plat)

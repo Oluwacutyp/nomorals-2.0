@@ -1,8 +1,20 @@
-"""Personal-presentation gating for social sends (code-enforced).
+"""Personal-presentation gating for social sends (code-enforced policy helper).
 
 Devon never acts like an AI outside the owner's DM / owner-originated
-chats — and that is enforced in code, not in a prompt. This module is
-the enforcement point every social send funnels through:
+chats. The LIVE enforcement of that rule is:
+
+* :mod:`nomorals.partner.gating` — prompt-level restriction
+  (``gate_decision`` / ``is_restricted``), consulted by the partner
+  brain and runtime on every inbound message;
+* :mod:`nomorals.partner.social_gate` — tool-call grants
+  (``grant_for`` / ``check_tool_call``), consulted by the agent loop
+  before a tool may act in a non-owner chat.
+
+This module is a TESTED POLICY HELPER for send-time checks — it is NOT
+wired into the send path and is not "the enforcement point every social
+send funnels through". It exists for callers that need an explicit
+policy decision about presenting as Devon (or as the owner) to a
+non-owner, e.g. future proactive-send flows:
 
 * **Identity.** A send that would present as Devon (or as the owner)
   to a non-owner must carry ``SOCIAL_DM`` (1:1) or ``SOCIAL_BULK``
