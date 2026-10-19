@@ -302,18 +302,26 @@ class RuntimeReachMixin:
             rest = parts[1].strip() if len(parts) > 1 else ""
             return self._control_browser_takeover(
                 rest, chat_key=chat_key, message=message)
+        if parts and parts[0].lower() == "run":
+            rest = parts[1].strip() if len(parts) > 1 else ""
+            return self._control_browser_run(
+                rest, chat_key=chat_key, message=message)
         if len(parts) < 2:
             return ("usage: /browser open <url> — fetch + show the text\n"
                     "       /browser text <url> — page text only\n"
                     "       /browser links <url> — outgoing links\n"
                     "       /browser forms <url> — forms + fields\n"
                     "       /browser takeover [url] — takeover sessions "
-                    "(owner-only)")
+                    "(owner-only)\n"
+                    "       /browser run <url> [goal] — drive a live tab "
+                    "with the agent loop (owner-only)")
         verb, url = parts[0].lower(), parts[1].strip()
         if verb not in ("open", "text", "links", "forms", "headings"):
             return ("usage: /browser open|text|links|forms|headings <url>\n"
                     "       /browser takeover [url] — takeover sessions "
-                    "(owner-only)")
+                    "(owner-only)\n"
+                    "       /browser run <url> [goal] — agent loop on a "
+                    "live tab (owner-only)")
         if not url.startswith(("http://", "https://")):
             return "give a full URL starting with http:// or https://"
         from ...tools.browser import BrowserSession
@@ -476,7 +484,8 @@ class RuntimeReachMixin:
                 / "challenge-memory.sqlite3")
             solver = ChallengeSolver(
                 takeover_manager=mgr, notifier=self._takeover_notifier(),
-                memory=memory)
+                memory=memory,
+                session_store=service.solved_session_store())
             outcome = solver.solve(
                 tab=RenderedTabTakeoverAdapter(tab),
                 resume_state={"step": 0, "url": url},
@@ -506,6 +515,69 @@ class RuntimeReachMixin:
                              "port-forward is set up.")
             return "\n".join(lines)
         return f"takeover failed: {outcome.message}"[:500]
+
+    def _control_browser_run(self, tail: str, *, chat_key: str = "",
+                              message: Any = None) -> str:
+        """Owner-only: ``/browser run <url> [goal]``.
+
+        The production entry point for the wired agent loop: open a
+        live rendered tab and drive it with an ``AgentLoop`` whose
+        ``on_blocked`` is the fully-wired ``ChallengeSolver`` handler
+        (takeover manager + owner notifier + challenge memory +
+        solved-session store). When the loop hits a wall it works the
+        ladder, escalates to the owner's Telegram as a last resort,
+        and PAUSES for resolution — this command blocks while waiting
+        for the owner (bounded by the takeover wait timeout), then
+        resumes where it left off on a verified clear, or stops
+        honestly on still-blocked. Decisions are the loop's heuristic
+        fallback (free-gain clicks) until an LLM decider is plugged
+        in — the wall path, not the decider, is what this verb wires.
+        """
+        if message is None or not self._is_operator(message):
+            return "browser run is owner-only — run it from the owner's chat."
+        rest = (tail or "").strip()
+        if not rest:
+            return "usage: /browser run <url> [goal] — e.g. /browser run https://example.test/ browse"
+        bits = rest.split(None, 1)
+        url = bits[0]
+        goal = bits[1].strip() if len(bits) > 1 else "browse"
+        if not url.startswith(("http://", "https://")):
+            return "give a full URL starting with http:// or https://"
+        try:
+            service = self._browser_service_for_takeover()
+            tab = service.open_rendered_tab("browser-run", url)
+        except Exception as exc:  # noqa: BLE001 - playwright/config errors
+            return f"browser run failed: could not open a live tab: {exc}"[:500]
+        try:
+            from ...browser.agent import CONSEQUENTIAL_KINDS
+            from ...browser.challenge_memory import ChallengeMemory
+            from ...browser.loop_wiring import build_wired_agent_loop
+
+            def _approve_benign(decision: Any, _obs: Any) -> bool:
+                # Benign acts (navigate/click around) proceed;
+                # consequential ones (spend/post/delete/irreversible)
+                # are denied — no human approver is attached, so they
+                # stop the loop instead of running.
+                return (not decision.irreversible
+                        and decision.action.kind not in CONSEQUENTIAL_KINDS)
+
+            memory = ChallengeMemory(
+                self.settings.resolve("data/takeover")
+                / "challenge-memory.sqlite3")
+            loop = build_wired_agent_loop(
+                tab=tab, takeover_manager=self._takeover_manager(),
+                notifier=self._takeover_notifier(), memory=memory,
+                session_store=service.solved_session_store(),
+                owner_chat=chat_key or "",
+                task_label=f"browser run {url}",
+                resume_state={"url": url, "goal": goal},
+                max_steps=30, approve=_approve_benign)
+            result = loop.run(url, goal=goal)
+        except Exception as exc:  # noqa: BLE001 - loop errors are data
+            return f"browser run failed: {exc}"[:500]
+        return (f"browser run done: {result.get('steps', 0)} steps, "
+                f"stopped: {result.get('stopped_reason', '')}, "
+                f"final URL: {result.get('final_url', url)}")
 
     # ── paper trading: /paper ───────────────────────────────────────────
     def _control_paper(self, tail: str, *, chat_key: str = "") -> str:

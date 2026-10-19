@@ -283,7 +283,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "checkmail": (0, 2),     # /checkmail [read <n> | code | forget] — read your temp inbox
     "vnumber": (0, 2),       # /vnumber [new [country] | status | forget] — temp/SMS number
     "checksms": (0, 1),      # /checksms [code | forget] — read SMS on your temp number
-    "browser": (1, None),    # /browser open|text|links|forms|headings <url> | takeover [url] (owner-only)
+    "browser": (1, None),    # /browser open|text|links|forms|headings <url> | takeover [url] | run <url> [goal] (owner-only)
     "paper": (0, None),      # /paper start|status|stop|list — simulated trading, never real money
     "people": (0, None),     # /people list|show|add|note — the people spine
     "commitments": (0, None),  # /commitments list|add|kept|broken|cancel|overdue|due|reliability|verify
@@ -608,6 +608,7 @@ _HELP_TEXT = "\n".join(
         "  — reachability wave (capabilities that had no command) —",
         "  /browser open|text|links|forms|headings <url>   the browser tool, in chat",
         "  /browser takeover [url]   takeover sessions — status / open (owner-only)",
+        "  /browser run <url> [goal]  drive a live tab with the agent loop — auto-escalates walls (owner-only)",
         "  /paper start <symbol> [market] [capital] | status [session|symbol] | stop | list",
         "   paper trading — simulated, never real money",
         "  /people list [n] | show <name> | add <name> | note <name> <text>",
@@ -2852,7 +2853,7 @@ LIST_ONELINERS: dict[str, str] = {
     "checkmail": "read your temp inbox: /checkmail [read <n> | code | forget]",
     "vnumber": "temp number: /vnumber new [country] gets a virtual number for SMS codes, per-user",
     "checksms": "read SMS on your temp number: /checksms [code | forget]",
-    "browser": "the browser tool in chat: /browser open|text|links|forms|headings <url> | takeover [url] (owner-only)",
+    "browser": "the browser tool in chat: /browser open|text|links|forms|headings <url> | takeover [url] | run <url> [goal] (owner-only)",
     "paper": "paper trading: /paper start <symbol> [market] [capital] | status | stop | list (simulated, never real)",
     "people": "the people spine: /people list | show <name> | add <name> | note <name> <text>",
     "commitments": "the obligation layer: /commitments list | add <what> [by <deadline>] | kept|broken|cancel <id> | overdue | due | reliability | verify",

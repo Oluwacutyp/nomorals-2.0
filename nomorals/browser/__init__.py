@@ -132,6 +132,10 @@ from .takeover import (
     TakeoverManager,
     TakeoverTabAdapter,
 )
+from .loop_wiring import (
+    RenderedTabDriver,
+    build_wired_agent_loop,
+)
 from .filtering import (
     UNTRUSTED_END,
     UNTRUSTED_START,
@@ -196,6 +200,7 @@ __all__ = [
     "AuthResult",
     "BotWallError",
     "BrowserBotDetectedError",
+    "build_wired_agent_loop",
     "BrowserDriver",
     "BrowserError",
     "BrowserNetworkError",
@@ -287,6 +292,7 @@ __all__ = [
     "Recording",
     "RecordingDiffError",
     "RenderedTab",
+    "RenderedTabDriver",
     "ScreenshotResult",
     "SessionHandle",
     "SitePlaybook",

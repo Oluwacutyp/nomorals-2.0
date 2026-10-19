@@ -121,6 +121,11 @@ class FakeBrowserService:
         self.opened.append((session_name, url))
         return self._tab
 
+    def solved_session_store(self) -> Any:
+        # The takeover verb passes the service's solved-session store
+        # into the solver; these wiring tests don't exercise saving.
+        return None
+
 
 class FakeTelegramAdapter(ChatAdapter):
     def __init__(self, name: str = "telegram") -> None:

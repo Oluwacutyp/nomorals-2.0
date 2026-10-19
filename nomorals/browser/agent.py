@@ -283,33 +283,47 @@ class AgentLoop:
                 return got
         return _heuristic_strategy(obs)
 
-    def _wall_check(self, page: Page, step: int) -> str | None:
+    def _wall_check(self, page: Page, step: int) -> tuple[str | None, Page]:
         """Detect a wall on ``page``; run the handler; return stop reason.
 
-        Returns None when there is no wall, or the handler cleared it
-        ("continue"). Any other outcome stops the loop honestly.
+        Returns ``(None, current_page)`` when there is no wall, or the
+        handler cleared it ("continue"). Any other outcome stops the
+        loop honestly with ``(reason, page)``.
+
+        On a cleared wall the returned page is FRESHLY RE-FETCHED from
+        the driver: the handler (solver / takeover) cleared the wall on
+        the LIVE tab, so the loop must resume on the post-clear page —
+        deciding on the stale wall HTML would re-decide a page that no
+        longer exists. A refetch failure keeps the old page (best
+        effort, logged) rather than stopping a cleared run.
         """
         try:
             from .errors import detect_challenge as _detect
             detection = _detect(page.html or "", title=page.title or "")
         except Exception:  # noqa: BLE001 - detection failure is not a wall
-            return None
+            return None, page
         if not detection:
-            return None
+            return None, page
         if self.on_blocked is None:
-            return f"blocked: {detection} (no wall handler)"
+            return f"blocked: {detection} (no wall handler)", page
         obs = Observation(page=page, step=step)
         try:
             verdict = self.on_blocked(obs, detection)
         except Exception as exc:  # noqa: BLE001 - handler errors stop us
-            return f"blocked: {detection} (wall handler failed: {exc})"
+            return (f"blocked: {detection} (wall handler failed: {exc})",
+                    page)
         if verdict == "continue":
-            return None
-        return f"blocked: {detection} (wall handler said stop)"
+            try:
+                return None, self.driver.fetch(page.url)
+            except Exception:  # noqa: BLE001 - refetch is best effort
+                _log.debug("wall cleared but refetch failed; keeping "
+                           "stale page", exc_info=True)
+                return None, page
+        return f"blocked: {detection} (wall handler said stop)", page
 
     def run(self, start_url: str, *, goal: str = "") -> dict[str, Any]:
         page = self.driver.fetch(start_url)
-        wall = self._wall_check(page, 0)
+        wall, page = self._wall_check(page, 0)
         if wall is not None:
             self.stopped_reason = wall
             return {"goal": goal, "steps": 0,
@@ -359,7 +373,7 @@ class AgentLoop:
                                   "url": new_page.url, "verified": verified})
             page = new_page
             last_result = {"ok": ok, "verified": verified}
-            wall = self._wall_check(page, step)
+            wall, page = self._wall_check(page, step)
             if wall is not None:
                 self.stopped_reason = wall
                 break

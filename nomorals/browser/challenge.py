@@ -425,13 +425,20 @@ class ChallengeSolver:
         takeover resolved), anything else stops the loop.
         """
         def _handler(observation: Any, detection: str) -> str:
+            # Resume state is fresh at call time: the loop's current
+            # step + page URL, merged over the base state the caller
+            # passed. A static captured state would resume the loop
+            # where the handler was BUILT, not where the wall hit.
+            page = getattr(observation, "page", None)
+            fresh_resume = dict(resume_state or {})
+            fresh_resume["step"] = getattr(observation, "step", None)
+            fresh_resume["url"] = getattr(page, "url", "") or \
+                fresh_resume.get("url", "")
             outcome = self.solve(
-                tab=tab, html=getattr(getattr(observation, "page", None),
-                                      "html", ""),
-                url=getattr(getattr(observation, "page", None), "url", ""),
-                title=getattr(getattr(observation, "page", None),
-                              "title", ""),
-                resume_state=resume_state, owner_chat=owner_chat,
+                tab=tab, html=getattr(page, "html", ""),
+                url=getattr(page, "url", ""),
+                title=getattr(page, "title", ""),
+                resume_state=fresh_resume, owner_chat=owner_chat,
                 task_label=task_label)
             if outcome.cleared:
                 return "continue"

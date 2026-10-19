@@ -2034,8 +2034,14 @@ class RenderedTab:
         """TakeoverTabAdapter alias for :meth:`click_at`."""
         self.click_at(x, y)
 
-    def type_text(self, text: str) -> None:
-        """Type into the focused field — takeover input."""
+    def type_into_focused(self, text: str) -> None:
+        """Type into the focused field — takeover input.
+
+        Named distinctly from :meth:`type_text` (target, text): the
+        later definition used to shadow this one, so the takeover
+        adapter's single-arg typing raised TypeError on a real tab
+        instead of typing. The adapter calls this method.
+        """
         page = self._require_loaded()
         try:
             page.keyboard.type(text or "")
@@ -2916,7 +2922,43 @@ class RenderedTabTakeoverAdapter:
         self._tab.click_norm(x, y)
 
     def type_text(self, text: str) -> None:
+        # Focused typing lives on type_into_focused (see RenderedTab):
+        # the (target, text) type_text would raise TypeError on a real
+        # tab. Duck-typed tabs without it fall back to legacy
+        # single-arg type_text.
+        focused = getattr(self._tab, "type_into_focused", None)
+        if callable(focused):
+            focused(text)
+            return
         self._tab.type_text(text)
+
+    def cookies(self) -> list[dict[str, Any]]:
+        """Solved-session save needs cookies; delegate, [] when absent."""
+        getter = getattr(self._tab, "cookies", None)
+        if not callable(getter):
+            return []
+        try:
+            return list(getter() or [])
+        except Exception:  # noqa: BLE001 - save is best effort
+            return []
+
+    def storage_state(self) -> dict[str, Any]:
+        """Solved-session save prefers storage_state; {} when absent."""
+        getter = getattr(self._tab, "storage_state", None)
+        if not callable(getter):
+            return {}
+        try:
+            state = getter()
+            return dict(state) if isinstance(state, dict) else {}
+        except Exception:  # noqa: BLE001 - save is best effort
+            return {}
+
+    def add_cookies(self, cookies: list[dict[str, Any]]) -> dict[str, Any]:
+        """Solved-session restore; no-op when the tab cannot take them."""
+        adder = getattr(self._tab, "add_cookies", None)
+        if not callable(adder):
+            return {"ok": False, "reason": "tab cannot take cookies"}
+        return adder(cookies)
 
     def press_key(self, key: str) -> None:
         self._tab.press_key(key)
