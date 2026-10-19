@@ -23,6 +23,14 @@ nervous system through plain language:
   shifts, but ``Policy`` allow-rules do not persist, so silent
   posting needs the runtime's configured ``AgencyAuthority``, not a
   scheduled shift.
+* ``__agent_modes_tick__`` — scheduler-internal agent-modes tick: one
+  autonomous cycle for every chat running the autonomous mode.
+  Same closure pattern. Reads the runtime's persistent ``AgentModes``
+  from ``context.extras["agent_modes"]`` (a fresh engine would have
+  no sources and no pending initiatives); falls back to a default
+  engine when the runtime never booted one.  Initiatives that need
+  approval land in ``/proposals`` via the runtime's proposal sink —
+  the tool itself never sends anything.
 """
 
 from __future__ import annotations
@@ -309,3 +317,41 @@ def register(registry: Any) -> None:
         expansion = _try(
             lambda: run_scheduled_expansion(db, authority=authority))
         return {"ok": True, "shift": shift, "expansion": expansion}
+
+    @registry.register(
+        "__agent_modes_tick__",
+        description="Run one autonomous-modes tick: every chat with the "
+        "autonomous mode gets one self-initiation cycle (sources propose "
+        "initiatives; ones needing approval land in /proposals). "
+        "Scheduler-internal; runs every ~30 min.",
+        capability="owner",
+    )
+    def _agent_modes_tick_tool() -> dict[str, Any]:
+        # The runtime's persistent engine (context.extras["agent_modes"])
+        # — it owns the registered sources, the proposal sink, and the
+        # pending initiatives.  A fresh engine here would tick nothing.
+        # Fallback: a default engine still ticks chats whose mode set
+        # (in the settings-resolved store) includes autonomous.
+        from ..agents.modes import AgentModes
+
+        modes = None
+        try:
+            modes = (_context.extras or {}).get("agent_modes")
+        except Exception:  # noqa: BLE001 - extras are best-effort
+            modes = None
+        if modes is None:
+            try:
+                modes = AgentModes()
+            except Exception as exc:  # noqa: BLE001 - never crash the tick
+                return {"ok": False, "error": f"no agent modes: {exc}"}
+        try:
+            out = modes.tick_all({})
+        except Exception as exc:  # noqa: BLE001 - one bad tick never kills the job
+            return {"ok": False, "error": f"agent modes tick failed: {exc}"}
+        total = sum(len(v) for v in out.values())
+        proposed = sum(1 for v in out.values() for i in v
+                       if i.status == "proposed")
+        done = sum(1 for v in out.values() for i in v
+                   if i.status == "done")
+        return {"ok": True, "chats": sorted(out),
+                "initiatives": total, "done": done, "proposed": proposed}

@@ -1920,6 +1920,31 @@ class PartnerRuntime(
                             )
                 except Exception as exc:  # noqa: BLE001 - optional
                     _log.warning("monitor tick job not registered: %s", exc)
+                # Agent modes: the autonomous-modes engine gets its
+                # proactive bridge (ProactiveEngine suggestions become
+                # initiatives) + one durable "agent modes tick" job on
+                # this same scheduler, so chats with autonomous mode
+                # get cycles without anyone poking them.  Idempotent
+                # by source name / job name; best-effort, never breaks
+                # boot.  Under /mode suggest the bridge's initiatives
+                # land in /proposals for approval; under /mode auto
+                # they execute immediately (existing policy).
+                try:
+                    modes = self.agent_modes
+                    if "proactive" not in \
+                            modes.autonomous.source_names():
+                        from ..modes import proactive_source
+                        from ..proactive import ProactiveEngine
+
+                        modes.autonomous.add_source(
+                            "proactive",
+                            proactive_source(ProactiveEngine(), "owner"))
+                    from ..modes import ensure_agent_modes_tick_job
+
+                    ensure_agent_modes_tick_job(self._scheduler)
+                except Exception as exc:  # noqa: BLE001 - optional
+                    _log.warning(
+                        "agent modes tick not registered: %s", exc)
             except Exception as exc:  # noqa: BLE001 - scheduler is optional
                 _log.warning("scheduler failed to start: %s", exc)
                 self._scheduler = None
@@ -4019,6 +4044,89 @@ class PartnerRuntime(
     def stop_platform(self, name: str) -> dict[str, Any]:
         return self.gateway.stop_one(name.strip().lower())
 
+    # ── agent modes: one persistent engine for /agent, /proposals, ticks ──
+
+    @property
+    def agent_modes(self) -> Any:
+        """The runtime's ONE persistent :class:`AgentModes`.
+
+        Shared by ``/agent``, ``/proposals`` approve/deny, and the
+        scheduled tick — a fresh engine per command would have no
+        sources and no pending initiatives.  Its engine files
+        approval-gated initiatives into ``proactive_log`` via
+        :meth:`_file_initiative_proposal`, and its approval policy is
+        the existing autonomy mode (:meth:`_initiative_requires_approval`).
+        A half-built runtime (tests using ``__new__``) falls back to a
+        bare ``AgentModes`` so mode commands never crash chat.
+        """
+        cached = self.__dict__.get("_agent_modes")
+        if cached is not None:
+            return cached
+        try:
+            from ..modes import AgentModes
+
+            modes = AgentModes(
+                proposal_sink=self._file_initiative_proposal,
+                requires_approval=self._initiative_requires_approval)
+        except Exception:  # noqa: BLE001 - a mode engine never breaks chat
+            from ..modes import AgentModes
+
+            modes = AgentModes()
+        self.__dict__["_agent_modes"] = modes
+        try:
+            self.context.extras["agent_modes"] = modes
+        except Exception:  # noqa: BLE001 - extras are best-effort
+            pass
+        return modes
+
+    def _initiative_requires_approval(self, spec: dict[str, Any],
+                                      ctx: dict[str, Any]) -> bool:
+        """Approval policy for modes initiatives: the existing autonomy mode.
+
+        ``/mode suggest`` → initiatives wait for approval in
+        ``/proposals``; ``/mode auto`` (default) → they run
+        immediately.  A spec-level ``requires_approval`` bool is
+        honoured by the engine before this callable is consulted.
+        """
+        try:
+            settings = (getattr(self, "settings", None)
+                        or getattr(self.context, "settings", None))
+            mode = getattr(getattr(settings, "partner", None),
+                           "autonomy_mode", "auto")
+        except Exception:  # noqa: BLE001 - unreadable policy = auto
+            mode = "auto"
+        return str(mode or "auto").strip().lower() == "suggest"
+
+    def _file_initiative_proposal(self, initiative: Any,
+                                  spec: dict[str, Any],
+                                  ctx: dict[str, Any]) -> str:
+        """File a held initiative into the proposals queue (``proactive_log``).
+
+        ``kind="initiative"`` so ``/proposals`` lists it and
+        :meth:`approve` / :meth:`deny` route it to the modes engine
+        instead of the message-send path — approving an initiative
+        RUNS its action; sending the proposal text as a chat message
+        would be wrong for an action.  Returns the proposal id
+        (= the initiative id, so routing is a direct lookup).
+        """
+        chat_key = (ctx or {}).get("chat_key", "")
+        platform, chat_id = "local", ""
+        try:
+            ref = ChatRef.parse(chat_key)
+            platform, chat_id = ref.platform, ref.chat_id
+        except Exception:  # noqa: BLE001 - unparseable chat key: local fallback
+            pass
+        content = str(spec.get("proposal")
+                      or f"autonomous initiative: {initiative.label}")
+        reason = f"autonomous initiative from {initiative.source}"
+        self.context.db.execute(
+            "INSERT INTO proactive_log (id, kind, platform, chat_id, "
+            "content, status, reason, decided_at, acted_at) "
+            "VALUES (?, 'initiative', ?, ?, ?, 'pending', ?, ?, NULL)",
+            (initiative.id, platform, chat_id, content, reason,
+             time.time()))
+        return initiative.id
+
     def proposals(self, status: str = "pending") -> list[dict[str, Any]]:
         """Everything awaiting owner approval, unified across both queues.
 
@@ -4073,6 +4181,37 @@ class PartnerRuntime(
                         "proposal": done}
         except Exception:  # noqa: BLE001 — fall through to proactive path
             pass
+        # Initiatives (kind="initiative") live in proactive_log but are
+        # ACTIONS, not messages — approving one RUNS the action via the
+        # modes engine.  This routes BEFORE the autonomy/direct paths,
+        # which would send the proposal text as a chat message.
+        try:
+            row = self.context.db.query_one(
+                "SELECT * FROM proactive_log WHERE id = ?", (proposal_id,))
+            if row is not None and row.get("kind") == "initiative":
+                try:
+                    init = self.agent_modes.approve_proposal(proposal_id)
+                except KeyError:
+                    # Orphaned by a restart: the in-memory action is gone.
+                    # Leave the row pending and say so honestly — the
+                    # owner can /deny it to clear it.
+                    return {"ok": False,
+                            "error": f"initiative {proposal_id!r} is no "
+                                     "longer pending (restarted since it was "
+                                     "proposed) — deny it to clear it"}
+                status = "approved" if init.status == "done" else "failed"
+                try:
+                    self.context.db.execute(
+                        "UPDATE proactive_log SET status = ?, acted_at = ? "
+                        "WHERE id = ?",
+                        (status, time.time(), proposal_id))
+                except Exception:  # noqa: BLE001
+                    pass
+                return {"ok": init.status == "done", "status": status,
+                        "error": init.error or None,
+                        "initiative": init.to_dict()}
+        except Exception:  # noqa: BLE001 — fall through to proactive path
+            pass
         if self._autonomy is not None:
             return self._autonomy.approve(proposal_id)
         return _direct_approve(self.context, self.gateway, proposal_id)
@@ -4098,6 +4237,26 @@ class PartnerRuntime(
                 return {"ok": True,
                         "status": denied.get("status", "denied"),
                         "proposal": denied}
+        except Exception:  # noqa: BLE001 — fall through to proactive path
+            pass
+        # Initiatives: denying one discards its action (never runs it)
+        # and clears the row — including rows orphaned by a restart.
+        try:
+            row = self.context.db.query_one(
+                "SELECT * FROM proactive_log WHERE id = ?", (proposal_id,))
+            if row is not None and row.get("kind") == "initiative":
+                try:
+                    self.agent_modes.deny_proposal(proposal_id)
+                except KeyError:
+                    pass  # orphaned by a restart: still clear the row
+                try:
+                    self.context.db.execute(
+                        "UPDATE proactive_log SET status = 'denied', "
+                        "acted_at = ? WHERE id = ?",
+                        (time.time(), proposal_id))
+                except Exception:  # noqa: BLE001
+                    pass
+                return {"ok": True, "status": "denied"}
         except Exception:  # noqa: BLE001 — fall through to proactive path
             pass
         if self._autonomy is not None:

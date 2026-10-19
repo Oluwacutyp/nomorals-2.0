@@ -38,7 +38,23 @@ Each mode is built on systems that already exist — nothing parallel:
   failed verification replans with the failure as evidence.
 
 Per-chat defaults live in :class:`ModeStore` (JSON, ``NM_AGENT_MODES_STORE``
-or ``data/agent-modes.json``) — each chat remembers its own mode set.
+or ``<settings-home>/data/agent-modes.json`` — resolved against the
+settings data dir, never the working directory) — each chat remembers
+its own mode set.
+
+Approval flow: an initiative that needs approval is NOT executed on
+tick. It is filed into the proposals queue (``proactive_log``,
+kind ``"initiative"``) via the engine's ``proposal_sink`` and held as
+``proposed``; ``/proposals`` lists it, ``/approve`` runs its action,
+``/deny`` discards it.  When no approval is required the initiative
+executes immediately, per the existing policy.  An initiative that
+needs approval but has no sink fails closed — it is never executed
+past a missing gate.
+
+Scheduled tick: :func:`ensure_agent_modes_tick_job` registers one
+durable ``agent modes tick`` job on the SAME scheduler the cognitive
+loop / agency shift uses; the ``__agent_modes_tick__`` tool ticks
+every chat with the autonomous mode.
 """
 
 from __future__ import annotations
@@ -72,6 +88,10 @@ __all__ = [
     "parse_agent_command",
     "parse_mode_phrase",
     "proactive_source",
+    "ensure_agent_modes_tick_job",
+    "AGENT_MODES_TICK_JOB",
+    "AGENT_MODES_TICK_TOOL",
+    "AGENT_MODES_TICK_SPEC",
 ]
 
 #: The three modes.  A chat runs a SET of these (possibly empty = baseline).
@@ -183,8 +203,45 @@ _USAGE = (
 
 # ── per-chat store ───────────────────────────────────────────────────────
 
-def _default_store_path() -> Path:
-    return Path(os.environ.get("NM_AGENT_MODES_STORE", "data/agent-modes.json"))
+def _settings_home(settings: Any = None) -> Path:
+    """The settings data dir (``NM_HOME`` / ``home``), never the cwd.
+
+    Same resolution the rest of the app uses for persistent state
+    (``Settings.home_path``); ``~/.nomorals`` when settings cannot load.
+    """
+    try:
+        if settings is not None:
+            return Path(settings.home_path)
+        from ..core.config import get_settings
+
+        return Path(get_settings().home_path)
+    except Exception:  # noqa: BLE001 - settings failure never breaks the store
+        return Path.home() / ".nomorals"
+
+
+def _default_store_path(settings: Any = None) -> Path:
+    """Default store path, resolved against the settings data dir.
+
+    ``NM_AGENT_MODES_STORE`` wins when set: absolute as-is, relative
+    resolved against the settings home (like every other relative
+    config path).  Otherwise ``<home>/data/agent-modes.json`` — the
+    same file from every working directory, so chat and CLI share one
+    store.
+    """
+    override = os.environ.get("NM_AGENT_MODES_STORE", "")
+    if override:
+        p = Path(os.path.expanduser(override))
+        if p.is_absolute():
+            return p
+        return (_settings_home(settings) / p).resolve()
+    try:
+        if settings is not None:
+            return settings.resolve("data/agent-modes.json")
+        from ..core.config import get_settings
+
+        return get_settings().resolve("data/agent-modes.json")
+    except Exception:  # noqa: BLE001 - settings failure never breaks the store
+        return Path.home() / ".nomorals" / "data" / "agent-modes.json"
 
 
 class ModeStore:
@@ -195,8 +252,10 @@ class ModeStore:
     fresh rather than taking chat down.
     """
 
-    def __init__(self, path: str | Path | None = None) -> None:
-        self.path = Path(path) if path is not None else _default_store_path()
+    def __init__(self, path: str | Path | None = None, *,
+                 settings: Any = None) -> None:
+        self.path = (Path(path) if path is not None
+                     else _default_store_path(settings))
         self._lock = threading.Lock()
         self._data: dict[str, Any] = {"chats": {}, "learning": {}}
         self._load()
@@ -387,18 +446,26 @@ class Initiative:
     label: str
     source: str
     priority: float = 0.5
-    status: str = "proposed"  # proposed → running → verified → done|failed
+    # proposed → running → verified → done|failed.  "proposed" also
+    # covers an initiative HELD for owner approval (its action has not
+    # run yet); "denied" is the terminal state for a held initiative
+    # the owner rejected.
+    status: str = "proposed"
     created_at: float = field(default_factory=time.time)
     result: Any = None
     error: str = ""
     verified: bool = False
+    #: ``proactive_log`` id when this initiative was filed for approval
+    #: ("" when it was never held).
+    proposal_id: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {"id": self.id, "label": self.label, "source": self.source,
                 "priority": self.priority, "status": self.status,
                 "result": str(self.result)[:400] if self.result is not None
                 else None,
-                "error": self.error, "verified": self.verified}
+                "error": self.error, "verified": self.verified,
+                "proposal_id": self.proposal_id}
 
 
 class AutonomousEngine:
@@ -410,16 +477,39 @@ class AutonomousEngine:
     None propose nothing this tick.  ``tick(ctx)`` needs no prompt — it
     is the "shows up and works" entry point.
 
+    Approval: when an initiative needs approval — the spec declares
+    ``requires_approval=True``, or the engine-level ``requires_approval``
+    callable says so — its action does NOT run on tick.  The initiative
+    is filed into the proposals queue via ``proposal_sink`` and held as
+    ``proposed``; ``approve_proposal`` runs the action,
+    ``deny_proposal`` discards it.  When approval is not required the
+    initiative executes immediately, per the existing policy.  When
+    approval is required but no sink is configured, the initiative
+    fails closed: it is never executed past a missing gate.
+
     Rotation: sources run in learned-weight order (see
     :class:`AdaptiveLearner`) — a source whose initiatives keep failing
     sinks below sources that deliver, so the rotation itself adapts.
     """
 
-    def __init__(self, learner: AdaptiveLearner | None = None) -> None:
+    def __init__(self, learner: AdaptiveLearner | None = None, *,
+                 proposal_sink: Callable[[Initiative, dict[str, Any],
+                                          dict[str, Any]], Any] | None = None,
+                 requires_approval: Callable[[dict[str, Any],
+                                              dict[str, Any]], bool] | None = None
+                 ) -> None:
         self.learner = learner or AdaptiveLearner()
+        self.proposal_sink = proposal_sink
+        self.requires_approval = requires_approval
         self._sources: list[dict[str, Any]] = []
         self._history: list[Initiative] = []
         self._ticks = 0
+        #: proposal id → (initiative, spec, ctx, executor) for held work.
+        #: In-memory only: the action itself cannot live in the DB row,
+        #: so a restart orphans held rows — approving one then fails
+        #: honestly instead of running something unrecorded.
+        self._pending: dict[str, tuple[Initiative, dict[str, Any],
+                                        dict[str, Any], Any]] = {}
 
     def add_source(self, name: str, fn: Callable[[dict[str, Any]], Any],
                    *, priority: float = 0.5) -> None:
@@ -444,6 +534,40 @@ class AutonomousEngine:
     def pending(self) -> list[Initiative]:
         return [i for i in self._history
                 if i.status in ("proposed", "running")]
+
+    def pending_proposals(self) -> list[Initiative]:
+        """Initiatives held for owner approval (action not yet run)."""
+        return [init for init, _s, _c, _e in self._pending.values()
+                if init.status == "proposed"]
+
+    def approve_proposal(self, proposal_id: str) -> Initiative:
+        """Owner approved a held initiative — run its action now.
+
+        Raises :class:`KeyError` when nothing is pending under that id
+        (unknown, already decided, or orphaned by a restart).
+        """
+        try:
+            init, spec, ctx, executor = self._pending.pop(str(proposal_id))
+        except KeyError:
+            raise KeyError(
+                f"no pending initiative for proposal {proposal_id!r}") from None
+        if init.status != "proposed":
+            raise KeyError(
+                f"no pending initiative for proposal {proposal_id!r}")
+        return self._execute(init, spec, ctx, executor)
+
+    def deny_proposal(self, proposal_id: str) -> Initiative:
+        """Owner denied a held initiative — discard it, never run it."""
+        try:
+            init, _spec, _ctx, _executor = self._pending.pop(
+                str(proposal_id))
+        except KeyError:
+            raise KeyError(
+                f"no pending initiative for proposal {proposal_id!r}") from None
+        init.status = "denied"
+        init.error = "denied by owner"
+        self.learner.record_outcome("autonomous", init.source, False)
+        return init
 
     def history(self, *, limit: int = 50) -> list[Initiative]:
         return list(self._history[-limit:])
@@ -479,13 +603,70 @@ class AutonomousEngine:
                                           ctx, executor))
         return done
 
+    def _needs_approval(self, spec: dict[str, Any],
+                        ctx: dict[str, Any]) -> bool:
+        """True when this initiative must wait for owner approval.
+
+        Precedence: an explicit ``requires_approval`` bool on the spec
+        wins; otherwise the engine-level callable decides; default is
+        no approval (immediate execution, as before).
+        """
+        declared = spec.get("requires_approval")
+        if isinstance(declared, bool):
+            return declared
+        if self.requires_approval is not None:
+            try:
+                return bool(self.requires_approval(spec, ctx))
+            except Exception:  # noqa: BLE001 - a broken policy fails closed
+                _log.warning("requires_approval check failed — holding")
+                return True
+        return False
+
     def _run_one(self, source: str, priority: float, spec: dict[str, Any],
                  ctx: dict[str, Any], executor: Any) -> Initiative:
         init = Initiative(id=new_id("init"),
                           label=str(spec.get("label", source)),
                           source=source, priority=priority,
-                          status="running")
+                          status="proposed")
         self._history.append(init)
+        if self._needs_approval(spec, ctx):
+            return self._hold_for_approval(init, spec, ctx, executor)
+        return self._execute(init, spec, ctx, executor)
+
+    def _hold_for_approval(self, init: Initiative, spec: dict[str, Any],
+                           ctx: dict[str, Any], executor: Any) -> Initiative:
+        """File the initiative into the proposals queue and hold it.
+
+        The action has NOT run.  Fail closed: a missing sink or a sink
+        that cannot file means the initiative fails, never executes.
+        """
+        if self.proposal_sink is None:
+            init.status = "failed"
+            init.error = ("initiative requires approval but no proposal "
+                          "sink is configured")
+            self.learner.record_outcome("autonomous", init.source, False)
+            return init
+        try:
+            proposal_id = self.proposal_sink(init, spec, ctx)
+        except Exception as exc:  # noqa: BLE001 - filing failure is data
+            init.status = "failed"
+            init.error = f"proposal sink failed: {exc}"[:300]
+            self.learner.record_outcome("autonomous", init.source, False)
+            return init
+        if not proposal_id:
+            init.status = "failed"
+            init.error = "proposal sink did not file the initiative"
+            self.learner.record_outcome("autonomous", init.source, False)
+            return init
+        init.proposal_id = str(proposal_id)
+        init.status = "proposed"
+        self._pending[init.proposal_id] = (init, spec, ctx, executor)
+        return init
+
+    def _execute(self, init: Initiative, spec: dict[str, Any],
+                 ctx: dict[str, Any], executor: Any) -> Initiative:
+        """Run one initiative's action now (immediate or approved path)."""
+        init.status = "running"
         try:
             if executor is not None:
                 result = executor(spec, ctx)
@@ -498,7 +679,7 @@ class AutonomousEngine:
         except Exception as exc:  # noqa: BLE001 - initiative failure is data
             init.status = "failed"
             init.error = str(exc)[:300]
-            self.learner.record_outcome("autonomous", source, False)
+            self.learner.record_outcome("autonomous", init.source, False)
             return init
         init.result = result
         init.status = "verified"
@@ -517,7 +698,7 @@ class AutonomousEngine:
         init.status = "done" if ok else "failed"
         if not ok and not init.error:
             init.error = "verification failed"
-        self.learner.record_outcome("autonomous", source, ok)
+        self.learner.record_outcome("autonomous", init.source, ok)
         return init
 
 
@@ -528,6 +709,10 @@ def proactive_source(proactive: Any, user_id: str, *,
 
     Each suggestion becomes an initiative whose action returns the
     suggestion payload (delivery stays with the caller's proposal flow).
+    Suggestions ALWAYS need approval: the spec carries
+    ``requires_approval=True``, so under an approval policy the
+    initiative is filed into the proposals queue instead of executing
+    — a suggestion must never run past the owner unapproved.
     The engine is async, so the bridge runs it to completion — callers
     that already run an event loop should wrap it themselves.
     """
@@ -548,6 +733,8 @@ def proactive_source(proactive: Any, user_id: str, *,
             payload = {"title": getattr(s, "title", str(s)),
                        "confidence": getattr(s, "confidence", 0.0)}
             out.append({"label": f"proactive: {payload['title']}",
+                        "proposal": payload["title"],
+                        "requires_approval": True,
                         "action": (lambda p: (lambda c: p))(payload)})
         return out
 
@@ -555,6 +742,14 @@ def proactive_source(proactive: Any, user_id: str, *,
 
 
 # ── planning: plan first, verify each step, replan on failure ────────────
+
+class _StepTimeout(Exception):
+    """Internal: one step exceeded its timeout (terminal, not a replan)."""
+
+    def __init__(self, timeout_s: float) -> None:
+        super().__init__(f"step timed out after {timeout_s:g}s")
+        self.timeout_s = timeout_s
+
 
 async def _maybe_await(value: Any) -> Any:
     if inspect.isawaitable(value):
@@ -572,10 +767,101 @@ class PlanningRunner:
     a failed verification replans with the failure as evidence
     (``max_replans`` caps it).  An invalid plan (unknown dep, cycle,
     unknown action) raises :class:`ValueError` and NOTHING executes.
+
+    Step timeout + cancellation: every step (execute AND verify) runs
+    under ``step_timeout_s`` (default 60s, configurable per runner or
+    per run).  A step that hangs past the timeout is aborted, marked
+    ``timeout`` — never claimed done — and the run stops with
+    ``cancelled=True`` (a timeout is terminal, NOT a replan trigger).
+    ``cancel`` (a ``threading.Event`` or a callable returning bool) is
+    honoured before the run and between steps: the run stops cleanly,
+    finished steps keep their results, later steps never run.  Sync
+    step functions run on a worker thread so a blocking sync hang can
+    actually be abandoned on timeout.
     """
 
-    def __init__(self, planner: AgentPlanner | None = None) -> None:
+    #: Sane default per-step timeout (seconds).  ``0`` disables it.
+    DEFAULT_STEP_TIMEOUT_S = 60.0
+
+    def __init__(self, planner: AgentPlanner | None = None, *,
+                 step_timeout_s: float | None = None) -> None:
         self.planner = planner or AgentPlanner()
+        self.step_timeout_s = (
+            self.DEFAULT_STEP_TIMEOUT_S if step_timeout_s is None
+            else max(0.0, float(step_timeout_s)))
+
+    @staticmethod
+    def _cancel_requested(cancel: Any) -> bool:
+        """True when the cancel signal (Event or callable) has fired."""
+        if cancel is None:
+            return False
+        try:
+            if hasattr(cancel, "is_set"):
+                return bool(cancel.is_set())
+            if callable(cancel):
+                return bool(cancel())
+        except Exception:  # noqa: BLE001 - a broken cancel signal reads as "stop"
+            return True
+        return False
+
+    @staticmethod
+    async def _call_step(fn: Callable[..., Any], step: PlanStep,
+                         ctx: dict[str, Any]) -> Any:
+        """Call a step function, async or sync.
+
+        Sync functions run on a DAEMON worker thread with the result
+        ferried back through a queue (polled, never blocking the
+        loop).  A daemon thread is abandoned — not awaited — when the
+        caller's timeout fires, so a hung sync step can actually be
+        aborted: ``asyncio.to_thread`` would leave the wait pinned to
+        the default executor, and ``asyncio.run`` blocks shutting
+        that executor down.  If the sync function returns an
+        awaitable it is awaited on the loop thread.
+        """
+        if asyncio.iscoroutinefunction(fn):
+            return await fn(step, ctx)
+        import queue as _queue
+
+        box: _queue.SimpleQueue[tuple[bool, Any]] = _queue.SimpleQueue()
+
+        def _target() -> None:
+            try:
+                box.put((True, fn(step, ctx)))
+            except Exception as exc:  # noqa: BLE001 - surfaced by the caller
+                box.put((False, exc))
+
+        worker = threading.Thread(target=_target, name="planning-step",
+                                  daemon=True)
+        worker.start()
+        while True:
+            try:
+                ok, value = box.get_nowait()
+                break
+            except _queue.Empty:
+                await asyncio.sleep(0.005)
+        if not ok:
+            raise value
+        if inspect.isawaitable(value):
+            return await value
+        return value
+
+    async def _call_with_timeout(self, fn: Callable[..., Any],
+                                 step: PlanStep, ctx: dict[str, Any],
+                                 timeout_s: float) -> Any:
+        """Call a step function under the per-step timeout.
+
+        ``timeout_s <= 0`` disables the timeout.  On expiry the
+        await is abandoned (a sync function keeps running on its
+        worker thread, but its late result is discarded — the step
+        is never claimed done) and :class:`_StepTimeout` is raised.
+        """
+        if timeout_s and timeout_s > 0:
+            try:
+                return await asyncio.wait_for(
+                    self._call_step(fn, step, ctx), timeout=timeout_s)
+            except asyncio.TimeoutError:
+                raise _StepTimeout(timeout_s) from None
+        return await self._call_step(fn, step, ctx)
 
     async def plan(self, goal: str, decompose: Callable[..., Any], *,
                    evidence: dict[str, Any] | None = None) -> Plan:
@@ -602,8 +888,20 @@ class PlanningRunner:
                   execute_step: Callable[..., Any],
                   verify_step: Callable[..., Any] | None = None,
                   on_plan: Callable[[Plan], Any] | None = None,
-                  max_replans: int = 2, account: str = "") -> PlanResult:
+                  max_replans: int = 2, account: str = "",
+                  step_timeout_s: float | None = None,
+                  cancel: Any = None) -> PlanResult:
         started = time.time()
+        timeout_s = (self.step_timeout_s if step_timeout_s is None
+                     else max(0.0, float(step_timeout_s)))
+        if self._cancel_requested(cancel):
+            return PlanResult(
+                plan_id=new_id("plan"), success=False, cancelled=True,
+                steps_completed=0, steps_total=0, results={},
+                errors=["run cancelled before start"],
+                duration_seconds=time.time() - started,
+                summary="cancelled before start",
+            )
         plan = await self.plan(goal, decompose)
         if on_plan is not None:
             await _maybe_await(on_plan(plan))
@@ -611,6 +909,7 @@ class PlanningRunner:
         errors: list[str] = []
         completed = 0
         replans = 0
+        halted = ""  # "timeout" | "cancelled" — terminal, never a replan
         ctx: dict[str, Any] = {"goal": goal, "account": account,
                                "results": results}
         while True:
@@ -619,6 +918,10 @@ class PlanningRunner:
                 for step in batch:
                     if step.step_id in results:
                         continue  # already done under a previous plan version
+                    if self._cancel_requested(cancel):
+                        errors.append("run cancelled")
+                        halted = "cancelled"
+                        break
                     if not all(d in results for d in step.depends_on):
                         step.status = "skipped"
                         step.error = "dependency failed"
@@ -627,7 +930,15 @@ class PlanningRunner:
                     step.status = "running"
                     step.started_at = time.time()
                     try:
-                        result = await _maybe_await(execute_step(step, ctx))
+                        result = await self._call_with_timeout(
+                            execute_step, step, ctx, timeout_s)
+                    except _StepTimeout as exc:
+                        step.status = "timeout"
+                        step.error = str(exc)
+                        step.completed_at = time.time()
+                        errors.append(f"{step.name}: {step.error}")
+                        halted = "timeout"
+                        break
                     except Exception as exc:  # noqa: BLE001 - step failure is data
                         result = None
                         failure = str(exc)[:300]
@@ -635,7 +946,15 @@ class PlanningRunner:
                         failure = ""
                     if not failure and verify_step is not None:
                         try:
-                            ok = await _maybe_await(verify_step(step, result))
+                            ok = await self._call_with_timeout(
+                                verify_step, step, ctx, timeout_s)
+                        except _StepTimeout as exc:
+                            step.status = "timeout"
+                            step.error = f"verify {exc}"
+                            step.completed_at = time.time()
+                            errors.append(f"{step.name}: {step.error}")
+                            halted = "timeout"
+                            break
                         except Exception as exc:  # noqa: BLE001
                             ok, failure = False, f"verify raised: {exc}"[:300]
                         else:
@@ -664,21 +983,29 @@ class PlanningRunner:
                     step.completed_at = time.time()
                     results[step.step_id] = result
                     completed += 1
-                if replanned:
+                if replanned or halted:
                     break
             if not replanned:
                 break
+        if halted:
+            summary = (f"cancelled ({halted}): {completed}/"
+                       f"{len(plan.steps)} steps, {replans} replan(s); "
+                       f"errors: {errors[0]}" if errors else
+                       f"cancelled ({halted})")
+        else:
+            summary = (f"{completed}/{len(plan.steps)} steps, "
+                       f"{replans} replan(s)" + (f"; errors: {errors[0]}"
+                                                 if errors else ""))
         return PlanResult(
             plan_id=plan.plan_id,
-            success=not errors,
+            success=not errors and not halted,
+            cancelled=bool(halted),
             steps_completed=completed,
             steps_total=len(plan.steps),
             results=results,
             errors=errors,
             duration_seconds=time.time() - started,
-            summary=(f"{completed}/{len(plan.steps)} steps, "
-                     f"{replans} replan(s)" + (f"; errors: {errors[0]}"
-                                               if errors else "")),
+            summary=summary,
         )
 
     def run_sync(self, goal: str, **kwargs: Any) -> PlanResult:
@@ -703,10 +1030,19 @@ class AgentModes:
     def __init__(self, store: ModeStore | None = None,
                  learner: AdaptiveLearner | None = None,
                  autonomous: AutonomousEngine | None = None,
-                 planner_runner: PlanningRunner | None = None) -> None:
-        self.store = store or ModeStore()
+                 planner_runner: PlanningRunner | None = None, *,
+                 proposal_sink: Callable[[Initiative, dict[str, Any],
+                                          dict[str, Any]], Any] | None = None,
+                 requires_approval: Callable[[dict[str, Any],
+                                              dict[str, Any]], bool] | None = None,
+                 settings: Any = None) -> None:
+        self.store = store or ModeStore(settings=settings)
         self.learner = learner or AdaptiveLearner(store=self.store)
-        self.autonomous = autonomous or AutonomousEngine(learner=self.learner)
+        # proposal_sink / requires_approval configure the engine we
+        # build; an explicitly passed engine already owns its own.
+        self.autonomous = autonomous or AutonomousEngine(
+            learner=self.learner, proposal_sink=proposal_sink,
+            requires_approval=requires_approval)
         self.planner = planner_runner or PlanningRunner()
 
     # ── selection ──
@@ -741,8 +1077,10 @@ class AgentModes:
                     if i.status == "done"]
             failed = [i for i in self.autonomous.history()
                       if i.status == "failed"]
+            pending = self.autonomous.pending_proposals()
             lines.append(f"autonomous: {len(done)} initiative(s) done, "
                          f"{len(failed)} failed, "
+                         f"{len(pending)} awaiting approval, "
                          f"{len(self.autonomous.source_names())} source(s)")
         if "planning" in modes:
             lines.append("planning: plan first, verify each step, "
@@ -771,8 +1109,12 @@ class AgentModes:
                 return "autonomous tick: nothing to do."
             lines = [f"autonomous tick: {len(done)} initiative(s)"]
             for init in done:
-                mark = "✓" if init.status == "done" else "✗"
-                lines.append(f"  {mark} {init.label} [{init.status}]")
+                mark = ("✓" if init.status == "done"
+                        else "…" if init.status == "proposed"
+                        else "✗")
+                extra = (f" — awaiting approval: /proposals"
+                         if init.status == "proposed" else "")
+                lines.append(f"  {mark} {init.label} [{init.status}]{extra}")
             return "\n".join(lines)
         if op == "status":
             return self.describe(chat_key)
@@ -786,7 +1128,9 @@ class AgentModes:
                           verify_step: Callable[..., Any] | None = None,
                           on_plan: Callable[[Plan], Any] | None = None,
                           strategies: list[str] | None = None,
-                          strategy_context: str = "default") -> PlanResult:
+                          strategy_context: str = "default",
+                          step_timeout_s: float | None = None,
+                          cancel: Any = None) -> PlanResult:
         """Run one task through this chat's mode set."""
         modes = self.modes_for(chat_key)
         strategy: str | None = None
@@ -801,7 +1145,8 @@ class AgentModes:
                     "planning mode needs a decompose(goal, evidence) function")
             result = await self.planner.run(
                 goal, decompose=decompose, execute_step=execute_step,
-                verify_step=verify_step, on_plan=on_plan)
+                verify_step=verify_step, on_plan=on_plan,
+                step_timeout_s=step_timeout_s, cancel=cancel)
             if "adaptive" in modes and strategy is not None:
                 self.learner.record_outcome(strategy_context, strategy,
                                             result.success)
@@ -857,3 +1202,112 @@ class AgentModes:
                     on_plan=spec.get("on_plan"))
             return self.autonomous.tick(base, executor=_executor)
         return self.autonomous.tick(base)
+
+    # ── approval queue ──
+
+    def pending_proposals(self) -> list[Initiative]:
+        """Initiatives held for owner approval (action not yet run)."""
+        return self.autonomous.pending_proposals()
+
+    def approve_proposal(self, proposal_id: str) -> Initiative:
+        """Owner approved a held initiative — run its action now."""
+        return self.autonomous.approve_proposal(proposal_id)
+
+    def deny_proposal(self, proposal_id: str) -> Initiative:
+        """Owner denied a held initiative — discard it, never run it."""
+        return self.autonomous.deny_proposal(proposal_id)
+
+    def tick_all(self, ctx: dict[str, Any] | None = None
+                 ) -> dict[str, list[Initiative]]:
+        """One autonomous cycle for EVERY chat running autonomous mode.
+
+        The scheduled-tick entry point: the ``__agent_modes_tick__``
+        tool calls this, so chats that enabled autonomous mode keep
+        getting cycles without anyone poking them.  Chats without the
+        autonomous mode are skipped, never ticked.
+        """
+        out: dict[str, list[Initiative]] = {}
+        for chat_key, modes in self.store.all_chats().items():
+            if "autonomous" not in modes:
+                continue
+            out[chat_key] = self.tick(chat_key, ctx)
+        return out
+
+
+# ── scheduled autonomous tick ──────────────────────────────────────────────
+
+#: Durable tick job: name, tool payload, default cadence.  Same scheduler
+#: the cognitive loop / agency shift uses — never a parallel scheduler.
+AGENT_MODES_TICK_JOB = "agent modes tick"
+AGENT_MODES_TICK_TOOL = "__agent_modes_tick__"
+AGENT_MODES_TICK_SPEC = "every 30m"
+
+_INTERVAL_UNITS = {
+    "s": 1, "sec": 1, "secs": 1, "second": 1, "seconds": 1,
+    "m": 60, "min": 60, "mins": 60, "minute": 60, "minutes": 60,
+    "h": 3600, "hr": 3600, "hrs": 3600, "hour": 3600, "hours": 3600,
+    "d": 86400, "day": 86400, "days": 86400,
+}
+
+
+def _interval_seconds(spec: str) -> float | None:
+    """``"every 30m"`` / ``"every 1800s"`` / ``"1800"`` → seconds, else None."""
+    s = str(spec or "").strip()
+    if re.fullmatch(r"\d+(?:\.\d+)?", s):
+        return float(s)
+    m = re.fullmatch(r"every\s+(\d+(?:\.\d+)?)\s*([a-z]+)", s,
+                     re.IGNORECASE)
+    if not m:
+        return None
+    unit = m.group(2).lower()
+    if unit not in _INTERVAL_UNITS:
+        return None
+    return float(m.group(1)) * _INTERVAL_UNITS[unit]
+
+
+def _spec_matches(stored: Any, spec: str) -> bool:
+    """True when a stored job spec is the requested one.
+
+    ``every``-kind jobs store the interval as plain seconds or as
+    ``"every 1800s"`` (via the scheduler's job formatter), so those
+    compare numerically; every other kind compares verbatim.
+    """
+    if str(stored or "") == spec:
+        return True
+    want = _interval_seconds(spec)
+    have = _interval_seconds(stored)
+    return want is not None and have is not None and want == have
+
+
+def ensure_agent_modes_tick_job(scheduler: Any, *,
+                                spec: str = AGENT_MODES_TICK_SPEC) -> Any:
+    """Register the durable agent-modes tick job. Idempotent by name.
+
+    Mirrors :func:`nomorals.agency.wiring.ensure_agency_shift_job`: a
+    job with the name already at the requested cadence is returned
+    as-is; a stale one is replaced.  Best-effort: never raises (a
+    missing scheduler just means no scheduled ticks — ``/agent tick``
+    still works).
+    """
+    if scheduler is None:
+        return None
+    try:
+        for job in (scheduler.list_jobs() or []):
+            name = job.get("name", "") if isinstance(job, dict) \
+                else getattr(job, "name", "")
+            if name == AGENT_MODES_TICK_JOB:
+                job_spec = job.get("spec", "") if isinstance(job, dict) \
+                    else getattr(job, "spec", "")
+                if _spec_matches(job_spec, spec):
+                    return job
+                job_id = job.get("id", "") if isinstance(job, dict) \
+                    else getattr(job, "id", "")
+                try:
+                    scheduler.remove(job_id)
+                except Exception:  # noqa: BLE001 - stale job removal
+                    pass
+                break
+        return scheduler.add(AGENT_MODES_TICK_JOB, spec, "tool",
+                             {"tool": AGENT_MODES_TICK_TOOL, "args": {}})
+    except Exception:  # noqa: BLE001 - scheduling is best-effort
+        return None

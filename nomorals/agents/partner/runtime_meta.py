@@ -199,11 +199,13 @@ class RuntimeMetaMixin:
         planning plans first and replans on failure.  Modes combine
         (``/agent adaptive+planning``) and persist per chat, so the
         CLI (``nm agent ...``) and chat see the same set.
-        """
-        from ..modes import AgentModes
 
+        Uses the runtime's ONE persistent ``agent_modes`` — a fresh
+        engine per command would have no sources and no pending
+        initiatives, so ``/agent tick`` would silently do nothing.
+        """
         try:
-            return AgentModes().apply_command(arg or "", chat_key or "")
+            return self.agent_modes.apply_command(arg or "", chat_key or "")
         except Exception as exc:  # noqa: BLE001 - a mode switch never kills chat
             _log.warning("agent mode switch failed: %s", exc)
             return f"agent command failed: {exc}"

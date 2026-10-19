@@ -163,6 +163,10 @@ class PlanResult:
     #: WHY the plan degraded ("" when the model planned it) — the template
     #: fallback is a degradation and must never look like a clean success.
     plan_error: str = ""
+    #: True when the run stopped early on a step timeout or a cancel
+    #: signal.  A cancelled run is never ``success``, and a timed-out /
+    #: cancelled step is never in ``results``.
+    cancelled: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to dict."""
@@ -176,6 +180,7 @@ class PlanResult:
             "duration_seconds": self.duration_seconds,
             "summary": self.summary,
             "plan_error": self.plan_error,
+            "cancelled": self.cancelled,
         }
 
 
