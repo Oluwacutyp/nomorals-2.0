@@ -22,9 +22,11 @@ Rules:
 """
 from __future__ import annotations
 
+import itertools
 import json
 import os
 import re
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -41,6 +43,12 @@ __all__ = [
 ]
 
 _SAFE_NAME = re.compile(r"[^A-Za-z0-9_.\-]+")
+
+#: Monotonic tmp-file counter. Two threads in one process share a pid,
+#: so a pid-only tmp name lets concurrent same-site saves share one
+#: tmp file and tear each other's JSON (or trip over os.replace).
+#: Thread ident + counter makes every save's tmp path unique.
+_TMP_COUNTER = itertools.count()
 
 
 def _clean_cookie(raw: Any) -> dict[str, Any] | None:
@@ -125,7 +133,9 @@ class SolvedSessionStore:
             "origins": list(origins or []),
         }
         path = self._path_for(site)
-        tmp = path.with_suffix(f".tmp-{os.getpid()}")
+        tmp = path.with_suffix(
+            f".tmp-{os.getpid()}-{threading.get_ident()}"
+            f"-{next(_TMP_COUNTER)}")
         tmp.write_text(json.dumps(record, sort_keys=True),
                        encoding="utf-8")
         os.replace(tmp, path)

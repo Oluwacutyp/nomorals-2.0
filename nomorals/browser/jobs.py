@@ -130,9 +130,16 @@ class BrowserRunJob:
         elif kind == "wall_escalated":
             with self._lock:
                 self.status = STATUS_WAITING_OWNER
-            self.note("wall_escalated",
-                      f"🧱 browser run {self.job_id}: self-solve failed — "
-                      "escalation sent, waiting for you to solve it.")
+            # The solver's own escalation message carries the link, but
+            # this job-scoped ping is what the owner sees in the run's
+            # context — it must be actionable on its own, not "a link
+            # was sent somewhere".
+            link = str(info.get("takeover_url") or "")
+            message = (f"🧱 browser run {self.job_id}: self-solve failed — "
+                       "escalation sent, waiting for you to solve it.")
+            if link:
+                message += f"\nTakeover link: {link}"
+            self.note("wall_escalated", message)
         elif kind == "wall_cleared":
             with self._lock:
                 self.status = STATUS_RUNNING

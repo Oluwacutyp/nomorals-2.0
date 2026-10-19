@@ -280,13 +280,27 @@ class ChallengeSolver:
                 resume_state=resume_state, signal=signal,
                 message="wall persists and no takeover manager is "
                         "configured — cannot escalate")
-        grant = self._takeover_manager.request_takeover(
-            session_id=session_id or f"challenge-{int(started * 1000)}",
-            url=page_url, task_label=task_label or "browsing",
-            signal_kind=signal.kind, attempts=attempts,
-            resume_state=resume_state or {}, tab=tab,
-            owner_chat=owner_chat,
-        )
+        try:
+            grant = self._takeover_manager.request_takeover(
+                session_id=session_id or f"challenge-{int(started * 1000)}",
+                url=page_url, task_label=task_label or "browsing",
+                signal_kind=signal.kind, attempts=attempts,
+                resume_state=resume_state or {}, tab=tab,
+                owner_chat=owner_chat,
+            )
+        except Exception as exc:  # noqa: BLE001 - e.g. stream bind failure
+            # An unwound exception here would skip the memory record and
+            # surface as a raw "wall handler failed" — the encounter is
+            # still data, and the owner deserves an honest outcome, not
+            # a traceback.
+            self._record_memory(signal, attempts, cleared=False,
+                                via="takeover_failed",
+                                takeover_needed=True, started=started)
+            return ChallengeOutcome(
+                cleared=False, via="takeover_failed", attempts=attempts,
+                resume_state=resume_state, signal=signal,
+                message="wall persists and takeover could not start: "
+                        f"{exc}")
         message = format_escalation_message(
             signal_kind=signal.kind, url=page_url, attempts=attempts,
             takeover_url=grant.url, task_label=task_label or "browsing")
