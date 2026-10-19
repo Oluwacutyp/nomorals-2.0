@@ -67,6 +67,21 @@ class WisdomKeeper:
             "semantic": self.corpus.semantic_index_status(),
         }
 
+    # ── readability: read / traditions / seeds ────────────────────────
+    def read_work(self, query: str, *, chapter: Any = None, page: int = 1,
+                  page_chars: int = 3500) -> dict[str, Any]:
+        """Read the actual full text of an ingested work, paginated."""
+        return self.corpus.read_work(query, chapter=chapter, page=page,
+                                     page_chars=page_chars)
+
+    def traditions(self) -> list[dict[str, Any]]:
+        """Traditions with labels, explanations, and their works."""
+        return self.corpus.traditions_detail()
+
+    def seeds(self) -> list[dict[str, Any]]:
+        """Every seed source + which works came from it."""
+        return self.corpus.seeds()
+
     # -- autonomy (WisdomOrgan, lazy) ---------------------------------
     def _organ(self) -> Any:
         from .autonomy import WisdomOrgan

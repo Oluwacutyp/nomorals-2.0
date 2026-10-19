@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from .errors import HistoryError
+from .reading import normalize_tradition
 
 # Fields every timeline entry must carry, and how each is validated.
 _FIELDS = ("start", "end", "tradition", "region", "title", "summary",
@@ -116,10 +117,13 @@ class HistoryEngine:
             self._events, key=lambda e: (e["start"], e["end"]))]
 
     def timeline(self, tradition: str = "", start_year: int = -3000,
-                 end_year: int = 2100) -> list[dict]:
+                 end_year: int = 2100, limit: int | None = None) -> list[dict]:
         """Events overlapping [start_year, end_year], optionally filtered
         by tradition. Sorted by start.
 
+        ``tradition`` matching is case-insensitive and tolerant of
+        hyphens/spaces (``"Christian-gnostic"`` == ``"christian-gnostic"``).
+        ``limit`` returns the first N events (``timeline <tradition> [n]``).
         Unknown tradition strings fail fast (with the known list) rather
         than silently returning empty.
         """
@@ -131,15 +135,21 @@ class HistoryEngine:
         if start_year > end_year:
             raise HistoryError(
                 f"start_year {start_year} is after end_year {end_year}")
+        if limit is not None and (type(limit) is not int or limit < 1):
+            raise HistoryError(f"limit must be a positive int, got {limit!r}")
         known = self.traditions()
-        if tradition and tradition not in known:
+        canon = normalize_tradition(tradition) if tradition else ""
+        if canon and canon not in [normalize_tradition(k) for k in known]:
             raise HistoryError(
                 f"unknown tradition {tradition!r}; known traditions: "
                 f"{', '.join(known)}")
         matched = [dict(e) for e in self._events
                    if e["start"] <= end_year and e["end"] >= start_year
-                   and (not tradition or e["tradition"] == tradition)]
+                   and (not canon
+                        or normalize_tradition(e["tradition"]) == canon)]
         matched.sort(key=lambda e: (e["start"], e["end"]))
+        if limit is not None:
+            matched = matched[:limit]
         return matched
 
     def lineage(self, figure_or_school: str) -> list[dict]:

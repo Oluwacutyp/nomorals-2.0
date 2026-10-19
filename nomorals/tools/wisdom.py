@@ -154,6 +154,32 @@ def register(registry: Any) -> None:
                     " WHERE status = 'queued'")[0]["n"]}
 
     @registry.register(
+        "wisdom_read",
+        description=(
+            "Read the ACTUAL full text of an ingested wisdom work, "
+            "paginated (page ends at sentence boundaries; page N+1 "
+            "continues page N). USE THIS when the owner wants to read a "
+            "text, not just ask about it. Args: work (slug or title), "
+            "chapter (number or title search, optional), page (1-based)."
+        ),
+        capability="network",
+        parameters={
+            "work": "str — slug or title, e.g. gospel-of-thomas",
+            "chapter": "int|str|null — chapter number or title search",
+            "page": "int — 1-based page",
+        },
+    )
+    def wisdom_read(work: str, chapter=None, page: int = 1) -> dict[str, Any]:
+        import importlib
+        mod = importlib.import_module("nomorals.wisdom.keeper")
+        keeper = mod.WisdomKeeper(context)
+        try:
+            got = keeper.read_work(work, chapter=chapter, page=int(page))
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+        return {"ok": True, **got}
+
+    @registry.register(
         "wisdom_organ_tick",
         description=(
             "Run one autonomous wisdom-organ cycle: ingest pending texts, "

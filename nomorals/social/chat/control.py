@@ -555,7 +555,10 @@ _HELP_TEXT = "\n".join(
         "  /wisdom ask <query>                     ask the corpus (answer + provenance)",
         "  /wisdom practice list | <session-id>    list sessions / start a guided session here",
         "  /wisdom practice stop                   stop the running session",
-        "  /wisdom timeline [tradition] | /wisdom compare <topic> | /wisdom status",
+        "  /wisdom read <work> [chapter] [page]   read the actual full text, paginated",
+        "  /wisdom traditions [tradition]         what each tradition is + its works",
+        "  /wisdom seeds                          every seed source + its works",
+        "  /wisdom timeline [tradition] [n] | /wisdom compare <topic> | /wisdom status",
         "  — decode & crypto —",
         "  /decode <data> | /decode file:<path>     Universal Decoder (sends binary back)",
         "  /decode hash <digest> | /decode decoders identify hashes / list engine",
@@ -1459,9 +1462,11 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
     "wisdom": {"what": "WisdomKeeper: ask the esoteric corpus (answer + provenance), "
                        "browse the history timeline, or run a guided breathing / "
                        "sitting session right here in chat with timed messages.",
-             "usage": "/wisdom ask <query>   |   /wisdom practice list   |   "
-                      "/wisdom practice <session-id>   |   /wisdom practice stop   |   "
-                      "/wisdom timeline [tradition]   |   /wisdom compare <topic>   |   "
+             "usage": "/wisdom ask <query>   |   /wisdom read <work> [chapter] [page]   |   "
+                      "/wisdom traditions [tradition]   |   /wisdom seeds   |   "
+                      "/wisdom practice list   |   /wisdom practice <session-id>   |   "
+                      "/wisdom practice stop   |   "
+                      "/wisdom timeline [tradition] [n]   |   /wisdom compare <topic>   |   "
                       "/wisdom status",
              "example": "/wisdom practice box-breathing",
              "related": "/search (general research)"},

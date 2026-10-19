@@ -13,6 +13,11 @@ from .vectorstore import VectorIndex, open_index
 from .ingestor import ArchiveIngestor
 from .autonomy import WisdomOrgan, mmr_order, textrank
 from .history import ERAS, HistoryEngine, era_of
+from .reading import (PAGE_CHARS, SEEDS, TRADITION_INFO, dehyphenate,
+                      normalize_tradition, paginate_text, parse_read_args,
+                      parse_timeline_args, sentence_passage,
+                      tradition_description, tradition_label,
+                      trim_to_sentences)
 from .keeper import WisdomKeeper
 from .practice import SAFETY_TEXT, PracticeGuide
 from .chat_session import ChatPracticeSession, WisdomChatManager
@@ -47,13 +52,25 @@ __all__ = [
     "WisdomOrgan",
     "auto_backend",
     "available_backends",
+    "dehyphenate",
     "embed_texts",
     "era_of",
     "fuse_hits",
     "mmr_order",
+    "normalize_tradition",
     "open_index",
+    "paginate_text",
+    "parse_read_args",
+    "parse_timeline_args",
     "reciprocal_rank_fusion",
+    "sentence_passage",
     "textrank",
+    "tradition_description",
+    "tradition_label",
+    "trim_to_sentences",
     "truncate_dim",
     "weighted_rrf",
+    "PAGE_CHARS",
+    "SEEDS",
+    "TRADITION_INFO",
 ]

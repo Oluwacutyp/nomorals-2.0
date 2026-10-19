@@ -16,6 +16,10 @@ from typing import Any
 
 from ..books.library import Library
 from .errors import CorpusError
+from .reading import (PAGE_CHARS, SEEDS, TRADITION_INFO, dehyphenate,
+                      normalize_tradition, paginate_text, sentence_passage,
+                      tradition_description, tradition_label,
+                      trim_to_sentences)
 
 # Canon statuses recognized by the manifest validator.
 CANON_STATUSES = frozenset({
@@ -41,6 +45,11 @@ class ManifestEntry:
     #: Operator triage notes (e.g. why a URL was changed, or why a text
     #: is currently unmirrorable). Informational only; never affects fetch.
     notes: str = ""
+    #: Which seed this work came from (see ``wisdom.reading.SEEDS``):
+    #: ``"packaged-seed"``, ``"hunt:gutendex"``, ``"manual"``, … — the
+    #: receipt proving where the text came from. Empty on entries saved
+    #: before seed tracking; :meth:`CanonCorpus._seed_of` resolves those.
+    seed: str = ""
 
     def validate(self) -> None:
         if not self.slug or not self.slug.replace("-", "").replace("_", "").isalnum():
@@ -69,6 +78,7 @@ class ManifestEntry:
             "sha256": self.sha256,
             "ingested_at": self.ingested_at,
             "notes": self.notes,
+            "seed": self.seed,
         }
 
     @classmethod
@@ -85,6 +95,7 @@ class ManifestEntry:
                 sha256=str(d.get("sha256", "")),
                 ingested_at=float(d.get("ingested_at", 0.0)),
                 notes=str(d.get("notes", "")),
+                seed=str(d.get("seed", "")),
             )
         except (KeyError, TypeError, ValueError) as exc:
             raise CorpusError(f"malformed manifest entry: {exc}") from exc
@@ -103,6 +114,12 @@ class ProvenanceHit:
     snippet: str
     score: float = 0.0
     canon_status: str = ""
+    #: Corpus slug of the work this passage came from — the key that
+    #: makes the passage openable: ``/wisdom read <slug>``.
+    slug: str = ""
+    #: Library chapter number the passage came from (0 when unknown),
+    #: so "read full passage" can jump straight to the chapter.
+    chapter_number: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -113,6 +130,8 @@ class ProvenanceHit:
             "snippet": self.snippet,
             "score": self.score,
             "canon_status": self.canon_status,
+            "slug": self.slug,
+            "chapter_number": self.chapter_number,
         }
 
 
@@ -173,6 +192,9 @@ class Answer:
                 lines.append(f"_{p.snippet.strip()[:400]}_")
                 if p.url:
                     lines.append(f"🔗 {p.url}")
+                if p.slug:
+                    ch = f" {p.chapter_number}" if p.chapter_number else ""
+                    lines.append(f"📖 Read full: /wisdom read {p.slug}{ch}")
                 if i < len(self.passages):
                     lines.append("─" * 24)
         elif style == "terminal":
@@ -188,6 +210,9 @@ class Answer:
                 lines.append(f"    {p.snippet.strip()[:420]}")
                 if p.url:
                     lines.append(f"    src: {p.url}")
+                if p.slug:
+                    ch = f" {p.chapter_number}" if p.chapter_number else ""
+                    lines.append(f"    read full: /wisdom read {p.slug}{ch}")
                 lines.append("─" * 60)
         else:  # markdown
             lines.append(f"## {self.query}")
@@ -203,6 +228,10 @@ class Answer:
                 lines.append("")
                 if p.url:
                     lines.append(f"[source]({p.url})")
+                    lines.append("")
+                if p.slug:
+                    ch = f" {p.chapter_number}" if p.chapter_number else ""
+                    lines.append(f"[read full](/wisdom read {p.slug}{ch})")
                     lines.append("")
         lines.append(self.synthesis)
         return "\n".join(lines).strip()
@@ -335,6 +364,8 @@ class CanonCorpus:
         for item in raw.get("entries", []):
             entry = ManifestEntry.from_dict(item)
             if entry.slug not in self._manifest:
+                if not entry.seed:
+                    entry.seed = "packaged-seed"
                 self._manifest[entry.slug] = entry
                 added += 1
         if added:
@@ -347,6 +378,8 @@ class CanonCorpus:
         if entry.slug in self._manifest:
             raise CorpusError(
                 f"manifest slug already registered: {entry.slug!r}")
+        if not entry.seed:
+            entry.seed = "manual"
         self._manifest[entry.slug] = entry
         self._save_manifest()
 
@@ -367,6 +400,315 @@ class CanonCorpus:
             "pending": len(self._manifest) - len(ingested),
             "by_tradition": self._count_by("tradition"),
             "by_canon_status": self._count_by("canon_status"),
+            # Receipts, not just counts: every work with its seed,
+            # source, ingest state, and the command that opens it.
+            "works": [self.work_state(e) for e in self._manifest.values()],
+            "seeds": self.seeds(),
+        }
+
+    # ── seeds ─────────────────────────────────────────────────────────
+    def _packaged_slugs(self) -> set[str]:
+        """Slugs of the packaged seed manifest (for legacy entries saved
+        before seed tracking existed)."""
+        cached = self.__dict__.get("_packaged_slugs_cache")
+        if cached is not None:
+            return cached
+        slugs: set[str] = set()
+        try:
+            raw = json.loads((Path(__file__).parent / "data"
+                              / "manifest.json").read_text(encoding="utf-8"))
+            for item in raw.get("entries", []):
+                if isinstance(item, dict) and item.get("slug"):
+                    slugs.add(str(item["slug"]))
+        except (OSError, ValueError):
+            pass
+        self.__dict__["_packaged_slugs_cache"] = slugs
+        return slugs
+
+    def _seed_of(self, entry: ManifestEntry) -> str:
+        """The seed a work came from. Entries saved before seed tracking
+        resolve by slug: packaged-manifest slugs → ``packaged-seed``,
+        anything else → ``manual``."""
+        if entry.seed:
+            return entry.seed
+        if entry.slug in self._packaged_slugs():
+            return "packaged-seed"
+        return "manual"
+
+    def seeds(self) -> list[dict[str, Any]]:
+        """Every seed source + which works came from it.
+
+        A "seed" is a starting source, not the texts themselves: the
+        packaged manifest, the timeline dataset, the four live hunt
+        channels, and manual adds. Each entry carries its ``what`` and
+        ``how_to_add`` so the owner can see where knowledge comes from
+        and how to add another source."""
+        counts: dict[str, int] = {}
+        by_seed: dict[str, list[str]] = {}
+        for e in self._manifest.values():
+            seed = self._seed_of(e)
+            counts[seed] = counts.get(seed, 0) + 1
+            by_seed.setdefault(seed, []).append(e.slug)
+        out: list[dict[str, Any]] = []
+        for seed_def in SEEDS:
+            sid = seed_def["id"]
+            out.append({**seed_def, "works": counts.get(sid, 0),
+                        "work_slugs": sorted(by_seed.get(sid, []))})
+        # Seeds recorded on works but not in the registry (e.g. a
+        # future hunt channel) still show up — never silently dropped.
+        for sid in sorted(counts):
+            if sid not in {s["id"] for s in SEEDS}:
+                out.append({"id": sid, "name": sid,
+                            "what": "Recorded on works; no registry entry.",
+                            "how_to_add": "Unknown — check the work's source URL.",
+                            "works": counts[sid],
+                            "work_slugs": sorted(by_seed[sid])})
+        return out
+
+    # ── traditions ────────────────────────────────────────────────────
+    def traditions_detail(self, tradition: str = "") -> list[dict[str, Any]]:
+        """Traditions with their works — self-explanatory categories.
+
+        Each tradition carries its readable label, a one-paragraph
+        explanation of what the tradition *is*, and every work filed
+        under it (title, seed, source, ingest state, read command).
+        ``tradition`` filters to one (case-insensitive); unknown names
+        fail fast with the known list."""
+        wanted = normalize_tradition(tradition) if tradition else ""
+        grouped: dict[str, list[ManifestEntry]] = {}
+        for e in self._manifest.values():
+            key = normalize_tradition(e.tradition)
+            grouped.setdefault(key, []).append(e)
+        if wanted and wanted not in grouped:
+            known = sorted(grouped)
+            raise CorpusError(
+                f"unknown tradition {tradition!r}; known traditions: "
+                f"{', '.join(known)}")
+        out = []
+        for trad in sorted(grouped):
+            if wanted and trad != wanted:
+                continue
+            works = [self.work_state(e)
+                     for e in sorted(grouped[trad], key=lambda e: e.title)]
+            out.append({
+                "tradition": trad,
+                "label": tradition_label(trad),
+                "description": tradition_description(trad),
+                "works": works,
+                "ingested": sum(1 for w in works if w["ingested"]),
+                "total": len(works),
+            })
+        return out
+
+    # ── work resolution + reading ─────────────────────────────────────
+    def resolve_work(self, query: str) -> ManifestEntry:
+        """Find a manifest entry by slug, title, or partial match.
+
+        Case-insensitive, tolerant of hyphens/spaces: ``"gth"``,
+        ``"Gospel of Thomas"``, ``"gospel-of-thomas"`` all resolve.
+        Ambiguous partial matches fail fast listing the candidates —
+        never silently pick one.
+        """
+        q = (query or "").strip()
+        if not q:
+            raise CorpusError("resolve_work() needs a non-empty query")
+        q_norm = normalize_tradition(q)
+        entries = list(self._manifest.values())
+        # 1. exact slug / normalized slug
+        for e in entries:
+            if e.slug == q or normalize_tradition(e.slug) == q_norm:
+                return e
+        # 2. exact title / normalized title
+        for e in entries:
+            if e.title.lower() == q.lower() \
+                    or normalize_tradition(e.title) == q_norm:
+                return e
+        # 3. unique partial: slug or title contains the query
+        partial = [e for e in entries
+                   if q_norm in normalize_tradition(e.slug)
+                   or q.lower() in e.title.lower()]
+        if len(partial) == 1:
+            return partial[0]
+        if len(partial) > 1:
+            names = ", ".join(f"{e.title} ({e.slug})" for e in partial[:10])
+            raise CorpusError(
+                f"ambiguous work {query!r} — matches: {names}. "
+                "Use the full title or slug.")
+        known = ", ".join(f"{e.title} ({e.slug})"
+                          for e in sorted(entries, key=lambda e: e.title)[:10])
+        raise CorpusError(
+            f"unknown work {query!r}. Known works include: {known}. "
+            "Run `/wisdom traditions` for the full list.")
+
+    def _library_book_for(self, slug: str) -> tuple[str, dict[str, Any]] | None:
+        """The Library book holding a corpus work's ingested text.
+
+        Ingest titles the book ``"[{slug}] {title}"``, so the library
+        slug is derived from that — resolved by scanning book.json
+        titles for the ``[slug]`` prefix rather than re-deriving it.
+        Returns (library_slug, book_meta) or None."""
+        root = self.library.root()
+        for book_json in sorted(root.glob("*/book.json")):
+            try:
+                meta = json.loads(book_json.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            title = str(meta.get("title", ""))
+            if title.startswith(f"[{slug}] "):
+                return book_json.parent.name, meta
+        return None
+
+    def _chapter_text(self, library_slug: str,
+                      chapter_number: int) -> str:
+        """Full text of one library chapter (header line stripped).
+
+        Chapter files start with the synthetic ``"# {name}"`` header
+        the Library wrote; when the chunker cut the book (no headings
+        found), the body's own first heading line survives under it —
+        strip all leading heading lines so neither leaks into a
+        passage or a read page.
+        """
+        path = (self.library.book_dir(library_slug) / "chapters"
+                / f"{int(chapter_number):03d}.md")
+        if not path.is_file():
+            return ""
+        raw = path.read_text(encoding="utf-8", errors="replace")
+        lines = raw.splitlines()
+        while lines and (not lines[0].strip()
+                         or lines[0].startswith("#")):
+            lines.pop(0)
+        return "\n".join(lines).strip()
+
+    def work_state(self, entry: ManifestEntry) -> dict[str, Any]:
+        """Per-work ingest receipt: seed, source, chars/pages, date,
+        and the command that opens it. No counts without receipts."""
+        import datetime as _dt
+        found = self._library_book_for(entry.slug)
+        chars, words, chapters = 0, 0, 0
+        if found:
+            lib_slug, meta = found
+            chapters = len(meta.get("chapters", []))
+            words = int(meta.get("total_words", 0) or 0)
+            for ch in meta.get("chapters", []):
+                chars += len(self._chapter_text(
+                    lib_slug, int(ch.get("number", 0))))
+        ingested = bool(entry.ingested_at)
+        return {
+            "slug": entry.slug,
+            "title": entry.title,
+            "tradition": entry.tradition,
+            "canon_status": entry.canon_status,
+            "translator": entry.translator,
+            "source_url": entry.source_url,
+            "license": entry.license,
+            "seed": self._seed_of(entry),
+            "notes": entry.notes,
+            "ingested": ingested,
+            "ingested_at": entry.ingested_at,
+            "ingested_date": (_dt.datetime.fromtimestamp(
+                entry.ingested_at).strftime("%Y-%m-%d")
+                if ingested else ""),
+            "chars": chars,
+            "words": words,
+            "chapters": chapters,
+            "pages": (chars + PAGE_CHARS - 1) // PAGE_CHARS if chars else 0,
+            "read_command": f"/wisdom read {entry.slug}",
+            "status": "ingested" if ingested else "pending",
+        }
+
+    def read_work(self, query: str, *, chapter: Any = None, page: int = 1,
+                  page_chars: int = PAGE_CHARS) -> dict[str, Any]:
+        """Read the ACTUAL full text of an ingested work, paginated.
+
+        ``query`` is a slug or title (see :meth:`resolve_work`).
+        ``chapter`` selects one chapter (number or title search);
+        ``page`` is 1-based within the chapter (or the whole work).
+        Pages end at sentence boundaries and page N+1 starts exactly
+        where page N ended. Raises :class:`CorpusError` for unknown,
+        un-ingested, or out-of-range requests — with the command that
+        fixes it.
+        """
+        entry = self.resolve_work(query)
+        if not entry.ingested_at:
+            raise CorpusError(
+                f"{entry.title!r} is registered but not ingested yet — "
+                f"nothing to read. Run `/wisdom ingest {entry.slug}` "
+                f"(source: {entry.source_url}), then "
+                f"`/wisdom read {entry.slug}`.")
+        found = self._library_book_for(entry.slug)
+        if found is None:
+            raise CorpusError(
+                f"{entry.title!r} is marked ingested but its text is not "
+                f"in the library — re-ingest with "
+                f"`/wisdom ingest {entry.slug}`.")
+        lib_slug, meta = found
+        chapters = meta.get("chapters", [])
+        chapter_no: int | None = None
+        chapter_title = ""
+        if chapter is not None:
+            if isinstance(chapter, int) or str(chapter).isdigit():
+                wanted = int(chapter)
+                match = next((c for c in chapters
+                              if int(c.get("number", 0)) == wanted), None)
+                if match is None:
+                    raise CorpusError(
+                        f"{entry.title!r} has no chapter {wanted} "
+                        f"(1–{len(chapters)}).")
+                chapter_no = wanted
+                chapter_title = str(match.get("title", ""))
+                text = self._chapter_text(lib_slug, wanted)
+            else:
+                needle = str(chapter).lower()
+                matches = [c for c in chapters
+                           if needle in str(c.get("title", "")).lower()]
+                if not matches:
+                    titles = ", ".join(str(c.get("title", ""))
+                                       for c in chapters[:20])
+                    raise CorpusError(
+                        f"no chapter matching {chapter!r} in "
+                        f"{entry.title!r}. Chapters: {titles}")
+                if len(matches) > 1:
+                    names = ", ".join(str(c.get("title", ""))
+                                      for c in matches)
+                    raise CorpusError(
+                        f"ambiguous chapter {chapter!r} — matches: {names}. "
+                        "Use the chapter number.")
+                chapter_no = int(matches[0].get("number", 0))
+                chapter_title = str(matches[0].get("title", ""))
+                text = self._chapter_text(lib_slug, chapter_no)
+        else:
+            parts = []
+            for c in chapters:
+                body = self._chapter_text(
+                    lib_slug, int(c.get("number", 0)))
+                parts.append(f"\n\n## {c.get('title', '')}\n\n{body}")
+            text = "".join(parts).strip()
+        pages = paginate_text(text, page_chars=page_chars)
+        if not 1 <= page <= len(pages):
+            raise CorpusError(
+                f"page {page} out of range for {entry.title!r} "
+                f"(1–{len(pages)}).")
+        base = f"/wisdom read {entry.slug}"
+        chap_part = f" {chapter_no}" if chapter_no is not None else ""
+        return {
+            "slug": entry.slug,
+            "title": entry.title,
+            "tradition": entry.tradition,
+            "translator": entry.translator,
+            "source_url": entry.source_url,
+            "seed": self._seed_of(entry),
+            "chapter": chapter_no,
+            "chapter_title": chapter_title,
+            "page": page,
+            "total_pages": len(pages),
+            "total_chars": len(dehyphenate(text)),
+            "text": pages[page - 1],
+            "has_next": page < len(pages),
+            "has_prev": page > 1,
+            "next_command": (f"{base}{chap_part} {page + 1}"
+                             if page < len(pages) else ""),
+            "prev_command": (f"{base}{chap_part} {page - 1}"
+                             if page > 1 else ""),
         }
 
     def _count_by(self, attr: str) -> dict[str, int]:
@@ -386,6 +728,10 @@ class CanonCorpus:
         unchanged bytes is a no-op (sha256 match).
         """
         entry = self.get(slug)
+        # Clean OCR line-break hyphenation BEFORE indexing: a search for
+        # "literature" must match text stored as "liter-\n ature", and
+        # the digest must cover the text actually indexed.
+        text = dehyphenate(text)
         digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
         if entry.sha256 == digest and entry.ingested_at:
             return entry  # already ingested, unchanged
@@ -446,6 +792,7 @@ class CanonCorpus:
         query = (query or "").strip()
         if not query:
             raise CorpusError("ask() needs a non-empty query")
+        tradition = normalize_tradition(tradition) if tradition else ""
         if mode not in ("keyword", "semantic", "hybrid"):
             raise CorpusError(
                 f"unknown ask() mode {mode!r} "
@@ -459,7 +806,7 @@ class CanonCorpus:
         if mode == "keyword":
             hits = self.library.search(
                 query, top=top * 2 if diversify else top)
-            passages = self._to_provenance(hits, tradition)
+            passages = self._to_provenance(hits, tradition, query)
         else:
             passages = self._ask_semantic(query, top=top,
                                           tradition=tradition,
@@ -518,8 +865,16 @@ class CanonCorpus:
         return f"{query} {' '.join(extra)}"
 
     def _to_provenance(self, hits: Any,
-                       tradition: str) -> list[ProvenanceHit]:
-        """Map raw search hits to provenance-carrying passages."""
+                       tradition: str, query: str = "") -> list[ProvenanceHit]:
+        """Map raw search hits to provenance-carrying passages.
+
+        Snippets are sentence-complete: each hit's full chapter text is
+        re-read from the library and the passage is re-extracted around
+        the query match at sentence boundaries — never the library's
+        hard-truncated 260-char window, never mid-sentence, hyphenation
+        breaks undone. Falls back to trimming the raw snippet when the
+        chapter file is unavailable.
+        """
         passages: list[ProvenanceHit] = []
         for h in hits:
             # The corpus slug is embedded as "[slug]" at the title start.
@@ -531,18 +886,53 @@ class CanonCorpus:
                     slug = title[1:end]
                     title = title[end + 1:].strip()
             entry = self._manifest.get(slug)
-            if tradition and entry and entry.tradition != tradition:
+            if tradition and entry and \
+                    normalize_tradition(entry.tradition) != \
+                    normalize_tradition(tradition):
                 continue
+            raw_snippet = getattr(h, "passage", "") or ""
+            snippet = self._sentence_snippet(h, raw_snippet, query)
             passages.append(ProvenanceHit(
                 work=title,
                 translator=entry.translator if entry else "",
                 section=h.chapter,
                 url=entry.source_url if entry else "",
-                snippet=h.passage,
+                snippet=snippet,
                 score=h.score,
                 canon_status=entry.canon_status if entry else "",
+                slug=slug,
+                chapter_number=int(getattr(h, "chapter_number", 0) or 0),
             ))
         return passages
+
+    def _sentence_snippet(self, hit: Any, raw: str, query: str) -> str:
+        """Sentence-complete snippet for one hit.
+
+        Prefers the hit's own full chapter text (semantic hits carry
+        it); otherwise re-reads the chapter file from the library.
+        """
+        full = (raw or "")
+        if len(full) < 2000:
+            # Keyword hits carry only a context window — re-read the
+            # full chapter so the passage can end at a sentence.
+            for candidate in (getattr(hit, "book_slug", ""),
+                              getattr(hit, "book", "")):
+                if not candidate:
+                    continue
+                try:
+                    text = self._chapter_text(
+                        str(candidate),
+                        int(getattr(hit, "chapter_number", 0) or 0))
+                except (ValueError, TypeError):
+                    continue
+                if text:
+                    full = text
+                    break
+        if full and query:
+            got = sentence_passage(full, query)
+            if got:
+                return got
+        return trim_to_sentences(raw)
 
     # ── semantic search ─────────────────────────────────────────────
     def _embed_backend(self, name: str = "") -> Any:
@@ -650,7 +1040,7 @@ class CanonCorpus:
             query, top=top * 2 if hybrid else top,
             tradition=tradition, min_score=min_score)
         if not hybrid:
-            return self._to_provenance(sem_hits, tradition)
+            return self._to_provenance(sem_hits, tradition, query)
         from .hybrid import fuse_hits
         kw_hits = self.library.search(query, top=top * 2)
         fused = fuse_hits(
@@ -658,7 +1048,7 @@ class CanonCorpus:
             key_fn=lambda h: (
                 h.title or h.book, h.chapter_number, h.passage[:64]),
             top=top * 2, weights=weights, semantic_floor=min_score)
-        return self._to_provenance(fused[:top], tradition)
+        return self._to_provenance(fused[:top], tradition, query)
 
     def _index_metadata(self) -> dict[str, dict[str, str]]:
         """Map vector-index passage keys → tradition/work metadata.

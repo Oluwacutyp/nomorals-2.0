@@ -3212,9 +3212,12 @@ def _parser() -> argparse.ArgumentParser:
         help="wisdom keeper: corpus, history, practice sessions",
         description=("nm wisdom status [--json]\n"
                      "nm wisdom ask <query> [--limit N] [--json]\n"
+                     "nm wisdom read <work> [chapter] [page]\n"
+                     "nm wisdom traditions [tradition]\n"
+                     "nm wisdom seeds\n"
                      "nm wisdom ingest <slug> | --all\n"
                      "nm wisdom search <query> [--limit N] [--json]\n"
-                     "nm wisdom timeline [--tradition T] [--from Y] [--to Y] [--json]\n"
+                     "nm wisdom timeline [tradition] [n] [--from Y] [--to Y] [--json]\n"
                      "nm wisdom compare <topic> [--json]\n"
                      "nm wisdom practice list [--json]\n"
                      "nm wisdom practice <session-id> [--rounds N] [--chat]"),

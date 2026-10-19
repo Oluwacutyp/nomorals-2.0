@@ -345,13 +345,19 @@ class ChatDispatchTests(unittest.TestCase):
         rt = self._runtime(ctx)
         rt._control_wisdom("ask what is breath", chat_key="telegram:1")
         self.assertTrue(rt.sent)  # long reply went through the checker
-        self.assertIn("No passages", rt.sent[0])
+        # Empty corpus: the ask still runs (no early-return bypass) and
+        # the "corpus is empty — run /wisdom seed" note rides along.
+        # ("No passages" is the answer for a *searched* corpus with no
+        # hits, not for an empty one.)
+        self.assertIn("corpus is empty", rt.sent[0])
 
     def test_control_wisdom_usage_and_unknown_verb(self):
         ctx, _ = _ctx()
         rt = self._runtime(ctx)
         self.assertIn("usage",
                       rt._control_wisdom("", chat_key="telegram:1"))
+        # Unknown verb → named error + usage (a typo'd verb must
+        # not silently become a nonsense question).
         self.assertIn("unknown /wisdom verb",
                       rt._control_wisdom("frobnicate", chat_key="telegram:1"))
 
@@ -374,6 +380,56 @@ class ChatDispatchTests(unittest.TestCase):
             self.assertIn("no practice session", reply)  # already finished
         finally:
             mgr.shutdown()
+
+    def test_control_wis_bare_tradition_lists_works(self):
+        ctx, _ = _ctx()
+        rt = self._runtime(ctx)
+        from nomorals.wisdom import ManifestEntry, WisdomKeeper
+        k = WisdomKeeper(ctx)
+        k.corpus.register(ManifestEntry.from_dict({
+            "slug": "gth", "title": "Gospel of Thomas",
+            "tradition": "christian-gnostic", "canon_status": "gnostic",
+            "source_url": "https://example.com/gth"}))
+        k.corpus.ingest_text(
+            "gth", "# Sayings\n\n" +
+            "The kingdom of heaven is within you. " * 40)
+        rt._control_wisdom("Christian-gnostic", chat_key="telegram:1")
+        reply = "\n".join(rt.sent)
+        self.assertIn("Gospel of Thomas", reply)
+        self.assertIn("/wisdom read gth", reply)
+
+    def test_control_wisdom_read_paginates(self):
+        ctx, _ = _ctx()
+        rt = self._runtime(ctx)
+        from nomorals.wisdom import ManifestEntry, WisdomKeeper
+        k = WisdomKeeper(ctx)
+        k.corpus.register(ManifestEntry.from_dict({
+            "slug": "gth", "title": "Gospel of Thomas",
+            "tradition": "christian-gnostic", "canon_status": "gnostic",
+            "source_url": "https://example.com/gth"}))
+        k.corpus.ingest_text(
+            "gth", "# Sayings\n\n" + " ".join(
+                f"Saying {i}: the kingdom is within you."
+                for i in range(1, 121)))
+        rt._control_wisdom("read gth 1", chat_key="telegram:1")
+        self.assertTrue(rt.sent)
+        self.assertIn("page 1/", rt.sent[0])
+        self.assertIn("next \u2192 /wisdom read gth 2", rt.sent[0])
+
+    def test_control_wisdom_timeline_count_and_case(self):
+        ctx, _ = _ctx()
+        rt = self._runtime(ctx)
+        rt._control_wisdom("timeline Christian-gnostic 2",
+                           chat_key="telegram:1")
+        self.assertTrue(rt.sent)
+        # Full summaries, not one-line stubs.
+        self.assertGreater(len(rt.sent[0]), 200)
+
+    def test_control_wisdom_seeds(self):
+        ctx, _ = _ctx()
+        rt = self._runtime(ctx)
+        rt._control_wisdom("seeds", chat_key="telegram:1")
+        self.assertIn("packaged-seed", "\n".join(rt.sent))
 
     def test_control_wis_alias_routes_same_handler(self):
         # /wis parses to kind "wis"; the runtime dispatches both to

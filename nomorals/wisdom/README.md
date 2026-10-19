@@ -16,6 +16,18 @@ rebuild either.
   weighted hybrid fusion (`weights=(kw, sem)`), and `Answer.render()`
   in `chat` / `terminal` / `markdown` styles with provenance badges and
   an honest coverage-based confidence note.
+  Ask passages are re-extracted from the full chapter text at sentence
+  boundaries (never mid-sentence), OCR hyphenation breaks are undone
+  at ingest, and every passage carries its work slug + chapter so
+  `Answer.render()` can print a "Read full: /wisdom read <slug>" line.
+- **`reading.py`** — pure readability helpers shared by CLI, Telegram,
+  and corpus: `normalize_tradition()` (case/hyphen/space-tolerant),
+  `parse_timeline_args()` (`timeline <tradition> [n]`), `parse_read_args()`
+  (`read <work> [chapter] [page]`), `dehyphenate()`, `paginate_text()`
+  (deterministic sentence-boundary pages: page N+1 starts exactly where
+  page N ended), `TRADITION_INFO` (what each tradition *is*), and `SEEDS`
+  (every seed source + how to add one). `ManifestEntry.seed` records
+  which seed each work came from.
 - **`ArchiveIngestor`** (`ingestor.py`) — fetches texts from public libraries
   (Gutendex/Gutenberg, Wikisource, archive.org, web fallback), respects
   robots.txt, per-domain politeness delay, caches blobs by sha256, strips
@@ -55,16 +67,24 @@ rebuild either.
 ## CLI (operator)
 
 ```
-nm wisdom status [--json]
-nm wisdom ask <query> [--limit N] [--json]
+nm wisdom status [--json]          # per-work receipts: seed, source, chars/pages, read command
+nm wisdom ask <query> [--limit N] [--json]   # sentence-complete passages + "read full" hints
+nm wisdom read <work> [chapter] [page]       # the ACTUAL full text, paginated
+nm wisdom traditions [tradition]    # what each tradition is + its works
+nm wisdom seeds                     # every seed source + which works came from it
+nm wisdom <tradition>               # bare tradition lists its works
 nm wisdom ingest <slug> | --all
 nm wisdom seed
 nm wisdom search <query> [--limit N] [--json]
-nm wisdom timeline [--tradition T] [--start Y] [--end Y] [--json]
+nm wisdom timeline [tradition] [n] [--start Y] [--end Y] [--json]
 nm wisdom compare <topic> [--json]
 nm wisdom practice list [--json]
 nm wisdom practice <session-id> [--rounds N]
 ```
+
+Telegram mirrors the CLI: `/wisdom read <work> [chapter] [page]`,
+`/wisdom traditions`, `/wisdom seeds`, `/wisdom <tradition>`,
+`/wisdom timeline <tradition> [n]` (full summaries), `/wisdom status`.
 
 ## Corpus seed
 
@@ -72,3 +92,21 @@ nm wisdom practice <session-id> [--rounds N]
 pseudepigrapha, gnostic, dss, eastern, esoteric, secondary). Run
 `nm wisdom seed` to register them, `nm wisdom ingest --all` to fetch.
 Only public sources; no credentials; robots.txt respected.
+
+## Seeds — more than one
+
+"Seed" = a starting source list / discovery channel, not the texts
+themselves (`/wisdom seeds` lists them all with how to add one):
+
+1. **packaged-seed** — `data/manifest.json`, the 47 curated texts.
+2. **timeline-seed** — `data/timeline.json`, 52 sourced history events
+   (history only — no full text to open).
+3. **hunt:gutendex / hunt:wikisource / hunt:archive / hunt:web** — live
+   discovery channels behind `/wisdom search <query>`; candidates are
+   NOT ingested until the owner picks one. A work ingested from a
+   candidate records `seed: hunt:<source>`.
+4. **manual** — texts registered directly (paste-in, local file, URL).
+
+Every work records its seed (`ManifestEntry.seed`), so
+`/wisdom status` and `/wisdom traditions` can always show the receipt:
+seed → work → source URL → ingested characters/pages → `/wisdom read`.

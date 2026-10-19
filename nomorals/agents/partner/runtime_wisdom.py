@@ -11,12 +11,16 @@ _log = logging.getLogger(__name__)
 _WISDOM_USAGE = (
     "usage:\n"
     "  /wisdom ask <query>                  ask the corpus (answer + provenance)\n"
+    "  /wisdom read <work> [chapter] [page]  read the actual full text\n"
+    "  /wisdom traditions [tradition]       what each tradition is + its works\n"
+    "  /wisdom seeds                        every seed source + its works\n"
+    "  /wisdom <tradition>                 list one tradition's works\n"
     "  /wisdom practice list                list guided sessions\n"
     "  /wisdom practice <session-id>        start a guided session in this chat\n"
     "  /wisdom practice stop                stop the running session\n"
-    "  /wisdom timeline [tradition]         history timeline\n"
+    "  /wisdom timeline [tradition] [n]     history timeline (full summaries)\n"
     "  /wisdom compare <topic>              cross-tradition comparison\n"
-    "  /wisdom status                       corpus status"
+    "  /wisdom status                       corpus status with per-work receipts"
 )
 
 
@@ -67,6 +71,12 @@ class RuntimeWisdomMixin:
             return self._control_wisdom_seed(keeper, chat)
         if verb == "ask":
             return self._control_wisdom_ask(keeper, rest, chat)
+        if verb == "read":
+            return self._control_wisdom_read(keeper, rest, chat)
+        if verb == "traditions":
+            return self._control_wisdom_traditions(keeper, rest, chat)
+        if verb == "seeds":
+            return self._control_wisdom_seeds(keeper, chat)
         if verb == "practice":
             return self._control_wisdom_practice(keeper, rest,
                                                  chat_key=chat_key, chat=chat)
@@ -74,6 +84,15 @@ class RuntimeWisdomMixin:
             return self._control_wisdom_timeline(keeper, rest, chat)
         if verb == "compare":
             return self._control_wisdom_compare(keeper, rest, chat)
+        # Bare tradition: `/wisdom christian-gnostic` lists its works.
+        if not rest:
+            from ...wisdom.reading import normalize_tradition
+            known = {normalize_tradition(e.tradition)
+                     for e in keeper.corpus.list()}
+            known |= {normalize_tradition(t)
+                      for t in keeper.history.traditions()}
+            if normalize_tradition(verb) in known:
+                return self._control_wisdom_traditions(keeper, verb, chat)
         # Unknown verb → say so (plus usage). Silently treating the
         # tail as a question turns a typo'd verb (e.g. /wisdom stauts)
         # into a nonsense question instead of a correction.
@@ -81,13 +100,103 @@ class RuntimeWisdomMixin:
 
     def _control_wisdom_status(self, keeper) -> str:
         try:
-            st = keeper.status()["corpus"]
+            full = keeper.status()
+            detail = keeper.corpus.traditions_detail()
         except Exception as exc:  # noqa: BLE001 - fail fast, honestly
             return f"⚠️ wisdom status failed: {type(exc).__name__}: {exc}"
-        lines = [f"📚 corpus: {st['ingested']}/{st['texts']} texts ingested"]
-        for trad, n in sorted(st["by_tradition"].items()):
-            lines.append(f"  {trad}: {n}")
+        c = full["corpus"]
+        lines = [f"📚 corpus: {c['ingested']}/{c['texts']} texts ingested",
+                 "A \"tradition\" = a family of texts + teachings that grew "
+                 "together around shared scriptures and practices."]
+        for trad in detail:
+            lines.append(f"\n{trad['label']} ({trad['tradition']}): "
+                         f"{trad['ingested']}/{trad['total']} ingested")
+            for w in trad["works"]:
+                state = (f"ingested {w['ingested_date']}, "
+                         f"{w['chars']:,} chars, {w['pages']} pp"
+                         if w["ingested"] else "PENDING")
+                lines.append(f"  {'✓' if w['ingested'] else '○'} {w['title']} "
+                             f"— seed: {w['seed']} — {state}")
+                lines.append(f"      {w['read_command']} · {w['source_url']}")
         return "\n".join(lines)
+
+    def _control_wisdom_read(self, keeper, rest: str, chat) -> str:
+        from ...wisdom.reading import parse_read_args
+        tokens = (rest or "").strip().split()
+        if not tokens:
+            return ("usage: /wisdom read <work> [chapter] [page]\n"
+                    "e.g. /wisdom read gospel-of-thomas\n"
+                    "     /wisdom read gospel-of-thomas 2  (page 2)\n"
+                    "     /wisdom read gospel-of-thomas 2 1  (chapter 2, page 1)")
+        # Longest leading prefix that names a work; the rest is chapter/page.
+        got = None
+        err: Exception | None = None
+        for split in range(len(tokens), 0, -1):
+            try:
+                chapter, page = parse_read_args(tokens[split:])
+                got = keeper.corpus.read_work(" ".join(tokens[:split]),
+                                              chapter=chapter, page=page)
+                break
+            except Exception as exc:  # noqa: BLE001 - try shorter prefix
+                err = exc
+                continue
+        if got is None:
+            return f"⚠️ read failed: {type(err).__name__}: {err}"
+        head = got["title"]
+        if got["chapter"]:
+            head += f" — chapter {got['chapter']}"
+            if got["chapter_title"]:
+                head += f": {got['chapter_title']}"
+        lines = [f"📖 {head} (page {got['page']}/{got['total_pages']}, "
+                 f"{got['total_chars']:,} chars total)",
+                 f"   source: {got['source_url']} · seed: {got['seed']}",
+                 "─" * 24, got["text"], "─" * 24]
+        if got["has_prev"]:
+            lines.append(f"← prev: {got['prev_command']}")
+        if got["has_next"]:
+            lines.append(f"next → {got['next_command']}")
+        return self._send_long_checked(
+            chat.platform, chat, "\n".join(lines))
+
+    def _control_wisdom_traditions(self, keeper, rest: str, chat) -> str:
+        try:
+            detail = keeper.corpus.traditions_detail((rest or "").strip())
+        except Exception as exc:  # noqa: BLE001
+            return f"⚠️ traditions failed: {type(exc).__name__}: {exc}"
+        if not detail:
+            return "no traditions registered yet — run /wisdom seed"
+        lines = ["A \"tradition\" = a family of texts + teachings that grew "
+                 "together around shared scriptures, teachers, and practices."]
+        for trad in detail:
+            lines.append(f"\n{trad['label']} ({trad['tradition']}): "
+                         f"{trad['ingested']}/{trad['total']} ingested")
+            lines.append(f"  {trad['description']}")
+            for w in trad["works"]:
+                state = (f"ingested, {w['chars']:,} chars, {w['pages']} pp"
+                         if w["ingested"] else "PENDING")
+                lines.append(f"  {'✓' if w['ingested'] else '○'} {w['title']} "
+                             f"({w['slug']}) — seed: {w['seed']} — {state}")
+                lines.append(f"      {w['read_command']} · {w['source_url']}")
+        return self._send_long_checked(
+            chat.platform, chat, "\n".join(lines))
+
+    def _control_wisdom_seeds(self, keeper, chat) -> str:
+        try:
+            seeds = keeper.corpus.seeds()
+        except Exception as exc:  # noqa: BLE001
+            return f"⚠️ seeds failed: {type(exc).__name__}: {exc}"
+        lines = ["Seeds — every source WisdomKeeper knowledge can come from. "
+                 "A seed is a starting source list / discovery channel, "
+                 "not the texts themselves."]
+        for s in seeds:
+            lines.append(f"\n{s['id']} — {s['name']} ({s['works']} work(s))")
+            lines.append(f"  {s['what']}")
+            lines.append(f"  Add: {s['how_to_add']}")
+            if s["work_slugs"]:
+                lines.append(f"  works: {', '.join(s['work_slugs'][:12])}"
+                             + (" …" if len(s["work_slugs"]) > 12 else ""))
+        return self._send_long_checked(
+            chat.platform, chat, "\n".join(lines))
 
     def _control_wisdom_seed(self, keeper, chat) -> str:
         """Seed the manifest and ingest the starter library in background."""
@@ -137,6 +246,9 @@ class RuntimeWisdomMixin:
             lines.append(f"  {p.snippet.strip()}")
             src = p.url or "(no url)"
             lines.append(f"  source: {src} [{p.canon_status}]")
+            if p.slug:
+                ch = f" {p.chapter_number}" if p.chapter_number else ""
+                lines.append(f"  📖 Read full: /wisdom read {p.slug}{ch}")
             lines.append("")
         if not ans.passages and not st.get("ingested"):
             # Truly empty corpus (not just no match): keep the seed
@@ -189,22 +301,35 @@ class RuntimeWisdomMixin:
             # unknown session id — the message already lists what's available
             return f"⚠️ {exc}"
 
-    def _control_wisdom_timeline(self, keeper, tradition: str, chat) -> str:
+    def _control_wisdom_timeline(self, keeper, rest: str, chat) -> str:
+        from ...wisdom.reading import parse_timeline_args
+        # `timeline <tradition> [n]` — trailing int is the count, never
+        # part of the tradition name; matching is case-insensitive.
+        tradition, limit = parse_timeline_args((rest or "").split())
         try:
-            events = keeper.history.timeline(tradition, -3000, 2100)
+            events = keeper.history.timeline(tradition, -3000, 2100,
+                                             limit=limit)
         except Exception as exc:  # noqa: BLE001
             return f"⚠️ timeline failed: {type(exc).__name__}: {exc}"
         if not events:
             return "no timeline events found."
         head = (f"📜 timeline — {tradition}"
                 if tradition else "📜 timeline")
-        lines = [f"{head} ({len(events)} events):"]
-        for e in events[:25]:
+        show = limit or 10
+        shown = events[:show]
+        lines = [f"{head} ({len(events)} events, showing {len(shown)}):"]
+        for e in shown:
             yr = (f"{e['start']}" if e["start"] == e["end"]
                   else f"{e['start']}…{e['end']}")
-            lines.append(f"  {yr}: {e['title']} [{e['tradition']}]")
-        if len(events) > 25:
-            lines.append(f"  …and {len(events) - 25} more")
+            lines.append(f"\n  {yr}: {e['title']} [{e['tradition']}] — "
+                         f"{e['region']}")
+            lines.append(f"    {e['summary']}")
+            lines.append(f"    sources: {', '.join(e['sources'])}")
+        if len(events) > len(shown):
+            more = (f"/wisdom timeline {tradition} {len(events)}"
+                    if tradition else
+                    f"/wisdom timeline {len(events)}")
+            lines.append(f"\n  …and {len(events) - len(shown)} more — {more}")
         return self._send_long_checked(chat.platform, chat, "\n".join(lines))
 
     def _control_wisdom_compare(self, keeper, topic: str, chat) -> str:
@@ -217,10 +342,13 @@ class RuntimeWisdomMixin:
         lines = [f"⚖️ topic: {out['topic']}", ""]
         for p in out["passages"][:5]:
             lines.append(f"[{p.get('work', '?')} — {p.get('canon_status', '')}]")
-            lines.append(f"  {p.get('snippet', '')[:200]}")
+            lines.append(f"  {p.get('snippet', '')}")
+            if p.get("slug"):
+                ch = f" {p['chapter_number']}" if p.get("chapter_number") else ""
+                lines.append(f"  📖 Read full: /wisdom read {p['slug']}{ch}")
             lines.append("")
         lines.append("— timeline context —")
         for e in out["timeline_context"][:10]:
-            lines.append(f"  {e['start']}: {e['title']}")
+            lines.append(f"  {e['start']}: {e['title']} — {e.get('summary', '')}")
         return self._send_long_checked(
             chat.platform, chat, "\n".join(lines).strip()[:6000])
