@@ -164,7 +164,13 @@ class ImprovementLoop:
         # 1. benchmark (bounded) — or measure just the forced dimension
         dims = [dimension] if dimension and dimension in LEVERS else None
         report = run_benchmark(self.context, dimensions=dims, limit=2)
-        measured = {k: v for k, v in report.scores.items()
+        # Numeric scores only: DimensionScore defines no ordering
+        # (score=None means unmeasurable), so comparing the objects
+        # themselves crashes (min -> DimensionScore < DimensionScore).
+        # Downstream code also treats `before` as a float, so extract
+        # .score here — same pattern as status() below and
+        # skill_evolution.py's baseline capture.
+        measured = {k: v.score for k, v in report.scores.items()
                     if v.score is not None}
         if not measured:
             return self._record(cycle_id, dimension, None, None, None, "",
@@ -321,7 +327,15 @@ class ImprovementLoop:
             "INSERT INTO improvement_runs (id, dimension, before_score, "
             "after_score, delta, proposal_id, action, rationale, "
             "edit_summary, status, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-            (cycle_id, dimension, before, after, delta, proposal_id, action,
+            # improvement_runs score columns are NOT NULL (migrations):
+            # 0.0 is the no-score sentinel, '' the no-text sentinel.
+            # The returned CycleRecord keeps None (Optional[float]) —
+            # only the persisted row is coerced to the schema contract.
+            (cycle_id, dimension,
+             before if before is not None else 0.0,
+             after if after is not None else 0.0,
+             delta if delta is not None else 0.0,
+             proposal_id or "", action,
              rec.rationale, rec.edit_summary, status, rec.created_at))
         # stash full details in kv so history can show them
         try:
@@ -377,7 +391,9 @@ class ImprovementLoop:
             status = "neutral"
         self.db.execute(
             "UPDATE improvement_runs SET after_score=?, delta=?, status=? "
-            "WHERE id=?", (after, delta, status, cycle_id))
+            "WHERE id=?",
+            (after if after is not None else 0.0,
+             delta if delta is not None else 0.0, status, cycle_id))
         return {"ok": True, "status": status, "before": before,
                 "after": after, "delta": delta}
 

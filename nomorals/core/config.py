@@ -26,7 +26,6 @@ from .errors import ConfigError
 
 __all__ = [
     "Settings",
-    "LocationSettings",
     "get_settings",
     "load_settings",
     "reset_settings",
@@ -532,18 +531,16 @@ class ImprovementSettings:
     target: float = 0.8
     benchmark: str = ""
     auto_tick: bool = True
+    # |delta| above this counts as a real improvement/regression
+    # (run_cycle autonomous path + apply_approval). Matches the training
+    # regression_tolerance convention.
+    tolerance: float = 0.02
+    # Max cycles per tick() call (stops early on meets_target).
+    max_cycles: int = 1
 
 @dataclass
 class TradingSettings:
     """FinancialExpert / trading gates. Live trading is inert by default."""
-    # Master switch for Devon's own trading tools (NM_TRADING_ENABLED).
-    # False refuses every trading action honestly. Default True preserves
-    # the existing paper/analysis behavior; live still needs live_enabled.
-    enabled: bool = True
-    # Trading posture (NM_TRADING_MODE): "paper" (default) or "live".
-    # "live" without live_enabled + a valid unlock still refuses live
-    # actions — mode alone never authorizes live trading.
-    mode: str = "paper"
     live_enabled: bool = False
     max_daily_loss_pct: float = 3.0
     min_sharpe: float = 1.0
@@ -651,29 +648,10 @@ class HubSettings:
     request_timeout: float = 15.0
 
 @dataclass
-class LocationSettings:
-    """The owner's geographic places (NOT the data home).
-
-    ``Settings.home`` is the DATA home (``~/.nomorals``) — it is never
-    a place. These are the places weather, news-local, and travel
-    features default to when the caller does not configure places
-    explicitly. Defaults: the owner lives in Lagos, Nigeria.
-    Env: ``NM_HOME_PLACE``, ``NM_WORK_PLACE``, ``NM_PLACES``
-    (comma-separated), ``NM_LOCALE``.
-    """
-
-    home_place: str = "Lagos, Nigeria"
-    work_place: str = ""
-    places: list[str] = field(default_factory=list)
-    locale: str = "ng"
-
-
-@dataclass
 class Settings:
     """Root configuration object."""
 
     home: str = "~/.nomorals"
-    location: LocationSettings = field(default_factory=LocationSettings)
     profile: str = "workstation"
     debug: bool = False
     offline: bool = False
@@ -871,10 +849,6 @@ _ENV_PREFIX = "NM_"
 #: Map of env var -> dotted config path, for the non-obvious ones.
 _ENV_MAP: dict[str, str] = {
     "NM_HOME": "home",
-    "NM_HOME_PLACE": "location.home_place",
-    "NM_WORK_PLACE": "location.work_place",
-    "NM_PLACES": "location.places",
-    "NM_LOCALE": "location.locale",
     "NM_PROFILE": "profile",
     "NM_DEBUG": "debug",
     "NM_OFFLINE": "offline",
@@ -1011,158 +985,6 @@ _ENV_MAP: dict[str, str] = {
     "NM_OSINT_SHODAN_KEY": "osint.shodan_key",
     "NM_OSINT_REQUEST_TIMEOUT": "osint.request_timeout",
     "NM_OSINT_CRTSH_DAYS": "osint.crtsh_days",
-    # ── P0 (infra spec §8.1): every documented template key has an entry. ──
-    # Explicit entries for keys the loader previously resolved only via the
-    # lowercase field-search fallback — locking in that behavior so a field
-    # rename can never silently unmap a documented key again.
-    "NM_API_GITHUB_TOKEN": "api.github_token",
-    "NM_AUTONOMY_DAILY_MODEL_CALLS": "autonomy.daily_model_calls",
-    "NM_CHAT_WHATSAPP_ENABLED": "chat.whatsapp_enabled",
-    "NM_GITHUB_TOKEN": "api.github_token",
-    "NM_LLM_ALLOW_MOCK_FALLBACK": "llm.allow_mock_fallback",
-    "NM_LLM_LOCAL_LORA": "llm.local_lora",
-    "NM_MASTODON_TOKEN": "social.mastodon_token",
-    "NM_MEDIA_MAX_MB": "chat.media_max_mb",
-    "NM_OCR_BINARY": "vision.ocr_binary",
-    "NM_PARTNER_OWNER_SENDER_IDS": "partner.owner_sender_ids",
-    "NM_PARTNER_POWER_DEFAULT_ON": "partner.power_default_on",
-    "NM_PARTNER_TRAIN_COLLECT": "partner.train_collect",
-    "NM_PARTNER_TYPING_CAP_SECONDS": "partner.typing_cap_seconds",
-    "NM_REASONING_MODE": "reasoning_mode",
-    "NM_SOCIAL_BLUESKY_APP_PASSWORD": "social.bluesky_app_password",
-    "NM_SOCIAL_BLUESKY_HANDLE": "social.bluesky_handle",
-    "NM_SOCIAL_DISCORD_WEBHOOK": "social.discord_webhook",
-    "NM_SOCIAL_MASTODON_DOMAIN": "social.mastodon_domain",
-    "NM_SOCIAL_MASTODON_TOKEN": "social.mastodon_token",
-    "NM_SOCIAL_REDDIT_CLIENT_ID": "social.reddit_client_id",
-    "NM_SOCIAL_REDDIT_CLIENT_SECRET": "social.reddit_client_secret",
-    "NM_SOCIAL_TELEGRAM_TOKEN": "social.telegram_token",
-    "NM_SOCIAL_X_ACCESS_SECRET": "social.x_access_secret",
-    "NM_SOCIAL_X_ACCESS_TOKEN": "social.x_access_token",
-    "NM_SOCIAL_X_API_KEY": "social.x_api_key",
-    "NM_SOCIAL_X_API_SECRET": "social.x_api_secret",
-    "NM_TELEGRAM_API_HASH": "chat.telegram_api_hash",
-    "NM_TELEGRAM_API_ID": "chat.telegram_api_id",
-    "NM_TELEGRAM_BOT_TOKEN": "chat.telegram_bot_token",
-    "NM_TRAINING_BASE_MODEL": "training.base_model",
-    "NM_VISION_OCR_BINARY": "vision.ocr_binary",
-    "NM_WORKERS": "api.workers",
-    # Trading guards: Devon never trades live. ALLOW_LIVE feeds the real
-    # live gate (settings.trading.live_enabled); ENABLED/MODE are enforced
-    # by the trading tool dispatcher (enabled=False refuses all trading
-    # actions; mode != "paper" without a live unlock refuses live actions).
-    "NM_TRADING_ALLOW_LIVE": "trading.live_enabled",
-    "NM_TRADING_ENABLED": "trading.enabled",
-    "NM_TRADING_MODE": "trading.mode",
-    # Alias: TTS "provider" and TTS "engine" are the same selection in this
-    # codebase (tools/audio.py reads audio.tts_engine). Both keys write it.
-    "NM_VOICE_TTS_PROVIDER": "audio.tts_engine",
-    # "direct:<module>" — the key is consumed via os.environ by the named
-    # module, NOT via Settings. The loader must NOT inject it into the
-    # Settings tree (it would be a phantom field nothing reads); the module
-    # reads the environment directly. The mapping test verifies the named
-    # module actually references the key, so a direct entry can never be a
-    # silent fake.
-    "NM_AGENTIC_MODE": "direct:nomorals/agents/orchestration/bridge.py",
-    "NM_ANTHROPIC_API_KEY": "direct:nomorals/llm/providers/anthropic.py",
-    "NM_ARCHIVE_MAX_EXTRACT_FILES": "direct:nomorals/tools/archive.py",
-    "NM_ARCHIVE_MAX_EXTRACT_MB": "direct:nomorals/tools/archive.py",
-    "NM_BACKUP_KEY_B64": "direct:nomorals/backup/__main__.py",
-    "NM_BRAVE_SEARCH_API_KEY": "direct:nomorals/search/web.py",
-    "NM_BROWSER_PLAYWRIGHT": "direct:nomorals/tools/browser.py",
-    "NM_CAPTCHA_API_MODE": "direct:nomorals/tools/captcha.py",
-    "NM_CAPTCHA_DAILY_CAP_USD": "direct:nomorals/tools/captcha.py",
-    "NM_CAPTCHA_ERROR_COOLDOWN": "direct:nomorals/tools/captcha.py",
-    "NM_CAPTCHA_MONTHLY_CAP_USD": "direct:nomorals/tools/captcha.py",
-    "NM_CAPTCHA_PER_DAY": "direct:nomorals/tools/captcha.py",
-    "NM_CAPTCHA_PER_MINUTE": "direct:nomorals/tools/captcha.py",
-    "NM_CAPTCHA_SOLVER": "direct:nomorals/tools/captcha.py",
-    "NM_CLOUD": "direct:nomorals/core/profile.py",
-    "NM_CODEBEAST_MODEL": "direct:nomorals/llm/defaults.py",
-    "NM_CONSOLE_THEME": "direct:nomorals/console/themes.py",
-    "NM_COST_LOG": "direct:nomorals/llm/router.py",
-    "NM_DDGS_BACKEND": "direct:nomorals/search/web.py",
-    "NM_DDGS_KIND": "direct:nomorals/search/web.py",
-    "NM_DDGS_REGION": "direct:nomorals/search/web.py",
-    "NM_DEEPSEEK_API_KEY": "direct:nomorals/llm/providers/deepseek.py",
-    "NM_DISTILL": "direct:nomorals/agents/skill_distillation.py",
-    "NM_EXA_API_KEY": "direct:nomorals/search/web.py",
-    "NM_GEMINI_API_KEY": "direct:nomorals/llm/providers/gemini.py",
-    "NM_GH_ASKPASS_TOKEN": "direct:nomorals/connectors/github.py",
-    "NM_HF_BASE": "direct:nomorals/training/free_datasets.py",
-    "NM_HF_SERVER": "direct:nomorals/training/free_datasets.py",
-    "NM_HUB_CERT": "direct:nomorals/hub/server.py",
-    "NM_HUB_CORS_ORIGINS": "direct:nomorals/hub/server.py",
-    "NM_HUB_KEY": "direct:nomorals/hub/server.py",
-    "NM_HUB_RATE_LIMIT": "direct:nomorals/hub/server.py",
-    "NM_LLAMA_CPP_MODEL": "direct:nomorals/cmdline/commands/doctor.py",
-    "NM_LLM_CASSETTE": "direct:nomorals/llm/cassette.py",
-    "NM_LLM_CASSETTE_DIR": "direct:nomorals/llm/cassette.py",
-    "NM_LLM_REPLAY": "direct:nomorals/llm/cassette.py",
-    "NM_MEDIA_AUDIO_BITRATE": "direct:nomorals/tools/media_pipeline.py",
-    "NM_MEDIA_IMAGE_MAX_WIDTH": "direct:nomorals/tools/media_pipeline.py",
-    "NM_MEDIA_IMAGE_QUALITY": "direct:nomorals/tools/media_pipeline.py",
-    "NM_MEDIA_VIDEO_CRF": "direct:nomorals/tools/media_pipeline.py",
-    "NM_MEDIA_VIDEO_PRESET": "direct:nomorals/tools/media_pipeline.py",
-    "NM_MISSION_STALE_HEARTBEAT_S": "direct:nomorals/missions/mission.py",
-    "NM_MODELS_DIR": "direct:nomorals/media_edit/_model_cache.py",
-    "NM_NO_COLOR": "direct:nomorals/cmdline/style.py",
-    "NM_OWNER_TZ": "direct:nomorals/pulses/timezone.py",
-    "NM_PLAN_STORE": "direct:nomorals/agents/plan_mode.py",
-    "NM_PLAY_UNLICENSED": "direct:nomorals/media/play_service.py",
-    "NM_PROCESS_WORKERS": "direct:nomorals/agents/runtime.py",
-    "NM_PULSE_TIMEZONE": "direct:nomorals/pulses/timezone.py",
-    "NM_REPO_DIR": "direct:nomorals/cmdline/commands/update.py",
-    "NM_RESEARCH_LOOP_DEDUPE_DAYS": "direct:nomorals/agents/research_loop.py",
-    "NM_RESEARCH_LOOP_HOURS": "direct:nomorals/agents/research_loop.py",
-    "NM_RESEARCH_LOOP_IGNORE_DAYS": "direct:nomorals/agents/research_loop.py",
-    "NM_RESEARCH_LOOP_MAX_PROPOSALS": "direct:nomorals/agents/research_loop.py",
-    "NM_RESOURCE_BATTERY_MIN": "direct:nomorals/os/resources.py",
-    "NM_RESOURCE_BATTERY_THROTTLE": "direct:nomorals/os/resources.py",
-    "NM_RESOURCE_CALM_SECONDS": "direct:nomorals/os/resources.py",
-    "NM_RESOURCE_CPU_CRITICAL": "direct:nomorals/os/resources.py",
-    "NM_RESOURCE_CPU_THROTTLE": "direct:nomorals/os/resources.py",
-    "NM_RESOURCE_DISK_CRITICAL": "direct:nomorals/os/resources.py",
-    "NM_RESOURCE_DISK_THROTTLE": "direct:nomorals/os/resources.py",
-    "NM_RESOURCE_HISTORY": "direct:nomorals/os/resources.py",
-    "NM_RESOURCE_MAX_PRESSURE": "direct:nomorals/os/resources.py",
-    "NM_RESOURCE_MEM_CRITICAL": "direct:nomorals/os/resources.py",
-    "NM_RESOURCE_MEM_THROTTLE": "direct:nomorals/os/resources.py",
-    "NM_RESOURCE_METERED": "direct:nomorals/os/resources.py",
-    "NM_RESOURCE_PSI_MEM_FULL_CRIT": "direct:nomorals/os/resources.py",
-    "NM_RESOURCE_PSI_MEM_WARN": "direct:nomorals/os/resources.py",
-    "NM_RESOURCE_RESERVE_MIN_MB": "direct:nomorals/os/resources.py",
-    "NM_RESOURCE_RESERVE_PCT": "direct:nomorals/os/resources.py",
-    "NM_RESOURCE_STEAL_CRITICAL": "direct:nomorals/os/resources.py",
-    "NM_RESOURCE_STEAL_WARN": "direct:nomorals/os/resources.py",
-    "NM_RESOURCE_THERMAL_HOT_C": "direct:nomorals/os/resources.py",
-    "NM_RESOURCE_THERMAL_WARM_C": "direct:nomorals/os/resources.py",
-    "NM_RESOURCE_UP_TICKS": "direct:nomorals/os/resources.py",
-    "NM_SANDBOX_ROOT": "direct:nomorals/tools/sandbox_code.py",
-    "NM_SEARXNG_CATEGORY": "direct:nomorals/search/web.py",
-    "NM_SEARXNG_ENGINES": "direct:nomorals/search/web.py",
-    "NM_SEARXNG_LANGUAGE": "direct:nomorals/search/web.py",
-    "NM_SEARXNG_TIME_RANGE": "direct:nomorals/search/web.py",
-    "NM_SEARXNG_URL": "direct:nomorals/search/web.py",
-    "NM_SERPER_API_KEY": "direct:nomorals/search/web.py",
-    "NM_SOUNDFONT": "direct:nomorals/media/synth_backend.py",
-    "NM_SPEC_STORE": "direct:nomorals/agents/plan_spec.py",
-    "NM_STDIN": "direct:nomorals/execbox.py",
-    "NM_SVS_DIR": "direct:nomorals/voice/singing.py",
-    "NM_SYNTH_BACKEND": "direct:nomorals/media/synth_backend.py",
-    "NM_TAVILY_API_KEY": "direct:nomorals/search/web.py",
-    "NM_TERMUX_NOTIFY": "direct:nomorals/agents/notifier.py",
-    "NM_TIMEZONE": "direct:nomorals/agents/coremind.py",
-    "NM_VAULT_KEY": "direct:nomorals/agents/cipher.py",
-    "NM_VAULT_PASSPHRASE": "direct:nomorals/agents/coremind.py",
-    "NM_VOICE_PRIVATE": "direct:nomorals/voice/tts.py",
-    "NM_VOICE_PUBLIC": "direct:nomorals/voice/tts.py",
-    "NM_WEB_RERANK": "direct:nomorals/search/web.py",
-    "NM_WEB_TIMEOUT": "direct:nomorals/search/web.py",
-    "NM_WHATSAPP_BRIDGE_HOST": "direct:nomorals/core/verify.py",
-    "NM_WHATSAPP_BRIDGE_PORT": "direct:nomorals/core/verify.py",
-    "NM_WHISPER_CPP_BIN": "direct:nomorals/tools/audio.py",
-    "NM_WHISPER_CPP_MODEL": "direct:nomorals/tools/audio.py",
 }
 
 
@@ -1410,10 +1232,6 @@ def load_settings(
             continue
         if key in _ENV_MAP:
             dotted = _ENV_MAP[key]
-            if dotted.startswith("direct:"):
-                # Consumed via os.environ by the named module, not via
-                # Settings. Do NOT inject into the Settings tree.
-                continue
             # Empty path fields = not set (template placeholder).
             if _is_path_field(dotted) and not value.strip():
                 continue
@@ -2034,69 +1852,6 @@ def env_var_path(env_var: str) -> str | None:
     # field must resolve to None (silently-ignored env vars were the bug
     # this guard exists to catch).
     return _find_field_path(Settings, remainder.lower())
-
-
-def is_direct_env_key(env_var: str) -> bool:
-    """True when ``env_var`` is consumed via os.environ by a named module."""
-    return _ENV_MAP.get(env_var, "").startswith("direct:")
-
-
-def direct_env_consumer(env_var: str) -> str | None:
-    """Module path that consumes a direct env key, or None."""
-    value = _ENV_MAP.get(env_var, "")
-    if value.startswith("direct:"):
-        return value[len("direct:"):]
-    return None
-
-
-def dotted_path_exists(dotted: str) -> bool:
-    """True when ``dotted`` names a real field path in the Settings tree."""
-    import dataclasses
-
-    parts = dotted.split(".")
-    node: Any = Settings
-    for i, part in enumerate(parts):
-        if not dataclasses.is_dataclass(node):
-            return False
-        fields = {f.name: f for f in dataclasses.fields(node)}
-        if part not in fields:
-            return False
-        if i == len(parts) - 1:
-            return True
-        ftype = fields[part].type
-        if isinstance(ftype, str):
-            node = globals().get(ftype.strip("\"'").split("[")[0])
-        else:
-            node = ftype
-        if node is None:
-            return False
-    return True
-
-
-def config_env_status(environ: Any | None = None) -> dict[str, Any]:
-    """Config-key status for ``nm doctor`` (spec §8.1).
-
-    Returns set (mapped + present), unset-but-defaulted (mapped, absent),
-    direct (consumed via os.environ), and ignored (NM_* present in the
-    environment but mapping to nothing — must be zero; an ignored key is
-    a bug, not a doc issue). Values are never included (secrets).
-    """
-    import os as _os
-
-    env = environ if environ is not None else _os.environ
-    mapped = sorted(k for k in _ENV_MAP if not _ENV_MAP[k].startswith("direct:"))
-    direct = sorted(k for k in _ENV_MAP if _ENV_MAP[k].startswith("direct:"))
-    present = set(env.keys())
-    ignored = sorted(
-        k for k in present
-        if k.startswith(_ENV_PREFIX) and k not in _ENV_MAP and env_var_path(k) is None
-    )
-    return {
-        "set_mapped": sorted(k for k in mapped if k in present),
-        "unset_mapped": sorted(k for k in mapped if k not in present),
-        "set_direct": sorted(k for k in direct if k in present),
-        "ignored": ignored,
-    }
 
 
 # ── redaction + validation ───────────────────────────────────────────────────
