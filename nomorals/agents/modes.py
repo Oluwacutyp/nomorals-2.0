@@ -828,6 +828,21 @@ async def _maybe_await(value: Any) -> Any:
     return value
 
 
+def _step_spec_key(step: "PlanStep") -> tuple:
+    """Fingerprint of the work a step IS (not just its id).
+
+    Two plan versions can reuse the same positional ``step_id`` for
+    different work. The replan skip must compare what the step does,
+    not the id string.
+    """
+    try:
+        params = json.dumps(getattr(step, "parameters", None) or {},
+                            sort_keys=True, default=str)
+    except Exception:  # noqa: BLE001 - fingerprinting never breaks a run
+        params = repr(getattr(step, "parameters", None))
+    return (getattr(step, "action", ""), getattr(step, "name", ""), params)
+
+
 class PlanningRunner:
     """Plan-first execution over :class:`AgentPlanner`'s dependency graph.
 
@@ -872,7 +887,6 @@ class PlanningRunner:
             return True
         return False
 
-    @staticmethod
     @staticmethod
     def _run_step_sync(fn: Callable[..., Any], step: PlanStep,
                        ctx: dict[str, Any]) -> Any:
@@ -983,6 +997,10 @@ class PlanningRunner:
         completed = 0
         replans = 0
         halted = ""  # "presumed-dead" | "cancelled" — terminal, never a replan
+        # Fingerprint of the work each completed step_id actually did.
+        # A replanned step that reuses a positional id (``step_{i+1}``)
+        # for DIFFERENT work must re-run — the old result is stale.
+        done_specs: dict[str, tuple] = {}
         ctx: dict[str, Any] = {"goal": goal, "account": account,
                                "results": results}
         while True:
@@ -990,7 +1008,13 @@ class PlanningRunner:
             for batch in self.planner.execution_batches(plan):
                 for step in batch:
                     if step.step_id in results:
-                        continue  # already done under a previous plan version
+                        if done_specs.get(step.step_id) == _step_spec_key(step):
+                            continue  # identical work already done
+                        # Same id, different work: the carried-over result
+                        # is stale — drop it and re-run the step.
+                        del results[step.step_id]
+                        done_specs.pop(step.step_id, None)
+                        completed -= 1
                     if self._cancel_requested(cancel):
                         errors.append("run cancelled")
                         halted = "cancelled"
@@ -1064,6 +1088,7 @@ class PlanningRunner:
                     step.status = "completed"
                     step.completed_at = time.time()
                     results[step.step_id] = result
+                    done_specs[step.step_id] = _step_spec_key(step)
                     completed += 1
                 if replanned or halted:
                     break
