@@ -1451,11 +1451,16 @@ class PartnerRuntime(
 
         Shows the "recording voice" indicator (not "typing") for the
         actual length of the note, and sends it as a voice bubble.
+
+        If TTS/ffmpeg throws part-way through, the failed part and every
+        part after it fall back to TEXT — a mid-reply voice failure must
+        never silently drop the rest of the reply.
         """
         from ...voice.pingpong import synthesize_voice_reply, ogg_duration
         from ...social.chat.base import MediaRef
         sent_any = False
-        for part in parts:
+        part_list = list(parts or [])
+        for idx, part in enumerate(part_list):
             text = (part or "").strip()
             if not text:
                 continue
@@ -1486,6 +1491,17 @@ class PartnerRuntime(
             except Exception as exc:  # noqa: BLE001 - fall back to text
                 _log.warning("voice reply failed, falling back to text: %s",
                              exc)
+                for rest in part_list[idx:]:
+                    rest_text = (rest or "").strip()
+                    if not rest_text:
+                        continue
+                    try:
+                        tts_result = self.gateway.send(
+                            message.chat.platform, message.chat, rest_text)
+                        if tts_result.ok:
+                            sent_any = True
+                    except Exception:  # noqa: BLE001 - degraded but not silent
+                        _log.exception("voice-fallback text send failed")
                 return sent_any
         return sent_any
 
@@ -4008,10 +4024,17 @@ class PartnerRuntime(
         Each chunk gets its own length-scaled typing run, so a report split
         into five pages reads as five real typing sessions, not a telegraph.
 
+        Chunks split at paragraph → sentence → word boundaries via the
+        shared lossless chunker (never mid-word when a boundary fits) —
+        the old hard ``text[i:i+limit]`` slicing cut words and sentences
+        in half. The join of the chunks is exactly ``text``.
+
         Returns the number of chunks actually delivered. A failed chunk is
         a warning log, never silent — callers must not treat the return as
         "delivered" without checking it (see :meth:`_send_long_checked`).
         """
+        from ...social.chat.chunking import chunk_message
+
         partner_cfg = self.settings.partner
         typing_on = (
             self._typing_enabled(chat)
@@ -4019,9 +4042,9 @@ class PartnerRuntime(
                  or partner_cfg.typing_in_groups)
         )
         sent = 0
-        chunks = max(1, (len(text) + limit - 1) // limit)
-        for i in range(0, max(1, len(text)), limit):
-            chunk = text[i:i + limit]
+        pieces = chunk_message(text, max_text=limit)
+        total = len(pieces)
+        for i, chunk in enumerate(pieces):
             if typing_on:
                 self.gateway.typing(
                     platform, chat,
@@ -4039,12 +4062,12 @@ class PartnerRuntime(
                     sent += 1
                 else:
                     _log.warning("send_long: chunk %d/%d to %s failed: %s",
-                                 sent + 1, chunks, getattr(chat, "key", chat),
+                                 sent + 1, total, getattr(chat, "key", chat),
                                  result.error)
                     break
             except Exception as exc:  # noqa: BLE001
                 _log.warning("send_long: chunk %d/%d to %s raised %s: %s",
-                             sent + 1, chunks, getattr(chat, "key", chat),
+                             sent + 1, total, getattr(chat, "key", chat),
                              type(exc).__name__, exc)
                 break
         return sent
