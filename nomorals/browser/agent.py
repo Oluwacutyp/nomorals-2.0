@@ -251,7 +251,8 @@ class AgentLoop:
                  dry_run: bool = False,
                  max_steps: int = 30,
                  on_trace: Callable[[AgentTrace], None] | None = None,
-                 on_progress: Callable[[dict[str, Any]], None] | None = None) -> None:
+                 on_progress: Callable[[dict[str, Any]], None] | None = None,
+                 on_blocked: Callable[[Observation, str], str] | None = None) -> None:
         self.driver = driver
         self.decide_llm = decide_llm
         self.strategy = strategy.lower()
@@ -262,6 +263,12 @@ class AgentLoop:
         self.max_steps = max(1, int(max_steps))
         self.on_trace = on_trace
         self.on_progress = on_progress
+        #: Wall handler: called with (observation, detection) when a
+        #: challenge page appears. Return "continue" to keep going
+        #: (the handler cleared it, e.g. via ChallengeSolver +
+        #: takeover); anything else stops the loop honestly.
+        #: No handler + wall = stop, never blindly continue.
+        self.on_blocked = on_blocked
         self.trace: list[AgentTrace] = []
         self.stopped_reason = ""
 
@@ -276,8 +283,39 @@ class AgentLoop:
                 return got
         return _heuristic_strategy(obs)
 
+    def _wall_check(self, page: Page, step: int) -> str | None:
+        """Detect a wall on ``page``; run the handler; return stop reason.
+
+        Returns None when there is no wall, or the handler cleared it
+        ("continue"). Any other outcome stops the loop honestly.
+        """
+        try:
+            from .errors import detect_challenge as _detect
+            detection = _detect(page.html or "", title=page.title or "")
+        except Exception:  # noqa: BLE001 - detection failure is not a wall
+            return None
+        if not detection:
+            return None
+        if self.on_blocked is None:
+            return f"blocked: {detection} (no wall handler)"
+        obs = Observation(page=page, step=step)
+        try:
+            verdict = self.on_blocked(obs, detection)
+        except Exception as exc:  # noqa: BLE001 - handler errors stop us
+            return f"blocked: {detection} (wall handler failed: {exc})"
+        if verdict == "continue":
+            return None
+        return f"blocked: {detection} (wall handler said stop)"
+
     def run(self, start_url: str, *, goal: str = "") -> dict[str, Any]:
         page = self.driver.fetch(start_url)
+        wall = self._wall_check(page, 0)
+        if wall is not None:
+            self.stopped_reason = wall
+            return {"goal": goal, "steps": 0,
+                    "stopped_reason": self.stopped_reason,
+                    "final_url": page.url,
+                    "trace": []}
         last_result: dict[str, Any] | None = None
         for step in range(1, self.max_steps + 1):
             obs = Observation(page=page, last_result=last_result, step=step)
@@ -321,6 +359,10 @@ class AgentLoop:
                                   "url": new_page.url, "verified": verified})
             page = new_page
             last_result = {"ok": ok, "verified": verified}
+            wall = self._wall_check(page, step)
+            if wall is not None:
+                self.stopped_reason = wall
+                break
             if self.dry_run:
                 # Dry run previews ONE move without acting. Continuing
                 # would re-decide the same unchanged page until the

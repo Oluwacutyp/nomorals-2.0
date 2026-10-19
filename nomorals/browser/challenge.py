@@ -1,0 +1,379 @@
+"""Challenge detection + self-solving, takeover LAST.
+
+When Devon hits a wall (Cloudflare / Turnstile / CAPTCHA / bot check),
+she does not hand it to the owner first. She works a strategy ladder,
+memory-ranked:
+
+    retry -> wait_for_proof_of_work -> captcha_service -> fresh_session
+    -> owner_takeover (LAST RESORT ONLY)
+
+Every attempt is recorded (strategy, outcome, ms, detail) into
+:class:`ChallengeMemory` when one is attached, and — when escalation
+does happen — the escalation message lists exactly what she already
+tried, so the owner sees the work before the ask. If the wall clears,
+``cleared`` is True and ``via`` names the winning strategy; if it does
+not, the outcome says so honestly — no fake "solved" claims.
+"""
+from __future__ import annotations
+
+import time
+from dataclasses import dataclass, field
+from typing import Any, Callable, Protocol
+
+from ..core.logging_setup import get_logger
+from . import errors as _errors
+from .challenge_memory import ChallengeMemory, _site_of
+
+_log = get_logger(__name__)
+
+__all__ = [
+    "AttemptRecord",
+    "ChallengeOutcome",
+    "ChallengeSignal",
+    "ChallengeSolver",
+    "DEFAULT_ORDER",
+    "STRATEGY_CAPTCHA_SERVICE",
+    "STRATEGY_FRESH_SESSION",
+    "STRATEGY_RETRY",
+    "STRATEGY_TAKEOVER",
+    "STRATEGY_WAIT",
+    "detect_challenge_signal",
+    "format_escalation_message",
+]
+
+STRATEGY_RETRY = "retry"
+STRATEGY_WAIT = "wait_proof_of_work"
+STRATEGY_CAPTCHA_SERVICE = "captcha_service"
+STRATEGY_FRESH_SESSION = "fresh_session"
+STRATEGY_TAKEOVER = "owner_takeover"
+
+#: Default strategy order when memory has no opinion.
+DEFAULT_ORDER = [STRATEGY_RETRY, STRATEGY_WAIT, STRATEGY_CAPTCHA_SERVICE,
+                 STRATEGY_FRESH_SESSION, STRATEGY_TAKEOVER]
+
+
+class TabLike(Protocol):
+    """Duck-typed live tab. Anything with these members works."""
+
+    @property
+    def url(self) -> str: ...
+    @property
+    def title(self) -> str: ...
+    def html(self) -> str: ...
+    def reload(self) -> None: ...
+
+
+@dataclass
+class ChallengeSignal:
+    kind: str
+    vendor: str
+    detection: str
+    url: str
+    evidence: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"kind": self.kind, "vendor": self.vendor,
+                "detection": self.detection, "url": self.url,
+                "evidence": self.evidence}
+
+
+@dataclass
+class AttemptRecord:
+    strategy: str
+    ok: bool
+    ms: int = 0
+    detail: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"strategy": self.strategy, "ok": self.ok, "ms": self.ms,
+                "detail": self.detail}
+
+
+@dataclass
+class ChallengeOutcome:
+    cleared: bool
+    via: str
+    attempts: list[AttemptRecord] = field(default_factory=list)
+    takeover_url: str | None = None
+    takeover_grant: Any | None = None
+    resume_state: dict[str, Any] | None = None
+    message: str = ""
+    signal: ChallengeSignal | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"cleared": self.cleared, "via": self.via,
+                "attempts": [a.to_dict() for a in self.attempts],
+                "takeover_url": self.takeover_url,
+                "resume_state": self.resume_state,
+                "message": self.message,
+                "signal": self.signal.to_dict() if self.signal else None}
+
+
+def detect_challenge_signal(html: str = "", url: str = "", *,
+                            title: str = "", headers: Any = None
+                            ) -> ChallengeSignal | None:
+    """Detect a wall on a page. ``None`` = no challenge.
+
+    Wall detection reuses the gated :func:`errors.detect_challenge`
+    (title family / WAF headers / body markers), then
+    :func:`tools.captcha.detect` for CAPTCHA-kind granularity — a page
+    with a reCAPTCHA widget but no wall title still counts.
+    """
+    detection = _errors.detect_challenge(html or "", title=title,
+                                         headers=headers)
+    if detection:
+        from .botwall import vendor_from_detection
+        return ChallengeSignal(kind=detection,
+                               vendor=vendor_from_detection(detection),
+                               detection=detection, url=url,
+                               evidence=f"wall marker: {detection}")
+    try:
+        from ..tools.captcha import detect as _captcha_detect
+        found = _captcha_detect(html or "", url or "")
+    except Exception:  # noqa: BLE001 - captcha detection never blocks
+        found = []
+    if found:
+        first = found[0]
+        return ChallengeSignal(kind=str(getattr(first, "kind", "captcha")),
+                               vendor="captcha", detection="captcha-wall",
+                               url=url,
+                               evidence=f"captcha widget: {first.kind}")
+    return None
+
+
+def format_escalation_message(*, signal_kind: str, url: str,
+                              attempts: list[tuple[str, bool, str]] | list[AttemptRecord],
+                              takeover_url: str,
+                              task_label: str = "") -> str:
+    """The owner escalation message. Lists what was already tried.
+
+    The attempt list is the anti-laziness receipt: the owner sees Devon
+    worked the ladder before asking for a hand.
+    """
+    lines = [
+        f"🧱 Browser wall: {signal_kind} on {url or 'the page'}",
+    ]
+    if task_label:
+        lines.append(f"task: {task_label}")
+    lines.append("I tried these first — none cleared it:")
+    for attempt in attempts:
+        if isinstance(attempt, AttemptRecord):
+            name, ok, detail = attempt.strategy, attempt.ok, attempt.detail
+        else:
+            name, ok, detail = attempt
+        mark = "✓" if ok else "✗"
+        lines.append(f"  {mark} {name}" + (f" — {detail}" if detail else ""))
+    lines.append("")
+    lines.append("Your turn — tap to take over this exact browser session:")
+    lines.append(takeover_url)
+    lines.append("Solve the challenge in the live view, then tap "
+                 "\"Done, take over\" — I'll check the wall is gone and "
+                 "pick up where I left off. (Or just close it — I'll "
+                 "re-check anyway.)")
+    return "\n".join(lines)
+
+
+class ChallengeSolver:
+    """Run the strategy ladder against one wall."""
+
+    def __init__(self, *,
+                 memory: ChallengeMemory | None = None,
+                 service_solve: Callable[[Any], Any] | None = None,
+                 fresh_session: Callable[[], Any] | None = None,
+                 takeover_manager: Any | None = None,
+                 notifier: Callable[[str, str], Any] | None = None,
+                 wait_s: float = 3.0,
+                 sleeper: Callable[[float], None] | None = None,
+                 clock: Callable[[], float] | None = None) -> None:
+        self._memory = memory
+        self._service_solve = service_solve
+        self._fresh_session = fresh_session
+        self._takeover_manager = takeover_manager
+        self._notifier = notifier
+        self._wait_s = max(0.0, float(wait_s))
+        self._sleep = sleeper or time.sleep
+        self._clock = clock or time.time
+
+    # -- main entry ------------------------------------------------------------
+    def solve(self, *, tab: TabLike | None = None, html: str = "",
+              url: str = "", title: str = "", headers: Any = None,
+              resume_state: dict[str, Any] | None = None,
+              owner_chat: str = "", task_label: str = "",
+              session_id: str = "") -> ChallengeOutcome:
+        """Detect + work the ladder. Takeover is the last rung only."""
+        started = self._clock()
+        page_html = tab.html() if tab is not None else html
+        page_url = tab.url if tab is not None else url
+        page_title = tab.title if tab is not None else title
+        signal = detect_challenge_signal(page_html, page_url,
+                                         title=page_title, headers=headers)
+        if signal is None:
+            return ChallengeOutcome(cleared=True, via="no_challenge",
+                                    message="no wall on this page")
+        attempts: list[AttemptRecord] = []
+        order = self._ordered(signal)
+        cleared_via = ""
+        for strategy in order:
+            if strategy == STRATEGY_TAKEOVER:
+                break  # handled below, after every self-solve rung
+            record = self._attempt(strategy, tab=tab, signal=signal)
+            attempts.append(record)
+            if self._recheck(tab, page_html):
+                cleared_via = strategy
+                break
+        if cleared_via:
+            self._record_memory(signal, attempts, cleared=True,
+                                via=cleared_via, takeover_needed=False,
+                                started=started)
+            return ChallengeOutcome(
+                cleared=True, via=cleared_via, attempts=attempts,
+                resume_state=resume_state, signal=signal,
+                message=f"wall cleared via {cleared_via}")
+        # Ladder exhausted — LAST RESORT: owner takeover.
+        attempts.append(AttemptRecord(
+            strategy=STRATEGY_TAKEOVER, ok=False, detail="escalating"))
+        if self._takeover_manager is None:
+            self._record_memory(signal, attempts, cleared=False,
+                                via="takeover_required",
+                                takeover_needed=True, started=started)
+            return ChallengeOutcome(
+                cleared=False, via="takeover_required", attempts=attempts,
+                resume_state=resume_state, signal=signal,
+                message="wall persists and no takeover manager is "
+                        "configured — cannot escalate")
+        grant = self._takeover_manager.request_takeover(
+            session_id=session_id or f"challenge-{int(started * 1000)}",
+            url=page_url, task_label=task_label or "browsing",
+            signal_kind=signal.kind, attempts=attempts,
+            resume_state=resume_state or {}, tab=tab,
+            owner_chat=owner_chat,
+        )
+        message = format_escalation_message(
+            signal_kind=signal.kind, url=page_url, attempts=attempts,
+            takeover_url=grant.url, task_label=task_label or "browsing")
+        if self._notifier is not None:
+            try:
+                self._notifier(message, grant.url)
+            except Exception:  # noqa: BLE001 - notify failure is reported
+                _log.warning("challenge escalation notify failed",
+                             exc_info=True)
+        self._record_memory(signal, attempts, cleared=False,
+                            via="takeover_pending", takeover_needed=True,
+                            started=started)
+        return ChallengeOutcome(
+            cleared=False, via="takeover_pending", attempts=attempts,
+            takeover_url=grant.url, takeover_grant=grant,
+            resume_state=resume_state, message=message, signal=signal)
+
+    # -- ladder ------------------------------------------------------------------
+    def _ordered(self, signal: ChallengeSignal) -> list[str]:
+        if self._memory is not None:
+            try:
+                return self._memory.rank_strategies(
+                    _site_of(signal.url), signal.kind,
+                    list(DEFAULT_ORDER))
+            except Exception:  # noqa: BLE001 - memory never blocks solving
+                _log.debug("challenge memory rank failed", exc_info=True)
+        return list(DEFAULT_ORDER)
+
+    def _attempt(self, strategy: str, *, tab: TabLike | None,
+                 signal: ChallengeSignal) -> AttemptRecord:
+        started = self._clock()
+
+        def done(ok: bool, detail: str) -> AttemptRecord:
+            return AttemptRecord(strategy=strategy, ok=ok,
+                                 ms=int((self._clock() - started) * 1000),
+                                 detail=detail)
+
+        try:
+            if strategy == STRATEGY_RETRY:
+                if tab is None:
+                    return done(False, "no tab to reload")
+                tab.reload()
+                return done(True, "reloaded")
+            if strategy == STRATEGY_WAIT:
+                # FriendlyCaptcha-style proof-of-work solves itself given
+                # time; for other walls the wait is just a settle pause.
+                self._sleep(self._wait_s)
+                return done(True, f"waited {self._wait_s:g}s")
+            if strategy == STRATEGY_CAPTCHA_SERVICE:
+                if self._service_solve is None:
+                    return done(False, "no solving service configured")
+                from ..tools.captcha import detect as _captcha_detect
+                html = tab.html() if tab is not None else ""
+                challenges = _captcha_detect(html, signal.url)
+                if not challenges:
+                    return done(False, "no captcha widget to solve")
+                result = self._service_solve(challenges)
+                if getattr(result, "ok", False):
+                    return done(True, "solving service returned a token")
+                return done(False, "solving service failed")
+            if strategy == STRATEGY_FRESH_SESSION:
+                if self._fresh_session is None:
+                    return done(False, "no fresh-session callback")
+                self._fresh_session()
+                return done(True, "fresh session started")
+            return done(False, f"unknown strategy {strategy!r}")
+        except Exception as exc:  # noqa: BLE001 - attempt failure is data
+            return done(False, f"{type(exc).__name__}: {exc}")
+
+    def _recheck(self, tab: TabLike | None, old_html: str) -> bool:
+        """True when the wall is gone. A recheck that errors is NOT a clear."""
+        if tab is None:
+            return False
+        try:
+            html = tab.html()
+        except Exception:  # noqa: BLE001 - unreadable page is not cleared
+            return False
+        return detect_challenge_signal(html, tab.url,
+                                       title=tab.title) is None
+
+    def _record_memory(self, signal: ChallengeSignal,
+                       attempts: list[AttemptRecord], *, cleared: bool,
+                       via: str, takeover_needed: bool,
+                       started: float) -> None:
+        if self._memory is None:
+            return
+        try:
+            self._memory.record(
+                site=signal.url, kind=signal.kind, vendor=signal.vendor,
+                strategies=[(a.strategy, a.ok, a.ms) for a in attempts],
+                cleared=cleared, via=via,
+                takeover_needed=takeover_needed,
+                ms=int((self._clock() - started) * 1000),
+                started_at=started)
+        except Exception:  # noqa: BLE001 - memory never blocks solving
+            _log.debug("challenge memory record failed", exc_info=True)
+
+    # -- AgentLoop hook ----------------------------------------------------------
+    def wall_handler_for(self, tab: TabLike | None = None, *,
+                         resume_state: dict[str, Any] | None = None,
+                         owner_chat: str = "",
+                         task_label: str = "") -> Callable[[Any, str], str]:
+        """An ``AgentLoop.on_blocked`` callback: solve or stop honestly.
+
+        Returns ``"continue"`` when the wall cleared (self-solved, or
+        takeover resolved), anything else stops the loop.
+        """
+        def _handler(observation: Any, detection: str) -> str:
+            outcome = self.solve(
+                tab=tab, html=getattr(getattr(observation, "page", None),
+                                      "html", ""),
+                url=getattr(getattr(observation, "page", None), "url", ""),
+                title=getattr(getattr(observation, "page", None),
+                              "title", ""),
+                resume_state=resume_state, owner_chat=owner_chat,
+                task_label=task_label)
+            if outcome.cleared:
+                return "continue"
+            if outcome.takeover_grant is not None \
+                    and self._takeover_manager is not None:
+                res = self._takeover_manager.wait_for_resolution(
+                    outcome.takeover_grant,
+                    cleared_check=lambda: self._recheck(tab, ""),
+                    timeout_s=getattr(
+                        self._takeover_manager, "wait_timeout_s", 900),
+                    poll_s=2.0)
+                return "continue" if res.cleared else "stop"
+            return "stop"
+        return _handler

@@ -375,6 +375,21 @@
 # Absolute as-is; relative against the settings home. Default:
 # <settings-home>/data/agent-modes.json.
 # NM_AGENT_MODES_STORE=
+# Browser takeover: 1 = takeover links enabled, 0 = disabled.
+# NM_TAKEOVER_ENABLED=
+# Browser takeover: PUBLIC URL prefix for takeover links (tunnel URL or
+# http://host:PORT). Empty = bind address (host-network-only).
+# NM_TAKEOVER_BASE_URL=
+# Browser takeover: stream server bind host (default 127.0.0.1).
+# NM_TAKEOVER_BIND_HOST=
+# Browser takeover: stream server port (0 = ephemeral).
+# NM_TAKEOVER_PORT=
+# Browser takeover: link lifetime in seconds (default 900).
+# NM_TAKEOVER_LINK_TTL_S=
+# Browser takeover: max seconds to wait for hand-back (default 900).
+# NM_TAKEOVER_WAIT_TIMEOUT_S=
+# Browser takeover: hand-back poll interval in seconds (default 2.0).
+# NM_TAKEOVER_POLL_S=
 # Config key read by Devon code.
 # NM_NO_COLOR=
 # Config key read by Devon code.

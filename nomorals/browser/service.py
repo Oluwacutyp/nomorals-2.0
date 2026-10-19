@@ -2002,6 +2002,62 @@ class RenderedTab:
                 f"rendered screenshot of {self.url} produced no image")
         return {"path": str(out), "url": self.url, "tab_id": self.tab_id}
 
+    # -- takeover input (owner drives THIS live tab) ------------------------
+    # These are the TakeoverTabAdapter surface: normalized 0..1 coords
+    # for clicks, plain text/keys for typing. They act on the live
+    # Playwright page — the same session the agent drives.
+    def screenshot_bytes(self) -> bytes:
+        """Raw PNG bytes of the live page (takeover frame source)."""
+        page = self._require_loaded()
+        try:
+            raw = page.screenshot()
+        except Exception as exc:  # noqa: BLE001 - capture errors are opaque
+            raise BrowserError(
+                f"rendered screenshot of {self.url} failed: {exc}") from exc
+        if not raw:
+            raise BrowserError(
+                f"rendered screenshot of {self.url} produced no image")
+        return bytes(raw)
+
+    def click_at(self, x: float, y: float) -> None:
+        """Click at NORMALIZED (0..1) viewport coords — takeover input."""
+        page = self._require_loaded()
+        try:
+            size = page.evaluate(
+                "() => ({w: window.innerWidth, h: window.innerHeight})")
+            page.mouse.click(int(float(size["w"]) * max(0.0, min(1.0, x))),
+                             int(float(size["h"]) * max(0.0, min(1.0, y))))
+        except Exception as exc:  # noqa: BLE001 - input errors are opaque
+            raise BrowserError(f"rendered click_at failed: {exc}") from exc
+
+    def click_norm(self, x: float, y: float) -> None:
+        """TakeoverTabAdapter alias for :meth:`click_at`."""
+        self.click_at(x, y)
+
+    def type_text(self, text: str) -> None:
+        """Type into the focused field — takeover input."""
+        page = self._require_loaded()
+        try:
+            page.keyboard.type(text or "")
+        except Exception as exc:  # noqa: BLE001 - input errors are opaque
+            raise BrowserError(f"rendered type_text failed: {exc}") from exc
+
+    def press_key(self, key: str) -> None:
+        """Press one key (e.g. Enter, Tab, Escape) — takeover input."""
+        page = self._require_loaded()
+        try:
+            page.keyboard.press(key or "")
+        except Exception as exc:  # noqa: BLE001 - input errors are opaque
+            raise BrowserError(f"rendered press_key failed: {exc}") from exc
+
+    def scroll_norm(self, dx: float, dy: float) -> None:
+        """Mouse-wheel scroll — takeover input (pixels, not normalized)."""
+        page = self._require_loaded()
+        try:
+            page.mouse.wheel(float(dx or 0.0), float(dy or 0.0))
+        except Exception as exc:  # noqa: BLE001 - input errors are opaque
+            raise BrowserError(f"rendered scroll failed: {exc}") from exc
+
     # -- accessibility snapshot (agent interaction model) ----------------------
     def snapshot(self, max_chars: int = _SNAPSHOT_MAX_CHARS) -> dict[str, Any]:
         """The page as an accessibility tree with ``[ref=..]`` handles —
@@ -2461,6 +2517,10 @@ class RenderedTab:
             raise self._action_error("back", exc) from exc
         return self._after_navigation(page, before,
                                       f"went back to {self.url}")
+
+    def reload(self) -> None:
+        """Reload the current URL (challenge-ladder retry rung)."""
+        self.navigate(self.url)
 
     # -- form intelligence ---------------------------------------------------------
     def candidates(self, name: str, limit: int = 5) -> dict[str, Any]:
@@ -3183,6 +3243,25 @@ class BrowserService:
                 del self._active_rendered[session_name]
             raise
         return tab
+
+    def takeover_manager(self, *, config: Any | None = None,
+                         notifier: Any | None = None) -> Any:
+        """A :class:`TakeoverManager` bound to this service's data dir.
+
+        The manager's stream server, grants, handoff state and audit log
+        all live under ``data_dir/takeover/``. ``config`` may be a
+        :class:`TakeoverConfig` or a settings object with a
+        ``takeover`` section; omitted = env-driven defaults.
+        """
+        from .takeover import TakeoverConfig, TakeoverManager
+        if config is None:
+            cfg = TakeoverConfig.from_env()
+        elif isinstance(config, TakeoverConfig):
+            cfg = config
+        else:
+            cfg = TakeoverConfig.from_settings(config)
+        return TakeoverManager(cfg, data_dir=self.data_dir / "takeover",
+                               notifier=notifier)
 
     def close_rendered_tab(self, tab_id: str) -> None:
         tab = self._rendered_tabs.get(tab_id)

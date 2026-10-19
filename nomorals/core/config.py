@@ -631,6 +631,27 @@ class RuntimeSettings:
     threads: int = 0
 
 @dataclass
+class TakeoverSettings:
+    """Human-in-the-loop browser takeover (see browser/takeover.py).
+
+    ``base_url`` is the PUBLIC prefix for takeover links — a tunnel URL
+    or ``http://host:PORT``. Empty = fall back to the bind address
+    (host-network-only). No hostnames/IPs/ports are hardcoded: every
+    value here is operator-configured.
+    Env: NM_TAKEOVER_ENABLED, NM_TAKEOVER_BASE_URL,
+    NM_TAKEOVER_BIND_HOST, NM_TAKEOVER_PORT, NM_TAKEOVER_LINK_TTL_S,
+    NM_TAKEOVER_WAIT_TIMEOUT_S, NM_TAKEOVER_POLL_S.
+    """
+    enabled: bool = True
+    base_url: str = ""
+    bind_host: str = "127.0.0.1"
+    port: int = 0
+    link_ttl_s: int = 900
+    wait_timeout_s: int = 900
+    poll_s: float = 2.0
+
+
+@dataclass
 class HubSettings:
     """Remote device hub (mesh + sync over HTTP).
 
@@ -702,6 +723,8 @@ class Settings:
     trading: "TradingSettings" = field(default_factory=lambda: TradingSettings())
     mind: "MindSettings" = field(default_factory=lambda: MindSettings())
     hub: "HubSettings" = field(default_factory=lambda: HubSettings())
+    takeover: "TakeoverSettings" = field(
+        default_factory=lambda: TakeoverSettings())
 
     # -- path helpers --------------------------------------------------------
     @property
@@ -918,6 +941,13 @@ _ENV_MAP: dict[str, str] = {
     "NM_HUB_HOST": "hub.bind_host",
     "NM_HUB_PORT": "hub.port",
     "NM_HUB_TIMEOUT": "hub.request_timeout",
+    "NM_TAKEOVER_ENABLED": "takeover.enabled",
+    "NM_TAKEOVER_BASE_URL": "takeover.base_url",
+    "NM_TAKEOVER_BIND_HOST": "takeover.bind_host",
+    "NM_TAKEOVER_PORT": "takeover.port",
+    "NM_TAKEOVER_LINK_TTL_S": "takeover.link_ttl_s",
+    "NM_TAKEOVER_WAIT_TIMEOUT_S": "takeover.wait_timeout_s",
+    "NM_TAKEOVER_POLL_S": "takeover.poll_s",
     "NM_CHAT_MEDIA_IN_GROUPS": "chat.media_in_groups",
     "NM_CHAT_MEDIA_MAX_MB": "chat.media_max_mb",
     "NM_CHAT_TELEGRAM_ENABLED": "chat.telegram_enabled",
