@@ -375,12 +375,14 @@ class TakeoverManager:
     def __init__(self, config: TakeoverConfig | None = None, *,
                  data_dir: str | Path | None = None,
                  notifier: Callable[[str, str], Any] | None = None,
+                 session_store: Any | None = None,
                  clock: Callable[[], float] | None = None) -> None:
         self._config = config or TakeoverConfig()
         self._data_dir = Path(data_dir).expanduser() if data_dir else None
         if self._data_dir is not None:
             self._data_dir.mkdir(parents=True, exist_ok=True)
         self._notifier = notifier
+        self._session_store = session_store
         self._clock = clock or time.time
         self._grants: dict[str, TakeoverGrant] = {}
         self._by_session: dict[str, TakeoverGrant] = {}
@@ -444,6 +446,17 @@ class TakeoverManager:
             grant.closed = True
             return None
         return grant
+
+    def record_session_saved(self, grant: TakeoverGrant, *,
+                             site: str, cookie_count: int,
+                             via: str) -> None:
+        """Audit a solved-session save. Site + count + via only — never
+        cookie values. Called by the solver on a verified clear."""
+        from .challenge_memory import _site_of
+        self._audit("session_saved", grant,
+                    {"site": _site_of(site),
+                     "cookies": max(0, int(cookie_count)),
+                     "via": via})
 
     def mark_done(self, grant: TakeoverGrant, *, note: str = "") -> None:
         """Owner tapped Done. The token dies; resolution verifies the wall."""

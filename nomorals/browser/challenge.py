@@ -23,6 +23,11 @@ from typing import Any, Callable, Protocol
 from ..core.logging_setup import get_logger
 from . import errors as _errors
 from .challenge_memory import ChallengeMemory, _site_of
+from .solved_sessions import (
+    SolvedSessionStore,
+    restore_solved_session,
+    save_solved_session,
+)
 
 _log = get_logger(__name__)
 
@@ -99,6 +104,10 @@ class ChallengeOutcome:
     resume_state: dict[str, Any] | None = None
     message: str = ""
     signal: ChallengeSignal | None = None
+    #: Cookies persisted to the solved-session store on this clear (0 =
+    #: nothing newly saved — e.g. a restore-clear re-saves, a
+    #: still-blocked outcome saves nothing).
+    session_saved: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return {"cleared": self.cleared, "via": self.via,
@@ -106,7 +115,8 @@ class ChallengeOutcome:
                 "takeover_url": self.takeover_url,
                 "resume_state": self.resume_state,
                 "message": self.message,
-                "signal": self.signal.to_dict() if self.signal else None}
+                "signal": self.signal.to_dict() if self.signal else None,
+                "session_saved": self.session_saved}
 
 
 def detect_challenge_signal(html: str = "", url: str = "", *,
@@ -182,6 +192,7 @@ class ChallengeSolver:
                  fresh_session: Callable[[], Any] | None = None,
                  takeover_manager: Any | None = None,
                  notifier: Callable[[str, str], Any] | None = None,
+                 session_store: SolvedSessionStore | None = None,
                  wait_s: float = 3.0,
                  sleeper: Callable[[float], None] | None = None,
                  clock: Callable[[], float] | None = None) -> None:
@@ -190,6 +201,7 @@ class ChallengeSolver:
         self._fresh_session = fresh_session
         self._takeover_manager = takeover_manager
         self._notifier = notifier
+        self._session_store = session_store
         self._wait_s = max(0.0, float(wait_s))
         self._sleep = sleeper or time.sleep
         self._clock = clock or time.time
@@ -210,6 +222,28 @@ class ChallengeSolver:
         if signal is None:
             return ChallengeOutcome(cleared=True, via="no_challenge",
                                     message="no wall on this page")
+        # A previous visit may already have cleared this wall: reuse the
+        # solved session before spending the ladder on it. A restore
+        # that does not clear falls through to the ladder.
+        if self._session_store is not None and tab is not None:
+            restored = restore_solved_session(
+                tab, page_url, self._session_store)
+            if restored and self._recheck(tab, page_html):
+                saved = self._save_solved(tab, page_url, "saved_session")
+                self._record_memory(signal, [AttemptRecord(
+                    strategy="saved_session", ok=True,
+                    detail=f"restored {restored} cookies")],
+                    cleared=True, via="saved_session",
+                    takeover_needed=False, started=started)
+                return ChallengeOutcome(
+                    cleared=True, via="saved_session",
+                    attempts=[AttemptRecord(
+                        strategy="saved_session", ok=True,
+                        detail=f"restored {restored} cookies")],
+                    resume_state=resume_state, signal=signal,
+                    message=f"wall already cleared — reused {restored} "
+                            f"saved cookies",
+                    session_saved=saved)
         attempts: list[AttemptRecord] = []
         order = self._ordered(signal)
         cleared_via = ""
@@ -222,13 +256,15 @@ class ChallengeSolver:
                 cleared_via = strategy
                 break
         if cleared_via:
+            saved = self._save_solved(tab, page_url, cleared_via)
             self._record_memory(signal, attempts, cleared=True,
                                 via=cleared_via, takeover_needed=False,
                                 started=started)
             return ChallengeOutcome(
                 cleared=True, via=cleared_via, attempts=attempts,
                 resume_state=resume_state, signal=signal,
-                message=f"wall cleared via {cleared_via}")
+                message=f"wall cleared via {cleared_via}",
+                session_saved=saved)
         # Ladder exhausted — LAST RESORT: owner takeover.
         attempts.append(AttemptRecord(
             strategy=STRATEGY_TAKEOVER, ok=False, detail="escalating"))
@@ -328,6 +364,28 @@ class ChallengeSolver:
         return detect_challenge_signal(html, tab.url,
                                        title=tab.title) is None
 
+    def _save_solved(self, tab: TabLike | None, url: str, via: str, *,
+                     grant: Any | None = None) -> int:
+        """Persist a cleared tab's cookies + storage. 0 = nothing saved.
+
+        Called ONLY on a verified clear — never on a still-blocked
+        outcome. Best effort: a save failure never breaks the resume.
+        With a takeover grant, the save is audited (site + count +
+        via, never cookie values).
+        """
+        if self._session_store is None or tab is None:
+            return 0
+        count = save_solved_session(tab, url, self._session_store,
+                                    cleared_via=via)
+        if count and grant is not None \
+                and self._takeover_manager is not None:
+            try:
+                self._takeover_manager.record_session_saved(
+                    grant, site=url, cookie_count=count, via=via)
+            except Exception:  # noqa: BLE001 - audit never blocks resume
+                _log.debug("session_saved audit failed", exc_info=True)
+        return count
+
     def _record_memory(self, signal: ChallengeSignal,
                        attempts: list[AttemptRecord], *, cleared: bool,
                        via: str, takeover_needed: bool,
@@ -374,6 +432,16 @@ class ChallengeSolver:
                     timeout_s=getattr(
                         self._takeover_manager, "wait_timeout_s", 900),
                     poll_s=2.0)
-                return "continue" if res.cleared else "stop"
+                if res.cleared:
+                    # Owner cleared it — persist the solved session so
+                    # the next visit reuses it. Still-blocked saves
+                    # nothing: _save_solved is only called on a clear.
+                    page_url = getattr(
+                        getattr(observation, "page", None), "url", "") or (
+                            tab.url if tab is not None else "")
+                    self._save_solved(tab, page_url, f"takeover:{res.via}",
+                                      grant=outcome.takeover_grant)
+                    return "continue"
+                return "stop"
             return "stop"
         return _handler

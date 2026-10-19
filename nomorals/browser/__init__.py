@@ -120,6 +120,11 @@ from .challenge import (
     format_escalation_message,
 )
 from .challenge_memory import ChallengeMemory
+from .solved_sessions import (
+    SolvedSessionStore,
+    restore_solved_session,
+    save_solved_session,
+)
 from .takeover import (
     Resolution,
     TakeoverConfig,
@@ -250,6 +255,7 @@ __all__ = [
     "SessionHealth",
     "SessionHealthRegistry",
     "SnapshotFilter",
+    "SolvedSessionStore",
     "SomOverlay",
     "StuckDetector",
     "StuckDiagnosis",
@@ -324,6 +330,8 @@ __all__ = [
     "register_strategy",
     "replay_or_raise",
     "republish_events",
+    "restore_solved_session",
+    "save_solved_session",
     "resolve_candidates",
     "sha256_file",
     "snapshot_block",

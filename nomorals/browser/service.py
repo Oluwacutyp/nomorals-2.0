@@ -2606,6 +2606,68 @@ class RenderedTab:
         out.sort(key=lambda c: (c["domain"], c["path"], c["name"]))
         return out
 
+    def storage_state(self) -> dict[str, Any]:
+        """This tab's full storage state (cookies + origins) as a dict.
+
+        Same shape as Playwright's ``context.storage_state()``. Used to
+        persist a solved session when a wall clears — the clearance
+        cookie plus any storage the wall set.
+        """
+        page = self._require_loaded()
+        try:
+            state = self._context.storage_state()
+        except Exception as exc:  # noqa: BLE001 - cookie errors are opaque
+            raise BrowserError(
+                f"rendered storage_state on {self.url} failed: {exc}"
+            ) from exc
+        if not isinstance(state, dict):
+            return {"cookies": [], "origins": []}
+        return {"cookies": state.get("cookies") or [],
+                "origins": state.get("origins") or []}
+
+    def add_cookies(self, cookies) -> dict[str, Any]:
+        """Add cookies to this tab's context (restore a solved session).
+
+        Accepts the stored cookie shape (``http_only`` / ``same_site``)
+        or Playwright's (``httpOnly`` / ``sameSite``); entries without
+        a name or domain are skipped. Session cookies (no positive
+        ``expires``) stay session cookies.
+        """
+        page = self._require_loaded()
+        prepared: list[dict[str, Any]] = []
+        for cookie in (cookies or []):
+            if not isinstance(cookie, dict):
+                continue
+            name = str(cookie.get("name") or "")
+            domain = str(cookie.get("domain") or "")
+            if not name or not domain:
+                continue
+            entry: dict[str, Any] = {
+                "name": name,
+                "value": str(cookie.get("value") or ""),
+                "domain": domain,
+                "path": str(cookie.get("path") or "/") or "/",
+            }
+            expires = cookie.get("expires")
+            if isinstance(expires, (int, float)) and expires > 0:
+                entry["expires"] = float(expires)
+            if cookie.get("secure"):
+                entry["secure"] = True
+            http_only = cookie.get("httpOnly", cookie.get("http_only"))
+            if http_only:
+                entry["httpOnly"] = True
+            same_site = cookie.get("sameSite", cookie.get("same_site"))
+            if same_site in ("Strict", "Lax", "None"):
+                entry["sameSite"] = same_site
+            prepared.append(entry)
+        try:
+            self._context.add_cookies(prepared)
+        except Exception as exc:  # noqa: BLE001 - cookie errors are opaque
+            raise BrowserError(
+                f"rendered add_cookies on {self.url} failed: {exc}"
+            ) from exc
+        return {"ok": True, "added": len(prepared)}
+
     def upload(self, selector: str, file_path: str, *,
                verify: bool = True) -> dict[str, Any]:
         """Set a ``<input type="file">`` to a real local file (playwright
@@ -3244,14 +3306,24 @@ class BrowserService:
             raise
         return tab
 
+    def solved_session_store(self) -> Any:
+        """A :class:`SolvedSessionStore` under this service's takeover
+        dir. Solved sessions persist per-site under
+        ``data_dir/takeover/solved_sessions/``."""
+        from .solved_sessions import SolvedSessionStore
+        return SolvedSessionStore(self.data_dir / "takeover")
+
     def takeover_manager(self, *, config: Any | None = None,
-                         notifier: Any | None = None) -> Any:
+                         notifier: Any | None = None,
+                         session_store: Any | None = None) -> Any:
         """A :class:`TakeoverManager` bound to this service's data dir.
 
         The manager's stream server, grants, handoff state and audit log
         all live under ``data_dir/takeover/``. ``config`` may be a
         :class:`TakeoverConfig` or a settings object with a
         ``takeover`` section; omitted = env-driven defaults.
+        ``session_store`` (default: this service's solved-session
+        store) is where cleared sessions' cookies + storage persist.
         """
         from .takeover import TakeoverConfig, TakeoverManager
         if config is None:
@@ -3260,8 +3332,11 @@ class BrowserService:
             cfg = config
         else:
             cfg = TakeoverConfig.from_settings(config)
+        if session_store is None:
+            session_store = self.solved_session_store()
         return TakeoverManager(cfg, data_dir=self.data_dir / "takeover",
-                               notifier=notifier)
+                               notifier=notifier,
+                               session_store=session_store)
 
     def close_rendered_tab(self, tab_id: str) -> None:
         tab = self._rendered_tabs.get(tab_id)
