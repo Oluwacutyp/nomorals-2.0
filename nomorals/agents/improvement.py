@@ -90,6 +90,20 @@ LEVERS: dict[str, dict[str, str]] = {
 }
 
 
+# (action, status) pairs whose score columns can only hold the 0.0
+# no-score sentinel (the INSERT coerced None because the schema is
+# NOT NULL). from_row maps the sentinel back to None for exactly these —
+# every other pair keeps its stored value, so a genuine measured 0.0 is
+# never rewritten as "no score".
+_NO_SCORE_SENTINEL = frozenset({
+    ("off", "skipped"), ("unmeasurable", "skipped"),
+    ("cooldown", "skipped"), ("proposal_failed", "skipped"),
+    ("proposed", "pending"),
+    ("reverted", "regressed"),
+    ("apply_failed", "regressed"), ("apply_failed", "failed"),
+})
+
+
 @dataclass
 class CycleRecord:
     id: str
@@ -122,14 +136,31 @@ class CycleRecord:
             details = json.loads(row.get("details_json") or "{}")
         except Exception:  # noqa: BLE001
             details = {}
+        # Score columns are NOT NULL in the schema, so _record coerces a
+        # missing score to 0.0 on INSERT. Map the sentinel back to None —
+        # but ONLY for the (action, status) pairs that can only have been
+        # written with None. Anything else keeps its value, so a genuine
+        # measured 0.0 is never rewritten as "no score".
+        action = row.get("action", "")
+        status = row.get("status", "pending")
+        before = row.get("before_score")
+        after = row.get("after_score")
+        delta = row.get("delta")
+        if (action, status) in _NO_SCORE_SENTINEL:
+            if action in ("off", "unmeasurable") and before == 0.0:
+                before = None
+            if after == 0.0:
+                after = None
+            if delta == 0.0:
+                delta = None
         return cls(
             id=row["id"], dimension=row.get("dimension", ""),
-            before_score=row.get("before_score"),
-            after_score=row.get("after_score"), delta=row.get("delta"),
-            proposal_id=row.get("proposal_id", ""), action=row.get("action", ""),
+            before_score=before,
+            after_score=after, delta=delta,
+            proposal_id=row.get("proposal_id", ""), action=action,
             rationale=row.get("rationale", ""),
             edit_summary=row.get("edit_summary", ""),
-            status=row.get("status", "pending"),
+            status=status,
             created_at=float(row.get("created_at", 0)), details=details)
 
 
@@ -177,12 +208,20 @@ class ImprovementLoop:
                                 "unmeasurable", "no measurable dimensions",
                                 "", "skipped", {"reason": "no measurable dim"})
 
-        # 2. weakest dimension
+        # 2. weakest dimension (or the forced one — but only if it was
+        # actually measurable; otherwise we'd score one dimension's
+        # number against another dimension's lever)
+        if dimension and dimension in LEVERS and dimension not in measured:
+            return self._record(cycle_id, dimension, None, None, None, "",
+                                "unmeasurable",
+                                f"{dimension} is not measurable right now",
+                                "", "skipped",
+                                {"reason": "dimension_unmeasurable"})
         weakest = min(measured, key=lambda k: measured[k])
         before = measured[weakest]
         if dimension and dimension in LEVERS:
             weakest = dimension
-            before = measured.get(weakest, before)
+            before = measured[weakest]
 
         # 3. at/above target -> no churn
         if before >= self.settings.target:
@@ -230,6 +269,8 @@ class ImprovementLoop:
             try:
                 from .upgrade_queue import UpgradeQueue
                 uq = UpgradeQueue(self.context)
+                edit_paths = [e.get("path", "") for e in (proposal.edits or [])
+                              if e.get("path")] or [lever["file"]]
                 uq.propose(
                     title=f"improve {weakest} ({before:.2f} → target "
                           f"{self.settings.target:.2f})",
@@ -238,11 +279,24 @@ class ImprovementLoop:
                         f"target {self.settings.target:.2f}. "
                         f"Edit summary: {edit_summary}. "
                         f"Evidence: {rationale[:500]}"),
+                    patch_plan={
+                        "source": "improvement",
+                        "improvement_cycle_id": cycle_id,
+                        "evolution_proposal_id": proposal_id,
+                        "dimension": weakest,
+                        "before_score": before,
+                        "target": self.settings.target,
+                        "lever_file": lever["file"],
+                        "edit_paths": edit_paths,
+                    },
                     files=[lever["file"]],
+                    tests=["full evolve gate: test suite + "
+                           "benchmark regression"],
                     source="improvement",
                 )
-            except Exception:  # noqa: BLE001 - queue filing is best-effort
-                pass
+            except Exception as exc:  # noqa: BLE001 - queue filing is best-effort
+                _log.warning("could not file improvement proposal %s to the "
+                             "upgrade queue: %s", cycle_id, exc)
             return self._record(
                 cycle_id, weakest, before, None, None, proposal_id,
                 "proposed",
@@ -281,10 +335,14 @@ class ImprovementLoop:
                 status = "neutral"
             details["after_provider"] = rerun.provider
         except Exception as exc:  # noqa: BLE001
+            # The edit never landed (dirty tree, model down, gate blew
+            # up before applying): this is a failure, NOT a regression.
+            # Recording "regressed" would trip the 24h regression
+            # cooldown for a dimension whose code was never touched.
             return self._record(
                 cycle_id, weakest, before, None, None, proposal_id,
                 "apply_failed", f"apply raised: {exc}", edit_summary,
-                "regressed", {**details, "error": str(exc)[:200]})
+                "failed", {**details, "error": str(exc)[:200]})
         return self._record(cycle_id, weakest, before, after,
                             (after - before) if after is not None else None,
                             proposal_id, action,
