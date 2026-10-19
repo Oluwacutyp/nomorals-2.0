@@ -29,6 +29,7 @@ filtered tool list AND gets denied at call time if they reach for more.
 
 from __future__ import annotations
 
+import contextvars
 import difflib
 import hashlib
 import json
@@ -436,6 +437,18 @@ class ToolCallingLoop:
                            if persona_extra.strip() else ""),
         )
 
+    def _submit(self, fn: Callable[..., Any], *args: Any,
+                **kwargs: Any) -> Any:
+        """Submit ``fn`` to the pool inside the submitter's context.
+
+        contextvars (request/run/mission correlation ids) do not cross
+        ThreadPoolExecutor boundaries on their own — without this copy,
+        every ``tool.call`` bus event from the loop carries empty ids
+        and replay/timeline cannot join the call to its request.
+        """
+        return self._pool.submit(
+            contextvars.copy_context().run, fn, *args, **kwargs)
+
     def _invoke(
         self,
         call: ToolCall,
@@ -573,7 +586,7 @@ class ToolCallingLoop:
             return self._execute_isolated(
                 call, actor=actor, capabilities=capabilities,
                 loop_ctx=loop_ctx)
-        fut = self._pool.submit(
+        fut = self._submit(
             self._invoke, call, actor=actor, capabilities=capabilities,
             loop_ctx=loop_ctx)
         try:
@@ -628,7 +641,7 @@ class ToolCallingLoop:
                     f"{result.error}")
         # not-supported (no fork): fall back to the cooperative thread
         # path — same unknown-outcome semantics as any thread tool.
-        fut = self._pool.submit(
+        fut = self._submit(
             self._invoke, call, actor=actor, capabilities=capabilities,
             loop_ctx=loop_ctx)
         try:
@@ -677,7 +690,7 @@ class ToolCallingLoop:
         # Parallel: submit _invoke directly (never _execute — that would
         # nest pool submissions and deadlock the 4-worker executor).
         pending = [
-            (call, self._pool.submit(
+            (call, self._submit(
                 self._invoke, call, actor=actor,
                 capabilities=capabilities, loop_ctx=loop_ctx))
             for call in calls
@@ -709,20 +722,19 @@ class ToolCallingLoop:
         return out
 
     def _note_tool_weakness(self, tool_name: str, error: str) -> None:
-        """Feed tool failures into weakness detection. Never breaks the loop."""
+        """Feed tool failures into weakness detection. Never breaks the loop.
+
+        The ledger lives in the app database (the registry context's db),
+        not a sidecar — a tool that keeps failing is exactly what the
+        weakness system clusters on.
+        """
         try:
             from ...autonomy.weakness import report_weakness
-            from ...storage.db import Database
             import time as _t
-            # Workspace dir from loop_ctx if available.
-            ws = None
-            try:
-                ws = getattr(self, "_workspace_dir", None)
-            except Exception:  # noqa: BLE001
-                pass
-            if not ws:
+            db = getattr(getattr(self.registry, "context", None),
+                         "db", None)
+            if db is None:
                 return
-            db = Database(ws)
             report_weakness(db, "tool_failure", tool_name,
                             {"error": str(error)[:300], "ts": _t.time()})
         except Exception:  # noqa: BLE001

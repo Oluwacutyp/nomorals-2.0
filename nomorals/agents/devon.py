@@ -606,15 +606,40 @@ class DevonAgent:
                 record_step(name, args)
             except Exception:  # noqa: BLE001 - recording is best-effort
                 pass
-        try:
-            observation = self._tools[name](args)
-            return StepOutcome(name, args, True, _clip(observation, _OBSERVATION_CHARS),
-                               time.perf_counter() - started)
-        except Exception as exc:  # noqa: BLE001 - one bad tool must not sink the run
+        # Per-step timeout on a daemon thread: the wall-clock budget in
+        # run() is only checked BETWEEN steps, so without this one hung
+        # tool hangs the whole run forever. A timeout is NOT a failure —
+        # the tool may still finish and change the world — so the outcome
+        # is marked honestly UNKNOWN, never blind-replayed.
+        box: dict[str, Any] = {}
+
+        def _run() -> None:
+            try:
+                box["observation"] = self._tools[name](args)
+            except Exception as exc:  # noqa: BLE001 - captured below
+                box["error"] = exc
+
+        worker = threading.Thread(target=_run, name=f"devon-step-{name}",
+                                  daemon=True)
+        worker.start()
+        worker.join(self.step_timeout)
+        elapsed = time.perf_counter() - started
+        if worker.is_alive():
+            err = (f"tool '{name}' timed out after {self.step_timeout:.0f}s "
+                   f"— outcome UNKNOWN (outcome_unknown): the tool may still "
+                   f"be running; do not retry blindly, check state first")
+            _log.warning("devon tool %s timed out after %.0fs",
+                         name, self.step_timeout)
+            return StepOutcome(name, args, False, err, elapsed, error=err)
+        if "error" in box:
+            exc = box["error"]
             _log.exception("devon tool %s failed", name)
             cause = describe_exc(exc)
             return StepOutcome(name, args, False, f"tool error: {cause}",
-                               time.perf_counter() - started, error=cause)
+                               elapsed, error=cause)
+        return StepOutcome(name, args, True,
+                           _clip(box.get("observation", ""),
+                                 _OBSERVATION_CHARS), elapsed)
 
     # ── memory box ───────────────────────────────────────────────────────────
 
