@@ -3546,7 +3546,8 @@ class PartnerRuntime(
             return self._control_checksms(
                 command.tail or arg, chat_key=chat_key, message=message)
         if kind == "browser":
-            return self._control_browser(command.tail or arg, chat_key=chat_key)
+            return self._control_browser(command.tail or arg, chat_key=chat_key,
+                                         message=message)
         if kind == "paper":
             return self._control_paper(command.tail or arg, chat_key=chat_key)
         if kind == "people":

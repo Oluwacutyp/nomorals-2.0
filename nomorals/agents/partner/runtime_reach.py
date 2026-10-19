@@ -17,6 +17,10 @@ import re
 import time
 from typing import Any
 
+from ...core.logging_setup import get_logger
+
+_log = get_logger(__name__)
+
 #: Temp-mail inboxes live at most a day; temp numbers a couple of hours.
 #: KV TTL expiry makes a stale inbox read as "none" — the honest answer
 #: is "run /tempmail new", never a resurrected address.
@@ -284,21 +288,35 @@ class RuntimeReachMixin:
         return "usage: /checksms [code | forget]"
 
     # ── browser: /browser ──────────────────────────────────────────────
-    def _control_browser(self, tail: str, *, chat_key: str = "") -> str:
-        """The browser tool in chat: /browser open|text|links|forms <url>."""
-        from ...tools.browser import BrowserSession
+    def _control_browser(self, tail: str, *, chat_key: str = "",
+                         message: Any = None) -> str:
+        """The browser tool in chat: /browser open|text|links|forms <url>.
 
+        ``takeover`` is the owner-only takeover verb:
+        ``/browser takeover`` = active takeover sessions;
+        ``/browser takeover <url>`` = open a live tab on the URL and run
+        the challenge ladder (self-solve first, takeover last resort).
+        """
         parts = (tail or "").strip().split(None, 1)
+        if parts and parts[0].lower() == "takeover":
+            rest = parts[1].strip() if len(parts) > 1 else ""
+            return self._control_browser_takeover(
+                rest, chat_key=chat_key, message=message)
         if len(parts) < 2:
             return ("usage: /browser open <url> — fetch + show the text\n"
                     "       /browser text <url> — page text only\n"
                     "       /browser links <url> — outgoing links\n"
-                    "       /browser forms <url> — forms + fields")
+                    "       /browser forms <url> — forms + fields\n"
+                    "       /browser takeover [url] — takeover sessions "
+                    "(owner-only)")
         verb, url = parts[0].lower(), parts[1].strip()
         if verb not in ("open", "text", "links", "forms", "headings"):
-            return ("usage: /browser open|text|links|forms|headings <url>")
+            return ("usage: /browser open|text|links|forms|headings <url>\n"
+                    "       /browser takeover [url] — takeover sessions "
+                    "(owner-only)")
         if not url.startswith(("http://", "https://")):
             return "give a full URL starting with http:// or https://"
+        from ...tools.browser import BrowserSession
         try:
             sess = BrowserSession()
             opened = sess.open(url)
@@ -342,6 +360,152 @@ class RuntimeReachMixin:
             return body or "(page has no readable text)"
         except Exception as exc:  # noqa: BLE001 - network + parse errors
             return f"browser failed: {exc}"[:500]
+
+    # ── browser takeover: the Telegram seam ─────────────────────────────
+    # The takeover library (browser/takeover.py + challenge.py) can issue
+    # grants and format escalation messages, but it cannot reach the
+    # owner by itself — its notifier is injected. These three helpers
+    # close that seam: one persistent manager, one browser service, and
+    # a notifier bound to the real partner-runtime Telegram sender.
+    def _takeover_notifier(self) -> Any:
+        """``(message, url) -> None`` sending escalations to the owner.
+
+        Owner-only by construction: :class:`Notifier` resolves delivery
+        targets from ``partner.owner_chats`` alone — a non-owner chat
+        can never be a target. ``force=True`` bypasses dedupe because
+        every wall escalation carries a FRESH one-time link; deduping a
+        second escalation would strand the owner with the first grant's
+        (expired) link. Proactive gates still apply for non-proactive
+        kinds (none here), and per-chat proactive-off is honored.
+        Never raises — a failed send must not break solving.
+        """
+        def _notify(message: str, url: str) -> None:
+            try:
+                from ..notifier import Notifier
+
+                Notifier(self.context, self.gateway).publish(
+                    kind="browser-takeover",
+                    title="🧱 Browser wall — your turn",
+                    body=message,
+                    force=True,
+                    channels=["telegram"],
+                )
+            except Exception:  # noqa: BLE001 - notify failure is reported
+                _log.warning("takeover escalation notify failed",
+                             exc_info=True)
+
+        return _notify
+
+    def _takeover_manager(self) -> Any:
+        """The ONE persistent takeover manager for this runtime.
+
+        Grants must be visible to both the challenge ladder (which
+        issues them) and ``/browser takeover`` (which lists them), and
+        the stream server must stay up — so the manager is built once
+        and cached, never fresh per command.
+        """
+        mgr = getattr(self, "_takeover_manager_inst", None)
+        if mgr is None:
+            from ...browser.takeover import TakeoverConfig, TakeoverManager
+
+            cfg = TakeoverConfig.from_settings(self.settings)
+            mgr = TakeoverManager(
+                cfg,
+                data_dir=self.settings.resolve("data/takeover"),
+                notifier=self._takeover_notifier())
+            self._takeover_manager_inst = mgr
+        return mgr
+
+    def _browser_service_for_takeover(self) -> Any:
+        """The ONE browser service for takeover tabs (cached)."""
+        svc = getattr(self, "_takeover_browser_service", None)
+        if svc is None:
+            from ...browser.service import BrowserService
+
+            svc = BrowserService(
+                data_dir=self.settings.resolve("data/browser-service"))
+            self._takeover_browser_service = svc
+        return svc
+
+    def _control_browser_takeover(self, tail: str, *, chat_key: str = "",
+                                  message: Any = None) -> str:
+        """Owner-only: ``/browser takeover [url]``.
+
+        No URL → status of active takeover sessions (metadata only —
+        never the token-bearing link). With a URL → open a live tab on
+        it and run the challenge ladder: self-solve first, takeover
+        LAST. On a wall the escalation (attempt receipt + link) is sent
+        to the owner's Telegram AND returned here. The verb never
+        blocks waiting for the owner — the grant stays open until the
+        owner taps Done (then the wall is verified before resume) or
+        it expires.
+        """
+        if message is None or not self._is_operator(message):
+            return "takeover is owner-only — run it from the owner's chat."
+        mgr = self._takeover_manager()
+        rest = (tail or "").strip()
+        if not rest:
+            grants = mgr.active_grants()
+            if not grants:
+                return "no active takeover sessions."
+            lines = ["active takeover sessions:"]
+            for g in grants:
+                exp = f"expires in {g['expires_in_s']}s"
+                warn = (" — ⚠️ host-network-only link "
+                        "(set NM_TAKEOVER_BASE_URL for a public link)"
+                        if g["needs_public_base"] else "")
+                lines.append(
+                    f"  {g['session_id']} — {g['task_label']} "
+                    f"({g['signal_kind']}, {exp}){warn}")
+            return "\n".join(lines)
+        url = rest.split()[0]
+        if not url.startswith(("http://", "https://")):
+            return "give a full URL starting with http:// or https://"
+        try:
+            service = self._browser_service_for_takeover()
+            tab = service.open_rendered_tab("takeover", url)
+        except Exception as exc:  # noqa: BLE001 - playwright/config errors
+            return f"takeover failed: could not open a live tab: {exc}"[:500]
+        try:
+            from ...browser.challenge import ChallengeSolver
+            from ...browser.challenge_memory import ChallengeMemory
+            from ...browser.service import RenderedTabTakeoverAdapter
+
+            memory = ChallengeMemory(
+                self.settings.resolve("data/takeover")
+                / "challenge-memory.sqlite3")
+            solver = ChallengeSolver(
+                takeover_manager=mgr, notifier=self._takeover_notifier(),
+                memory=memory)
+            outcome = solver.solve(
+                tab=RenderedTabTakeoverAdapter(tab),
+                resume_state={"step": 0, "url": url},
+                owner_chat=chat_key or "",
+                task_label=f"takeover {url}",
+                session_id=f"takeover-{int(time.time() * 1000)}")
+        except Exception as exc:  # noqa: BLE001 - solver errors are data
+            return f"takeover failed: {exc}"[:500]
+        if outcome.cleared:
+            if outcome.via == "no_challenge":
+                return f"no wall on {url} — page is clean."
+            return f"wall cleared via {outcome.via} — no takeover needed."
+        if outcome.via == "takeover_required":
+            return ("wall persists and takeover is unavailable "
+                    "(no takeover manager).")
+        if outcome.takeover_url:
+            lines = [f"takeover open: {outcome.takeover_url}",
+                     "I also sent this link to your Telegram — solve the "
+                     "challenge in the live view, then tap "
+                     "\"Done, take over\"."]
+            grant = outcome.takeover_grant
+            if grant is not None and getattr(
+                    grant, "needs_public_base", False):
+                lines.append("⚠️ No public takeover URL is configured "
+                             "(NM_TAKEOVER_BASE_URL) — this link works on "
+                             "the host network only until a tunnel / "
+                             "port-forward is set up.")
+            return "\n".join(lines)
+        return f"takeover failed: {outcome.message}"[:500]
 
     # ── paper trading: /paper ───────────────────────────────────────────
     def _control_paper(self, tail: str, *, chat_key: str = "") -> str:

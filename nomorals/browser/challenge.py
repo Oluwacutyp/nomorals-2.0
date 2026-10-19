@@ -176,6 +176,9 @@ def format_escalation_message(*, signal_kind: str, url: str,
     lines.append("")
     lines.append("Your turn — tap to take over this exact browser session:")
     lines.append(takeover_url)
+    lines.append("Tap the link to open it right in Telegram, or copy it and "
+                 "open it in Chrome if the view feels cramped — same live "
+                 "session either way.")
     lines.append("Solve the challenge in the live view, then tap "
                  "\"Done, take over\" — I'll check the wall is gone and "
                  "pick up where I left off. (Or just close it — I'll "
@@ -287,6 +290,14 @@ class ChallengeSolver:
         message = format_escalation_message(
             signal_kind=signal.kind, url=page_url, attempts=attempts,
             takeover_url=grant.url, task_label=task_label or "browsing")
+        if grant.needs_public_base:
+            # The link is host-network-only until the operator sets a
+            # public base URL — say so in the escalation itself instead
+            # of sending a link that silently fails on the owner's phone.
+            message += (
+                "\n\n⚠️ No public takeover URL is configured "
+                "(NM_TAKEOVER_BASE_URL) — this link works on the host "
+                "network only until a tunnel / port-forward is set up.")
         if self._notifier is not None:
             try:
                 self._notifier(message, grant.url)

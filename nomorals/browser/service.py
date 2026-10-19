@@ -2876,6 +2876,55 @@ class SessionHandle:
 # ── service ──────────────────────────────────────────────────────────────────
 
 
+class RenderedTabTakeoverAdapter:
+    """Bridge a :class:`RenderedTab` to the takeover tab protocol.
+
+    RenderedTab's shape differs in two places: ``html()`` returns a
+    dict (``{"html": ...}``) where the protocol wants ``str``, and the
+    frame source is ``screenshot_bytes()`` where the protocol wants
+    ``screenshot_png()``. Everything else (click/type/key/scroll/reload)
+    delegates directly — the owner drives the same live Playwright page.
+    """
+
+    def __init__(self, tab: Any) -> None:
+        self._tab = tab
+
+    @property
+    def url(self) -> str:
+        return str(getattr(self._tab, "url", "") or "")
+
+    @property
+    def title(self) -> str:
+        return str(getattr(self._tab, "title", "") or "")
+
+    def html(self) -> str:
+        raw = self._tab.html()
+        if isinstance(raw, dict):
+            return str(raw.get("html") or "")
+        return str(raw or "")
+
+    def reload(self) -> None:
+        self._tab.reload()
+
+    def screenshot_png(self) -> bytes:
+        shot = getattr(self._tab, "screenshot_png", None)
+        if callable(shot):
+            return bytes(shot())
+        return bytes(self._tab.screenshot_bytes())
+
+    def click_norm(self, x: float, y: float) -> None:
+        self._tab.click_norm(x, y)
+
+    def type_text(self, text: str) -> None:
+        self._tab.type_text(text)
+
+    def press_key(self, key: str) -> None:
+        self._tab.press_key(key)
+
+    def scroll_norm(self, dx: float, dy: float) -> None:
+        self._tab.scroll_norm(dx, dy)
+
+
 class BrowserService:
     """Multi-session, multi-tab browsing built on ``tools.browser``.
 

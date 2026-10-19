@@ -397,6 +397,37 @@ class TakeoverManager:
     def wait_timeout_s(self) -> int:
         return self._config.wait_timeout_s
 
+    @property
+    def data_dir(self) -> Path | None:
+        """Where grants audit + handoff state live (None = in-memory)."""
+        return self._data_dir
+
+    def active_grants(self) -> list[dict[str, Any]]:
+        """Active (not closed, not expired) grants, for status displays.
+
+        Never includes the grant URL — it carries the one-time token.
+        """
+        now = self._clock()
+        out: list[dict[str, Any]] = []
+        with self._lock:
+            for grant in self._grants.values():
+                if grant.closed or grant.done or now >= grant.expires_at:
+                    continue
+                out.append({
+                    "session_id": grant.session_id,
+                    "owner_chat": grant.owner_chat,
+                    "task_label": grant.task_label,
+                    "signal_kind": grant.signal_kind,
+                    "created_at": grant.created_at,
+                    "expires_at": grant.expires_at,
+                    "expires_in_s": max(0, int(grant.expires_at - now)),
+                    "done": grant.done,
+                    "closed": grant.closed,
+                    "needs_public_base": grant.needs_public_base,
+                    "token_hash_prefix": grant.token_hash[:8],
+                })
+        return out
+
     # -- grants -----------------------------------------------------------------
     def request_takeover(self, *, session_id: str, url: str,
                          task_label: str, signal_kind: str,
