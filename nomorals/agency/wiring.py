@@ -29,14 +29,50 @@ AGENCY_SHIFT_JOB = "agency-shift"
 AGENCY_SHIFT_TOOL = "__agency_shift__"
 AGENCY_SHIFT_SPEC = "*/30 * * * *"
 
+#: Generous wall-clock cap for the shift job. The scheduler's default
+#: ``wall_seconds`` (300s) is a blunt timeout with thread abandonment:
+#: a shift legitimately running longer was marked failed, paged the
+#: owner falsely, and lost its result. 1800s is the shift's own
+#: interval — a job that cannot finish inside its own slot is genuinely
+#: wedged. (Heartbeat decision: generous last-resort hang-guards only.)
+SHIFT_RUN_TIMEOUT_S = 1800.0
+
+
+def _shift_spec_matches(stored: Any, spec: str) -> bool:
+    """True when a stored job spec is the requested one.
+
+    ``Scheduler.list_jobs()`` formats cron specs with a ``"cron "``
+    prefix (``"cron */30 * * * *"``) while callers pass the bare
+    expression — both forms must compare, or the idempotency check can
+    never succeed and every boot re-registers the job (ID churn,
+    orphaned run history, lost retry state).
+    """
+    s = str(stored or "").strip()
+    want = (spec or "").strip()
+    if s == want:
+        return True
+    if s.startswith("cron "):
+        s = s[5:].strip()
+    return s == want
+
+
+def _job_run_timeout(job: Any) -> float:
+    raw = job.get("run_timeout_s", 0.0) if isinstance(job, dict) \
+        else getattr(job, "run_timeout_s", 0.0)
+    try:
+        return float(raw or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
 
 def ensure_agency_shift_job(scheduler: Any, *,
                             spec: str = AGENCY_SHIFT_SPEC) -> Any:
     """Register the agency-shift job. Idempotent by job name.
 
-    A stale job with a different interval is replaced. Best-effort:
-    never raises (a missing scheduler just means no scheduled
-    shifts — the runtime can still call ``work_shift`` directly).
+    A stale job (different interval OR different run cap) is replaced.
+    Best-effort: never raises (a missing scheduler just means no
+    scheduled shifts — the runtime can still call ``work_shift``
+    directly).
     """
     if scheduler is None:
         return None
@@ -47,7 +83,8 @@ def ensure_agency_shift_job(scheduler: Any, *,
             if name == AGENCY_SHIFT_JOB:
                 job_spec = job.get("spec", "") if isinstance(job, dict) \
                     else getattr(job, "spec", "")
-                if job_spec == spec:
+                if (_shift_spec_matches(job_spec, spec)
+                        and _job_run_timeout(job) == SHIFT_RUN_TIMEOUT_S):
                     return job
                 job_id = job.get("id", "") if isinstance(job, dict) \
                     else getattr(job, "id", "")
@@ -57,7 +94,8 @@ def ensure_agency_shift_job(scheduler: Any, *,
                     pass
                 break
         return scheduler.add(AGENCY_SHIFT_JOB, spec, "tool",
-                             {"tool": AGENCY_SHIFT_TOOL})
+                             {"tool": AGENCY_SHIFT_TOOL},
+                             run_timeout_s=SHIFT_RUN_TIMEOUT_S)
     except Exception:  # noqa: BLE001 - scheduling is best-effort
         return None
 

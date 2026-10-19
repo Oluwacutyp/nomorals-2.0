@@ -1342,6 +1342,12 @@ AGENT_MODES_TICK_JOB = "agent modes tick"
 AGENT_MODES_TICK_TOOL = "__agent_modes_tick__"
 AGENT_MODES_TICK_SPEC = "every 30m"
 
+#: Generous wall-clock cap for the tick job — same reasoning as the
+#: agency shift (see agency.wiring.SHIFT_RUN_TIMEOUT_S): the
+#: scheduler's 300s default is a blunt timeout with thread
+#: abandonment, wrong for the autonomy core.
+TICK_RUN_TIMEOUT_S = 1800.0
+
 _INTERVAL_UNITS = {
     "s": 1, "sec": 1, "secs": 1, "second": 1, "seconds": 1,
     "m": 60, "min": 60, "mins": 60, "minute": 60, "minutes": 60,
@@ -1398,7 +1404,15 @@ def ensure_agent_modes_tick_job(scheduler: Any, *,
             if name == AGENT_MODES_TICK_JOB:
                 job_spec = job.get("spec", "") if isinstance(job, dict) \
                     else getattr(job, "spec", "")
-                if _spec_matches(job_spec, spec):
+                timeout = job.get("run_timeout_s", 0.0) \
+                    if isinstance(job, dict) \
+                    else getattr(job, "run_timeout_s", 0.0)
+                try:
+                    timeout = float(timeout or 0.0)
+                except (TypeError, ValueError):
+                    timeout = 0.0
+                if (_spec_matches(job_spec, spec)
+                        and timeout == TICK_RUN_TIMEOUT_S):
                     return job
                 job_id = job.get("id", "") if isinstance(job, dict) \
                     else getattr(job, "id", "")
@@ -1408,6 +1422,7 @@ def ensure_agent_modes_tick_job(scheduler: Any, *,
                     pass
                 break
         return scheduler.add(AGENT_MODES_TICK_JOB, spec, "tool",
-                             {"tool": AGENT_MODES_TICK_TOOL, "args": {}})
+                             {"tool": AGENT_MODES_TICK_TOOL, "args": {}},
+                             run_timeout_s=TICK_RUN_TIMEOUT_S)
     except Exception:  # noqa: BLE001 - scheduling is best-effort
         return None

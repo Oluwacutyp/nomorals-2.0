@@ -281,10 +281,11 @@ class FakeScheduler:
     def list_jobs(self):
         return list(self.jobs)
 
-    def add(self, name, spec, payload_kind, payload):
+    def add(self, name, spec, payload_kind, payload, **kw):
         self._n += 1
         job = {"id": f"j{self._n}", "name": name, "spec": spec,
-               "payload_kind": payload_kind, "payload": payload}
+               "payload_kind": payload_kind, "payload": payload,
+               "run_timeout_s": float(kw.get("run_timeout_s", 0.0))}
         self.jobs.append(job)
         return job
 
