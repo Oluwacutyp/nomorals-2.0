@@ -1,4 +1,4 @@
-"""Tests for multi-slot briefings (morning/afternoon/evening)."""
+"""Tests for multi-slot briefings (morning/afternoon/evening/midnight)."""
 import json
 import os
 import sys
@@ -24,7 +24,8 @@ class FakeContext:
 
 
 def test_slots_defined():
-    assert set(mp.BRIEFING_SLOTS) == {"morning", "afternoon", "evening"}
+    assert set(mp.BRIEFING_SLOTS) == {"morning", "afternoon", "evening",
+                                       "midnight"}
     for slot, spec in mp.BRIEFING_SLOTS.items():
         assert spec["job_name"]
         assert spec["default_time"]
@@ -36,6 +37,7 @@ def test_slot_prefs_defaults():
     assert mp.slot_time(ctx, "morning") == "23:00"
     assert mp.slot_time(ctx, "afternoon") == "13:00"
     assert mp.slot_time(ctx, "evening") == "19:00"
+    assert mp.slot_time(ctx, "midnight") == "00:00"
     assert mp.slot_enabled(ctx, "afternoon") is True
     assert mp.slot_voice(ctx, "morning") is True
     assert mp.slot_voice(ctx, "afternoon") is False
@@ -70,11 +72,17 @@ def test_seen_store_no_repeats():
 
 def test_unknown_slot_rejected():
     ctx = FakeContext()
-    r = mp.run_slot(ctx, "midnight")
+    r = mp.run_slot(ctx, "dawn")
     assert r["ok"] is False
     assert "unknown slot" in r["error"]
-    r = mp.ensure_slot_job(ctx, "midnight")
+    r = mp.ensure_slot_job(ctx, "dawn")
     assert "error" in r
+
+
+def test_midnight_slot_accepted():
+    # midnight is a real fourth slot now, not an unknown one
+    assert "midnight" in mp.BRIEFING_SLOTS
+    assert mp.slot_time(FakeContext(), "midnight") == "00:00"
 
 
 def test_disabled_slot_removes_job():

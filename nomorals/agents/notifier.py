@@ -487,9 +487,12 @@ class Notifier:
         outcome = DeliveryOutcome()
         if self.gateway is None:
             return outcome
-        from .render import banner, truncate
+        from .render import banner
+        # NO length cut here: the gateway chunks long messages losslessly
+        # (paragraph → sentence → word boundary, labelled (i/n)). Cutting
+        # at 3900 used to slice briefings mid-sentence and silently drop
+        # the rest — the "briefings always get cut off" bug.
         text = banner(title, "🔔") + (f"\n{body}" if body else "")
-        text = truncate(text, 3900)
         partner = getattr(self.settings, "partner", None) if self.settings else None
         raw = getattr(partner, "owner_chats", "") or ""
         status: dict[str, Any] = {}

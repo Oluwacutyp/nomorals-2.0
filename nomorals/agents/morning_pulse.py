@@ -390,6 +390,14 @@ def run_pulse(context: Any) -> dict[str, Any]:
     audio_ok = _deliver_audio(context, audio_path) if audio_path else False
     stages.append("deliver")
 
+    # Mark the radar stories seen so later slots don't repeat them:
+    # afternoon/evening/midnight cover what's new SINCE the morning.
+    if text_ok and news_items:
+        _mark_seen(context,
+                    [str(it.get("url") or it.get("title", ""))
+                     for it in news_items if it.get("url") or it.get("title")],
+                    "morning")
+
     elapsed = round(time.time() - started, 1)
     delivered = text_ok or audio_ok
     _log.info("morning-pulse done in %ss: stages=%s text=%s audio=%s",
@@ -542,12 +550,16 @@ def _synthesize(context: Any, script: str) -> str:
 
 
 def _deliver_text(context: Any, text: str) -> bool:
-    """Deliver the text pulse via Notifier.  Never raises."""
+    """Deliver the text pulse via Notifier.  Never raises.
+
+    No length cut: the gateway chunks long messages losslessly, so the
+    full briefing text goes out (paginated), never sliced mid-sentence.
+    """
     from .notifier import Notifier
     title = "🌙 Morning pulse"
     try:
         notifier = Notifier(context)
-        res = notifier.publish("pulse", title, text[:3500], force=True)
+        res = notifier.publish("pulse", title, text, force=True)
         delivered = bool(res.get("delivered"))
         if not delivered:
             _log.warning(
@@ -649,7 +661,7 @@ def _delivery_diagnosis(context: Any) -> str:
 # ── tool registration ──────────────────────────────────────────────────
 
 def register(registry: Any) -> None:
-    """Register the ``pulse`` tool (briefing slots: morning/afternoon/evening)."""
+    """Register the ``pulse`` tool (briefing slots: morning/afternoon/evening/midnight)."""
     from ..core.policy import Capability
 
     context = registry.context
@@ -658,15 +670,16 @@ def register(registry: Any) -> None:
         "pulse",
         description=(
             "Daily briefings: morning (news → briefing → voice), afternoon "
-            "(markets + fresh news), evening (day wrap + tomorrow). "
+            "(markets + fresh news), evening (day wrap + tomorrow), "
+            "midnight (overnight fresh news + still-open items). "
             "action=run (deliver now) | status (schedules + last runs) | "
             "config (show times) | catchup (run undelivered slots). "
-            "slot=morning|afternoon|evening (default morning)."
+            "slot=morning|afternoon|evening|midnight (default morning)."
         ),
         capability=Capability.DB_READ,
         parameters={
             "action": "str — run|status|config|catchup",
-            "slot": "str — morning|afternoon|evening (default morning)",
+            "slot": "str — morning|afternoon|evening|midnight (default morning)",
         },
     )
     def pulse(*, action: str = "", slot: str = "morning") -> dict[str, Any]:
@@ -726,7 +739,7 @@ def register(registry: Any) -> None:
 # ═══════════════════════════════════════════════════════════════════════
 
 #: Slot definitions.  ``voice`` controls whether the slot synthesizes
-#: audio (morning does; afternoon/evening are text-first by default).
+#: audio (morning does; afternoon/evening/midnight are text-first).
 BRIEFING_SLOTS: dict[str, dict[str, Any]] = {
     "morning": {
         "job_name": PULSE_JOB_NAME,          # "morning-pulse" (existing)
@@ -748,6 +761,13 @@ BRIEFING_SLOTS: dict[str, dict[str, Any]] = {
         "title": "🌆 Evening wrap",
         "voice": False,
         "marker": "pulse_last_run_evening.json",
+    },
+    "midnight": {
+        "job_name": "midnight-pulse",
+        "default_time": "00:00",
+        "title": "🌃 Midnight briefing",
+        "voice": False,
+        "marker": "pulse_last_run_midnight.json",
     },
 }
 
@@ -885,9 +905,15 @@ def _seen_path(context: Any) -> Path | None:
 
 
 def _read_seen(context: Any) -> dict[str, Any]:
-    """{day: {item_key: slot}} — item keys already delivered today."""
+    """{day: {item_key: slot}} — item keys already delivered.
+
+    Keeps today AND yesterday: the midnight slot fires at 00:00, the
+    first minutes of a new day, and must still dedupe against the
+    evening briefing's stories. Pruning to today only made midnight
+    repeat the evening wrap.
+    """
     try:
-        from datetime import datetime
+        from datetime import datetime, timedelta
         from ..core.tz import safe_zoneinfo
         p = _seen_path(context)
         if p is None or not p.is_file():
@@ -896,9 +922,12 @@ def _read_seen(context: Any) -> dict[str, Any]:
         if not isinstance(data, dict):
             return {}
         tz = safe_zoneinfo(PULSE_TIMEZONE)
-        today = datetime.now(tz).strftime("%Y-%m-%d")
-        # prune to today only
-        return {today: data.get(today, {})}
+        now = datetime.now(tz)
+        today = now.strftime("%Y-%m-%d")
+        yesterday = (now - timedelta(days=1)).strftime("%Y-%m-%d")
+        # prune to today + yesterday only
+        return {d: data.get(d, {}) for d in (today, yesterday)
+                if isinstance(data.get(d), dict)}
     except Exception:  # noqa: BLE001
         return {}
 
@@ -907,13 +936,15 @@ def _mark_seen(context: Any, keys: list[str], slot: str) -> None:
     if not keys:
         return
     try:
-        from datetime import datetime
+        from datetime import datetime, timedelta
         from ..core.tz import safe_zoneinfo
         p = _seen_path(context)
         if p is None:
             return
         tz = safe_zoneinfo(PULSE_TIMEZONE)
-        today = datetime.now(tz).strftime("%Y-%m-%d")
+        now = datetime.now(tz)
+        today = now.strftime("%Y-%m-%d")
+        yesterday = (now - timedelta(days=1)).strftime("%Y-%m-%d")
         data: dict[str, Any] = {}
         if p.is_file():
             try:
@@ -927,9 +958,13 @@ def _mark_seen(context: Any, keys: list[str], slot: str) -> None:
             day = {}
         for k in keys:
             day[str(k)] = slot
-        data = {today: day}  # drop older days
+        # keep today + yesterday (midnight dedupes against the evening);
+        # drop anything older
+        kept: dict[str, Any] = {today: day}
+        if isinstance(data.get(yesterday), dict):
+            kept[yesterday] = data[yesterday]
         p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(json.dumps(data), encoding="utf-8")
+        p.write_text(json.dumps(kept), encoding="utf-8")
     except Exception:  # noqa: BLE001
         _log.debug("pulse: seen-store write failed", exc_info=True)
 
@@ -986,8 +1021,13 @@ def _afternoon_markets(context: Any) -> tuple[str, list[str]]:
     return "\n".join(lines), keys
 
 
-def _fresh_news(context: Any, limit: int = 6) -> tuple[str, list[str]]:
-    """News not yet delivered today.  Never raises."""
+def _fresh_news(context: Any, limit: int | None = None) -> tuple[str, list[str]]:
+    """News not yet delivered.  Never raises.
+
+    Returns ALL unseen items (``limit=None``): capping the fresh list
+    silently dropped stories the owner never saw. Delivery paginates,
+    so a long fresh list is fine.
+    """
     try:
         from .news import NewsAgent
         agent = NewsAgent(context)
@@ -996,9 +1036,11 @@ def _fresh_news(context: Any, limit: int = 6) -> tuple[str, list[str]]:
         fresh = _filter_unseen(
             context, items,
             lambda it: it.get("url") or it.get("title", ""))
+        if limit is not None:
+            fresh = fresh[:limit]
         lines = []
         keys = []
-        for it in fresh[:limit]:
+        for it in fresh:
             title = str(it.get("title", "")).strip()
             if title:
                 lines.append(f"• {title}")
@@ -1147,15 +1189,42 @@ def _compose_evening(context: Any) -> tuple[str, list[str]]:
     return "\n".join(parts).strip(), []
 
 
+# ── midnight content: overnight fresh news + still open ─────────────────
+
+def _compose_midnight(context: Any) -> tuple[str, list[str]]:
+    """Midnight briefing text + delivered item keys.
+
+    Only what's new SINCE the evening wrap (the seen-store filters
+    anything an earlier slot already delivered, including across the
+    midnight day boundary). Plus anything still open overnight.
+    """
+    keys: list[str] = []
+    parts = ["🌃 *Midnight briefing* — overnight, since the evening wrap.\n"]
+    news, nkeys = _fresh_news(context)
+    keys.extend(nkeys)
+    if news:
+        parts.append("*Fresh headlines*\n" + news + "\n")
+    pend = _pending_items(context)
+    if pend:
+        parts.append("*Still open*\n" + pend + "\n")
+    if len(parts) == 1:
+        parts.append("Quiet night — nothing new since the evening wrap.")
+    return "\n".join(parts).strip(), keys
+
+
 # ── generalized slot runner ──────────────────────────────────────────
 
 def _deliver_slot_text(context: Any, slot: str, text: str) -> bool:
-    """Deliver a slot's text via Notifier.  Never raises."""
+    """Deliver a slot's text via Notifier.  Never raises.
+
+    No length cut: the gateway chunks long messages losslessly, so the
+    full briefing text goes out (paginated), never sliced mid-sentence.
+    """
     spec = BRIEFING_SLOTS.get(slot, BRIEFING_SLOTS["morning"])
     from .notifier import Notifier
     try:
         notifier = Notifier(context)
-        res = notifier.publish("pulse", spec["title"], text[:3500],
+        res = notifier.publish("pulse", spec["title"], text,
                                force=True)
         delivered = bool(res.get("delivered"))
         if not delivered:
@@ -1187,6 +1256,8 @@ def run_slot(context: Any, slot: str = "morning") -> dict[str, Any]:
     stages: list[str] = []
     if slot == "afternoon":
         text, keys = _compose_afternoon(context)
+    elif slot == "midnight":
+        text, keys = _compose_midnight(context)
     else:
         text, keys = _compose_evening(context)
     stages.append("compose")

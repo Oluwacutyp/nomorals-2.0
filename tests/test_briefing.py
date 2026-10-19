@@ -97,7 +97,10 @@ class LengthCapTests(unittest.TestCase):
     def setUp(self):
         self.ctx, self.tmp = make_ctx(self)
 
-    def test_200_news_items_capped_with_note(self):
+    def test_200_news_items_no_sections_dropped(self):
+        # The old 600-word cap dropped whole sections to fit and pointed
+        # at a "full digest" that was the same capped briefing. Long
+        # briefings now paginate at delivery instead of cutting content.
         from nomorals.core.ids import new_id
         for i in range(200):
             long_title = f"headline number {i} " + "word " * 80
@@ -107,9 +110,8 @@ class LengthCapTests(unittest.TestCase):
                 (new_id(), f"src-{i % 5}", long_title, f"https://x/{i}",
                  "summary " * 40, 0, time.time()))
         b = mb.BriefingComposer().compose(self.ctx, "2026-10-01")
-        self.assertLessEqual(b.word_count(), mb.MAX_WORDS)
-        self.assertIn("+", b.truncated_note)
-        self.assertIn("more", b.truncated_note)
+        self.assertEqual(b.truncated_note, "")
+        self.assertTrue(any(s.name == "news" for s in b.sections))
 
 
 class RunDeliverTests(unittest.TestCase):

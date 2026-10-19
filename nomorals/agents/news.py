@@ -263,6 +263,34 @@ def _strip(markup: str, limit: int = 500) -> str:
     return text[:limit]
 
 
+def _short_summary(summary: str, limit: int = 200) -> str:
+    """Shorten ``summary`` to ``limit`` chars without cutting mid-sentence.
+
+    Keeps whole sentences that fit; if the first sentence alone exceeds
+    the limit, falls back to the last word boundary. No mid-word cuts,
+    no mid-sentence cuts when avoidable.
+    """
+    text = (summary or "").strip()
+    if len(text) <= limit:
+        return text
+    # whole sentences that fit entirely
+    sentences = re.split(r"(?<=[.!?…])\s+", text)
+    kept = ""
+    for sent in sentences:
+        candidate = f"{kept} {sent}".strip() if kept else sent
+        if len(candidate) <= limit:
+            kept = candidate
+        else:
+            break
+    if kept:
+        return kept
+    # single over-long sentence: cut at the last space before the limit
+    cut = text.rfind(" ", 0, limit)
+    if cut <= 0:
+        cut = limit
+    return text[:cut].rstrip() + "…"
+
+
 def parse_feed(markup: str) -> list[dict[str, str]]:
     """Parse RSS/Atom-ish markup into [{title, url, summary, source_ts}]."""
     items: list[dict[str, str]] = []
@@ -433,9 +461,12 @@ class NewsAgent:
             by_source.setdefault(it["source"], []).append(it)
         for source, items in by_source.items():
             lines.append(f"■ {source}")
-            for it in items[:4]:
+            # every selected item is shown — the old [:4]-per-source slice
+            # silently dropped stories that made it into `top`.
+            for it in items:
                 summary = summaries.get(it["url"]) or it.get("summary") or ""
-                lines.append(f"  • {it['title']}" + (f" — {summary[:200]}" if summary else ""))
+                lines.append(f"  • {it['title']}" + (
+                    f" — {_short_summary(summary)}" if summary else ""))
         digest = "\n".join(lines)
         result = {
             "ok": bool(top),
@@ -450,7 +481,8 @@ class NewsAgent:
             "per_source": per_source,
         }
         if self.notifier is not None and top:
-            self.notifier.publish("news", f"news digest — {len(top)} new items", digest[:3500])
+            # full digest — the gateway chunks it; no [:3500] cut.
+            self.notifier.publish("news", f"news digest — {len(top)} new items", digest)
         return result
 
     def recent(self, limit: int = 15) -> list[dict[str, Any]]:

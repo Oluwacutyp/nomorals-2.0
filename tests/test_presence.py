@@ -327,14 +327,14 @@ class RuntimePresenceE2E(unittest.TestCase):
             }
         )
         self.context = build_context(settings, with_executor=False, with_tools=False)
-        # Pulse catch-up seeding: mark all three briefing slots delivered
+        # Pulse catch-up seeding: mark all four briefing slots delivered
         # today, or runtime.start() fires catch-up briefings (fresh DB,
         # no deliveries) into the adapter and every "first send is the
         # reply" wait becomes a race. Same pattern as the briefings-table
         # seed below.
         _ws = Path(self.context.settings.workspace_dir)
         for _marker in ("pulse_last_run.json", "pulse_last_run_afternoon.json",
-                        "pulse_last_run_evening.json"):
+                        "pulse_last_run_evening.json", "pulse_last_run_midnight.json"):
             (_ws / _marker).write_text(
                 json.dumps({"ts": time.time(), "delivered_text": True}),
                 encoding="utf-8")

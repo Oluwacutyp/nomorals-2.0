@@ -1765,8 +1765,9 @@ class PartnerRuntime(
                     _log.warning("briefing job not registered: %s", exc)
                 # Briefing slots — morning pulse (news → briefing → voice,
                 # daily 23:00 America/Denver = 06:00 WAT) plus afternoon
-                # (markets + fresh news, 13:00) and evening (day wrap +
-                # tomorrow, 19:00).  Idempotent by name; catch-up covers
+                # (markets + fresh news, 13:00), evening (day wrap +
+                # tomorrow, 19:00) and midnight (overnight fresh news,
+                # 00:00).  Idempotent by name; catch-up covers
                 # slots whose time passed without delivery.
                 try:
                     from ..morning_pulse import (
@@ -3644,6 +3645,8 @@ class PartnerRuntime(
                 player=self._game_player_for_key(chat_key))
         if kind == "news":
             return self._control_news(command.tail or arg)
+        if kind == "pulse":
+            return self._control_pulse(command.tail or arg)
         if kind == "code":
             return self._control_code(command.tail, chat_key=chat_key)
         if kind == "checkpoint":

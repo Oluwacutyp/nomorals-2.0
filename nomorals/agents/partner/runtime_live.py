@@ -68,7 +68,7 @@ class RuntimeLiveMixin:
             for row in rows:
                 lines.append(f"  [{row['source']}] {row['title'][:70]}")
             return "\n".join(lines)
-        if verb == "run":
+        if verb == "run" or verb == "briefing":
             cap = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else None
             report = agent.run(cap)
             if not report["ok"]:
@@ -79,9 +79,107 @@ class RuntimeLiveMixin:
             src_line = (f"sources: {len(ok_srcs)}/{tried} feeds answered "
                         f"({', '.join(ok_srcs[:12])}"
                         f"{'…' if len(ok_srcs) > 12 else ''})")
+            # FULL digest — no [:3000] cut; the gateway chunks it losslessly.
             return (f"news digest — {report['items']} new items (of {report['fresh']} fresh) "
-                    f"— delivered where a channel is live.\n{src_line}\n\n{report['digest'][:3000]}")
-        return "usage: /news [run [n]|status]"
+                    f"— delivered where a channel is live.\n{src_line}\n\n{report['digest']}")
+        return "usage: /news [run [n]|briefing|status]"
+
+    # ── pulse / briefings ──────────────────────────────────────────────
+    def _control_pulse(self, tail: str) -> str:
+        """Briefing schedule + on-demand runs. Never raises.
+
+        /pulse                → status (all four slots)
+/pulse status [slot]   → schedules + last runs
+        /pulse config [slot]  → times / enabled / voice
+        /pulse run [slot|all] → deliver the briefing now
+        /pulse catchup [slot] → run undelivered slots
+        Slots: morning · afternoon · evening · midnight.
+        """
+        try:
+            from ..morning_pulse import (
+                BRIEFING_SLOTS,
+                _read_slot_marker,
+                _slot_prefs,
+                check_slot_catchup,
+                last_pulse_run,
+                run_slot,
+                slot_enabled,
+                slot_time,
+                slot_voice,
+            )
+            parts = (tail or "").split()
+            verb = parts[0].lower() if parts else "status"
+            slot = parts[1].lower() if len(parts) > 1 else "all"
+
+            def _last_run_text(s: str) -> str:
+                try:
+                    m = (last_pulse_run(self.context) if s == "morning"
+                         else _read_slot_marker(self.context, s))
+                    ts = float(m.get("ts") or 0)
+                    if not ts:
+                        return "never"
+                    from datetime import datetime
+                    return datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M")
+                except Exception:  # noqa: BLE001
+                    return "?"
+
+            def _status_line(s: str) -> str:
+                spec = BRIEFING_SLOTS[s]
+                tz = str(_slot_prefs(self.context, s).get("timezone") or "")
+                return (f"• {s} — {slot_time(self.context, s)} {tz}, "
+                        f"{'on' if slot_enabled(self.context, s) else 'off'}, "
+                        f"voice {'on' if slot_voice(self.context, s) else 'off'}, "
+                        f"last run: {_last_run_text(s)} "
+                        f"({spec['title']})")
+
+            if verb == "run":
+                if slot in ("all", ""):
+                    lines = []
+                    for s in BRIEFING_SLOTS:
+                        r = run_slot(self.context, s)
+                        lines.append(
+                            f"• {s}: {'delivered' if r.get('delivered_text') else 'not delivered'}"
+                            + (f" (text+audio)" if r.get("delivered_audio") else ""))
+                    return "briefings run:\n" + "\n".join(lines)
+                if slot not in BRIEFING_SLOTS:
+                    return (f"unknown slot {slot!r} — "
+                            f"slots: {', '.join(BRIEFING_SLOTS)}")
+                r = run_slot(self.context, slot)
+                if r.get("ok"):
+                    return (f"{slot} briefing: "
+                            f"{'delivered' if r.get('delivered_text') else 'not delivered'}"
+                            + (f" (text+audio)" if r.get("delivered_audio") else "")
+                            + f" — {r.get('elapsed_s', 0)}s")
+                return f"{slot} briefing failed: {r.get('error', '?')}"
+            if verb == "status":
+                if slot in BRIEFING_SLOTS:
+                    return _status_line(slot)
+                if slot in ("all", ""):
+                    return ("briefing schedule:\n" + "\n".join(
+                        _status_line(s) for s in BRIEFING_SLOTS))
+                return (f"unknown slot {slot!r} — "
+                        f"slots: {', '.join(BRIEFING_SLOTS)}")
+            if verb == "config":
+                if slot in BRIEFING_SLOTS:
+                    return _status_line(slot)
+                if slot in ("all", ""):
+                    return ("briefing config:\n" + "\n".join(
+                        _status_line(s) for s in BRIEFING_SLOTS))
+                return (f"unknown slot {slot!r} — "
+                        f"slots: {', '.join(BRIEFING_SLOTS)}")
+            if verb == "catchup":
+                if slot in BRIEFING_SLOTS:
+                    r = check_slot_catchup(self.context, slot)
+                    return f"{slot} catch-up: {r}"
+                if slot in ("all", ""):
+                    from ..morning_pulse import check_all_catchup
+                    return f"catch-up: {check_all_catchup(self.context)}"
+                return (f"unknown slot {slot!r} — "
+                        f"slots: {', '.join(BRIEFING_SLOTS)}")
+            return ("usage: /pulse [status|config|run|catchup] "
+                    "[morning|afternoon|evening|midnight|all]")
+        except Exception as exc:  # noqa: BLE001 — command never raises
+            return f"pulse error: {exc}"
 
     # ── always-on research ───────────────────────────────────────────────────
     def _control_research(self, tail: str, chat_key: str = "",

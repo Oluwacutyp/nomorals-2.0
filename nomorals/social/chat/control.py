@@ -342,7 +342,8 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "sudoku": (0, 0), "anagram": (0, 0), "cryptogram": (0, 0),
     # wave 87: the Core Mind — manual override over natural-language routing
     "mind": (0, None),       # /mind [status|clear|<goal>] — the core mind
-    "news": (0, 2),          # /news [run|status]
+    "news": (0, 2),          # /news [run|briefing|status]
+    "pulse": (0, None),       # /pulse [status|config|run|catchup] [slot]
     # /research is ONE command (single registry entry — a duplicate key
     # here would silently discard one meaning): ad-hoc web research on
     # any topic, plus the always-on research loop (status/ideas/approve/
@@ -1733,8 +1734,11 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
              "usage": "/political", "example": "/political",
              "related": "/game list · /game leaderboard political · /game quit"},
     "news": {"what": "fetch and summarize the news feeds.",
-             "usage": "/news [run|status]", "example": "/news run",
-             "related": "/research"},
+             "usage": "/news [run [n]|briefing|status]", "example": "/news run",
+             "related": "/research · /pulse"},
+    "pulse": {"what": "briefings: morning, afternoon, evening, midnight — check the schedule or trigger any briefing on demand. Each briefing covers what's new since the last one; long briefings arrive in full, paginated.",
+             "usage": "/pulse [status|config|run|catchup] [morning|afternoon|evening|midnight|all]", "example": "/pulse run midnight",
+             "related": "/news · /brief"},
     # (no second "research" entry: the single entry above is the web-research page)
     "code": {"what": "the coding bot: drafts code, runs it in the sandbox, fixes until the acceptance command passes; the real file lands in her workspace.",
              "usage": "/code <what to build>", "example": "/code a todo cli in python",
@@ -2348,7 +2352,7 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
 _HELP_GROUPS: list[tuple[str, list[str]]] = [
     ("her day", ["status", "platforms", "proposals", "approve", "deny",
                  "mood", "stage", "model", "providers", "say", "power", "quit",
-                 "mode", "agent", "mind"]),
+                 "mode", "agent", "mind", "pulse"]),
     ("search & research", ["search", "searchdeep", "searchleads",
                            "money",
                            "searchhist", "research", "news", "osint",
@@ -2581,7 +2585,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
       "proposals", "approve", "deny", "start", "stop", "quit",
       "mode", "agent", "chatmode", "style", "doctor", "profile", "mind",
       "spend", "budget", "spending", "mandate", "balances", "goal",
-      "insights", "alert", "cost", "heal", "tour"]),
+      "insights", "alert", "cost", "heal", "tour", "pulse"]),
     ("search & research",
      ["search", "searchdeep", "searchleads", "money", "searchhist", "research",
       "news", "osint", "dns", "scan", "whois", "ports",
@@ -2716,6 +2720,7 @@ LIST_ONELINERS: dict[str, str] = {
     "searchhist": "your recent research runs",
     "research": "web research on any topic + the always-on research loop (status/ideas/approve)",
     "news": "fetch + summarize the feeds",
+    "pulse": "briefings — schedule + run any slot on demand",
     "osint": "read-only public-intel: reports, campaigns, graph",
     "dns": "DNS records, zero dependencies",
     "scan": "port scan (own infra)",

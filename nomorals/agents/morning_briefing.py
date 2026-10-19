@@ -1088,25 +1088,15 @@ class BriefingComposer:
             if len(s.items) > budget:
                 s.items = s.items[:budget]
 
-    # -- length cap: drop lowest-priority sections first ------------------
+    # -- length cap: REMOVED (2026-10-19). The old cap dropped whole
+    # lowest-priority sections to fit MAX_WORDS and pointed at a "full
+    # digest" that was the same capped briefing — a false promise, and
+    # the "briefings always get cut off" bug. A long briefing now
+    # paginates at delivery (the gateway chunks losslessly); it never
+    # shrinks to fit by cutting content. Engagement budgets still size
+    # sections; nothing is dropped for length.
     def _enforce_cap(self, briefing: Briefing) -> str:
-        if briefing.word_count() <= MAX_WORDS:
-            return ""
-        dropped = 0
-        # never drop alerts (priority 10) — drop from the bottom
-        droppable = [s for s in briefing.sections if s.priority > 10]
-        droppable.sort(key=lambda s: -s.priority)
-        while briefing.word_count() > MAX_WORDS and droppable:
-            victim = droppable.pop(0)
-            briefing.sections.remove(victim)
-            dropped += 1
-        if not droppable:  # still over: truncate lines in place
-            for s in briefing.sections:
-                while briefing.word_count() > MAX_WORDS and len(s.lines) > 1:
-                    s.lines.pop()
-                    dropped += 1
-        return (f"+{dropped} more in the full digest — "
-                f"run `nm briefing today` for everything." if dropped else "")
+        return ""
 
 # ── persistence ────────────────────────────────────────────────────────────
 
