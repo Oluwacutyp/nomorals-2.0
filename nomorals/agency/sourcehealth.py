@@ -426,6 +426,61 @@ class SourceHealth:
         self._save(rec)
         return rec
 
+    def note_result(self, spec: SourceSpec, *, ok: bool,
+                    error: str = "", items: int = 0, http: int = 0,
+                    now: float | None = None) -> SourceRecord:
+        """Record one observed fetch outcome WITHOUT re-fetching.
+
+        For callers (like ``NewsAgent.run``) that already fetched the
+        source themselves: reports the outcome into the same circuit
+        breaker ``check_one`` maintains, so run-path failures count
+        toward stand-down/disable and successes re-activate.
+
+        Transitions mirror ``check_one``: a success marks the source
+        ``verified-live`` and resets the consecutive-failure streak; a
+        failure bumps the streak — a lone failure is ``unverifiable``
+        (evidence about this attempt, not a verdict), ``STAND_DOWN_AFTER``
+        consecutive failures stand the source down (excluded from active
+        sets until a success re-activates it), ``DISABLE_AFTER`` disables
+        it. Never raises.
+        """
+        now = time.time() if now is None else now
+        prior = self.record(spec.key)
+        rec = SourceRecord(
+            key=spec.key, category=spec.category, name=spec.name,
+            url=spec.url, kind=spec.kind, notes=spec.notes)
+        if prior is not None:
+            rec.fail_count = prior.fail_count
+            rec.consecutive_failures = prior.consecutive_failures
+            rec.last_ok = prior.last_ok
+            rec.items = prior.items
+            rec.etag = prior.etag
+            rec.last_modified = prior.last_modified
+        rec.last_checked = now
+        rec.http = http
+        if ok:
+            rec.status = "verified-live"
+            rec.consecutive_failures = 0
+            rec.last_ok = now
+            rec.last_error = ""
+            rec.items = items
+        else:
+            rec.consecutive_failures = (prior.consecutive_failures + 1) \
+                if prior else 1
+            rec.fail_count = (prior.fail_count + 1) if prior else 1
+            rec.last_error = (error or "fetch failed")[:300]
+            if rec.consecutive_failures >= DISABLE_AFTER:
+                rec.status = "disabled"
+            elif rec.consecutive_failures >= STAND_DOWN_AFTER:
+                rec.status = "stood-down"
+            else:
+                rec.status = "unverifiable"
+        try:
+            self._save(rec)
+        except Exception:  # noqa: BLE001 - health must never break a run
+            pass
+        return rec
+
     def verify_all(self, specs: list[SourceSpec],
                    fetcher: Callable[..., FetchResult] | None = None, *,
                    now: float | None = None) -> dict[str, Any]:

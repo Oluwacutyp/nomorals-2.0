@@ -53,11 +53,17 @@ class RuntimeLiveMixin:
     def _control_news(self, tail: str) -> str:
         from ..features import feature_enabled
         from ..news import NewsAgent
-        from ..notifier import Notifier
 
         if not feature_enabled(self.context, "news"):
             return "news is off. /features news on"
-        agent = NewsAgent(self.context, notifier=Notifier(self.context, self.gateway))
+        # The command reply IS the delivery — NewsAgent is constructed
+        # with NO notifier on purpose. NewsAgent.run() publishes through
+        # a notifier when given one, and attaching it here pushed the
+        # full digest to every owner channel on EVERY /news run: a
+        # duplicate inside the owner's own chat, and worse, an
+        # owner-channel push triggerable by any non-owner (/news is a
+        # PUBLIC command).
+        agent = NewsAgent(self.context)
         parts = tail.split()
         verb = parts[0].lower() if parts else "run"
         if verb == "status":
@@ -74,14 +80,29 @@ class RuntimeLiveMixin:
             if not report["ok"]:
                 errs = "; ".join(report["errors"][:3])
                 return f"news run got nothing readable ({report['items']} items)" + (f" — {errs}" if errs else "")
+            # Mark what this run delivered in the pulse seen-store, so the
+            # next briefing slot doesn't repeat it as "fresh news"
+            # (its _filter_unseen only knows slot-marked keys).
+            try:
+                from ..morning_pulse import _mark_seen
+                delivered = agent.recent(report["items"])
+                _mark_seen(
+                    self.context,
+                    [str(r.get("url") or r.get("title", ""))
+                     for r in delivered],
+                    "news")
+            except Exception:  # noqa: BLE001 - seen-marking is best-effort
+                pass
             tried = report.get("sources_tried", 0)
             ok_srcs = report.get("sources_ok") or []
             src_line = (f"sources: {len(ok_srcs)}/{tried} feeds answered "
                         f"({', '.join(ok_srcs[:12])}"
                         f"{'…' if len(ok_srcs) > 12 else ''})")
+            stood = report.get("stood_down") or []
+            stood_line = ("\n(standing down unhealthy feeds, skipped this "
+                          f"run: {', '.join(stood)})" if stood else "")
             # FULL digest — no [:3000] cut; the gateway chunks it losslessly.
-            return (f"news digest — {report['items']} new items (of {report['fresh']} fresh) "
-                    f"— delivered where a channel is live.\n{src_line}\n\n{report['digest']}")
+            return (f"news digest — {report['items']} new items (of {report['fresh']} fresh)\n{src_line}{stood_line}\n\n{report['digest']}")
         return "usage: /news [run [n]|briefing|status]"
 
     # ── pulse / briefings ──────────────────────────────────────────────

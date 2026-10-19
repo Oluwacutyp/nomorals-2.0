@@ -41,7 +41,8 @@ from .search.engine import SearchEngine
 
 __all__ = ["DEFAULT_FEEDS", "DEFAULT_CATEGORIES", "FEED_CATEGORIES",
            "FEED_REGIONS", "NEWS_GLOBAL_REGIONS", "feeds_for",
-           "news_covered_regions", "NewsAgent", "parse_feed"]
+           "news_covered_regions", "feed_health_key",
+           "NewsAgent", "parse_feed"]
 
 #: Sane keyless defaults when settings.news.feeds is empty.
 #: Categorized so callers can subscribe by interest (``feeds_for``);
@@ -253,6 +254,34 @@ def news_covered_regions(categories: tuple[str, ...] | None = None) -> set[str]:
             out.add(region)
     return out
 
+
+#: Reverse index feed-URL → registry health key. Built lazily; the key
+#: scheme MUST match ``agency.sources_registry._collect_news``
+#: (``news:{category}:{name}``) so the run path and the scheduled
+#: SourceHealth re-verification read and write the SAME records —
+#: otherwise stood-down feeds would never be re-activated.
+_FEED_URL_TO_HEALTH_KEY: dict[str, str] | None = None
+
+
+def feed_health_key(source: str, url: str) -> str:
+    """Health-record key for one feed, matching the sources registry.
+
+    Custom (settings-configured) feeds not in FEED_CATEGORIES get a
+    URL-based key under ``news:custom:`` — still tracked, just never
+    re-verified by the registry collector.
+    """
+    global _FEED_URL_TO_HEALTH_KEY
+    if _FEED_URL_TO_HEALTH_KEY is None:
+        index: dict[str, str] = {}
+        for cat, feeds in FEED_CATEGORIES.items():
+            for name, feed_url in feeds:
+                index[feed_url] = f"news:{cat}:{name}"
+        _FEED_URL_TO_HEALTH_KEY = index
+    hit = (_FEED_URL_TO_HEALTH_KEY or {}).get(url)
+    if hit:
+        return hit
+    return f"news:custom:{url}"
+
 _TAG = re.compile(r"<[^>]+>")
 
 
@@ -382,6 +411,8 @@ class NewsAgent:
 
     # ── one digest cycle ─────────────────────────────────────────────────────
     def run(self, cap: int | None = None) -> dict[str, Any]:
+        from ..agency.sourcehealth import SourceHealth, SourceSpec, RSS
+
         settings_news = getattr(self.settings, "news", None)
         cap = int(cap or getattr(settings_news, "cap", 12))
         cap = max(1, min(cap, 40))
@@ -389,8 +420,24 @@ class NewsAgent:
         errors: list[str] = []
         per_source: dict[str, int] = {}
         sources_ok: list[str] = []
+        stood_down: list[str] = []
         feeds = self._feeds()
+        # Circuit breaker: a feed the health table has stood down (or
+        # disabled) is skipped, not retried forever — the scheduled
+        # SourceHealth re-verification re-activates it on recovery.
+        # Every attempt here is ALSO recorded, so run-path failures
+        # count toward stand-down even between scheduled checks.
+        health = SourceHealth(self.db) if self.db is not None else None
         for source, url in feeds:
+            spec = SourceSpec(key=feed_health_key(source, url),
+                              category="news", name=source,
+                              url=url, kind=RSS)
+            if health is not None:
+                rec = health.record(spec.key)
+                if rec is not None and rec.status in ("stood-down",
+                                                      "disabled"):
+                    stood_down.append(f"{source} ({rec.status})")
+                    continue
             try:
                 # RSS Accept headers: several feeds (CBS, ESPN, PBS,
                 # Engadget — verified 2026-10-18) reject the generic
@@ -404,7 +451,20 @@ class NewsAgent:
                 items = parse_feed(response.text)
             except Exception as exc:  # noqa: BLE001 - one dead feed must not kill the digest
                 errors.append(f"{source}: {exc}")
+                if health is not None:
+                    health.note_result(spec, ok=False,
+                                       error=str(exc)[:200])
                 continue
+            if not items:
+                # HTTP 200 but zero usable items: unusable as a source —
+                # a health failure (counts toward stand-down), though the
+                # digest itself still degrades gracefully below.
+                if health is not None:
+                    health.note_result(spec, ok=False,
+                                       error="zero usable items", http=200)
+            elif health is not None:
+                health.note_result(spec, ok=True, items=len(items),
+                                   http=200)
             sources_ok.append(source)
             per_source[source] = len(items)
             for it in items:
@@ -475,10 +535,12 @@ class NewsAgent:
             "errors": errors,
             "digest": digest,
             # Visible breadth: the user sees HOW MANY sources were tried
-            # and which ones answered — never a silent 1–2.
+            # and which ones answered — never a silent 1–2. Stood-down
+            # feeds are reported, not silently dropped.
             "sources_tried": len(feeds),
             "sources_ok": sources_ok,
             "per_source": per_source,
+            "stood_down": stood_down,
         }
         if self.notifier is not None and top:
             # full digest — the gateway chunks it; no [:3500] cut.
