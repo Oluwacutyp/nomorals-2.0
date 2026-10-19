@@ -1461,13 +1461,16 @@ class PartnerRuntime(
                 continue
             try:
                 ogg_path = synthesize_voice_reply(self.context, text)
-                # recording indicator matches the note's real length
-                try:
-                    secs = max(1.0, min(60.0, ogg_duration(ogg_path)))
-                    self.gateway.typing(message.chat.platform, message.chat,
-                                        seconds=secs, action="recording")
-                except Exception:  # noqa: BLE001 - cosmetic
-                    pass
+                # recording indicator matches the note's real length —
+                # unless this chat has the typing simulation off (owner
+                # order: userbot owner DM + personal bot send at once).
+                if self._typing_enabled(message.chat):
+                    try:
+                        secs = max(1.0, min(60.0, ogg_duration(ogg_path)))
+                        self.gateway.typing(message.chat.platform, message.chat,
+                                            seconds=secs, action="recording")
+                    except Exception:  # noqa: BLE001 - cosmetic
+                        pass
                 media = MediaRef(path=ogg_path, kind="audio",
                                  name="reply.ogg", mime="audio/ogg",
                                  voice_note=True)
@@ -1513,18 +1516,23 @@ class PartnerRuntime(
         partner_cfg = self.settings.partner
         values = self.brain.mood.current().values
         # Typing indicator on every kind of chat, per part: each chunk of a
-        # split reply gets its own realistic, length-scaled typing run.
+        # split reply gets its own realistic, length-scaled typing run —
+        # except chats where the owner ordered the simulation off
+        # (userbot owner DM + personal bot: send at once, no delay).
         typing_on = (
-            message.chat.kind != ChatKind.GROUP
-            or partner_cfg.typing_in_groups
+            self._typing_enabled(message.chat)
+            and (message.chat.kind != ChatKind.GROUP
+                 or partner_cfg.typing_in_groups)
         )
         _log.info("_send_reply: %d part(s), typing_on=%s, chat=%s", 
                   len(parts), typing_on, message.chat.key)
         try:
             for i, part in enumerate(parts):
-                if i:
+                if i and typing_on:
                     # Between parts: a breath, a re-think, thumbs back on the
                     # keys. The configured delay is a base, not a metronome.
+                    # Same simulation as the indicator — off where the
+                    # owner ordered it off, so parts land back-to-back.
                     delay = partner_cfg.part_delay_seconds * self.brain.presence_rng.uniform(0.6, 2.4)
                     _log.debug("_send_reply: sleeping %.1fs between parts", delay)
                     time.sleep(delay)
@@ -3908,11 +3916,30 @@ class PartnerRuntime(
         plat, _, cid = key.partition(":")
         return ChatRef(platform=plat or "local", chat_id=cid or key)
 
+    def _typing_enabled(self, chat: ChatRef) -> bool:
+        """False where the owner ordered the typing simulation off.
+
+        - Personal bot (``telegram-personal``) is owner-only: no typing
+          delay / fake indicator on any of its chats.
+        - Userbot (``telegram`` MTProto) in the owner's DM: no typing
+          delay / fake indicator. Other userbot chats are unchanged.
+        - Everything else — main gated bot (``telegram-bot``) included,
+          in owner and non-owner chats — keeps the existing behavior.
+        """
+        if chat.platform == "telegram-personal":
+            return False
+        if chat.platform == "telegram" and is_owner_chat(
+                chat, owner_chats=getattr(self, "_owner_chats", ())):
+            return False
+        return True
+
     def _typing_for(self, chat: ChatRef, text: str, *, cap: float = 10.0) -> None:
         """Length-scaled typing before a short outgoing reply (control
         answers, game moves). Skipped in groups when configured off; never
         raises — typing is cosmetic."""
         partner_cfg = self.settings.partner
+        if not self._typing_enabled(chat):
+            return
         if chat.kind == ChatKind.GROUP and not partner_cfg.typing_in_groups:
             return
         try:
@@ -3947,6 +3974,7 @@ class PartnerRuntime(
         partner_cfg = self.settings.partner
         if chat.kind == ChatKind.GROUP and not partner_cfg.typing_in_groups:
             return
+        typing_on = self._typing_enabled(chat)
         tick = max(0.2, partner_cfg.typing_keepalive_seconds)
         deadline = time.time() + partner_cfg.typing_keepalive_budget
         # One "still thinking" line in a DM when the answer is taking a long
@@ -3966,7 +3994,7 @@ class PartnerRuntime(
                 except Exception:  # noqa: BLE001 - the notice must never kill the reply
                     _log.warning("slow-reply notice failed for %s", chat.key)
             started = time.time()
-            if not self.gateway.typing(chat.platform, chat, seconds=tick):
+            if typing_on and not self.gateway.typing(chat.platform, chat, seconds=tick):
                 return  # no adapter / platform down — stop, don't retry blindly
             stop.wait(max(0.05, tick - (time.time() - started)))
 
@@ -3982,8 +4010,9 @@ class PartnerRuntime(
         """
         partner_cfg = self.settings.partner
         typing_on = (
-            getattr(chat, "kind", ChatKind.DM) != ChatKind.GROUP
-            or partner_cfg.typing_in_groups
+            self._typing_enabled(chat)
+            and (getattr(chat, "kind", ChatKind.DM) != ChatKind.GROUP
+                 or partner_cfg.typing_in_groups)
         )
         sent = 0
         chunks = max(1, (len(text) + limit - 1) // limit)
