@@ -16,10 +16,15 @@ Output is THREE deltas:
    work. Judged by improved answers / changed plans / prevented
    mistakes / completed outcomes — not documents read.
 
-Learning loop: callers feed real outcomes back via
+Learning loop: callers SHOULD feed real outcomes back via
 :func:`record_outcome` (e.g. gig never paid → source estimates drop;
-deal hid shipping → scoring changes). Kept in-memory per digest
-call-site; durable calibration lives in ``research`` source-quality.
+deal hid shipping → scoring changes) — but no production caller is
+wired to do so yet, so the loop does not currently close in
+production. The returned adjustment dict is the contract a caller
+applies to its own estimates. The durable calibration that IS wired
+lives in the research organ's per-domain source-quality
+(``research/autonomy.py``: every finding assessment teaches it which
+domains are worth its time, and the pipeline re-ranks by it).
 """
 from __future__ import annotations
 
@@ -58,6 +63,26 @@ class ThreeDeltas:
     action_delta: list[str] | None = None
 
 
+def _is_stale(claim: Claim, now: float) -> bool:
+    """True when the claim's freshness rule has lapsed at ``now``.
+
+    A non-positive ``freshness_s`` means "no rule" → never stale (the
+    old skip-everything behavior). ``now=0.0`` (the default, for
+    callers without a clock) never marks anything stale.
+    """
+    try:
+        freshness = float(claim.freshness_s or 0)
+    except (TypeError, ValueError):
+        return False
+    if freshness <= 0:
+        return False
+    try:
+        age = float(now or 0) - float(claim.observed_at or 0)
+    except (TypeError, ValueError):
+        return False
+    return age > freshness
+
+
 def digest(source: str, claims: list[Claim], *,
            known_claims: list[Claim] | None = None,
            now: float = 0.0,
@@ -71,8 +96,13 @@ def digest(source: str, claims: list[Claim], *,
     for claim in claims:
         if relevance is not None and not relevance(claim):
             continue
-        # Novelty: exact-normalized duplicate of known state → nothing new.
-        if claim.key in known:
+        # Novelty: exact-normalized duplicate of known state → nothing
+        # new — UNLESS the known claim is stale (its freshness_s lapsed
+        # at ``now``). A fact re-observed after its freshness expired is
+        # confirmation, not a duplicate; it re-enters the knowledge
+        # delta so the caller can refresh its stored copy.
+        prior = known.get(claim.key)
+        if prior is not None and not _is_stale(prior, now):
             continue
         # Conflict: explicit contradiction of a known claim.
         if claim.contradicts and _normalize(claim.contradicts) in known:
