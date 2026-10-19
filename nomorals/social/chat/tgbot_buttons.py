@@ -325,6 +325,32 @@ def personal_buttons_for(text: str, last_command: str = "") -> Keyboard | None:
         )
         return [row] if row else None
 
+    # ── /wisdom read — book-style paging ──
+    if kind == "wisdom" and rest.startswith("read"):
+        # The read reply prints its own navigation lines:
+        #   ← prev: /wisdom read <work> [chapter] <page>
+        #   next → /wisdom read <work> [chapter] <page>
+        # Buttons re-run exactly those commands (callback data is the
+        # command without the slash — the adapter re-adds it on tap and
+        # routes it through the normal command pipeline). Page 1 has no
+        # prev line, so it gets no Previous button; the last page has
+        # no next line, so it gets no Next button. An over-budget
+        # command is dropped by _personal_row, never truncated — the
+        # printed command in the message body stays as the fallback.
+        import re as _re
+
+        prev = _re.search(r"← prev: (/wisdom read [^\n\r]+)", text or "")
+        nxt = _re.search(r"next → (/wisdom read [^\n\r]+)", text or "")
+        pairs: list[tuple[str, str]] = []
+        if prev:
+            pairs.append(("⬅️ Previous", prev.group(1).strip()[1:]))
+        if nxt:
+            pairs.append(("Next ➡️", nxt.group(1).strip()[1:]))
+        if pairs:
+            row = _personal_row(*pairs)
+            return [row] if row else None
+        return None
+
     return None
 
 
