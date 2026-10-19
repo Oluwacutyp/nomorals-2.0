@@ -136,6 +136,14 @@ from .loop_wiring import (
     RenderedTabDriver,
     build_wired_agent_loop,
 )
+from .jobs import (
+    BrowserJobManager,
+    BrowserRunJob,
+)
+from .llm_decider import (
+    LLMDecider,
+    build_llm_decider,
+)
 from .filtering import (
     UNTRUSTED_END,
     UNTRUSTED_START,
@@ -203,8 +211,10 @@ __all__ = [
     "build_wired_agent_loop",
     "BrowserDriver",
     "BrowserError",
+    "BrowserJobManager",
     "BrowserNetworkError",
     "BrowserProfile",
+    "BrowserRunJob",
     "BrowserSiteError",
     "BrowserService",
     "BUILTIN_PLAYBOOKS",
@@ -229,6 +239,7 @@ __all__ = [
     "DownloadQueue",
     "FilteredSnapshot",
     "LedgerRow",
+    "LLMDecider",
     "LongTask",
     "LongTaskRunner",
     "MarkedElement",
@@ -315,6 +326,7 @@ __all__ = [
     "TakeoverTabAdapter",
     "action_icon",
     "builtin_registry",
+    "build_llm_decider",
     "classify_botwall",
     "classify_exception",
     "classify_http_status",

@@ -100,10 +100,17 @@ class Observation:
     tier: int = 1
     last_result: dict[str, Any] | None = None
     step: int = 0
+    #: The run's goal, so a decider (e.g. the LLM decider) can judge
+    #: whether a candidate action advances it instead of guessing.
+    goal: str = ""
+    #: Steps taken so far: [{step, action, result}]. The decider sees
+    #: what already happened — no repeating a failed move blind.
+    history: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {"url": self.page.url, "title": self.page.title,
                 "tier": self.tier, "step": self.step,
+                "goal": self.goal, "history": list(self.history),
                 "snapshot_hash": self.page.snapshot_hash(),
                 "elements": self.page.elements,
                 "last_result": self.last_result}
@@ -283,7 +290,7 @@ class AgentLoop:
                 return got
         return _heuristic_strategy(obs)
 
-    def _wall_check(self, page: Page, step: int) -> tuple[str | None, Page]:
+    def _wall_check(self, page: Page, step: int, goal: str = "") -> tuple[str | None, Page]:
         """Detect a wall on ``page``; run the handler; return stop reason.
 
         Returns ``(None, current_page)`` when there is no wall, or the
@@ -306,7 +313,8 @@ class AgentLoop:
             return None, page
         if self.on_blocked is None:
             return f"blocked: {detection} (no wall handler)", page
-        obs = Observation(page=page, step=step)
+        obs = Observation(page=page, step=step, goal=goal,
+                          history=[t.to_dict() for t in self.trace])
         try:
             verdict = self.on_blocked(obs, detection)
         except Exception as exc:  # noqa: BLE001 - handler errors stop us
@@ -323,7 +331,7 @@ class AgentLoop:
 
     def run(self, start_url: str, *, goal: str = "") -> dict[str, Any]:
         page = self.driver.fetch(start_url)
-        wall, page = self._wall_check(page, 0)
+        wall, page = self._wall_check(page, 0, goal)
         if wall is not None:
             self.stopped_reason = wall
             return {"goal": goal, "steps": 0,
@@ -332,7 +340,9 @@ class AgentLoop:
                     "trace": []}
         last_result: dict[str, Any] | None = None
         for step in range(1, self.max_steps + 1):
-            obs = Observation(page=page, last_result=last_result, step=step)
+            obs = Observation(page=page, last_result=last_result, step=step,
+                              goal=goal,
+                              history=[t.to_dict() for t in self.trace])
             decision = self._decide(obs)
             if decision is None:
                 self.stopped_reason = "nothing safe to do"
@@ -373,7 +383,7 @@ class AgentLoop:
                                   "url": new_page.url, "verified": verified})
             page = new_page
             last_result = {"ok": ok, "verified": verified}
-            wall, page = self._wall_check(page, step)
+            wall, page = self._wall_check(page, step, goal)
             if wall is not None:
                 self.stopped_reason = wall
                 break

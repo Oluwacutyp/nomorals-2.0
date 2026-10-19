@@ -17,6 +17,7 @@ worked. These tests pin the seam:
 """
 from __future__ import annotations
 
+import re
 import tempfile
 from typing import Any
 
@@ -327,6 +328,23 @@ def test_adapter_type_text_falls_back_to_legacy_tab():
 
 # -- /browser run: production entry point ------------------------------------
 
+class _NoLlmBrain:
+    """Brain with no usable LLM: every decider call falls back."""
+
+    def complete(self, prompt: str, **_kw: Any) -> Any:
+        from types import SimpleNamespace
+
+        return SimpleNamespace(ok=False, text="")
+
+
+_JOB_RE = re.compile(r"br-[0-9a-f]{12}")
+
+
+def _job_id(reply: str) -> str:
+    match = _JOB_RE.search(reply)
+    assert match, f"no job id in reply: {reply!r}"
+    return match.group(0)
+
 class FakeTelegramAdapter(ChatAdapter):
     def __init__(self, name: str = "telegram") -> None:
         super().__init__(media_dir="/tmp/nm-test-media")
@@ -418,27 +436,43 @@ def test_browser_run_verb_refuses_non_owner():
         _teardown(runtime, tmp)
 
 
-def test_browser_run_verb_runs_loop_and_reports():
+def test_browser_run_verb_runs_loop_and_reports(monkeypatch: Any) -> None:
+    monkeypatch.setattr(
+        "nomorals.llm.brain.brain_for",
+        lambda ctx: _NoLlmBrain())
     runtime, adapter, tmp = _make_runtime()
     try:
-        runtime._browser_service_for_takeover = (  # type: ignore[method-assign]
-            lambda: FakeBrowserService(FakeLiveTab(CLEAN_HTML)))
+        runtime._browser_service_for_run_job = (  # type: ignore[method-assign]
+            lambda job_id: FakeBrowserService(FakeLiveTab(CLEAN_HTML)))
+        # The verb returns immediately with a job id — the loop runs
+        # detached. Poll the job for the outcome it used to return.
         reply = runtime._control_browser(
             "run https://example.test/ browse", chat_key="telegram:111",
             message=_owner_msg())
-        assert "steps" in reply.lower()
-        assert "example.test" in reply
-        assert adapter.sent == []  # no wall, no escalation
+        assert "started" in reply.lower()
+        job_id = _job_id(reply)
+        assert runtime._browser_run_jobs().get(job_id).wait(15)
+        status = runtime._control_browser(
+            f"run status {job_id}", chat_key="telegram:111",
+            message=_owner_msg())
+        assert "steps" in status.lower()
+        assert "example.test" in status
+        # No wall, no escalation — only the job-done update.
+        assert len(adapter.sent) == 1
+        assert "done" in adapter.sent[0][1].lower()
     finally:
         _teardown(runtime, tmp)
 
 
-def test_browser_run_verb_wall_escalates_to_owner():
+def test_browser_run_verb_wall_escalates_to_owner(monkeypatch: Any) -> None:
+    monkeypatch.setattr(
+        "nomorals.llm.brain.brain_for",
+        lambda ctx: _NoLlmBrain())
     runtime, adapter, tmp = _make_runtime()
     try:
         tab = FakeLiveTab(CF_HTML)
-        runtime._browser_service_for_takeover = (  # type: ignore[method-assign]
-            lambda: FakeBrowserService(tab))
+        runtime._browser_service_for_run_job = (  # type: ignore[method-assign]
+            lambda job_id: FakeBrowserService(tab))
         # Short-circuit the real manager: the fake resolves like an
         # owner solving in the live view.
         runtime._takeover_manager_inst = FakeTakeoverManager(
@@ -446,10 +480,16 @@ def test_browser_run_verb_wall_escalates_to_owner():
         reply = runtime._control_browser(
             "run https://example.test/ browse", chat_key="telegram:111",
             message=_owner_msg())
-        assert "blocked" not in reply.lower()
-        assert len(adapter.sent) == 1
+        job_id = _job_id(reply)
+        assert runtime._browser_run_jobs().get(job_id).wait(15)
+        status = runtime._control_browser(
+            f"run status {job_id}", chat_key="telegram:111",
+            message=_owner_msg())
+        assert "blocked" not in status.lower()
+        assert "cleared via takeover" in status
+        assert len(adapter.sent) >= 1
         assert adapter.sent[0][0] == "111"
-        assert "retry" in adapter.sent[0][1]
+        assert any("retry" in text for _, text in adapter.sent)
     finally:
         _teardown(runtime, tmp)
 

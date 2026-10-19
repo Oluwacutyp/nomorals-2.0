@@ -314,14 +314,16 @@ class RuntimeReachMixin:
                     "       /browser takeover [url] — takeover sessions "
                     "(owner-only)\n"
                     "       /browser run <url> [goal] — drive a live tab "
-                    "with the agent loop (owner-only)")
+                    "with the agent loop (owner-only, background job)\n"
+                    "       /browser run status [job] — job progress")
         verb, url = parts[0].lower(), parts[1].strip()
         if verb not in ("open", "text", "links", "forms", "headings"):
             return ("usage: /browser open|text|links|forms|headings <url>\n"
                     "       /browser takeover [url] — takeover sessions "
                     "(owner-only)\n"
                     "       /browser run <url> [goal] — agent loop on a "
-                    "live tab (owner-only)")
+                    "live tab (owner-only, background job)\n"
+                    "       /browser run status [job] — job progress")
         if not url.startswith(("http://", "https://")):
             return "give a full URL starting with http:// or https://"
         from ...tools.browser import BrowserSession
@@ -518,49 +520,84 @@ class RuntimeReachMixin:
 
     def _control_browser_run(self, tail: str, *, chat_key: str = "",
                               message: Any = None) -> str:
-        """Owner-only: ``/browser run <url> [goal]``.
+        """Owner-only: ``/browser run <url> [goal]`` / ``run status [job]``.
 
-        The production entry point for the wired agent loop: open a
-        live rendered tab and drive it with an ``AgentLoop`` whose
-        ``on_blocked`` is the fully-wired ``ChallengeSolver`` handler
-        (takeover manager + owner notifier + challenge memory +
-        solved-session store). When the loop hits a wall it works the
-        ladder, escalates to the owner's Telegram as a last resort,
-        and PAUSES for resolution — this command blocks while waiting
-        for the owner (bounded by the takeover wait timeout), then
-        resumes where it left off on a verified clear, or stops
-        honestly on still-blocked. Decisions are the loop's heuristic
-        fallback (free-gain clicks) until an LLM decider is plugged
-        in — the wall path, not the decider, is what this verb wires.
+        The production entry point for the wired agent loop: a live
+        rendered tab driven by an ``AgentLoop`` whose ``on_blocked``
+        is the fully-wired ``ChallengeSolver`` handler (takeover
+        manager + owner notifier + challenge memory + solved-session
+        store) and whose decider is the real brain (LLM decider,
+        heuristic fallback).
+
+        NON-BLOCKING: the command starts the loop as a background job
+        and returns immediately with the job id. The loop runs
+        detached; the owner gets Telegram updates on wall hit ->
+        escalation, cleared -> resumed, blocked -> stopped, and done;
+        ``/browser run status <job>`` reports steps, stopped-reason,
+        final URL, and the wall outcome (e.g. "cleared via takeover").
+        Takeover escalation still pauses the loop for resolution and
+        resumes where it left off. A second run for the same URL+goal
+        returns the live job instead of a duplicate loop, unless
+        ``--new`` starts a fresh one explicitly.
         """
         if message is None or not self._is_operator(message):
             return "browser run is owner-only — run it from the owner's chat."
         rest = (tail or "").strip()
-        if not rest:
-            return "usage: /browser run <url> [goal] — e.g. /browser run https://example.test/ browse"
         bits = rest.split(None, 1)
-        url = bits[0]
-        goal = bits[1].strip() if len(bits) > 1 else "browse"
+        if bits and bits[0].lower() == "status":
+            return self._browser_run_status(
+                bits[1].strip() if len(bits) > 1 else "")
+        if not rest:
+            return ("usage: /browser run <url> [goal] — e.g. /browser run "
+                    "https://example.test/ browse\n"
+                    "       /browser run status [job] — job progress")
+        tokens = rest.split()
+        force = False
+        if tokens and tokens[-1] in ("--new", "--force"):
+            force = True
+            tokens.pop()
+        if not tokens:
+            return "usage: /browser run <url> [goal]"
+        url = tokens[0]
+        goal = " ".join(tokens[1:]) or "browse"
         if not url.startswith(("http://", "https://")):
             return "give a full URL starting with http:// or https://"
-        try:
-            service = self._browser_service_for_takeover()
-            tab = service.open_rendered_tab("browser-run", url)
-        except Exception as exc:  # noqa: BLE001 - playwright/config errors
-            return f"browser run failed: could not open a live tab: {exc}"[:500]
-        try:
+
+        def _approve_benign(decision: Any, _obs: Any) -> bool:
+            # Benign acts (navigate/click around) proceed;
+            # consequential ones (spend/post/delete/irreversible)
+            # are denied — no human approver is attached, so they
+            # stop the loop instead of running.
             from ...browser.agent import CONSEQUENTIAL_KINDS
+
+            return (not decision.irreversible
+                    and decision.action.kind not in CONSEQUENTIAL_KINDS)
+
+        def _decider() -> Any:
+            # The real brain, up front; the heuristic is the fallback
+            # when no LLM is available or it returns nothing usable.
+            try:
+                from ...browser.llm_decider import build_llm_decider
+                from ...llm.brain import brain_for
+
+                return build_llm_decider(brain_for(self.context),
+                                         goal=goal)
+            except Exception:  # noqa: BLE001 - heuristic covers us
+                _log.debug("browser run: LLM decider unavailable; "
+                           "heuristic fallback", exc_info=True)
+                return None
+
+        def _runner(job: Any) -> dict[str, Any]:
+            # Everything the loop touches is built HERE, on the job's
+            # own thread: the Playwright tab and the sqlite-backed
+            # challenge memory are both thread-bound. Building them
+            # on the command thread and using them here would break.
             from ...browser.challenge_memory import ChallengeMemory
             from ...browser.loop_wiring import build_wired_agent_loop
 
-            def _approve_benign(decision: Any, _obs: Any) -> bool:
-                # Benign acts (navigate/click around) proceed;
-                # consequential ones (spend/post/delete/irreversible)
-                # are denied — no human approver is attached, so they
-                # stop the loop instead of running.
-                return (not decision.irreversible
-                        and decision.action.kind not in CONSEQUENTIAL_KINDS)
-
+            service = self._browser_service_for_run_job(job.job_id)
+            tab = service.open_rendered_tab(
+                f"browser-run-{job.job_id}", url)
             memory = ChallengeMemory(
                 self.settings.resolve("data/takeover")
                 / "challenge-memory.sqlite3")
@@ -571,13 +608,64 @@ class RuntimeReachMixin:
                 owner_chat=chat_key or "",
                 task_label=f"browser run {url}",
                 resume_state={"url": url, "goal": goal},
-                max_steps=30, approve=_approve_benign)
-            result = loop.run(url, goal=goal)
-        except Exception as exc:  # noqa: BLE001 - loop errors are data
-            return f"browser run failed: {exc}"[:500]
-        return (f"browser run done: {result.get('steps', 0)} steps, "
-                f"stopped: {result.get('stopped_reason', '')}, "
-                f"final URL: {result.get('final_url', url)}")
+                max_steps=30, approve=_approve_benign,
+                decide_llm=_decider(),
+                on_progress=job.note_progress,
+                on_wall_outcome=job.wall_event)
+            return loop.run(url, goal=goal)
+
+        job, duplicate = self._browser_run_jobs().start(
+            url, goal, _runner, force=force)
+        if duplicate:
+            return (f"browser run already running: job {job.job_id} — "
+                    f"{url} (goal: {goal}). "
+                    f"/browser run status {job.job_id} for progress. "
+                    "Add --new to start a fresh one.")
+        return (f"browser run started: job {job.job_id} — {url} "
+                f"(goal: {goal}). "
+                f"/browser run status {job.job_id} for progress. "
+                "I'll ping you on wall / cleared / blocked / done.")
+
+    def _browser_run_status(self, arg: str) -> str:
+        """``/browser run status [job]`` — job progress, no new loop."""
+        arg = (arg or "").strip()
+        if not arg:
+            jobs = self._browser_run_jobs().list_recent(5)
+            if not jobs:
+                return ("no browser run jobs yet — "
+                        "/browser run <url> [goal] starts one.")
+            lines = ["browser run jobs (newest first):"]
+            for job in jobs:
+                lines.append(
+                    f"  {job.job_id} [{job.status}] {job.url} — "
+                    f"{job.steps} steps, wall: {job.wall_outcome}")
+            lines.append("detail: /browser run status <job>")
+            return "\n".join(lines)
+        return self._browser_run_jobs().status_text(arg)
+
+    def _browser_run_jobs(self) -> Any:
+        """The ONE background-job registry for this runtime (cached)."""
+        mgr = getattr(self, "_browser_run_jobs_inst", None)
+        if mgr is None:
+            from ...browser.jobs import BrowserJobManager
+
+            mgr = BrowserJobManager(notifier=self._takeover_notifier())
+            self._browser_run_jobs_inst = mgr
+        return mgr
+
+    def _browser_service_for_run_job(self, job_id: str) -> Any:
+        """A FRESH browser service per job, built on the job's thread.
+
+        The cached takeover service is NOT reused here: its Playwright
+        driver is thread-bound to whichever thread opened the first
+        tab, and a background job runs on its own thread. Each job
+        also gets its own session name (``browser-run-<job>``), so two
+        jobs never share one tab's cookie space.
+        """
+        from ...browser.service import BrowserService
+
+        return BrowserService(
+            data_dir=self.settings.resolve("data/browser-service"))
 
     # ── paper trading: /paper ───────────────────────────────────────────
     def _control_paper(self, tail: str, *, chat_key: str = "") -> str:

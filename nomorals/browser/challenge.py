@@ -418,18 +418,37 @@ class ChallengeSolver:
     def wall_handler_for(self, tab: TabLike | None = None, *,
                          resume_state: dict[str, Any] | None = None,
                          owner_chat: str = "",
-                         task_label: str = "") -> Callable[[Any, str], str]:
+                         task_label: str = "",
+                         on_outcome: Callable[[str, dict[str, Any]], None]
+                         | None = None) -> Callable[[Any, str], str]:
         """An ``AgentLoop.on_blocked`` callback: solve or stop honestly.
 
         Returns ``"continue"`` when the wall cleared (self-solved, or
         takeover resolved), anything else stops the loop.
+
+        ``on_outcome`` (optional) reports wall lifecycle events —
+        ``wall_hit`` / ``wall_escalated`` / ``wall_cleared`` /
+        ``wall_blocked`` with ``{"detection", "via", ...}`` — so a
+        background job can notify the owner and record the wall
+        outcome. It never affects solving: callback errors are logged,
+        not raised.
         """
+        def _emit(kind: str, info: dict[str, Any]) -> None:
+            if on_outcome is None:
+                return
+            try:
+                on_outcome(kind, info)
+            except Exception:  # noqa: BLE001 - reporting never breaks solving
+                _log.debug("wall on_outcome callback failed", exc_info=True)
+
         def _handler(observation: Any, detection: str) -> str:
             # Resume state is fresh at call time: the loop's current
             # step + page URL, merged over the base state the caller
             # passed. A static captured state would resume the loop
             # where the handler was BUILT, not where the wall hit.
             page = getattr(observation, "page", None)
+            _emit("wall_hit", {"detection": detection,
+                               "url": getattr(page, "url", "") or ""})
             fresh_resume = dict(resume_state or {})
             fresh_resume["step"] = getattr(observation, "step", None)
             fresh_resume["url"] = getattr(page, "url", "") or \
@@ -441,9 +460,14 @@ class ChallengeSolver:
                 resume_state=fresh_resume, owner_chat=owner_chat,
                 task_label=task_label)
             if outcome.cleared:
+                _emit("wall_cleared", {"detection": detection,
+                                       "via": outcome.via})
                 return "continue"
             if outcome.takeover_grant is not None \
                     and self._takeover_manager is not None:
+                _emit("wall_escalated", {
+                    "detection": detection, "via": "takeover_pending",
+                    "takeover_url": outcome.takeover_url or ""})
                 res = self._takeover_manager.wait_for_resolution(
                     outcome.takeover_grant,
                     cleared_check=lambda: self._recheck(tab, ""),
@@ -459,7 +483,15 @@ class ChallengeSolver:
                             tab.url if tab is not None else "")
                     self._save_solved(tab, page_url, f"takeover:{res.via}",
                                       grant=outcome.takeover_grant)
+                    _emit("wall_cleared", {
+                        "detection": detection,
+                        "via": f"takeover:{res.via}"})
                     return "continue"
+                _emit("wall_blocked", {
+                    "detection": detection,
+                    "via": "takeover:still_blocked"})
                 return "stop"
+            _emit("wall_blocked", {"detection": detection,
+                                   "via": outcome.via})
             return "stop"
         return _handler

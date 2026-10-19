@@ -163,15 +163,19 @@ def build_wired_agent_loop(*, tab: Any,
                            verify: Any = None,
                            dry_run: bool = False,
                            on_trace: Any = None,
-                           on_progress: Any = None) -> AgentLoop:
+                           on_progress: Any = None,
+                           on_wall_outcome: Any = None) -> AgentLoop:
     """Build an ``AgentLoop`` whose wall path is fully wired.
 
     ``tab`` is the live rendered tab (raw — the factory wraps it in
     the takeover adapter for the solver and drives it with
     :class:`RenderedTabDriver` for the loop). ``notifier`` is the
     owner-chat sender (``(message, url) -> None``); ``session_store``
-    is where cleared sessions' cookies persist. Everything else is
-    passed straight through to :class:`AgentLoop`.
+    is where cleared sessions' cookies persist. ``on_wall_outcome``
+    (optional) receives wall lifecycle events — ``wall_hit`` /
+    ``wall_escalated`` / ``wall_cleared`` / ``wall_blocked`` — so a
+    background job can notify the owner and record the wall outcome.
+    Everything else is passed straight through to :class:`AgentLoop`.
     """
     adapter = RenderedTabTakeoverAdapter(tab)
     solver = ChallengeSolver(
@@ -179,7 +183,8 @@ def build_wired_agent_loop(*, tab: Any,
         notifier=notifier, session_store=session_store)
     handler = solver.wall_handler_for(
         tab=adapter, resume_state=dict(resume_state or {}),
-        owner_chat=owner_chat, task_label=task_label or "browsing")
+        owner_chat=owner_chat, task_label=task_label or "browsing",
+        on_outcome=on_wall_outcome)
     loop = AgentLoop(
         RenderedTabDriver(tab), decide_llm=decide_llm,
         autonomy=autonomy, approve=approve, verify=verify,
