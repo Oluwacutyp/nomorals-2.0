@@ -126,8 +126,21 @@ class ActiveSystems:
         is NOT completed, the discrepancy is visible, and the next
         turn can retry. The worker never grades its own work.
         """
+        # The checker re-reads through adapters AND the injected organs:
+        # research / wisdom / impossible organs are not in the adapters
+        # dict (they are separate constructor args), but their re-reads
+        # (open_gaps, queue_list) are the independent observations the
+        # checker needs. Same objects the worker used — independence comes
+        # from re-observing state, not from a different handle.
+        check_adapters = dict(self.adapters)
+        if self._research_organ is not None:
+            check_adapters.setdefault("research", self._research_organ)
+        if self._wisdom_organ is not None:
+            check_adapters.setdefault("wisdom", self._wisdom_organ)
+        if self._impossible is not None:
+            check_adapters.setdefault("impossible", self._impossible)
         check = self.checker.verify(
-            system, verification, adapters=self.adapters, db=self.db)
+            system, verification, adapters=check_adapters, db=self.db)
         if check.passed:
             merged = dict(verification)
             merged["maker_checker"] = {"passed": True,
@@ -985,7 +998,13 @@ class ActiveSystems:
         urgent: set[str] = set()
         for it in self.store.list_active():
             if (it.priority >= 0.8 and it.next_review_at
-                    and now - it.next_review_at > 3600):
+                    and now - it.next_review_at > 3600
+                    and not it.blocker):
+                # Blocked initiatives are excluded: a blocker names work
+                # that cannot proceed (owner approval, failed check), so
+                # preempting the planner for it starves the whole cycle
+                # for work that will never happen — the wake-up
+                # (next_review_at) re-surfaces it when the blocker clears.
                 urgent.add("planner")
         ran: set[str] = set()
         useful = 0

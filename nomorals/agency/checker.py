@@ -27,7 +27,9 @@ per system:
 * research — the gap must no longer be open (``open_gaps`` re-read,
   or the ``knowledge_gaps`` DB row when a db is available).
 * wisdom — the claimed ingested slug must no longer be pending.
-* impossible — the claim must no longer be queued.
+* impossible — the claim must show a recorded attempt on re-read
+  (claims stay queued across hypothesis tries; the queue item's
+  ``attempts`` count is the independent evidence).
 * planner — the executed graph must no longer be pending.
 * digestion — the knowledge count must be >= the claimed count.
 
@@ -250,29 +252,169 @@ class Checker:
                         True, checks=["research: knowledge_gaps row agrees"])
             except Exception:  # noqa: BLE001 - fall through to organ read
                 pass
+        # No DB row: independent organ re-read of the open list.
+        adapter = adapters.get("research")
+        if adapter is not None and callable(
+                getattr(adapter, "open_gaps", None)):
+            try:
+                gaps = adapter.open_gaps(limit=200) or []
+            except Exception as exc:  # noqa: BLE001
+                return CheckResult(
+                    False,
+                    reason="maker-checker: research open_gaps re-read "
+                           f"failed: {exc}")
+            open_ids = {
+                str(g.get("id", "") if isinstance(g, dict)
+                    else getattr(g, "id", ""))
+                for g in gaps}
+            if gap_id in open_ids:
+                return CheckResult(
+                    False,
+                    reason="maker-checker: gap still open on organ "
+                           "re-read",
+                    checks=["research: open_gaps re-read"])
+            return CheckResult(True, checks=[
+                "research: open_gaps re-read agrees"])
         return CheckResult(
-            True, reason="maker-checker: no DB row available; gap claim "
-                         "accepted on organ evidence",
-            checks=["research: organ evidence only"])
+            False, reason="maker-checker: no independent research read "
+                           "available (no DB row, no organ)")
 
     def _check_wisdom(self, claimed, adapters, db):
-        ingested = claimed.get("ingested") or []
+        ingested = [str(s) for s in (claimed.get("ingested") or [])
+                    if str(s or "").strip()]
         if not ingested:
             return CheckResult(False, reason="maker-checker: wisdom claim "
                                              "carries no ingested items")
-        return CheckResult(True, checks=["wisdom: ingested items recorded"])
+        if db is None:
+            return CheckResult(False, reason="maker-checker: no DB to "
+                                             "verify wisdom ingest against")
+        # Independent record: the ingest pipeline marks queue rows 'done'.
+        # Queue-derived slugs ("q-<sha256(url)[:10]>") are reversible by
+        # scanning the table — a fabricated slug has no done row.
+        import hashlib
+        try:
+            rows = db.query(
+                "SELECT url, status FROM wisdom_ingest_queue") or []
+        except Exception:  # noqa: BLE001 - missing table = no record
+            rows = []
+        done = set()
+        for r in rows:
+            if (r.get("status") or "") == "done" and r.get("url"):
+                done.add("q-" + hashlib.sha256(
+                    r["url"].encode()).hexdigest()[:10])
+        checks = []
+        for slug in ingested:
+            if slug.startswith("q-"):
+                if slug not in done:
+                    return CheckResult(
+                        False,
+                        reason="maker-checker: wisdom queue ingest "
+                               f"{slug} has no completed queue row",
+                        checks=checks)
+                checks.append(f"wisdom: queue ingest {slug} completed")
+            else:
+                # Manifest slug: no independent DB record exists — the
+                # organ's success signal stands, recorded honestly as
+                # such rather than as a re-read.
+                checks.append(f"wisdom: manifest slug {slug} "
+                              f"(organ signal only)")
+        return CheckResult(True, checks=checks)
 
     def _check_impossible(self, claimed, adapters, db):
-        return CheckResult(True, checks=["impossible: attempt recorded"])
+        # An attempt does NOT dequeue the claim (further hypotheses may
+        # remain) — what the re-read must show is a RECORDED attempt.
+        adapter = adapters.get("impossible")
+        claim_id = str(claimed.get("claim_id", "") or "")
+        if not claim_id:
+            return CheckResult(False, reason="maker-checker: impossible "
+                                             "claim carries no claim_id")
+        if adapter is None or not callable(
+                getattr(adapter, "queue_list", None)):
+            return CheckResult(False, reason="maker-checker: no impossible "
+                                             "adapter to re-check with")
+        try:
+            items = adapter.queue_list() or []
+        except Exception as exc:  # noqa: BLE001
+            return CheckResult(
+                False,
+                reason=f"maker-checker: impossible queue re-read failed: "
+                       f"{exc}")
+        match = None
+        for item in items:
+            cid = str(item.get("claim_id", "") if isinstance(item, dict)
+                      else getattr(item, "claim_id", ""))
+            if cid == claim_id or cid.startswith(claim_id):
+                match = item
+                break
+        if match is None:
+            # Claim left the queue entirely — attempt recorded elsewhere
+            # (ledger); the queue re-read agrees it is no longer pending.
+            return CheckResult(
+                True, checks=["impossible: claim no longer queued"])
+        attempts = int(match.get("attempts", 0) if isinstance(match, dict)
+                       else getattr(match, "attempts", 0))
+        if attempts < 1:
+            return CheckResult(
+                False,
+                reason="maker-checker: impossible claim shows no "
+                       "recorded attempt on re-read",
+                checks=["impossible: queue re-read"])
+        return CheckResult(True, checks=[
+            f"impossible: claim has {attempts} recorded attempt(s)"])
 
     def _check_planner(self, claimed, adapters, db):
         adapter = adapters.get("planner")
-        if adapter is not None and callable(
+        if adapter is None or not callable(
                 getattr(adapter, "pending_graphs", None)):
-            # The executed graph must no longer be pending.
-            return CheckResult(True, checks=["planner: pending re-read"])
-        return CheckResult(False, reason="maker-checker: no planner "
-                                         "adapter to re-check with")
+            return CheckResult(False, reason="maker-checker: no planner "
+                                             "adapter to re-check with")
+        graph_id = str(claimed.get("graph_id", "") or "")
+        try:
+            pending = adapter.pending_graphs() or []
+        except Exception as exc:  # noqa: BLE001
+            return CheckResult(
+                False,
+                reason=f"maker-checker: planner pending re-read failed: "
+                       f"{exc}")
+        pending_ids = {
+            str(g.get("id", "") if isinstance(g, dict)
+                else getattr(g, "id", ""))
+            for g in pending}
+        if graph_id and graph_id in pending_ids:
+            return CheckResult(
+                False,
+                reason="maker-checker: graph still pending on re-read "
+                       "after claimed execution",
+                checks=["planner: pending re-read"])
+        return CheckResult(True, checks=["planner: pending re-read agrees"])
 
     def _check_digestion(self, claimed, adapters, db):
-        return CheckResult(True, checks=["digestion: deposit recorded"])
+        if db is None:
+            return CheckResult(False, reason="maker-checker: no DB for "
+                                             "knowledge count re-read")
+        from .knowledge import KnowledgeStore
+        try:
+            count = KnowledgeStore(db).count()
+        except Exception as exc:  # noqa: BLE001
+            return CheckResult(
+                False,
+                reason=f"maker-checker: knowledge count unreadable: {exc}")
+        claimed_count = claimed.get("knowledge_count")
+        if claimed_count is None:
+            return CheckResult(False, reason="maker-checker: digestion "
+                                             "claim carries no "
+                                             "knowledge_count")
+        try:
+            claimed_n = int(claimed_count)
+        except (TypeError, ValueError):
+            return CheckResult(False, reason="maker-checker: digestion "
+                                             "claim knowledge_count not "
+                                             "an int")
+        if count < claimed_n:
+            return CheckResult(
+                False,
+                reason=f"maker-checker: knowledge count {count} < "
+                       f"claimed {claimed_n}",
+                checks=["digestion: knowledge count re-read"])
+        return CheckResult(True, checks=[
+            "digestion: knowledge count re-read agrees"])

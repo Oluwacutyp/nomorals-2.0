@@ -80,7 +80,14 @@ class DeliberationLoop:
         room = max(0, capacity - len(chosen))
         chosen += explore[:min(room, max_explore)]
         # Deferred set is implicit: everything active not chosen. Record
-        # the decision cheaply so "Why?" can explain it.
+        # the decision cheaply so "Why?" can explain it — and record the
+        # SELECTIONS too. Before this, only deferrals were logged: the
+        # choice itself evaporated, so a deliberation that changed nothing
+        # else was indistinguishable from one that never ran.
+        for it in chosen:
+            self.store._event(it.id, "selected",
+                              f"deliberation chose for this cycle "
+                              f"(capacity={capacity})")
         for it in active:
             if it not in chosen:
                 self.store._event(it.id, "deferred",
