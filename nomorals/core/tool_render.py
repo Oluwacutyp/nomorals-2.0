@@ -188,8 +188,11 @@ def render_mapping(mapping: dict[str, Any], *, title: str = "") -> str:
 
 #: Progress callback type for long Devon runs:
 #: ``(step_index_1_based, total_steps, tool_name, status)`` where status is
-#: "start" | "done" | "failed". Callbacks must never raise — Devon swallows
-#: callback errors so progress can never break the run.
+#: "start" | "parked" | "done" | "failed". "parked" means the step's tool
+#: is running as a background job with heartbeats — the run moved on and
+#: will collect (or already collected) the result. Callbacks must never
+#: raise — Devon swallows callback errors so progress can never break
+#: the run.
 ProgressCallback = Callable[[int, int, str, str], None]
 
 

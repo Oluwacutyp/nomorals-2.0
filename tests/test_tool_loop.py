@@ -161,3 +161,87 @@ class TestAudit:
         # Restricted sees fewer tools than the full set.
         assert audit["listed"] < audit["total"]
         assert audit["listed"] > 0
+
+
+class TestBackgroundJobs:
+    """Heartbeat + background-job execution: slow tools park, the loop
+    moves on, and results are harvested (never silently dropped)."""
+
+    def _loop_with_slow_tool(self, sleep_s=0.8, park_after_s=0.1):
+        from nomorals.tools.registry import ToolRegistry
+        r = ToolRegistry()
+        r.register("slow_echo",
+                   lambda text="": (__import__("time").sleep(sleep_s),
+                                    f"slow:{text}")[1],
+                   description="slow echo", parameters={"text": "str"})
+        return r
+
+    def test_fast_tool_returns_inline_no_park(self):
+        from nomorals.tools.registry import ToolRegistry
+        from nomorals.agents.partner.tool_loop import ToolCall
+        r = ToolRegistry()
+        r.register("quick", lambda: "fast-result", description="q",
+                   parameters={})
+        loop = ToolCallingLoop(FakeLLM(["done"]), r, park_after_s=5.0)
+        obs = loop._execute(ToolCall(name="quick", args={}), actor="owner")
+        assert "fast-result" in obs
+        assert "parked" not in obs
+
+    def test_slow_tool_parks_with_job_id(self):
+        from nomorals.agents.partner.tool_loop import ToolCall
+        r = self._loop_with_slow_tool(sleep_s=2.0)
+        loop = ToolCallingLoop(FakeLLM(["done"]), r, park_after_s=0.1)
+        obs = loop._execute(ToolCall(name="slow_echo", args={"text": "x"}),
+                            actor="owner")
+        assert "parked as a background job" in obs
+        assert "Do NOT re-issue" in obs
+        # The job keeps running; collect it directly — nothing is lost.
+        job_id = obs.split("[job ")[1].split("]")[0]
+        job = loop._jobs.collect(job_id, timeout=5.0)
+        assert job is not None and job.status == "done"
+        assert "slow:x" in str(job.result)
+
+    def test_crashed_tool_reports_honestly(self):
+        from nomorals.tools.registry import ToolRegistry
+        from nomorals.agents.partner.tool_loop import ToolCall
+        r = ToolRegistry()
+
+        def _boom():
+            raise RuntimeError("kaput")
+
+        r.register("boom", _boom, description="b", parameters={})
+        loop = ToolCallingLoop(FakeLLM(["done"]), r, park_after_s=0.1)
+        obs = loop._execute(ToolCall(name="boom", args={}), actor="owner")
+        # _invoke formats the crash honestly as text — no fake success,
+        # no parked message for a finished (crashed) call.
+        assert "[tool failed]" in obs and "kaput" in obs
+        assert "parked" not in obs
+
+    def test_parked_result_harvested_on_next_run(self):
+        # Turn 1 parks a slow tool and the model answers without it; a
+        # later run harvests the background completion into context.
+        import time
+        r = self._loop_with_slow_tool(sleep_s=0.6, park_after_s=0.1)
+        llm = FakeLLM([
+            'Working on it.\n```tool\n{"tool": "slow_echo", '
+            '"args": {"text": "abc"}}\n```',
+            "The slow tool is running in the background.",
+        ])
+        loop = ToolCallingLoop(llm, r, max_iterations=3, park_after_s=0.1)
+        result = loop.run("do the slow thing", actor="owner")
+        assert result.ok
+        parked_obs = " ".join(result.trace[0].observations)
+        assert "parked as a background job" in parked_obs
+        # Let the background job finish, then start a new run on a FRESH
+        # loop instance: the shared registry hands it the background
+        # completion as a system message.
+        time.sleep(1.0)
+        llm2 = FakeLLM(["Noted, thanks."])
+        loop2 = ToolCallingLoop(llm2, r, max_iterations=3, park_after_s=0.1)
+        result2 = loop2.run("anything new?", actor="owner")
+        assert result2.ok
+        assert llm2.calls == 1
+        first_turn = " ".join(m.content for m in llm2.seen_messages[0])
+        assert "background job" in first_turn
+        assert "slow_echo" in first_turn
+        assert "slow:abc" in first_turn

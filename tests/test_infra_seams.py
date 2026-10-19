@@ -89,8 +89,11 @@ class TestSeamDNumericPrecision(unittest.TestCase):
         self.assertNotIn("• 0\n", out + "\n")
 
 
-class TestSeamCTimeout(unittest.TestCase):
-    def test_timeout_reports_unknown_outcome_not_failure(self):
+class TestSeamCBackgroundJobs(unittest.TestCase):
+    def test_slow_tool_parks_and_late_result_is_harvested(self):
+        # No blunt timeout: a slow tool parks as a background job with
+        # heartbeats; its late result is harvested, never faked, never
+        # dropped, and never blind-replayed.
         finished: list[str] = []
 
         def slow():
@@ -100,20 +103,22 @@ class TestSeamCTimeout(unittest.TestCase):
 
         reg = ToolRegistry()
         reg.register("slow", slow, description="slow")
-        loop = ToolCallingLoop(llm=None, registry=reg, tool_timeout_s=1.0)
+        loop = ToolCallingLoop(llm=None, registry=reg, park_after_s=0.2)
         obs = loop._execute(ToolCall("slow", {}), actor="owner")
-        self.assertIn("timed out", obs)
-        self.assertIn("UNKNOWN", obs)
-        self.assertIn("do not retry", obs.lower())
-        # The tool really did finish later: reconcile surfaces it.
-        time.sleep(2.0)
-        unknowns = loop.unknown_outcomes()
-        self.assertEqual(len(unknowns), 1)
-        self.assertEqual(unknowns[0]["tool"], "slow")
-        reconciled = loop.reconcile_unknown()
-        self.assertEqual(len(reconciled), 1)
-        self.assertIn("late-result", reconciled[0]["result"])
+        self.assertIn("parked as a background job", obs)
+        self.assertIn("Do NOT re-issue", obs)
+        # Nothing is registered as unknown-timeout anymore — the job is
+        # parked and visible in the registry with heartbeats.
         self.assertEqual(loop.unknown_outcomes(), [])
+        self.assertTrue(
+            loop._jobs.list(status="running", labels={"owner": "loop"}))
+        # The tool really did finish later: the harvest surfaces it.
+        time.sleep(3.0)
+        harvested = loop._jobs.collect_ready(labels={"owner": "loop"})
+        self.assertEqual(len(harvested), 1)
+        self.assertEqual(harvested[0].status, "done")
+        self.assertIn("late-result", str(harvested[0].result))
+        self.assertEqual(finished, ["done"])
 
     def test_parallel_turn_uses_one_absolute_deadline(self):
         started = time.monotonic()
@@ -131,9 +136,12 @@ class TestSeamCTimeout(unittest.TestCase):
             [ToolCall("slow", {}), ToolCall("slow", {}), ToolCall("slow", {})],
             actor="owner")
         elapsed = time.monotonic() - t0
-        self.assertTrue(all("UNKNOWN" in o for o in out))
-        # Three fresh per-future timeouts would take ~3s; one shared
-        # deadline takes ~1s (plus scheduling slack).
+        # Past the shared deadline the calls park (background jobs with
+        # heartbeats) instead of timing out — honest, never UNKNOWN.
+        self.assertTrue(all("parked as a background job" in o for o in out))
+        self.assertTrue(all("UNKNOWN" not in o for o in out))
+        # Three fresh per-call waits would take ~3s; one shared deadline
+        # takes ~1s (plus scheduling slack).
         self.assertLess(elapsed, 2.5, f"parallel wait took {elapsed:.2f}s")
         self.assertGreater(time.monotonic() - started, 0)
 

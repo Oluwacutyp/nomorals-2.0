@@ -29,7 +29,6 @@ filtered tool list AND gets denied at call time if they reach for more.
 
 from __future__ import annotations
 
-import contextvars
 import difflib
 import hashlib
 import json
@@ -38,9 +37,10 @@ import re
 import threading
 import time
 import uuid
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
 from dataclasses import dataclass, field
 from typing import Any, Callable, Sequence
+
+from ...core.jobs import shared_registry
 
 _log = logging.getLogger(__name__)
 
@@ -300,6 +300,7 @@ class ToolCallingLoop:
         on_event: Callable[[ToolLoopEvent], None] | None = None,
         parallel_per_turn: bool = False,
         isolated_tools: Any | None = None,
+        park_after_s: float = 5.0,
     ) -> None:
         self.llm = llm
         self.registry = registry
@@ -307,14 +308,21 @@ class ToolCallingLoop:
         self.tool_timeout_s = max(1.0, float(tool_timeout_s))
         self.total_timeout_s = max(10.0, float(total_timeout_s))
         self.max_tool_calls_per_turn = max(1, int(max_tool_calls_per_turn))
+        #: Grace period before a slow tool call parks as a background job.
+        #: Fast tools return inline (unchanged behavior); slower ones keep
+        #: running with heartbeats while the loop moves on. This is a
+        #: latency optimization, not a timeout — nothing is abandoned or
+        #: marked failed at this boundary.
+        self.park_after_s = max(0.0, float(park_after_s))
+        #: Background jobs for tool calls — shared process-wide so parked
+        #: jobs stay visible for debugging across loop instances.
+        self._jobs = shared_registry()
         #: Lifecycle hook — called with a ToolLoopEvent for turn/tool/final
         #: transitions. Never allowed to break the loop.
         self.on_event = on_event
-        #: When True, a turn's tool calls execute concurrently in the pool
-        #: (smolagents ToolCallingAgent style) instead of sequentially.
+        #: When True, a turn's tool calls execute concurrently as background
+        #: jobs (smolagents ToolCallingAgent style) instead of sequentially.
         self.parallel_per_turn = bool(parallel_per_turn)
-        self._pool = ThreadPoolExecutor(
-            max_workers=4, thread_name_prefix="tool-loop")
         #: Tools that run in an ISOLATED CHILD PROCESS (see
         #: :mod:`nomorals.core.process_isolation`) instead of the
         #: thread pool, so a timeout SIGKILLs them — forcible
@@ -363,6 +371,18 @@ class ToolCallingLoop:
                              if not k.startswith("_")})
                 del self._unknown_outcomes[sig]
         return done
+
+    def _harvest_message(self, job) -> str:
+        """Surface a harvested background job's result to the model."""
+        tag = f"[background job {job.id}]"
+        if job.labels.get("run_id"):
+            tag += f" (run {job.labels['run_id']})"
+        if job.status == "done":
+            return f"{tag} tool '{job.tool}' finished:\n{job.result}"
+        if job.status == "failed":
+            return f"{tag} tool '{job.tool}' failed: {job.error}"
+        # presumed-dead: the honest UNKNOWN text lives on job.error.
+        return f"{tag} tool '{job.tool}': {job.error}"
 
     def _register_unknown(self, call: ToolCall, fut: Any) -> None:
         with self._unknown_lock:
@@ -437,18 +457,6 @@ class ToolCallingLoop:
                            if persona_extra.strip() else ""),
         )
 
-    def _submit(self, fn: Callable[..., Any], *args: Any,
-                **kwargs: Any) -> Any:
-        """Submit ``fn`` to the pool inside the submitter's context.
-
-        contextvars (request/run/mission correlation ids) do not cross
-        ThreadPoolExecutor boundaries on their own — without this copy,
-        every ``tool.call`` bus event from the loop carries empty ids
-        and replay/timeline cannot join the call to its request.
-        """
-        return self._pool.submit(
-            contextvars.copy_context().run, fn, *args, **kwargs)
-
     def _invoke(
         self,
         call: ToolCall,
@@ -459,9 +467,9 @@ class ToolCallingLoop:
     ) -> str:
         """Run one tool call synchronously. Never raises — failures are text.
 
-        This is the pool-free core: :meth:`_execute` wraps it in a timeout,
-        and parallel per-turn mode submits it directly (no nested pools,
-        which would deadlock the 4-worker executor).
+        This is the job-free core: :meth:`_execute` runs it inside a
+        background job, and parallel per-turn mode gives each call its
+        own job.
         """
         spec = None
         try:
@@ -565,6 +573,48 @@ class ToolCallingLoop:
         except Exception as exc:  # noqa: BLE001
             return f"[tool error] '{call.name}' result unreadable: {exc}"
 
+    def _job_labels(self) -> dict[str, str]:
+        """Labels tying a job to this loop's current correlated run."""
+        try:
+            from ...core.correlation import current_correlation
+            run_id = current_correlation().get("run_id", "") or ""
+        except Exception:  # noqa: BLE001 - labels are best-effort
+            run_id = ""
+        return {"owner": "loop", "run_id": run_id}
+
+    def _submit_job(self, call: ToolCall, *, actor: str,
+                    capabilities: Any = None,
+                    loop_ctx: dict[str, Any] | None = None):
+        """Run one tool call as a background job. Returns immediately."""
+        def _run() -> str:
+            return self._invoke(call, actor=actor,
+                                capabilities=capabilities, loop_ctx=loop_ctx)
+
+        return self._jobs.submit(_run, tool=call.name,
+                                 args=dict(call.args),
+                                 labels=self._job_labels())
+
+    def _job_observation(self, call: ToolCall, job) -> str | None:
+        """Observation text for a finished job; None when still running."""
+        status = job.status
+        if status == "done":
+            return str(job.result)
+        if status == "failed":
+            self._note_tool_weakness(call.name, f"crashed: {job.error}")
+            return f"[tool error] '{call.name}' crashed: {job.error}"
+        if status == "presumed-dead":
+            # The dead-man's switch fired: honest UNKNOWN, never a failure.
+            self._note_tool_weakness(call.name, "presumed-dead: no heartbeat")
+            return f"[job {job.id}] '{call.name}': {job.error}"
+        return None
+
+    def _parked_message(self, call: ToolCall, job) -> str:
+        return (
+            f"[job {job.id}] '{call.name}' is still running after "
+            f"{self.park_after_s:.0f}s — parked as a background job with "
+            f"heartbeats. Move on to other work; its result will arrive "
+            f"automatically on a later turn. Do NOT re-issue the call.")
+
     def _execute(
         self,
         call: ToolCall,
@@ -573,35 +623,32 @@ class ToolCallingLoop:
         capabilities: Any = None,
         loop_ctx: dict[str, Any] | None = None,
     ) -> str:
-        """Run one tool call with timeout. Never raises — failures are text.
+        """Run one tool call as a background job. Never raises — failures are text.
+
+        Fast tools return inline (unchanged behavior). A tool slower than
+        ``park_after_s`` parks: the call returns a parked message carrying
+        the job id, the job keeps running with heartbeats, and its result
+        is harvested on a later turn. No blunt timeout: only the
+        dead-man's switch (heartbeat silence) marks a job presumed-dead —
+        honest UNKNOWN, never a fake failure.
 
         Process-isolated tools (name in ``isolated_tools`` or spec
         metadata ``process_isolated``) run in a forked child: a
         timeout SIGKILLs the child, so the outcome is KNOWN (dead) —
-        no unknown-outcome record, no still-running tool. Thread
-        tools keep the cooperative path (cancel is best-effort, the
-        outcome stays UNKNOWN and is recorded for reconciliation).
+        no still-running tool.
         """
         if self._is_isolated(call.name):
             return self._execute_isolated(
                 call, actor=actor, capabilities=capabilities,
                 loop_ctx=loop_ctx)
-        fut = self._submit(
-            self._invoke, call, actor=actor, capabilities=capabilities,
-            loop_ctx=loop_ctx)
-        try:
-            return fut.result(timeout=self.tool_timeout_s)
-        except FuturesTimeout:
-            self._note_tool_weakness(call.name, "timeout")
-            try:
-                fut.cancel()  # no-op once running: the tool may still finish
-            except Exception:  # noqa: BLE001 - cancellation is best-effort
-                pass
-            self._register_unknown(call, fut)
-            return self._unknown_message(call)
-        except Exception as exc:  # noqa: BLE001 — execution must not kill the loop
-            self._note_tool_weakness(call.name, f"crashed: {exc}")
-            return f"[tool error] '{call.name}' crashed: {exc}"
+        job = self._submit_job(call, actor=actor,
+                               capabilities=capabilities, loop_ctx=loop_ctx)
+        finished = self._jobs.collect(job.id, timeout=self.park_after_s)
+        if finished is not None:
+            obs = self._job_observation(call, finished)
+            if obs is not None:
+                return obs
+        return self._parked_message(call, job)
 
     def _is_isolated(self, name: str) -> bool:
         """True when this tool runs in a child process (forcible kill)."""
@@ -640,23 +687,15 @@ class ToolCallingLoop:
             return (f"[tool error] '{call.name}' process crashed: "
                     f"{result.error}")
         # not-supported (no fork): fall back to the cooperative thread
-        # path — same unknown-outcome semantics as any thread tool.
-        fut = self._submit(
-            self._invoke, call, actor=actor, capabilities=capabilities,
-            loop_ctx=loop_ctx)
-        try:
-            return fut.result(timeout=self.tool_timeout_s)
-        except FuturesTimeout:
-            self._note_tool_weakness(call.name, "timeout")
-            try:
-                fut.cancel()
-            except Exception:  # noqa: BLE001 - best-effort
-                pass
-            self._register_unknown(call, fut)
-            return self._unknown_message(call)
-        except Exception as exc:  # noqa: BLE001
-            self._note_tool_weakness(call.name, f"crashed: {exc}")
-            return f"[tool error] '{call.name}' crashed: {exc}"
+        # path — same background-job semantics as any thread tool.
+        job = self._submit_job(call, actor=actor,
+                               capabilities=capabilities, loop_ctx=loop_ctx)
+        finished = self._jobs.collect(job.id, timeout=self.park_after_s)
+        if finished is not None:
+            obs = self._job_observation(call, finished)
+            if obs is not None:
+                return obs
+        return self._parked_message(call, job)
 
     def _execute_turn(
         self,
@@ -687,35 +726,29 @@ class ToolCallingLoop:
                            detail=obs[:120].replace("\n", " "))
                 out.append(obs)
             return out
-        # Parallel: submit _invoke directly (never _execute — that would
+        # Parallel: one background job per call (never _execute — that would
         # nest pool submissions and deadlock the 4-worker executor).
         pending = [
-            (call, self._submit(
-                self._invoke, call, actor=actor,
-                capabilities=capabilities, loop_ctx=loop_ctx))
+            (call, self._submit_job(call, actor=actor,
+                                    capabilities=capabilities,
+                                    loop_ctx=loop_ctx))
             for call in calls
         ]
         for call, _ in pending:
             self._emit("tool_start", iteration=iteration, tool_name=call.name)
         # ONE absolute deadline for the whole parallel turn — not a fresh
-        # timeout per future, which could consume N × timeout overall.
+        # wait per job, which could consume N × grace overall. Past the
+        # deadline a job parks (keeps running with heartbeats) instead of
+        # timing out.
         deadline = time.monotonic() + self.tool_timeout_s
         out = []
-        for call, fut in pending:
+        for call, job in pending:
             remaining = max(0.0, deadline - time.monotonic())
-            try:
-                obs = fut.result(timeout=remaining)
-            except FuturesTimeout:
-                self._note_tool_weakness(call.name, "timeout")
-                try:
-                    fut.cancel()
-                except Exception:  # noqa: BLE001 - best-effort
-                    pass
-                self._register_unknown(call, fut)
-                obs = self._unknown_message(call)
-            except Exception as exc:  # noqa: BLE001
-                self._note_tool_weakness(call.name, f"crashed: {exc}")
-                obs = f"[tool error] '{call.name}' crashed: {exc}"
+            finished = self._jobs.collect(job.id, timeout=remaining)
+            obs = (self._job_observation(call, finished)
+                   if finished is not None else None)
+            if obs is None:
+                obs = self._parked_message(call, job)
             self._emit("tool_end", iteration=iteration, tool_name=call.name,
                        detail=str(obs)[:120].replace("\n", " "))
             out.append(obs)
@@ -900,6 +933,12 @@ class ToolCallingLoop:
                     f"total budget ({self.total_timeout_s:.0f}s) exhausted "
                     f"after {iteration - 1} iterations")
                 break
+
+            # Background harvest: jobs parked on earlier turns (or earlier
+            # runs) that finished since. Each job is harvested exactly once;
+            # the model gets the result on this turn and can act on it.
+            for _job in self._jobs.collect_ready(labels={"owner": "loop"}):
+                messages.append(Message.system(self._harvest_message(_job)))
 
             self._emit("turn_start", iteration=iteration)
             step_started = time.perf_counter()

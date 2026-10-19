@@ -36,6 +36,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from ..core.ids import new_short_id
+from ..core.jobs import shared_registry
 from ..core.logging_setup import get_logger
 from ..core.tool_render import (
     describe_exc,
@@ -155,6 +156,11 @@ class StepOutcome:
     observation: str
     seconds: float
     error: str = ""
+    #: Background-job handle when this step was parked instead of run
+    #: inline (see _execute). The job keeps running with heartbeats while
+    #: the run moves on; its result is collected later.
+    job_id: str = ""
+    parked: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -164,6 +170,8 @@ class StepOutcome:
             "observation": self.observation,
             "seconds": round(self.seconds, 3),
             "error": self.error,
+            "job_id": self.job_id,
+            "parked": self.parked,
         }
 
 
@@ -220,8 +228,17 @@ class DevonAgent:
         self.brain = brain
         self.gateway = gateway
         self.max_steps = max(1, int(max_steps))
+        # NOTE: ``step_timeout`` is NOT a per-step timeout anymore — steps
+        # run as background jobs with heartbeats and are never timed out.
+        # It survives as the run's wall-clock budget basis
+        # (``step_timeout * max(2, max_steps)``), kept under its old name
+        # for backward compatibility.
         self.step_timeout = float(step_timeout)
         self.repo_root = Path(repo_root) if repo_root else _REPO_ROOT
+        # Background jobs for tool steps: slow tools park here with
+        # heartbeats while the run moves on to other steps. Shared
+        # process-wide so parked jobs stay visible for debugging.
+        self.jobs = shared_registry()
         self._tools: dict[str, Callable[[dict[str, Any]], str]] = {
             name: getattr(self, f"_tool_{name}")
             for name, _ in TOOL_CATALOG
@@ -236,9 +253,15 @@ class DevonAgent:
         result whose digest says what went wrong.
 
         ``on_progress(step, total, tool, status)`` fires per step
-        (``status``: "start" | "done" | "failed") so a chat caller can
-        show progress instead of silence on a multi-step run. A
+        (``status``: "start" | "parked" | "done" | "failed") so a chat
+        caller can show progress instead of silence on a multi-step run. A
         misbehaving callback can never break the run.
+
+        Steps run as background jobs: a slow tool parks and the run moves
+        on to the next step instead of blocking. Results are collected in
+        the end-of-run drain (bounded by the run's wall-clock budget) or
+        by a later run — parked jobs stay visible in the job registry and
+        are never silently dropped.
         """
         started = time.time()
         run_id = new_short_id("devon")
@@ -258,7 +281,14 @@ class DevonAgent:
         if planned_by in ("llm", "reasoning"):
             steps_plan = self._reason_review_plan(task, steps_plan)
         observations: list[StepOutcome] = []
+        # Jobs parked by previous runs: harvest what finished so their
+        # results are never silently dropped. They preface this run's
+        # digest as background completions.
+        background: list[StepOutcome] = []
+        for job in self.jobs.collect_ready(labels={"owner": "devon"}):
+            background.append(self._job_outcome(job, background=True))
 
+        parked: list[tuple[str, int]] = []  # (memory id, observations index)
         for idx, step in enumerate(steps_plan[: self.max_steps], start=1):
             name = str(step.get("tool") or "").strip()
             args = step.get("args") or {}
@@ -267,19 +297,41 @@ class DevonAgent:
             if name not in self._tools:
                 outcome = StepOutcome(name or "(none)", args, False,
                                       f"unknown tool {name!r}", 0.0, error="not a valid tool")
+                mem_id = self._remember(run_id, chat_key, task, idx, outcome)
             else:
                 emit_progress(on_progress, idx, len(steps_plan[: self.max_steps]),
                               name, "start")
                 outcome = self._execute(name, args)
                 emit_progress(on_progress, idx, len(steps_plan[: self.max_steps]),
-                              name, "done" if outcome.ok else "failed")
+                              name, "parked")
+                mem_id = self._remember(run_id, chat_key, task, idx, outcome)
+                if outcome.parked:
+                    parked.append((mem_id, len(observations)))
             observations.append(outcome)
-            self._remember(run_id, chat_key, task, idx, outcome)
             if time.time() - started > self.step_timeout * max(2, self.max_steps):
                 _log.info("devon wall-clock budget hit after %d steps", idx)
                 break
 
-        digest = self._digest(task, observations, memory, model,
+        # Drain: collect parked jobs within the remaining run budget. Jobs
+        # still running afterwards stay parked — visible in the registry,
+        # harvested by a later run. There is no per-step timeout: a job
+        # that keeps heartbeating runs as long as it needs; only a silent
+        # job is presumed dead (honest UNKNOWN via the dead-man's switch).
+        deadline = started + self.step_timeout * max(2, self.max_steps)
+        total_steps = len(steps_plan[: self.max_steps])
+        for mem_id, pos in parked:
+            outcome = observations[pos]
+            remaining = max(0.0, deadline - time.time())
+            job = self.jobs.collect(outcome.job_id, timeout=remaining)
+            if job is None or not job.done():
+                continue  # still parked; a later run collects it
+            final = self._job_outcome(job)
+            observations[pos] = final
+            self._update_memory(mem_id, final)
+            emit_progress(on_progress, pos + 1, total_steps,
+                          final.tool, "done" if final.ok else "failed")
+
+        digest = self._digest(task, background + observations, memory, model,
                               plan_error=plan_error)
         self._finish(run_id, chat_key, task, digest, ok=bool(observations))
         return DevonResult(
@@ -606,44 +658,57 @@ class DevonAgent:
                 record_step(name, args)
             except Exception:  # noqa: BLE001 - recording is best-effort
                 pass
-        # Per-step timeout on a daemon thread: the wall-clock budget in
-        # run() is only checked BETWEEN steps, so without this one hung
-        # tool hangs the whole run forever. A timeout is NOT a failure —
-        # the tool may still finish and change the world — so the outcome
-        # is marked honestly UNKNOWN, never blind-replayed.
-        box: dict[str, Any] = {}
+        # Background-job execution (no blunt timeout): the tool runs on a
+        # daemon worker thread with a heartbeat thread beside it. The run
+        # never blocks on a slow tool — it parks the job handle, moves on
+        # to the next step, and collects the result in the end-of-run
+        # drain (or on a later run). A job that goes silent is presumed
+        # dead by the registry's dead-man's switch: honest UNKNOWN, never
+        # a fake failure, and a late result is still recorded.
+        tool_fn = self._tools[name]
+        job = self.jobs.submit(lambda: tool_fn(args), tool=name,
+                               args=args, labels={"owner": "devon"})
+        return StepOutcome(
+            name, args, False,
+            f"[job {job.id}] tool '{name}' parked — running in the "
+            f"background with heartbeats; the run moves on and collects "
+            f"the result when it completes.",
+            time.perf_counter() - started, job_id=job.id, parked=True)
 
-        def _run() -> None:
-            try:
-                box["observation"] = self._tools[name](args)
-            except Exception as exc:  # noqa: BLE001 - captured below
-                box["error"] = exc
-
-        worker = threading.Thread(target=_run, name=f"devon-step-{name}",
-                                  daemon=True)
-        worker.start()
-        worker.join(self.step_timeout)
-        elapsed = time.perf_counter() - started
-        if worker.is_alive():
-            err = (f"tool '{name}' timed out after {self.step_timeout:.0f}s "
-                   f"— outcome UNKNOWN (outcome_unknown): the tool may still "
-                   f"be running; do not retry blindly, check state first")
-            _log.warning("devon tool %s timed out after %.0fs",
-                         name, self.step_timeout)
-            return StepOutcome(name, args, False, err, elapsed, error=err)
-        if "error" in box:
-            exc = box["error"]
-            _log.exception("devon tool %s failed", name)
-            cause = describe_exc(exc)
-            return StepOutcome(name, args, False, f"tool error: {cause}",
-                               elapsed, error=cause)
-        return StepOutcome(name, args, True,
-                           _clip(box.get("observation", ""),
-                                 _OBSERVATION_CHARS), elapsed)
+    def _job_outcome(self, job: Any, background: bool = False) -> StepOutcome:
+        """Turn a collected job into the step outcome it earned."""
+        prefix = "[background] " if background else ""
+        status = job.status
+        if status == "done":
+            return StepOutcome(
+                job.tool, job.args, True,
+                prefix + _clip(str(job.result), _OBSERVATION_CHARS),
+                job.elapsed, job_id=job.id)
+        if status == "failed":
+            err = f"tool error: {job.error}"
+            return StepOutcome(job.tool, job.args, False, prefix + err,
+                               job.elapsed, error=err, job_id=job.id)
+        # presumed-dead: the dead-man's switch fired — honest UNKNOWN.
+        # The job may still finish; a late result is recorded, never
+        # presented as a fresh success.
+        err = (f"[job {job.id}] {job.error}"
+               + (" (finished late — recorded, not a fresh success)"
+                  if job.late_result else ""))
+        return StepOutcome(job.tool, job.args, False, prefix + err,
+                           job.elapsed, error="outcome_unknown",
+                           job_id=job.id)
 
     # ── memory box ───────────────────────────────────────────────────────────
 
-    def _remember(self, run_id: str, chat_key: str, task: str, step: int, outcome: StepOutcome) -> None:
+    def _remember(self, run_id: str, chat_key: str, task: str, step: int, outcome: StepOutcome) -> str:
+        """Persist one step. Returns the memory row id ("" when not stored).
+
+        Parked steps are stored with their parked observation; when the
+        end-of-run drain collects the job, :meth:`_update_memory` rewrites
+        the row with the real outcome so the journal never claims a
+        parked step as the final word.
+        """
+        mem_id = new_short_id("devon")
         try:
             with self.context.db.transaction():
                 self.context.db.execute(
@@ -651,7 +716,7 @@ class DevonAgent:
                        (id, ts, chat_key, run_id, task, step, tool, args, observation, digest, status)
                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '', 'step')""",
                     (
-                        new_short_id("devon"),
+                        mem_id,
                         time.time(),
                         chat_key,
                         run_id,
@@ -664,6 +729,21 @@ class DevonAgent:
                 )
         except Exception:  # noqa: BLE001 - a memory failure must not kill the run
             _log.warning("devon memory step write failed", exc_info=True)
+            return ""
+        return mem_id
+
+    def _update_memory(self, mem_id: str, outcome: StepOutcome) -> None:
+        """Rewrite a parked step's memory row with its collected outcome."""
+        if not mem_id:
+            return
+        try:
+            with self.context.db.transaction():
+                self.context.db.execute(
+                    "UPDATE devon_memory SET observation = ? WHERE id = ?",
+                    (outcome.observation, mem_id),
+                )
+        except Exception:  # noqa: BLE001 - a memory failure must not kill the run
+            _log.warning("devon memory step update failed", exc_info=True)
 
     def _finish(self, run_id: str, chat_key: str, task: str, digest: str, ok: bool) -> None:
         try:

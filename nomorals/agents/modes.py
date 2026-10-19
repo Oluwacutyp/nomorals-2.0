@@ -71,6 +71,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from ..core.ids import new_id
+from ..core.jobs import shared_registry
 from ..core.logging_setup import get_logger
 from .planner import AgentPlanner, Plan, PlanResult, PlanStep
 
@@ -458,6 +459,9 @@ class Initiative:
     #: ``proactive_log`` id when this initiative was filed for approval
     #: ("" when it was never held).
     proposal_id: str = ""
+    #: Background-job handle when the action parked instead of running
+    #: inline. Harvested (and verified) on a later tick.
+    job_id: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {"id": self.id, "label": self.label, "source": self.source,
@@ -465,7 +469,7 @@ class Initiative:
                 "result": str(self.result)[:400] if self.result is not None
                 else None,
                 "error": self.error, "verified": self.verified,
-                "proposal_id": self.proposal_id}
+                "proposal_id": self.proposal_id, "job_id": self.job_id}
 
 
 class AutonomousEngine:
@@ -496,11 +500,20 @@ class AutonomousEngine:
                  proposal_sink: Callable[[Initiative, dict[str, Any],
                                           dict[str, Any]], Any] | None = None,
                  requires_approval: Callable[[dict[str, Any],
-                                              dict[str, Any]], bool] | None = None
+                                              dict[str, Any]], bool] | None = None,
+                 park_after_s: float = 5.0,
                  ) -> None:
         self.learner = learner or AdaptiveLearner()
         self.proposal_sink = proposal_sink
         self.requires_approval = requires_approval
+        #: Grace period before a slow action parks as a background job.
+        #: Fast actions complete inline (unchanged behavior); slower ones
+        #: keep running with heartbeats while the tick moves on. A latency
+        #: optimization, not a timeout — nothing is abandoned here.
+        self.park_after_s = max(0.0, float(park_after_s))
+        #: Background jobs for initiative actions — shared process-wide so
+        #: parked initiatives stay visible for debugging.
+        self._jobs = shared_registry()
         self._sources: list[dict[str, Any]] = []
         self._history: list[Initiative] = []
         self._ticks = 0
@@ -578,10 +591,12 @@ class AutonomousEngine:
         """One self-initiated cycle.  No prompt, no user message needed."""
         ctx = dict(ctx or {})
         self._ticks += 1
+        # First: harvest parked initiatives whose background jobs finished
+        # since the last tick — their results land here, exactly once.
+        done: list[Initiative] = self._harvest()
         names = [s["name"] for s in self._sources]
         ordered = self.rotation_order(names, "autonomous")
         by_name = {s["name"]: s for s in self._sources}
-        done: list[Initiative] = []
         for name in ordered:
             source = by_name[name]
             try:
@@ -663,24 +678,55 @@ class AutonomousEngine:
         self._pending[init.proposal_id] = (init, spec, ctx, executor)
         return init
 
+    def _run_action(self, spec: dict[str, Any], ctx: dict[str, Any],
+                    executor: Any) -> Any:
+        """Run one initiative's action synchronously. Exceptions propagate."""
+        if executor is not None:
+            return executor(spec, ctx)
+        action = spec.get("action")
+        if action is None:
+            raise ValueError(
+                f"initiative {spec.get('label', '?')!r} has no action")
+        return action(ctx)
+
     def _execute(self, init: Initiative, spec: dict[str, Any],
                  ctx: dict[str, Any], executor: Any) -> Initiative:
-        """Run one initiative's action now (immediate or approved path)."""
+        """Run one initiative's action now (immediate or approved path).
+
+        Background-job execution (no blunt timeout): the action runs with
+        heartbeats; a slow action parks — the initiative stays "running"
+        with its job id and the tick moves on to other sources. Fast
+        actions complete inline (unchanged behavior). Parked initiatives
+        are harvested and verified by :meth:`_harvest` on a later tick.
+        """
         init.status = "running"
-        try:
-            if executor is not None:
-                result = executor(spec, ctx)
-            else:
-                action = spec.get("action")
-                if action is None:
-                    raise ValueError(
-                        f"initiative {init.label!r} has no action")
-                result = action(ctx)
-        except Exception as exc:  # noqa: BLE001 - initiative failure is data
+        job = self._jobs.submit(
+            lambda: self._run_action(spec, ctx, executor),
+            tool=f"autonomous:{init.source}", args={"label": init.label},
+            labels={"owner": "autonomous"})
+        init.job_id = job.id
+        finished = self._jobs.collect(job.id, timeout=self.park_after_s)
+        if finished is not None and finished.done():
+            return self._complete_initiative(init, spec, finished)
+        return init  # parked — harvested on a later tick
+
+    def _complete_initiative(self, init: Initiative, spec: dict[str, Any],
+                             job) -> Initiative:
+        """Verify a finished job and close the initiative honestly."""
+        status = job.status
+        if status == "failed":
             init.status = "failed"
-            init.error = str(exc)[:300]
+            init.error = str(job.error)[:300]
             self.learner.record_outcome("autonomous", init.source, False)
             return init
+        if status == "presumed-dead":
+            # The dead-man's switch fired: honest UNKNOWN, never claimed
+            # done. A late result is still recorded on the job itself.
+            init.status = "failed"
+            init.error = str(job.error)[:300]
+            self.learner.record_outcome("autonomous", init.source, False)
+            return init
+        result = job.result
         init.result = result
         init.status = "verified"
         verify = spec.get("verify")
@@ -700,6 +746,39 @@ class AutonomousEngine:
             init.error = "verification failed"
         self.learner.record_outcome("autonomous", init.source, ok)
         return init
+
+    def _harvest(self) -> list[Initiative]:
+        """Collect parked initiatives whose jobs finished since last tick.
+
+        Each job is harvested exactly once (collect_ready marks collected).
+        Initiatives whose jobs are still running stay parked — visible via
+        their job id, never silently dropped.
+        """
+        done: list[Initiative] = []
+        by_job = {i.job_id: i for i in self._history
+                  if i.job_id and i.status == "running"}
+        for _pid, (init, _spec, _ctx, _exec) in self._pending.items():
+            if init.job_id and init.status == "running":
+                by_job[init.job_id] = init
+        for job in self._jobs.collect_ready(labels={"owner": "autonomous"}):
+            init = by_job.get(job.id)
+            if init is None:
+                continue
+            spec = self._spec_for_harvest(init)
+            done.append(self._complete_initiative(init, spec, job))
+        return done
+
+    def _spec_for_harvest(self, init: Initiative) -> dict[str, Any]:
+        """Best-effort spec recovery for a harvested initiative.
+
+        The verifier lives on the spec; for history initiatives the spec
+        is not retained, so verification falls back to the PlanResult /
+        truthy convention inside ``_complete_initiative``.
+        """
+        for _pid, (p_init, spec, _ctx, _exec) in self._pending.items():
+            if p_init is init:
+                return spec
+        return {}
 
 
 def proactive_source(proactive: Any, user_id: str, *,
@@ -743,14 +822,6 @@ def proactive_source(proactive: Any, user_id: str, *,
 
 # ── planning: plan first, verify each step, replan on failure ────────────
 
-class _StepTimeout(Exception):
-    """Internal: one step exceeded its timeout (terminal, not a replan)."""
-
-    def __init__(self, timeout_s: float) -> None:
-        super().__init__(f"step timed out after {timeout_s:g}s")
-        self.timeout_s = timeout_s
-
-
 async def _maybe_await(value: Any) -> Any:
     if inspect.isawaitable(value):
         return await value
@@ -768,27 +839,24 @@ class PlanningRunner:
     (``max_replans`` caps it).  An invalid plan (unknown dep, cycle,
     unknown action) raises :class:`ValueError` and NOTHING executes.
 
-    Step timeout + cancellation: every step (execute AND verify) runs
-    under ``step_timeout_s`` (default 60s, configurable per runner or
-    per run).  A step that hangs past the timeout is aborted, marked
-    ``timeout`` — never claimed done — and the run stops with
-    ``cancelled=True`` (a timeout is terminal, NOT a replan trigger).
-    ``cancel`` (a ``threading.Event`` or a callable returning bool) is
-    honoured before the run and between steps: the run stops cleanly,
-    finished steps keep their results, later steps never run.  Sync
-    step functions run on a worker thread so a blocking sync hang can
-    actually be abandoned on timeout.
+    Heartbeat + background jobs: every step (execute AND verify) runs
+    as a background job with heartbeats — there is NO per-step timeout.
+    A slow step keeps running while the run waits cancel-aware; only
+    the dead-man's switch (heartbeat silence) stops a step, marking it
+    ``presumed-dead`` with an honest UNKNOWN outcome — never claimed
+    done — and the run stops with ``cancelled=True`` (presumed-dead is
+    terminal, NOT a replan trigger, because re-running blindly could
+    duplicate side effects).  ``cancel`` (a ``threading.Event`` or a
+    callable returning bool) is honoured before the run and between
+    steps: the run stops cleanly, finished steps keep their results,
+    later steps never run.
     """
 
-    #: Sane default per-step timeout (seconds).  ``0`` disables it.
-    DEFAULT_STEP_TIMEOUT_S = 60.0
-
-    def __init__(self, planner: AgentPlanner | None = None, *,
-                 step_timeout_s: float | None = None) -> None:
+    def __init__(self, planner: AgentPlanner | None = None) -> None:
         self.planner = planner or AgentPlanner()
-        self.step_timeout_s = (
-            self.DEFAULT_STEP_TIMEOUT_S if step_timeout_s is None
-            else max(0.0, float(step_timeout_s)))
+        #: Background jobs for plan steps — shared process-wide so parked
+        #: steps stay visible for debugging.
+        self._jobs = shared_registry()
 
     @staticmethod
     def _cancel_requested(cancel: Any) -> bool:
@@ -805,63 +873,71 @@ class PlanningRunner:
         return False
 
     @staticmethod
-    async def _call_step(fn: Callable[..., Any], step: PlanStep,
-                         ctx: dict[str, Any]) -> Any:
-        """Call a step function, async or sync.
+    @staticmethod
+    def _run_step_sync(fn: Callable[..., Any], step: PlanStep,
+                       ctx: dict[str, Any]) -> Any:
+        """Run a step function to completion (job worker thread).
 
-        Sync functions run on a DAEMON worker thread with the result
-        ferried back through a queue (polled, never blocking the
-        loop).  A daemon thread is abandoned — not awaited — when the
-        caller's timeout fires, so a hung sync step can actually be
-        aborted: ``asyncio.to_thread`` would leave the wait pinned to
-        the default executor, and ``asyncio.run`` blocks shutting
-        that executor down.  If the sync function returns an
-        awaitable it is awaited on the loop thread.
+        Sync or async: an async function gets a fresh event loop in the
+        worker thread; a sync function runs inline.  Exceptions
+        propagate — the job records them as ``failed``.
         """
-        if asyncio.iscoroutinefunction(fn):
-            return await fn(step, ctx)
-        import queue as _queue
-
-        box: _queue.SimpleQueue[tuple[bool, Any]] = _queue.SimpleQueue()
-
-        def _target() -> None:
-            try:
-                box.put((True, fn(step, ctx)))
-            except Exception as exc:  # noqa: BLE001 - surfaced by the caller
-                box.put((False, exc))
-
-        worker = threading.Thread(target=_target, name="planning-step",
-                                  daemon=True)
-        worker.start()
-        while True:
-            try:
-                ok, value = box.get_nowait()
-                break
-            except _queue.Empty:
-                await asyncio.sleep(0.005)
-        if not ok:
-            raise value
+        value = fn(step, ctx)
         if inspect.isawaitable(value):
-            return await value
+            async def _await_it() -> Any:
+                return await value
+            return asyncio.run(_await_it())
         return value
 
-    async def _call_with_timeout(self, fn: Callable[..., Any],
-                                 step: PlanStep, ctx: dict[str, Any],
-                                 timeout_s: float) -> Any:
-        """Call a step function under the per-step timeout.
+    def _submit_step_job(self, fn: Callable[..., Any], step: PlanStep,
+                         ctx: dict[str, Any], phase: str):
+        """Run a step phase (execute/verify) as a background job."""
+        return self._jobs.submit(
+            lambda: self._run_step_sync(fn, step, ctx),
+            tool=f"plan:{step.name}:{phase}",
+            args={"step_id": step.step_id},
+            labels={"owner": "planning"})
 
-        ``timeout_s <= 0`` disables the timeout.  On expiry the
-        await is abandoned (a sync function keeps running on its
-        worker thread, but its late result is discarded — the step
-        is never claimed done) and :class:`_StepTimeout` is raised.
+    async def _collect_cancel_aware(self, job_id: str,
+                                    cancel: Any):
+        """Wait for a step job, honouring cancellation; never times out.
+
+        Returns the job when done, or None when the run was cancelled.
+        A finished job wins over a pending cancel (in-flight work is
+        kept, mirroring the old between-steps cancel check). A cancelled
+        wait leaves the job parked — it keeps running with heartbeats
+        and stays visible in the registry.
         """
-        if timeout_s and timeout_s > 0:
-            try:
-                return await asyncio.wait_for(
-                    self._call_step(fn, step, ctx), timeout=timeout_s)
-            except asyncio.TimeoutError:
-                raise _StepTimeout(timeout_s) from None
-        return await self._call_step(fn, step, ctx)
+        while True:
+            job = self._jobs.poll(job_id)
+            if job is not None and job.done():
+                return job
+            if self._cancel_requested(cancel):
+                return None
+            await asyncio.sleep(0.1)
+
+    @staticmethod
+    def _job_failure(job) -> str:
+        """Honest failure text for a finished step job ("" when done)."""
+        if job.status == "done":
+            return ""
+        if job.status == "failed":
+            return str(job.error)[:300] or "step failed"
+        # presumed-dead: the dead-man's switch fired — honest UNKNOWN.
+        return str(job.error)[:300] or "outcome unknown"
+
+    async def run_step_job(self, fn: Callable[..., Any], step: PlanStep,
+                           ctx: dict[str, Any], *, phase: str,
+                           cancel: Any = None):
+        """Run one step phase as a background job with heartbeats.
+
+        No timeout — the wait is cancel-aware only. Returns the finished
+        job (inspect ``status``/``result``/``error``), or None when the
+        run was cancelled while waiting; the job then stays parked in
+        the registry, still running and visible.
+        """
+        job = self._submit_step_job(fn, step, ctx, phase)
+        return await self._collect_cancel_aware(job.id, cancel)
 
     async def plan(self, goal: str, decompose: Callable[..., Any], *,
                    evidence: dict[str, Any] | None = None) -> Plan:
@@ -889,11 +965,8 @@ class PlanningRunner:
                   verify_step: Callable[..., Any] | None = None,
                   on_plan: Callable[[Plan], Any] | None = None,
                   max_replans: int = 2, account: str = "",
-                  step_timeout_s: float | None = None,
                   cancel: Any = None) -> PlanResult:
         started = time.time()
-        timeout_s = (self.step_timeout_s if step_timeout_s is None
-                     else max(0.0, float(step_timeout_s)))
         if self._cancel_requested(cancel):
             return PlanResult(
                 plan_id=new_id("plan"), success=False, cancelled=True,
@@ -909,7 +982,7 @@ class PlanningRunner:
         errors: list[str] = []
         completed = 0
         replans = 0
-        halted = ""  # "timeout" | "cancelled" — terminal, never a replan
+        halted = ""  # "presumed-dead" | "cancelled" — terminal, never a replan
         ctx: dict[str, Any] = {"goal": goal, "account": account,
                                "results": results}
         while True:
@@ -929,37 +1002,46 @@ class PlanningRunner:
                         continue
                     step.status = "running"
                     step.started_at = time.time()
-                    try:
-                        result = await self._call_with_timeout(
-                            execute_step, step, ctx, timeout_s)
-                    except _StepTimeout as exc:
-                        step.status = "timeout"
-                        step.error = str(exc)
+                    # Background job + heartbeats: no per-step timeout.
+                    # The wait is cancel-aware only; a silent job ends
+                    # via the dead-man's switch (honest UNKNOWN).
+                    finished = await self.run_step_job(
+                        execute_step, step, ctx, phase="execute",
+                        cancel=cancel)
+                    if finished is None:
+                        errors.append("run cancelled")
+                        halted = "cancelled"
+                        break
+                    failure = self._job_failure(finished)
+                    if finished.status == "presumed-dead":
+                        step.status = "presumed-dead"
+                        step.error = failure
                         step.completed_at = time.time()
                         errors.append(f"{step.name}: {step.error}")
-                        halted = "timeout"
+                        halted = "presumed-dead"
                         break
-                    except Exception as exc:  # noqa: BLE001 - step failure is data
-                        result = None
-                        failure = str(exc)[:300]
-                    else:
-                        failure = ""
+                    result = finished.result if not failure else None
                     if not failure and verify_step is not None:
-                        try:
-                            ok = await self._call_with_timeout(
-                                verify_step, step, ctx, timeout_s)
-                        except _StepTimeout as exc:
-                            step.status = "timeout"
-                            step.error = f"verify {exc}"
+                        vfinished = await self.run_step_job(
+                            verify_step, step, ctx, phase="verify",
+                            cancel=cancel)
+                        if vfinished is None:
+                            errors.append("run cancelled")
+                            halted = "cancelled"
+                            break
+                        if vfinished.status == "presumed-dead":
+                            step.status = "presumed-dead"
+                            step.error = (
+                                f"verify {self._job_failure(vfinished)}")
                             step.completed_at = time.time()
                             errors.append(f"{step.name}: {step.error}")
-                            halted = "timeout"
+                            halted = "presumed-dead"
                             break
-                        except Exception as exc:  # noqa: BLE001
-                            ok, failure = False, f"verify raised: {exc}"[:300]
-                        else:
-                            if not ok:
-                                failure = "verification failed"
+                        if vfinished.status == "failed":
+                            ok, failure = False, (
+                                f"verify raised: {vfinished.error}"[:300])
+                        elif not vfinished.result:
+                            failure = "verification failed"
                     if failure:
                         if replans < max_replans:
                             replans += 1
@@ -1129,7 +1211,6 @@ class AgentModes:
                           on_plan: Callable[[Plan], Any] | None = None,
                           strategies: list[str] | None = None,
                           strategy_context: str = "default",
-                          step_timeout_s: float | None = None,
                           cancel: Any = None) -> PlanResult:
         """Run one task through this chat's mode set."""
         modes = self.modes_for(chat_key)
@@ -1145,24 +1226,43 @@ class AgentModes:
                     "planning mode needs a decompose(goal, evidence) function")
             result = await self.planner.run(
                 goal, decompose=decompose, execute_step=execute_step,
-                verify_step=verify_step, on_plan=on_plan,
-                step_timeout_s=step_timeout_s, cancel=cancel)
+                verify_step=verify_step, on_plan=on_plan, cancel=cancel)
             if "adaptive" in modes and strategy is not None:
                 self.learner.record_outcome(strategy_context, strategy,
                                             result.success)
             return result
-        # baseline / adaptive-only: direct single-step execution
+        # baseline / adaptive-only: direct single-step execution — as a
+        # background job with heartbeats (no blunt timeout; the wait is
+        # cancel-aware only).
         step = PlanStep(step_id="step_1", name=goal, description=goal,
                         action="run")
-        try:
-            result_val = await _maybe_await(execute_step(step, ctx))
-            ok = True
-            failure = ""
-            if verify_step is not None:
-                ok = bool(await _maybe_await(verify_step(step, result_val)))
-                failure = "" if ok else "verification failed"
-        except Exception as exc:  # noqa: BLE001 - direct failure is data
-            result_val, ok, failure = None, False, str(exc)[:300]
+        finished = await self.planner.run_step_job(
+            execute_step, step, ctx, phase="direct", cancel=cancel)
+        if finished is None:
+            result_val, ok, failure = None, False, "run cancelled"
+        else:
+            failure = self.planner._job_failure(finished)
+            result_val = finished.result if not failure else None
+            ok = not failure
+            if ok and verify_step is not None:
+                # The direct path honors the documented contract
+                # verify_step(step, result) — wrap so the job target
+                # receives the result, not the ctx.
+                def _verify_with_result(s, c, _v=verify_step,
+                                        _r=result_val):
+                    return _v(s, _r)
+
+                vfinished = await self.planner.run_step_job(
+                    _verify_with_result, step, ctx, phase="verify",
+                    cancel=cancel)
+                if vfinished is None:
+                    result_val, ok, failure = None, False, "run cancelled"
+                else:
+                    vfailure = self.planner._job_failure(vfinished)
+                    if vfailure:
+                        ok, failure = False, vfailure
+                    elif not vfinished.result:
+                        ok, failure = False, "verification failed"
         if "adaptive" in modes and strategy is not None:
             self.learner.record_outcome(strategy_context, strategy, ok)
         return PlanResult(

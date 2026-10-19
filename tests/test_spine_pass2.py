@@ -108,24 +108,91 @@ def test_tool_loop_reports_tool_failure_to_weakness_ledger():
     assert rows[0]["subject"] == "probe"
 
 
-def test_devon_step_timeout_is_honest():
-    """Bug C: one hung tool hangs DevonAgent.run() forever — _execute has
-    no per-step timeout even though step_timeout exists."""
+def test_devon_step_parks_slow_tool_as_background_job():
+    """Bug C (superseded): one hung tool hung DevonAgent.run() forever.
+    Now _execute never blocks — the tool parks as a background job with
+    heartbeats, the run moves on, and the result is collected later."""
     from nomorals.agents.devon import DevonAgent
 
     ctx = SimpleNamespace(db=None, tools=None)
     agent = DevonAgent(ctx, step_timeout=0.3)
 
     def slow(args):
-        time.sleep(10)
-        return "never"
+        time.sleep(2)
+        return "slow-result"
 
     agent._tools["slow_tool"] = slow
     t0 = time.time()
     outcome = agent._execute("slow_tool", {})
     dt = time.time() - t0
-    assert dt < 5, f"no per-step timeout: blocked {dt:.1f}s on one tool"
-    assert outcome.ok is False
-    assert "timed out" in outcome.error
-    assert "unknown" in outcome.error.lower(), (
-        f"timeout must be marked outcome-unknown, got: {outcome.error!r}")
+    assert dt < 5, f"_execute blocked {dt:.1f}s instead of parking"
+    assert outcome.parked is True
+    assert outcome.job_id, "parked outcome must carry the job handle"
+    assert outcome.ok is False  # parked is not a success
+    # The job keeps running in the background; its result is collected.
+    job = agent.jobs.collect(outcome.job_id, timeout=10.0)
+    assert job is not None and job.status == "done"
+    assert job.result == "slow-result"
+    final = agent._job_outcome(job)
+    assert final.ok is True
+    assert "slow-result" in final.observation
+
+
+def test_devon_run_parks_slow_step_and_drains_it():
+    """run(): a slow step parks (the run moves on to the next step
+    instead of blocking), then the end-of-run drain collects it — the
+    digest sees the real result, not a parked placeholder."""
+    from nomorals.agents.devon import DevonAgent
+
+    ctx = SimpleNamespace(db=None, tools=None)
+    agent = DevonAgent(ctx, step_timeout=30, max_steps=2)
+
+    def slow(args):
+        time.sleep(1.0)
+        return "slow-done"
+
+    def fast(args):
+        return "fast-done"
+
+    agent._tools["slow_tool"] = slow
+    agent._tools["fast_tool"] = fast
+    agent._plan = lambda task, memory: (
+        [{"tool": "slow_tool", "args": {}},
+         {"tool": "fast_tool", "args": {}}],
+        "test", "test-model", "")
+    result = agent.run("do things", chat_key="test")
+    assert len(result.steps) == 2
+    # The slow step was drained: real outcome, not parked.
+    assert result.steps[0].ok is True
+    assert result.steps[0].parked is False
+    assert "slow-done" in result.steps[0].observation
+    assert result.steps[1].ok is True
+    assert "fast-done" in result.steps[1].observation
+    # Nothing left parked behind.
+    assert agent.jobs.list(status="running",
+                           labels={"owner": "devon"}) == []
+
+
+def test_devon_run_leaves_unfinished_job_parked_not_dropped():
+    """A step slower than the run's wall-clock budget stays parked —
+    visible in the registry for a later run, never silently dropped."""
+    from nomorals.agents.devon import DevonAgent
+
+    ctx = SimpleNamespace(db=None, tools=None)
+    agent = DevonAgent(ctx, step_timeout=0.2, max_steps=1)
+
+    def very_slow(args):
+        time.sleep(30)
+        return "eventually"
+
+    agent._tools["very_slow_tool"] = very_slow
+    agent._plan = lambda task, memory: (
+        [{"tool": "very_slow_tool", "args": {}}], "test", "t", "")
+    result = agent.run("do slow thing", chat_key="test")
+    assert len(result.steps) == 1
+    assert result.steps[0].parked is True
+    assert result.steps[0].job_id
+    parked = agent.jobs.list(status="running",
+                             labels={"owner": "devon"})
+    assert any(s["id"] == result.steps[0].job_id for s in parked), \
+        "unfinished job must stay visible in the registry"

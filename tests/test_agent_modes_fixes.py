@@ -7,7 +7,10 @@
 2. No scheduled autonomous tick was wired — ``tick()`` ran only on
    ``/agent tick`` or programmatic calls, not cron/heartbeat.
 3. ``PlanningRunner`` had no step timeout or cancellation — a hung
-   ``execute_step`` blocked the run.
+   ``execute_step`` blocked the run.  (Superseded: steps now run as
+   background jobs with heartbeats — no blunt timeout; a hung step is
+   abandoned only via cancellation, and a silent job via the dead-man's
+   switch, both honest.)
 4. ``ModeStore`` path was cwd-relative (``data/agent-modes.json``) — chat
    and CLI could read different stores depending on working directory.
 
@@ -19,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import threading
 import time
 from types import SimpleNamespace
 
@@ -318,64 +322,127 @@ def test_tick_all_only_ticks_autonomous_chats(tmp_path):
     assert ran == ["telegram:1"]
 
 
-# ── 3. PlanningRunner step timeout + cancellation ─────────────────────────
+# ── 3. PlanningRunner: heartbeat jobs + cancellation (no blunt timeout) ──
 
 def _one_step_decompose(goal, evidence=None):
     return [{"name": "only", "description": "only step", "action": "wait",
              "parameters": {"seconds": 0}, "depends_on": []}]
 
 
-def test_hung_async_step_times_out_and_run_reports_cancelled():
-    runner = M.PlanningRunner(step_timeout_s=0.2)
+def test_slow_step_completes_no_timeout():
+    # No per-step timeout anymore: a slow-but-alive step runs to
+    # completion instead of being aborted.
+    runner = M.PlanningRunner()
 
-    async def _hang(step, ctx):
-        await asyncio.sleep(30)
+    async def _slow(step, ctx):
+        await asyncio.sleep(1.0)
+        return "done-slow"
+
+    result = asyncio.run(runner.run(
+        "goal", decompose=_one_step_decompose, execute_step=_slow))
+    assert result.success is True
+    assert result.cancelled is False
+    assert result.results == {"step_1": "done-slow"}
+
+
+def test_hung_step_cancelled_leaves_job_parked():
+    # Cancelling a hung step stops the run; the job stays parked in the
+    # registry (still running, visible) — nothing is silently dropped.
+    runner = M.PlanningRunner()
+    gate = threading.Event()
+    box: dict[str, Any] = {}
+
+    def _hang(step, ctx):
+        gate.wait(30)
         return "never"
 
-    started = time.time()
-    result = asyncio.run(runner.run(
-        "goal", decompose=_one_step_decompose, execute_step=_hang))
-    elapsed = time.time() - started
-    assert elapsed < 10  # aborted, not stuck for 30s
+    def _run():
+        box["result"] = asyncio.run(runner.run(
+            "goal", decompose=_one_step_decompose, execute_step=_hang,
+            cancel=box["cancel"]))
+
+    box["cancel"] = threading.Event()
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+    deadline = time.time() + 10
+    while time.time() < deadline:
+        if runner._jobs.list(status="running",
+                             labels={"owner": "planning"}):
+            break
+        time.sleep(0.05)
+    else:
+        pytest.fail("step job never started")
+    box["cancel"].set()  # cancel while the step is hung
+    t.join(15)
+    gate.set()
+    result = box["result"]
     assert result.success is False
     assert result.cancelled is True
     assert result.steps_completed == 0
-    assert result.results == {}  # half-executed step never claimed done
-    assert any("timed out" in e for e in result.errors)
+    assert any("cancelled" in e for e in result.errors)
+    # The abandoned job is still parked and visible — not dropped.
+    parked = runner._jobs.list(status="running",
+                               labels={"owner": "planning"})
+    assert parked, "hung job should stay parked after cancel"
 
 
-def test_hung_sync_step_times_out():
-    runner = M.PlanningRunner(step_timeout_s=0.2)
-
-    def _hang(step, ctx):
-        time.sleep(30)
-        return "never"
-
-    started = time.time()
-    result = asyncio.run(runner.run(
-        "goal", decompose=_one_step_decompose, execute_step=_hang))
-    assert time.time() - started < 10
-    assert result.success is False
-    assert result.cancelled is True
-    assert result.results == {}
-
-
-def test_timeout_does_not_replan():
-    runner = M.PlanningRunner(step_timeout_s=0.2)
+def test_presumed_dead_step_halts_without_replan():
+    # The dead-man's switch firing mid-step is terminal (never a replan
+    # trigger — blind re-running could duplicate side effects) and the
+    # error is honest UNKNOWN, never a fake failure.
+    runner = M.PlanningRunner()
     calls = {"n": 0}
 
     def _decompose(goal, evidence=None):
         calls["n"] += 1
         return _one_step_decompose(goal, evidence)
 
-    async def _hang(step, ctx):
-        await asyncio.sleep(30)
+    gate = threading.Event()
+
+    def _hang(step, ctx):
+        gate.wait(30)
         return "never"
 
-    result = asyncio.run(runner.run(
-        "goal", decompose=_decompose, execute_step=_hang, max_replans=2))
-    assert calls["n"] == 1  # timeout is terminal, not a replan trigger
-    assert result.cancelled is True
+    box: dict[str, Any] = {}
+
+    def _run():
+        box["result"] = asyncio.run(runner.run(
+            "goal", decompose=_decompose, execute_step=_hang,
+            max_replans=2))
+
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+    try:
+        # Simulate lost visibility: backdate every running planning job's
+        # heartbeat until the run halts (the wrapper refreshes only every
+        # 10s; the collect loop polls every 0.1s, so the switch fires).
+        # An earlier test may have left a parked job in the shared
+        # registry — backdating it too is harmless.
+        deadline = time.time() + 20
+        backdated = False
+        while time.time() < deadline and t.is_alive():
+            running = runner._jobs.list(
+                status="running", labels={"owner": "planning"})
+            for snap in running:
+                job = runner._jobs.poll(snap["id"])
+                if job is not None:
+                    with job.lock:
+                        job.last_heartbeat_at -= 10 ** 6
+                    backdated = True
+            time.sleep(0.2)
+        assert backdated, "step job never started"
+        t.join(15)
+        assert not t.is_alive(), "run did not halt on presumed-dead"
+        result = box["result"]
+        assert calls["n"] == 1  # terminal, not a replan trigger
+        assert result.cancelled is True
+        assert result.success is False
+        assert result.steps_completed == 0
+        assert result.results == {}  # unknown step never claimed done
+        assert any("no heartbeat" in e for e in result.errors)
+        assert any("UNKNOWN" in e for e in result.errors)
+    finally:
+        gate.set()
 
 
 def test_cancel_event_stops_run_cleanly():
@@ -427,18 +494,19 @@ def test_cancel_before_start_runs_nothing():
     assert result.steps_completed == 0
 
 
-def test_run_sync_honours_timeout():
-    runner = M.PlanningRunner(step_timeout_s=0.2)
+def test_run_sync_slow_step_completes():
+    # run_sync has no blunt timeout either: a slow step finishes.
+    runner = M.PlanningRunner()
 
-    async def _hang(step, ctx):
-        await asyncio.sleep(30)
-        return "never"
+    def _slow(step, ctx):
+        time.sleep(1.0)
+        return "slow-ok"
 
-    started = time.time()
     result = runner.run_sync(
-        "goal", decompose=_one_step_decompose, execute_step=_hang)
-    assert time.time() - started < 10
-    assert result.cancelled is True
+        "goal", decompose=_one_step_decompose, execute_step=_slow)
+    assert result.success is True
+    assert result.cancelled is False
+    assert result.results == {"step_1": "slow-ok"}
 
 
 # ── 4. ModeStore resolves against the settings data dir ───────────────────
@@ -514,3 +582,43 @@ def test_agent_modes_shares_store_across_cwds(tmp_path, monkeypatch):
             {"autonomous", "planning"})
     finally:
         reset_settings()
+
+
+# ── 5. AutonomousEngine: slow actions park, harvest completes them ──────
+
+def test_autonomous_slow_action_parks_then_harvests():
+    engine = M.AutonomousEngine(park_after_s=0.1)
+
+    def _slow(ctx):
+        time.sleep(0.8)
+        return "slow-result"
+
+    engine.add_source("slow-src",
+                      lambda ctx: [{"label": "slow", "action": _slow}],
+                      priority=0.9)
+    tick1 = engine.tick({})
+    assert len(tick1) == 1
+    init = tick1[0]
+    # Parked: still running, with a job handle — the tick moved on.
+    assert init.status == "running"
+    assert init.job_id, "parked initiative must carry its job handle"
+    # Next tick harvests the finished job and verifies it.
+    time.sleep(1.0)
+    tick2 = engine.tick({})
+    harvested = [i for i in tick2 if i.id == init.id]
+    assert harvested, "parked initiative was never harvested"
+    assert harvested[0].status == "done"
+    assert harvested[0].result == "slow-result"
+    assert harvested[0].verified is True
+
+
+def test_autonomous_fast_action_completes_inline():
+    engine = M.AutonomousEngine(park_after_s=5.0)
+    engine.add_source("fast-src",
+                      lambda ctx: [{"label": "fast",
+                                    "action": lambda c: "quick"}],
+                      priority=0.9)
+    tick1 = engine.tick({})
+    assert len(tick1) == 1
+    assert tick1[0].status == "done"
+    assert tick1[0].result == "quick"
