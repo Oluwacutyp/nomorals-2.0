@@ -67,7 +67,9 @@ TOOL_CATALOG: tuple[tuple[str, str], ...] = (
     ("find_code", "regex search across the repo (args: grep, path, max_hits)"),
     ("db_query", "SELECT-only query against the live state (args: sql)"),
     ("message_flow", "recent chat flow: who sent what, did the brain reply, which model (args: limit)"),
-    ("run_tests", "run a unittest module or the tests/ directory (args: pattern, timeout)"),
+    ("run_tests", "run tests (args: pattern, timeout, chunk; no pattern = "
+     "targeted run over tests touching changed files; pattern='tests' runs "
+     "the full suite in chunks)"),
     ("git_status", "current branch, commit, dirty files (no args)"),
     ("git_diff", "diff between two commits/refs, line-capped (args: ref_a, ref_b, path)"),
     ("logs_tail", "tail of the running log file (args: n)"),
@@ -867,20 +869,148 @@ class DevonAgent:
         cmd.append("-v")
         return cmd
 
-    def _tool_run_tests(self, args: dict[str, Any]) -> str:
-        pattern = str(args.get("pattern") or "tests").strip() or "tests"
-        timeout = _as_int(args.get("timeout"), 120, lo=5, hi=300)
-        cmd = self._test_cmd(pattern)
+    @staticmethod
+    def _test_cmd_many(patterns: list[str]) -> list[str]:
+        """The unittest invocation for a list of test-file paths."""
+        cmd = [sys.executable, "-m", "unittest"]
+        for pattern in patterns:
+            if pattern.endswith(".py"):
+                cmd.append(pattern[:-3].replace("/", ".").replace("\\", "."))
+            elif "." in pattern:
+                cmd.append(pattern)
+            else:
+                cmd += ["discover", "-s", pattern, "-p", "test_*.py", "-t", "."]
+        cmd.append("-v")
+        return cmd
+
+    @staticmethod
+    def _parse_unittest_counts(output: str) -> tuple[int, bool]:
+        """(tests ran, ok) from ``python -m unittest`` output."""
+        m = re.search(r"Ran (\d+) tests?", output or "")
+        ran = int(m.group(1)) if m else 0
+        ok = bool(re.search(r"^OK$", output or "", re.MULTILINE))
+        return ran, ok
+
+    def _run_one_unittest(self, cmd: list[str], timeout: float):
+        """Run one unittest command; returns (returncode, output, timed_out)."""
         try:
             proc = subprocess.run(
                 cmd, cwd=str(self.repo_root), capture_output=True, text=True,
                 timeout=timeout, check=False,
             )
         except subprocess.TimeoutExpired:
-            return f"test run timed out after {timeout}s (pattern {pattern})"
+            return None, "", True
+        return proc.returncode, (proc.stdout or "") + (proc.stderr or ""), False
+
+    def _tool_run_tests(self, args: dict[str, Any]) -> str:
+        # The full suite is ~815 files / ~85 min in this repo. The old
+        # defaults — pattern "tests" + 120s cap (hard-capped at 300s) —
+        # guaranteed a timeout that read as "the tests hang". New shape:
+        # no pattern → targeted run (tests touching changed files);
+        # pattern "tests" → chunked full suite with partial results;
+        # a timeout says the suite was STILL RUNNING and how to resume.
+        pattern = str(args.get("pattern") or "").strip()
+        timeout = _as_int(args.get("timeout"), 600, lo=5, hi=7200)
+        chunk = str(args.get("chunk") or "").strip()
+        try:
+            return self._tool_run_tests_inner(pattern, timeout, chunk)
         except OSError as exc:
             return f"could not run tests: {describe_exc(exc)}"
-        return summarize_test_run(pattern, proc.returncode, (proc.stdout or "") + (proc.stderr or ""))
+
+    def _tool_run_tests_inner(self, pattern: str, timeout: int,
+                              chunk: str) -> str:
+        if not pattern:
+            from ..tools.pytest_runner import select_changed_tests
+
+            selected = select_changed_tests(str(self.repo_root))
+            if not selected:
+                return ("no tests matched the changed files — nothing ran. "
+                        "Pass pattern='tests' for the full suite "
+                        "(chunk='i/4' slices, ~85 min total) or "
+                        "pattern=<file> for one file.")
+            _rc, output, timed_out = self._run_one_unittest(
+                self._test_cmd_many(selected), timeout)
+            if timed_out:
+                return (f"stopped after {timeout}s — targeted run was still "
+                        "running (not necessarily hung). Rerun with a larger "
+                        "timeout or pattern='tests' chunk='i/4'.")
+            return ("targeted (tests touching changed files):\n"
+                    + summarize_test_run(",".join(selected), _rc or 0, output))
+        suite_dir = self.repo_root / pattern
+        if suite_dir.is_dir():
+            files = sorted(
+                str(p.relative_to(self.repo_root))
+                for p in suite_dir.rglob("test_*.py"))
+            return self._run_chunked_suite(files, timeout, chunk,
+                                           label=pattern)
+        # Single file / module / dotted pattern: one run, honest timeout.
+        _rc, output, timed_out = self._run_one_unittest(
+            self._test_cmd(pattern), timeout)
+        if timed_out:
+            return (f"stopped after {timeout}s — test run was still running "
+                    "(not necessarily hung). Rerun with a larger timeout, "
+                    "or chunk='i/n' for the full suite.")
+        return summarize_test_run(pattern, _rc or 0, output)
+
+    def _run_chunked_suite(self, files: list[str], timeout: float,
+                           chunk: str, *, label: str) -> str:
+        """Run a suite directory in chunks, reporting partial progress.
+
+        ``chunk="i/n"`` runs one slice; no chunk runs every slice in
+        order inside the timeout budget. A timeout mid-suite returns the
+        completed chunks + how to resume — never a bare "timed out" that
+        reads as a hang.
+        """
+        from ..tools.pytest_runner import parse_chunk, slice_chunk
+
+        total_chunks = 4
+        parsed = parse_chunk(chunk) if chunk else None
+        if parsed is not None:
+            slices = [(parsed[0], slice_chunk(files, chunk))]
+        else:
+            slices = [(i, slice_chunk(files, f"{i}/{total_chunks}"))
+                      for i in range(1, total_chunks + 1)]
+        started = time.monotonic()
+        ran_total = 0
+        failed_chunks: list[int] = []
+        done = 0
+        for cid, slice_files in slices:
+            if not slice_files:
+                done += 1
+                continue
+            remaining = timeout - (time.monotonic() - started)
+            if remaining <= 0:
+                elapsed = round(time.monotonic() - started, 1)
+                return (f"unittest {label} → PARTIAL after {elapsed}s — "
+                        "suite was still running (not necessarily hung). "
+                        f"Chunks done: {done}/{total_chunks} "
+                        f"({ran_total} tests). Resume with chunk="
+                        f"'{cid}/{total_chunks}' (same pattern, "
+                        f"timeout={timeout}).")
+            _rc, output, timed_out = self._run_one_unittest(
+                self._test_cmd_many(slice_files), max(1.0, remaining))
+            if timed_out:
+                elapsed = round(time.monotonic() - started, 1)
+                return (f"unittest {label} → PARTIAL after {elapsed}s — "
+                        "suite was still running (not necessarily hung). "
+                        f"Chunks done: {done}/{total_chunks} "
+                        f"({ran_total} tests). Resume with chunk="
+                        f"'{cid}/{total_chunks}' (same pattern, "
+                        f"timeout={timeout}).")
+            ran, ok = self._parse_unittest_counts(output)
+            ran_total += ran
+            done += 1
+            if not ok:
+                failed_chunks.append(cid)
+        status = ("PASS" if not failed_chunks
+                  else f"FAIL (chunks {failed_chunks})")
+        if parsed is not None:
+            return (f"unittest {label} → {status} — full suite "
+                    f"({len(files)} test files, ~85 min in this repo), "
+                    f"chunk {chunk}: {ran_total} tests")
+        return (f"unittest {label} → {status} — full suite "
+                f"({len(files)} test files, ~85 min in this repo) ran in "
+                f"{done} chunk(s): {ran_total} tests")
 
     def _tool_git_status(self, args: dict[str, Any]) -> str:
         try:

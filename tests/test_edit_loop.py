@@ -848,5 +848,25 @@ class TestLLMPathHonesty(unittest.TestCase):
         self.assertIn("no fenced code block", str(ctx.exception))
 
 
+class TestRunTestsTimeoutHonesty(unittest.TestCase):
+    """EditLoop.run_tests timeout must say "still running", not "timed out".
+
+    Same misdiagnosis as the Devon tool: a timeout on a long suite is
+    not evidence of a hang.
+    """
+
+    def test_timeout_says_still_running(self) -> None:
+        import asyncio
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as td:
+            loop = make_loop(Path(td))
+            res = asyncio.run(
+                loop.run_tests("sleep 30", timeout=1))
+            self.assertFalse(res.passed)
+            self.assertIn("still running", res.output.lower())
+            self.assertNotIn("timed out", res.output.lower())
+
+
 if __name__ == "__main__":
     unittest.main()

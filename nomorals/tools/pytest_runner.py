@@ -27,6 +27,7 @@ from ..core.logging_setup import get_logger
 _log = get_logger(__name__)
 
 __all__ = ["run_tests", "select_changed_tests", "format_test_result",
+           "parse_chunk", "slice_chunk",
            "register"]
 
 _FAILED_LINE = re.compile(r"^FAILED\s+(\S+)", re.MULTILINE)
@@ -192,10 +193,16 @@ def _run_pytest(root: Path, paths: list[str] | None,
         proc = subprocess.run(cmd, cwd=str(root), capture_output=True,
                               text=True, encoding="utf-8", errors="replace", timeout=timeout)
     except subprocess.TimeoutExpired:
+        # NOT a hang: the suite was still running when the budget ran
+        # out. A bare "timed out" reads as "the tests hang" — the exact
+        # misdiagnosis a full-suite run with a 120s cap produced. Say
+        # what happened and how to continue (bigger timeout / chunk).
         return {"ok": False, "passed": 0, "failed": [], "errors": 1,
                 "seconds": round(time.perf_counter() - t0, 2),
                 "selected": targets, "runner": "pytest",
-                "note": f"timed out after {timeout}s"}
+                "note": (f"stopped after {timeout}s — suite was still running "
+                         "(not necessarily hung); rerun with a larger "
+                         "timeout or chunk='i/n' to continue")}
     out = (proc.stdout or "") + (proc.stderr or "")
     counts = _parse_pytest_counts(out)
     passed = counts.get("passed", 0)
@@ -227,7 +234,61 @@ def _run_pytest(root: Path, paths: list[str] | None,
             "runner": "pytest", "note": note}
 
 
-def _path_to_module(path: str) -> str:
+def parse_chunk(chunk: str | None) -> tuple[int, int] | None:
+    """``"i/n"`` → ``(i, n)``, or None when no chunk was asked for.
+
+    Raises ValueError on a malformed chunk spec — a silent mis-slice
+    would run the wrong tests and report them as the whole suite.
+    """
+    if chunk is None:
+        return None
+    text = str(chunk).strip()
+    if not text:
+        return None
+    try:
+        i_str, n_str = text.split("/", 1)
+        i, n = int(i_str), int(n_str)
+    except ValueError:
+        raise ValueError(
+            f"chunk must look like 'i/n' (e.g. '1/4'), got {chunk!r}") from None
+    if n < 1 or i < 1 or i > n:
+        raise ValueError(
+            f"chunk must satisfy 1 <= i <= n, got {chunk!r}")
+    return (i, n)
+
+
+def slice_chunk(files: list[str], chunk: str | None) -> list[str]:
+    """One slice of ``files`` for chunk ``"i/n"`` (even split, ceil).
+
+    The full suite is ~815 files / ~85 min in this repo, so callers with
+    a short timeout run one slice per call (1/4 … 4/4) instead of timing
+    out mid-suite and concluding the tests hang.
+    """
+    parsed = parse_chunk(chunk)
+    if parsed is None:
+        return list(files)
+    i, n = parsed
+    if not files:
+        return []
+    per = -(-len(files) // n)  # ceil division
+    return list(files[(i - 1) * per:i * per])
+
+
+def _expand_test_files(root: Path, targets: list[str] | None) -> list[str]:
+    """Directory targets → sorted test-file list; file/node targets as-is."""
+    out: list[str] = []
+    for target in targets or []:
+        candidate = root / target
+        if candidate.is_dir():
+            for tf in sorted(candidate.rglob("test_*.py")):
+                out.append(str(tf.relative_to(root)))
+        else:
+            out.append(target)
+    return out
+
+
+def _is_dir_target(root: Path, targets: list[str] | None) -> bool:
+    return bool(targets) and any((root / t).is_dir() for t in targets)
     """``tests/test_mod.py`` -> ``tests.test_mod``.
 
     pytest accepts file paths on its command line; ``python -m unittest``
@@ -273,7 +334,9 @@ def _run_unittest(root: Path, paths: list[str] | None,
         return {"ok": False, "passed": 0, "failed": [], "errors": 1,
                 "seconds": round(time.perf_counter() - t0, 2),
                 "selected": paths or ["tests"], "runner": "unittest",
-                "note": f"timed out after {timeout}s"}
+                "note": (f"stopped after {timeout}s — suite was still running "
+                         "(not necessarily hung); rerun with a larger "
+                         "timeout or chunk='i/n' to continue")}
     out = (proc.stdout or "") + (proc.stderr or "")
     failed = []
     for m in _UNITTEST_FAIL.finditer(out):
@@ -310,15 +373,28 @@ def _run_unittest(root: Path, paths: list[str] | None,
 def run_tests(paths: list[str] | None = None,
               changed_only: bool = False,
               repo: str | None = None,
-              timeout: float = 300.0) -> dict[str, Any]:
+              timeout: float = 300.0,
+              chunk: str | None = None) -> dict[str, Any]:
     """Run the test suite and return a structured result.
 
     ``changed_only`` selects tests via ``select_changed_tests``; when
     nothing matches, the run is skipped honestly (no silent full-suite
     run, no fake pass).
+
+    No ``paths`` and no ``changed_only`` → targeted by default: the
+    tests touching changed files. A bare call used to run the FULL suite
+    (~815 files / ~85 min in this repo) behind whatever timeout the
+    caller had — a 120s cap guaranteed a timeout that looked like a
+    hang. To run the whole suite, pass ``paths=["tests"]`` with
+    ``chunk="i/n"`` (e.g. 1/4 … 4/4), one slice per call.
     """
     root = _repo_root(repo)
+    if isinstance(paths, str):
+        # cmdline/commands/repo.py calls run_tests(root, ...) with a bare
+        # string; list(str) would split it into characters.
+        paths = [paths]
     selected: list[str] | None = list(paths) if paths else None
+    targeted = False
     if changed_only:
         selected = select_changed_tests(str(root))
         if not selected:
@@ -326,10 +402,53 @@ def run_tests(paths: list[str] | None = None,
                     "seconds": 0.0, "selected": [],
                     "runner": "pytest" if _has_pytest() else "unittest",
                     "note": "no tests matched the changed files — nothing ran"}
+    elif selected is None:
+        selected = select_changed_tests(str(root))
+        if selected:
+            targeted = True
+        else:
+            return {"ok": True, "passed": 0, "failed": [], "errors": 0,
+                    "seconds": 0.0, "selected": [],
+                    "runner": "pytest" if _has_pytest() else "unittest",
+                    "note": ("no tests matched the changed files — nothing ran. "
+                             "Pass paths=['tests'] for the full suite "
+                             "(chunk='i/n' slices, e.g. 1/4 … 4/4) or "
+                             "paths=[...] for specific files.")}
+    chunk_parsed = parse_chunk(chunk)
+    full_suite = _is_dir_target(root, selected)
+    if chunk_parsed is not None:
+        expanded = _expand_test_files(root, selected)
+        selected = slice_chunk(expanded, chunk)
+        if not selected:
+            # An empty slice must NOT fall through to _run_pytest's
+            # ["tests"] default — that would run the whole suite.
+            return {"ok": True, "passed": 0, "failed": [], "errors": 0,
+                    "seconds": 0.0, "selected": [],
+                    "runner": "pytest" if _has_pytest() else "unittest",
+                    "chunk": chunk, "chunk_of": f"{chunk_parsed[0]}/{chunk_parsed[1]}",
+                    "note": (f"chunk {chunk} is empty — only "
+                             f"{len(expanded)} test file(s) exist")}
     if _has_pytest():
-        return _run_pytest(root, selected, timeout)
-    _log.info("pytest not found — falling back to unittest discover")
-    return _run_unittest(root, selected, timeout)
+        result = _run_pytest(root, selected, timeout)
+    else:
+        _log.info("pytest not found — falling back to unittest discover")
+        result = _run_unittest(root, selected, timeout)
+    if chunk_parsed is not None:
+        result["chunk"] = chunk
+        result["chunk_of"] = f"{chunk_parsed[0]}/{chunk_parsed[1]}"
+        base = result.get("note") or ""
+        result["note"] = (f"chunk {chunk} of the suite"
+                          + (f" — {base}" if base else ""))
+    elif targeted:
+        base = result.get("note") or ""
+        result["note"] = ("targeted run: tests touching changed files"
+                          + (f" — {base}" if base else ""))
+    elif full_suite and not result.get("note"):
+        n_files = len(_expand_test_files(root, selected))
+        result["note"] = (
+            f"full-suite run: {n_files} test files — pass chunk='i/n' "
+            "(e.g. 1/4 … 4/4) to run one slice per call")
+    return result
 
 
 def register(registry: Any) -> None:
@@ -340,11 +459,24 @@ def register(registry: Any) -> None:
         "run_tests",
         description=("Run the test suite (pytest if installed, else unittest "
                      "discover). changed_only selects tests touching changed "
-                     "files. Returns {ok, passed, failed:[{test_id, file, "
-                     "error_snippet}], errors, seconds}."),
+                     "files. No paths → targeted run (changed files only); "
+                     "pass paths=['tests'] + chunk='i/n' for one slice of the "
+                     "full suite (~85 min). Returns {ok, passed, failed:"
+                     "[{test_id, file, error_snippet}], errors, seconds}."),
         capability=Capability.EXEC_SHELL,
+        parameters={
+            "paths": "list[str] (optional) — test files/dirs to run",
+            "changed_only": "bool (optional) — only tests touching changed files",
+            "repo": "str (optional) — repo root",
+            "timeout": "float (optional, 300) — seconds per run; full-suite "
+                       "runs should use chunk= instead of a huge timeout",
+            "chunk": "str (optional, 'i/n') — run one slice of the suite",
+        },
     )
     def _run_tests(paths: list[str] | None = None,
                    changed_only: bool = False,
-                   repo: str | None = None) -> dict[str, Any]:
-        return run_tests(paths=paths, changed_only=changed_only, repo=repo)
+                   repo: str | None = None,
+                   timeout: float = 300.0,
+                   chunk: str | None = None) -> dict[str, Any]:
+        return run_tests(paths=paths, changed_only=changed_only, repo=repo,
+                         timeout=timeout, chunk=chunk)

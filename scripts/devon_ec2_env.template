@@ -371,6 +371,10 @@
 # NM_PLAN_STORE=
 # Config key read by Devon code.
 # NM_SPEC_STORE=
+# Agent-modes store path (per-chat adaptive/autonomous/planning modes).
+# Absolute as-is; relative against the settings home. Default:
+# <settings-home>/data/agent-modes.json.
+# NM_AGENT_MODES_STORE=
 # Config key read by Devon code.
 # NM_NO_COLOR=
 # Config key read by Devon code.

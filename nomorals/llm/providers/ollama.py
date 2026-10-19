@@ -88,6 +88,15 @@ class OllamaProvider(LLMProvider):
         self.keep_alive = keep_alive
         self.options = dict(options or {})
         self.http = HttpClient(timeout=timeout, headers=dict(headers or {}))
+        # Ollama always runs on the operator's own machine (loopback,
+        # same as llama-server). The SSRF guard would block 127.0.0.1 —
+        # allow it here only. This is the operator's own box talking to
+        # itself, not an SSRF attack: base_url comes from operator config
+        # (OLLAMA_HOST), never from untrusted input. Without this, every
+        # Ollama call dies with "SSRF block" before the router can even
+        # fail over — which is how the reasoning tool failed outright on
+        # a chain whose only local provider was Ollama.
+        self.http.allow_private_ips = True
         self._policy = BackoffPolicy(max_attempts=max(1, max_retries), cap=30.0)
 
     # ── introspection ────────────────────────────────────────────────────────

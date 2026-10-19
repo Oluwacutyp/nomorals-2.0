@@ -924,13 +924,16 @@ class EditLoop:
         
         return results
     
-    async def run_tests(self, command: str, *, timeout: int = 120) -> TestResult:
+    async def run_tests(self, command: str, *, timeout: int = 600) -> TestResult:
         """Run test command and parse results.
-        
+
         Args:
             command: Test command to run
-            timeout: Max seconds to wait
-            
+            timeout: Max seconds to wait (default 600: the full suite is
+                ~85 min, so a 120s cap guaranteed a timeout that read as
+                a hang — the timeout result now says the run was still
+                going, not that it hung).
+
         Returns:
             TestResult with pass/fail and errors
         """
@@ -970,8 +973,10 @@ class EditLoop:
         except asyncio.TimeoutError:
             return TestResult(
                 passed=False,
-                output=f"Tests timed out after {timeout}s",
-                errors=[f"Timeout after {timeout}s"],
+                output=(f"Tests stopped after {timeout}s — command was still "
+                        "running (not necessarily hung); rerun with a larger "
+                        "timeout or a narrower test selection."),
+                errors=[f"Stopped after {timeout}s — still running, not hung"],
                 duration=timeout,
                 return_code=-1,
             )
