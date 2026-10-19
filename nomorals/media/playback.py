@@ -873,29 +873,33 @@ class PlaybackEngine:
         try:
             video_id = self._youtube_search_id(query)
         except Exception as exc:  # noqa: BLE001
-            from .cookies import BOT_COOKIE_HELP, is_bot_detection_error
+            from .cookies import BOT_COOKIE_SHORT_HELP, is_bot_detection_error
             if is_bot_detection_error(exc):
                 return {"ok": False,
                         "reason": f"{source_label} blocked the download ({sc_error[:80]}). "
-                                  f"{BOT_COOKIE_HELP}"}
+                                  f"{BOT_COOKIE_SHORT_HELP}",
+                        "youtube_fallback_attempted": True}
             return {"ok": False,
                     "reason": f"{source_label} blocked the download ({sc_error[:80]}) "
-                              f"and YouTube search failed: {exc}"}
+                              f"and YouTube search failed: {exc}",
+                    "youtube_fallback_attempted": True}
         yt_item = {"kind": "youtube",
                    "path": self._youtube_watch_url(video_id),
                    "title": title}
         try:
             path = self._youtube_audio(yt_item)
         except Exception as exc:  # noqa: BLE001
-            from .cookies import BOT_COOKIE_HELP, is_bot_detection_error
+            from .cookies import BOT_COOKIE_SHORT_HELP, is_bot_detection_error
             err = str(exc)
             if is_bot_detection_error(err):
                 return {"ok": False,
                         "reason": f"{source_label} blocked the download ({sc_error[:80]}). "
-                                  f"{BOT_COOKIE_HELP}"}
+                                  f"{BOT_COOKIE_SHORT_HELP}",
+                        "youtube_fallback_attempted": True}
             return {"ok": False,
                     "reason": f"{source_label} blocked the download ({sc_error[:80]}) "
-                              f"and YouTube download failed: {exc}"}
+                              f"and YouTube download failed: {exc}",
+                    "youtube_fallback_attempted": True}
         _log.info("youtube fallback succeeded for %r", query)
         return {"ok": True, "path": path, "title": title,
                 "note": f"via YouTube ({source_label} was blocked)"}

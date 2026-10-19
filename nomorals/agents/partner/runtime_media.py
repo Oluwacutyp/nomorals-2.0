@@ -440,6 +440,19 @@ class RuntimeMediaMixin:
             return _dist.format_packet(packet)
         return nxt
 
+    @staticmethod
+    def _youtube_error(prefix: str, exc: Any, chat: Any) -> str:
+        """Forced-YouTube failure with the cookies hint when the cause
+        is a bot-check.  Chat users are on phones: they get the short
+        /cookies pointer, never the yt-dlp command dump.  CLI users
+        CAN run commands, so they get the full FAQ-grounded help."""
+        from ...media.cookies import (
+            BOT_COOKIE_HELP, BOT_COOKIE_SHORT_HELP, is_bot_detection_error)
+        msg = f"{prefix}: {exc}"
+        if is_bot_detection_error(exc):
+            msg += f"\n{BOT_COOKIE_SHORT_HELP if chat is not None else BOT_COOKIE_HELP}"
+        return msg
+
     def _control_play(self, tail: str, chat_key: str = "") -> str:
         """Play transport.  <query> is ONE thing — a path, a URL, or a
         song title — never whitespace-split into word-paths.
@@ -518,14 +531,23 @@ class RuntimeMediaMixin:
                     try:
                         added = engine._add_youtube(rest)
                     except Exception as exc:  # noqa: BLE001
-                        return f"can't play {rest[:80]!r} from YouTube: {exc}"
+                        return self._youtube_error(
+                            f"can't play {rest[:80]!r} from YouTube",
+                            exc, chat)
                     if chat is not None and added:
                         out = f"queued 1:\n  - {added[0].get('title')}"
                         return self._play_send_in_chat(engine, added[0], out, chat)
+                    # CLI: play the item _add_youtube just enqueued.
+                    # Do NOT call engine.play_youtube(rest) — it
+                    # re-adds the same video, double-enqueuing it.
                     try:
-                        res = engine.play_youtube(rest)
+                        q = engine.queue()
+                        n = len(q) if isinstance(q, list) else 0
+                        res = engine.play(n - 1 if n else 0)
                     except Exception as exc:  # noqa: BLE001
-                        return f"can't play {rest[:80]!r} from YouTube: {exc}"
+                        return self._youtube_error(
+                            f"can't play {rest[:80]!r} from YouTube",
+                            exc, chat)
                     return self._fmt_started(res, engine)
                 # Dynamic resolution: the strategy chain in
                 # nomorals/media/resolver.py tries local file → yt-dlp
@@ -590,7 +612,16 @@ class RuntimeMediaMixin:
                                      or "no strategies"))
                         hint = (f"\n{resolution.hint}"
                                 if resolution.hint else "")
-                    return (f"couldn't find {rest[:80]!r} —\n{detail}{hint}")
+                    msg = f"couldn't find {rest[:80]!r} —\n{detail}{hint}"
+                    if chat is not None:
+                        # Chat users are on phones: the resolver's
+                        # full yt-dlp command dump is not actionable
+                        # there — shorten to the /cookies pointer.
+                        from ...media.cookies import (
+                            BOT_COOKIE_HELP as _FULL_HELP,
+                            BOT_COOKIE_SHORT_HELP as _SHORT_HELP)
+                        msg = msg.replace(_FULL_HELP, _SHORT_HELP)
+                    return msg
                 added = []
                 for r in (resolution, *resolution.extra_tracks):
                     added.append(engine._enqueue(
@@ -600,6 +631,35 @@ class RuntimeMediaMixin:
                 out = (f"queued {len(added)} (queue {queue_len}):\n"
                        + "\n".join(f"  - {a.get('title') or a['path']}"
                                    for a in added))
+                # Chat context: SEND the audio file instead of local mpv.
+                # Nobody hears the server's speakers — the user gets the track.
+                # Text query, single track: download fall-through across
+                # ALL candidates.  A search-ok source whose download
+                # fails is a download failure, not success — keep
+                # trying until one both finds AND downloads.  The
+                # helper renders the full tried-list, so don't append
+                # the resolver's partial list here.
+                if (action == "play" and chat is not None
+                        and not _is_urlish and not _is_pathish
+                        and not resolution.extra_tracks):
+                    try:
+                        from ...media.resolver import SourceResolver
+                        cands, detailed = SourceResolver(
+                            self.context).search_candidates_detailed(
+                                search_q)
+                    except Exception:  # noqa: BLE001
+                        cands, detailed = [], []
+                    fallbacks = [
+                        {"kind": c.kind, "path": c.path_or_url,
+                         "title": c.title or c.path_or_url,
+                         "artist": c.artist or "",
+                         "duration": c.duration or 0.0,
+                         "downloadable": c.downloadable}
+                        for c in (cands or [])]
+                    merged = self._merge_search_attempts(
+                        resolution.attempts, detailed)
+                    return self._play_send_with_fallthrough(
+                        engine, added[0], fallbacks, merged, out, chat)
                 # Sources tried — visible, so the user sees MANY sources
                 # were consulted, not 1–2.  Attempts already record
                 # every strategy in order (failed + the winner).
@@ -607,8 +667,6 @@ class RuntimeMediaMixin:
                 if tried:
                     out += ("\nsources tried "
                             f"({len(tried)}): " + "; ".join(tried))
-                # Chat context: SEND the audio file instead of local mpv.
-                # Nobody hears the server's speakers — the user gets the track.
                 if action == "play" and chat is not None:
                     return self._play_send_in_chat(engine, added[0], out, chat)
                 if action == "play":
@@ -620,12 +678,40 @@ class RuntimeMediaMixin:
                         out += (f"\nstatus: {st.get('status')} "
                                 f"{st.get('error') or st.get('hint', '')}")
                 return out
-            if action == "seek" and rest:
-                return f"seeked to {rest.split()[0]}s: {engine.seek(float(rest.split()[0]))}"
-            if action == "volume" and rest:
-                return f"volume: {engine.volume(int(rest.split()[0]))}"
-            if action == "remove" and rest:
-                return f"removed: {engine.remove(int(rest.split()[0]))}"
+            if action == "seek":
+                if not rest:
+                    return ("usage: /play seek <seconds> — jump to a "
+                            "position in the current track.")
+                try:
+                    secs = float(rest.split()[0])
+                except (TypeError, ValueError):
+                    return (f"“{rest.split()[0]}” isn't a number — "
+                            "usage: /play seek <seconds>.")
+                return f"seeked to {rest.split()[0]}s: {engine.seek(secs)}"
+            if action == "volume":
+                if not rest:
+                    return ("usage: /play volume <0-100> — set the "
+                            "playback volume.")
+                try:
+                    level = int(rest.split()[0])
+                except (TypeError, ValueError):
+                    return (f"“{rest.split()[0]}” isn't a number — "
+                            "usage: /play volume <0-100>.")
+                return f"volume: {engine.volume(level)}"
+            if action == "remove":
+                if not rest:
+                    return ("usage: /play remove <number> — remove a "
+                            "track from the queue (/play queue to see "
+                            "numbers).")
+                try:
+                    idx = int(rest.split()[0])
+                except (TypeError, ValueError):
+                    return (f"“{rest.split()[0]}” isn't a number — "
+                            "usage: /play remove <number>.")
+                try:
+                    return f"removed: {engine.remove(idx)}"
+                except Exception as exc:  # noqa: BLE001
+                    return f"can't remove item {idx}: {exc}"
             if action == "queue":
                 items = engine.queue()
                 return (f"queue ({len(items)}):\n"
@@ -662,7 +748,11 @@ class RuntimeMediaMixin:
             n = int(num_s)
         except (TypeError, ValueError):
             return f"“{num_s}” isn't a track number — reply with a number from the list."
-        entry = PickCache.consume(token)
+        # Peek, don't consume: the list is consumed on a SUCCESSFUL
+        # pick.  Consuming up front loses the whole list when the
+        # download fails, forcing the user to re-run /play (and
+        # re-search every source) just to try another number.
+        entry = PickCache.get(token)
         if entry is None:
             return ("that pick-list expired (5 min) — run /play again and "
                     "pick fast 😄")
@@ -681,11 +771,16 @@ class RuntimeMediaMixin:
             return f"couldn't queue “{cand.title}”: {exc}"
         out = f"picked {n}/{len(cands)}:\n  - {cand.title}"
         if chat is not None:
-            return self._play_send_in_chat(engine, item, out, chat)
+            text, sent = self._play_send_in_chat_result(
+                engine, item, out, chat)
+            if sent:
+                PickCache.consume(token)
+            return text
         try:
             st = engine.play()
             if st.get("status") == "playing":
                 out += f"\n▶ playing “{st.get('current', '')}”"
+                PickCache.consume(token)
         except Exception:  # noqa: BLE001
             pass
         return out
@@ -821,22 +916,272 @@ class RuntimeMediaMixin:
 
         Never plays locally — the user receives the audio in the
         conversation.  Honest on every failure path.  Never raises.
+
+        Wording matters: when the download fails there was nothing to
+        send, so the failure is "couldn't download", never
+        "couldn't send".  "Couldn't send" is reserved for the case
+        where the file WAS downloaded but the send itself failed.
         """
+        text, _sent = self._play_send_in_chat_result(engine, item, out, chat)
+        return text
+
+    def _play_send_in_chat_result(self, engine: Any, item: dict[str, Any],
+                                  out: str, chat: Any) -> tuple[str, bool]:
+        """Same as :meth:`_play_send_in_chat`, plus whether the file
+        was actually sent — callers that consume state on success
+        (e.g. the pick-list) need the signal, not a string search.
+        ``sent`` is True only when send_file succeeded.  Never raises.
+        """
+        from ...media.cookies import (
+            BOT_COOKIE_SHORT_HELP, is_bot_detection_error)
         try:
             dl = engine.download(item)
         except Exception as exc:  # noqa: BLE001 - download() shouldn't raise, belt and braces
-            return out + f"\ncouldn't get the audio file: {exc}"
+            # Undeliverable: drop the just-enqueued queue row so the
+            # durable queue doesn't keep a broken item.
+            self._drop_matching_queued(engine, item)
+            return out + f"\ncouldn't download the audio file: {exc}", False
         if not dl.get("ok"):
-            return out + f"\ncouldn't send the audio: {dl.get('reason', 'unknown error')}"
+            reason = str(dl.get("reason", "unknown error"))
+            self._drop_matching_queued(engine, item)
+            msg = out + f"\ncouldn't download the audio: {reason}"
+            if is_bot_detection_error(reason):
+                msg += f"\n{BOT_COOKIE_SHORT_HELP}"
+            return msg, False
         path = dl["path"]
         title = dl.get("title") or item.get("title", "audio")
         try:
             self.gateway.send_file(
                 chat.platform, f"{chat.platform}:{chat.chat_id}",
                 path, caption=f"🎵 {title}")
-            return out + f"\n▶ sent “{title}” to this chat."
+            return out + f"\n▶ sent “{title}” to this chat.", True
         except Exception as exc:  # noqa: BLE001
-            return out + f"\nhad the file ({path}) but couldn't send it: {exc}"
+            return out + f"\nhad the file ({path}) but couldn't send it: {exc}", False
+
+    @staticmethod
+    def _queued_index_of(engine: Any, item: dict[str, Any]) -> int | None:
+        """Index of the LAST queue row matching (kind, path), or None.
+
+        The just-enqueued row is the last match — removing exactly
+        that one never touches an older duplicate.  Best-effort:
+        engines without a list-shaped queue() return None.
+        """
+        try:
+            rows = engine.queue()
+            if not isinstance(rows, list):
+                return None
+            kind = str(item.get("kind", ""))
+            path = str(item.get("path", ""))
+            found: int | None = None
+            for r in rows:
+                if not isinstance(r, dict):
+                    continue
+                if str(r.get("kind", "")) == kind \
+                        and str(r.get("path", "")) == path:
+                    idx = r.get("index")
+                    if isinstance(idx, int):
+                        found = idx
+            return found
+        except Exception:  # noqa: BLE001 - queue hygiene never breaks chat
+            return None
+
+    @classmethod
+    def _drop_matching_queued(cls, engine: Any, item: dict[str, Any]) -> None:
+        """Remove the just-enqueued queue row for *item*.  Best-effort."""
+        try:
+            idx = cls._queued_index_of(engine, item)
+            if idx is not None:
+                engine.remove(idx)
+        except Exception:  # noqa: BLE001
+            pass
+
+    @classmethod
+    def _replace_queued_with(cls, engine: Any, old_item: dict[str, Any],
+                             new_item: dict[str, Any]) -> None:
+        """The queue must hold what was actually SENT, not the failed
+        first pick: swap the old row for the delivered candidate.
+        Best-effort — never raises, never changes the reply text."""
+        try:
+            cls._drop_matching_queued(engine, old_item)
+            engine._enqueue(
+                str(new_item.get("path", "")),
+                str(new_item.get("kind", "")),
+                str(new_item.get("title", "") or new_item.get("path", "")),
+                artist=str(new_item.get("artist", "") or ""),
+                duration=float(new_item.get("duration", 0.0) or 0.0))
+        except Exception:  # noqa: BLE001
+            pass
+
+    # Candidate kind -> search-attempt name, for merging download
+    # outcomes into the tried-list.
+    _KIND_TO_ATTEMPT_NAME = {
+        "file": "workspace-scan",
+        "netnaija": "netnaija-search",
+        "notjustok": "notjustok-search",
+        "tooxclusive": "tooxclusive-search",
+        "soundcloud": "soundcloud-search",
+        "bandcamp": "bandcamp-search",
+        "youtube": "youtube-search",
+        "youtube-music": "youtube-music-search",
+        "archiveorg": "archiveorg-search",
+        "boomplay": "boomplay-search",
+        "musicbrainz": "musicbrainz-search",
+        "openverse": "openverse-search",
+        "wikimedia": "wikimedia-search",
+        "itunes": "itunes-search",
+        "deezer": "deezer-search",
+        "spotify": "spotify-search",
+        "audiomack": "audiomack",
+        "url": "direct-url",
+    }
+
+    @staticmethod
+    def _merge_search_attempts(resolution_attempts: Any,
+                               detailed_attempts: Any) -> list[str]:
+        """Full search audit: the detailed candidate sweep (every
+        candidate source) plus any resolve-chain-only source
+        (workspace-scan) it lacks.  Never raises."""
+        try:
+            merged = list(detailed_attempts or [])
+            names = {a.split(" — ", 1)[0].strip() for a in merged
+                     if isinstance(a, str)}
+            missing = [a for a in (resolution_attempts or [])
+                       if isinstance(a, str)
+                       and a.split(" — ", 1)[0].strip() not in names]
+            return missing + merged
+        except Exception:  # noqa: BLE001 - audit trail is best-effort
+            return list(detailed_attempts or []) or \
+                list(resolution_attempts or [])
+
+    @staticmethod
+    def _format_tried_list(search_attempts: Any,
+                           outcomes: dict[str, str]) -> list[str]:
+        """Merge search-stage attempts with download-stage outcomes,
+        one line per source actually tried.  Never raises."""
+        try:
+            merged: list[str] = []
+            seen: set[str] = set()
+            for attempt in (search_attempts or []):
+                if not isinstance(attempt, str):
+                    continue
+                name = attempt.split(" — ", 1)[0].strip()
+                seen.add(name)
+                if name in outcomes:
+                    merged.append(f"{attempt}, {outcomes[name]}")
+                else:
+                    merged.append(attempt)
+            for name, outcome in outcomes.items():
+                if name not in seen:
+                    merged.append(f"{name} — {outcome}")
+            return merged
+        except Exception:  # noqa: BLE001
+            return list(search_attempts or [])
+
+    def _play_send_with_fallthrough(
+            self, engine: Any, first_item: dict[str, Any],
+            fallbacks: Any, search_attempts: Any, out: str,
+            chat: Any) -> str:
+        """Chat path: try candidates in order until one DOWNLOADS.
+
+        A source whose search succeeded but whose download failed is a
+        *download* failure, not success — the loop keeps trying the
+        next source until one both finds AND downloads, or all
+        candidates are exhausted.  The reply lists EVERY source
+        actually tried (search + download stage), says "couldn't
+        download" (never "couldn't send") on total failure, and shows
+        the short /cookies hint ONLY when YouTube was actually
+        attempted AND bot-blocked.  Never raises.
+        """
+        from ...media.cookies import (
+            BOT_COOKIE_SHORT_HELP, is_bot_detection_error)
+
+        title = str(first_item.get("title") or "audio")
+        items: list[dict[str, Any]] = []
+        seen: set[tuple[str, str]] = set()
+        for it in (first_item, *(fallbacks or [])):
+            if not isinstance(it, dict):
+                continue
+            key = (str(it.get("kind", "")), str(it.get("path", "")))
+            if key in seen:
+                continue
+            seen.add(key)
+            items.append(it)
+        outcomes: dict[str, str] = {}
+        youtube_bot_blocked = False
+        for attempt in (search_attempts or []):
+            if isinstance(attempt, str) \
+                    and attempt.startswith("youtube-search") \
+                    and is_bot_detection_error(attempt):
+                youtube_bot_blocked = True
+        youtube_already_attempted = False
+        for item in items:
+            kind = str(item.get("kind", ""))
+            name = self._KIND_TO_ATTEMPT_NAME.get(
+                kind, f"{kind}-search" if kind else "unknown")
+            if kind == "youtube" and youtube_already_attempted:
+                # A previous download already ran the YouTube fallback
+                # (e.g. SoundCloud DRM -> YouTube) — don't attempt
+                # YouTube twice; record it as already attempted.
+                outcomes[name] = \
+                    "already attempted via fallback — blocked"
+                continue
+            if item.get("downloadable") is False:
+                outcomes[name] = "not downloadable (protected streams)"
+                continue
+            try:
+                dl = engine.download(item)
+            except Exception as exc:  # noqa: BLE001
+                dl = {"ok": False, "reason": f"download error: {exc}"}
+            if dl.get("ok"):
+                path = dl["path"]
+                dl_title = dl.get("title") or item.get("title", "audio")
+                outcomes[name] = "downloaded ✓"
+                tried = self._format_tried_list(search_attempts, outcomes)
+                suffix = (f"\nsources tried ({len(tried)}): "
+                          + "; ".join(tried))
+                note = dl.get("note")
+                if note:
+                    suffix += f"\n({note})"
+                try:
+                    self.gateway.send_file(
+                        chat.platform, f"{chat.platform}:{chat.chat_id}",
+                        path, caption=f"🎵 {dl_title}")
+                    # The queue must hold what was actually sent: if
+                    # the winner differs from the first pick, swap
+                    # the queued row so a later /play next doesn't
+                    # play the failed first pick.
+                    if (str(item.get("kind", "")), str(item.get("path", ""))) != \
+                            (str(first_item.get("kind", "")),
+                             str(first_item.get("path", ""))):
+                        self._replace_queued_with(engine, first_item, item)
+                    return (out + suffix
+                            + f"\n▶ sent “{dl_title}” to this chat.")
+                except Exception as exc:  # noqa: BLE001
+                    return (out + suffix + "\nhad the file ({path}) "
+                            f"but couldn't send it: {exc}")
+            reason = str(dl.get("reason", "unknown error"))
+            if dl.get("youtube_fallback_attempted"):
+                youtube_already_attempted = True
+                if is_bot_detection_error(reason):
+                    youtube_bot_blocked = True
+                    outcomes[name] = (
+                        "download blocked — YouTube fallback also "
+                        "bot-blocked")
+                else:
+                    outcomes[name] = (
+                        f"download blocked ({reason[:120]}) — YouTube "
+                        "fallback also tried")
+                continue
+            if kind == "youtube" and is_bot_detection_error(reason):
+                youtube_bot_blocked = True
+            outcomes[name] = f"download blocked ({reason[:120]})"
+        tried = self._format_tried_list(search_attempts, outcomes)
+        msg = (out + f"\nsources tried ({len(tried)}): "
+               + "; ".join(tried))
+        msg += f"\ncouldn't download {title!r} from any source."
+        if youtube_bot_blocked:
+            msg += f"\n{BOT_COOKIE_SHORT_HELP}"
+        return msg
 
     @staticmethod
     def _fmt_started(res: dict[str, Any], engine: Any) -> str:
@@ -1062,9 +1407,24 @@ class RuntimeMediaMixin:
         from ...media.cookies import BOT_COOKIE_HELP, cookies_status
         st = cookies_status()
         found = st.get("found")
+        valid = st.get("valid_youtube")
         lines = []
         if found:
-            lines.append(f"✅ cookies file found: {found}")
+            if valid:
+                lines.append(
+                    f"✅ cookies file found: {found} "
+                    f"({valid} valid YouTube cookie"
+                    f"{'s' if valid != 1 else ''})")
+            else:
+                # A file that exists but holds no valid YouTube
+                # cookies fails the bot check exactly like no file —
+                # saying only "found" would be false confidence.
+                lines.append(f"⚠️ cookies file found: {found} — but it "
+                             "has no valid (non-expired) YouTube cookies.")
+                lines.append("Re-export your browser cookies (see below) "
+                             "— an expired file won't pass the bot check.")
+                lines.append("")
+                lines.append(BOT_COOKIE_HELP)
         else:
             lines.append("❌ no YouTube cookies file found.")
             lines.append("")

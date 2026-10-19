@@ -2184,7 +2184,13 @@ class CoreMind:
 
     def _dispatch_play(self, intent: Intent, job_id: str, chat_key: str,
                        message: Any) -> str:
-        """NL "play <title>" → media playback with title resolution."""
+        """NL "play <title>" → media playback with title resolution.
+
+        Same contract as slash /play: the chat_key is passed so the
+        file is SENT to the chat (dropping it silently routes to
+        local-only playback), and the per-chat music toggle is
+        honored — NL must not bypass the gate slash commands obey.
+        """
         query = (intent.target or "").strip()
         if self.runtime is None:
             return ("playback lives in the chat — run `nm chat` and say "
@@ -2192,7 +2198,15 @@ class CoreMind:
         if not query:
             return "what should I play? Say “play <song or artist>”."
         try:
-            reply = self.runtime._control_play(query)
+            from ..partner.chat_modes import (
+                feature_disabled_reply as _disabled_reply,
+                is_feature_disabled as _is_disabled)
+            if _is_disabled(chat_key, "music"):
+                return _disabled_reply("music")
+        except Exception:  # noqa: BLE001 - gate is advisory; never eat chat
+            pass
+        try:
+            reply = self.runtime._control_play(query, chat_key=chat_key)
         except Exception as exc:  # noqa: BLE001
             return f"the play organ failed: {exc}"
         return (reply or f"queued “{query[:70]}”."

@@ -230,8 +230,38 @@ def format_duration(seconds: float) -> str:
         return ""
 
 
+#: Pick-list source labels, by candidate kind.  The list must name the
+#: source — the user is choosing WHERE the track comes from, and a
+#: bare title hides whether they are about to get a full track or a
+#: 30-second preview clip.
+_KIND_LABELS = {
+    "file": "Local",
+    "netnaija": "NetNaija",
+    "notjustok": "NotJustOk",
+    "tooxclusive": "TooXclusive",
+    "soundcloud": "SoundCloud",
+    "bandcamp": "Bandcamp",
+    "youtube": "YouTube",
+    "youtube-music": "YouTube Music",
+    "archiveorg": "Archive",
+    "boomplay": "Boomplay",
+    "musicbrainz": "MusicBrainz",
+    "openverse": "Openverse",
+    "wikimedia": "Wikimedia",
+    "itunes": "iTunes",
+    "deezer": "Deezer",
+    "spotify": "Spotify",
+    "audiomack": "Audiomack",
+    "url": "Link",
+}
+
+
 def format_picklist(candidates: list[Any], query: str, token: str) -> str:
-    """Compact numbered pick-list.  Never raises."""
+    """Compact numbered pick-list.  Never raises.
+
+    Every entry names its source, and 30s-preview entries say so —
+    picking a preview blind is a wasted download and a confused user.
+    """
     try:
         lines = [f"🎵 “{query}” — pick one (reply with the number):"]
         for i, c in enumerate(candidates[:PICK_LIMIT], 1):
@@ -240,7 +270,21 @@ def format_picklist(candidates: list[Any], query: str, token: str) -> str:
             dur = format_duration(getattr(c, "duration", 0))
             who = f" — {artist}" if artist else ""
             when = f" ({dur})" if dur and dur != "0:00" else ""
-            lines.append(f"{i}. {title}{who}{when}")
+            kind = str(getattr(c, "kind", "") or "").lower()
+            label = _KIND_LABELS.get(kind, "") or kind
+            source_name = str(getattr(c, "source_name", "") or "")
+            if kind in ("itunes", "deezer") \
+                    or "preview" in source_name.lower():
+                tag = f" [{label} · 30s preview]" if label \
+                    else " [30s preview]"
+            elif getattr(c, "downloadable", True) is False:
+                tag = f" [{label} · metadata only]" if label \
+                    else " [metadata only]"
+            elif label:
+                tag = f" [{label}]"
+            else:
+                tag = ""
+            lines.append(f"{i}. {title}{who}{when}{tag}")
         lines.append("tap a number below 👇")
         if token:
             lines.append(f"pick:{token}")

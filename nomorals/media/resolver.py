@@ -203,45 +203,83 @@ class SourceResolver:
         One source failing never kills the others.  Never raises; empty
         list on total failure.
         """
+        out, _attempts = self.search_candidates_detailed(query, limit=limit)
+        return out
+
+    def search_candidates_detailed(self, query: str, limit: int = 8
+                                   ) -> tuple[list[ResolvedAudio],
+                                              list[str]]:
+        """Same candidate sweep as :meth:`search_candidates`, plus the
+        per-source audit trail.
+
+        Returns ``(candidates, attempts)`` where ``attempts`` has one
+        entry per source tried — ``"<name> — ok (N)"``,
+        ``"<name> — no results"``, or ``"<name> — failed: <reason>"``.
+        Only DOWNLOADABLE candidates are returned: a metadata-only
+        (MusicBrainz) or protected-stream (Boomplay) hit is not
+        something the caller can download, so it must never show up
+        as a pickable/downloadable candidate — the audit trail still
+        records that it was tried.  The chat download fall-through
+        needs this: a source whose search succeeded but whose
+        download failed is a *download* failure, not success, and the
+        reply must list EVERY source actually tried — not just the
+        ones the first-ok chain reached.  Never raises.
+        """
         out: list[ResolvedAudio] = []
+        attempts: list[str] = []
         q = (query or "").strip()
         if not q:
-            return out
+            return out, attempts
         limit = max(1, min(int(limit or 8), 25))
         # Regional blogs first (direct MP3s), then the global catalogs.
-        for fn in (
-            self._netnaija_search_many,
-            self._notjustok_search_many,
-            self._tooxclusive_search_many,
-            self._soundcloud_search_many,
-            self._bandcamp_search_many,
-            self._youtube_search_many,
-            self._youtube_music_search_many,
-            self._archiveorg_search_many,
-            self._musicbrainz_search_many,
-            self._openverse_search_many,
-            self._wikimedia_search_many,
-            self._itunes_search_many,
-            self._deezer_search_many,
-        ):
+        fns: list[tuple[str, Any]] = [
+            ("netnaija-search", self._netnaija_search_many),
+            ("notjustok-search", self._notjustok_search_many),
+            ("tooxclusive-search", self._tooxclusive_search_many),
+            ("soundcloud-search", self._soundcloud_search_many),
+            ("bandcamp-search", self._bandcamp_search_many),
+            ("youtube-search", self._youtube_search_many),
+            ("youtube-music-search", self._youtube_music_search_many),
+            ("archiveorg-search", self._archiveorg_search_many),
+            ("musicbrainz-search", self._musicbrainz_search_many),
+            ("openverse-search", self._openverse_search_many),
+            ("wikimedia-search", self._wikimedia_search_many),
+            ("itunes-search", self._itunes_search_many),
+            ("deezer-search", self._deezer_search_many),
+        ]
+        for name, fn in fns:
             try:
-                out.extend(fn(q, limit))
+                got = fn(q, limit)
             except Exception as exc:  # noqa: BLE001 — one source dying
                 # must not kill the others
+                attempts.append(f"{name} — failed: {exc}")
                 _log.info("resolver candidates: %s failed: %s",
                           getattr(fn, "__name__", "?"), exc)
+                continue
+            if got:
+                attempts.append(f"{name} — ok ({len(got)})")
+                out.extend(got)
+            else:
+                attempts.append(f"{name} — no results")
         seen: set[tuple[str, str]] = set()
         deduped: list[ResolvedAudio] = []
         for r in out:
             title = (r.title or "").strip()
             if not title:
                 continue
+            # Non-downloadable hits (metadata-only / protected
+            # streams) are not candidates — nothing can download
+            # them, so offering them to pick/download only produces
+            # a guaranteed failure.  The attempts trail above still
+            # records that the source was tried.
+            if r.downloadable is False:
+                continue
             key = (title.lower(), (r.artist or "").strip().lower())
             if key in seen:
                 continue
             seen.add(key)
             deduped.append(r)
-        return deduped[:limit]
+        return deduped[:limit], attempts
 
     def _soundcloud_search_many(self, query: str,
                                 limit: int) -> list[ResolvedAudio]:
@@ -442,11 +480,21 @@ class SourceResolver:
     def _run_chain(self, result: ResolvedAudio,
                    strategies: list[tuple[str, Callable[[], ResolvedAudio]]]
                    ) -> ResolvedAudio:
-        """Try each strategy in order; first success wins.
+        """Try each strategy in order; first DOWNLOADABLE success wins.
 
         Failures are recorded, never fatal — the chain only reports
         failure when EVERY strategy has failed.
+
+        A hit that is found but NOT downloadable (Boomplay's protected
+        streams, MusicBrainz metadata, Spotify DRM) is recorded and the
+        chain KEEPS GOING: a later downloadable source must win over
+        an earlier undownloadable one — "found but can't download" is
+        not success.  When nothing downloadable is found, the FIRST
+        non-downloadable hit is returned (found-but-blocked) with the
+        full attempt log, so the caller can explain what was found and
+        why it can't be delivered instead of "couldn't find".
         """
+        first_blocked: ResolvedAudio | None = None
         for name, fn in strategies:
             try:
                 out = fn()
@@ -466,6 +514,13 @@ class SourceResolver:
                 result.attempts.append(f"{name} — no result")
                 result.errors.append(f"{name}: returned no audio")
                 continue
+            if out.downloadable is False:
+                # Found but not deliverable — record and keep going.
+                result.attempts.append(
+                    f"{name} — ok ({out.source_name}; not downloadable)")
+                if first_blocked is None:
+                    first_blocked = out
+                continue
             result.attempts.append(f"{name} — ok ({out.source_name})")
             result.ok = True
             result.path_or_url = out.path_or_url
@@ -478,6 +533,21 @@ class SourceResolver:
             result.extra_tracks = out.extra_tracks
             if out.hint and not result.hint:
                 result.hint = out.hint
+            return result
+        if first_blocked is not None:
+            # Nothing downloadable — return the first found-but-blocked
+            # hit so the caller can name the source and its block.
+            result.ok = True
+            result.path_or_url = first_blocked.path_or_url
+            result.title = first_blocked.title
+            result.artist = first_blocked.artist
+            result.duration = first_blocked.duration
+            result.kind = first_blocked.kind
+            result.source_name = first_blocked.source_name
+            result.downloadable = False
+            result.extra_tracks = first_blocked.extra_tracks
+            if first_blocked.hint and not result.hint:
+                result.hint = first_blocked.hint
             return result
         return self._finalize_failure(result)
 

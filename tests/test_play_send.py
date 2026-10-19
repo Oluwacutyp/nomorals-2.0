@@ -188,7 +188,10 @@ class ChatSendTests(unittest.TestCase):
         engine.download.return_value = {"ok": False, "reason": "no yt-dlp"}
 
         result = inst._play_send_in_chat(engine, {"title": "X"}, "queued:", chat)
-        self.assertIn("couldn't send", result)
+        # Download failure is "couldn't download" — there was nothing
+        # to send, so "couldn't send" would mislead the user.
+        self.assertIn("couldn't download", result)
+        self.assertNotIn("couldn't send the audio", result)
         self.assertIn("no yt-dlp", result)
         inst.gateway.send_file.assert_not_called()
 

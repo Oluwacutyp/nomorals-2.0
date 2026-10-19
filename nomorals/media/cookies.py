@@ -13,6 +13,7 @@ exists, everything behaves exactly as before.
 from __future__ import annotations
 
 import os
+import time
 from pathlib import Path
 from typing import Any
 
@@ -23,6 +24,7 @@ __all__ = [
     "is_bot_detection_error",
     "cookies_status",
     "BOT_COOKIE_HELP",
+    "BOT_COOKIE_SHORT_HELP",
     "YTDLP_INSTALL_HELP",
     "COOKIES_ENV",
 ]
@@ -69,7 +71,14 @@ BOT_COOKIE_HELP = (
     "https://github.com/yt-dlp/yt-dlp/wiki/FAQ#how-do-i-pass-cookies-to-yt-dlp"
 )
 
-#: Markers (case-insensitive) that identify YouTube's bot check.
+#: 1-line user-facing help when YouTube bot-blocks a download in chat.
+#: Phone-actionable: points at /cookies, never a yt-dlp command dump.
+#: The full FAQ-grounded help stays in BOT_COOKIE_HELP (used by
+#: /cookies itself, where the user asked for setup detail).
+BOT_COOKIE_SHORT_HELP = (
+    "YouTube is bot-blocking downloads — run /cookies to check/add "
+    "your browser cookies."
+)
 _BOT_MARKERS = (
     "not a bot",
     "sign in to confirm",
@@ -133,14 +142,51 @@ def is_bot_detection_error(message: Any) -> bool:
     return any(marker in text for marker in _BOT_MARKERS)
 
 
+def _count_valid_youtube_cookies(path: str) -> int:
+    """Non-expired youtube.com entries in a Netscape cookies file.
+
+    A file that EXISTS is not a file that WORKS: YouTube cookies
+    expire, and an expired file fails the bot check exactly like no
+    file at all — while /cookies would still report "found".  Session
+    cookies (expiry 0) count as valid.  Never raises.
+    """
+    try:
+        now = time.time()
+        count = 0
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                parts = line.split("\t")
+                if len(parts) < 7:
+                    continue
+                domain = parts[0].strip().lower().lstrip(".")
+                if domain != "youtube.com" \
+                        and not domain.endswith(".youtube.com"):
+                    continue
+                try:
+                    expiry = int(parts[4])
+                except (TypeError, ValueError):
+                    continue
+                if expiry == 0 or expiry > now:
+                    count += 1
+        return count
+    except Exception:  # noqa: BLE001 - counting must never break callers
+        return 0
+
+
 def cookies_status() -> dict[str, Any]:
     """Where Devon looks for cookies + whether one was found. Never raises."""
     try:
         found = find_cookies_file()
         return {
             "found": found,
+            "valid_youtube": (_count_valid_youtube_cookies(found)
+                              if found else None),
             "checked": [str(p) for p in _candidate_paths()],
             "env_var": COOKIES_ENV,
         }
     except Exception:  # noqa: BLE001
-        return {"found": None, "checked": [], "env_var": COOKIES_ENV}
+        return {"found": None, "valid_youtube": None, "checked": [],
+                "env_var": COOKIES_ENV}

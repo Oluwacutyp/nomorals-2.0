@@ -149,7 +149,16 @@ def test_bot_detection_no_false_positives(msg):
 
 
 def test_bot_help_is_two_lines():
-    assert len(BOT_COOKIE_HELP.strip().split(". ")) <= 3
+    # Sentence-count the help properly: a naive '. '-split overcounts
+    # because the text contains periods inside paths/URLs
+    # ("~/.nomorals/youtube-cookies.txt", "github.com/...").  Real
+    # sentences end with ". " + a capital.  The help is 6 short
+    # sentences — the bound pins "short", not the stale "two lines".
+    import re
+    sentences = [s for s in
+                 re.split(r"\.\s+(?=[A-Z])", BOT_COOKIE_HELP.strip())
+                 if s.strip()]
+    assert len(sentences) <= 6, sentences
     assert "youtube-cookies.txt" in BOT_COOKIE_HELP
     assert "~/.nomorals" in BOT_COOKIE_HELP
 
