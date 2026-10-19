@@ -429,7 +429,16 @@ class GameEngine:
                     "state = excluded.state, status = excluded.status, "
                     "players = excluded.players, updated_at = excluded.updated_at",
                     (room.id, room.game, room.chat_key, room.platform,
-                     room.kind, _json.dumps([p.key for p in room.players]),
+                     room.kind, _json.dumps([
+                         # full identity, not just the key: from_row used
+                         # to rebuild the display name from the key, so a
+                         # restart turned every player into their raw
+                         # sender id ("Ada" -> "456"). Dict shape; the
+                         # legacy plain-key list still loads (see
+                         # Room.from_row).
+                         {"key": p.key, "name": p.name,
+                          "platform": p.platform, "is_ai": bool(p.is_ai)}
+                         for p in room.players]),
                      room.turn, _json.dumps(room.state), room.status,
                      room.started_at, room.seed, time.time()),
                 )

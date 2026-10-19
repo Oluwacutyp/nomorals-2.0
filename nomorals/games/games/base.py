@@ -155,18 +155,37 @@ class Room:
         except Exception:  # noqa: BLE001
             state = {}
         try:
-            keys = json.loads(row.get("players") or "[]")
+            raw_players = json.loads(row.get("players") or "[]")
         except Exception:  # noqa: BLE001
-            keys = []
+            raw_players = []
+        if not isinstance(raw_players, list):
+            raw_players = []
+        players = []
+        for entry in raw_players:
+            # new shape: {"key","name","platform","is_ai"} (see engine
+            # _persist_inner). Legacy rows stored bare key strings —
+            # the name then falls back to the sender id, as before.
+            if isinstance(entry, dict):
+                k = str(entry.get("key") or "")
+                players.append(Player(
+                    key=k,
+                    platform=str(entry.get("platform") or k.split(":", 1)[0]
+                                 or "local"),
+                    name=str(entry.get("name") or k.split(":", 1)[-1] or k),
+                    is_ai=bool(entry.get("is_ai", False))
+                    or k == AI_PLAYER or k.startswith(AI_PLAYER + ":")))
+            else:
+                k = str(entry or "")
+                players.append(Player(
+                    key=k, platform=k.split(":", 1)[0],
+                    name=k.split(":", 1)[-1] or k,
+                    is_ai=(k == AI_PLAYER
+                           or k.startswith(AI_PLAYER + ":"))))
         return cls(
             id=row["id"], game=row["game"], chat_key=row["chat_key"],
             platform=row.get("platform") or "local",
             kind=row.get("kind") or "dm",
-            players=[Player(key=k, platform=k.split(":", 1)[0],
-                            name=k.split(":", 1)[-1],
-                            is_ai=(k == AI_PLAYER
-                                   or k.startswith(AI_PLAYER + ":")))
-                     for k in keys],
+            players=players,
             turn=int(row.get("turn") or 0), state=state,
             status=row.get("status") or "active",
             started_at=float(row.get("started_at") or time.time()),

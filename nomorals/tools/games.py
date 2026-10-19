@@ -16,13 +16,17 @@ from ..core.logging_setup import get_logger
 
 _log = get_logger(__name__)
 
-_engines: dict[int, Any] = {}
-
-
 def _engine(registry: Any) -> Any:
-    """One GameEngine per registry (shared rooms, shared players)."""
-    key = id(registry)
-    eng = _engines.get(key)
+    """One GameEngine per registry (shared rooms, shared players).
+
+    The engine lives ON the registry (``registry._games_engine``),
+    not in a module-global dict: a global ``id()``-keyed cache never
+    evicted dead registries — their engines (and ticker threads)
+    leaked forever, and a new registry reusing an id inherited a
+    stale engine bound to a dead context. Bound to the registry, the
+    engine dies with it (``GameEngine.__del__`` shuts the ticker down).
+    """
+    eng = getattr(registry, "_games_engine", None)
     if eng is None:
         from ..games.engine import GameEngine
         context = getattr(registry, "context", None)
@@ -45,7 +49,10 @@ def _engine(registry: Any) -> Any:
             register_with_engine(eng, CharacterStore(), suggest=suggest)
         except Exception:  # noqa: BLE001
             pass
-        _engines[key] = eng
+        try:
+            registry._games_engine = eng
+        except Exception:  # noqa: BLE001 - exotic registry without attrs
+            pass
     return eng
 
 
