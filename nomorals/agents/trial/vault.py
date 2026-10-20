@@ -93,6 +93,15 @@ class TrialVault:
             data = self.key_path.read_bytes()
             if len(data) == 32:
                 return data
+            # A malformed key file is NOT silently replaced: overwriting it
+            # would destroy the key material for every stored credential
+            # while new stores kept working under the new key — a silent,
+            # total loss.  Fail loud and leave the file untouched so the
+            # original key can be restored and the credentials recovered.
+            raise ValueError(
+                f"trial vault key file is corrupt (expected 32 bytes, "
+                f"found {len(data)}) — refusing to overwrite it. Restore "
+                "the original trial.key to recover stored credentials.")
         self.home.mkdir(parents=True, exist_ok=True)
         master = secrets.token_bytes(32)
         fd = os.open(str(self.key_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)

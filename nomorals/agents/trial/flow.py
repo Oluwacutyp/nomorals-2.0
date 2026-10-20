@@ -487,6 +487,22 @@ class TrialFlow:
                 "  set NM_VAULT_PASSPHRASE so the personal vault can be "
                 "checked, then retry."
             )
+        # One signup at a time per service: the vault checks above only
+        # see COMPLETED accounts — a drive still in flight has stored
+        # nothing yet, so without this guard a second launch (repeat
+        # command, second confirmed token, resume re-drive) starts a
+        # second driver and both submit signup forms for one service.
+        inflight = self._inflight_assist_run(platform)
+        if inflight is not None:
+            self._audit("assist_refused", platform,
+                        "signup already in progress")
+            return (
+                f"already driving a signup for {platform} — one is in "
+                "progress right now, and a second one would race it and "
+                "double-submit.\n"
+                "  check status: /trial status\n"
+                "  I'll report here when the running one finishes."
+            )
         if not self._assist_sem.acquire(blocking=False):
             return (
                 f"already driving {_assist_max_inflight()} assisted signups — "
@@ -770,6 +786,25 @@ class TrialFlow:
     # rows in ``trial_assist_runs`` outlive the process.  A restart can
     # never silently swallow a run: anything not in a terminal state is
     # marked ``interrupted`` and reported once via the durable notifier.
+
+    def _inflight_assist_run(self, platform: str) -> dict[str, Any] | None:
+        """The live (non-terminal) assist run for ``platform``, if any.
+
+        The runtime builds a fresh TrialFlow per command, so this first
+        merges run rows other instances persisted — an in-flight signup
+        started by an earlier command still counts.  Terminal runs
+        (done/failed/interrupted) never block a fresh launch.
+        """
+        key = (platform or "").strip().lower()
+        if not key:
+            return None
+        self._load_assist_runs()
+        with self._assist_lock:
+            for run in self._assist_runs.values():
+                if (run.get("platform") or "").lower() == key and \
+                        run.get("state") not in _ASSIST_TERMINAL_STATES:
+                    return dict(run)
+        return None
 
     def _ensure_assist_runs_table(self) -> None:
         if self.db is None:
