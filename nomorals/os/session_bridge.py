@@ -74,7 +74,12 @@ class SessionBridge:
         """
         platform = message.chat.platform
         chat_id = message.chat.chat_id
-        conv_id = conversation_id_for(platform, chat_id)
+        # The chat KEY is the deterministic conversation id — identical to
+        # conversation_id_for(platform, chat_id) for plain chats, and it
+        # additionally separates threaded chats (forum topics): two topics
+        # in one group are different conversations and must never share a
+        # session scope (their histories would bleed into one prompt).
+        conv_id = message.chat.key
         try:
             for session in reversed(self.store.list_active()):
                 if session.conversation_id == conv_id:
@@ -138,10 +143,47 @@ class SessionBridge:
         if is_owner is not None:
             session.principal = "owner" if is_owner else "guest"
         session.touch(activity=True)
+        # History is keyed by conversation id, so the persisted rows must
+        # move with the binding — otherwise the handed-off chat starts
+        # with amnesia while its history sits orphaned under the old id.
+        if new_conv != old_conv:
+            self._rekey_conversation(old_conv, new_conv)
         self.store.update(session)
         _log.info("session %s handed off %s -> %s", session_id, old_conv,
                   new_conv)
         return session
+
+    def _rekey_conversation(self, old_conv: str, new_conv: str) -> None:
+        """Move persisted conversation rows old -> new (best effort).
+
+        Order matters (foreign keys are enforced): the target
+        ``conversations`` row is created first (an existing row for the
+        new id wins), then the messages re-key, then the old row goes.
+        A store without the chat tables (a standalone bridge DB) simply
+        has nothing to move; failures are logged, never fatal — the
+        session move itself has already been decided by the caller.
+        """
+        db = getattr(self.store, "db", None)
+        if db is None:
+            return
+        try:
+            with db.transaction():
+                db.execute(
+                    "INSERT INTO conversations (id, title, agent, channel,"
+                    " summary, tokens, created_at, updated_at, metadata)"
+                    " SELECT ?, title, agent, channel, summary, tokens,"
+                    " created_at, updated_at, metadata FROM conversations"
+                    " WHERE id = ? ON CONFLICT(id) DO NOTHING",
+                    (new_conv, old_conv))
+                db.execute(
+                    "UPDATE messages SET conversation_id = ?"
+                    " WHERE conversation_id = ?",
+                    (new_conv, old_conv))
+                db.execute(
+                    "DELETE FROM conversations WHERE id = ?", (old_conv,))
+        except Exception:  # noqa: BLE001 — history merge must not break handoff
+            _log.warning("handoff history re-key %s -> %s failed",
+                         old_conv, new_conv, exc_info=True)
 
     def sessions_for_principal(self, principal: str) -> list[Session]:
         """Every active session belonging to ``principal``."""

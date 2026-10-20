@@ -305,14 +305,14 @@ class TestDatabaseUpgrades(unittest.TestCase):
         db.optimize()  # must not raise
         db.close()
 
-    def test_migrate_reaches_86(self):
+    def test_migrate_reaches_87(self):
         from nomorals.storage.migrations import MIGRATIONS, latest_version
 
-        self.assertEqual(latest_version(), 86)
+        self.assertEqual(latest_version(), 87)
         tmp = tempfile.mkdtemp()
         db = Database(os.path.join(tmp, "mig.db"))
         summary = db.migrate()
-        self.assertEqual(summary.version, 86)
+        self.assertEqual(summary.version, 87)
         cols = {c["name"] for c in db.table_info("kv_store")}
         self.assertIn("expires_at", cols)
         db.close()

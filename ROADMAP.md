@@ -9,7 +9,7 @@ Correction: stale v7/52 claim corrected — the L2 section below previously
 said "7 migrations to 52 tables"; the live numbers are:
 
 packages: 75
-schema version: 86
+schema version: 87
 tables: 125 real (152 incl. FTS shadow tables)
 
 How counted: `packages` = sub-directories of `nomorals/` excluding

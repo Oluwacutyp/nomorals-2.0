@@ -3024,6 +3024,62 @@ def _apply_kv_store_ttl(db: object) -> None:
     )
 
 
+def _apply_conversation_scope_rekey(db: object) -> None:
+    """Re-key conversation history from session-record ids to conversation ids.
+
+    Until pass #56 the chat gateway attached the OS Session's random
+    record id (``sess_…``) as the brain's conversation scope, so history
+    rows accumulated under ids that die with the session record — while
+    every chat-key consumer (double-reply guard, per-chat profiles,
+    curation) looked under the deterministic ``platform:chat_id`` id and
+    found nothing. The gateway now attaches the session's conversation
+    id; this migration moves the existing rows to match:
+
+    * for every ``os_sessions`` row, rows keyed by the session's record
+      id move to its ``conversation_id``;
+    * rows keyed by a transient fallback id (``transient-<conv id>``,
+      minted when the session store hiccuped) move to the embedded
+      conversation id.
+
+    Foreign keys are enforced, so per scope the target ``conversations``
+    row is created first (an existing row wins), then messages move,
+    then the old row is deleted. Guarded no-op when ``os_sessions`` does
+    not exist (the bridge never ran against this database) — the table
+    is created lazily by ``SessionStore``, outside this chain.
+    """
+    ex = db.execute  # type: ignore[attr-defined]
+    tables = {str(r[0]) for r in ex(
+        "SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()}
+    if "os_sessions" not in tables or "messages" not in tables:
+        return
+
+    def _move(old: str, new: str) -> None:
+        if not old or not new or old == new:
+            return
+        ex(
+            "INSERT INTO conversations (id, title, agent, channel,"
+            " summary, tokens, created_at, updated_at, metadata)"
+            " SELECT ?, title, agent, channel, summary, tokens,"
+            " created_at, updated_at, metadata FROM conversations"
+            " WHERE id = ? ON CONFLICT(id) DO NOTHING",
+            (new, old))
+        ex("UPDATE messages SET conversation_id = ?"
+           " WHERE conversation_id = ?", (new, old))
+        ex("DELETE FROM conversations WHERE id = ?", (old,))
+
+    for sess_id, conv_id in ex(
+            "SELECT id, conversation_id FROM os_sessions").fetchall():
+        _move(str(sess_id), str(conv_id or ""))
+    transient_ids = [str(r[0]) for r in ex(
+        "SELECT DISTINCT conversation_id FROM messages"
+        " WHERE conversation_id LIKE 'transient-%'").fetchall()]
+    transient_ids += [str(r[0]) for r in ex(
+        "SELECT id FROM conversations"
+        " WHERE id LIKE 'transient-%'").fetchall()]
+    for old in dict.fromkeys(transient_ids):
+        _move(old, old[len("transient-"):])
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "core_state", sql=_V1),
     Migration(2, "agents_tasks_missions", sql=_V2),
@@ -3132,6 +3188,8 @@ MIGRATIONS: tuple[Migration, ...] = (
               sql=_V85_SCHEDULER_DEEP),
     Migration(86, "kv_store_ttl",
               fn=_apply_kv_store_ttl),
+    Migration(87, "conversation_scope_rekey",
+              fn=_apply_conversation_scope_rekey),
 )
 
 

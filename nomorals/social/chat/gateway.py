@@ -484,11 +484,17 @@ class ChatGateway:
         # Attach the OS Session (when a bridge is injected): every surface
         # shares one Session per chat, so memory/persona/missions are keyed
         # off the session, not the platform. Never drops the message.
+        # The value attached is the session's CONVERSATION id (deterministic
+        # "platform:chat_id" — the chat key), NOT the session record's own
+        # random id: conversation history is durable and keyed by the
+        # conversation, so an ended/rotated session record must never
+        # orphan it, and chat-key consumers (double-reply guard, per-chat
+        # profiles, curation) must see the same scope the brain writes.
         if self.session_bridge is not None:
             try:
                 session = self.session_bridge.session_for_message(
                     message, is_owner=is_owner)
-                message.meta["os_session_id"] = session.id
+                message.meta["os_session_id"] = session.conversation_id
                 message.meta["os_gating_mode"] = session.state.get(
                     "gating_mode", "")
             except Exception:  # noqa: BLE001 — session attach never drops

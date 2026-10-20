@@ -336,14 +336,30 @@ class PartnerBrain:
             return "", reason
 
     # ── history ─────────────────────────────────────────────────────────────
-    def _history(self, chat_key: str, limit: int) -> list[Message]:
+    def _history(self, chat_key: str, limit: int, *,
+                 exclude_id: str = "") -> list[Message]:
+        """The last ``limit`` usable turns of a conversation, oldest first.
+
+        The SQL fetches ``limit * 2`` rows as headroom for the rows the
+        filter drops (non-chat roles, empty content) and for the excluded
+        row — the filter's survivors are then sliced to ``limit`` so the
+        configured window is a hard bound, not a suggestion. ``exclude_id``
+        is the row id of the inbound message currently being answered: it
+        is already persisted (crash safety), but the generation paths
+        append the live turn themselves, so it must not ALSO arrive via
+        history or the model sees the message twice.
+        """
+        if limit <= 0:
+            return []
         rows = self.context.db.query(
-            "SELECT role, content, name FROM messages WHERE conversation_id = ? ORDER BY created_at DESC LIMIT ?",
+            "SELECT id, role, content, name FROM messages WHERE conversation_id = ? ORDER BY created_at DESC LIMIT ?",
             (chat_key, limit * 2),
         )
         rows.reverse()
         out: list[Message] = []
         for row in rows:
+            if exclude_id and str(row.get("id") or "") == exclude_id:
+                continue
             if row["role"] not in {"user", "assistant"} or not (row["content"] or "").strip():
                 continue
             # Name is carried so the style layer can tell the OWNER's own
@@ -352,7 +368,7 @@ class PartnerBrain:
             name = str(row.get("name") or "")
             out.append(Message.user(row["content"], name=name) if row["role"] == "user"
                          else Message.assistant(row["content"], name=name))
-        return out
+        return out[-limit:]
 
     # ── persistence ──────────────────────────────────────────────────────────
     def _persist_turn(
@@ -382,6 +398,7 @@ class PartnerBrain:
         # double-reply check and the chat profile can see them.
         sender = "__owner__" if message.meta.get("own_message") else message.sender
         now = time.time()
+        row_id = ulid_now()
         try:
             with db.transaction():
                 db.execute(
@@ -393,8 +410,12 @@ class PartnerBrain:
                 )
                 db.execute(
                     "INSERT INTO messages (id, conversation_id, role, content, name, model, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                    (ulid_now(), conv_id, "user", message.text, sender, "", now),
+                    (row_id, conv_id, "user", message.text, sender, "", now),
                 )
+            # Remember WHICH row this turn is, so history assembly can
+            # keep it out of the prompt's history (the live turn is
+            # appended separately by both generation paths).
+            message.meta["_inbound_row_id"] = row_id
         except Exception as exc:  # noqa: BLE001 - persistence must never block a reply
             _log.warning("persist turn failed: %s", exc)
         return now
@@ -778,8 +799,12 @@ class PartnerBrain:
         except Exception:  # noqa: BLE001
             pass
 
-        # Generate.
-        history = self._history(session_id, limit=self.settings.partner.history_window)
+        # Generate. History excludes the row of the message being
+        # answered (persisted above for crash safety): both generation
+        # paths append the live turn themselves.
+        history = self._history(
+            session_id, limit=self.settings.partner.history_window,
+            exclude_id=str(message.meta.get("_inbound_row_id") or ""))
         continuity = () if restricted else self._continuity_lines(session_id)
         if is_owner and not restricted:
             digest = self._reasoning_digest(message.text)
