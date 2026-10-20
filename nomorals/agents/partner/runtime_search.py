@@ -313,7 +313,11 @@ class RuntimeSearchMixin:
         """``/novel`` — story reader + continuer.
 
         follow <url|title> | list | read <slug> [chapter] |
-        next <slug> | continue <slug> [n]
+        next <slug> | sync <slug> | continue <slug> [n]
+
+        Following ingests the WHOLE story into its own library in the
+        background (resumable); continue writes from the story's true
+        final chapter, never from the reading position.
         """
         from ...books.reader import StoryReader, ReaderError
         from ...books.continuation import StoryContinuer
@@ -333,10 +337,15 @@ class RuntimeSearchMixin:
                         "e.g. /novel follow my vampire system")
             lines = ["followed stories:"]
             for s in stories:
-                lines.append(
+                line = (
                     f"  {s['slug']} — {s.get('title', '?')} "
                     f"[{s.get('source', '?')}] ch {s.get('current_chapter', 0)}/"
                     f"{s.get('total_chapters') or '?'}")
+                if s.get("ingest_total"):
+                    line += (f" · library {s.get('ingested', 0)}/"
+                             f"{s['ingest_total']}"
+                             + (" ✓" if s.get("library_complete") else ""))
+                lines.append(line)
             return "\n".join(lines)
 
         if verb == "follow":
@@ -348,9 +357,108 @@ class RuntimeSearchMixin:
                 return f"follow failed: {exc}"
             except Exception as exc:  # noqa: BLE001
                 return f"follow failed: {type(exc).__name__}: {exc}"
+            # following = owning: ingest the WHOLE story into its own
+            # library, in the background (same pattern as continue) —
+            # the reply reports the library state as it stands NOW and
+            # never claims chapters that are not here yet.
+            state = reader.ingest_state(story.slug)
+            if state["complete"]:
+                return (f"📖 following “{story.title}” [{story.source}] — "
+                        f"{state['total']} chapters, and the whole story "
+                        f"is already in its library "
+                        f"({state['ingested']} of {state['total']}). "
+                        f"/novel read {story.slug} · "
+                        f"/novel continue {story.slug} writes from the "
+                        f"true ending.")
+            chat = self._ref_from_key(chat_key)
+            slug = story.slug
+            title = story.title
+
+            def _wingest() -> None:
+                try:
+                    bg = StoryReader(self.context)
+                    report = bg.ingest(slug)
+                    if report["complete"]:
+                        self._notify(
+                            chat,
+                            f"📚 library complete for “{title}” — all "
+                            f"{report['total']} chapters ingested. "
+                            f"/novel continue {slug} now writes from "
+                            f"the story's true ending.")
+                    else:
+                        self._notify(
+                            chat,
+                            f"⚠️ ingestion of “{title}” stopped at "
+                            f"{report['ingested']} of {report['total']} "
+                            f"chapters — /novel sync {slug} resumes it "
+                            f"where it left off.")
+                except Exception as exc:  # noqa: BLE001
+                    self._notify(chat, f"⚠️ ingestion of “{title}” "
+                                       f"failed: {exc}")
+                finally:
+                    self._release_db_thread()
+
+            import threading
+            threading.Thread(target=_wingest, name=f"novel-ingest-{slug}",
+                             daemon=True).start()
             return (f"📖 following “{story.title}” [{story.source}] — "
-                    f"{story.total_chapters or '?'} chapters. "
-                    f"/novel read {story.slug}")
+                    f"{story.total_chapters or '?'} chapters. Ingesting "
+                    f"the whole story into its own library in the "
+                    f"background — {state['ingested']} of "
+                    f"{state['total'] or story.total_chapters or '?'} "
+                    f"chapters are in so far; I'll ping when the library "
+                    f"is complete. /novel read {story.slug} works "
+                    f"meanwhile.")
+
+        if verb in ("sync", "ingest"):
+            if not rest:
+                return ("usage: /novel sync <slug> — finish ingesting "
+                        "the story's whole library (resumes where it "
+                        "left off)")
+            try:
+                slug = reader.resolve_slug(rest.split()[0])
+            except ReaderError as exc:
+                return f"sync failed: {exc}"
+            chat = self._ref_from_key(chat_key)
+            try:
+                self.gateway.send(chat.platform, chat,
+                                  "📚 ingesting the whole story into "
+                                  "its library — resuming where it "
+                                  "left off…")
+            except Exception:  # noqa: BLE001
+                pass
+
+            def _wsync() -> None:
+                try:
+                    bg = StoryReader(self.context)
+                    report = bg.ingest(slug)
+                    if report["complete"]:
+                        self._notify(
+                            chat,
+                            f"📚 “{report['title']}” library complete — "
+                            f"all {report['total']} chapters ingested.")
+                    else:
+                        detail = ""
+                        if report.get("failed"):
+                            first = report["failed"][0]
+                            detail = (f" (first failure at chapter "
+                                      f"{first['number']}: "
+                                      f"{first['reason']})")
+                        self._notify(
+                            chat,
+                            f"⚠️ “{report['title']}” ingestion stopped "
+                            f"at {report['ingested']} of "
+                            f"{report['total']} chapters{detail} — "
+                            f"/novel sync {slug} resumes it.")
+                except Exception as exc:  # noqa: BLE001
+                    self._notify(chat, f"⚠️ sync failed: {exc}")
+                finally:
+                    self._release_db_thread()
+
+            import threading
+            threading.Thread(target=_wsync, name=f"novel-sync-{slug}",
+                             daemon=True).start()
+            return ""
 
         if verb in ("read", "next"):
             if not rest:

@@ -262,7 +262,7 @@ def register(registry: Any) -> None:
         description=(
             "Follow a webnovel: give its archive URL (or just the title — "
             "Devon searches the verified archives). Fetches metadata; "
-            "chapters are pulled on demand and cached."
+            "use story_ingest to pull the whole story into its library."
         ),
         capability=Capability.NET_OUT,
         parameters={
@@ -344,6 +344,23 @@ def register(registry: Any) -> None:
         return _reader().sync(slug, chapters=chapters)
 
     @registry.register(
+        "story_ingest",
+        description=(
+            "Ingest a followed story's WHOLE library: every chapter "
+            "from 1 to the source's current end, cached in the story's "
+            "own library. Resumable (cached chapters are skipped) and "
+            "never moves reading progress. Reports ingested vs total; "
+            "continuation requires a complete library."
+        ),
+        capability=Capability.NET_OUT,
+        parameters={
+            "slug": "str — the followed story slug (title works too)",
+        },
+    )
+    def story_ingest(slug: str) -> dict[str, Any]:
+        return _reader().ingest(slug)
+
+    @registry.register(
         "story_progress",
         description=(
             "Reading progress on a followed story. get = where you left "
@@ -412,15 +429,17 @@ def register(registry: Any) -> None:
     @registry.register(
         "bible_build",
         description=(
-            "Auto-build a story bible from a followed story's read chapters: "
-            "cast, open plot threads, world rules, voice (POV/tense/tone). "
-            "The bible steers continuations so long stories stay in "
-            "character. Re-run to digest more chapters."
+            "Auto-build a story bible from a followed story: the "
+            "library is ingested whole and EVERY chapter digested "
+            "through the story's true end — cast, open plot threads, "
+            "world rules, voice (POV/tense/tone). The bible steers "
+            "continuations so long stories stay in character. Re-run "
+            "to digest chapters published since."
         ),
         capability=Capability.NET_OUT,
         parameters={
             "slug": "str — the followed story slug",
-            "chapters": "int (optional, 6) — how many recent chapters to digest",
+            "chapters": "int (optional, 6) — retained for compatibility; digestion always runs to the story's end",
         },
     )
     def bible_build(slug: str, *, chapters: int = 6) -> dict[str, Any]:

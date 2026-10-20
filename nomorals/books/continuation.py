@@ -15,7 +15,9 @@ pasted by the owner), ``StoryContinuer`` writes the next chapter(s):
 The user's canonical example: "My Vampire System" by JKSManga — they
 dislike the ending and want Devon to keep it going.  That is exactly
 ``continue_story("my-vampire-system-freewebnovel", n=...)`` after
-following + reading the final chapters.
+following: the follow ingests the whole story into its library, and
+the continuation anchors at the story's true final chapter — never
+at the owner's reading position.
 """
 
 from __future__ import annotations
@@ -56,34 +58,111 @@ class StoryContinuer:
         return slugify(slug_or_url.split("/")[-1] or slug_or_url,
                        fallback="story")[:80]
 
+    def _ensure_library(self, slug: str) -> int:
+        """Ingest the story's library to the source's current end.
+
+        Returns the final source chapter number.  Raises
+        ContinuationError — naming how far the library got vs the
+        source's end — when ingestion cannot complete: a continuation
+        is NEVER written from a partial library.
+        """
+        try:
+            report = self.reader.ingest(slug)
+        except ReaderError as exc:
+            raise ContinuationError(str(exc)) from exc
+        if not report["complete"]:
+            detail = ""
+            if report.get("failed"):
+                first = report["failed"][0]
+                detail = (f"; first failure at chapter {first['number']}: "
+                          f"{first['reason']}")
+            raise ContinuationError(
+                f"cannot continue {slug!r} from a partial library: "
+                f"{report['ingested']} of {report['total']} chapters "
+                f"are ingested{detail}. Finish the ingestion "
+                f"(/novel sync {slug}) and continue again.")
+        return int(report["total"])
+
+    def _written_continuations(self, slug: str) -> list[int]:
+        """Chapter numbers Devon has already written for this story."""
+        out_dir = self.reader.story_dir(slug) / "continuations"
+        nums: list[int] = []
+        if out_dir.exists():
+            for p in out_dir.glob("chapter-*.md"):
+                m = re.fullmatch(r"chapter-(\d+)", p.stem)
+                if m:
+                    nums.append(int(m.group(1)))
+        return sorted(nums)
+
+    def _continuation_text(self, slug: str, number: int) -> str:
+        """Text of a chapter DEVON wrote (continuations/), in the same
+        shape reader.chapter_text returns for source chapters."""
+        path = (self.reader.story_dir(slug) / "continuations"
+                / f"chapter-{number:05d}.md")
+        if not path.exists():
+            raise ReaderError(f"no written chapter {number} for {slug!r}")
+        text = path.read_text(encoding="utf-8")
+        parts = text.split("\n\n", 2)
+        body = parts[2] if len(parts) > 2 else text
+        title = parts[0].lstrip("# ").strip() if parts else ""
+        return f"# {title}\n\n{body}" if title else body
+
+    def _any_chapter_text(self, slug: str, number: int, final: int) -> str:
+        """Chapter text across the seam: source chapters up to the
+        story's end, Devon's written chapters beyond it."""
+        if final and number > final:
+            return self._continuation_text(slug, number)
+        try:
+            return self.reader.chapter_text(slug, number)
+        except ReaderError:
+            if number > (final or 0):
+                return self._continuation_text(slug, number)
+            raise
+
     def prepare(self, slug: str, *,
                 chapters: int = 6) -> StoryBible:
-        """Ensure a bible exists: build from the last ``chapters`` read
-        chapters (fetching them when the cache is cold)."""
+        """Ensure a bible exists, digested through the story's TRUE END.
+
+        The library is first ingested to the source's current end
+        (failing honestly when it cannot be), then every undigested
+        chapter — from wherever an existing bible stopped, all the
+        way to the final chapter — is folded in, in batches.  The old
+        behaviour anchored the bible at the owner's reading position,
+        so continuing a story read only at chapter 1 produced a
+        "Chapter 2" from a near-empty bible.  ``chapters`` is retained
+        for call compatibility; digestion now always runs to the end.
+        """
         story = self.reader._load(slug)
+        slug = story.slug
+        final = self._ensure_library(slug)
         bible = self.bibles.load(slug)
         have = bible.chapters_digested if bible else 0
-        # gather the most recent chapters Devon has (or can fetch)
-        end = story.current_chapter or story.total_chapters or chapters
-        start = max(1, end - chapters + 1)
-        batch: list[tuple[int, str, str]] = []
-        for n in range(start, end + 1):
-            if n <= have:
-                continue
+        if have < final:
+            batch: list[tuple[int, str, str]] = []
+
+            def _flush() -> None:
+                nonlocal bible, batch
+                if not batch:
+                    return
+                if bible is None:
+                    bible = self.bibles.build(slug, story.title, batch)
+                else:
+                    bible = self.bibles.update(slug, batch)
+                batch = []
+
             try:
-                text = self.reader.chapter_text(slug, n)
+                for n in range(have + 1, final + 1):
+                    text = self.reader.chapter_text(slug, n)
+                    title = text.split("\n", 1)[0].lstrip("# ").strip()[:120]
+                    batch.append((n, title, text))
+                    if len(batch) >= 24:
+                        _flush()
+                _flush()
             except ReaderError as exc:
-                _log.warning("continuation prepare: ch%s: %s", n, exc)
-                continue
-            title = text.split("\n", 1)[0].lstrip("# ").strip()[:120]
-            batch.append((n, title, text))
-        if not batch and bible is None:
+                raise ContinuationError(str(exc)) from exc
+        if bible is None:
             raise ContinuationError(
                 f"no chapters readable for {slug!r} — read some first")
-        if bible is None:
-            bible = self.bibles.build(slug, story.title, batch)
-        elif batch:
-            bible = self.bibles.update(slug, batch)
         return bible
 
     def prepare_from_text(self, title: str, text: str) -> StoryBible:
@@ -141,48 +220,69 @@ class StoryContinuer:
     def continue_story(self, slug: str, n: int = 1, *,
                        words: int = 1500,
                        direction: str = "",
-                       takes: int = 1) -> dict[str, Any]:
+                       takes: int = 1,
+                       from_chapter: int = 0) -> dict[str, Any]:
         """Write ``n`` new chapters continuing the story.
+
+        Anchored at the story's TRUE END: the library is ingested to
+        the source's current end and the bible digested through the
+        final chapter (see :meth:`prepare`) before anything is
+        written.  The first new chapter is (final source chapter)+1;
+        later continues increment from the last chapter Devon wrote
+        (persisted under the story's ``continuations/``), so a second
+        continue builds on the first.  The owner's reading position
+        (``current_chapter``) is never moved by writing.
 
         ``takes`` = alternate versions per chapter (AI-Dungeon retry
         style); the best-scored take becomes the live chapter, the rest
-        are kept beside it for the author to pick.
+        are kept beside it for the author to pick.  ``from_chapter``
+        is the explicit fork override (SerialManager's continue-from-
+        any-chapter): numbering and tails anchor there instead.
         """
         story = self.reader._load(slug)
+        slug = story.slug
         bible = self.prepare(slug)
-        written: list[dict[str, Any]] = []
+        state = self.reader.ingest_state(slug)
+        final = int(state["total"])
+        written = self._written_continuations(slug)
+        if from_chapter and from_chapter >= 1:
+            anchor = from_chapter
+        else:
+            anchor = max([final, *written])
+        written_out: list[dict[str, Any]] = []
+        last = anchor
         for _ in range(max(1, n)):
-            chapter_no = (story.current_chapter or bible.chapters_digested) + 1
+            chapter_no = last + 1
             result = self._write_one(slug, story.title, bible, chapter_no,
                                      words=words, direction=direction,
-                                     takes=takes)
-            written.append(result)
+                                     takes=takes, final=final)
+            written_out.append(result)
+            last = chapter_no
             # digest back into the bible so continuity compounds
             bible = self.bibles.update(
                 slug, [(chapter_no, result["title"], result["text"])])
             self._update_summary(bible, chapter_no, result["text"])
             self.bibles.save(bible)
-            story.current_chapter = chapter_no
-            story.last_read_at = self.reader._load(slug).last_read_at
-            # persist progress without clobbering the cache count
-            cur = self.reader._load(slug)
-            cur.current_chapter = chapter_no
-            self.reader._save(cur)
             direction = ""  # only the first chapter takes a direction
         return {"slug": slug, "title": story.title,
-                "chapters": written,
+                "chapters": written_out,
+                "continued_from_chapter": anchor,
+                "final_chapter": final,
                 "bible": self.bibles.bible_path(slug).as_posix()}
 
     def _write_one(self, slug: str, title: str, bible: StoryBible,
                    chapter_no: int, *, words: int,
-                   direction: str, takes: int = 1) -> dict[str, Any]:
-        # immediate continuity: tails of the last two chapters
+                   direction: str, takes: int = 1,
+                   final: int = 0) -> dict[str, Any]:
+        # immediate continuity: tails of the last two chapters — the
+        # story's actual last chapters (source tail, then any chapters
+        # Devon already wrote beyond it)
         tails: list[str] = []
         for n in (chapter_no - 2, chapter_no - 1):
             if n < 1:
                 continue
             try:
-                tails.append(_tail(self.reader.chapter_text(slug, n)))
+                tails.append(_tail(self._any_chapter_text(slug, n, final)))
             except ReaderError:
                 continue
         candidates: list[str] = []

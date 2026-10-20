@@ -290,20 +290,18 @@ class SerialManager:
     def continue_past_ending(self, slug: str, n: int = 1, *,
                              from_chapter: int = 0,
                              direction: str = "") -> dict[str, Any]:
-        """Continue a read story past its ending (or from any chapter).
+        """Continue a followed story past its ending (or from any chapter).
 
-        The story bible is built from the read chapters; each new
-        chapter is scored against the reference voice built from the
-        story's own early chapters. Drift is reported, never blocking."""
+        By default the continuation anchors at the story's TRUE END:
+        the library is ingested whole and the bible digested through
+        the final chapter before writing.  ``from_chapter`` is the
+        explicit fork override — it is handed to the continuer as an
+        anchor (the reader's progress is NOT moved to fake one).
+        Each new chapter is scored against the reference voice built
+        from the story's own early chapters. Drift is reported, never
+        blocking."""
         story = self.reader._load(slug)
-        # continue from any chapter: point the reader at from_chapter
-        # first, so prepare() + continue_story() write from there
-        if from_chapter and from_chapter >= 1:
-            try:
-                self.reader.set_progress(slug, from_chapter)
-                story = self.reader._load(slug)
-            except Exception as exc:  # noqa: BLE001 - progress is advisory
-                _log.debug("continue from_chapter progress failed: %s", exc)
+        slug = story.slug
         bible = self.continuer.prepare(slug)
         # reference voice from the story's own first chapters
         ref_texts: list[str] = []
@@ -314,7 +312,8 @@ class SerialManager:
                 continue
         ref = fingerprint("\n\n".join(ref_texts)) if ref_texts else None
         result = self.continuer.continue_story(
-            slug, n=max(1, n), direction=direction)
+            slug, n=max(1, n), direction=direction,
+            from_chapter=from_chapter)
         scored = []
         for ch in result["chapters"]:
             drift = None
@@ -323,7 +322,8 @@ class SerialManager:
             scored.append({**ch, "drift": drift})
         return {
             "slug": slug, "title": story.title,
-            "continued_from_chapter": from_chapter or story.current_chapter,
+            "continued_from_chapter": result.get(
+                "continued_from_chapter", story.current_chapter),
             "chapters": scored,
             "bible": result.get("bible"),
         }

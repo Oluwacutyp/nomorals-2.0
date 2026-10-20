@@ -8,11 +8,18 @@ across restarts, greppable by the owner.
 
 Fetch politeness is profile-gated: termux fetches fewer chapters per
 sync with longer pauses; laptop/workstation go faster.
+
+Following a story also means OWNING it: :meth:`StoryReader.ingest`
+pulls every chapter from 1 to the source's current end into the
+story's own library (resumable, progress persisted on the record,
+reading position untouched), so continuation can anchor at the
+story's true end instead of wherever the owner stopped reading.
 """
 
 from __future__ import annotations
 
 import json
+import re
 import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
@@ -52,6 +59,13 @@ class FollowedStory:
     last_read_at: str = ""
     chapters_cached: int = 0
     followed_at: str = ""
+    # library ingestion state — SEPARATE from reading progress: how much
+    # of the story sits in the story's own library, ingested on follow.
+    # ``ingested_chapters`` is the contiguous watermark (chapters
+    # 1..N are all held locally); ``ingest_total`` is the source total
+    # observed at the last ingest.
+    ingested_chapters: int = 0
+    ingest_total: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -74,6 +88,14 @@ class FollowedStory:
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _norm_story_name(value: str) -> str:
+    """Normalize a story name/slug/title for resolution: case-folded,
+    underscores/spaces/punctuation all become single dashes."""
+    s = (value or "").strip().lower().replace("_", "-")
+    s = re.sub(r"[^a-z0-9]+", "-", s)
+    return re.sub(r"-{2,}", "-", s).strip("-")
 
 
 class StoryReader:
@@ -115,12 +137,65 @@ class StoryReader:
         }
 
     # ── story registry ────────────────────────────────────────────────────
-    def _load(self, slug: str) -> FollowedStory:
-        path = self._meta_path(slug)
+    def resolve_slug(self, name: str) -> str:
+        """Resolve a user-typed story reference to the followed slug.
+
+        Accepts the full slug, the slug without its source suffix, or
+        the story title — all case/underscore/dash-insensitive — plus a
+        unique prefix of any of those.  Ambiguous input raises
+        ReaderError listing the candidate slugs; unknown input raises
+        the honest "no followed story" error.  Never creates dirs.
+        """
+        raw = (name or "").strip()
+        if raw and (self.reader_dir() / raw / "story.json").exists():
+            return raw
+        want = _norm_story_name(raw)
+        if not want:
+            raise ReaderError(f"no followed story {name!r}")
+        stories: list[tuple[str, FollowedStory]] = []
+        for meta_path in sorted(self.reader_dir().glob("*/story.json")):
+            try:
+                story = FollowedStory.from_dict(
+                    json.loads(meta_path.read_text(encoding="utf-8")))
+            except Exception:  # noqa: BLE001 - a corrupt entry never resolves
+                continue
+            stories.append((meta_path.parent.name, story))
+
+        def keys(slug: str, story: FollowedStory) -> set[str]:
+            full = _norm_story_name(slug)
+            out = {full, _norm_story_name(story.title)}
+            suffix = _norm_story_name(story.source or "")
+            if suffix and full.endswith("-" + suffix):
+                out.add(full[: -(len(suffix) + 1)])
+            return {k for k in out if k}
+
+        exact = [slug for slug, st in stories if want in keys(slug, st)]
+        if len(exact) == 1:
+            return exact[0]
+        if len(exact) > 1:
+            raise ReaderError(
+                f"{name!r} is ambiguous — it matches more than one "
+                f"followed story: {', '.join(sorted(exact))}")
+        prefix = [slug for slug, st in stories
+                  if any(k.startswith(want) for k in keys(slug, st))]
+        if len(prefix) == 1:
+            return prefix[0]
+        if len(prefix) > 1:
+            raise ReaderError(
+                f"{name!r} is ambiguous — it matches more than one "
+                f"followed story: {', '.join(sorted(prefix))}")
+        raise ReaderError(f"no followed story {name!r}")
+
+    def _load_exact(self, slug: str) -> FollowedStory:
+        """Load by canonical slug (no resolution)."""
+        path = self.reader_dir() / slug / "story.json"
         if not path.exists():
             raise ReaderError(f"no followed story {slug!r}")
         return FollowedStory.from_dict(
             json.loads(path.read_text(encoding="utf-8")))
+
+    def _load(self, slug: str) -> FollowedStory:
+        return self._load_exact(self.resolve_slug(slug))
 
     def _save(self, story: FollowedStory) -> None:
         path = self._meta_path(story.slug)
@@ -148,28 +223,32 @@ class StoryReader:
         adapter = self._adapter(target)
         meta: StoryMeta = adapter.novel(target)
         slug = slugify(f"{meta.title}-{adapter.name}", fallback="story")
-        try:
-            story = self._load(slug)
-        except ReaderError:
-            story = FollowedStory(
-                slug=slug, title=meta.title, url=meta.url,
-                source=adapter.name, author=meta.author,
-                synopsis=meta.synopsis, genres=meta.genres,
-                status=meta.status, total_chapters=meta.total_chapters,
-                cover_url=meta.cover_url, followed_at=_now())
-        else:
+        # exact-slug existence check (NOT _load: name resolution must
+        # never let a new follow land on a different story's record)
+        meta_path = self.reader_dir() / slug / "story.json"
+        if meta_path.exists():
+            story = FollowedStory.from_dict(
+                json.loads(meta_path.read_text(encoding="utf-8")))
             # re-follow refreshes metadata, never wipes reading state
             story.title = meta.title or story.title
             story.url = meta.url
             story.author = meta.author or story.author
             story.total_chapters = meta.total_chapters or story.total_chapters
             story.status = meta.status or story.status
+        else:
+            story = FollowedStory(
+                slug=slug, title=meta.title, url=meta.url,
+                source=adapter.name, author=meta.author,
+                synopsis=meta.synopsis, genres=meta.genres,
+                status=meta.status, total_chapters=meta.total_chapters,
+                cover_url=meta.cover_url, followed_at=_now())
         self._save(story)
         _log.info("following story %s (%s)", slug, adapter.name)
         return story
 
     def unfollow(self, slug: str, *, keep_cache: bool = True) -> dict[str, Any]:
         story = self._load(slug)
+        slug = story.slug
         d = self.story_dir(slug)
         if keep_cache:
             # keep the chapters; drop the follow record
@@ -194,7 +273,13 @@ class StoryReader:
                 "author": story.author, "source": story.source,
                 "status": story.status,
                 "progress": f"{story.current_chapter}/{story.total_chapters or '?'}",
+                "current_chapter": story.current_chapter,
+                "total_chapters": story.total_chapters,
                 "chapters_cached": story.chapters_cached,
+                "ingested": story.ingested_chapters,
+                "ingest_total": story.ingest_total,
+                "library_complete": bool(story.ingest_total) and
+                    story.ingested_chapters >= story.ingest_total,
                 "last_read_at": story.last_read_at,
             })
         return out
@@ -275,6 +360,7 @@ class StoryReader:
     def read(self, slug: str, chapter: int = 0) -> dict[str, Any]:
         """Read a chapter (cached when available); updates progress."""
         story = self._load(slug)
+        slug = story.slug
         number = chapter or max(1, story.current_chapter or 1)
         if number < 1:
             number = 1
@@ -318,6 +404,7 @@ class StoryReader:
 
     def chapter_text(self, slug: str, number: int) -> str:
         """Full raw text of a chapter (fetching it first when needed)."""
+        slug = self.resolve_slug(slug)
         ch = self._cached_chapter(slug, number)
         if ch is None:
             self.read(slug, chapter=number)
@@ -365,10 +452,149 @@ class StoryReader:
                            "new_total": story.total_chapters})
         return {"synced": report}
 
+    # ── full library ingestion ────────────────────────────────────────────
+    def _cached_numbers(self, slug: str) -> set[int]:
+        """Chapter numbers held in the story's library (disk is truth)."""
+        return {int(p.stem) for p in
+                (self.story_dir(slug) / "chapters").glob("*.md")
+                if p.stem.isdigit()}
+
+    @staticmethod
+    def _watermark(cached: set[int]) -> int:
+        """Highest N such that chapters 1..N are ALL in the library."""
+        n = 0
+        while n + 1 in cached:
+            n += 1
+        return n
+
+    def ingest_state(self, slug: str) -> dict[str, Any]:
+        """Library completeness from disk — no network."""
+        story = self._load(slug)
+        cached = self._cached_numbers(story.slug)
+        watermark = self._watermark(cached)
+        total = story.ingest_total or story.total_chapters or 0
+        return {"slug": story.slug, "title": story.title,
+                "ingested": watermark, "cached": len(cached),
+                "total": total,
+                "complete": bool(total) and watermark >= total}
+
+    def ingest(self, slug: str, *, max_chapters: int = 0) -> dict[str, Any]:
+        """Ingest the WHOLE story into its own library, 1..source end.
+
+        Resumable: chapters already cached are never re-fetched, and
+        progress (contiguous watermark vs the source total observed)
+        is persisted on the story record after every run.  Ingestion
+        is not reading — ``current_chapter`` is never touched.
+
+        Enumeration asks the adapter for its FULL list (``limit=0`` —
+        the profile list cap applies to interactive reads, never to
+        ingestion); numbers the listing misses are resolved via the
+        previous chapter's ``next_url`` chain or the adapter's
+        deterministic ``chapter_url``.  A chapter that fails is
+        recorded, never silently skipped; three consecutive failures
+        stop the run (the source is likely down) and the report says
+        exactly how far the library got.
+        """
+        story = self._load(slug)
+        slug = story.slug
+        adapter = self._adapter(story.url)
+        profile = self._profile()
+        # refresh the known end from the source itself
+        try:
+            meta = adapter.novel(story.url)
+            if meta.total_chapters:
+                story.total_chapters = meta.total_chapters
+            if meta.status:
+                story.status = meta.status
+        except SourceError as exc:
+            _log.warning("ingest %s: meta refresh failed: %s", slug, exc)
+        try:
+            listing = adapter.chapter_list(story.url, limit=0)
+        except SourceError as exc:
+            # a library already complete on disk stays usable offline —
+            # only a genuinely incomplete one fails here
+            cached = self._cached_numbers(slug)
+            watermark = self._watermark(cached)
+            known_total = story.ingest_total or story.total_chapters or 0
+            if known_total and watermark >= known_total:
+                _log.warning("ingest %s: source unreachable (%s) — "
+                             "library already complete on disk",
+                             slug, exc)
+                return {"slug": slug, "title": story.title, "fetched": [],
+                        "failed": [], "ingested": watermark,
+                        "cached": len(cached), "total": known_total,
+                        "complete": True, "source_unreachable": True}
+            raise ReaderError(
+                f"could not list chapters of {story.title!r}: {exc}"
+            ) from exc
+        urls: dict[int, str] = {}
+        for n, _title, href in listing:
+            if n >= 1 and href:
+                urls.setdefault(n, href)
+        total = max([story.total_chapters or 0, *urls.keys()], default=0)
+        if total <= 0:
+            raise ReaderError(
+                f"{story.title!r}: the source lists no chapters to ingest")
+        cached = self._cached_numbers(slug)
+        fetched: list[int] = []
+        failed: list[dict[str, Any]] = []
+        consecutive_failures = 0
+        next_hint = ""
+        for n in range(1, total + 1):
+            if max_chapters and len(fetched) >= max_chapters:
+                break
+            if n in cached:
+                ch = self._cached_chapter(slug, n)
+                if ch and ch.next_url:
+                    next_hint = ch.next_url
+                continue
+            url = urls.get(n) or next_hint or adapter.chapter_url(
+                story.url, n)
+            if not url:
+                failed.append({"number": n,
+                               "reason": "no URL in the chapter list, "
+                                         "the next-link chain, or the "
+                                         "adapter's URL pattern"})
+                consecutive_failures += 1
+                if consecutive_failures >= 3:
+                    break
+                continue
+            try:
+                ch = adapter.fetch_chapter(url)
+            except SourceError as exc:
+                failed.append({"number": n, "reason": str(exc)[:160]})
+                consecutive_failures += 1
+                _log.warning("ingest %s ch%s: %s", slug, n, exc)
+                if consecutive_failures >= 3:
+                    break
+                continue
+            consecutive_failures = 0
+            if ch.number != n:
+                # the enumerated list is authoritative for numbering
+                ch.number = n
+            self._store_chapter(slug, ch)
+            cached.add(n)
+            fetched.append(n)
+            if ch.next_url:
+                next_hint = ch.next_url
+            time.sleep(profile["pause_s"])
+        watermark = self._watermark(cached)
+        story.ingested_chapters = watermark
+        story.ingest_total = total
+        story.chapters_cached = len(cached)
+        self._save(story)
+        report = {"slug": slug, "title": story.title,
+                  "fetched": fetched, "failed": failed,
+                  "ingested": watermark, "cached": len(cached),
+                  "total": total, "complete": watermark >= total}
+        _log.info("ingest %s: %s/%s chapters (fetched %s, failed %s)",
+                  slug, watermark, total, len(fetched), len(failed))
+        return report
+
     # ── progress & bookmarks ──────────────────────────────────────────────
     def get_progress(self, slug: str) -> dict[str, Any]:
         story = self._load(slug)
-        return {"slug": slug, "title": story.title,
+        return {"slug": story.slug, "title": story.title,
                 "chapter": story.current_chapter,
                 "offset": story.current_offset,
                 "total_chapters": story.total_chapters,
@@ -405,7 +631,8 @@ class StoryReader:
 
     def add_bookmark(self, slug: str, chapter: int, offset: int = 0,
                      label: str = "") -> dict[str, Any]:
-        self._load(slug)  # validates the story exists
+        story = self._load(slug)  # validates the story exists
+        slug = story.slug
         path = self._bookmarks_path(slug)
         marks = self._read_json_list(path)
         mark_id = max([m.get("id", 0) for m in marks] + [0]) + 1
@@ -418,6 +645,7 @@ class StoryReader:
 
     def list_bookmarks(self, slug: str = "") -> list[dict[str, Any]]:
         if slug:
+            slug = self.resolve_slug(slug)
             return [{"slug": slug, **m}
                     for m in self._read_json_list(self._bookmarks_path(slug))]
         out: list[dict[str, Any]] = []
@@ -428,6 +656,7 @@ class StoryReader:
         return out
 
     def remove_bookmark(self, slug: str, mark_id: int) -> dict[str, Any]:
+        slug = self.resolve_slug(slug)
         path = self._bookmarks_path(slug)
         marks = self._read_json_list(path)
         kept = [m for m in marks if m.get("id") != mark_id]
@@ -455,7 +684,8 @@ def add_highlight(self: "StoryReader", slug: str, chapter: int,
                   quote: str, note: str = "",
                   color: str = "yellow") -> dict[str, Any]:
     """KOReader-style highlight on a chapter passage."""
-    self._load(slug)  # validates the story exists
+    story = self._load(slug)  # validates the story exists
+    slug = story.slug
     quote = (quote or "").strip()
     if not quote:
         raise ReaderError("highlight needs quoted text")
@@ -475,6 +705,7 @@ def add_highlight(self: "StoryReader", slug: str, chapter: int,
 def list_highlights(self: "StoryReader",
                     slug: str = "") -> list[dict[str, Any]]:
     if slug:
+        slug = self.resolve_slug(slug)
         return [{"slug": slug, **m}
                 for m in self._read_json_list(_highlights_path(self, slug))]
     out: list[dict[str, Any]] = []
@@ -487,6 +718,7 @@ def list_highlights(self: "StoryReader",
 
 def remove_highlight(self: "StoryReader", slug: str,
                      highlight_id: int) -> dict[str, Any]:
+    slug = self.resolve_slug(slug)
     path = _highlights_path(self, slug)
     marks = self._read_json_list(path)
     kept = [m for m in marks if m.get("id") != highlight_id]
@@ -566,6 +798,7 @@ def catch_up(self: "StoryReader", slug: str,
              limit: int = 10) -> dict[str, Any]:
     """Read every unread cached chapter in order, advancing progress."""
     story = self._load(slug)
+    slug = story.slug
     cached = sorted(
         int(p.stem) for p in
         (self.story_dir(slug) / "chapters").glob("*.md")
