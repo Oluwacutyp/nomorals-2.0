@@ -77,6 +77,28 @@ class Section:
         return len((self.heading + " " + self.text).split())
 
 
+def _unique_headers(headers: list[str]) -> list[str]:
+    """Header names made unique, pandas-style (``a``, ``a.1``, ``a.2``).
+
+    Dict-keyed views (records, stats) must never silently drop a column
+    because two headers share a name.
+    """
+    used: set[str] = set()
+    counts: dict[str, int] = {}
+    out: list[str] = []
+    for h in headers:
+        name = h
+        if name in used:
+            counts[h] = counts.get(h, 0) + 1
+            name = f"{h}.{counts[h]}"
+            while name in used:
+                counts[h] += 1
+                name = f"{h}.{counts[h]}"
+        used.add(name)
+        out.append(name)
+    return out
+
+
 @dataclass
 class Table:
     """A rectangular data table: header row plus data rows, all strings.
@@ -134,9 +156,22 @@ class Table:
             return len(self.headers)
         return max((len(r) for r in self.rows), default=0)
 
+    def _record_headers(self) -> list[str]:
+        """Unique record keys: headers padded to the widest row with
+        ``col_N`` fallbacks, duplicates disambiguated — no cell of any
+        row is left without a key."""
+        width = max([len(self.headers)] + [len(r) for r in self.rows])
+        base = list(self.headers) + [
+            f"col_{i + 1}" for i in range(len(self.headers), width)]
+        return _unique_headers(base)
+
     def to_records(self) -> list[dict[str, str]]:
-        """Rows as dicts keyed by header (pandas ``to_dict('records')``)."""
-        headers = self.headers or [f"col_{i + 1}" for i in range(self.n_cols)]
+        """Rows as dicts keyed by header (pandas ``to_dict('records')``).
+
+        Duplicate header names are disambiguated pandas-style
+        (``a``, ``a.1``, …) so no column is silently lost.
+        """
+        headers = self._record_headers()
         records = []
         for row in self.rows:
             padded = list(row) + [""] * (len(headers) - len(row))
@@ -159,7 +194,7 @@ class Table:
 
     def stats(self) -> dict[str, dict[str, Any]]:
         """Per-column fill/numeric/uniqueness stats (profiling hook)."""
-        headers = self.headers or [f"col_{i + 1}" for i in range(self.n_cols)]
+        headers = self._record_headers()
         out: dict[str, dict[str, Any]] = {}
         for i, header in enumerate(headers):
             cells = [row[i] if i < len(row) else "" for row in self.rows]
@@ -282,9 +317,12 @@ class Document:
                 return
             context = " > ".join(h for h in heading_path if h)
             if chunks and chunks[-1]["words"] + len(text.split()) <= max_words \
-                    and chunks[-1]["page"] == page:
+                    and chunks[-1]["page"] == page \
+                    and chunks[-1]["heading_path"] == context:
                 # merge_peers: fold an undersized sibling into the previous
-                # chunk when it still fits.
+                # chunk when it still fits — siblings share a heading
+                # context; text from a different section never merges in
+                # (its heading_path would misattribute the words).
                 chunks[-1]["text"] += "\n\n" + text
                 chunks[-1]["words"] = len(chunks[-1]["text"].split())
             else:

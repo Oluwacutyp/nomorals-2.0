@@ -629,6 +629,9 @@ def assemble_segments(clips: list[Clip], *,
     a_labels: list[str] = []
     cursors = [w0 for w0, _ in windows]  # continuous walk per clip
     total_dur = 0.0
+    pending_head_fade: list[str] | None = None  # blink head fade from the
+    # previous boundary — applied to this segment after its effects, so
+    # flash/dip blink on both sides of the cut (tail of A + head of B).
     for n, (ci, play_d) in enumerate(plan):
         clip = clips[ci]
         s0, s1 = windows[ci]
@@ -674,16 +677,25 @@ def assemble_segments(clips: list[Clip], *,
                    beats=[0.0, play_d])
         for k, fx in enumerate(clip.effects):
             vcur = _chain_effect(parts, vcur, fx, ctx, f"{tag}e{k}")
+        # blink-kind head fade carried from the previous boundary
+        if pending_head_fade:
+            parts.append(f"[{vcur}]{','.join(pending_head_fade)}[{tag}hd]")
+            vcur = f"{tag}hd"
+            pending_head_fade = None
         # blink-kind transitions bake edge fades into the segment
         if n < len(plan) - 1:
             tr = tlist[n]
             if tr.kind in ("flash", "dip"):
-                head_f, tail_f = edge_fade_filters(play_d, tr.kind,
-                                                   tr.params)
+                _head, tail_f = edge_fade_filters(play_d, tr.kind,
+                                                  tr.params)
                 # tail fade on this segment; head fade on the next
+                # (clamped by the next segment's own length)
                 if tail_f:
                     parts.append(f"[{vcur}]{','.join(tail_f)}[{tag}tr]")
                     vcur = f"{tag}tr"
+                head_next, _tail = edge_fade_filters(plan[n + 1][1],
+                                                     tr.kind, tr.params)
+                pending_head_fade = head_next or None
             elif tr.kind == "glitch_cut":
                 gp = glitch_burst_params(tr.params)
                 win = gp.pop("window")

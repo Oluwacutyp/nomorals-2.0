@@ -174,6 +174,19 @@ def _sha256_file(path: Path) -> str:
     return h.hexdigest()
 
 
+def _cat_label(value: Any) -> str:
+    """Category label for charts/counts: missing values render as the
+    ``∅`` bucket. (``astype(str)`` would stringify NaN/None to
+    "nan"/"None" first, so the label is decided from the NA mask.)"""
+    try:
+        import pandas as _pd_mod
+        if bool(_pd_mod.isna(value)):
+            return "∅"
+    except (ValueError, TypeError):
+        pass
+    return str(value)
+
+
 def _json_safe(value: Any) -> Any:
     """Normalize a scalar for JSON output (NaN/NaT/inf → None)."""
     if value is None:
@@ -489,7 +502,7 @@ class DataWorkspace:
         if column not in ds.columns:
             raise QueryError(
                 f"column {column!r} not in {ds.columns}")
-        vc = ds.frame[column].astype(str).fillna("∅").value_counts().head(n)
+        vc = ds.frame[column].map(_cat_label).value_counts().head(n)
         return [{"value": _json_safe(v), "count": int(c)}
                 for v, c in vc.items()]
 
@@ -550,7 +563,7 @@ class DataWorkspace:
                 if isinstance(skew, (int, float)) and abs(skew) >= _ALERT_SKEW:
                     _alert("SKEWED", cname, f"skew={skew:.2f}")
             else:
-                top = s.astype(str).fillna("∅").value_counts().head(5)
+                top = s.map(_cat_label).value_counts().head(5)
                 info["top_values"] = [
                     {"value": _json_safe(v), "count": int(c)}
                     for v, c in top.items()]

@@ -42,16 +42,20 @@ def _table_as_markdown(table: Table) -> str:
     def esc(cell: str) -> str:
         return re.sub(r"\s+", " ", cell).replace("|", "\\|").strip()
 
+    # The grid is as wide as the widest row — a row with more cells
+    # than the header must not lose its trailing cells, and a shorter
+    # header row is padded.
+    width = max([len(table.headers)] + [len(r) for r in table.rows])
+    headers = list(table.headers) + [""] * (width - len(table.headers))
     lines = []
-    width = len(table.headers)
     if table.headers:
-        lines.append("| " + " | ".join(esc(h) for h in table.headers) + " |")
-        lines.append("| " + " | ".join("---" for _ in table.headers) + " |")
+        lines.append("| " + " | ".join(esc(h) for h in headers) + " |")
+        lines.append("| " + " | ".join("---" for _ in headers) + " |")
     for row in table.rows:
         cells = [esc(c) for c in row]
         while len(cells) < width:
             cells.append("")
-        lines.append("| " + " | ".join(cells[:width] if width else cells) + " |")
+        lines.append("| " + " | ".join(cells) + " |")
     return "\n".join(lines)
 
 

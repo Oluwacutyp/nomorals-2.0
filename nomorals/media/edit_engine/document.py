@@ -183,6 +183,7 @@ class Document:
             "output": dict(self.output),
             "title": self.title,
             "version": self.version,
+            "doc_hash": self.doc_hash,
             "removed": copy.deepcopy(self.removed),
         }
         return data
@@ -209,7 +210,9 @@ class Document:
 
     def compute_hash(self) -> str:
         """SHA-256 of the canonical document (hash field excluded)."""
-        data = _canonical(self.to_dict())
+        raw = self.to_dict()
+        raw.pop("doc_hash", None)  # the hash never hashes itself
+        data = _canonical(raw)
         blob = json.dumps(data, sort_keys=True,
                           separators=(",", ":")).encode("utf-8")
         return hashlib.sha256(blob).hexdigest()
@@ -391,10 +394,12 @@ class Document:
         """Recover a removed range back into the video track."""
         if not self.removed:
             raise MediaEditError("nothing removed to restore")
-        entry = self.removed.pop(index)
+        # validate BEFORE popping: a failed restore must not destroy
+        # the recoverable range it was asked to bring back.
         video = self.track("video")
         if video is None or not video.clips:
             raise MediaEditError("no video track to restore into")
+        entry = self.removed.pop(index)
         src = video.clips[0].path
         video.clips.append(Clip(path=src, start=float(entry["start"]),
                                 end=float(entry["end"])))
@@ -502,13 +507,16 @@ def diff_documents(a: Document | dict[str, Any],
     """
     da = a.to_dict() if isinstance(a, Document) else dict(a)
     db = b.to_dict() if isinstance(b, Document) else dict(b)
+    before_hash, after_hash = da.get("doc_hash"), db.get("doc_hash")
+    da.pop("doc_hash", None)  # reported separately below, not a "change"
+    db.pop("doc_hash", None)
     changed = [k for k in sorted(set(da) | set(db))
                if _canonical(da.get(k)) != _canonical(db.get(k))]
     return {"changed": changed,
             "before_version": da.get("version"),
             "after_version": db.get("version"),
-            "before_hash": da.get("doc_hash"),
-            "after_hash": db.get("doc_hash")}
+            "before_hash": before_hash,
+            "after_hash": after_hash}
 
 
 # -- specialisation constructors -----------------------------------------

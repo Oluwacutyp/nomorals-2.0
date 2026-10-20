@@ -71,6 +71,11 @@ class KeyframeTrack:
     param: str
     keys: list[Keyframe] = field(default_factory=list)
 
+    def __post_init__(self) -> None:
+        # sample()/duration() assume chronological keys — enforce it
+        # for every construction path (from_dict, direct), not just add().
+        self.keys.sort(key=lambda k: k.time)
+
     def add(self, time: float, value: float,
             easing: str = "smooth") -> "KeyframeTrack":
         if easing not in _EASINGS:

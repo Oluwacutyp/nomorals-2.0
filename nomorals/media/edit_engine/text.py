@@ -152,25 +152,24 @@ def layer_to_ass(layer: TextLayer, *, width: int = 1080,
     align = layer.alignment
     body = (str(layer.text or "").replace("\n", r"\N")
             .replace("{", r"\{").replace("}", r"\}"))
+    # box → BorderStyle 3 (opaque box) with the box colour as
+    # BackColour; no box → BorderStyle 1 (outline + shadow).
+    border_style = 3 if layer.box else 1
+    back_colour = ass_color(layer.box_color) if layer.box \
+        else ass_color("#00000088")
     style_line = (
         f"Style: Layer,Arial,{layer.size},"
         f"{ass_color(layer.color)},{ass_color(layer.color)},"
-        f"{ass_color(layer.stroke_color)},{ass_color('#00000088')},"
-        f"0,{-int(bool(layer.stroke))},0,0,100,100,0,0,1,"
-        f"{layer.stroke},{layer.stroke},"
-        f"{'3' if layer.box else '1'},"
+        f"{ass_color(layer.stroke_color)},{back_colour},"
+        f"0,{-int(bool(layer.stroke))},0,0,100,100,0,0,"
+        f"{border_style},{layer.stroke},{layer.stroke},"
+        f"{align},"
         f"{layer.margin_v},{layer.margin_v},{layer.margin_v},1")
-    # box → BorderStyle 3 needs a box color override
-    if layer.box:
-        style_line += f"\n# box color: {ass_color(layer.box_color)}"
     dialogue = (f"Dialogue: 0,{ts(layer.start)},{ts(end)},Layer,,0,0,0,,"
                 f"{{\\an{align}}}"
                 + (f"{{\\pos({layer.x},{layer.y})}}"
                    if layer.x is not None and layer.y is not None else "")
                 + body)
-    # strip the comment line (kept human-readable, harmless to libass)
-    style_line = "\n".join(
-        ln for ln in style_line.splitlines() if not ln.startswith("#"))
     return (
         "[Script Info]\nScriptType: v4.00+\n"
         f"PlayResX: {width}\nPlayResY: {height}\nScaledBorderAndShadow: yes\n\n"

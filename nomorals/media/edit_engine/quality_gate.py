@@ -266,13 +266,33 @@ def auto_fix(document: Any, report: dict[str, Any],
     cap = axes.get("caption_sync_drift", {})
     if cap.get("status") == "fail" and m.get("caption_drift_s") is not None:
         shift = -float(m["caption_drift_s"])
+
+        def _shifted(value: Any) -> float:
+            return max(0.0, float(value) + shift)
+
         for layer in doc.text_layers:
-            start = getattr(layer, "start", None)
-            if start is not None:
+            # the layer window AND the word timings move together —
+            # words carry the timings that actually render, so shifting
+            # only layer.start would leave the captions where they were.
+            if getattr(layer, "start", None) is not None:
                 try:
-                    layer.start = max(0.0, float(start) + shift)
+                    layer.start = _shifted(layer.start)
                 except (AttributeError, TypeError, ValueError):
                     pass
+            if getattr(layer, "end", None) is not None:
+                try:
+                    layer.end = _shifted(layer.end)
+                except (AttributeError, TypeError, ValueError):
+                    pass
+            for w in getattr(layer, "words", None) or []:
+                if isinstance(w, dict):
+                    for key in ("start", "end"):
+                        if w.get(key) is not None:
+                            w[key] = _shifted(w[key])
+                else:
+                    for key in ("start", "end"):
+                        if getattr(w, key, None) is not None:
+                            setattr(w, key, _shifted(getattr(w, key)))
         applied.append(f"captions shifted {shift:+.2f}s")
     exp = axes.get("exposure_clipping", {})
     if exp.get("status") == "fail":

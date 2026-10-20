@@ -111,12 +111,25 @@ def _check_col(cols: list[str], col: str, kind: str) -> None:
         raise PlotError(f"column {col!r} not in {cols} (kind={kind})")
 
 
+def _cat_label(value: Any) -> str:
+    """Category label: missing values render as the ``∅`` bucket.
+    (``astype(str)`` would stringify NaN/None to "nan"/"None" first,
+    so the label is decided from the NA mask.)"""
+    try:
+        import pandas as pd
+        if bool(pd.isna(value)):
+            return "∅"
+    except (ValueError, TypeError):
+        pass
+    return str(value)
+
+
 def _top_categories(frame: Any, x: str, y: str, top_n: int):
     """Return (labels, values) capped at ``top_n`` categories, ordered by
     value descending so the chart stays readable."""
     import pandas as pd
     s = frame[[x, y]].copy()
-    s[x] = s[x].astype(str)
+    s[x] = s[x].map(_cat_label)
     grouped = s.groupby(x, as_index=False)[y].sum(numeric_only=True)
     grouped = grouped.sort_values(y, ascending=False).head(max(top_n, 1))
     return grouped[x].tolist(), grouped[y].tolist()
@@ -209,10 +222,10 @@ def _render_group(ax, frame, kind, x, y, top_n):
         data = [yv.to_numpy()]
         labels = [y]
     else:
-        cats = frame[x].astype(str).fillna("∅").unique().tolist()[:max(top_n, 1)]
+        cats = frame[x].map(_cat_label).unique().tolist()[:max(top_n, 1)]
         data, labels = [], []
         for cat in cats:
-            grp = yv[frame[x].astype(str).fillna("∅") == cat].to_numpy()
+            grp = yv[frame[x].map(_cat_label) == cat].to_numpy()
             if len(grp):
                 data.append(grp)
                 labels.append(cat)
@@ -266,7 +279,7 @@ def _render_area(ax, frame, x, y):
 
 
 def _render_pie(ax, frame, x, top_n):
-    vc = frame[x].astype(str).fillna("∅").value_counts().head(max(top_n, 1))
+    vc = frame[x].map(_cat_label).value_counts().head(max(top_n, 1))
     if vc.empty:
         raise PlotError(f"pie: column {x!r} has no values")
     ax.pie(vc.to_numpy(), labels=vc.index.tolist(), autopct="%1.1f%%",
