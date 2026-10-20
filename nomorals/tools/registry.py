@@ -962,18 +962,38 @@ class ToolRegistry:
         """Wave 76: real tool errors land in the failure ledger so the
         failure analyzer can learn from them (and routing can demote what
         keeps breaking). Best-effort, never raises, no recursion into the
-        failure tooling itself."""
+        failure tooling itself.
+
+        The row carries the same attribution
+        :meth:`FailureAnalyzer.record` writes — the deterministic
+        ``fingerprint`` (source|family|skill|operation|normalized error)
+        and ``skill`` = the tool name (the ledger's skill/tool
+        attribution slot). Without them the row is invisible to the
+        consumers that key on those columns: lesson-usefulness
+        recurrence checks match on ``fingerprint`` and skill-evolution
+        detection groups on ``skill``, so a stripped row silently
+        read as "this failure never recurred / implicates nothing".
+        """
         db = getattr(self.context, "db", None) if self.context else None
         if db is None or getattr(self, "_recording", False):
             return
         self._recording = True
         try:
+            fingerprint = ""
+            try:
+                from ..agents.failure import failure_fingerprint
+
+                fingerprint = failure_fingerprint(
+                    "tool", detail[:500], "", tool)
+            except Exception:  # noqa: BLE001 — attribution is a bonus
+                fingerprint = ""
             db.execute(
                 "INSERT INTO failures (id, source, summary, error, family, "
-                "lesson, ts) VALUES (?,?,?,?,?,?,?)",
+                "lesson, ts, fingerprint, skill) VALUES (?,?,?,?,?,?,?,?,?)",
                 (f"tool-{int(time.time_ns())}", "tool",
                  f"{tool} failed {message}"[:500], detail[:500],
-                 self._failure_family(detail or message), "", time.time()))
+                 self._failure_family(detail or message), "", time.time(),
+                 fingerprint, tool))
         except Exception:  # noqa: BLE001 — the ledger never sinks the result
             pass
         finally:

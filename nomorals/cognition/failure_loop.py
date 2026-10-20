@@ -314,6 +314,22 @@ def apply_proposal(
         out["apply_blocked_reason"] = (
             "sandbox check has not passed — fix must pass sandbox first")
         return out
+    # The recorded pass attests a sandbox run happened — but the
+    # proposal is just a dict: its fix text may have been edited (or
+    # the flag set) after that run. Re-run the static checks on the
+    # text as it stands NOW; a dangerous pattern in the current text
+    # blocks application even with approval and a recorded pass. (The
+    # static checks are a subset of any earlier full run, so a
+    # legitimately passed, unedited proposal always passes this.)
+    static = sandbox_check(out)
+    if not static["passed"]:
+        failed = [c["name"] for c in static["checks"] if not c["passed"]]
+        out["applied"] = False
+        out["status"] = "sandbox_required"
+        out["apply_blocked_reason"] = (
+            "fix text fails the static sandbox re-check: "
+            + ", ".join(failed))
+        return out
     out["applied"] = True
     out["status"] = "applied"
     out["applied_at"] = time.time()

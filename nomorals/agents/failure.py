@@ -208,6 +208,26 @@ class FailureAnalyzer:
                     error=(r["digest"] or "")[:1500], ts=float(r["ts"] or 0)))
         except Exception:  # noqa: BLE001
             pass
+        # the failures ledger — where real production failures land:
+        # tool errors from the registry, evolution reverts, mission and
+        # analyzer records. Without this source, learn_from_all never
+        # distills the failures the system actually hits most (the
+        # registry docstring promises the analyzer learns from them).
+        # Denial telemetry (family='tool_denied') is a policy event, not
+        # a failure to learn a lesson from — excluded.
+        try:
+            rows = self.db.query(
+                "SELECT source, summary, error, ts, skill FROM failures "
+                "WHERE family<>'tool_denied' ORDER BY ts DESC LIMIT ?",
+                (limit,))
+            for r in rows:
+                cases.append(FailureCase(
+                    source=r["source"] or "tool",
+                    summary=(r["summary"] or "")[:200],
+                    error=(r["error"] or "")[:1500],
+                    ts=float(r["ts"] or 0), skill=r["skill"] or ""))
+        except Exception:  # noqa: BLE001 — pre-ledger databases
+            pass
         return cases
 
     # ── record: the high-frequency, always-on entry point ───────────────────
@@ -400,16 +420,28 @@ class FailureAnalyzer:
                       fingerprint=fingerprint)
 
     def learn_from_all(self, *, limit: int = 20) -> int:
-        """Learn from every recent, not-yet-learned failure. Returns count."""
-        seen = {r["id"] for r in self.db.query(
-            "SELECT root_cause||source||category AS id FROM lessons")}
+        """Learn from every recent, not-yet-learned failure. Returns count.
+
+        "Already learned" is keyed on the lesson fingerprint — the same
+        deterministic fingerprint :meth:`learn_from_failure` stamps on
+        the lesson — so a repeat run skips known failures instead of
+        re-analyzing them (the previous seen-key concatenated
+        root_cause||source||category on one side and source||category
+        on the other, so it could never match and every call
+        re-analyzed the full window)."""
+        try:
+            seen = {r["fingerprint"] for r in self.db.query(
+                "SELECT fingerprint FROM lessons") if r["fingerprint"]}
+        except Exception:  # noqa: BLE001 — pre-fingerprint databases
+            seen = set()
         learned = 0
         for case in self.collect(limit=limit):
-            key = f"{case.source}{categorize(case.error)}"
-            if key in seen:
+            fp = failure_fingerprint(case.source, case.error,
+                                     case.operation, case.skill)
+            if fp in seen:
                 continue
             self.learn_from_failure(case)
-            seen.add(key)
+            seen.add(fp)
             learned += 1
         return learned
 

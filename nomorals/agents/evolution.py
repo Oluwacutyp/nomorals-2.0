@@ -1094,6 +1094,35 @@ class EvolutionAgent:
                 "report": f"benchmark ok: {report.overall:.2f} "
                           f"(baseline {baseline:.2f})"}
 
+    def _prime_benchmark_baseline(self) -> None:
+        """Record the benchmark baseline from the PRE-EDIT tree, if none.
+
+        The regression gate compares the post-edit score against the
+        stored baseline. If the baseline were first recorded by the
+        gate itself, it would be measured on the already-edited tree —
+        a regressed first edit would pass the gate and its lowered
+        score would become the bar every later edit is held to.
+        :meth:`apply` calls this before any edit is written (the apply
+        contract already requires a clean tree at that point), so the
+        comparison is pre-edit vs post-edit. No-op when a baseline
+        exists, the gate is off, or the provider can't be measured —
+        an unmeasurable benchmark never blocks. Never raises.
+        """
+        try:
+            mode = str(getattr(self.context.settings.evolution,
+                               "benchmark", "on") or "on").strip().lower()
+            if mode == "off":
+                return
+            if self._load_benchmark_baseline() is not None:
+                return
+            from .benchmark import run_benchmark
+
+            report = run_benchmark(self.context, limit=2)
+            if report.measurable and report.overall is not None:
+                self._save_benchmark_baseline(report.overall)
+        except Exception:  # noqa: BLE001 — priming must never break apply
+            _log.debug("benchmark baseline priming failed", exc_info=True)
+
     def _load_benchmark_baseline(self) -> float | None:
         db = getattr(self.context, "db", None)
         if db is None:
@@ -1136,6 +1165,9 @@ class EvolutionAgent:
         # the closed loop measures before it acts — the before-snapshot
         metrics_before = self.measure()
         self._last_instruction = proposal.instruction
+        # Benchmark baseline, also BEFORE the edits land: the gate's
+        # regression comparison is only honest against a pre-edit bar.
+        self._prime_benchmark_baseline()
 
         # always-on mid-task reasoning: one thinking pass over what we
         # are about to change — the system shows its work before it acts

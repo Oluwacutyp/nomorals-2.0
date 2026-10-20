@@ -992,7 +992,15 @@ class MasterOrchestrator:
         try:
             from .reasoning import ReasoningAgent
 
-            verdict = ReasoningAgent(self.context).course_correct(
+            agent = ReasoningAgent(self.context)
+            # Feed the failed attempt into the failure ledger BEFORE the
+            # consult, so course-correction (here and on later attempts)
+            # sees task-level failures — a step that failed without a
+            # tool exception otherwise never reaches the ledger the
+            # signals read. Best-effort bookkeeping; never raises.
+            agent.record_outcome("orchestrator", task.name, False,
+                                 task.error or "")
+            verdict = agent.course_correct(
                 task.error or task.name, attempts=max(1, task.attempts))
         except Exception as exc:  # noqa: BLE001 — advisory, never fatal
             _log.debug("course-correct consult failed: %s", exc)
