@@ -25,6 +25,14 @@ Field semantics:
 * ``gateway_chunks`` — False when the adapter owns segmentation
   (SMS: encoding-aware splitting lives in the adapter, and gateway
   chunking would double-label segments).
+* ``utf16_lengths`` — True when the platform's caps are counted in
+  UTF-16 code units rather than Unicode code points (Telegram's Bot
+  API / MTProto limits, and the JS stacks behind Discord and WhatsApp,
+  all measure string length in UTF-16 units: an astral-plane emoji
+  counts 2).  Chunking and caption splitting for such platforms
+  measure with :func:`nomorals.social.chat.chunking.utf16_len` — a
+  4096-code-point chunk of emoji is 8192 UTF-16 units and Telegram
+  rejects it as too long.
 """
 
 from __future__ import annotations
@@ -47,6 +55,7 @@ class PlatformLimits:
     rate_per_hour: int
     cost_model: str
     gateway_chunks: bool = True
+    utf16_lengths: bool = False
 
 
 #: One row per platform. This is the whole table — see the descriptor rule.
@@ -57,6 +66,7 @@ _LIMITS: dict[str, PlatformLimits] = {
         max_text=4096, max_caption=1024, max_file_mb=50,
         supports_buttons=True, supports_html=True, supports_media_edit=False,
         rate_per_hour=0, cost_model="free",
+        utf16_lengths=True,
     ),
     # Telegram Bot API. editMessageMedia is implemented.
     "telegram-bot": PlatformLimits(
@@ -64,6 +74,7 @@ _LIMITS: dict[str, PlatformLimits] = {
         max_text=4096, max_caption=1024, max_file_mb=50,
         supports_buttons=True, supports_html=True, supports_media_edit=True,
         rate_per_hour=0, cost_model="free",
+        utf16_lengths=True,
     ),
     # Second BotFather bot (personal, owner-only). Same Bot API limits
     # as the gated bot — a separate row so chunking/gateway routing
@@ -74,6 +85,7 @@ _LIMITS: dict[str, PlatformLimits] = {
         max_text=4096, max_caption=1024, max_file_mb=50,
         supports_buttons=True, supports_html=True, supports_media_edit=True,
         rate_per_hour=0, cost_model="free",
+        utf16_lengths=True,
     ),
     # WhatsApp via the local Baileys bridge. max_text is the bridge-effective
     # cap the adapter already split at (4000), not the protocol maximum.
@@ -82,6 +94,7 @@ _LIMITS: dict[str, PlatformLimits] = {
         max_text=4000, max_caption=1024, max_file_mb=16,
         supports_buttons=False, supports_html=False, supports_media_edit=False,
         rate_per_hour=0, cost_model="free",
+        utf16_lengths=True,
     ),
     # Discord: 2000-char hard cap, 25 MB free-tier upload cap.
     "discord": PlatformLimits(
@@ -89,6 +102,7 @@ _LIMITS: dict[str, PlatformLimits] = {
         max_text=2000, max_caption=2000, max_file_mb=25,
         supports_buttons=False, supports_html=False, supports_media_edit=False,
         rate_per_hour=0, cost_model="free",
+        utf16_lengths=True,
     ),
     # SMS: single-segment GSM-7 budget; the adapter owns multi-part
     # segmentation (encoding-aware), so the gateway does not chunk.

@@ -805,10 +805,10 @@ class Notifier:
                 "AND retry_count < ? "
                 "UNION ALL "
                 "SELECT * FROM notifications WHERE delivered = 0 "
-                "AND delivery_state = ? "
+                "AND delivery_state = ? AND next_retry_at <= ? "
                 "ORDER BY created_at ASC LIMIT ?",
                 (STATE_PENDING, STATE_FAILED, now, DELIVERY_MAX_ATTEMPTS,
-                 STATE_HELD_QUIET, max(1, int(limit))),
+                 STATE_HELD_QUIET, now, max(1, int(limit))),
             )
         except Exception:  # noqa: BLE001 - pre-migration 83: no backoff cols
             try:
@@ -822,9 +822,11 @@ class Notifier:
                        *, consume_attempt: bool) -> bool:
         """Attempt one redelivery.  Returns True when it landed.
 
-        ``consume_attempt`` is False for quiet-hour holds (a policy hold
-        is not a delivery failure); everything else burns one attempt and
-        reschedules with exponential backoff.
+        Every attempt burns one retry and reschedules with exponential
+        backoff.  A quiet-hour hold is not itself an attempt — the row
+        only reaches this method once the hold has ended (see
+        :meth:`redeliver`) — but a send attempted after the hold is a
+        real attempt and counts toward the dead-letter cap.
         """
         attempts = int(row.get("retry_count") or 0)
         if consume_attempt:
@@ -905,11 +907,42 @@ class Notifier:
             state = (row.get("delivery_state") or "")
             try:
                 if state == STATE_HELD_QUIET:
-                    gate = proactive_gate(self.context, row.get("kind") or "")
-                    if gate == STATE_HELD_QUIET:
+                    # The hold is a *clock* decision, not a per-kind
+                    # gate decision: rows land here from any producer
+                    # that defers during quiet hours (missions progress
+                    # stores kind="mission"; the proactive gate stores
+                    # its own kinds).  Re-check the clock itself.
+                    # proactive_gate() cannot answer for kinds it does
+                    # not govern (it returns None for them) and its two
+                    # governed kinds are quiet-exempt by design — so
+                    # consulting it alone sent held rows out on the
+                    # first sweep, in the middle of quiet hours.
+                    if _in_quiet_hours_now(self.context):
                         continue  # still quiet — keep holding
-                    # quiet hours ended: deliver now, no attempt consumed
-                    if self._redeliver_row(row, now, consume_attempt=False):
+                    if proactive_gate(self.context, row.get("kind") or "") \
+                            == STATE_DISABLED:
+                        # The owner turned this kind (or proactive
+                        # entirely) off while the row was held: honour
+                        # the switch — park the row in the terminal
+                        # "disabled" state (redelivery never picks it
+                        # up again) instead of sending it.
+                        try:
+                            with self.db.transaction():
+                                self.db.execute(
+                                    "UPDATE notifications SET "
+                                    "delivery_state = ? WHERE id = ?",
+                                    (STATE_DISABLED, row["id"]),
+                                )
+                        except Exception:  # noqa: BLE001 - bookkeeping only
+                            _log.debug("notifier: could not park held row "
+                                       "as disabled", exc_info=True)
+                        continue
+                    # Quiet hours ended: deliver now.  The hold itself
+                    # consumed no attempt, but a failed send here is a
+                    # real attempt — it counts toward the dead-letter
+                    # cap, else a dead channel retries every sweep
+                    # forever.
+                    if self._redeliver_row(row, now, consume_attempt=True):
                         sent += 1
                     continue
                 if self._redeliver_row(row, now, consume_attempt=True):

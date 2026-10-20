@@ -39,6 +39,7 @@ from .chunking import (
     media_plan,
     split_caption,
     strip_label,
+    utf16_len,
 )
 from .conformance import (
     all_adapter_classes,
@@ -88,6 +89,7 @@ __all__ = [
     "send_with_retry",
     "split_caption",
     "strip_label",
+    "utf16_len",
 ]
 
 _log = get_logger(__name__)

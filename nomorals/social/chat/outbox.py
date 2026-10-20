@@ -137,6 +137,14 @@ class Outbox:
         self.db = db
         self.queue = queue if queue is not None else WorkQueue(db)
         self.worker = worker
+        #: Unique to this Outbox instance. Auto-generated idempotency
+        #: keys carry it (see :meth:`submit`): two instances over one
+        #: database can compute the same ``order_seq`` for a topic (each
+        #: scans before the other submits), and without the instance
+        #: component their auto keys collide — WorkQueue.enqueue then
+        #: returns the *first* job's id for the second submit and that
+        #: message is silently never enqueued.
+        self._instance = new_id("obx")
         #: Outer attempts per job (WorkQueue requeues). The *inner* retry
         #: (classified, backoff+jitter) happens inside one lease via
         #: send_with_retry; the outer layer only covers crashes and
@@ -202,7 +210,13 @@ class Outbox:
             if existing:
                 return existing
         order_seq = self._next_seq(topic)
-        key = idempotency_key or f"seq:{platform}:{chat_key}:{order_seq}"
+        # Without an explicit key the queueing lock only has to be
+        # unique per submit (never a false dedup) — the instance suffix
+        # is what guarantees that across Outbox instances/processes
+        # sharing one database (see __init__). Explicit keys keep their
+        # exact cross-instance dedup semantics.
+        key = idempotency_key or (
+            f"seq:{platform}:{chat_key}:{order_seq}:{self._instance}")
         payload: dict[str, Any] = {
             "kind": kind,
             "platform": platform,

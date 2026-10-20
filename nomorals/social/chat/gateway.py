@@ -46,6 +46,7 @@ from .chunking import (
     label_chunks,
     media_kind_for,
     split_caption,
+    utf16_len,
 )
 from .outbox import Outbox
 from .platform_limits import for_platform
@@ -908,8 +909,11 @@ class ChatGateway:
         except OSError:
             size_bytes = 0
         kind = media_kind_for(size_bytes, "file", limits)
-        caption_chunks = split_caption(caption, max_caption=limits.max_caption) \
-            if caption and limits.max_caption > 0 and len(caption) > limits.max_caption \
+        caption_width = utf16_len if limits.utf16_lengths else len
+        caption_chunks = split_caption(caption, max_caption=limits.max_caption,
+                                       width=caption_width) \
+            if caption and limits.max_caption > 0 \
+            and caption_width(caption) > limits.max_caption \
             else [caption]
         caption_first = caption_chunks[0]
         caption_rest = caption_chunks[1:]

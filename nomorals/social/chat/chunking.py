@@ -15,7 +15,7 @@ chunk as the caption, the rest as follow-up text.
 from __future__ import annotations
 
 import re
-from typing import Literal
+from typing import Callable, Literal
 
 from .platform_limits import PlatformLimits, for_platform
 
@@ -27,7 +27,19 @@ __all__ = [
     "media_plan",
     "media_kind_for",
     "split_caption",
+    "utf16_len",
 ]
+
+
+def utf16_len(text: str) -> int:
+    """Length of ``text`` in UTF-16 code units.
+
+    Telegram (Bot API and MTProto) and the JS stacks behind Discord and
+    WhatsApp count string length this way: BMP characters count 1,
+    astral characters (most emoji) count 2.  ``surrogatepass`` keeps a
+    lone surrogate at its true wire size (one unit) instead of raising.
+    """
+    return len(str(text).encode("utf-16-le", "surrogatepass")) // 2
 
 #: Paragraph boundary: a blank line (a newline, optional spaces, a newline).
 _PARAGRAPH_SEP = re.compile(r"(\n[ \t]*\n)")
@@ -55,17 +67,31 @@ def _split_keep(text: str, pattern: re.Pattern[str]) -> list[str]:
     return [a for a in atoms if a]
 
 
-def _hard_split(atom: str, budget: int) -> list[str]:
-    """Split ``atom`` at ``budget`` chars, preferring a space boundary.
-    The space stays at the end of the left chunk, so the join is exact."""
+def _hard_split(atom: str, budget: int,
+                width: Callable[[str], int]) -> list[str]:
+    """Split ``atom`` so each piece measures at most ``budget`` (by
+    ``width``), preferring a space boundary. The space stays at the end
+    of the left chunk, so the join is exact."""
     out: list[str] = []
     rest = atom
-    while len(rest) > budget:
-        cut = rest.rfind(" ", 0, budget)
-        if cut <= budget // 2:
-            cut = budget
-        else:
-            cut = cut + 1  # keep the space — join stays exact
+    while width(rest) > budget:
+        # Largest prefix that fits the budget.
+        total = 0
+        cut = 0
+        for i, ch in enumerate(rest):
+            w = width(ch)
+            if total + w > budget:
+                break
+            total += w
+            cut = i + 1
+        if cut == 0:
+            # One character wider than the whole budget (an astral char
+            # against a 1-unit budget): it cannot be split — emit it
+            # whole rather than loop forever.
+            cut = 1
+        space = rest.rfind(" ", 0, cut)
+        if space > 0 and width(rest[:space + 1]) > budget // 2:
+            cut = space + 1  # keep the space — join stays exact
         out.append(rest[:cut])
         rest = rest[cut:]
     if rest:
@@ -73,40 +99,46 @@ def _hard_split(atom: str, budget: int) -> list[str]:
     return out
 
 
-def _pack(atoms: list[str], budget: int) -> list[str]:
-    """Greedily pack atoms (each <= budget) into chunks <= budget."""
+def _pack(atoms: list[str], budget: int,
+          width: Callable[[str], int]) -> list[str]:
+    """Greedily pack atoms (each <= budget by ``width``) into chunks
+    <= budget."""
     chunks: list[str] = []
     current: list[str] = []
     current_len = 0
     for atom in atoms:
-        if current and current_len + len(atom) > budget:
+        if current and current_len + width(atom) > budget:
             chunks.append("".join(current))
             current, current_len = [], 0
         current.append(atom)
-        current_len += len(atom)
+        current_len += width(atom)
     if current:
         chunks.append("".join(current))
     return chunks or [""]
 
 
-def _chunk_with_budget(text: str, budget: int) -> list[str]:
-    if len(text) <= budget:
+def _chunk_with_budget(text: str, budget: int,
+                       width: Callable[[str], int]) -> list[str]:
+    if width(text) <= budget:
         return [text]
     atoms: list[str] = []
     for para in _split_keep(text, _PARAGRAPH_SEP):
-        if len(para) <= budget:
+        if width(para) <= budget:
             atoms.append(para)
             continue
         for sent in _split_keep(para, _SENTENCE_SEP):
-            if len(sent) <= budget:
+            if width(sent) <= budget:
                 atoms.append(sent)
                 continue
-            atoms.extend(_hard_split(sent, budget))
-    return _pack(atoms, budget)
+            atoms.extend(_hard_split(sent, budget, width))
+    return _pack(atoms, budget, width)
 
 
-def chunk_message(text: str | None, *, max_text: int) -> list[str]:
-    """Split ``text`` into content chunks of at most ``max_text`` chars.
+def chunk_message(text: str | None, *, max_text: int,
+                  width: Callable[[str], int] = len) -> list[str]:
+    """Split ``text`` into content chunks of at most ``max_text`` —
+    measured by ``width`` (code points by default; :func:`utf16_len`
+    for platforms whose caps are UTF-16 code units).
 
     Content chunks carry no labels (see :func:`label_chunks`). The join
     of the returned chunks is exactly ``text`` — never truncated, never
@@ -114,20 +146,20 @@ def chunk_message(text: str | None, *, max_text: int) -> list[str]:
     """
     text = str(text or "")
     budget = max(1, int(max_text))
-    if len(text) <= budget:
+    if width(text) <= budget:
         return [text]
-    chunks = _chunk_with_budget(text, budget)
+    chunks = _chunk_with_budget(text, budget, width)
     if len(chunks) == 1:
         return chunks
     # Reserve room for the " (i/n)" labels: the label length depends on
     # the chunk count, which depends on the label length. Iterate until
     # stable (digit-width changes converge in at most a couple of passes).
     for _ in range(4):
-        suffix_len = len(f" ({len(chunks)}/{len(chunks)})")
+        suffix_len = width(f" ({len(chunks)}/{len(chunks)})")
         budget2 = budget - suffix_len
         if budget2 < 1:
             return chunks
-        new = _chunk_with_budget(text, budget2)
+        new = _chunk_with_budget(text, budget2, width)
         if len(new) == len(chunks):
             return new
         chunks = new
@@ -152,11 +184,13 @@ def strip_label(chunk: str) -> str:
 
 def chunk_for_platform(text: str | None, platform: str) -> list[str]:
     """Chunk ``text`` for ``platform``. Platforms whose adapter owns
-    segmentation (SMS) return the text untouched as a single chunk."""
+    segmentation (SMS) return the text untouched as a single chunk.
+    Platforms whose caps are UTF-16 code units chunk by UTF-16 width."""
     limits = for_platform(platform)
     if not limits.gateway_chunks:
         return [str(text or "")]
-    return chunk_message(text, max_text=limits.max_text)
+    width = utf16_len if limits.utf16_lengths else len
+    return chunk_message(text, max_text=limits.max_text, width=width)
 
 
 def media_plan(size_bytes: int, limits: PlatformLimits) -> Literal["inline", "document"]:
@@ -176,10 +210,12 @@ def media_kind_for(size_bytes: int, requested_kind: str, limits: PlatformLimits)
     return requested_kind
 
 
-def split_caption(caption: str | None, *, max_caption: int) -> list[str]:
-    """Split a caption against the caption cap. First chunk is the caption;
-    the rest go out as follow-up text. Never truncates."""
+def split_caption(caption: str | None, *, max_caption: int,
+                  width: Callable[[str], int] = len) -> list[str]:
+    """Split a caption against the caption cap (measured by ``width``,
+    like :func:`chunk_message`). First chunk is the caption; the rest
+    go out as follow-up text. Never truncates."""
     caption = str(caption or "")
-    if max_caption <= 0 or len(caption) <= max_caption:
+    if max_caption <= 0 or width(caption) <= max_caption:
         return [caption]
-    return chunk_message(caption, max_text=max_caption)
+    return chunk_message(caption, max_text=max_caption, width=width)
