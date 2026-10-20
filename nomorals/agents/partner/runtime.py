@@ -44,6 +44,60 @@ from .runtime_reach import RuntimeReachMixin
 _log = get_logger(__name__)
 
 
+def _update_recovery_notice(receipt: dict) -> tuple[str, str]:
+    """Owner-facing (title, body) for an update crash recovery that acted.
+
+    Only called when the receipt says the recovery DID something
+    (``recovered`` is true); a clean boot never reaches this, so the
+    text can state plainly what happened and what state Devon is
+    running on now.
+    """
+    action = str(receipt.get("action", ""))
+    snap = str(receipt.get("restored_snapshot")
+               or receipt.get("snapshot") or "")
+    if action == "rolled_back":
+        return (
+            "interrupted update rolled back at startup",
+            "Devon restarted while a self-update was mid-flight — it "
+            "died during or after migrations, so at startup I rolled "
+            f"it back: restored the pre-update snapshot ({snap}) and "
+            "put the code tree back to the pre-update version. You "
+            "are running the state from before that update. The "
+            "interrupted run is closed out and will not retry on its "
+            "own — run /update when you're ready.",
+        )
+    if action == "rolled_back_state_only":
+        return (
+            "interrupted update: state restored, code NOT restored",
+            "Devon restarted while a self-update was mid-flight. At "
+            f"startup I restored the pre-update snapshot ({snap}), "
+            "but the code tree could not be put back "
+            f"({receipt.get('code_restore_error') or 'unknown error'})"
+            " — the code may still be the interrupted update's. "
+            "Check the install before relying on it.",
+        )
+    if action == "rollback_failed":
+        return (
+            "interrupted update recovery FAILED at startup",
+            "Devon restarted while a self-update was mid-flight, and "
+            "the startup recovery could not restore the pre-update "
+            f"state ({receipt.get('error') or 'unknown error'}). "
+            "Devon is booting on the possibly half-updated state — "
+            "database and/or code from an update that never finished. "
+            "Check the install before trusting it; a manual snapshot "
+            "restore may be needed.",
+        )
+    # aborted (and any future close-out action): died before the
+    # dangerous steps, so nothing was changed and nothing restored.
+    return (
+        "interrupted update closed out at startup",
+        "A self-update was interrupted by a restart before it "
+        "changed anything (it died before migrations), so at "
+        "startup I marked it aborted. Nothing was restored and "
+        "nothing is pending — no action needed.",
+    )
+
+
 class _VoiceUnavailable(Exception):
     """Voice synthesis degraded (the voice ladder's silent rung served).
 
@@ -2141,7 +2195,84 @@ class PartnerRuntime(
                     self.context, gateway=self.gateway)
             except Exception as exc:  # noqa: BLE001 - recovery is optional
                 _log.warning("trial assist recovery failed: %s", exc)
+        # Self-update crash recovery: an update interrupted mid-run
+        # (crash / power loss) leaves a journal with no terminal
+        # event; replay it once here so a run that died at/after a
+        # dangerous step is rolled back (state snapshot AND code
+        # tree) before Devon serves on a possibly half-migrated
+        # database paired with new code. A clean journal is a cheap
+        # no-op (one journal read, no notice). Same guarantee class
+        # as the trial recovery above: reported once when it acts,
+        # and a failure inside recovery never blocks boot.
+        if not self.dry_run:
+            try:
+                self._recover_interrupted_update()
+            except Exception as exc:  # noqa: BLE001 - recovery is optional
+                _log.warning("update crash recovery failed: %s", exc)
         return started
+
+    def _recover_interrupted_update(
+            self, *, repo_root: Any = None) -> dict[str, Any] | None:
+        """Replay the self-update journal once at boot (pass 46).
+
+        Builds the UpdateManager exactly as the chat ``/update``
+        branch does (same SnapshotManager from the runtime's real
+        settings, same repo-root derivation) and calls
+        :meth:`UpdateManager.recover_interrupted`. On a clean journal
+        this is the cheap no-op that method already is — one journal
+        read, nothing restored, no owner notice. When the receipt
+        says the recovery acted, the owner is told via
+        :meth:`_report_update_recovery`.
+
+        Returns the receipt, or None when the check itself could not
+        run. NEVER raises — a recovery failure is logged and boot
+        continues on the state as found.
+        """
+        try:
+            from pathlib import Path
+
+            from ...os.snapshots import SnapshotManager
+            from ...os.update import UpdateManager
+
+            settings = self.context.settings
+            if repo_root is None:
+                repo_root = Path(__file__).resolve().parents[3]
+            snapshots = SnapshotManager(
+                home=settings.home_path, db_path=settings.db_path,
+                blob_dir=getattr(settings, "blob_dir", None))
+            receipt = UpdateManager(
+                repo_root, snapshots).recover_interrupted()
+        except Exception as exc:  # noqa: BLE001 - boot must not fail here
+            _log.warning("update crash recovery could not run: %s", exc)
+            return None
+        if not receipt.get("recovered"):
+            return receipt
+        self._report_update_recovery(receipt)
+        return receipt
+
+    def _report_update_recovery(self, receipt: dict[str, Any]) -> None:
+        """Surface an acting update crash recovery to the owner.
+
+        Log at warning level (error for ``rollback_failed`` — Devon
+        is then booting on the unrecovered state) plus one durable
+        Notifier publish, the same report-once mechanism the
+        TrialFlow boot recovery beside this uses: the alert persists
+        even if live delivery fails and is redelivered later. Never
+        raises.
+        """
+        title, body = _update_recovery_notice(receipt)
+        failed = receipt.get("action") == "rollback_failed"
+        if failed:
+            _log.error("update crash recovery FAILED: %s", body)
+        else:
+            _log.warning("update crash recovery acted: %s", body)
+        try:
+            from ..notifier import Notifier
+
+            Notifier(self.context, gateway=self.gateway).publish(
+                "update", title, body, force=True, critical=failed)
+        except Exception as exc:  # noqa: BLE001 - reporting is best-effort
+            _log.warning("update recovery notice not delivered: %s", exc)
 
     def _arena_notify(self, text: str) -> None:
         """Deliver an arena build review to the owner, on every live channel."""
