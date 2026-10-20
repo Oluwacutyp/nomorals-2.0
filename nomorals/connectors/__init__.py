@@ -19,7 +19,7 @@ AWS, Dropbox, YouTube, Spotify, AudD (music recognition), Duffel
 from __future__ import annotations
 
 from .auth import device_flow_token, new_state, pick_scopes, pkce_pair, prompt_secret
-from .audd import AudDConnector, AudDError
+from .audd import AudDConnector, AudDError, AudDNetworkError
 from .base import (
     AuthMethod,
     Connector,
@@ -110,6 +110,7 @@ __all__ = [
     "AuthMethod",
     "AudDConnector",
     "AudDError",
+    "AudDNetworkError",
     "AWSConnector",
     "AWSError",
     "BinanceConnector",

@@ -129,7 +129,7 @@ class GoogleOAuth:
         one-time ``state`` that is validated before the code is accepted
         (RFC 8252 §8 / RFC 9700 baseline).
 
-        Returns the token dict from ``_google_exchange_code``.
+        Returns the token dict from the code exchange.
         """
         import http.server
         import threading
@@ -240,9 +240,24 @@ class GoogleOAuth:
                 GOOGLE_TOKEN_URL,
                 form,
             )
-        except Exception as exc:
-            raise ConnectorError(f"Google token exchange failed: {exc}") from exc
-        return resp
+        except ConnectorError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - network layer is opaque
+            raise ConnectorError(
+                f"google token exchange failed: {exc}"
+            ) from exc
+        if not resp.ok:
+            raise ConnectorError(
+                "google rejected the authorization code "
+                f"({resp.status}): {resp.text[:200]} — the code may have "
+                "expired; generate a fresh one from the authorization URL"
+            )
+        data = resp.json()
+        if not isinstance(data, dict):
+            raise ConnectorError(
+                "google token exchange returned an unexpected response"
+            )
+        return data
 
     def _google_exchange_code(
         self,

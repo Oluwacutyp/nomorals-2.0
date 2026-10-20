@@ -19,6 +19,7 @@ metadata (Spotify/Apple Music links) in the recognition response.
 from __future__ import annotations
 
 import os
+import time
 from pathlib import Path
 from typing import Any
 
@@ -27,12 +28,13 @@ from .base import (
     AuthMethod,
     Connector,
     ConnectorError,
+    ConnectorNetworkError,
     ConnectorStatus,
     ConnectResult,
 )
 from .registry import register_connector
 
-__all__ = ["AudDConnector", "AudDError"]
+__all__ = ["AudDConnector", "AudDError", "AudDNetworkError"]
 
 _log = get_logger(__name__)
 
@@ -58,6 +60,14 @@ class AudDError(ConnectorError):
     ) -> None:
         super().__init__(message)
         self.error_code = error_code
+
+
+class AudDNetworkError(AudDError, ConnectorNetworkError):
+    """AudD could not be reached at all (DNS, TLS, timeout, reset).
+
+    Distinct from an API-level :class:`AudDError`: the token was never
+    judged, so no lifecycle method may read this as "token accepted".
+    """
 
 
 @register_connector
@@ -100,11 +110,21 @@ class AudDConnector(Connector):
         # Auth errors raise; anything else means the token is fine.
         try:
             self._api_post(key, fields={"return": "apple_music,spotify"})
+        except AudDNetworkError as exc:
+            raise ConnectorError(
+                "could not reach AudD to validate the token — check "
+                f"the connection and retry ({exc})"
+            ) from exc
         except AudDError as exc:
             if exc.error_code in (900, 901):
                 raise ConnectorError(
                     f"AudD rejected the token (error {exc.error_code}). "
                     "Check it at " + DASHBOARD_URL
+                ) from exc
+            if exc.error_code == 0:
+                raise ConnectorError(
+                    f"AudD validation was inconclusive ({exc}) — retry "
+                    "when the service answers properly"
                 ) from exc
             # Any other error = token accepted, request malformed. Good.
         self._store_credential(
@@ -138,26 +158,54 @@ class AudDConnector(Connector):
                     f"(300 requests, no card) at {DASHBOARD_URL}"
                 ),
             )
+        accepted, detail = self._probe_token(cred.password)
+        if not accepted:
+            return ConnectorStatus(
+                connected=False,
+                account=cred.username,
+                last_checked=time.time(),
+                detail=detail,
+            )
         return ConnectorStatus(
             connected=True,
-            account="audd-user",
-            detail="audd connected",
+            account=cred.username,
+            scopes=list((cred.metadata or {}).get("scopes", [])),
+            last_checked=time.time(),
+            detail="audd connected (token verified live)",
         )
 
     def test_connection(self) -> bool:
         cred = self._load_credential()
         if cred is None:
             return False
+        accepted, _detail = self._probe_token(cred.password)
+        return accepted
+
+    def _probe_token(self, key: str) -> tuple[bool, str]:
+        """Live-check a token with the cheap file-less recognize call.
+
+        Returns ``(accepted, failure_detail)``. Auth errors (#900/#901)
+        and transport failures mean NOT accepted — the token was
+        rejected or never judged. Any other API error means the token
+        was accepted and only the deliberately empty request was
+        malformed (the same signal :meth:`connect` validates with).
+        """
         try:
-            self._api_post(
-                cred.password,
-                fields={"return": "apple_music,spotify"},
+            self._api_post(key, fields={"return": "apple_music,spotify"})
+        except AudDNetworkError as exc:
+            return False, (
+                f"audd unreachable — cannot verify the token ({exc})"
             )
         except AudDError as exc:
-            return exc.error_code not in (900, 901)
-        except Exception:  # noqa: BLE001 - any failure is "not working"
-            return False
-        return True
+            if exc.error_code in (900, 901):
+                return False, (
+                    f"audd rejected the token (error {exc.error_code}) "
+                    f"— reconnect with a fresh token from {DASHBOARD_URL}"
+                )
+            if exc.error_code == 0:
+                return False, f"audd check inconclusive ({exc})"
+            return True, ""
+        return True, ""
 
     # ── recognition ──────────────────────────────────────────────
 
@@ -293,7 +341,7 @@ class AudDConnector(Connector):
                 API_URL, fields=body_fields, files=files, timeout=30
             )
         except Exception as exc:
-            raise AudDError(f"AudD request failed: {exc}") from exc
+            raise AudDNetworkError(f"AudD request failed: {exc}") from exc
         try:
             data = resp.json()
         except Exception as exc:
