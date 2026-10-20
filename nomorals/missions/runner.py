@@ -47,6 +47,8 @@ from .mission import (
     Mission,
     MissionStatus,
     MissionStore,
+    _process_alive,
+    _stale_heartbeat_after,
     mission_liveness,
 )
 from .idempotency import (
@@ -520,6 +522,16 @@ class MissionRunner:
         self.checkpoint_every = max(1, checkpoint_every)
         self.on_step = on_step
         self._clock = clock
+        # Run claims held by this runner (mission_id -> token), written
+        # into the mission row by run() so a second driver — another
+        # thread, another process — is refused instead of interleaving
+        # whole-row saves and duplicating step side effects.
+        self._run_claims: dict[str, str] = {}
+        # Iteration-cap bookkeeping for the in-flight run (see run()):
+        # the cap counts steps executed by THIS run, not the mission's
+        # lifetime counter.
+        self._iteration_cap = 0
+        self._iteration_baseline = 0
         self._cancel = False
         # Guards shared mutable mission state when steps execute on worker
         # threads (``max_parallel > 1``). The settle phase stays single-
@@ -591,6 +603,14 @@ class MissionRunner:
         if progress is not None:
             hb["progress"] = progress
         mission.state["heartbeat"] = hb
+        # A live driver refreshes its run claim on the same cadence, so
+        # the claim's freshness tracks the heartbeat exactly: when the
+        # driver dies (thread or process), both go stale together.
+        claim = mission.state.get("run_claim")
+        if (isinstance(claim, dict)
+                and claim.get("token")
+                and claim.get("token") == self._run_claims.get(mission.id)):
+            claim["at"] = time.time()
 
     def heartbeat_progress(self, mission_id: str, payload: Any) -> bool:
         """Attach a progress payload to a mission's heartbeat.
@@ -809,6 +829,63 @@ class MissionRunner:
             error=f"awaiting approval for step {step_name!r}",
         )
 
+    def _park_external_pause(
+        self,
+        mission: Mission,
+        st: _RunState,
+        started: float,
+        resumed_from: str,
+    ) -> MissionResult:
+        """Stop because another process paused the mission mid-run.
+
+        The persisted status is already PAUSED (the external writer set
+        it; ``_settle_step`` adopted it into this copy before its save
+        could clobber it). Park the progress and return — the mission
+        stays resumable with its completed steps intact.
+        """
+        self._heartbeat(mission)
+        self.store.save(mission)
+        self.store.checkpoint(mission, label="paused:external")
+        self._ledger("paused", mission,
+                     "paused externally mid-run — progress parked",
+                     ok=True)
+        _log.info("mission %s parked: paused externally", mission.id)
+        return MissionResult(
+            mission_id=mission.id,
+            status=MissionStatus.PAUSED,
+            iterations=mission.iterations,
+            steps=st.steps,
+            resumed_from=resumed_from,
+            seconds=self._clock() - started,
+            error="paused externally — resume to continue",
+        )
+
+    def _sync_external_status(self, mission: Mission) -> None:
+        """Adopt a status written by another process, before we save.
+
+        The runner's saves are whole-row: without this, a pause/cancel
+        persisted by the chat layer while a step was in flight would be
+        silently overwritten by the settle save — the run would carry on
+        and finish "done" over the owner's cancel (verified pre-fix).
+        Only a live in-memory RUNNING status yields, and only to a
+        persisted PAUSED/CANCELLED: the runner's own transitions are
+        written by the runner itself, never adopted from the row it is
+        about to write, and the os hook only writes "running" mid-run.
+        Best-effort: a failed re-read keeps the run going and the
+        ``_finish`` guard re-checks before any terminal verdict lands.
+        """
+        if mission.status != MissionStatus.RUNNING:
+            return
+        try:
+            persisted = self.store.get(mission.id)
+        except Exception:  # noqa: BLE001
+            return
+        if persisted.status in (MissionStatus.CANCELLED,
+                                MissionStatus.PAUSED):
+            _log.info("mission %s: adopting external status %s",
+                      mission.id, persisted.status)
+            mission.status = persisted.status
+
     def approve(self, mission_id: str, approved: bool = True,
                 note: str = "") -> dict[str, Any]:
         """Resolve a pending approval gate (the signal half of the gate).
@@ -1010,6 +1087,114 @@ class MissionRunner:
             "text": text,
         }
 
+    # ── run claims (one driver per mission) ─────────────────────────────
+    #
+    # run() writes a claim into the mission row (``state["run_claim"]``:
+    # token + pid + timestamp, refreshed by every heartbeat). A second
+    # live driver — a double /mission resume, resume racing replan, a
+    # CLI resume racing the bot — is refused with ValidationError
+    # instead of interleaving whole-row saves with the real driver
+    # (lost updates) and re-executing its steps (duplicated side
+    # effects). A claim is live while it is fresh (the driver
+    # heartbeats every step) or held by a live foreign process (which
+    # may be inside one long step — the same rule reconcile uses). A
+    # dead driver's claim goes stale with its heartbeat and is stolen
+    # by the next run, so crash recovery is never blocked for long.
+
+    @staticmethod
+    def _claim_is_live(claim: dict[str, Any]) -> bool:
+        pid = claim.get("pid")
+        if isinstance(pid, int) and pid > 0 and pid != os.getpid():
+            # A foreign process: a live pid is a live driver (it may be
+            # inside one long step — the rule reconcile uses); a dead
+            # pid is a dead claim, however fresh its timestamp is.
+            return _process_alive(pid)
+        # Our own process: another thread holds the claim only while it
+        # keeps refreshing it (heartbeat cadence); a stale same-pid
+        # claim belonged to a thread that died without process death.
+        try:
+            age = time.time() - float(claim.get("at") or 0.0)
+        except (TypeError, ValueError):
+            return False
+        return age <= _stale_heartbeat_after()
+
+    def _claim_run(self, mission: Mission) -> str:
+        """Claim ``mission`` for this run. Raises ValidationError when a
+        live driver already holds it."""
+        from ..core.ids import new_id
+
+        existing = (mission.state or {}).get("run_claim")
+        if (isinstance(existing, dict) and existing.get("token")
+                and self._claim_is_live(existing)):
+            raise ValidationError(
+                f"mission {mission.id} is already being driven "
+                f"(pid {existing.get('pid')}) — refusing a second "
+                "concurrent driver; resume it after the current run "
+                "finishes or dies")
+        token = new_id()
+        mission.state["run_claim"] = {
+            "token": token, "pid": os.getpid(), "at": time.time()}
+        self.store.save(mission)
+        # Re-read and verify: if a racer's claim landed after ours, the
+        # persisted token is theirs and we back off.
+        persisted = (self.store.get(mission.id).state or {}).get(
+            "run_claim") or {}
+        if persisted.get("token") != token:
+            raise ValidationError(
+                f"mission {mission.id} was claimed by another driver "
+                "concurrently — refusing to drive it twice")
+        self._run_claims[mission.id] = token
+        return token
+
+    def _release_run_claim(self, mission_id: str, token: str) -> None:
+        """Drop this run's claim (fresh re-read: never clobber the row
+        the run just finished writing). Best-effort — a stranded claim
+        goes stale and is stolen, it never wedges the mission."""
+        self._run_claims.pop(mission_id, None)
+        try:
+            row = self.store.get(mission_id)
+        except Exception:  # noqa: BLE001
+            return
+        claim = (row.state or {}).get("run_claim") or {}
+        if claim.get("token") == token:
+            row.state.pop("run_claim", None)
+            try:
+                self.store.save(row)
+            except Exception:  # noqa: BLE001
+                _log.debug("run claim release failed for %s",
+                           mission_id, exc_info=True)
+
+    def _catch_up_terminal_report(self, mission: Mission) -> None:
+        """Re-deliver a terminal milestone whose push was lost.
+
+        ``_finish`` saves the terminal row BEFORE the milestone push
+        fires; a crash in between loses the notification, and nothing
+        else ever re-sends it (``resume_all`` skips terminal missions,
+        ``resume`` returned early). The milestone reporter persists its
+        marks in ``mission.state``, so an unmarked terminal mission is
+        provably un-notified: fire it now. Marked ones stay silent —
+        delivery stays exactly-once.
+        """
+        reporter = self.reporter
+        if reporter is None:
+            return
+        marked = getattr(reporter, "_marked", None)
+        if not callable(marked):
+            return
+        try:
+            if marked(mission, f"terminal:{mission.status}"):
+                return
+        except Exception:  # noqa: BLE001 - telemetry never breaks a run
+            return
+        _log.info("mission %s: re-delivering lost terminal notification "
+                  "(%s)", mission.id, mission.status)
+        self._report("on_terminal", mission, mission.status,
+                     error=str(mission.state.get("last_error") or ""))
+        try:
+            self.store.save(mission)
+        except Exception:  # noqa: BLE001
+            _log.debug("terminal catch-up save failed", exc_info=True)
+
     def run(
         self,
         mission: Mission,
@@ -1017,11 +1202,22 @@ class MissionRunner:
         max_iterations: int = 8,
         reflect: bool = True,
     ) -> MissionResult:
-        """Run (or resume) a mission to a terminal state."""
-        started = self._clock()
+        """Run (or resume) a mission to a terminal state.
 
+        ``max_iterations`` caps the steps THIS run executes — a resumed
+        mission's persisted ``iterations`` counter is lifetime history,
+        not a budget it must re-fit under. ``max_iterations <= 0`` means
+        unlimited: the mission's persisted budget is the only stop. (The
+        chat spawner and the trigger action both pass 0 with exactly
+        that intent.)
+
+        One driver per mission: the run claims the mission in its row
+        and a second live driver is refused (see ``_claim_run``).
+        """
+        started = self._clock()
         resumed_from = self._resume(mission)
         if mission.terminal:
+            self._catch_up_terminal_report(mission)
             return MissionResult(
                 mission_id=mission.id,
                 status=mission.status,
@@ -1030,6 +1226,32 @@ class MissionRunner:
                 resumed_from=resumed_from,
                 seconds=self._clock() - started,
             )
+        token = self._claim_run(mission)
+        try:
+            return self._run_body(
+                mission, max_iterations=max_iterations, reflect=reflect,
+                resumed_from=resumed_from)
+        finally:
+            self._release_run_claim(mission.id, token)
+
+    def _run_body(
+        self,
+        mission: Mission,
+        *,
+        max_iterations: int = 8,
+        reflect: bool = True,
+        resumed_from: str = "",
+    ) -> MissionResult:
+        """The run itself (see :meth:`run` for the contract). The
+        caller holds the run claim and has handled terminal missions."""
+        started = self._clock()
+        # The iteration cap buys steps for THIS run; the persisted
+        # counter is lifetime history. <= 0 = no cap (budget only).
+        try:
+            self._iteration_cap = max(0, int(max_iterations or 0))
+        except (TypeError, ValueError):
+            self._iteration_cap = 0
+        self._iteration_baseline = mission.iterations
 
         mission.status = MissionStatus.RUNNING
         self._heartbeat(mission)
@@ -1067,6 +1289,9 @@ class MissionRunner:
                     )
                     return self._pause_for_approval(
                         mission, gate, st, started, resumed_from)
+                if action == "paused_external":
+                    return self._park_external_pause(
+                        mission, st, started, resumed_from)
                 if action == "replanned":
                     # same restart protocol as the sequential path: the
                     # outer loop's `level_idx += 1` lands on level 0 and
@@ -1084,8 +1309,22 @@ class MissionRunner:
                 if self._cancel:
                     return self._finish(mission, MissionStatus.CANCELLED, st.steps, started,
                                         resumed_from, error="cancelled")
-                if mission.iterations >= max_iterations:
-                    st.failure = f"iteration limit {max_iterations} reached"
+                # a status written by another process (chat pause /
+                # cancel) is adopted by _settle_step before each save —
+                # honor it here, before executing anything else: the
+                # owner's word outranks the run's momentum.
+                if mission.status == MissionStatus.CANCELLED:
+                    return self._finish(mission, MissionStatus.CANCELLED,
+                                        st.steps, started, resumed_from,
+                                        error="cancelled")
+                if mission.status == MissionStatus.PAUSED:
+                    return self._park_external_pause(
+                        mission, st, started, resumed_from)
+                if (self._iteration_cap
+                        and mission.iterations - self._iteration_baseline
+                        >= self._iteration_cap):
+                    st.failure = (f"iteration limit {self._iteration_cap} "
+                                  "reached")
                     stop_levels = True
                     break
                 if mission.budget_exhausted:
@@ -1136,6 +1375,17 @@ class MissionRunner:
             if stop_levels:
                 break
             level_idx += 1
+
+        # an external pause/cancel that landed during the final step
+        # (adopted into mission.status by _settle_step) outranks the
+        # computed verdict. When the mission genuinely failed first,
+        # _finish's own guard applies the cancel on top instead.
+        if not st.failure and mission.status == MissionStatus.CANCELLED:
+            return self._finish(mission, MissionStatus.CANCELLED, st.steps,
+                                started, resumed_from, error="cancelled")
+        if not st.failure and mission.status == MissionStatus.PAUSED:
+            return self._park_external_pause(mission, st, started,
+                                             resumed_from)
 
         # observability: when the mission dies, the steps that never ran
         # get a verdict instead of vanishing — transitively blocked by a
@@ -1307,7 +1557,9 @@ class MissionRunner:
 
         Returns ``"continue"`` (next level), ``"stop"`` (``st.failure`` is
         set — break out), ``"cancelled"``, ``"paused"`` (an approval gate
-        fired — the caller resolves it via ``_pause_for_approval``), or
+        fired — the caller resolves it via ``_pause_for_approval``),
+        ``"paused_external"`` (another process paused the mission — the
+        caller parks it via ``_park_external_pause``), or
         ``"replanned"`` (fresh graph on ``st.replanned_levels``).
         """
         for step in level:
@@ -1325,6 +1577,12 @@ class MissionRunner:
         while pending:
             if self._cancel:
                 return "cancelled"
+            # external pause/cancel adopted by _settle_step (see the
+            # sequential driver): honor before executing anything else
+            if mission.status == MissionStatus.CANCELLED:
+                return "cancelled"
+            if mission.status == MissionStatus.PAUSED:
+                return "paused_external"
             # an approval gate anywhere in the pending set pauses the
             # whole run — the gate is found by the caller via _check_approval
             if any(not self._check_approval(mission, s) for s in pending):
@@ -1333,10 +1591,15 @@ class MissionRunner:
                 st.failure = "budget exhausted"
                 self._record_budget_stall(mission)
                 return "stop"
-            slots = max_iterations - mission.iterations
-            if slots <= 0:
-                st.failure = f"iteration limit {max_iterations} reached"
-                return "stop"
+            if self._iteration_cap:
+                slots = (self._iteration_cap
+                         - (mission.iterations - self._iteration_baseline))
+                if slots <= 0:
+                    st.failure = (f"iteration limit {self._iteration_cap} "
+                                  "reached")
+                    return "stop"
+            else:
+                slots = len(pending)
             batch, pending = pending[:slots], pending[slots:]
             for step, outcome in self._execute_batch(mission, batch,
                                                      max_parallel):
@@ -1427,6 +1690,7 @@ class MissionRunner:
         else:
             new_stall = False
         self._heartbeat(mission)
+        self._sync_external_status(mission)
         self.store.save(mission)
         if index % self.checkpoint_every == 0:
             self.store.checkpoint(mission, label=f"after:{step.name}")
@@ -1655,8 +1919,11 @@ class MissionRunner:
             # The worker is dead: drop the stale heartbeat and re-drive the
             # remaining steps. Status stays live (running/paused), so the os
             # state machine needs no repair — run() re-fires RUNNING, which
-            # is an idempotent no-op on the transition hook.
+            # is an idempotent no-op on the transition hook. The dead
+            # worker's run claim goes too: its pid is provably gone, so
+            # the heal must not wait out the claim's freshness window.
             mission.state.pop("heartbeat", None)
+            mission.state.pop("run_claim", None)
             mission.state["self_heal"] = {"at": time.time(),
                                          "reason": "worker dead; resumed remaining steps"}
             self.store.save(mission)
@@ -2117,6 +2384,19 @@ class MissionRunner:
         reflect: bool = True,
     ) -> MissionResult:
         lessons: list[str] = []
+        if status != MissionStatus.CANCELLED:
+            # An external cancel that landed while the final step (or
+            # teardown itself) was in flight wins over the computed
+            # verdict — the owner's cancel is never overwritten by a
+            # "done"/"failed" the run was about to write.
+            try:
+                persisted_status = self.store.get(mission.id).status
+            except Exception:  # noqa: BLE001 - guard is best-effort
+                persisted_status = ""
+            if (persisted_status == MissionStatus.CANCELLED
+                    or mission.status == MissionStatus.CANCELLED):
+                status = MissionStatus.CANCELLED
+                error = error or "cancelled"
         if status == MissionStatus.DONE:
             # Acceptance gate: a mission that finished its steps but carries
             # acceptance criteria must pass VERIFYING before it may COMPLETE.

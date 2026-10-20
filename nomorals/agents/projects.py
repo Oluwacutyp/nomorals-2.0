@@ -462,6 +462,13 @@ class ProjectManager:
                 return p
         if p.status == "planning":
             p = self.plan(project_id)
+        # a step still marked in_progress on entry was interrupted by
+        # process death (advance persists the mark BEFORE executing —
+        # see below): resolve it before choosing what runs next, or it
+        # would be silently skipped and the project finalised over it.
+        recovered = self._recover_interrupted(p, attempts)
+        if recovered is not None:
+            return recovered
         step = p.next_step
         if step is None:
             p = self._finalise(p)
@@ -469,6 +476,13 @@ class ProjectManager:
         p.status = "running"
         step.status = "in_progress"
         step.attempts += 1
+        # Persist the attempt BEFORE the step executes: if the process
+        # dies mid-step, the record must show the step was in flight and
+        # its attempt was spent — otherwise recovery re-runs it as if
+        # nothing happened (duplicating whatever side effects already
+        # landed) and a process-killing step loops forever, its attempt
+        # counter never advancing.
+        self._upsert_row(p)
         self._current_project_id = project_id
         self._current_step_id = step.id  # wave 67: acceptance regression
         exec_fn = executor or self._default_executor
@@ -574,7 +588,13 @@ class ProjectManager:
             # a fresh project (nm project create) is still unplanned — plan
             # it so `run` works in one command
             last = self.plan(project_id)
-        while last is not None and last.status == "running" and last.next_step is not None:
+        # work remains while a step is pending OR in_progress: an
+        # in_progress step is an interrupted one (process death), and
+        # advance() is where it gets recovered — a loop keyed on
+        # pending alone would strand it forever.
+        while (last is not None and last.status == "running"
+               and (last.next_step is not None
+                    or any(s.status == "in_progress" for s in last.steps))):
             if max_steps is not None and ran >= max_steps:
                 last.status = "paused"
                 last.report = f"Paused after {ran} steps (max_steps reached)."
@@ -590,7 +610,55 @@ class ProjectManager:
             "report": last.report if last else "",
         }
 
+    def _recover_interrupted(self, p: Project,
+                             max_attempts: int) -> Project | None:
+        """Resolve steps left ``in_progress`` by a dead process.
+
+        ``advance`` persists a step as in_progress (attempt counted)
+        BEFORE executing it, so an in_progress step on entry means the
+        process died mid-step: its side effects may have partially
+        landed and its attempt is spent. With attempts left, the step
+        returns to pending with the interruption on its record; with
+        none left, the project fails honestly instead of re-running a
+        process-killing step forever. Returns the project to return
+        early (attempts exhausted), or None to continue.
+        """
+        interrupted = [s for s in p.steps if s.status == "in_progress"]
+        if not interrupted:
+            return None
+        for step in interrupted:
+            note = (f"attempt {step.attempts} interrupted — the process "
+                    "died mid-step; partial side effects were not "
+                    "rolled back")
+            if step.attempts >= max_attempts:
+                step.status = "failed"
+                step.result = f"{note}; no attempts left"
+                p.status = "failed"
+                p.report = (f"Step '{step.description[:60]}' was "
+                            f"interrupted by process death on attempt "
+                            f"{step.attempts} of {max_attempts} — failing "
+                            "instead of re-running it forever.")
+                p.updated_at = time.time()
+                self._upsert_row(p)
+                self._record_failure(step.description, note)
+                self._sync_goal(p)
+                return p
+            step.status = "pending"
+            step.result = note + "; will re-run"
+            _log.warning("project %s: step %r recovered from a "
+                         "mid-step process death (attempt %d)",
+                         p.id, step.description[:60], step.attempts)
+        p.updated_at = time.time()
+        self._upsert_row(p)
+        return None
+
     def _finalise(self, p: Project) -> Project:
+        if any(s.status in {"in_progress", "pending"} for s in p.steps):
+            # Never declare done/failed over steps that have not reached
+            # a verdict — an interrupted step must be recovered (see
+            # advance) or explicitly resolved first. Returning the
+            # project unfinalised keeps the status honest.
+            return p
         p.progress = (p.done_count / p.total) if p.total else 0.0
         if p.failed_count and not p.done_count:
             p.status = "failed"

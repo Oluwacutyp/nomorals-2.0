@@ -182,8 +182,10 @@ class RuntimeMissionMixin:
                 mission = store.get(mission.id)
             if mission.terminal:
                 return (f"{mission.name} is {mission.status} — terminal "
-                        "missions can't resume; /mission retry starts a "
-                        "fresh attempt.")
+                        "missions can't resume in place; "
+                        f"/mission replan {mission.id} resumes the "
+                        "remaining work (completed steps are kept), or "
+                        "/mission retry starts a fresh attempt.")
             # idempotent: resume of a live mission is a no-op success
             if mission.status == MissionStatus.RUNNING:
                 return (f"▶ {mission.name}: already running — no change; "
