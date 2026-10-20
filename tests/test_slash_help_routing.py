@@ -133,9 +133,18 @@ class HelpRoutingTest(unittest.TestCase):
                          f"expected exactly one reply on {platform}")
         return self.adapter.sent[0]
 
-    def test_help_on_gated_first_bot(self) -> None:
+    def test_help_on_gated_first_bot_is_public_catalog(self) -> None:
+        # Pass #55 (owner's model, 2026-10-20): the first bot is PUBLIC
+        # and gated for everyone on it, owner included — /help there is
+        # the PUBLIC catalog, never the full one. (This assertion used
+        # to pin the full catalog on telegram-bot; that was the defect
+        # the owner reported.) Routing is unchanged: static reply, the
+        # brain never sees the command.
         reply = self._help_reply("telegram-bot")
-        self.assertIn("full catalog", reply)
+        self.assertNotIn("full catalog", reply)
+        self.assertIn("public catalog", reply)
+        for kind in ("/update", "/exness", "/tempmail"):
+            self.assertNotIn(kind, reply)
         for phrase in FALLBACK_PHRASES:
             self.assertNotIn(phrase, reply)
 

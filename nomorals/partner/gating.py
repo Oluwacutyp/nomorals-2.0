@@ -17,9 +17,21 @@ are written in the same voice as the rest of the context (second person,
 plain words, no document furniture). The owner's explicit steering still
 works anywhere: an owner message in a group is classified as ``owner``,
 and control commands were already operator-gated at the runtime.
+
+**Surface rule (owner's model, 2026-10-20):** gating is a property of
+the SURFACE, not only of the person. The main Telegram bot
+(``telegram-bot``) is public, so it is gated for *everyone on it, owner
+included* — restricted context, public commands only. The owner's
+private surfaces (``telegram-personal``, the ``telegram`` userbot, the
+console) carry full owner treatment. :func:`is_owner_chat` still answers
+*who* someone is; :func:`effective_is_owner` answers what treatment a
+chat on this surface gets, and every gating consumer goes through it
+(via :func:`gate_decision` / :func:`classify_chat`).
 """
 
 from __future__ import annotations
+
+from typing import Any
 
 from ..social.chat.base import ChatKind, is_owner_chat
 
@@ -27,8 +39,11 @@ __all__ = [
     "MODE_OWNER",
     "MODE_PRIVATE",
     "MODE_GROUP",
+    "GATED_SURFACES",
     "classify_chat",
     "is_owner_chat",  # re-exported from nomorals.social.chat.base (L4)
+    "is_gated_surface",
+    "effective_is_owner",
     "gate_decision",
     "is_restricted",
     "gate_block",
@@ -39,6 +54,36 @@ MODE_OWNER = "owner"
 MODE_PRIVATE = "private"  # DM with someone who is not the owner
 MODE_GROUP = "group"      # groups and channels (non-owner voice)
 
+#: Surfaces gated for EVERYONE on them, owner included. The main
+#: Telegram bot is the public endpoint: it must never hold owner
+#: context or owner power, no matter who is talking to it. The
+#: personal bot and the userbot are the owner's private surfaces and
+#: are deliberately NOT in this set.
+GATED_SURFACES = frozenset({"telegram-bot"})
+
+
+def is_gated_surface(chat: Any) -> bool:
+    """True when this chat lives on a gated surface.
+
+    Accepts a ChatRef-like (anything with ``.platform``) or a bare
+    platform string, so callers holding either form get one answer.
+    """
+    platform = chat if isinstance(chat, str) else str(
+        getattr(chat, "platform", "") or "")
+    return platform.strip().lower() in GATED_SURFACES
+
+
+def effective_is_owner(chat: Any, is_owner: bool) -> bool:
+    """The owner TREATMENT test: identity AND an ungated surface.
+
+    ``is_owner`` says who the person is (style mining, presence,
+    session identity keep using it raw). This says whether this chat
+    may receive owner treatment — full context, owner commands,
+    operator power. On a gated surface the answer is False for
+    everyone, the owner included.
+    """
+    return bool(is_owner) and not is_gated_surface(chat)
+
 
 def classify_chat(chat, *, is_owner: bool) -> str:
     """Which version of her this message gets.
@@ -47,7 +92,7 @@ def classify_chat(chat, *, is_owner: bool) -> str:
     group (the brain never generates for a channel anyway — it's
     read-only — but the mode must be restricted if it ever did).
     """
-    if is_owner:
+    if effective_is_owner(chat, is_owner):
         return MODE_OWNER
     if chat.kind == ChatKind.DM:
         return MODE_PRIVATE
@@ -59,9 +104,12 @@ def gate_decision(chat, *, is_owner: bool, restricted_enabled: bool = True) -> s
 
     Wraps :func:`classify_chat` with the owner's kill-switch
     (``settings.partner.gate_restricted_chats``): when restricted gating
-    is disabled everything is treated as owner mode. Every reply path
-    must go through this — never inline the kill-switch check — so DM /
-    group / stranger handling stays uniform across platforms.
+    is disabled everything is treated as owner mode — the kill-switch
+    turns ALL gating off, surface gating included; that is its
+    documented meaning, and it is the only way a gated surface yields
+    owner mode. Every reply path must go through this — never inline
+    the kill-switch check — so DM / group / stranger handling stays
+    uniform across platforms.
     """
     raw_mode = classify_chat(chat, is_owner=is_owner)
     return raw_mode if restricted_enabled else MODE_OWNER

@@ -743,11 +743,14 @@ class PartnerBrain:
         # Per-adapter partner context (two-bot split): the adapter stamps
         # ``meta["partner_context"]`` on every inbound message — True on
         # the personal bot (every chat there is the owner, so partner
-        # context always rides along), False on the gated bot (its
-        # groups never carry it). An owner DM on the gated bot still
-        # does — that is the existing owner-DM behavior, preserved.
+        # context always rides along), False on the gated bot.
         # Adapters that don't stamp (userbot, Discord, …) keep the
         # legacy rule: owner ⇒ partner context allowed.
+        # Surface rule (owner's model, 2026-10-20): the gated bot is
+        # gated for EVERYONE on it, owner included — ``restricted``
+        # (from the surface-aware gate decision above) vetoes romantic
+        # context there even when the adapter fallback would allow it
+        # for an owner DM.
         _adapter_partner = message.meta.get("partner_context")
         if _adapter_partner is None:
             _partner_allowed = True
@@ -756,7 +759,7 @@ class PartnerBrain:
         else:
             _partner_allowed = bool(
                 is_owner and chat.kind == ChatKind.DM)
-        romantic = (is_owner and _partner_allowed
+        romantic = (is_owner and not restricted and _partner_allowed
                     and self.relationship.is_romantic())
         background_lines = self.background.context(
             message.text,
@@ -778,7 +781,7 @@ class PartnerBrain:
         # Generate.
         history = self._history(session_id, limit=self.settings.partner.history_window)
         continuity = () if restricted else self._continuity_lines(session_id)
-        if is_owner:
+        if is_owner and not restricted:
             digest = self._reasoning_digest(message.text)
             if digest:
                 continuity = list(continuity) + [digest]

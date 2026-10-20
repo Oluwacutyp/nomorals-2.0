@@ -20,7 +20,8 @@ from ...partner.chat_modes import (
     is_game_disabled as _chat_modes_is_game_disabled,
     is_games_disabled as _chat_modes_is_games_disabled,
     is_games_only as _chat_modes_is_games_only)
-from ...partner.gating import gate_decision, is_owner_chat, is_restricted
+from ...partner.gating import (
+    gate_decision, is_gated_surface, is_owner_chat, is_restricted)
 from ...partner.presence import Presence, decide_presence, human_typing_seconds
 from ...social.chat.base import ChatKind, ChatMessage, ChatRef
 from ...social.chat.gateway import ChatGateway
@@ -1195,6 +1196,11 @@ class PartnerRuntime(
                         reply = "that broke something on my end — try again."
                     if reply:
                         try:
+                            # Same typing treatment as every other reply
+                            # path (operator branch, games): the public
+                            # branch originally sent bare, so the main
+                            # bot never showed "typing…" for its commands.
+                            self._typing_for(message.chat, reply)
                             self.gateway.send(
                                 message.chat.platform, message.chat, reply,
                                 reply_keyboard=public_menu_keyboard()
@@ -1207,6 +1213,8 @@ class PartnerRuntime(
                           command.kind, message.sender or "?",
                           message.chat.key)
                 try:
+                    self._typing_for(message.chat,
+                                     _PUBLIC_BOT_NOT_AVAILABLE)
                     self.gateway.send(message.chat.platform, message.chat,
                                       _PUBLIC_BOT_NOT_AVAILABLE)
                 except Exception:  # noqa: BLE001
@@ -2467,6 +2475,15 @@ class PartnerRuntime(
 
     # ── control commands (live steering) ─────────────────────────────────────
     def _is_operator(self, message: ChatMessage) -> bool:
+        # Surface rule (owner's model, 2026-10-20): operator power is a
+        # property of the surface, not just the person. On the gated
+        # public bot (telegram-bot) NOBODY is an operator — the owner
+        # included; owner power lives on the personal bot and the
+        # userbot. This check comes first, before every identity test,
+        # so no identity path (meta stamp, sender allowlist, chat key)
+        # can re-open operator power on the public surface.
+        if is_gated_surface(getattr(message, "chat", None)):
+            return False
         # Same single owner test as reply gating — a control command from a
         # chat the gating layer doesn't call owner must not run.
         # Prefer the gateway's verdict (stashed in meta) which includes the
@@ -2957,11 +2974,21 @@ class PartnerRuntime(
         if kind == "menu" and not command.tail:
             return public_menu_text()
 
+        # The originating surface, from the chat key — one computation,
+        # used by the grant denial below, the SMS surface gate and the
+        # catalog dispatch (all surface decisions key off it).
+        platform = (chat_key or "").partition(":")[0].strip().lower()
+
         # Capability grant: every command checks the caller's grant —
         # deny without grant. message=None means an internal call
         # (tour/heal/self-heal probe), which runs as the owner.
         is_owner = True if message is None else self._is_operator(message)
         if not caller_may_run(kind, is_owner):
+            # On the gated public surface the honest denial names the
+            # surface, not the person: the owner is denied there too
+            # (operator power is a surface property — see _is_operator).
+            if is_gated_surface(platform):
+                return _PUBLIC_BOT_NOT_AVAILABLE
             return "that one's just for the owner."
 
         # Per-chat feature gate: the shared choke point for every slash
@@ -3009,7 +3036,6 @@ class PartnerRuntime(
         # SMS fallback surface (build-map #19): restricted command set over
         # SMS — games, media, exec and everything heavy get an honest
         # "needs the app" reply instead of running.
-        platform = (chat_key or "").partition(":")[0].strip().lower()
         if platform == "sms":
             from ...social.chat.sms import SMS_BLOCKED_REPLY, sms_allows
 
@@ -3025,8 +3051,12 @@ class PartnerRuntime(
         if kind in {"list", "commands", "menu"}:
             # wave 68: /list — every executable chat command, categorized
             # with a one-line "what it does"; /list <group> filters.
+            # On the gated public surface the catalog is the PUBLIC
+            # list only — the full catalog names owner-only commands
+            # (platform control, money, trial tooling) that must never
+            # be advertised there.
             from ...social.chat.control import list_catalog
-            return list_catalog(arg)
+            return list_catalog(arg, public_only=is_gated_surface(platform))
         if kind == "help":
             # wave 67: detailed help — /help for the catalog,
             # /help <command> for one command's full page, /help budget
@@ -3040,7 +3070,8 @@ class PartnerRuntime(
             if platform in ("whatsapp", "wa") and not (arg or command.tail):
                 from ...social.chat.control import help_menu
                 return help_menu("whatsapp")
-            return detailed_help(arg or command.tail)
+            return detailed_help(arg or command.tail,
+                                 public_only=is_gated_surface(platform))
 
         if kind == "tour":
             # smoke-test every command with safe read-only probes.

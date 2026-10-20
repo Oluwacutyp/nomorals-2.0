@@ -2557,32 +2557,56 @@ def _wrap_commands(kinds: list[str], width: int = 64) -> list[str]:
     return lines
 
 
-def _detailed_overview() -> str:
-    lines = [
-        "the full catalog — detail for any command: /help <command>",
-        "topic pages: /help budget|goals|builds|skills|missions|modes|stack",
-        "",
-    ]
-    for group, kinds in _HELP_GROUPS:
+def _detailed_overview(*, public_only: bool = False) -> str:
+    if public_only:
+        # The gated public surface's catalog: the PUBLIC command list
+        # only. Owner-only commands (platform control, money, trial
+        # tooling, …) are not advertised there — groups left empty by
+        # the filter drop out entirely, and the owner-system tail
+        # (topic pages, console) is not public copy.
+        lines = [
+            "the public catalog — detail for any command: /help <command>",
+            "",
+        ]
+        groups = [(group, [k for k in kinds if k in PUBLIC_COMMANDS])
+                  for group, kinds in _HELP_GROUPS]
+        groups = [(group, kinds) for group, kinds in groups if kinds]
+    else:
+        lines = [
+            "the full catalog — detail for any command: /help <command>",
+            "topic pages: /help budget|goals|builds|skills|missions|modes|stack",
+            "",
+        ]
+        groups = _HELP_GROUPS
+    for group, kinds in groups:
         lines.append(f"  — {group} —")
         lines.extend(_wrap_commands(kinds))
         lines.append("")
-    shown = {k for _, kinds in _HELP_GROUPS for k in kinds}
+    shown = {k for _, kinds in groups for k in kinds}
     rest = [k for k in CONTROL_COMMANDS if k not in shown]
+    if public_only:
+        rest = [k for k in rest if k in PUBLIC_COMMANDS]
     if rest:
         lines.append("  — everything else —")
         lines.append("  " + "  ".join(f"/{k}" for k in rest))
         lines.append("")
-    lines += [
-        "how she works:  goals → projects → real execution.  Builds run "
-        "in a sandbox until the real acceptance command passes; every "
-        "fixed failure becomes a skill; the portfolio is ranked by "
-        "cost-aware expected value; the budget is unlimited unless you "
-        "cap it (nm autonomy budget).",
-        "console:  the whole system is also `nm <command>` — "
-        "`nm help <topic>` shows these same pages.",
-    ]
+    if not public_only:
+        lines += [
+            "how she works:  goals → projects → real execution.  Builds run "
+            "in a sandbox until the real acceptance command passes; every "
+            "fixed failure becomes a skill; the portfolio is ranked by "
+            "cost-aware expected value; the budget is unlimited unless you "
+            "cap it (nm autonomy budget).",
+            "console:  the whole system is also `nm <command>` — "
+            "`nm help <topic>` shows these same pages.",
+        ]
     return "\n".join(lines)
+
+
+def _public_no_help_page(t: str) -> str:
+    """The /help answer for a non-public topic on the gated surface."""
+    return (f"no help page for '{t}' here — this bot carries the public "
+            f"commands only. /help shows what I can do here.")
 
 
 #: One-line summaries for /list — what each command actually DOES.
@@ -2946,11 +2970,15 @@ for _kind in CONTROL_COMMANDS:
         LIST_ONELINERS[_kind] = COMMAND_DETAILS[_kind]["what"]
 
 
-def list_catalog(topic: str = "") -> str:
+def list_catalog(topic: str = "", *, public_only: bool = False) -> str:
     """/list — every executable chat command, cleanly categorized (wave 68).
 
     No topic: the full categorized catalog.  A topic (group name or
     alias): just that group.  Every line is ``/cmd — what it does``.
+
+    ``public_only`` renders the gated public surface's version: only
+    PUBLIC_COMMANDS are listed, and groups with no public commands
+    left in them drop out (including from the "available" pointer).
 
     ``topic`` must be a string (``None``/``""`` mean the full catalog);
     anything else raises :class:`TypeError`.
@@ -2968,16 +2996,25 @@ def list_catalog(topic: str = "") -> str:
     lines = [f"🥷 <b>Devon</b> — commands (tap any {cmd('/command')} to run it):"]
     shown = 0
     for group, kinds in groups:
+        renderable = [k for k in kinds if k in CONTROL_COMMANDS]
+        if public_only:
+            renderable = [k for k in renderable if k in PUBLIC_COMMANDS]
+            if not renderable:
+                continue
         emoji = _GROUP_EMOJI.get(group, "•")
         lines.append("")
         lines.append(section(emoji, group))
-        for k in kinds:
-            if k not in CONTROL_COMMANDS:
-                continue
+        for k in renderable:
             one = LIST_ONELINERS.get(k, COMMAND_DETAILS.get(k, {}).get('what', ''))
             lines.append(f"  {cmd('/' + k)} — {escape(one)}")
             shown += 1
     if not shown:
+        if public_only:
+            avail = " | ".join(
+                g for g, ks in LIST_GROUPS
+                if any(k in CONTROL_COMMANDS and k in PUBLIC_COMMANDS
+                       for k in ks))
+            return f"no group '{t}' — available: {escape(avail)}"
         groups_now = [g for g, _ in groups]
         all_groups = " | ".join(dict.fromkeys(_LIST_GROUP_ALIASES.values()))
         return (f"no group '{t}' — available: {escape(all_groups)}")
@@ -2990,7 +3027,7 @@ def list_catalog(topic: str = "") -> str:
     return "\n".join(lines)
 
 
-def detailed_help(topic: str = "") -> str:
+def detailed_help(topic: str = "", *, public_only: bool = False) -> str:
     """The detailed help for chat (and ``nm help``).
 
     * no topic — the catalog: every command grouped, topic pages listed.
@@ -2999,6 +3036,10 @@ def detailed_help(topic: str = "") -> str:
     * ``/help budget|goals|builds|skills|missions|modes`` — topic pages.
     * unknown — fuzzy match or a pointer, never a dead end.
 
+    ``public_only`` renders the gated public surface's version: the
+    overview lists PUBLIC_COMMANDS only, and pages for owner-only
+    commands / owner-system topic pages are not served.
+
     ``topic`` must be a string (``None``/``""`` mean the catalog); anything
     else raises :class:`TypeError`.
     """
@@ -3006,8 +3047,10 @@ def detailed_help(topic: str = "") -> str:
         raise TypeError(f"detailed_help expects str, got {type(topic).__name__}")
     t = (topic or "").strip().lstrip("/").lower()
     if not t:
-        return _detailed_overview()
+        return _detailed_overview(public_only=public_only)
     if t in COMMAND_DETAILS:
+        if public_only and t not in PUBLIC_COMMANDS:
+            return _public_no_help_page(t)
         from .style import cmd, escape
         d = COMMAND_DETAILS[t]
         lines = [f"📖 <code>{escape(d['usage'])}</code>",
@@ -3020,15 +3063,21 @@ def detailed_help(topic: str = "") -> str:
         lines.append(f"{cmd('/help')} — catalog  ·  {cmd('/help')} topics — subject guides")
         return "\n".join(lines)
     if t in _TOPIC_PAGES:
+        if public_only:
+            return _public_no_help_page(t)
         return _TOPIC_PAGES[t]
     cands = sorted(k for k in COMMAND_DETAILS
                    if t in k or k in t or t in k.replace("_", " "))
+    if public_only:
+        cands = [c for c in cands if c in PUBLIC_COMMANDS]
     if len(cands) == 1:
-        return detailed_help(cands[0])
+        return detailed_help(cands[0], public_only=public_only)
     if cands:
         return ("did you mean: "
                 + ", ".join(f"/help {c}" for c in cands[:8])
                 + "\ncatalog: /help")
+    if public_only:
+        return _public_no_help_page(t)
     return (f"no help page for '{t}' — /help <command> for any command "
             "(e.g. /help devon), or /help budget|goals|builds|skills|"
             "missions|modes for topics.")
