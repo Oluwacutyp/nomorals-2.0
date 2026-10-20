@@ -113,10 +113,13 @@ def register(registry: Any) -> None:
             if c is None:
                 return f"no character named '{target}'."
             dlg = converse("You are Devon, a warm AI companion.",
-                           c, text or "hey", suggest, rounds=2)
+                           c, text or "hey", suggest, rounds=2, graph=graph)
             store.save(c)
             _save_graph(store, graph)
-            last = dlg.turns[-1] if dlg.turns else None
+            # the reply shown is the CHARACTER's latest line — with an
+            # even number of turns the dialogue's last turn is Devon's.
+            own = [t for t in dlg.turns if t.speaker == c.name]
+            last = own[-1] if own else (dlg.turns[-1] if dlg.turns else None)
             return f"🎭 {c.name}: {last.text}" if last else "…"
 
         if action == "direct":

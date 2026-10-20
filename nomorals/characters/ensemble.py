@@ -90,10 +90,13 @@ class Beat:
 
     def ready(self, scene: Scene, director: "DramaDirector",
               round_no: int) -> bool:
-        if self.precondition is None:
-            return True
+        # the cooldown holds for every beat — with or without a
+        # precondition (a beat that re-fires every round is a nag,
+        # not a director).
         if director._cooldowns.get(self.name, -99) + self.cooldown_rounds > round_no:
             return False
+        if self.precondition is None:
+            return True
         try:
             return bool(self.precondition(scene, director))
         except Exception:

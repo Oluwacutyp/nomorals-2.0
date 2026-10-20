@@ -69,9 +69,16 @@ def _brain_say(brain_persona: str, context: str,
 
 def converse(brain_persona: str, char: Character, opener: str,
              suggest: SuggestFn | None, rounds: int = 3,
-             memories: str = "") -> Dialogue:
+             memories: str = "",
+             graph: Any | None = None) -> Dialogue:
     """Brain and character talk. ``opener`` is who speaks first's line —
-    prefix with 'brain:' or '<name>:' or neither (brain opens)."""
+    prefix with 'brain:' or '<name>:' or neither (brain opens).
+
+    ``graph``: the caller's shared RelationshipGraph. When given, the
+    post-conversation processing shifts the char<->brain edge on *that*
+    graph so the caller can persist it — a fresh internal graph would
+    silently discard the relationship growth.
+    """
     dlg = Dialogue(participants=["Devon", char.name])
     if opener.startswith("brain:"):
         dlg.add("Devon", opener[len("brain:"):].strip())
@@ -103,7 +110,7 @@ def converse(brain_persona: str, char: Character, opener: str,
     try:
         from .processing import SessionEvent, process_session
         from .relationships import RelationshipGraph, BRAIN_ID
-        graph = RelationshipGraph()
+        graph = graph if graph is not None else RelationshipGraph()
         deep = any(len(t.text or "") > 200 for t in dlg.turns)
         kind = "deep_conversation" if deep else "good_conversation"
         process_session(
