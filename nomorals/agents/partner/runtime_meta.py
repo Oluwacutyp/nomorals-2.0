@@ -119,23 +119,32 @@ class RuntimeMetaMixin:
         power_state = "active" if power_mode_for(self.context).active else "locked"
         platforms = ", ".join(
             name for name, info in self.gateway.status().items()
-            if name != "_stats" and info.get("running_in_session")
+            if not name.startswith("_") and isinstance(info, dict)
+            and info.get("running_in_session")
         ) or "none"
         stats = self._stats_snapshot()
-        return "\n".join(
-            [
-                f"mood: {mood.label} (affection {mood.values.get('affection', 0):.0f}, "
-                f"energy {mood.values.get('energy', 0):.0f}, frustration {mood.values.get('frustration', 0):.0f})",
-                f"relationship: {rel.stage}, trust {rel.trust:.0f}, "
-                f"{len(rel.milestones)} milestones, {len(rel.fights)} fights logged",
-                f"autonomy: {aut.get('mode', 'off')}, {aut.get('pending_proposals', 0)} pending",
-                f"model: {self._model_status_line()}",
-                f"platforms running: {platforms}",
-                f"power mode: {power_state}",
-                f"stats: {stats['messages']} msgs, {stats['replies']} replies, "
-                f"{stats['errors']} errors, {stats.get('controls', 0)} commands",
-            ]
-        )
+        lines = [
+            f"mood: {mood.label} (affection {mood.values.get('affection', 0):.0f}, "
+            f"energy {mood.values.get('energy', 0):.0f}, frustration {mood.values.get('frustration', 0):.0f})",
+            f"relationship: {rel.stage}, trust {rel.trust:.0f}, "
+            f"{len(rel.milestones)} milestones, {len(rel.fights)} fights logged",
+            f"autonomy: {aut.get('mode', 'off')}, {aut.get('pending_proposals', 0)} pending",
+            f"model: {self._model_status_line()}",
+            f"platforms running: {platforms}",
+            f"power mode: {power_state}",
+            f"stats: {stats['messages']} msgs, {stats['replies']} replies, "
+            f"{stats['errors']} errors, {stats.get('controls', 0)} commands",
+        ]
+        # Degradation ladders: surfaced ONLY when a subsystem is
+        # actually serving from a fallback rung — silence when healthy.
+        degradation = self._degradation_status()
+        if degradation.get("degraded"):
+            rungs = ", ".join(
+                f"{name} on rung {degradation['ladders'][name]['rung']} "
+                f"({degradation['ladders'][name]['rung_name']})"
+                for name in degradation["degraded"])
+            lines.append(f"degradation: {rungs}")
+        return "\n".join(lines)
 
     def _control_mood(self, arg: str) -> str:
         engine = self.brain.mood

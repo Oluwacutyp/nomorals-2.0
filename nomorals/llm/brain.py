@@ -232,6 +232,98 @@ class Brain:
         """The underlying router (builds the default chain if needed)."""
         return self._get_router()
 
+    # ── degradation ladder ─────────────────────────────────────────────
+    def _llm_ladder(self) -> Any:
+        """The process llm degradation ladder, when THIS brain may use it.
+
+        The ladder's rung 0 IS the agent context's router — so only a
+        brain wrapping that very router may route through it. Brains
+        with a private chain (the shared env brain, a caller's own
+        router) keep their direct path: rerouting them would silently
+        swap which provider chain serves the call. Never raises.
+        """
+        if self._external_router is None:
+            return None
+        try:
+            from ..core.error_system import get_error_system
+
+            es = get_error_system()
+            if es is None:
+                return None
+            ctx_router = getattr(getattr(es, "context", None),
+                                 "router", None)
+            if ctx_router is None or ctx_router is not self._external_router:
+                return None
+            return es.ladders.get("llm")
+        except Exception:  # noqa: BLE001 — ladder lookup never breaks a call
+            return None
+
+    @staticmethod
+    def _ladder_failure_text(ladder: Any, exc: BaseException) -> str:
+        """User-honest error for a total outage: the ladder's honesty
+        clause first, the real provider error kept alongside it."""
+        honesty = ""
+        try:
+            honesty = str(ladder.rungs[-1].honesty or "")
+        except Exception:  # noqa: BLE001
+            honesty = ""
+        real = ""
+        details = getattr(exc, "details", None)
+        if isinstance(details, dict):
+            errors = [str(e) for e in (details.get("errors") or [])]
+            real = errors[0] if errors else ""
+        if not real:
+            real = str(exc)
+        if honesty:
+            return f"{honesty} [{real}]"[:600]
+        return real[:600]
+
+    def _chat_dispatch(self, msgs: Any, params: Any, *,
+                       task_kind: str = "", tier: str | None = None,
+                       constraints: Any = None,
+                       timeout_s: float | None = None,
+                       route: dict[str, Any] | None = None) -> LLMResponse:
+        """One chat dispatch — through the llm ladder when it is wired.
+
+        With a ladder, rung 0 is this brain's own router (the router's
+        provider failover runs inside it, untouched) and rung 1 is the
+        honest-failure rung: a total outage surfaces the ladder's
+        honesty clause, journals the failure and leaves the ladder
+        visibly degraded for status surfaces, instead of handing the
+        caller a bare provider exception. Without a ladder, the direct
+        :meth:`_call` path runs, unchanged.
+        """
+        ladder = self._llm_ladder()
+        if ladder is None:
+            return self._classify(self._call(
+                "chat", self._get_router().chat, msgs, params,
+                task_kind=task_kind, tier=tier, constraints=constraints,
+                timeout_s=timeout_s, route=route))
+
+        def _via_ladder() -> Any:
+            from ..core.degradation import LadderExhausted
+
+            try:
+                result, _meta = ladder.call(
+                    "", messages=list(msgs), params=params,
+                    task_kind=task_kind, tier=tier,
+                    constraints=constraints, route=route)
+                return result
+            except LadderExhausted as exc:
+                return LLMResponse(
+                    text="",
+                    error=self._ladder_failure_text(ladder, exc))
+
+        if timeout_s is not None and timeout_s > 0:
+            raw = self._call_bounded("chat", _via_ladder, timeout_s)
+            return self._classify(self._coerce_response("chat", raw))
+        try:
+            raw = _via_ladder()
+        except Exception as exc:  # noqa: BLE001 — the brain never raises
+            return self._classify(LLMResponse(
+                text="", error=f"brain.chat failed before dispatch: {exc}"))
+        return self._classify(self._coerce_response("chat", raw))
+
     # ── generation ───────────────────────────────────────────────────────
     @staticmethod
     def _accepts(fn: Any, name: str) -> bool:
@@ -449,11 +541,10 @@ class Brain:
         the middle summarized - the caller never sees the raw 400.
         """
         msgs = self._fit_for_send(messages, task_kind or "chat")
-        resp = self._classify(self._call(
-            "chat", self._get_router().chat, msgs, params,
-            task_kind=task_kind, tier=tier,
+        resp = self._chat_dispatch(
+            msgs, params, task_kind=task_kind, tier=tier,
             constraints=_with_quality(constraints, quality),
-            timeout_s=timeout_s, route=route))
+            timeout_s=timeout_s, route=route)
         if (not resp.ok
                 and resp.failure_class == FailureClass.CONTEXT_OVERFLOW.value):
             # The chain failed over and every provider choked on size: the
@@ -471,10 +562,9 @@ class Brain:
             if fitted.ok and fitted.messages != list(messages):
                 _log.info("brain: context overflow - retrying with fitted "
                           "context (%d est. tokens)", fitted.tokens)
-                resp = self._classify(self._call(
-                    "chat", self._get_router().chat, fitted.messages, params,
-                    task_kind=task_kind, tier=tier,
-                    constraints=constraints, timeout_s=timeout_s))
+                resp = self._chat_dispatch(
+                    fitted.messages, params, task_kind=task_kind, tier=tier,
+                    constraints=constraints, timeout_s=timeout_s)
         return resp
 
     def complete(

@@ -43,6 +43,18 @@ from .runtime_wisdom import RuntimeWisdomMixin
 from .runtime_reach import RuntimeReachMixin
 _log = get_logger(__name__)
 
+
+class _VoiceUnavailable(Exception):
+    """Voice synthesis degraded (the voice ladder's silent rung served).
+
+    Carries the ladder's honesty clause in ``honesty_note`` so the text
+    fallback can tell the chat why the reply is text, not voice.
+    """
+
+    def __init__(self, note: str = "") -> None:
+        super().__init__(note or "voice synthesis unavailable")
+        self.honesty_note = note
+
 #: telegram-bot is the public endpoint: conversation + games only. A known
 #: non-game slash command there gets this redirect instead of running —
 #: owner/system controls live on the userbot (``telegram`` endpoint).
@@ -199,6 +211,21 @@ class PartnerRuntime(
         # Tools that deliver files into chats (file_send, report_publish)
         # reach the live gateway through the context, not a second wire.
         context.extras["gateway"] = self.gateway
+        # Degradation-ladder drain: messages the telegram ladder queued
+        # into the KV store while no gateway existed (gateway-less
+        # processes) move into this gateway's durable outbox now that a
+        # gateway DOES exist — the outbox's own drain delivers them.
+        try:
+            from ...core.error_system import drain_tg_retry_queue
+            from ...storage.kv import KVStore
+
+            drained = drain_tg_retry_queue(
+                context, self.gateway, kv_factory=lambda db: KVStore(db))
+            if drained:
+                _log.info("drained %d ladder-queued message(s) into the "
+                          "durable outbox", drained)
+        except Exception as exc:  # noqa: BLE001 — drain is best-effort
+            _log.debug("tg_retry drain skipped: %s", exc)
         # The spine's social tools (social_send, social_history, …) reach
         # the same live gateway. Bound once here so the brain's hands are
         # live on every platform from boot.
@@ -1481,6 +1508,39 @@ class PartnerRuntime(
 
         threading.Thread(target=_job, name=f"delayed-reply-{message.chat.key}", daemon=True).start()
 
+    def _synthesize_voice_part(self, text: str) -> str:
+        """Synthesize one voice-reply part → path to an .ogg voice note.
+
+        Routes through the voice degradation ladder when the error
+        system is wired: rung 0 is the real TTS engine (injected at
+        the composition root), rung 1 is the silent rung — a TTS
+        failure raises :class:`_VoiceUnavailable` carrying the ladder's
+        honesty clause, so the text fallback in :meth:`_send_voice_reply`
+        can say WHY the reply is text. Without a wired ladder the
+        direct synthesis call runs, exactly as before.
+        """
+        from ...voice.pingpong import synthesize_voice_reply
+
+        ladder = None
+        es = getattr(self.context, "error_system", None)
+        if es is not None:
+            try:
+                ladder = es.ladders.get("voice")
+            except Exception:  # noqa: BLE001 - ladder is best-effort
+                ladder = None
+        if ladder is None:
+            return synthesize_voice_reply(self.context, text)
+        result, meta = ladder.call(text, context=self.context)
+        if isinstance(result, dict) and result.get("ok") \
+                and result.get("path"):
+            return str(result["path"])
+        note = ""
+        if isinstance(meta, dict):
+            note = str(meta.get("honesty") or "")
+        if isinstance(result, dict):
+            note = note or str(result.get("note") or "")
+        raise _VoiceUnavailable(note)
+
     def _send_voice_reply(self, message: ChatMessage,
                             parts: list[str]) -> bool:
         """Reply with voice note(s).  True when at least one went out.
@@ -1492,7 +1552,7 @@ class PartnerRuntime(
         part after it fall back to TEXT — a mid-reply voice failure must
         never silently drop the rest of the reply.
         """
-        from ...voice.pingpong import synthesize_voice_reply, ogg_duration
+        from ...voice.pingpong import ogg_duration
         from ...social.chat.base import MediaRef
         sent_any = False
         part_list = list(parts or [])
@@ -1501,7 +1561,7 @@ class PartnerRuntime(
             if not text:
                 continue
             try:
-                ogg_path = synthesize_voice_reply(self.context, text)
+                ogg_path = self._synthesize_voice_part(text)
                 # recording indicator matches the note's real length —
                 # unless this chat has the typing simulation off (owner
                 # order: userbot owner DM + personal bot send at once).
@@ -1527,10 +1587,19 @@ class PartnerRuntime(
             except Exception as exc:  # noqa: BLE001 - fall back to text
                 _log.warning("voice reply failed, falling back to text: %s",
                              exc)
+                # When the degradation came through the voice ladder,
+                # its honesty clause rides on the first text part — the
+                # chat is told the reply is text because voice is down,
+                # not left to guess.
+                honesty_note = str(getattr(exc, "honesty_note", "") or "")
+                note_pending = bool(honesty_note)
                 for rest in part_list[idx:]:
                     rest_text = (rest or "").strip()
                     if not rest_text:
                         continue
+                    if note_pending:
+                        rest_text = f"{honesty_note}\n{rest_text}"
+                        note_pending = False
                     try:
                         tts_result = self.gateway.send(
                             message.chat.platform, message.chat, rest_text)
@@ -2199,6 +2268,10 @@ class PartnerRuntime(
                 "durable_outbox": bool(self.gateway.durable_outbox),
                 "outbox": self.gateway.outbox is not None,
             },
+            # Degradation ladders (llm / telegram / voice): which rung
+            # each subsystem is serving from right now. Empty when the
+            # error system never wired (shouldn't happen in production).
+            "degradation": self._degradation_status(),
             "autonomy": self._autonomy.status() if self._autonomy else "off",
             # Dynamic lexicon voice feed: per-category term counts so the
             # owner can see what the feed is working with (deeper inspection
@@ -2212,6 +2285,20 @@ class PartnerRuntime(
             # fell back instead of stalling the chat.
             "reply_timeouts": self.brain.responder.reply_timeouts,
         }
+
+    def _degradation_status(self) -> dict[str, Any]:
+        """Ladder snapshot for status surfaces. Never raises."""
+        es = getattr(self.context, "error_system", None)
+        if es is None:
+            return {"wired": False, "degraded": [], "ladders": {}}
+        try:
+            return {
+                "wired": True,
+                "degraded": es.ladders.degraded_subsystems(),
+                "ladders": es.ladders.status_all(),
+            }
+        except Exception:  # noqa: BLE001 - status must never break
+            return {"wired": True, "degraded": [], "ladders": {}}
 
     def say(self, chat_key: str, text: str, *, reply_to: str = "") -> Any:
         """Owner-initiated send (CLI `partner --say`): goes through the gateway,
@@ -2862,7 +2949,7 @@ class PartnerRuntime(
         if kind == "platforms":
             lines = ["platforms:"]
             for name, info in sorted(self.gateway.status().items()):
-                if name == "_stats":
+                if name.startswith("_") or not isinstance(info, dict):
                     continue
                 state = "running" if info.get("running_in_session") else "not running"
                 suffix = "" if info.get("running") else " (adapter thread down)"

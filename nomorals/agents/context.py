@@ -324,12 +324,48 @@ def build_context(
         from ..core.error_system import build_error_system, set_error_system
         from ..llm.base import Message
         from ..storage.kv import KVStore
-        # The kernel may not import storage / llm: the composition root
-        # injects the factories the degradation ladders need.
+        # The kernel may not import storage / llm / voice: the
+        # composition root injects the context itself (the ladder
+        # handlers resolve router / gateway / db from it lazily — the
+        # gateway only exists once the partner runtime starts) plus the
+        # factories the degradation ladders need.
+        #
+        # Voice factories are best-effort: a voice stack that fails to
+        # import leaves the voice ladder's rung 0 honestly un-wired
+        # (factory None → the rung fails fast, the ladder degrades to
+        # its silent rung) instead of breaking boot.
+        tts_factory = None
+        tts_probe = None
+        try:
+            from ..tools.audio import detect_tts_engines
+            from ..voice.pingpong import synthesize_voice_reply
+
+            def _tts_factory(ctx: Any, text: str) -> Any:
+                return synthesize_voice_reply(ctx, text)
+
+            def _tts_probe() -> bool:
+                # Healthy = a local engine exists, or a remote TTS
+                # provider is configured (the API engine the EC2 uses —
+                # undetectable by binary scan). A wrong True only costs
+                # one retried synthesis per probe interval; a wrong
+                # False would pin voice replies to text.
+                if detect_tts_engines():
+                    return True
+                engine = str(getattr(settings.audio, "tts_engine", "")
+                             or "").lower()
+                return engine in {"api", "openai_compat", "openai"}
+
+            tts_factory = _tts_factory
+            tts_probe = _tts_probe
+        except Exception as exc:  # noqa: BLE001 — voice is optional at boot
+            _log.debug("voice ladder factories unavailable: %s", exc)
         context.error_system = build_error_system(
             settings,
+            context=context,
             kv_factory=lambda db: KVStore(db),
             message_factory=lambda prompt: [Message.user(prompt)],
+            tts_factory=tts_factory,
+            tts_probe=tts_probe,
         )
         set_error_system(context.error_system)
     except Exception as exc:  # noqa: BLE001 — error telemetry is optional
