@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from .typed_encoding import _decode_typed, _encode_typed
 
+import contextvars
 import fnmatch
 import hashlib
 import inspect
@@ -1079,6 +1080,7 @@ class ToolRegistry:
 
     def _idempotency_replay(
         self, name: str, key: str, actor: str, digest: str,
+        tool_version: str = "",
     ) -> Outcome[Any] | None:
         """Replay / reject for a stored record. None = no record (miss)."""
         rec = self._idempotency_load(name, key)
@@ -1094,6 +1096,12 @@ class ToolRegistry:
                 f"idempotency key {key!r} for tool {name!r} was already used "
                 f"with different arguments (conflict) — refusing to return "
                 f"an unrelated result or re-execute"))
+        if rec.tool_version != tool_version:
+            return Err(ValidationError(
+                f"idempotency key {key!r} for tool {name!r} was recorded "
+                f"under tool version {rec.tool_version!r} but the tool is "
+                f"now version {tool_version!r} (conflict) — refusing to "
+                f"return a stale result or re-execute"))
         return rec.outcome
 
     def _idempotency_acquire(self, name: str, key: str) -> bool:
@@ -1208,7 +1216,8 @@ class ToolRegistry:
             return outcome
 
         digest = self._args_digest(kwargs)
-        hit = self._idempotency_replay(name, idempotency_key, actor, digest)
+        hit = self._idempotency_replay(name, idempotency_key, actor, digest,
+                                       tool_version=spec.version)
         if hit is not None:
             if hit.ok:
                 self._audit(name, actor, spec.capability, "allow", kwargs,
@@ -1220,7 +1229,8 @@ class ToolRegistry:
             # A waiter that found the slot freed re-checks: the owner
             # may have stored a result (replay) or failed (execute).
             hit = self._idempotency_replay(name, idempotency_key, actor,
-                                           digest)
+                                           digest,
+                                           tool_version=spec.version)
             if hit is not None:
                 if hit.ok:
                     self._audit(name, actor, spec.capability, "allow", kwargs,
@@ -1259,13 +1269,23 @@ class ToolRegistry:
             return [self.call(name, **{**common, **kwargs})
                     for name, kwargs in calls]
 
-        def _one(call: tuple[str, dict[str, Any]]) -> Outcome[Any]:
-            name, kwargs = call
-            return self.call(name, **{**common, **kwargs})
+        # Pool threads do not inherit the caller's contextvars, so a
+        # bare ``self.call`` on a worker thread runs with an EMPTY
+        # context: correlation ids (request/run/mission) vanish from
+        # the tool.call events those calls emit, and replay cannot
+        # join them to their turn. Capture one context copy per call
+        # HERE, on the submitting thread (each copy is entered by
+        # exactly one worker), mirroring core/jobs.py's submit.
+        captured = [(call, contextvars.copy_context()) for call in calls]
+
+        def _one(item: tuple[tuple[str, dict[str, Any]],
+                             contextvars.Context]) -> Outcome[Any]:
+            (name, kwargs), ctx = item
+            return ctx.run(self.call, name, **{**common, **kwargs})
 
         with ThreadPoolExecutor(max_workers=max_workers,
                                 thread_name_prefix="tool-call") as pool:
-            return list(pool.map(_one, calls))
+            return list(pool.map(_one, captured))
 
     def request_approval(
         self,

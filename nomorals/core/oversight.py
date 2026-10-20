@@ -141,12 +141,22 @@ def _parts(value: str) -> tuple[str, ...]:
 
 
 def _is_oversight_path(value: str) -> bool:
-    """True when ``value`` names an oversight file or secret material."""
-    parts = _parts(value)
+    """True when ``value`` names an oversight file or secret material.
+
+    Matching is case-insensitive: on a case-insensitive filesystem
+    (Windows — the deployment host) ``NOMORALS/CORE/POLICY.PY`` IS
+    the policy file, and a gate that only recognises the exact-case
+    spelling would wave the write through. Case-folding the compare
+    can only widen matches to case variants of the exact oversight
+    suffixes / secret names, which the suffix design already treats
+    conservatively (any project with a ``core/policy.py`` matches).
+    """
+    parts = tuple(p.casefold() for p in _parts(value))
     if not parts:
         return False
     for suffix in _OVERSIGHT_SUFFIXES:
-        if len(parts) >= len(suffix) and parts[-len(suffix):] == suffix:
+        folded = tuple(p.casefold() for p in suffix)
+        if len(parts) >= len(folded) and parts[-len(folded):] == folded:
             return True
     if _SECRET_COMPONENTS.intersection(parts):
         return True
@@ -164,8 +174,9 @@ def _is_oversight_exec_text(text: str) -> bool:
     if not any(ind in lowered for ind in _WRITE_INDICATORS):
         return False
     # Reassemble candidate paths from the text: any oversight suffix
-    # appearing as a substring of the (separator-normalized) command.
-    normalized = text.replace("\\", "/")
+    # appearing as a substring of the (separator-normalized, case-folded)
+    # command — case variants name the same file on Windows.
+    normalized = lowered.replace("\\", "/")
     for suffix in _OVERSIGHT_SUFFIXES:
         if "/".join(suffix) in normalized:
             return True

@@ -4,8 +4,10 @@ Thread timeouts are cooperative only: ``Future.cancel()`` is a no-op
 once the callable is running, so a hung tool leaves an UNKNOWN
 outcome. Where forcible termination is appropriate (isolated
 processes for dangerous / long-running tools), run the callable in
-a CHILD PROCESS and ``SIGKILL`` it on timeout — a dead process has a
-KNOWN outcome (dead), never unknown.
+a CHILD PROCESS and ``SIGKILL`` its process group on timeout — a dead
+process tree has a KNOWN outcome (dead), never unknown. The child
+starts a new session at fork so the group kill also reaches any
+subprocesses the callable spawned.
 
 Mechanism: ``os.fork()`` + a result pipe. Fork inherits memory, so
 the callable may be a bound method or closure — nothing is pickled
@@ -71,6 +73,14 @@ def run_isolated(fn: Callable[..., Any], *args: Any,
     if pid == 0:
         # ── child ──────────────────────────────────────────────
         try:
+            # Own session/process group, so the parent's timeout kill
+            # reaches the WHOLE tree the callable spawns — killing
+            # only the child would leave grandchildren running (and
+            # producing side effects) after a "known dead" verdict.
+            try:
+                os.setsid()
+            except OSError:
+                pass
             os.close(read_fd)
             try:
                 result = fn(*args, **kwargs)
@@ -99,12 +109,18 @@ def run_isolated(fn: Callable[..., Any], *args: Any,
         while True:
             remaining = deadline - time.time()
             if remaining <= 0:
-                # Deadline: SIGKILL + reap. The outcome is KNOWN
-                # (dead), never unknown.
+                # Deadline: SIGKILL the child's whole process group
+                # (it did setsid at fork) + reap. The outcome is
+                # KNOWN (dead), never unknown — for the tree, not
+                # just the direct child. If the group is already
+                # gone, fall back to the bare pid kill.
                 try:
-                    os.kill(pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
+                    os.killpg(pid, signal.SIGKILL)
+                except (ProcessLookupError, PermissionError, OSError):
+                    try:
+                        os.kill(pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
                 killed = True
                 break
             import select
