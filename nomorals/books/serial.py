@@ -28,13 +28,18 @@ from typing import Any
 from ..core.logging_setup import get_logger
 from .bible import BibleBuilder
 from .continuation import StoryContinuer
-from .fiction import FictionWriter
+from .fiction import FictionWriter, StoryCompleteError
 from .reader import StoryReader
 from .voiceprint import Voiceprint, compare, fingerprint
 
 _log = get_logger(__name__)
 
 __all__ = ["SerialManager", "SerialError"]
+
+#: Chapters written per ``write_novel`` run when no smaller batch is
+#: asked for.  A batching limit for ONE run (the caller runs again to
+#: continue) — never the story's length, which the story decides.
+WRITE_RUN_BATCH = 30
 
 
 class SerialError(Exception):
@@ -109,21 +114,28 @@ class SerialManager:
                     chapters: int = 0,
                     for_whom: dict[str, Any] | None = None,
                     wisdom_theme: str = "") -> dict[str, Any]:
-        """Start a complete novel. ``chapters`` 0 = the book decides
-        its own shape from premise complexity; a positive value is the
-        owner's explicit shape and is planned exactly."""
+        """Start a complete novel. ``chapters`` 0 = the story decides
+        its own length (its arcs running out ends it; the premise-
+        complexity estimate is recorded as advisory metadata only);
+        a positive value is the owner's explicit shape and is planned
+        exactly."""
         result = self.fiction.start(
             premise, genre=genre, mode="novel",
             chapters=int(chapters or 0),
             theme=wisdom_theme or "")
         slug = result["slug"]
+        state = self.fiction.load(slug)
         meta = self._load_meta(slug)
         meta.update({
             "kind": "novel",
             "for_whom": for_whom or {},
             "wisdom_theme": wisdom_theme or "",
             "reference_voiceprint": None,
-            "planned_chapters": chapters or result.get("total_planned"),
+            # honest metadata: an explicit owner count, else the
+            # advisory estimate (never recorded as the owner's number)
+            "planned_chapters": (int(chapters) if chapters
+                                 else state.total_planned),
+            "shape_source": "owner" if chapters else "estimate",
         })
         self._save_meta(slug, meta)
         return {**result, "for_whom": for_whom or {}, "kind": "novel"}
@@ -188,32 +200,77 @@ class SerialManager:
         return {**result, "drift": drift, "bible_updated": bible_updated}
 
     def write_novel(self, slug: str, *, max_chapters: int = 0) -> dict[str, Any]:
-        """Write a complete novel to its planned end (or ``max_chapters``
-        chapters). Returns per-chapter drift + a completion summary."""
+        """Write a novel onward and report honestly what stopped the run.
+
+        Who decides the end is never a silent hardcoded count:
+        * a novel ends when its STORY ends — its arcs are all served
+          (``StoryCompleteError`` from the writer) → ``done: True``;
+        * the owner's explicit chapter count (``shape_source="owner"``)
+          is a decision, honored exactly → ``done: True``;
+        * the premise-complexity estimate (``shape_source="estimate"``)
+          never stops the writing;
+        * a serial never ends (never-ending) — one run writes one batch
+          and says so plainly → ``done: False``.
+        ``max_chapters`` caps a single run on the owner's explicit
+        instruction — that is batching, not the story's length.  A run
+        that hits the per-run batch limit simply continues next call.
+        """
         state = self.fiction.load(slug)
-        total = max_chapters or state.total_planned or 0
+        serial = state.mode == "serial"
+        owner_target = (state.total_planned
+                        if (not serial and state.shape_source == "owner")
+                        else 0)
+        batch = max(1, int(max_chapters or 0)) if max_chapters else WRITE_RUN_BATCH
         written: list[dict[str, Any]] = []
-        while total == 0 or state.chapters_written < total:
-            chapter = self.write_next(slug)
+        done = False
+        stopped_because = ""
+        while len(written) < batch:
+            if owner_target and state.chapters_written >= owner_target:
+                done = True
+                stopped_because = (
+                    f"owner-set shape reached ({owner_target} chapters)")
+                break
+            try:
+                chapter = self.write_next(slug)
+            except StoryCompleteError:
+                done = True
+                stopped_because = ("the story's arcs are all served — "
+                                   "it reached its own end")
+                break
             written.append({"number": chapter.get("number"),
                             "words": chapter.get("words"),
                             "drift": (chapter.get("drift") or {}).get("drift"),
                             "path": chapter.get("path")})
             state = self.fiction.load(slug)
-            if total and state.chapters_written >= total:
-                break
-            if not total and len(written) >= 30:
-                # unplanned novel: cap a single run, owner continues
-                break
+        if not done:
+            # exact batch edge: the final arc may have closed on the last
+            # written chapter — the story is still complete even though
+            # the writer never got to say so.
+            if (not serial) and self.fiction.story_complete(state):
+                done = True
+                stopped_because = ("the story's arcs are all served — "
+                                   "it reached its own end")
+            elif serial:
+                stopped_because = ("serial — never-ending; wrote one batch "
+                                   f"of {len(written)} chapters, the story "
+                                   "continues")
+            else:
+                stopped_because = (f"run batch limit ({batch} chapters) — "
+                                   "the story is not finished; run again "
+                                   "to continue")
         meta = self._load_meta(slug)
         return {
-            "slug": slug, "title": state.title, "kind": "novel",
+            "slug": slug, "title": state.title,
+            "kind": meta.get("kind", state.mode),
             "chapters_written": state.chapters_written,
             "total_planned": state.total_planned,
+            "planned_is_estimate": (not serial
+                                    and state.shape_source != "owner"),
             "for_whom": meta.get("for_whom", {}),
             "chapters": written,
             "drift_log": meta.get("drift_log", []),
-            "done": bool(total) and state.chapters_written >= total,
+            "done": done,
+            "stopped_because": stopped_because,
         }
 
     def status(self, slug: str) -> dict[str, Any]:

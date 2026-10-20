@@ -53,7 +53,16 @@ _log = get_logger(__name__)
 __all__ = [
     "FictionWriter", "GenreEngine", "StoryState", "Arc", "ChapterBrief",
     "ENGINES", "engine_for", "BeatSheet", "SAVE_THE_CAT_BEATS",
+    "StoryCompleteError",
 ]
+
+
+class StoryCompleteError(ValueError):
+    """A novel's arcs are all served — the story reached its own end.
+
+    Raised instead of silently stopping at (or padding past) a chapter
+    count: the story decided.  A ``ValueError`` so existing handlers
+    that treat "no arcs left" as an error keep working."""
 
 
 # ── beat sheets (Save the Cat, novel-adapted) ─────────────────────────────────
@@ -176,6 +185,11 @@ class StoryState:
     arcs: list[dict[str, Any]] = field(default_factory=list)
     current_arc: int = 0
     total_planned: int = 0
+    #: where ``total_planned`` came from: "owner" (explicit decision,
+    #: honored exactly), "estimate" (premise-complexity suggestion —
+    #: advisory only, the story's arcs decide the real length), or
+    #: "none" (serials: never-ending, no total is ever planned).
+    shape_source: str = "estimate"
     style: dict[str, Any] = field(default_factory=dict)
     ledger: dict[str, Any] = field(default_factory=dict)
     #: Humane ``for:`` field — who the story is for (name / relationship /
@@ -1380,8 +1394,11 @@ class FictionWriter:
     # -- starting -----------------------------------------------------------------
     def decide_shape(self, premise: str, genre: str,
                      mode: str) -> tuple[int, str]:
-        """The book decides its own shape: chapter count from premise
-        complexity (threads × depth signals), never a hardcoded template."""
+        """An opening ESTIMATE of chapter count from premise complexity
+        (threads × depth signals) — advisory only, never a plan the code
+        enforces.  A novel's real length is decided by its story: its
+        arcs being served (see :meth:`write_next`).  A serial gets no
+        total at all: the number here is only its first-arc scale."""
         low = premise.lower()
         # complexity signals in the premise itself
         thread_signals = sum(low.count(w) for w in
@@ -1396,11 +1413,13 @@ class FictionWriter:
             # serials don't end: shape = first arc length
             chapters = max(6, min(12, 6 + complexity // 3))
             note = (f"serial — first arc of ~{chapters} chapters; "
-                    f"arcs spawn from dangling threads indefinitely")
+                    f"arcs spawn from dangling threads indefinitely; "
+                    f"no total is planned")
         else:
             chapters = max(8, min(30, 10 + complexity // 2))
-            note = (f"novel — ~{chapters} chapters from premise complexity "
-                    f"(signals: {complexity})")
+            note = (f"novel — opening estimate ~{chapters} chapters from "
+                    f"premise complexity (signals: {complexity}); the "
+                    f"story's arcs decide the real length")
         return chapters, note
 
     def start(self, premise: str, genre: str = "fantasy",
@@ -1411,10 +1430,14 @@ class FictionWriter:
               owner_texts: list[str] | None = None) -> dict[str, Any]:
         """Begin a story: shape it, plan arcs, weave wisdom, write ch.1.
 
-        ``chapters`` 0 (default) = the book decides its own shape from
-        premise complexity (:meth:`decide_shape`).  A positive value is
-        an explicit owner decision and overrides the estimate — it is
-        never silently ignored.
+        ``chapters`` 0 (default) = the story decides its own length: a
+        novel runs until its arcs are served (the premise-complexity
+        estimate from :meth:`decide_shape` is recorded as an advisory
+        ``total_planned`` with ``shape_source="estimate"`` and never
+        stops the writing); a serial is never-ending and records no
+        total at all.  A positive ``chapters`` is an explicit owner
+        decision (``shape_source="owner"``) — planned exactly, never
+        silently ignored or rewritten.
         ``for_whom`` is the humane ``for:`` field (name / relationship /
         occasion) stored on the state; ``owner_texts`` are the owner's
         own prose, measured into ``state.style["owner_voiceprint"]`` —
@@ -1425,16 +1448,28 @@ class FictionWriter:
         if mode not in ("novel", "serial"):
             raise ValueError("mode must be novel | serial")
         slug = slugify(f"{title or premise[:40]}-{genre}", fallback="story")
-        total, shape_note = self.decide_shape(premise, genre, mode)
+        estimate, shape_note = self.decide_shape(premise, genre, mode)
         if chapters and int(chapters) > 0:
-            suggested = total
             total = int(chapters)
+            shape_source = "owner"
             shape_note = (f"owner-set shape: {total} chapters "
-                          f"(premise complexity suggested ~{suggested})")
+                          f"(premise complexity suggested ~{estimate})")
+        elif mode == "serial":
+            # never-ending: no total is planned, ever — the estimate
+            # only scales the first arc's pacing seeds below.
+            total = 0
+            shape_source = "none"
+        else:
+            total = estimate
+            shape_source = "estimate"
+        # engine pacing seeds (mystery reveal, thriller deadline) scale
+        # with the planned length when there is one, else the estimate.
+        seed_total = total or estimate
         engine = engine_for(genre, seed=hash(slug) & 0xFFFFFFFF)
         state = StoryState(
             slug=slug, title=title or premise[:60], premise=premise,
             genre=engine.name, mode=mode, total_planned=total,
+            shape_source=shape_source,
             style={"theme": theme or premise[:80]},
             for_whom=dict(for_whom or {}))
         if owner_texts:
@@ -1449,9 +1484,9 @@ class FictionWriter:
         arcs = engine.plan_arcs(premise, state)
         # the mystery engine learns its reveal chapter from the shape
         if engine.name == "mystery":
-            state.ledger["reveal_chapter"] = max(4, total - 2)
+            state.ledger["reveal_chapter"] = max(4, seed_total - 2)
         if engine.name == "thriller":
-            state.ledger["deadline_chapter"] = total
+            state.ledger["deadline_chapter"] = seed_total
         state.arcs = [a.to_dict() for a in arcs]
         if arcs:
             arcs[0].status = "active"
@@ -1482,14 +1517,51 @@ class FictionWriter:
                 self._save_state(state)
                 d = dict(a)
                 return Arc(**{k: d.get(k) for k in Arc.__dataclass_fields__})
+        if state.mode == "novel":
+            raise StoryCompleteError(
+                "the story is complete — every arc has been served")
         raise ValueError("story has no arcs left — spawn one (serial mode)")
 
     def _arc_written(self, state: StoryState, arc: Arc) -> int:
         # chapters written while this arc was active: track via ledger
         return int(state.ledger.get(f"arc_{arc.name}_written", 0))
 
+    def story_complete(self, state: StoryState) -> bool:
+        """Has the story reached its own end?  A novel is complete when
+        every arc it planned has been fully served — the story decides,
+        never a chapter count.  Serials are never complete."""
+        if state.mode != "novel" or not state.arcs:
+            return False
+        for a in state.arcs:
+            if a.get("status") == "closed":
+                continue
+            written = int(state.ledger.get(
+                f"arc_{a.get('name')}_written", 0))
+            if written < int(a.get("chapters_planned", 0) or 0):
+                return False
+        return True
+
+    def _close_served_arc(self, state: StoryState, arc: Arc) -> Arc:
+        """Novel arc progression: once the active arc has been fully
+        served, close it and move to the next planned arc — so a
+        novel's chapters actually travel its structure (the mystery's
+        Investigation and Resolution briefs only exist on later arcs).
+        When no arc remains, the story has reached its own end:
+        :class:`StoryCompleteError`."""
+        if self._arc_written(state, arc) < arc.chapters_planned:
+            return arc
+        for a in state.arcs:
+            if a.get("name") == arc.name:
+                a["status"] = "closed"
+        self._save_state(state)
+        return self._current_arc(state)
+
     def write_next(self, slug: str, *, direction: str = "") -> dict[str, Any]:
-        """Write the next chapter: brief → prose → validate → advance."""
+        """Write the next chapter: brief → prose → validate → advance.
+
+        Raises :class:`StoryCompleteError` when a novel's arcs are all
+        served — the story reached its own end.  Serials never raise it:
+        their arcs spawn indefinitely."""
         state = self.load(slug)
         engine = engine_for(state.genre, seed=hash(slug) & 0xFFFFFFFF)
         arc = self._current_arc(state)
@@ -1499,6 +1571,10 @@ class FictionWriter:
         if state.mode == "serial":
             self._maybe_roll_arc(state, engine, arc, chapter_no)
             arc = self._current_arc(state)
+        elif state.mode == "novel":
+            # novel mode: a fully-served arc closes and the next planned
+            # arc takes over; no arcs left = the story reached its end.
+            arc = self._close_served_arc(state, arc)
 
         brief = engine.chapter_brief(state, arc, chapter_no)
         if state.style.get("wisdom_motifs"):
@@ -2042,13 +2118,18 @@ class FictionWriter:
         state = self.load(slug)
         arcs = [{"name": a.get("name"), "status": a.get("status"),
                  "goal": a.get("goal", "")[:100]} for a in state.arcs]
+        try:
+            current_arc = self._current_arc(state).name if state.arcs else ""
+        except StoryCompleteError:
+            current_arc = "(complete — all arcs served)"
         return {
             "slug": state.slug, "title": state.title, "genre": state.genre,
             "mode": state.mode, "for_whom": dict(state.for_whom),
             "chapters_written": state.chapters_written,
             "total_planned": state.total_planned,
-            "current_arc": self._current_arc(state).name
-            if state.arcs else "",
+            "shape_source": state.shape_source,
+            "complete": self.story_complete(state),
+            "current_arc": current_arc,
             "arcs": arcs,
             "open_threads": [t for t in state.threads
                              if t.get("status") == "open"],
