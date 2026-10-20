@@ -75,11 +75,13 @@ def test_immune_quarantine_disarm_arrest_fever_drift_casefile():
     assert "ACTIVE" in control_immune("fever status", chat_key="t3")
     ended = control_immune("fever end", chat_key="t3")
     assert "fever ended" in ended
-    # drift needs 3 days
+    # drift needs 3 full DAYS: the chat stamps today's date, so three
+    # adds in one session are one day (re-adding a date replaces that
+    # day's metrics — pass #28) and the verdict stays insufficient.
     control_immune("drift add 100 5 1 0", chat_key="t3")
     control_immune("drift add 110 5 1 0", chat_key="t3")
     control_immune("drift add 120 5 1 0", chat_key="t3")
-    assert "insufficient" not in control_immune("drift report", chat_key="t3")
+    assert "insufficient" in control_immune("drift report", chat_key="t3")
     assert "case file" in control_immune("casefile add first evidence", chat_key="t3")
     assert "sealed" in control_immune("casefile seal " + control_immune("casefile list", chat_key="t3").split()[2][:4], chat_key="t3") or True
     assert "case files" in control_immune("casefile list", chat_key="t3")

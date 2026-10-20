@@ -151,7 +151,7 @@ def _status(state: _ImmuneState) -> str:
     lines = [
         "🛡️ immune status",
         f"  antibodies: {len(active)} active",
-        f"  fever: {'ACTIVE — ' + state.fever.reason if state.fever.active else 'off'}",
+        f"  fever: {'ACTIVE — ' + state.fever.reason if state.fever.is_active() else 'off'}",
         f"  drift: {drift.verdict} ({drift.days_considered} days)",
         f"  quarantined artifacts: {len(state.vault)} (vault, never deleted)",
         f"  case files: {len(state.casefiles)}",
@@ -307,7 +307,7 @@ def _fever(state: _ImmuneState, rest: str) -> str:
     verb = verb.lower()
     tail = tail.strip()
     if verb == "status" or not verb:
-        if state.fever.active:
+        if state.fever.is_active():
             return (
                 f"fever ACTIVE: {state.fever.reason} "
                 f"(max {state.fever.max_seconds:g}s, "

@@ -49,6 +49,14 @@ class BehaviourDriftMonitor:
             "grants_held": float(metrics.get("grants_held", 0) or 0),
             "errors": float(metrics.get("errors", 0) or 0),
         }
+        # One metrics dict per day: re-adding a date REPLACES that
+        # day's metrics. Appending unconditionally let three adds of
+        # the same calendar date pose as 3 full days and produce a
+        # verdict from a single day.
+        for idx, (existing_date, _metrics) in enumerate(self._days):
+            if existing_date == date:
+                self._days[idx] = (date, clean)
+                return self.current_report()
         self._days.append((date, clean))
         return self.current_report()
 

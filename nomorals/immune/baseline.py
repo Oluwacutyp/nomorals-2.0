@@ -13,9 +13,9 @@ the fixed numbers with percentiles computed from an
   baseline.
 * At >= 30 samples, thresholds are the 95th percentile (p95) of
   ``processes_spawned`` and of ``process_growth`` across the recorded
-  samples. A threshold of 0 (degenerate all-zero baseline) is treated
-  as insufficient — a baseline that has only ever seen zero cannot
-  say what "too much" is.
+  samples. A threshold of 0 on either leg (degenerate baseline) is
+  treated as insufficient — a leg that has only ever seen zero
+  cannot say what "too much" is for that leg.
 * :func:`collect_process_sample` reads the live process count from
   ``/proc`` on Linux (stdlib only) and derives growth as the ratio of
   the current count to the median of prior counts. On non-Linux, or
@@ -91,13 +91,26 @@ class AdaptiveBaseline:
         return len(self._samples)
 
     def record(self, sample: Dict[str, Any]) -> int:
-        """Record one sample. Returns the total sample count."""
+        """Record one sample. Returns the total sample count.
+
+        ``process_growth`` accepts the legacy ``growth`` alias — the
+        same fallback :func:`adaptive_consult_then_enforce` and
+        ``police._exceeds_cancer`` apply when reading a sample.
+        Dropping the alias here silently recorded growth 0.0 for
+        callers using the legacy key.
+        """
         clean: Dict[str, float] = {}
-        for key in ("processes_spawned", "process_growth", "tokens", "errors"):
+        for key in ("processes_spawned", "tokens", "errors"):
             try:
                 clean[key] = float(sample.get(key, 0) or 0)
             except (TypeError, ValueError):
                 clean[key] = 0.0
+        try:
+            clean["process_growth"] = float(
+                sample.get("process_growth", sample.get("growth", 0)) or 0
+            )
+        except (TypeError, ValueError):
+            clean["process_growth"] = 0.0
         self._samples.append(clean)
         return len(self._samples)
 
@@ -124,6 +137,18 @@ class AdaptiveBaseline:
                 spawned_p95=spawned_p95,
                 growth_p95=growth_p95,
                 reason="degenerate all-zero baseline — cannot say what 'too much' is",
+            )
+        if spawned_p95 <= 0 or growth_p95 <= 0:
+            leg = "processes_spawned" if spawned_p95 <= 0 else "process_growth"
+            return Thresholds(
+                status="insufficient",
+                samples=n,
+                spawned_p95=spawned_p95,
+                growth_p95=growth_p95,
+                reason=(
+                    f"degenerate baseline: {leg} has only ever been 0 — "
+                    "cannot say what 'too much' is"
+                ),
             )
         return Thresholds(
             status="ready",
@@ -207,9 +232,13 @@ def adaptive_consult_then_enforce(
                 "details": receipt.details, "receipt": receipt}
     spawned = float(sample.get("processes_spawned", 0) or 0)
     growth = float(sample.get("process_growth", sample.get("growth", 0)) or 0)
+    # Strictly OVER both thresholds: a sample sitting exactly AT the
+    # p95 of the baseline is behaviour the baseline itself has seen —
+    # with a low-variance baseline (e.g. a constant process count)
+    # ``>=`` would enforce on the most normal sample there is.
     over = (
-        thresholds.spawned_p95 is not None and spawned >= thresholds.spawned_p95
-        and thresholds.growth_p95 is not None and growth >= thresholds.growth_p95
+        thresholds.spawned_p95 is not None and spawned > thresholds.spawned_p95
+        and thresholds.growth_p95 is not None and growth > thresholds.growth_p95
     )
     if is_system_process and over:
         if enforce_fn is not None:
@@ -218,8 +247,8 @@ def adaptive_consult_then_enforce(
             rung=5, action="enforce", target=target,
             reason=(
                 f"system process over adaptive thresholds "
-                f"(spawned {spawned:g} >= p95 {thresholds.spawned_p95:g}, "
-                f"growth {growth:g} >= p95 {thresholds.growth_p95:g}): enforced"
+                f"(spawned {spawned:g} > p95 {thresholds.spawned_p95:g}, "
+                f"growth {growth:g} > p95 {thresholds.growth_p95:g}): enforced"
             ),
             reversible=False,
             details={"enforced": True, "sample": dict(sample),
