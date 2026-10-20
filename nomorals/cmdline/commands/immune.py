@@ -20,7 +20,8 @@ def _cmd_immune(args: Any, context: Any) -> int:
               "       nm immune quarantine <artifact> | disarm <grant-id> | arrest <process-id> [system]\n"
               "       nm immune fever status | start <reason> <seconds> | end\n"
               "       nm immune drift add <tokens> <spawned> <grants> <errors> | report\n"
-              "       nm immune casefile list | add <text> | seal <id-prefix>",
+              "       nm immune casefile list | add <text> | seal <id-prefix>\n"
+              "       nm immune gate [spawned growth]",
               file=sys.stderr)
         return 2
     from ...immune.chat import control_immune

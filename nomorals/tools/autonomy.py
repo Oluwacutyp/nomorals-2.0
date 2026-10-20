@@ -36,6 +36,11 @@ nervous system through plain language:
   engine when the runtime never booted one.  Initiatives that need
   approval land in ``/proposals`` via the runtime's proposal sink —
   the tool itself never sends anything.
+* ``__immune_sampler__`` — scheduler-internal immune sampler: one
+  live process sample into the persisted adaptive baseline
+  (immune/wiring.py), consulting the adaptive cancer gate. Same
+  closure pattern. The monitor is shared per store path, so the
+  sampler, ``/immune`` chat and ``nm immune`` all see one baseline.
 """
 
 from __future__ import annotations
@@ -360,3 +365,25 @@ def register(registry: Any) -> None:
                    if i.status == "done")
         return {"ok": True, "chats": sorted(out),
                 "initiatives": total, "done": done, "proposed": proposed}
+
+    @registry.register(
+        "__immune_sampler__",
+        description="Collect one live process sample into the immune "
+        "adaptive baseline: persisted, recency-windowed, and "
+        "quarantined (never learned) while an incident is active. "
+        "Consults the adaptive cancer gate on each sample. "
+        "Scheduler-internal; runs every ~1 min.",
+        capability="owner",
+    )
+    def _immune_sampler_tool() -> dict[str, Any]:
+        # The shared monitor resolves its store from the same
+        # settings the runtime uses, so the sampler, /immune status
+        # and `nm immune` all read ONE baseline. The tick itself
+        # never raises (a failed collect is an honest no-sample).
+        from ..immune import wiring
+
+        monitor = wiring.shared_monitor(wiring.default_store_path(_context))
+        try:
+            return monitor.tick()
+        except Exception as exc:  # noqa: BLE001 - one bad tick never kills the job
+            return {"ok": False, "error": f"immune sampler tick failed: {exc}"}

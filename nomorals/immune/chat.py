@@ -14,9 +14,15 @@ Usage:
     /immune fever status | start <reason> <seconds> | end
     /immune drift add <tokens> <spawned> <grants> <errors> | report
     /immune casefile list | add <text> | seal <id-prefix>
+    /immune gate [spawned growth]
 
 State is in-memory per chat key (same as /tutor): antibody store,
 police vault, fever, drift monitor, case files, receipts. The
+adaptive cancer gate is NOT per-chat: its baseline, incident state
+and quarantine count live in the shared persisted monitor
+(immune/wiring.py), fed by the durable sampler job — ``status``
+reports that live state, and this chat's fever is registered with
+the monitor so its samples quarantine like any incident. The
 constitution lives in police.py — this control only routes; it never
 grants capability, and ``arrest`` without the ``system`` keyword
 returns a report-only receipt.
@@ -58,7 +64,9 @@ def IMMUNE_USAGE() -> str:
         "  /immune arrest <process-id> [system] — system processes only (owner-only)\n"
         "  /immune fever status | start <reason> <seconds> | end\n"
         "  /immune drift add <tokens> <spawned> <grants> <errors> | report\n"
-        "  /immune casefile list | add <text> | seal <id-prefix>"
+        "  /immune casefile list | add <text> | seal <id-prefix>\n"
+        "  /immune gate [spawned growth] — consult the adaptive cancer gate "
+        "(live sample, or probe with numbers)"
     )
 
 
@@ -109,13 +117,39 @@ def control_immune(tail: str, context: Any = None, chat: Any = None,
                    chat_key: str = "") -> str:
     """``/immune`` — one front door over nomorals.immune. Never raises."""
     try:
-        return _control_immune(tail, chat_key=chat_key)
+        return _control_immune(tail, chat_key=chat_key, context=context)
     except Exception as exc:  # noqa: BLE001 — never raise from chat
         return f"Immune hit an error ({exc})."
 
 
-def _control_immune(tail: str, *, chat_key: str = "") -> str:
+def _monitor_for(context: Any = None):
+    """The shared live gate monitor for this surface.
+
+    Resolved from the context's settings (same store the sampler job
+    feeds). Returns None when the monitor cannot load — the surface
+    then says so honestly instead of printing a gate claim with no
+    state behind it.
+    """
+    try:
+        from . import wiring
+
+        return wiring.shared_monitor(wiring.default_store_path(context))
+    except Exception:  # noqa: BLE001 — status degrades honestly
+        _log.warning("immune monitor unavailable", exc_info=True)
+        return None
+
+
+def _control_immune(tail: str, *, chat_key: str = "",
+                    context: Any = None) -> str:
     state = get_immune_state(chat_key)
+    monitor = _monitor_for(context)
+    if monitor is not None:
+        # This chat's fever is an incident like any other: while it
+        # runs, the shared baseline quarantines instead of learning.
+        try:
+            monitor.attach_fever(state.fever)
+        except Exception:  # noqa: BLE001 — never break the surface
+            pass
     raw = (tail or "").strip()
     if not raw or raw.lower() == "help":
         return IMMUNE_USAGE()
@@ -123,7 +157,7 @@ def _control_immune(tail: str, *, chat_key: str = "") -> str:
     verb = verb.lower()
     rest = rest.strip()
     if verb == "status":
-        return _status(state)
+        return _status(state, monitor)
     if verb == "scan":
         return _scan(state, rest)
     if verb == "antibodies":
@@ -140,12 +174,12 @@ def _control_immune(tail: str, *, chat_key: str = "") -> str:
         return _drift(state, rest)
     if verb == "casefile":
         return _casefile(state, rest)
+    if verb == "gate":
+        return _gate(state, monitor, rest)
     return IMMUNE_USAGE()
 
 
-def _status(state: _ImmuneState) -> str:
-    from .baseline import AdaptiveBaseline  # noqa: F401 — documents the adaptive gate
-
+def _status(state: _ImmuneState, monitor: Any = None) -> str:
     active = state.store.list_active()
     drift = state.drift.current_report()
     lines = [
@@ -157,9 +191,100 @@ def _status(state: _ImmuneState) -> str:
         f"  case files: {len(state.casefiles)}",
         f"  receipts: {len(state.receipts)}",
         "  constitution: revoke-only — no grant/acquire; owner work is report-only.",
-        "  cancer gate: adaptive p95 baseline (report-only until 30 live samples).",
     ]
+    lines += _gate_status_lines(monitor)
     return "\n".join(lines)
+
+
+def _gate_status_lines(monitor: Any) -> List[str]:
+    """The adaptive gate's REAL live state — measured, never claimed.
+
+    Samples recorded, baseline ready vs report-only with the count,
+    current p95 thresholds when ready, quarantined incident samples,
+    whether the sampler is actually ticking, and the store behind it.
+    """
+    if monitor is None:
+        return ["  cancer gate: adaptive p95 baseline — monitor "
+                "unavailable, no live state to report."]
+    st = monitor.status()
+    if st["ready"]:
+        head = (
+            f"  cancer gate: adaptive p95 baseline — {st['samples']} samples "
+            f"· READY (spawned p95 {st['spawned_p95']:g} · "
+            f"growth p95 {st['growth_p95']:g})"
+        )
+    else:
+        head = (
+            f"  cancer gate: adaptive p95 baseline — "
+            f"{st['samples']}/{st['min_samples']} samples · report-only "
+            f"({st['threshold_reason']})"
+        )
+    age = st["last_tick_age_s"]
+    if st["sampler_running"]:
+        sampler = "running"
+    elif age is None:
+        sampler = "no tick yet"
+    else:
+        sampler = f"stale (last tick {age:.0f}s ago)"
+    lines = [
+        head,
+        f"  sampler: {sampler} (every {st['sampler_interval_s']:.0f}s) · "
+        f"quarantined: {st['quarantined']} incident sample(s) · "
+        f"store: {st['store_path']}",
+    ]
+    if st["incident_active"]:
+        cause = "gate enforcement" if st["gate_incident"] else "fever"
+        lines.append(
+            f"  incident: ACTIVE ({cause}) — samples are quarantined, "
+            "not learned, until it closes")
+    return lines
+
+
+def _gate(state: _ImmuneState, monitor: Any, rest: str) -> str:
+    """``/immune gate [spawned growth]`` — the live decision path.
+
+    No numbers: run one sampler tick NOW (collect the real process
+    sample, consult the gate, learn or quarantine it). Two numbers:
+    a probe — consult the gate on that sample as a system process;
+    probes are never learned (typed numbers are not live behaviour).
+    """
+    if monitor is None:
+        return "🛡️ gate: monitor unavailable — no live gate state."
+    rest = rest.strip()
+    if not rest:
+        out = monitor.tick()
+        if not out["sampled"]:
+            return ("🛡️ gate: no live process sample available on this "
+                    "platform — nothing consulted, nothing learned.")
+        sample = out.get("sample") or {}
+        desc = (f"spawned {float(sample.get('processes_spawned', 0) or 0):g}, "
+                f"growth {float(sample.get('process_growth', 0) or 0):g}")
+        if out.get("enforced"):
+            return (f"🛡️ gate: ENFORCE — {out['reason']} · live sample "
+                    f"({desc}) quarantined; incident open.")
+        if out.get("incident"):
+            return (f"🛡️ gate: incident active — live sample ({desc}) "
+                    f"quarantined, not learned "
+                    f"({out['quarantined']} quarantined total).")
+        return (f"🛡️ gate: live sample ({desc}) — report-only, learned "
+                f"({out['samples']} samples in the baseline).")
+    parts = rest.split()
+    if len(parts) != 2:
+        return "usage: /immune gate [spawned growth]"
+    try:
+        spawned, growth = (float(p) for p in parts)
+    except ValueError:
+        return "usage: /immune gate [spawned growth] (numbers)"
+    result = monitor.consult(
+        {"process_id": "chat-gate-probe", "processes_spawned": spawned,
+         "process_growth": growth},
+        is_system_process=True)
+    state._record(result["receipt"])
+    if result["action"] == "enforce":
+        return (f"🛡️ gate probe: ENFORCE — {result['reason']} · incident "
+                "opened; the probe sample was not learned.")
+    return (f"🛡️ gate probe: report-only — {result['reason']} · the probe "
+            "sample was not learned.")
 
 
 def _scan(state: _ImmuneState, text: str) -> str:

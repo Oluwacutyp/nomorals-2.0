@@ -40,6 +40,7 @@ __all__ = [
     "Thresholds",
     "collect_process_sample",
     "adaptive_consult_then_enforce",
+    "sample_over_thresholds",
 ]
 
 #: Minimum samples before any percentile threshold is trusted.
@@ -82,13 +83,30 @@ class AdaptiveBaseline:
     optionally ``process_growth`` (ratio vs. prior median). Growth is
     computed by :func:`collect_process_sample` when the caller passes
     the baseline's own history; callers may also supply it directly.
+
+    ``window`` bounds the baseline to the most recent ``window``
+    samples (a recency window: the baseline tracks current behaviour
+    and the sample list cannot grow unbounded). ``None`` (the default)
+    keeps every sample, the historical behaviour.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, window: Optional[int] = None) -> None:
+        if window is not None and int(window) < 1:
+            raise ValueError("baseline window must be a positive count")
         self._samples: List[Dict[str, float]] = []
+        self._window: Optional[int] = int(window) if window else None
 
     def __len__(self) -> int:
         return len(self._samples)
+
+    @property
+    def window(self) -> Optional[int]:
+        """The recency window (``None`` = unbounded)."""
+        return self._window
+
+    def samples(self) -> List[Dict[str, float]]:
+        """A copy of the recorded (cleaned) samples, oldest first."""
+        return [dict(s) for s in self._samples]
 
     def record(self, sample: Dict[str, Any]) -> int:
         """Record one sample. Returns the total sample count.
@@ -112,6 +130,8 @@ class AdaptiveBaseline:
         except (TypeError, ValueError):
             clean["process_growth"] = 0.0
         self._samples.append(clean)
+        if self._window is not None and len(self._samples) > self._window:
+            del self._samples[: len(self._samples) - self._window]
         return len(self._samples)
 
     def thresholds(self) -> Thresholds:
@@ -188,6 +208,25 @@ def collect_process_sample(baseline: Optional[AdaptiveBaseline] = None) -> Optio
     return {"processes_spawned": current, "process_growth": growth}
 
 
+def sample_over_thresholds(sample: Dict[str, Any],
+                           thresholds: Thresholds) -> bool:
+    """True when ``sample`` is strictly over BOTH p95 thresholds.
+
+    The one definition of "over" for the adaptive gate: a sample
+    sitting exactly AT the p95 of the baseline is behaviour the
+    baseline itself has seen, so the comparison is strict on both
+    legs. Non-ready thresholds are never "over".
+    """
+    if thresholds.status != "ready":
+        return False
+    spawned = float(sample.get("processes_spawned", 0) or 0)
+    growth = float(sample.get("process_growth", sample.get("growth", 0)) or 0)
+    return (
+        thresholds.spawned_p95 is not None and spawned > thresholds.spawned_p95
+        and thresholds.growth_p95 is not None and growth > thresholds.growth_p95
+    )
+
+
 def adaptive_consult_then_enforce(
     sample: Dict[str, Any],
     baseline: AdaptiveBaseline,
@@ -232,14 +271,10 @@ def adaptive_consult_then_enforce(
                 "details": receipt.details, "receipt": receipt}
     spawned = float(sample.get("processes_spawned", 0) or 0)
     growth = float(sample.get("process_growth", sample.get("growth", 0)) or 0)
-    # Strictly OVER both thresholds: a sample sitting exactly AT the
-    # p95 of the baseline is behaviour the baseline itself has seen —
+    # Strictly OVER both thresholds (see sample_over_thresholds):
     # with a low-variance baseline (e.g. a constant process count)
     # ``>=`` would enforce on the most normal sample there is.
-    over = (
-        thresholds.spawned_p95 is not None and spawned > thresholds.spawned_p95
-        and thresholds.growth_p95 is not None and growth > thresholds.growth_p95
-    )
+    over = sample_over_thresholds(sample, thresholds)
     if is_system_process and over:
         if enforce_fn is not None:
             enforce_fn(sample)

@@ -1978,6 +1978,20 @@ class PartnerRuntime(
                 except Exception as exc:  # noqa: BLE001 - optional
                     _log.warning(
                         "agent modes tick not registered: %s", exc)
+                # Immune adaptive gate: one durable "immune baseline
+                # sampler" job (every 1m) collecting real process
+                # samples into the persisted adaptive baseline, so the
+                # cancer gate learns from live behaviour and can
+                # actually arm — before this wiring nothing recorded
+                # samples at runtime and the baseline stayed empty
+                # forever.  Idempotent; best-effort.
+                try:
+                    from ...immune.wiring import ensure_immune_sampler_job
+
+                    ensure_immune_sampler_job(self._scheduler)
+                except Exception as exc:  # noqa: BLE001 - optional
+                    _log.warning(
+                        "immune sampler job not registered: %s", exc)
             except Exception as exc:  # noqa: BLE001 - scheduler is optional
                 _log.warning("scheduler failed to start: %s", exc)
                 self._scheduler = None

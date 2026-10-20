@@ -18,6 +18,11 @@ Layer 0: standard library only. Integration is via injected callables
 and plain data — this package imports nothing from ``nomorals.*``.
 Surfaces: ``nm immune`` (cmdline/commands/immune.py) and ``/immune``
 in chat (agents/partner/runtime.py → immune/chat.py control_immune).
+Wiring (immune/wiring.py): the adaptive cancer gate is LIVE — a
+durable sampler job (``__immune_sampler__``, every 1m) feeds real
+process samples into a persisted, recency-windowed baseline;
+incident samples quarantine instead of teaching the baseline that a
+runaway is normal.
 """
 
 from __future__ import annotations
@@ -29,6 +34,20 @@ from .baseline import (
     Thresholds,
     adaptive_consult_then_enforce,
     collect_process_sample,
+    sample_over_thresholds,
+)
+from .wiring import (
+    BASELINE_WINDOW,
+    IMMUNE_SAMPLER_INTERVAL_S,
+    IMMUNE_SAMPLER_JOB,
+    IMMUNE_SAMPLER_SPEC,
+    IMMUNE_SAMPLER_TOOL,
+    BaselineStore,
+    ImmuneMonitor,
+    default_store_path,
+    ensure_immune_sampler_job,
+    reset_shared_monitors,
+    shared_monitor,
 )
 from .antibodies import AntibodyStore
 from .casefile import CaseFile, build_case
@@ -100,6 +119,19 @@ __all__ = [
     "Thresholds",
     "adaptive_consult_then_enforce",
     "collect_process_sample",
+    "sample_over_thresholds",
+    # wiring (persisted baseline, live sampler, incident quarantine)
+    "BASELINE_WINDOW",
+    "BaselineStore",
+    "ImmuneMonitor",
+    "default_store_path",
+    "shared_monitor",
+    "reset_shared_monitors",
+    "ensure_immune_sampler_job",
+    "IMMUNE_SAMPLER_JOB",
+    "IMMUNE_SAMPLER_TOOL",
+    "IMMUNE_SAMPLER_SPEC",
+    "IMMUNE_SAMPLER_INTERVAL_S",
     # chat control
     "control_immune",
     "IMMUNE_USAGE",
