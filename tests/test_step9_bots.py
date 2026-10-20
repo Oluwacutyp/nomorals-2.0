@@ -312,9 +312,14 @@ class TestPersonalPresentation(unittest.TestCase):
 
 class TestChatUpdateDispatch(unittest.TestCase):
     """Runtime dispatch for /update etc. — proves the branch runs (this
-    is where a missing ``Path`` import hid: no test exercised it)."""
+    is where a missing ``Path`` import hid: no test exercised it).
 
-    def _make_runtime(self):
+    Pass #55 made the surface decide: on the gated public bot
+    (telegram-bot) NOBODY reaches the update machinery — the surface
+    refusal comes first, owner included. Dispatch itself is proven on
+    the owner's own surface (telegram-personal), where it must work."""
+
+    def _make_runtime(self, platform="telegram-bot"):
         import tempfile
         from nomorals.agents.context import build_context
         from nomorals.agents.partner_runtime import PartnerRuntime
@@ -325,7 +330,7 @@ class TestChatUpdateDispatch(unittest.TestCase):
         class FakeAdapter(ChatAdapter):
             def __init__(self):
                 super().__init__(media_dir="/tmp/nm-test-media")
-                self.name = "telegram-bot"
+                self.name = platform
 
             def run(self, handler):
                 pass
@@ -335,22 +340,25 @@ class TestChatUpdateDispatch(unittest.TestCase):
 
         tmp = tempfile.TemporaryDirectory(prefix="nm-test-update-dispatch-")
         settings = load_settings(overrides={"home": tmp.name,
-                                            "partner.platforms": "telegram-bot"})
+                                            "partner.platforms": platform})
         context = build_context(settings, with_executor=False, with_tools=False)
         adapter = FakeAdapter()
-        gateway = ChatGateway({"telegram-bot": adapter}, db=context.db)
+        gateway = ChatGateway({platform: adapter}, db=context.db)
         runtime = PartnerRuntime(context, gateway=gateway)
         return runtime, context, tmp
 
-    def _msg(self, owner: bool):
+    def _msg(self, owner: bool, platform="telegram-bot"):
         from nomorals.social.chat.base import ChatKind, ChatMessage, ChatRef
         return ChatMessage(
-            chat=ChatRef(platform="telegram-bot", chat_id="c1",
+            chat=ChatRef(platform=platform, chat_id="c1",
                          kind=ChatKind.DM, peer="someone"),
             incoming=True, text="/update", sender="someone",
             meta={"is_owner": True} if owner else {})
 
     def test_non_owner_denied_before_update_machinery(self):
+        # On the gated public bot the surface refusal comes first —
+        # the update machinery is never constructed, for anyone
+        # (pass #55: the surface decides, not the caller).
         from unittest import mock
         runtime, context, tmp = self._make_runtime()
         try:
@@ -359,7 +367,11 @@ class TestChatUpdateDispatch(unittest.TestCase):
                     side_effect=AssertionError("must not be constructed")):
                 reply = runtime.handle_control("/update", "telegram-bot:c1",
                                                message=self._msg(owner=False))
-            self.assertEqual(reply, "that one's just for the owner.")
+            self.assertEqual(
+                reply,
+                "that's not something I can do here — this is my public "
+                "chat, so I keep it to conversation and games. "
+                "try /game list to see what's on, or just talk to me.")
         finally:
             try:
                 runtime.stop()
@@ -369,8 +381,12 @@ class TestChatUpdateDispatch(unittest.TestCase):
             tmp.cleanup()
 
     def test_owner_pull_dispatches_to_controller(self):
+        # Dispatch is proven on the owner's own surface: on
+        # telegram-personal the owner's /pull reaches the controller
+        # (on the gated public bot it is refused at the surface —
+        # see the non-owner test above; pass #55).
         from unittest import mock
-        runtime, context, tmp = self._make_runtime()
+        runtime, context, tmp = self._make_runtime("telegram-personal")
         seen = {}
 
         class FakeCtl:
@@ -387,8 +403,10 @@ class TestChatUpdateDispatch(unittest.TestCase):
             with mock.patch(
                     "nomorals.social.chat.update_control.ChatUpdateController",
                     FakeCtl):
-                reply = runtime.handle_control("/pull", "telegram-bot:c1",
-                                               message=self._msg(owner=True))
+                reply = runtime.handle_control(
+                    "/pull", "telegram-personal:c1",
+                    message=self._msg(owner=True,
+                                      platform="telegram-personal"))
             self.assertEqual(reply, "fake update done")
             self.assertEqual(seen["kind"], "pull")
         finally:
