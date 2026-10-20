@@ -2830,11 +2830,18 @@ class TelegramBotAdapter(ChatAdapter):
         if not path.is_file():
             return SendResult(ok=False, platform=self.name,
                               error=f"media file not found: {media.path}")
-        method = {
-            "image": "sendPhoto",
-            "video": "sendVideo",
-            "audio": "sendVoice" if path.suffix.lower() == ".ogg" else "sendAudio",
-        }.get(media.kind, "sendDocument")
+        if media.kind == "voice" or getattr(media, "voice_note", False):
+            # A voice note must arrive as a voice bubble, not a file
+            # attachment: kind="voice" used to fall through the map to
+            # sendDocument, so TTS replies landed as documents on both
+            # bots. (Producers convert to ogg first; see voice paths.)
+            method = "sendVoice"
+        else:
+            method = {
+                "image": "sendPhoto",
+                "video": "sendVideo",
+                "audio": "sendVoice" if path.suffix.lower() == ".ogg" else "sendAudio",
+            }.get(media.kind, "sendDocument")
         field = {"sendPhoto": "photo", "sendVideo": "video",
                  "sendVoice": "voice", "sendAudio": "audio"}.get(method, "document")
         try:

@@ -188,34 +188,24 @@ def normalize_gsm7(text: str) -> tuple[str, list[str]]:
         return str(text or ""), []
 
 
-def split_sms(text: str) -> list[str]:
-    """Split ``text`` into numbered SMS segments on the REAL budget.
-
-    A single segment goes out unnumbered. Multi-part messages are split on
-    word boundaries at the encoding-correct content budget (153 for GSM-7,
-    67 for UCS-2), then prefixed ``(i/n)``. Never silently truncates —
-    callers send every segment.
-    """
-    text = text or ""
-    info = sms_segments(text)
-    single = 160 if info["encoding"] == "gsm7" else 70
-    concat = int(info["per_part"])
-    if len(text) <= single:
-        return [text]
+def _split_sms_words(text: str, budget: int) -> list[str]:
+    """Word-aware content chunks of at most ``budget`` chars (a single
+    over-long word is hard-split). The ``(i/n)`` prefix is not part of
+    these chunks — the caller reserves room for it."""
     words = text.split()
     chunks: list[str] = []
     current: list[str] = []
     current_len = 0
     for word in words:
         # A single pathological word longer than the budget: hard-split it.
-        while len(word) > concat:
+        while len(word) > budget:
             if current:
                 chunks.append(" ".join(current))
                 current, current_len = [], 0
-            chunks.append(word[:concat])
-            word = word[concat:]
+            chunks.append(word[:budget])
+            word = word[budget:]
         extra = len(word) + (1 if current else 0)
-        if current_len + extra > concat:
+        if current_len + extra > budget:
             chunks.append(" ".join(current))
             current, current_len = [word], len(word)
         else:
@@ -223,6 +213,41 @@ def split_sms(text: str) -> list[str]:
             current_len += extra
     if current:
         chunks.append(" ".join(current))
+    return chunks
+
+
+def split_sms(text: str) -> list[str]:
+    """Split ``text`` into numbered SMS segments on the REAL budget.
+
+    A single segment goes out unnumbered. Multi-part messages are split on
+    word boundaries, then prefixed ``(i/n)``. Never silently truncates —
+    callers send every segment.
+
+    The prefix is part of the wire part, so it comes OUT of the
+    concatenated budget (153 GSM-7 / 67 UCS-2) — that is exactly the room
+    :data:`SMS_CONCAT_CHARS` documents. The old code budgeted content at
+    the full 153/67 and then prepended the prefix, so every numbered
+    part went out over the concatenated-segment size and the carrier
+    re-split each one (double segments, double billing). Prefix length
+    depends on the part count, so the split iterates to a fixed point
+    (converges at once except across powers of ten).
+    """
+    text = text or ""
+    info = sms_segments(text)
+    single = 160 if info["encoding"] == "gsm7" else 70
+    concat = int(info["per_part"])
+    if len(text) <= single:
+        return [text]
+    budget = concat
+    chunks: list[str] = []
+    for _ in range(4):
+        chunks = _split_sms_words(text, budget)
+        if len(chunks) <= 1:
+            return chunks or [text]
+        prefix_len = len(f"({len(chunks)}/{len(chunks)}) ")
+        if budget + prefix_len <= concat:
+            break
+        budget = concat - prefix_len
     total = len(chunks)
     return [f"({i + 1}/{total}) {chunk}" for i, chunk in enumerate(chunks)]
 

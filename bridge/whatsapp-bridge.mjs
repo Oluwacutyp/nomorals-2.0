@@ -13,11 +13,12 @@
  *     {"type":"status","state":"open|closed","user":"<jid>"}
  *     {"type":"qr","data":"<qr string>"}
  *     {"type":"pairing_code","data":"<8-char code>"}   (when WA_PAIRING_CODE=1)
- *     {"type":"message","chat":{"id","kind","title"},"from":{"id","name"},
- *      "text":"...","media":[{"path","mime","kind"}],"reply_to":"",
- *      "mentioned":false,"ts":<ms>}
+ *     {"type":"message","id":"<wa message id>","chat":{"id","kind","title"},
+ *      "from":{"id","name"},"text":"...","media":[{"path","mime","kind"}],
+ *      "reply_to":"","mentioned":false,"ts":<ms>}
  *     {"type":"receipt","chat":"<jid>","ids":["<msg>",...],"kind":"delivered|read"}
  *     {"id":"<req>","ok":true|false,"error":"", ...extra}
+ *      (send/send_media replies add "message_id": the real WA message id)
  *
  *   python -> bridge
  *     {"id":"<req>","cmd":"send","chat":"<jid>","text":"...","reply_to":""}
@@ -489,6 +490,7 @@ async function connect() {
         if (m.key.fromMe) {
           const ownOut = {
             type: 'own_message',
+            id: m.key.id || '',
             chat: { id: jid, kind: kindOf(jid), title: chatTitles.get(jid) || '' },
             text: textOf(m),
             ts: Number(m.messageTimestamp || Date.now() / 1000) * 1000,
@@ -516,6 +518,7 @@ async function connect() {
           (j) => jidNormalizedUser(String(j)) === meJid);
         const out = {
           type: 'message',
+          id: m.key.id || '',
           chat: { id: jid, kind, title },
           from: { id: senderId, name: m.pushName || '' },
           text: textOf(m),
@@ -573,12 +576,15 @@ async function handleCommand(sock, req) {
   try {
     switch (cmd) {
       case 'send': {
-        await cmdSend(req);
-        return reply(sock, id, { ok: true });
+        const sent = await cmdSend(req);
+        // The real WhatsApp message id — the Python adapter keys
+        // delivery receipts off it. (The reply's own "id" field is
+        // just the request id echoed back.)
+        return reply(sock, id, { ok: true, message_id: sent?.key?.id || '' });
       }
       case 'send_media': {
-        await cmdSendMedia(req);
-        return reply(sock, id, { ok: true });
+        const sent = await cmdSendMedia(req);
+        return reply(sock, id, { ok: true, message_id: sent?.key?.id || '' });
       }
       case 'typing': {
         const secs = Math.max(1, Math.min(30, parseInt(req.seconds || '3', 10)));

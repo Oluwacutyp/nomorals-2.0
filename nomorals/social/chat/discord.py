@@ -268,9 +268,31 @@ class DiscordAdapter(ChatAdapter):
                         fname = f"dc-{int(time.time() * 1000)}-{i}{os.path.splitext(str(attachment.filename or ''))[1] or '.bin'}"
                         path = os.path.join(self.media_dir, fname)
                         await attachment.save(path)
+                        # Kind from the content type, like every other
+                        # adapter: the old image-or-"file" collapse sent
+                        # voice messages and videos to the brain as
+                        # generic files, so they were never transcribed
+                        # or described. Discord voice messages are audio
+                        # attachments the client flags as such — spoken
+                        # notes, not song clips.
+                        ctype = str(attachment.content_type or "").lower()
+                        mkind = "file"
+                        is_voice = False
+                        if ctype.startswith("image"):
+                            mkind = "image"
+                        elif ctype.startswith("video"):
+                            mkind = "video"
+                        elif ctype.startswith("audio"):
+                            mkind = "audio"
+                            try:
+                                ivm = getattr(attachment, "is_voice_message", None)
+                                if callable(ivm) and ivm():
+                                    mkind, is_voice = "voice", True
+                            except Exception:  # noqa: BLE001 - flag is best-effort
+                                pass
                         media.append(
                             MediaRef(path=path, mime=str(attachment.content_type or ""),
-                                     kind="image" if str(attachment.content_type or "").startswith("image") else "file",
+                                     kind=mkind, is_voice=is_voice,
                                      name=str(attachment.filename or ""))
                         )
                     except Exception as exc:  # noqa: BLE001 - media is best-effort
@@ -320,8 +342,19 @@ class DiscordAdapter(ChatAdapter):
     # ── outbound ─────────────────────────────────────────────────────────────
     async def _channel(self, chat: ChatRef) -> Any:
         if chat.kind == ChatKind.DM:
-            user = await self._bot.fetch_user(int(chat.chat_id))
-            return await user.create_dm()
+            # This adapter's DM chat ids are CHANNEL ids everywhere:
+            # inbound stores ``channel.id`` and ``start_dm()`` returns
+            # ``dm.id``. Resolve the channel itself — the old code ran
+            # ``fetch_user(chat_id)``, treating a channel snowflake as
+            # a user id, so every DM send resolved a wrong/nonexistent
+            # user and failed. Fall back to the user interpretation
+            # only when no such channel exists (a ref built by hand
+            # from a user id).
+            try:
+                return await self._bot.fetch_channel(int(chat.chat_id))
+            except Exception:  # noqa: BLE001 - not a channel id: try user
+                user = await self._bot.fetch_user(int(chat.chat_id))
+                return await user.create_dm()
         return await self._bot.fetch_channel(int(chat.chat_id))
 
     def send(self, chat: ChatRef, text: str, *,

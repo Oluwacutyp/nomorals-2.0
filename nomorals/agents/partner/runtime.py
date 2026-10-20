@@ -2785,6 +2785,15 @@ class PartnerRuntime(
             # wave 67: detailed help — /help for the catalog,
             # /help <command> for one command's full page, /help budget
             # etc. for topic pages.
+            # WhatsApp gets its OWN menu (owner rule): the bare catalog
+            # on WhatsApp serves the WhatsApp-native, text-first menu —
+            # control.help_menu existed for exactly this but had no
+            # production caller, so WhatsApp users got the
+            # Telegram-styled catalog. Topic pages stay detailed_help
+            # (content; the outbound formatter converts per platform).
+            if platform in ("whatsapp", "wa") and not (arg or command.tail):
+                from ...social.chat.control import help_menu
+                return help_menu("whatsapp")
             return detailed_help(arg or command.tail)
 
         if kind == "tour":

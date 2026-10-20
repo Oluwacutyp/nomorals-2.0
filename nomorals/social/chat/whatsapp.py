@@ -11,10 +11,14 @@ Protocol (one JSON object per line):
   bridge -> python
     {"type":"status","state":"open|closed","user":"<jid>"}
     {"type":"qr","data":"<qr string>"}
-    {"type":"message","chat":{"id","kind","title"},"from":{"id","name"},
-     "text":"...","media":[{"path","mime","kind"}],"reply_to":"","mentioned":false,"ts":<ms>}
+    {"type":"message","id":"<wa message id>","chat":{"id","kind","title"},
+     "from":{"id","name"},"text":"...",
+     "media":[{"path","mime","kind"}],"reply_to":"","mentioned":false,"ts":<ms>}
     {"type":"receipt","chat":"<jid>","ids":["<msg id>",...],"kind":"delivered|read"}
     {"id":"<req>","ok":true,"error":""}          # response to a command
+    # send/send_media responses also carry "message_id": the real
+    # WhatsApp message id (the receipt key space) — "id" alone is the
+    # request id and identifies nothing on WhatsApp's side.
 
   python -> bridge
     {"id":"<req>","cmd":"send","chat":"<jid>","text":"...","reply_to":""}
@@ -354,11 +358,25 @@ class WhatsAppAdapter(ChatAdapter):
                                  name=str(entry.get("name") or ""))
                 result = self.send_media(chat, media,
                                          caption=str(entry.get("caption") or ""))
-            else:
+                return bool(result.ok)
+            # Text entries render EXACTLY like the live path in send():
+            # WhatsApp-markdown conversion + platform split. The flush
+            # used to hand the stored text to the bridge raw, so a reply
+            # queued during an outage went out with Telegram HTML still
+            # in it (and unsplit past the platform cap).
+            text = str(entry.get("text") or "")
+            try:
+                from .platforms import format_for_platform
+                text = format_for_platform(text, "whatsapp")
+            except Exception:  # noqa: BLE001 - same best-effort as send()
+                pass
+            reply_to = str(entry.get("reply_to") or "")
+            for i, chunk in enumerate(_split_text(text)):
                 result = self._send_with_retry(
-                    chat, str(entry.get("text") or ""),
-                    reply_to=str(entry.get("reply_to") or ""))
-            return bool(result.ok)
+                    chat, chunk, reply_to=reply_to if i == 0 else "")
+                if not result.ok:
+                    return False
+            return True
         except Exception as exc:  # noqa: BLE001
             _log.debug("whatsapp outbox entry failed: %s", exc)
             return False
@@ -367,9 +385,13 @@ class WhatsAppAdapter(ChatAdapter):
     def _jid(self, chat: ChatRef) -> str:
         """Normalize a chat to a WhatsApp JID."""
         jid = (chat.chat_id or "").strip()
-        if chat.kind == ChatKind.DM and jid and not jid.endswith(
-                ("@s.whatsapp.net", "@whatsapp.net", "@c.us", "@g.us")):
-            # plain phone number → personal chat JID
+        if chat.kind == ChatKind.DM and jid and "@" not in jid:
+            # A bare phone number (no domain at all) → personal chat
+            # JID. Anything already carrying a domain is a complete JID
+            # and passes through untouched — the old suffix whitelist
+            # rewrote unknown domains (``@lid`` privacy ids, future
+            # Baileys domains) into ``digits@c.us``, a *different*
+            # address that silently misroutes the send.
             digits = "".join(c for c in jid if c.isdigit() or c == "+")
             jid = f"{digits}@c.us" if digits else jid
         return jid
@@ -496,6 +518,7 @@ class WhatsAppAdapter(ChatAdapter):
                 incoming=False,
                 text=str(obj.get("text") or ""),
                 sender="",
+                message_id=str(obj.get("id") or ""),
                 ts=ts,
             )
             msg.meta["own_message"] = True
@@ -525,9 +548,17 @@ class WhatsAppAdapter(ChatAdapter):
                     incoming=True,
                     text=str(obj.get("text") or ""),
                     sender=str((obj.get("from") or {}).get("name") or ""),
+                    # The bridge sends the author's JID as from.id —
+                    # keep it as the stable sender_id (group identity
+                    # must not key off the mutable pushName alone), and
+                    # the WhatsApp message id as message_id (the
+                    # gateway/reply machinery keys off it).
+                    sender_id=str((obj.get("from") or {}).get("id") or ""),
+                    message_id=str(obj.get("id") or ""),
                     media=[
                         MediaRef(path=str(m.get("path") or ""), mime=str(m.get("mime") or ""),
-                                 kind=str(m.get("kind") or "file"))
+                                 kind=str(m.get("kind") or "file"),
+                                 is_voice=str(m.get("kind") or "") == "voice")
                         for m in (obj.get("media") or [])
                         if m.get("path")
                     ],
@@ -620,8 +651,12 @@ class WhatsAppAdapter(ChatAdapter):
                  "reply_to": reply_to})
             if response.get("ok"):
                 self.stats["sent"] += 1
+                # The bridge's reply id is OUR request id — the real
+                # WhatsApp message id rides in ``message_id`` (it is
+                # the key space delivery receipts use; the request id
+                # matched nothing and made receipts unresolvable).
                 return SendResult(ok=True, platform=self.name,
-                                  message_id=str(response.get("id") or ""),
+                                  message_id=str(response.get("message_id") or ""),
                                   seconds=time.perf_counter() - started)
             last_error = str(response.get("error") or last_error)
             # only retry transient failures, not rejections
@@ -705,7 +740,7 @@ class WhatsAppAdapter(ChatAdapter):
         if response.get("ok"):
             self.stats["sent"] += 1
             return SendResult(ok=True, platform=self.name,
-                              message_id=str(response.get("id") or ""),
+                              message_id=str(response.get("message_id") or ""),
                               seconds=time.perf_counter() - started)
         self.stats["send_errors"] += 1
         return SendResult(ok=False, platform=self.name,
@@ -1163,7 +1198,8 @@ class WhatsAppAdapter(ChatAdapter):
                     media=[
                         MediaRef(path=str(m.get("path") or ""),
                                  mime=str(m.get("mime") or ""),
-                                 kind=str(m.get("kind") or "file"))
+                                 kind=str(m.get("kind") or "file"),
+                                 is_voice=str(m.get("kind") or "") == "voice")
                         for m in (entry.get("media") or [])
                         if m.get("path")
                     ],
