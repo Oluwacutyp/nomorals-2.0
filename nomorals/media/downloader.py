@@ -412,7 +412,8 @@ class MediaDownloader:
             try:
                 result = direct_download(
                     url, target_dir, format_spec=format_spec,
-                    audio_only=audio_only, timeout=timeout)
+                    audio_only=audio_only, timeout=timeout,
+                    progress=self._job_progress("direct"))
             except Exception as exc:  # noqa: BLE001
                 kind = classify_failure(exc)
                 lat = time.perf_counter() - t0
@@ -432,14 +433,30 @@ class MediaDownloader:
                     continue
                 return False
             lat = time.perf_counter() - t0
-            size = int(result.get("bytes") or 0)
+            landed = self._verify_landed(result)
+            if landed is None:
+                # The stage CLAIMS success — but a claim is not a
+                # file.  Nothing (or an empty stub) is on disk, so
+                # this stage failed and the chain moves on.
+                report.stages.append(StageLog(
+                    stage="direct", url=url, attempt=attempt, latency_s=lat,
+                    error_class=FailureKind.NO_MEDIA_FOUND.value,
+                    error="download reported success but the file is "
+                          "missing or empty on disk "
+                          f"({result.get('path', '') or 'no path'})"))
+                self._log_stage("direct", url, "", lat, 0,
+                                FailureKind.NO_MEDIA_FOUND,
+                                "reported success, nothing on disk",
+                                attempt)
+                return False
+            _path, size = landed
             report.stages.append(StageLog(
                 stage="direct", url=url, attempt=attempt, latency_s=lat,
                 size_bytes=size, ok=True,
                 note=f"extractor={result.get('extractor', '')}"))
             self._log_stage("direct", url, "", lat, size, FailureKind.OK,
                             "", attempt)
-            self._fill_success(report, result)
+            self._fill_success(report, result, size)
             return True
         return False
 
@@ -544,7 +561,8 @@ class MediaDownloader:
                 with _proxy_env(proxy_url):
                     result = direct_download(
                         url, target_dir, format_spec=format_spec,
-                        audio_only=audio_only, timeout=timeout)
+                        audio_only=audio_only, timeout=timeout,
+                        progress=self._job_progress("proxy"))
             except Exception as exc:  # noqa: BLE001 — demote, don't die
                 kind = classify_failure(exc)
                 lat = time.perf_counter() - t0
@@ -561,7 +579,25 @@ class MediaDownloader:
                                 str(exc)[:200])
                 continue
             lat = time.perf_counter() - t0
-            size = int(result.get("bytes") or 0)
+            landed = self._verify_landed(result)
+            if landed is None:
+                # The fetch through this proxy claimed success but
+                # landed nothing usable.  That is a content failure,
+                # not proxy ill-health: the proxy is neither credited
+                # nor demoted, and the chain tries the next one.
+                report.stages.append(StageLog(
+                    stage="proxy", url=url, proxy=masked, latency_s=lat,
+                    error_class=FailureKind.NO_MEDIA_FOUND.value,
+                    error="download reported success but the file is "
+                          "missing or empty on disk "
+                          f"({result.get('path', '') or 'no path'})",
+                    note="proxy neither credited nor demoted — "
+                         "content failure, trying next"))
+                self._log_stage("proxy", url, masked, lat, 0,
+                                FailureKind.NO_MEDIA_FOUND,
+                                "reported success, nothing on disk")
+                continue
+            _path, size = landed
             try:
                 pool.record_success(pid, latency_ms=lat * 1000)
             except Exception:  # noqa: BLE001 — bookkeeping only
@@ -572,7 +608,7 @@ class MediaDownloader:
                 note=f"extractor={result.get('extractor', '')}"))
             self._log_stage("proxy", url, masked, lat, size,
                             FailureKind.OK, "")
-            self._fill_success(report, result)
+            self._fill_success(report, result, size)
             return True
         return False
 
@@ -731,6 +767,11 @@ class MediaDownloader:
         fetch = getattr(session, "fetch_bytes", None)
         name = _safe_name(media_url, audio_only)
         dest = target_dir / name
+        try:
+            from ..core.jobs import report_progress
+            report_progress(f"browser: fetching {media_url[:80]}")
+        except Exception:  # noqa: BLE001 - progress is best-effort
+            pass
         t0 = time.perf_counter()
         try:
             got = fetch(media_url, dest)
@@ -776,16 +817,46 @@ class MediaDownloader:
             except OSError:
                 pass
             return False
+        # Byte-level landing truth: an absent Content-Type (or a
+        # generic octet-stream) proves nothing about what landed.
+        # Sniff the actual bytes — an HTML page here is an error page
+        # wearing a media filename — and trust the size on disk over
+        # the fetch's claimed byte count.
+        from ..tools.media import _looks_like_html
+
+        try:
+            actual = dest.stat().st_size if dest.is_file() else 0
+            with dest.open("rb") as fh:
+                head = fh.read(1024)
+        except OSError:
+            actual, head = 0, b""
+        if actual <= 0 or _looks_like_html(head):
+            why = ("browser fetch reported bytes but no file is on "
+                   "disk" if actual <= 0 else
+                   "landed bytes are an HTML page, not media "
+                   f"(content-type {ctype or 'absent'})")
+            report.stages.append(StageLog(
+                stage="browser", url=media_url, latency_s=lat,
+                size_bytes=actual,
+                error_class=FailureKind.NO_MEDIA_FOUND.value,
+                error=why, note="candidate was a page, not a file"))
+            self._log_stage("browser", media_url, "", lat, actual,
+                            FailureKind.NO_MEDIA_FOUND, why)
+            try:
+                dest.unlink(missing_ok=True)
+            except OSError:
+                pass
+            return False
         report.stages.append(StageLog(
             stage="browser", url=media_url, latency_s=lat,
-            size_bytes=size, ok=True,
+            size_bytes=actual, ok=True,
             note=f"content-type={ctype or '?'} via browser session"))
-        self._log_stage("browser", media_url, "", lat, size,
+        self._log_stage("browser", media_url, "", lat, actual,
                         FailureKind.OK, "")
         report.ok = True
         report.failure = FailureKind.OK
         report.path = str(dest)
-        report.size_bytes = size
+        report.size_bytes = actual
         report.title = dest.stem
         report.extractor = "browser-session"
         return True
@@ -873,11 +944,52 @@ class MediaDownloader:
             return fallback
 
     @staticmethod
+    def _verify_landed(result: dict[str, Any]) -> tuple[str, int] | None:
+        """(path, size on disk) when a stage's success claim is real.
+
+        A stage result dict is a claim, not evidence: the file must
+        exist, be a regular file, and be non-empty.  Returns None
+        when the claim does not hold — the stage failed, whatever it
+        said.  The size that survives is the size on disk, never the
+        claimed byte count.
+        """
+        path = str(result.get("path") or "")
+        if not path:
+            return None
+        try:
+            p = Path(path)
+            if not p.is_file():
+                return None
+            size = p.stat().st_size
+        except OSError:
+            return None
+        if size <= 0:
+            return None
+        return path, size
+
+    @staticmethod
+    def _job_progress(stage: str):
+        """Progress callback forwarding a stage's real figures to the
+        running background job (``core.jobs.report_progress`` — a
+        no-op outside a job context, so foreground downloads are
+        unaffected)."""
+        def _cb(message: str) -> None:
+            try:
+                from ..core.jobs import report_progress
+                report_progress(f"{stage}: {message}")
+            except Exception:  # noqa: BLE001 - progress is best-effort
+                pass
+        return _cb
+
+    @staticmethod
     def _fill_success(report: DownloadReport,
-                      result: dict[str, Any]) -> None:
+                      result: dict[str, Any],
+                      size_bytes: int | None = None) -> None:
         report.ok = True
         report.path = str(result.get("path", ""))
-        report.size_bytes = int(result.get("bytes") or 0)
+        report.size_bytes = int(
+            size_bytes if size_bytes is not None
+            else (result.get("bytes") or 0))
         report.title = str(result.get("title", "") or "")
         report.extractor = str(result.get("extractor", "") or "")
         report.failure = FailureKind.OK

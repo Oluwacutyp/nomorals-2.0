@@ -89,6 +89,11 @@ class Job:
     #: True when the worker finished AFTER the job was presumed dead.
     late_result: bool = False
     collected: bool = False
+    #: Cooperative cancellation: set by :meth:`JobRegistry.cancel`.
+    #: Threads cannot be killed, so workers poll this flag at their
+    #: progress points and stop themselves; a job that never checks
+    #: the flag is reported as still running, never as cancelled.
+    cancel_requested: bool = False
     #: Heartbeat cadence for this job; the dead-man's switch fires after
     #: ``heartbeat_interval_s * MAX_MISSED_HEARTBEATS`` of silence.
     heartbeat_interval_s: float = HEARTBEAT_INTERVAL_S
@@ -123,6 +128,7 @@ class Job:
                 "last_progress": self.last_progress,
                 "late_result": self.late_result,
                 "collected": self.collected,
+                "cancel_requested": self.cancel_requested,
                 "labels": dict(self.labels),
             }
 
@@ -234,6 +240,28 @@ class JobRegistry:
         _publish("tool.job", {"job_id": job.id, "tool": job.tool,
                               "phase": "submitted"})
         return job
+
+    def cancel(self, job_id: str) -> bool:
+        """Request cooperative cancellation of a live job.
+
+        Sets ``cancel_requested`` on the job; workers that poll the
+        flag at progress points (the download backends do, via
+        :func:`current_job`) stop themselves and finish as failed
+        with a cancellation error.  Returns False for unknown or
+        already-terminal jobs — a finished job cannot be cancelled
+        and this never pretends otherwise.
+        """
+        with self._lock:
+            job = self._jobs.get(job_id)
+        if job is None:
+            return False
+        with job.lock:
+            if job.status in TERMINAL_STATUSES:
+                return False
+            job.cancel_requested = True
+        _publish("tool.job", {"job_id": job.id, "tool": job.tool,
+                              "phase": "cancel-requested"})
+        return True
 
     # ── dead-man's switch ─────────────────────────────────────────
 

@@ -929,6 +929,9 @@ class RuntimeMediaMixin:
                     "paste any media URL — YouTube, TikTok, Instagram, X, "
                     "SoundCloud, direct mp3/mp4 links, 1000+ sites via yt-dlp.")
         words = tail.split()
+        if words and words[0].lower() == "cancel":
+            return self._cancel_download_job(
+                words[1] if len(words) > 1 else "", chat_key)
         audio_only = any(w.lower() in ("audio", "--audio", "-a") for w in words)
         url = " ".join(w for w in words
                        if w.lower() not in ("audio", "--audio", "-a")).strip()
@@ -1003,11 +1006,39 @@ class RuntimeMediaMixin:
         from ...core.jobs import (
             current_job, report_progress, shared_registry)
 
+        # Duplicate guard: the same chat asking for the same title
+        # while it is already downloading gets the EXISTING job named
+        # back — never a second download of the same file (and never
+        # the file sent twice).
+        try:
+            for snap in shared_registry().list():
+                labels = snap.get("labels") or {}
+                if (snap.get("status") in ("pending", "running")
+                        and labels.get("owner") == self._PLAY_DL_JOB_OWNER
+                        and labels.get("chat") == (chat_key or "")
+                        and labels.get("title") == (title or "")[:80]):
+                    return (
+                        out_prefix
+                        + f"\n⏳ “{(title or 'that download')[:60]}” is "
+                          "already downloading in the background "
+                          f"[job {snap.get('id')}] — I won't start a "
+                          "second copy. "
+                          f"Send /download cancel {snap.get('id')} "
+                          "to stop it.")
+        except Exception:  # noqa: BLE001 - guard must never block a dl
+            pass
+
+        # The worker body needs its own job id (for the durable
+        # record) before submit() returns it — a one-cell holder the
+        # submitting thread fills in immediately after submit.
+        holder: dict[str, str] = {}
+
         def _body() -> dict[str, Any]:
             try:
                 report_progress("download started")
                 text, sent = produce()
             except Exception as exc:  # noqa: BLE001 - failure is data
+                self._play_dl_mark_finished(holder)
                 return {"ok": False, "delivered": False, "sent": False,
                         "title": title, "text": "",
                         "error": f"{type(exc).__name__}: {exc}"[:300]}
@@ -1033,6 +1064,7 @@ class RuntimeMediaMixin:
                     delivered = True
                 except Exception:  # noqa: BLE001 - harvest retries
                     delivered = False
+            self._play_dl_mark_finished(holder)
             return {"ok": True, "delivered": delivered,
                     "sent": bool(sent), "title": title, "text": final,
                     "late": late}
@@ -1046,9 +1078,137 @@ class RuntimeMediaMixin:
         except Exception:  # noqa: BLE001 - registry down: degrade to sync
             text, _sent = produce()
             return text
+        holder["job_id"] = job.id
+        self._play_dl_record_start(job.id, chat_key, title)
         return (out_prefix
                 + "\n⏳ downloading in the background — I'll send it "
                   f"here when it's ready. [job {job.id}]")
+
+    # ── durable record of chat downloads (restart honesty) ─────────
+    #
+    # The job registry is in-memory: a process restart mid-download
+    # used to lose the job silently — the chat was never told.  Every
+    # chat download now also writes a row (job id, chat, title, boot
+    # id) to the DB at submit; the body flips it to "done" when it
+    # finishes.  A row still "running" under a DIFFERENT boot id can
+    # only mean the process that owned it died — the harvester says
+    # so, once, instead of the download vanishing.
+
+    def _play_dl_boot_id(self) -> str:
+        """This process's boot id (one per runtime instance)."""
+        bid = getattr(self, "_play_dl_boot", "")
+        if not bid:
+            import uuid
+
+            bid = uuid.uuid4().hex[:12]
+            self._play_dl_boot = bid
+        return bid
+
+    def _play_dl_db(self) -> Any | None:
+        """The context DB with the downloads table ensured, or None."""
+        ctx = getattr(self, "context", None)
+        db = getattr(ctx, "db", None) if ctx is not None else None
+        if db is None:
+            return None
+        try:
+            db.execute(
+                "CREATE TABLE IF NOT EXISTS play_download_jobs ("
+                "job_id TEXT PRIMARY KEY, chat_key TEXT NOT NULL "
+                "DEFAULT '', title TEXT NOT NULL DEFAULT '', "
+                "boot_id TEXT NOT NULL DEFAULT '', status TEXT NOT "
+                "NULL DEFAULT 'running', created_at REAL NOT NULL "
+                "DEFAULT 0)")
+        except Exception:  # noqa: BLE001 - bookkeeping never breaks dl
+            return None
+        return db
+
+    def _play_dl_record_start(self, job_id: str, chat_key: str,
+                              title: str) -> None:
+        import time
+
+        db = self._play_dl_db()
+        if db is None or not job_id:
+            return
+        try:
+            db.execute(
+                "INSERT OR REPLACE INTO play_download_jobs "
+                "(job_id, chat_key, title, boot_id, status, created_at) "
+                "VALUES (?,?,?,?,?,?)",
+                (job_id, chat_key or "", (title or "")[:120],
+                 self._play_dl_boot_id(), "running", time.time()))
+            # Prune finished rows older than a week — the table is a
+            # restart ledger, not an archive.
+            db.execute(
+                "DELETE FROM play_download_jobs WHERE status != "
+                "'running' AND created_at < ?",
+                (time.time() - 7 * 24 * 3600,))
+        except Exception:  # noqa: BLE001 - bookkeeping never breaks dl
+            pass
+
+    def _play_dl_record_finish(self, job_id: str) -> None:
+        db = self._play_dl_db()
+        if db is None or not job_id:
+            return
+        try:
+            db.execute(
+                "UPDATE play_download_jobs SET status = 'done' "
+                "WHERE job_id = ? AND status = 'running'", (job_id,))
+        except Exception:  # noqa: BLE001 - bookkeeping never breaks dl
+            pass
+
+    def _play_dl_mark_finished(self, holder: dict[str, str]) -> None:
+        """Record the body's job as finished in the durable ledger.
+
+        The body starts before submit() returns its job id; the
+        submitting thread fills *holder* immediately after, so a
+        fast body waits briefly for the id rather than skipping the
+        record (which would later read as a lost download).
+        """
+        import time
+
+        job_id = holder.get("job_id") or ""
+        for _ in range(40):
+            if job_id:
+                break
+            time.sleep(0.05)
+            job_id = holder.get("job_id") or ""
+        if job_id:
+            self._play_dl_record_finish(job_id)
+
+    def _cancel_download_job(self, job_id: str, chat_key: str) -> str:
+        """/download cancel <job-id> — cooperative cancellation.
+
+        Only the chat that owns the job may cancel it.  Cancellation
+        is cooperative: the flag is set on the job and the download
+        backends stop at their next progress checkpoint (yt-dlp hook,
+        direct-HTTP chunk hook, CLI subprocess poll) — bytes actually
+        stop; a job that already finished is reported as finished.
+        """
+        from ...core.jobs import shared_registry
+
+        job_id = (job_id or "").strip()
+        if not job_id:
+            return ("usage: /download cancel <job-id> — the id is in "
+                    "the ack I sent when the download started.")
+        registry = shared_registry()
+        job = registry.poll(job_id)
+        if job is None:
+            return (f"no download job {job_id} on record — it may "
+                    "already have finished and been swept.")
+        labels = job.labels or {}
+        if labels.get("owner") != self._PLAY_DL_JOB_OWNER \
+                or labels.get("chat") != (chat_key or ""):
+            return "that job isn't a download belonging to this chat."
+        if job.done():
+            return (f"job {job_id} already finished ({job.status}) — "
+                    "nothing left to cancel.")
+        if registry.cancel(job_id):
+            title = str(labels.get("title") or "download")
+            return (f"🛑 cancellation requested for “{title[:60]}” "
+                    f"[job {job_id}] — the download stops at its next "
+                    "progress checkpoint. If it had already finished, "
+                    "its result still arrives.")
+        return f"job {job_id} finished before the cancellation landed."
 
     def _harvest_play_downloads(self, chat_key: str, chat: Any) -> None:
         """Surface this chat's download jobs that never got to report.
@@ -1078,6 +1238,7 @@ class RuntimeMediaMixin:
         target = f"{chat.platform}:{chat.chat_id}"
         for job in jobs:
             try:
+                self._play_dl_record_finish(job.id)
                 res = job.result if isinstance(job.result, dict) else {}
                 if res.get("delivered"):
                     continue  # body already reported — never twice
@@ -1109,6 +1270,34 @@ class RuntimeMediaMixin:
                     self.gateway.send(chat.platform, target, text)
             except Exception:  # noqa: BLE001 - one job never blocks rest
                 continue
+        # Restart losses: rows still "running" under a previous boot
+        # id belong to a process that died mid-download.  Say so —
+        # once — instead of the download vanishing silently.
+        db = self._play_dl_db()
+        if db is not None:
+            try:
+                rows = db.query(
+                    "SELECT job_id, title FROM play_download_jobs "
+                    "WHERE chat_key = ? AND status = 'running' "
+                    "AND boot_id != ?",
+                    (chat_key or "", self._play_dl_boot_id()))
+            except Exception:  # noqa: BLE001 - sweep never breaks chat
+                rows = []
+            for row in rows or []:
+                lost_title = str(row.get("title") or "download")
+                try:
+                    self.gateway.send(
+                        chat.platform, target,
+                        f"⚠️ the download “{lost_title}” was lost when "
+                        "I restarted — it never finished. Ask me again "
+                        "and I'll redo it. (If the file did reach you "
+                        "before the restart, ignore this.)")
+                    db.execute(
+                        "UPDATE play_download_jobs SET status = "
+                        "'lost-reported' WHERE job_id = ?",
+                        (row.get("job_id"),))
+                except Exception:  # noqa: BLE001 - one row never blocks
+                    continue
 
     def _play_send_in_chat(self, engine: Any, item: dict[str, Any],
                            out: str, chat: Any) -> str:

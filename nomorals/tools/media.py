@@ -37,6 +37,104 @@ def _clean(name: str, limit: int = 120) -> str:
     return cleaned[:limit] or "media"
 
 
+#: Error text shared by every backend when a job cancellation lands.
+CANCELLED_MESSAGE = "download cancelled by request"
+
+
+def _cancel_requested() -> bool:
+    """True when the background job running this download was cancelled.
+
+    Cooperative cancellation: the job registry cannot kill threads, so
+    download backends poll this at every progress tick and stop
+    themselves.  Outside a job context this is always False.
+    """
+    try:
+        from ..core.jobs import current_job
+
+        job = current_job()
+        return bool(job is not None
+                    and getattr(job, "cancel_requested", False))
+    except Exception:  # noqa: BLE001 - cancellation is best-effort
+        return False
+
+
+def _snapshot_dir(target_dir: Path) -> dict[str, tuple[int, int]]:
+    """name -> (size, mtime_ns) for every file in *target_dir*.
+
+    Taken before a download starts so the result can be attributed to
+    THIS download: the downloads directory is shared and accumulates
+    every previous download, so "the largest file in the directory"
+    is not evidence about what just landed.
+    """
+    snap: dict[str, tuple[int, int]] = {}
+    try:
+        entries = list(target_dir.iterdir())
+    except OSError:
+        return snap
+    for entry in entries:
+        try:
+            if entry.is_file():
+                st = entry.stat()
+                snap[entry.name] = (st.st_size, st.st_mtime_ns)
+        except OSError:
+            continue
+    return snap
+
+
+def _fresh_files(target_dir: Path,
+                 before: dict[str, tuple[int, int]]) -> list[Path]:
+    """Non-empty files created or changed since the *before* snapshot."""
+    out: list[Path] = []
+    try:
+        entries = list(target_dir.iterdir())
+    except OSError:
+        return out
+    for entry in entries:
+        try:
+            if not entry.is_file():
+                continue
+            st = entry.stat()
+        except OSError:
+            continue
+        if st.st_size <= 0:
+            continue
+        if before.get(entry.name) != (st.st_size, st.st_mtime_ns):
+            out.append(entry)
+    return out
+
+
+def _looks_like_html(head: bytes) -> bool:
+    """True when the first bytes are an HTML page, not media.
+
+    The landing check for downloads: a soft-404 / interstitial page
+    served with HTTP 200 must never be saved as ``.mp3``/``.mp4``.
+    Real media containers (ID3/MP3 frames, ftyp, OggS, RIFF, fLaC)
+    never begin with markup, so this cannot false-positive on audio
+    or video bytes.
+    """
+    text = head[:1024].decode("utf-8", errors="replace")
+    text = text.lstrip("\ufeff \t\r\n").lower()
+    if text.startswith(("<!doctype html", "<html", "<head", "<title",
+                        "<body", "<!--")):
+        return True
+    return "<html" in text[:512] and "<head" in text[:512]
+
+
+def _looks_like_media(head: bytes) -> bool:
+    """True when the first bytes carry a known media-container magic.
+
+    Used to let a real media body win over a wrong ``text/html``
+    Content-Type header (some CDNs mislabel everything).
+    """
+    if head.startswith((b"ID3", b"OggS", b"RIFF", b"fLaC", b"FLV",
+                        b"\x1a\x45\xdf\xa3", b"\x30\x26\xb2\x75")):
+        return True
+    if len(head) >= 8 and head[4:8] == b"ftyp":  # mp4/m4a family
+        return True
+    # MP3 frame sync: 11 bits set at the start of a frame header.
+    return len(head) >= 2 and head[0] == 0xFF and (head[1] & 0xE0) == 0xE0
+
+
 def probe(url: str, *, timeout: float = 60.0) -> dict[str, Any]:
     """Fetch metadata without downloading."""
     from ..media.cookies import ytdlp_cookie_args, ytdlp_cookie_opts
@@ -135,23 +233,51 @@ def _download_python_api(
         options["postprocessors"] = [
             {"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "192"}
         ]
-    if progress is not None:
-        def hook(state: dict[str, Any]) -> None:
-            if state.get("status") == "downloading":
-                progress(f"{state.get('_percent_str', '?').strip()} of {state.get('_total_bytes_str', '?')}")
+    def hook(state: dict[str, Any]) -> None:
+        if _cancel_requested():
+            raise MediaError(CANCELLED_MESSAGE)
+        if progress is not None and state.get("status") == "downloading":
+            progress(f"{state.get('_percent_str', '?').strip()} of {state.get('_total_bytes_str', '?')}")
 
-        options["progress_hooks"] = [hook]
+    # Always installed (not only when a progress callback was given):
+    # the hook is also the cancellation checkpoint for this backend.
+    options["progress_hooks"] = [hook]
+    if _cancel_requested():
+        raise MediaError(CANCELLED_MESSAGE)
+    before = _snapshot_dir(target_dir)
     try:
         with module.YoutubeDL(options) as ydl:
             info = ydl.extract_info(url, download=True)
             filename = ydl.prepare_filename(info) if info else ""
+    except MediaError:
+        raise
     except Exception as exc:  # noqa: BLE001
         raise MediaError(f"download failed: {exc}") from exc
 
-    path = Path(filename) if filename else None
-    if path is None or not path.exists():
-        candidates = sorted(target_dir.iterdir(), key=lambda p: -p.stat().st_size)
-        path = candidates[0] if candidates else None
+    # Attribute the result to THIS download.  Preference order: the
+    # filepath yt-dlp reports for the finished item, the prepared
+    # filename when it exists, then files that are new/changed since
+    # the snapshot (preferring the one carrying this item's id).
+    # NEVER a pre-existing untouched file: that is some earlier
+    # download, and returning it reports the wrong content as success.
+    path: Path | None = None
+    if info:
+        for key in ("filepath", "_filename"):
+            reported = info.get(key)
+            if reported and Path(str(reported)).is_file():
+                path = Path(str(reported))
+                break
+    if path is None and filename and Path(filename).is_file():
+        path = Path(filename)
+    if path is None:
+        fresh = _fresh_files(target_dir, before)
+        video_id = str((info or {}).get("id") or "")
+        if video_id:
+            named = [p for p in fresh if f"[{video_id}]" in p.name]
+            if named:
+                fresh = named
+        if fresh:
+            path = max(fresh, key=lambda p: p.stat().st_size)
     if path is None:
         raise MediaError("download reported success but produced no file")
     return {
@@ -181,16 +307,82 @@ def _download_cli(
         argv += ["-x", "--audio-format", "mp3"]
     if which("ffmpeg"):
         argv += ["--ffmpeg-location", which("ffmpeg") or "ffmpeg"]
+    if _cancel_requested():
+        raise MediaError(CANCELLED_MESSAGE)
+    before = _snapshot_dir(target_dir)
+    # Popen + communicate slices (not subprocess.run): the loop is the
+    # cancellation checkpoint for this backend — a cancelled job
+    # terminates the subprocess instead of letting it run to timeout.
     try:
-        completed = subprocess.run(argv, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout, check=False)
-    except subprocess.TimeoutExpired as exc:
-        raise MediaError(f"download timed out after {timeout}s") from exc
-    if completed.returncode != 0:
-        raise MediaError(f"yt-dlp failed: {completed.stderr.strip()[-400:]}")
-    candidates = sorted(target_dir.iterdir(), key=lambda p: -p.stat().st_size)
-    if not candidates:
+        proc = subprocess.Popen(
+            argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, encoding="utf-8", errors="replace")
+    except OSError as exc:
+        raise MediaError(f"yt-dlp failed to start: {exc}") from exc
+    deadline = time.perf_counter() + timeout
+    stdout_text, stderr_text = "", ""
+    while True:
+        try:
+            stdout_text, stderr_text = proc.communicate(timeout=0.25)
+            break
+        except subprocess.TimeoutExpired:
+            if _cancel_requested():
+                proc.terminate()
+                try:
+                    proc.communicate(timeout=5)
+                except Exception:  # noqa: BLE001 - already terminating
+                    proc.kill()
+                raise MediaError(CANCELLED_MESSAGE) from None
+            if time.perf_counter() > deadline:
+                proc.kill()
+                try:
+                    proc.communicate(timeout=5)
+                except Exception:  # noqa: BLE001 - already killing
+                    pass
+                raise MediaError(
+                    f"download timed out after {timeout}s") from None
+    if proc.returncode != 0:
+        raise MediaError(
+            f"yt-dlp failed: {(stderr_text or '').strip()[-400:]}")
+    # Attribute the result to THIS run: files yt-dlp named on stdout
+    # (Destination / already-downloaded / merge target) inside the
+    # target dir win; otherwise the largest file that is new/changed
+    # since the snapshot.  A pre-existing untouched file is never the
+    # result — it is an earlier download wearing this one's name.
+    fresh = _fresh_files(target_dir, before)
+    named: list[tuple[Path, bool]] = []  # (path, already_downloaded)
+    for line in (stdout_text or "").splitlines():
+        candidate = ""
+        already = False
+        if "Destination: " in line:
+            candidate = line.split("Destination: ", 1)[1].strip()
+        elif " has already been downloaded" in line:
+            candidate = line.split(" has already been downloaded",
+                                   1)[0].strip()
+            candidate = candidate.split("] ", 1)[-1].strip()
+            already = True
+        elif "Merging formats into " in line:
+            candidate = line.split("Merging formats into ", 1)[1] \
+                .strip().strip('"')
+        if candidate:
+            p = Path(candidate)
+            try:
+                if p.is_file() and p.parent == target_dir:
+                    named.append((p, already))
+            except OSError:
+                continue
+    path: Path | None = None
+    for p, already in reversed(named):
+        # A path yt-dlp names is this run's file when it is fresh —
+        # or when yt-dlp says it was already downloaded (this run's
+        # item, fetched by an earlier run of the same request).
+        if p in fresh or already:
+            path = p
+            break
+    if path is None and fresh:
+        path = max(fresh, key=lambda p: p.stat().st_size)
+    if path is None:
         raise MediaError("yt-dlp produced no file")
-    path = candidates[0]
     return {
         "url": url, "path": str(path), "bytes": path.stat().st_size,
         "extractor": "yt-dlp-cli", "seconds": round(time.perf_counter() - started, 2),
@@ -210,12 +402,38 @@ def _download_direct(
     target = target_dir / name
 
     def hook(done: int, total: int) -> None:
+        if _cancel_requested():
+            raise MediaError(CANCELLED_MESSAGE)
         if progress is not None and total:
             progress(f"{done * 100 // total}% ({done}/{total} bytes)")
 
-    HttpClient(timeout=600.0).download(url, target, resume=True, progress=hook)
+    if _cancel_requested():
+        raise MediaError(CANCELLED_MESSAGE)
+    response = HttpClient(timeout=600.0).request(
+        "GET", url, stream_to=target, resume=True, progress=hook)
     if not target.exists() or target.stat().st_size == 0:
         raise MediaError("direct download produced an empty file")
+    # Landing truth: an HTTP 200 HTML page (soft-404, interstitial,
+    # parked domain) is not the media the URL promised.  HTTP error
+    # statuses already raised inside the client; what remains is the
+    # 200-with-an-error-page case.  The bytes decide — a real media
+    # body served with a wrong Content-Type still passes.
+    try:
+        with target.open("rb") as fh:
+            head = fh.read(1024)
+    except OSError:
+        head = b""
+    ctype = str((response.headers or {}).get("content-type", "")).lower()
+    if _looks_like_html(head) or (
+            ctype.startswith(("text/html", "application/xhtml+xml"))
+            and not _looks_like_media(head)):
+        try:
+            target.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise MediaError(
+            f"direct download from {url} returned an HTML page, "
+            "not media (soft-404 or interstitial)")
     return {
         "url": url, "path": str(target), "bytes": target.stat().st_size,
         "extractor": "direct", "seconds": round(time.perf_counter() - started, 2),
