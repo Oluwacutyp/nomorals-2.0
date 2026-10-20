@@ -799,12 +799,20 @@ class ContractPortfolio:
     # — portfolio value —
 
     def portfolio_value(self) -> float:
-        """Sum of the largest ₦ amount seen in each contract's text."""
+        """Sum of the largest ₦ amount seen in each contract's text.
+
+        Only CURRENT versions count: a contract another row supersedes
+        is history (kept for the version chain), and summing it too
+        would count the same agreement twice after an amendment.
+        """
         if not self._ok:
             return 0.0
         try:
             total = self._db.execute(
-                "SELECT SUM(annual_value) FROM contracts").fetchone()[0]
+                "SELECT SUM(annual_value) FROM contracts WHERE id NOT IN "
+                "(SELECT supersedes FROM contracts "
+                "WHERE supersedes IS NOT NULL AND supersedes != '')"
+            ).fetchone()[0]
             return float(total or 0.0)
         except Exception:  # noqa: BLE001
             return 0.0
@@ -831,6 +839,14 @@ class ContractPortfolio:
             self._db.execute(
                 "UPDATE contracts SET supersedes = ? WHERE id = ?",
                 (contract_id, contract.id))
+            # The amended text re-extracted the live obligations under
+            # the new version; retire the superseded version's open ones
+            # so attention/pipeline/alerts track each real-world date
+            # once, not once per version. History keeps the rows.
+            self._db.execute(
+                "UPDATE obligations SET done = 1, done_at = ? "
+                "WHERE contract_id = ? AND done = 0",
+                (_now(), contract_id))
             self._db.commit()
             contract.supersedes = contract_id
             return contract, review

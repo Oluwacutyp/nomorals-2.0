@@ -163,7 +163,14 @@ def detect_subscriptions(
             continue
         period = float(statistics.median(gaps))
         last_seen = rows[-1][1]
-        nxt = last_seen + timedelta(days=round(period))
+        step = max(1, round(period))
+        nxt = last_seen + timedelta(days=step)
+        if nxt <= as_of:
+            # Roll forward by whole periods (O(1)): an estimate in the
+            # past is unreachable for renewal reminders — the real next
+            # renewal is the first occurrence after ``as_of``.
+            k = (as_of - nxt).days // step + 1
+            nxt += timedelta(days=step * k)
         last_used = usage_norm.get(key, "MISSING")
         suspected = False
         reason = ""

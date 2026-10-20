@@ -330,7 +330,7 @@ def evaluate_alerts(
             from .insights import _window, detect_recurring
             ledger_path, _ = finance_paths(None)
             ledger = ledger or Ledger(ledger_path)
-            recurring = detect_recurring(_window(ledger, 120, now))
+            recurring = detect_recurring(_window(ledger, 120, now), now=now)
         except Exception:  # noqa: BLE001
             _log.debug("recurring snapshot failed", exc_info=True)
 
@@ -464,7 +464,7 @@ def sync_bill_alerts(store: AlertStore | None = None,
     store = store or AlertStore()
     ledger_path, _ = finance_paths(None)
     ledger = ledger or Ledger(ledger_path)
-    recurring = detect_recurring(_window(ledger, 120, now))
+    recurring = detect_recurring(_window(ledger, 120, now), now=now)
     existing = {a.target.strip().lower(): a
                 for a in store.list()
                 if a.kind == KIND_BILL_DUE}

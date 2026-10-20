@@ -95,10 +95,20 @@ def compute_shares(amount_kobo: int, members: list[str], *,
     split = (split or SPLIT_EQUAL).lower()
     if split == SPLIT_PERCENT:
         pcts = list(shares or [])
-        if len(pcts) != n or abs(sum(pcts) - 100) > 0.01:
+        # 1e-9 slack: 33.33×3 = 99.99 must pass the 0.01 tolerance —
+        # in float it lands a hair OVER 0.01 away from 100.
+        if len(pcts) != n or abs(sum(pcts) - 100) > 0.01 + 1e-9:
             raise ValueError("percent split needs one % per member "
                              "totalling 100")
-        raw = [amount_kobo * p / 100 for p in pcts]
+        total_pct = sum(pcts)
+        if total_pct <= 0:
+            raise ValueError("percent split needs one % per member "
+                             "totalling 100")
+        # Percentages are PROPORTIONS of the bill: divide by their
+        # actual total, not by 100. Totals a hair over 100 (100.009)
+        # otherwise produced shares summing to MORE than the expense —
+        # the dust loop below only ever adds kobo, never removes.
+        raw = [amount_kobo * p / total_pct for p in pcts]
     elif split == SPLIT_EXACT:
         exact = [int(x) for x in (shares or [])]
         if len(exact) != n or sum(exact) != amount_kobo:
@@ -112,6 +122,22 @@ def compute_shares(amount_kobo: int, members: list[str], *,
     # first members absorb the leftover kobo — sums exactly, no dust lost
     for i in range(dust):
         floors[i % n] += 1
+    if dust < 0:
+        # Float guard: never hand back shares above the expense —
+        # trim the excess from the largest shares, never below zero.
+        order = sorted(range(n), key=lambda i: floors[i], reverse=True)
+        remaining = -dust
+        while remaining > 0:
+            progressed = False
+            for i in order:
+                if remaining <= 0:
+                    break
+                if floors[i] > 0:
+                    floors[i] -= 1
+                    remaining -= 1
+                    progressed = True
+            if not progressed:
+                break
     return floors
 
 

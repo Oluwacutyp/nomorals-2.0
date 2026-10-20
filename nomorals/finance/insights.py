@@ -88,7 +88,8 @@ def _window(ledger: Ledger, days: int, now: float,
     return ledger.transactions(since=start, until=end)
 
 
-def detect_recurring(txns: list[Any], *, min_occurrences: int = 3) -> list[RecurringCharge]:
+def detect_recurring(txns: list[Any], *, min_occurrences: int = 3,
+                   now: float | None = None) -> list[RecurringCharge]:
     """Find charges repeating on a fixed cadence (subscriptions etc.).
 
     Groups by normalized note; a group qualifies when it has >=
@@ -98,6 +99,14 @@ def detect_recurring(txns: list[Any], *, min_occurrences: int = 3) -> list[Recur
     the median — the same subscription, not coincidental same-merchant
     charges). Amount drift inside the band is KEPT (not bucketed away)
     so price hikes are detectable — Rocket Money's rate-increase flag.
+
+    ``next_due_ts`` is always the next FUTURE occurrence: when the
+    last charge is more than one interval old the estimate rolls
+    forward by whole intervals, arithmetically. The reference time
+    defaults to the latest supplied transaction (the data's own edge),
+    or pass ``now`` explicitly. Without this, bills whose last charge
+    is stale report a "next due" in the past and silently vanish from
+    upcoming-bill and bill-alert surfaces.
     """
     groups: dict[str, list[Any]] = defaultdict(list)
     for t in txns:
@@ -108,6 +117,10 @@ def detect_recurring(txns: list[Any], *, min_occurrences: int = 3) -> list[Recur
         if not norm:
             continue
         groups[norm].append(t)
+    if now is None:
+        all_ts = [t.ts for hits in groups.values() for t in hits
+                  if getattr(t, "ts", 0)]
+        now = max(all_ts) if all_ts else time.time()
     out: list[RecurringCharge] = []
     for norm, hits in groups.items():
         if len(hits) < min_occurrences:
@@ -134,6 +147,12 @@ def detect_recurring(txns: list[Any], *, min_occurrences: int = 3) -> list[Recur
         last_amount = hits[-1].amount_kobo
         first_amount = hits[0].amount_kobo
         next_due = hits[-1].ts + avg * 86400
+        if next_due <= now:
+            # Roll forward by whole intervals (O(1), no loop): the
+            # smallest k >= 1 with last + (k+1)*interval > now.
+            step = avg * 86400
+            k = int((now - next_due) // step) + 1
+            next_due += k * step
         per_year = 365.0 / avg if avg > 0 else 0
         out.append(RecurringCharge(
             note_pattern=hits[-1].note or norm,
@@ -154,7 +173,7 @@ def upcoming_bills(ledger: Ledger, *, days: int = 14,
     """Recurring charges due within ``days``. Rocket Money's core view."""
     now = time.time() if now is None else now
     txns = _window(ledger, 120, now)
-    return [r for r in detect_recurring(txns)
+    return [r for r in detect_recurring(txns, now=now)
             if 0 < r.next_due_ts - now <= days * 86400]
 
 

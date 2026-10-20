@@ -121,7 +121,11 @@ def _txns():
 
 def test_subscriptions_detected_from_supplied_transactions_only():
     assert detect_subscriptions([]) == []
-    subs = detect_subscriptions(_txns())
+    # as_of pinned inside the fixture's era (the sibling tests do the
+    # same): estimated_next_renewal is the next FUTURE occurrence as of
+    # as_of, so an unpinned call would roll past 2026-10-02 as the
+    # wall clock advances.
+    subs = detect_subscriptions(_txns(), as_of=date(2026, 9, 28))
     assert [s.merchant for s in subs] == ["Netflix"]
     sub = subs[0]
     assert sub.occurrences == 3 and sub.cost_minor == 650000
@@ -146,7 +150,7 @@ def test_subscription_never_cancels_without_confirmation():
         assert not name.startswith("cancel"), f"cancel-act function present: {name}"
     assert not hasattr(mod, "cancel_subscription")
     assert not hasattr(mod, "cancel")
-    subs = detect_subscriptions(_txns())
+    subs = detect_subscriptions(_txns(), as_of=date(2026, 9, 28))
     reminders = renewal_reminders(subs, as_of=date(2026, 9, 28), days_ahead=7)
     assert len(reminders) == 1
     assert reminders[0].merchant == "Netflix"
