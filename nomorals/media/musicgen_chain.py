@@ -143,9 +143,12 @@ def draft_melody(lyrics: str, language: str = "yo", key: str = "C",
     degree = 0
     n = len(syllables)
     for i, _syl in enumerate(syllables):
-        # phrase arch: climb toward the middle, descend to the end
+        # phrase arch: climb toward the middle, descend to the end.
+        # The walk is biased toward the arch target — the bias term
+        # used to be multiplied by 0, leaving a bare random walk.
         target = 2 if i < n / 2 else -2
-        degree += rng.choice([-1, 0, 0, 1]) + (1 if target > 0 else -1 if target < 0 else 0) * 0
+        bias = 1 if degree < target else (-1 if degree > target else 0)
+        degree += rng.choice([-1, 0, 0, 1]) + bias
         degree = max(-3, min(5, degree))
         octave, step = divmod(degree, len(_MAJOR))
         midi = root + octave * 12 + _MAJOR[step]
@@ -318,7 +321,12 @@ def run_chain(req: ChainRequest,
             from .ace_step import ACEStepBackend
             backend = ACEStepBackend()
             if req.lora:
-                backend = ACEStepBackend()  # LoRA applied via adapter below
+                # attach the LoRA the way the backend expects it (see
+                # AfrobeatsLoRA.apply_lora): the diffusers adapter reads
+                # lora_path/lora_scale at load time. Previously a second
+                # identical backend was constructed and the LoRA never
+                # attached, while the stage detail below claimed it had.
+                backend.lora_path = req.lora
             res = backend.generate(req.lyrics, req.genre,
                                    duration_s=req.bed_duration_s,
                                    seed=req.seed, title=req.title,
@@ -465,7 +473,7 @@ def register(registry: Any) -> None:
             "Full music generation chain: lyrics+tones → draft score → "
             "ACE-Step bed → DiffSinger vocal → RVC timbre → master. "
             "action=run (title, lyrics, language, genre, key, bpm, seed, "
-            "voicebank, rvc_model, audience, workdir). Stages report "
+            "lora, voicebank, rvc_model, audience, workdir). Stages report "
             "real/skipped honestly; ok=False when no audio was produced. "
             "Licence is a label in the manifest (commercial_use flag per "
             "model), never a gate — audience just records intent."
@@ -476,11 +484,13 @@ def register(registry: Any) -> None:
                        lyrics: str = "Mo dé, ayọ dé", language: str = "yo",
                        genre: str = "afrobeats", key: str = "C",
                        bpm: float = 100.0, seed: int = 0,
+                       lora: str = "",
                        voicebank: str = "", rvc_model: str = "",
                        audience: str = "private",
                        workdir: str = "musicgen_out") -> dict:
         req = ChainRequest(title=title, lyrics=lyrics, language=language,
                            genre=genre, key=key, bpm=bpm, seed=seed,
+                           lora=lora,
                            voicebank=voicebank, rvc_model=rvc_model,
                            audience=audience, workdir=workdir)
         r = run_chain(req)

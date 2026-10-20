@@ -635,6 +635,34 @@ class Producer:
                                          velocity=80 + i * 4))
 
     # ── render ────────────────────────────────────────────────────────────
+    #: Conventional GM channel per part. The builtin synth routes by
+    #: part name, but a MIDI render (fluidsynth) routes by channel —
+    #: and drums only sound as drums on the percussion channel (9).
+    _PART_CHANNELS = {"melody": 0, "chords": 1, "counter": 2,
+                      "bass": 3, "drums": 9}
+
+    @classmethod
+    def _midi_parts(cls, b, parts: dict[str, list]) -> None:
+        """Write EVERY composed part into the MIDI builder, each part's
+        events copied onto its conventional channel (caller's events
+        are not mutated).
+
+        This MIDI is what the fluidsynth backend renders from, so any
+        part left out here is silently absent from the delivered WAV
+        on exactly the profile that picks the studio backend — the
+        profile path used to omit drums and counter entirely, the
+        spec path omitted counter, and rhythm-engine drum events all
+        carry channel 0, so drums played as piano notes.
+        """
+        from dataclasses import replace as _replace
+
+        for pname, ch in cls._PART_CHANNELS.items():
+            events = [(_replace(e, channel=ch)
+                       if getattr(e, "channel", ch) != ch else e)
+                      for e in parts.get(pname, [])]
+            if events:
+                b.add_notes(b.new_track(pname), events)
+
     def _render(self, profile: ReferenceProfile, parts: dict[str, list],
                 seed: int, workdir: str) -> str:
         from ..tools.filesystem import safe_path
@@ -647,10 +675,9 @@ class Producer:
                       (profile.title or "produced").lower()).strip("-") or "produced"
         target = base / f"{slug}-{seed % 100000:05d}.wav"
 
-        # minimal MIDI so fluidsynth (if chosen) has something real
+        # full-arrangement MIDI — fluidsynth (if chosen) renders from it
         b = MidiBuilder(tempo=profile.bpm, time_signature=(4, 4))
-        for ch, pname in enumerate(["melody", "chords", "bass"]):
-            b.add_notes(b.new_track(pname), parts.get(pname, []))
+        self._midi_parts(b, parts)
         midi_path = str(target.with_suffix(".mid"))
         try:
             b.write(midi_path)
@@ -927,8 +954,7 @@ class Producer:
 
         b = MidiBuilder(tempo=spec.tempo,
                         time_signature=tuple(spec.time_signature))
-        for ch, pname in enumerate(["melody", "chords", "bass", "drums"]):
-            b.add_notes(b.new_track(pname), parts.get(pname, []))
+        self._midi_parts(b, parts)
         midi_path = str(target.with_suffix(".mid"))
         try:
             b.write(midi_path)

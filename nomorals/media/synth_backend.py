@@ -305,5 +305,15 @@ def render_wav(parts: dict[str, list], tempo: float, seed: int,
                 note=choice.note)
     # builtin path (also the explicit fallback)
     from .synth import write_wav
-    write_wav(out_path, parts, tempo, seed=seed)
+    written = write_wav(out_path, parts, tempo, seed=seed)
+    if written is None or not os.path.exists(out_path) \
+            or os.path.getsize(out_path) == 0:
+        # write_wav refuses (returns None, writes nothing) when the
+        # render exceeds the audio write cap. Returning the choice
+        # anyway made every caller report success for a file that
+        # does not exist — fail loudly so produce/compose surface an
+        # honest error instead of delivering a phantom path.
+        raise RuntimeError(
+            f"builtin synth wrote no audio to {out_path} "
+            "(write refused — see the caps refusal logged above)")
     return choice

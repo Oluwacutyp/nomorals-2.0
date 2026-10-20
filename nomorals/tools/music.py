@@ -285,7 +285,7 @@ def _video_board(song: str, ctx: Any) -> str:
     from ..llm.base import Message, SamplingParams
     from ..llm.brain import brain_for
 
-    draft = _ACTIVE_DRAFTS.get(_draft_key(None))
+    draft = _ACTIVE_DRAFTS.get(_draft_key(ctx))
     context_line = ""
     if draft is not None:
         title = getattr(draft, "title", "")

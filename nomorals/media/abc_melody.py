@@ -96,20 +96,25 @@ def parse_abc_melody(abc: str, default_octave: int = 4) -> list[tuple[int, float
     if not abc or not abc.strip():
         return notes
 
-    # strip header lines and comments
+    # strip header lines and comments — but honor L: (unit note
+    # length) first: the composition prompt tells the LLM to write
+    # "L:1/4" so duration numbers are beats; stripping it and keeping
+    # the 0.5-beat default rendered every such melody at half length.
     lines = []
+    default_len = 0.5  # no L: header → 1/8 note, the common LLM output
     for ln in abc.strip().splitlines():
         ln = ln.strip()
         if not ln or ln.startswith("%"):
             continue
         if re.match(r"^[A-Z]:", ln):
+            if ln.startswith("L:"):
+                m = re.match(r"L:\s*(\d+)\s*/\s*(\d+)", ln)
+                if m and int(m.group(2)):
+                    # beats per unit note (a quarter note is one beat)
+                    default_len = 4.0 * int(m.group(1)) / int(m.group(2))
             continue  # header field
         lines.append(ln)
     body = " ".join(lines)
-
-    # default length: assume 1/8 = 0.5 beats unless specified
-    # (we stripped L: but default to eighth notes, the common LLM output)
-    default_len = 0.5
 
     t = 0.0  # current beat position
     i = 0

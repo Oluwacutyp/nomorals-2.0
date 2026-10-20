@@ -39,6 +39,7 @@ the test suite to prove the bytes are real.
 
 from __future__ import annotations
 
+import math
 import random
 import struct
 from dataclasses import dataclass, field
@@ -121,12 +122,20 @@ def midi_note(n: int) -> str:
 
 def _parse_root(root: str) -> int:
     """Key root like "C", "F#", "Bb" → semitone offset from C."""
-    root = root.strip().upper().replace("BB", "B")
+    root = root.strip()
     if not root:
         raise ValueError("empty key root")
-    letter = root[0]
+    letter = root[0].upper()
     base = {"C": 0, "D": 2, "E": 4, "F": 5, "G": 7, "A": 9, "B": 11}[letter]
-    return base + (1 if "#" in root else (-1 if "b" in root else 0))
+    # The accidental is the second character and must be read before
+    # any case folding: uppercasing the whole string first ("Bb" →
+    # "BB") erased every flat, so flat keys rendered a semitone sharp.
+    acc = root[1:2]
+    if acc == "#":
+        return base + 1
+    if acc in ("b", "B"):
+        return base - 1
+    return base
 
 
 def scale_notes(root: str, mode: str, octaves: int = 2,
@@ -965,12 +974,21 @@ class MidiBuilder:
         # tempo meta (microseconds per quarter)
         usq = int(60_000_000 / max(20.0, self.tempo))
         t0._raw(0, b"\xff\x51\x03" + struct.pack(">I", usq)[1:])
-        # time signature
+        # time signature — SMF stores the denominator as a power of
+        # two (dd), not the denominator itself: 4/4 → dd=2, 6/8 → dd=3.
+        # Writing the raw denominator declared every file x/16 (or worse).
         num, den = self.time_signature
-        t0._raw(0, b"\xff\x58\x04" + bytes([num, den, 24, 8]))
+        dd = int(round(math.log2(den))) if den > 0 else 2
+        t0._raw(0, b"\xff\x58\x04" + bytes([num, dd, 24, 8]))
         # program changes per channel
         for ch, prog in sorted(self._programs.items()):
             t0._raw(0, bytes([0xC0 | (ch & 0x0F), prog & 0x7F]))
+        # track names (FF 03): MidiTrack.name was collected from every
+        # caller but never serialized — written files had anonymous tracks
+        for tr in self.tracks:
+            if tr.name:
+                nb = tr.name.encode("utf-8", "replace")
+                tr._raw(0, b"\xff\x03" + _vlq(len(nb)) + nb)
         # end-of-track must be the last event of every track
         for tr in self.tracks:
             max_tick = max((e.delta for e in tr._events), default=0)
