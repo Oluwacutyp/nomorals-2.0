@@ -157,12 +157,17 @@ class FederatedParallelTests(unittest.TestCase):
         self.assertEqual(par.sources_skipped, seq.sources_skipped)
 
     def test_parallel_error_names_source(self):
+        # Documented contract (federated.py): a source that errors
+        # mid-search is skipped with its real error recorded in
+        # sources_skipped — one bad source never kills the whole
+        # search, in parallel mode exactly as in sequential mode.
         bad = FakeAdapter("web_tavily", boom=RuntimeError("backend exploded"))
-        with self.assertRaises(SearchError) as cm:
-            federated_search("q", sources=["web_searxng", "web_tavily"], parallel=True,
-                             adapters=_adapters(web_tavily=bad))
-        self.assertIn("'web_tavily'", str(cm.exception))
-        self.assertIn("backend exploded", str(cm.exception))
+        resp = federated_search(
+            "q", sources=["web_searxng", "web_tavily"], parallel=True,
+            adapters=_adapters(web_tavily=bad))
+        self.assertEqual(resp.sources_searched, ["web_searxng"])
+        self.assertIn("web_tavily", resp.sources_skipped)
+        self.assertIn("backend exploded", resp.sources_skipped["web_tavily"])
 
     def test_parallel_rrf(self):
         a = FakeAdapter("web_searxng", hits=[_hit("web_searxng", "shared")])

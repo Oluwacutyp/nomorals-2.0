@@ -168,6 +168,12 @@ IPAPI_PAYLOAD = {
 def _base_routes() -> dict[str, Any]:
     return {
         "crt.sh": FakeResponse(payload=CRT_PAYLOAD),
+        "api.certspotter.com": FakeResponse(payload=[
+            {"dns_names": ["example.com", "www.example.com",
+                           "*.example.com"]}]),
+        "rapiddns.io": FakeResponse(
+            text=("<table><tr><td>www.example.com</td></tr>"
+                  "<tr><td>mail.example.com</td></tr></table>")),
         "cloudflare-dns.com/dns-query": doh_answer,
         "dns.google/resolve": doh_answer,
         "urlscan.io": FakeResponse(payload=URLSCAN_PAYLOAD),

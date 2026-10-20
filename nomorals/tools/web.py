@@ -491,6 +491,14 @@ def _run_engines(client: Any, needle: str) -> tuple[
                        classify(exc).message)
             failed.append(engine)
             continue
+        if not getattr(response, "ok", True):
+            # An HTTP error status (403 bot wall, 429, 5xx) is a FAILED
+            # engine, not "no results" — report it as one.  (Duck-typed
+            # responses without an ``ok`` attribute are treated as OK.)
+            _log.debug("search engine %s returned HTTP %s", engine,
+                       getattr(response, "status", "?"))
+            failed.append(engine)
+            continue
         try:
             got = _engine_parser(engine)(response.text)
         except Exception as exc:  # noqa: BLE001 - a parser bug must not
@@ -506,11 +514,34 @@ def _run_engines(client: Any, needle: str) -> tuple[
     return results, used, failed
 
 
+#: Click-tracking parameters that never identify a page — stripped for
+#: dedupe so the same link with different campaign tags still dedupes.
+_TRACKING_PARAMS = frozenset({
+    "utm", "fbclid", "gclid", "dclid", "gbraid", "wbraid", "msclkid",
+    "mc_cid", "mc_eid", "igshid", "_ga",
+})
+
+
 def _normalize_url(url: str) -> str:
-    """Canonical form for dedupe: scheme + lowercased host + bare path."""
+    """Canonical form for dedupe: scheme + lowercased host + bare path +
+    identity-bearing query.
+
+    Query parameters are part of a page's identity (``watch?v=AAA`` and
+    ``watch?v=BBB`` are different pages), so they are kept — sorted, so
+    parameter order still canonicalizes. Only click-tracking params
+    (``utm_*``, ``fbclid``, …) and the fragment are dropped: they never
+    change which page a URL names."""
     parsed = urllib.parse.urlparse(url.strip())
     path = parsed.path.rstrip("/") or "/"
-    return f"{parsed.scheme.lower()}://{parsed.netloc.lower()}{path}"
+    pairs = [
+        (k, v) for k, v in urllib.parse.parse_qsl(parsed.query,
+                                                  keep_blank_values=True)
+        if not (k.lower().startswith("utm_") or k.lower() in _TRACKING_PARAMS)
+    ]
+    base = f"{parsed.scheme.lower()}://{parsed.netloc.lower()}{path}"
+    if pairs:
+        return f"{base}?{urllib.parse.urlencode(sorted(pairs))}"
+    return base
 
 
 def _dedupe_results(results: list[dict[str, str]]) -> list[dict[str, str]]:

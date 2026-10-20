@@ -208,6 +208,18 @@ def osint_url(context: Any, url: str) -> dict[str, Any]:
                     out["final"]["body_start"] = body[:500].decode("utf-8", "replace")
                     break
             except urllib.error.HTTPError as exc:
+                # With the no-redirect opener, urllib raises HTTPError
+                # for 3xx as well: a redirect is a chain hop to follow,
+                # not a terminal error.
+                location = ""
+                if exc.headers is not None:
+                    location = exc.headers.get("Location") or ""
+                if exc.code in (301, 302, 303, 307, 308) and location:
+                    nxt = urllib.parse.urljoin(current, location)
+                    out["chain"].append({"url": current, "status": exc.code,
+                                         "location": nxt})
+                    current = nxt
+                    continue
                 out["chain"].append({"url": current, "status": exc.code,
                                      "error": str(exc.reason)[:120]})
                 break
@@ -557,20 +569,28 @@ def _crtsh_subdomains(domain: str, timeout: float) -> dict[str, Any]:
            "&output=json")
     try:
         response = HttpClient(timeout=timeout).get(url)
-        certs = response.json() if response.ok else []
-    except Exception:
-        certs = []
+    except Exception as exc:  # noqa: BLE001 - surfaced as a source failure
+        raise ToolError(f"crt.sh lookup failed for {domain}: {exc}") from exc
+    if not response.ok:
+        raise ToolError(
+            f"crt.sh lookup failed for {domain}: HTTP {response.status}")
+    try:
+        certs = response.json()
+    except Exception as exc:  # noqa: BLE001 - surfaced as a source failure
+        raise ToolError(
+            f"crt.sh returned unparseable JSON for {domain}: {exc}") from exc
+    if not isinstance(certs, list):
+        raise ToolError(f"crt.sh returned a non-list payload for {domain}")
     names: set[str] = set()
-    if isinstance(certs, list):
-        for entry in certs:
-            for name in str(entry.get("name_value") or "").split("\n"):
-                name = name.strip().lower().rstrip(".")
-                if name and not name.startswith("*"):
-                    names.add(name)
+    for entry in certs:
+        for name in str(entry.get("name_value") or "").split("\n"):
+            name = name.strip().lower().rstrip(".")
+            if name and not name.startswith("*"):
+                names.add(name)
     suffix = "." + domain.lower()
     subs = sorted(n for n in names if n == domain.lower() or n.endswith(suffix))
     return {"subdomains": subs, "count": len(subs),
-            "certs_seen": len(certs) if isinstance(certs, list) else 0}
+            "certs_seen": len(certs)}
 
 
 def _certspotter_subdomains(domain: str, timeout: float) -> dict[str, Any]:
@@ -580,16 +600,27 @@ def _certspotter_subdomains(domain: str, timeout: float) -> dict[str, Any]:
            "&include_subdomains=true&expand=dns_names")
     try:
         response = HttpClient(timeout=timeout).get(url)
-        issuances = response.json() if response.ok else []
-    except Exception:
-        issuances = []
+    except Exception as exc:  # noqa: BLE001 - surfaced as a source failure
+        raise ToolError(
+            f"certspotter lookup failed for {domain}: {exc}") from exc
+    if not response.ok:
+        raise ToolError(
+            f"certspotter lookup failed for {domain}: HTTP {response.status}")
+    try:
+        issuances = response.json()
+    except Exception as exc:  # noqa: BLE001 - surfaced as a source failure
+        raise ToolError(
+            f"certspotter returned unparseable JSON for {domain}: {exc}"
+        ) from exc
+    if not isinstance(issuances, list):
+        raise ToolError(
+            f"certspotter returned a non-list payload for {domain}")
     names: set[str] = set()
-    if isinstance(issuances, list):
-        for item in issuances:
-            for name in (item.get("dns_names") or []):
-                name = str(name).strip().lower().rstrip(".")
-                if name and not name.startswith("*"):
-                    names.add(name)
+    for item in issuances:
+        for name in (item.get("dns_names") or []):
+            name = str(name).strip().lower().rstrip(".")
+            if name and not name.startswith("*"):
+                names.add(name)
     suffix = "." + domain.lower()
     subs = sorted(n for n in names if n == domain.lower() or n.endswith(suffix))
     return {"subdomains": subs, "count": len(subs)}
@@ -600,9 +631,12 @@ def _rapiddns_subdomains(domain: str, timeout: float) -> dict[str, Any]:
     url = f"https://rapiddns.io/subdomain/{urllib.parse.quote(domain)}?full=1"
     try:
         response = HttpClient(timeout=timeout).get(url)
-        html = response.text if response.ok else ""
-    except Exception:
-        html = ""
+    except Exception as exc:  # noqa: BLE001 - surfaced as a source failure
+        raise ToolError(f"rapiddns lookup failed for {domain}: {exc}") from exc
+    if not response.ok:
+        raise ToolError(
+            f"rapiddns lookup failed for {domain}: HTTP {response.status}")
+    html = response.text
     subs = sorted(set(
         m.group(1).lower().rstrip(".")
         for m in re.finditer(

@@ -80,8 +80,13 @@ def dns_query(domain: str, record: str = "A", *, resolvers: tuple[str, ...] = _P
     """Resolve a record type. Pure-Python: builds the UDP query, sends it to
     the first public resolver that answers, parses the answer section."""
     record = (record or "A").upper()
-    if record == "SPF":
-        record, domain = "TXT", f"spf.{domain}" if not domain.startswith("_spf.") else domain
+    spf = record == "SPF"
+    if spf:
+        # RFC 7208: the SPF policy is a TXT record published at the
+        # domain itself, selected by its "v=spf1" prefix — there is no
+        # "spf." subdomain convention, so query TXT at the domain and
+        # filter the answer set below.
+        record = "TXT"
     type_id = _TYPE_IDS.get(record.lower())
     if type_id is None:
         raise ToolError(f"unsupported record type {record!r}; use one of {sorted(set(_TYPE_IDS))}")
@@ -112,6 +117,11 @@ def dns_query(domain: str, record: str = "A", *, resolvers: tuple[str, ...] = _P
         if rcode == 3:  # NXDOMAIN is definitive
             return []
         if answers:
+            if spf:
+                # The TXT answer set is authoritative: keep only the
+                # SPF policy record (empty = the domain publishes none).
+                return [a for a in answers
+                        if a.lstrip('"').lower().startswith("v=spf1")]
             return answers
         # empty answer — try the next resolver before trusting it
     if got_response:

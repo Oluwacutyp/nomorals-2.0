@@ -214,7 +214,7 @@ def email_investigate(context: Any, email: str) -> dict[str, Any]:
     try:
         domain_info = osint_domain(context, domain)
         out["domain_registration"] = domain_info.get("registration")
-        out["domain_nameservers"] = domain_info.get("nameservers")
+        out["domain_nameservers"] = (domain_info.get("dns") or {}).get("NS")
     except ToolError as e:
         _log.debug("domain enrichment failed for %s: %s", domain, e)
     out["breaches"] = breach_check(context, email)
@@ -437,16 +437,18 @@ def osint_people(context: Any, seeds: str) -> dict[str, Any]:
                 for mx in info["mx"][:3]:
                     host = mx.split()[-1]
                     add_edge(domain_node, add_node("host", host), "MX →")
+            entry: dict[str, Any] = {}
             if info["spf"]:
-                info_out = {"spf": info["spf"], "dmarc": info["dmarc"],
-                            "deliverable": info["deliverable"]}
-                sections.setdefault("emails", {})[email] = info_out
+                entry = {"spf": info["spf"], "dmarc": info["dmarc"],
+                         "deliverable": info["deliverable"]}
             breaches = info.get("breaches") or {}
             if breaches.get("pwned"):
                 for breach in breaches["breaches"][:5]:
                     add_edge(node, add_node("breach", breach["name"]), "in breach")
             elif breaches.get("checked"):
-                sections.setdefault("emails", {})[email] = {"breach": "clean (HIBP)"}
+                entry["breach"] = "clean (HIBP)"
+            if entry:
+                sections.setdefault("emails", {})[email] = entry
         except ToolError as exc:
             sections.setdefault("emails", {})[email] = f"error: {exc}"
 
