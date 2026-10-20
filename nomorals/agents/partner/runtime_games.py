@@ -38,6 +38,37 @@ def _pop_opt(toks: list, *names: str) -> tuple:
     return val, out
 
 
+def _charagent_graph(store: Any) -> Any:
+    """Load the shared character RelationshipGraph (the
+    ``_relationships.json`` sidecar next to the character files).
+
+    Mirrors the tool path (tools/characters.py): load it, pass it to
+    ``converse()``, save it after — converse's internal throwaway
+    graph would silently discard the relationship growth."""
+    import json
+
+    from ...characters.relationships import RelationshipGraph
+
+    g = RelationshipGraph()
+    p = store.dir / "_relationships.json"
+    if p.exists():
+        try:
+            g = RelationshipGraph.from_dict(json.loads(p.read_text("utf-8")))
+        except Exception:
+            pass
+    return g
+
+
+def _charagent_save_graph(store: Any, graph: Any) -> None:
+    import json
+
+    try:
+        (store.dir / "_relationships.json").write_text(
+            json.dumps(graph.to_dict(), indent=1), encoding="utf-8")
+    except Exception:
+        pass
+
+
 class RuntimeGamesMixin:
     """RuntimeGamesMixin for :class:`PartnerRuntime`."""
 
@@ -1597,9 +1628,11 @@ class RuntimeGamesMixin:
             if c is None:
                 return f"no character named '{bits[0]}'."
             suggest = getattr(self.context, "suggest", None)
+            graph = _charagent_graph(store)
             dlg = converse("You are Devon, a warm AI companion.",
-                           c, bits[1], suggest, rounds=1)
+                           c, bits[1], suggest, rounds=1, graph=graph)
             store.save(c)
+            _charagent_save_graph(store, graph)
             last = dlg.turns[-1] if dlg.turns else None
             return f"🎭 {c.name}: {last.text}" if last else "…"
 
