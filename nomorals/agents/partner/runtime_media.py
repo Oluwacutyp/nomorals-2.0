@@ -2933,13 +2933,15 @@ class RuntimeMediaMixin:
                          "(native analyses still work)")
         return "\n".join(lines)
 
-    def _control_image(self, tail: str) -> str:
+    def _control_image(self, tail: str, *, chat_key: str = "",
+                       message: Any = None) -> str:
         ref = (tail or "").strip()
         if not ref:
             return "usage: /image <path-or-url> (lookup) or /image <prompt> (generate)"
         if _looks_like_path_or_url(ref):
             return self._image_lookup(ref)
-        return self._image_generate(ref)
+        return self._image_generate(ref, chat_key=chat_key,
+                                    message=message)
 
     def _image_lookup(self, ref: str) -> str:
         outcome = self.context.tools.call("image_lookup", path=ref)
@@ -2956,7 +2958,8 @@ class RuntimeMediaMixin:
             lines.append("near duplicates: " + "; ".join(near[:3]))
         return "\n".join(lines)
 
-    def _image_generate(self, prompt: str) -> str:
+    def _image_generate(self, prompt: str, *, chat_key: str = "",
+                        message: Any = None) -> str:
         """Generate an image from a text prompt via the generative backend."""
         try:
             from ...media_edit.generate import get_backend, GenerativeEditError
@@ -2969,6 +2972,17 @@ class RuntimeMediaMixin:
         try:
             images = backend.generate(prompt)
         except Exception as exc:  # noqa: BLE001 - backend errors surface as text
+            # A missing credential is not a dead end on owner surfaces:
+            # offer the self-provisioning drive and remember this
+            # request so it retries once the key lands.
+            from ...core.errors import MissingCredentialError
+
+            if isinstance(exc, MissingCredentialError):
+                offer = self._provision_offer_for_missing(
+                    exc, retry=("image_generate", prompt),
+                    chat_key=chat_key, message=message)
+                base = f"image generation failed: {exc}"
+                return f"{base}\n{offer}" if offer else base
             return f"image generation failed: {exc}"
         if not images:
             return "image generation failed: backend returned no images"

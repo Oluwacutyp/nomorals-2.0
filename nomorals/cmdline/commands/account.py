@@ -234,6 +234,62 @@ def _cmd_account(args: argparse.Namespace, context: Any) -> int:
                 print(f"cookies saved: {result['cookies_saved']}")
         return 0
 
+    if action == "store-login":
+        # The secure login handoff: an EXISTING account's password is
+        # read through the connectors' hidden prompt (env override for
+        # scripts), never echoed, never logged, never taken from chat —
+        # then stored straight into the CredentialVault so
+        # `nm account login` / the provisioning drive can use it.
+        from ...connectors.auth import prompt_secret
+
+        try:
+            vault = _vault(context)
+        except _AccountCliError as exc:
+            print(str(exc), file=sys.stderr)
+            return 2
+        service = (args.service or "").strip().lower()
+        username = (args.username or "").strip()
+        if not service or not username:
+            print("store-login needs --service and --username",
+                  file=sys.stderr)
+            return 2
+        login_url = (getattr(args, "login_url", "") or "").strip()
+        # A registered provisioning service names the canonical vault
+        # service (aliases like "hf" land on "huggingface").
+        from ...accounts.provisioning import get_provision_service
+
+        svc = get_provision_service(service)
+        if svc is not None:
+            service = svc.vault_service
+            if not login_url:
+                login_url = svc.login_url
+        try:
+            secret = prompt_secret(
+                f"password for {service}/{username}",
+                env_var="NM_ACCOUNT_PASSWORD")
+        except Exception as exc:  # noqa: BLE001 — message carries no secret
+            print(f"store-login cancelled: {exc}", file=sys.stderr)
+            return 2
+        if not secret:
+            print("no password entered — nothing was stored.",
+                  file=sys.stderr)
+            return 1
+        vault.store(
+            service, username, secret,
+            credential_type="password",
+            tags=["login", "handoff"],
+            metadata={"login_url": login_url, "source": "store-login"},
+        )
+        out = {"status": "stored", "service": service,
+               "username": username, "login_url": login_url}
+        if getattr(args, "json", False):
+            print(_json.dumps(out, indent=2))
+        else:
+            print(f"stored login for {service}/{username} in the vault "
+                  "(password never echoed). Devon can now log in — and "
+                  "provision an API key — with it.")
+        return 0
+
     if action == "default":
         from ...accounts import AccountManager
         try:

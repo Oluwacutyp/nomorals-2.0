@@ -209,6 +209,27 @@ class LiveView:
         finally:
             self.detach()
 
+    def retarget(self, tab: Any) -> None:
+        """Move this view's action hook to a different tab.
+
+        Multi-tab tasks (a login tab, then a work tab in the same
+        session) keep ONE live window: the old tab's hook is cleared
+        (only if it is still ours) and the new tab reports through
+        this view. Never raises."""
+        try:
+            old, self._tab = self._tab, tab
+            if old is not None and old is not tab:
+                hook = getattr(old, "on_action", None)
+                if (hook is not None
+                        and getattr(hook, "__self__", None) is self
+                        and getattr(hook, "__func__", None)
+                        == self.update.__func__):
+                    old.on_action = None
+            if tab is not None:
+                tab.on_action = self.update
+        except Exception:  # noqa: BLE001 - live view never kills the task
+            _log.debug("liveview.retarget failed", exc_info=True)
+
     def detach(self) -> None:
         """Unhook from the tab. Never raises."""
         try:

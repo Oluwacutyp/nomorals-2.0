@@ -302,6 +302,10 @@ class RuntimeReachMixin:
             rest = parts[1].strip() if len(parts) > 1 else ""
             return self._control_browser_takeover(
                 rest, chat_key=chat_key, message=message)
+        if parts and parts[0].lower() == "watch":
+            rest = parts[1].strip() if len(parts) > 1 else ""
+            return self._control_browser_watch(
+                rest, chat_key=chat_key, message=message)
         if parts and parts[0].lower() == "run":
             rest = parts[1].strip() if len(parts) > 1 else ""
             return self._control_browser_run(
@@ -315,7 +319,9 @@ class RuntimeReachMixin:
                     "(owner-only)\n"
                     "       /browser run <url> [goal] — drive a live tab "
                     "with the agent loop (owner-only, background job)\n"
-                    "       /browser run status [job] — job progress")
+                    "       /browser run status [job] — job progress\n"
+                    "       /browser watch [session] — attach a live view "
+                    "to a running browser session (owner-only)")
         verb, url = parts[0].lower(), parts[1].strip()
         if verb not in ("open", "text", "links", "forms", "headings"):
             return ("usage: /browser open|text|links|forms|headings <url>\n"

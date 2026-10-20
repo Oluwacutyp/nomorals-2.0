@@ -36,6 +36,7 @@ from .runtime_schedule import RuntimeScheduleMixin
 from .runtime_voice import RuntimeVoiceMixin
 from .runtime_memory import RuntimeMemoryMixin
 from .runtime_games import RuntimeGamesMixin
+from .runtime_provision import RuntimeProvisionMixin
 from .runtime_system import RuntimeSystemMixin
 from .runtime_media import RuntimeMediaMixin
 from .runtime_intel import RuntimeIntelMixin
@@ -130,6 +131,7 @@ class PartnerRuntime(
     RuntimeMemoryMixin,
     RuntimeGamesMixin,
     RuntimeSystemMixin,
+    RuntimeProvisionMixin,
     RuntimeMediaMixin,
     RuntimeIntelMixin,
     RuntimeSearchMixin,
@@ -725,6 +727,15 @@ class PartnerRuntime(
             self._harvest_play_downloads(message.chat.key, message.chat)
         except Exception:  # noqa: BLE001 - harvest never breaks chat
             pass
+        # One-time login intake (armed by /provision login): the
+        # owner's next message IS a password. Consumed here — before
+        # the autonomy interest recorder and before the brain — so the
+        # secret never reaches history, logs, or interest models.
+        try:
+            if self._try_consume_login_intake(message):
+                return
+        except Exception:  # noqa: BLE001 - intake never breaks chat
+            _log.exception("login intake consume failed")
         # Autonomy: every inbound message resets the idle clock and feeds
         # the pattern/interest models. Cheap, never blocks.
         try:
@@ -1762,6 +1773,10 @@ class PartnerRuntime(
                 self._start_boot_mission_resume()
             except Exception as exc:  # noqa: BLE001 - boot must not fail here
                 _log.warning("boot mission resume not started: %s", exc)
+        # Self-provisioned credentials: bridge vault keys into the env
+        # before anything can fail for a missing one. Best-effort — a
+        # locked vault skips the bridge, never the boot.
+        self._bridge_provisioned_credentials()
         started = self.gateway.start(self.on_message)
         if self.settings.partner.enabled and not self.dry_run:
             try:
@@ -4362,6 +4377,10 @@ class PartnerRuntime(
             return self._control_api(command.tail or arg)
         if kind == "connectors":
             return self._control_connectors(command.tail or arg)
+        if kind == "provision":
+            return self._control_provision(command.tail or arg,
+                                           chat_key=chat_key,
+                                           message=message)
         if kind == "notion":
             return self._control_notion(command.tail or arg)
         if kind == "gcal":
@@ -4444,7 +4463,8 @@ class PartnerRuntime(
         if kind == "mission":
             return self._control_mission(command.tail or arg, chat_key=chat_key)
         if kind == "image":
-            return self._control_image(command.tail or arg)
+            return self._control_image(command.tail or arg,
+                                       chat_key=chat_key, message=message)
         if kind == "imggen":
             return self._control_imggen(command.tail or arg)
         if kind == "shorts":

@@ -1468,6 +1468,19 @@ def _parser() -> argparse.ArgumentParser:
     a_login.add_argument("--json", action="store_true",
                          help="output as JSON")
 
+    a_storelogin = account_sub.add_parser(
+        "store-login", help="save an EXISTING login into the vault "
+                            "(hidden prompt — the password is never "
+                            "echoed, logged, or taken from chat)")
+    a_storelogin.add_argument("--service", required=True, help="service name")
+    a_storelogin.add_argument("--username", required=True,
+                              help="the account username/email")
+    a_storelogin.add_argument("--login-url", default="",
+                              help="login page URL (default: the "
+                                   "provisioning registry's, when known)")
+    a_storelogin.add_argument("--json", action="store_true",
+                              help="output as JSON")
+
     a_default = account_sub.add_parser(
         "default", help="set/clear the default account for a service "
                         "(account switching)")

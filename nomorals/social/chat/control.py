@@ -429,6 +429,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "artifact": (0, None),   # /artifact list | info <ref> | send <ref> — saved artifacts, sent to this chat
     "api": (0, None),        # /api list | <connector> [json params]
     "connectors": (0, 2),   # /connectors [list|status|connect] [name] — manage the service connectors
+    "provision": (0, None),  # /provision [service] | login <service> <username> — Devon fetches missing API keys herself (owner only)
     "notion": (0, None),      # /notion dbs|query|add — Notion reads + page writes
     "gcal": (0, None),        # /gcal [agenda] | add — Google Calendar
     "trello": (0, None),      # /trello boards|lists|cards|add — Trello
@@ -824,6 +825,7 @@ NON_STACKABLE_COMMANDS: frozenset[str] = frozenset({
     *GAME_COMMANDS,
     "game", "npc", "charagent", "dm", "predict",
     "quit", "forget", "restart", "deploy", "update", "pull",
+    "provision",
 })
 
 #: The exact owner-grant denial :func:`handle_control` returns. The stack
@@ -1991,6 +1993,10 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
             "usage": "/connectors [list] | /connectors status <name> | /connectors connect <name>",
             "example": "/connectors connect leonardo",
             "related": "/api /notion /gcal /trello"},
+    "provision": {"what": "self-provisioning: when a feature dies for a missing API key, Devon offers to fetch one herself — logs in (or creates the account, your identity, one per service), creates the key, validates it, vaults it and retries. Owner only; never offered on the public bot.",
+            "usage": "/provision [service] | /provision login <service> <username>",
+            "example": "/provision hf",
+            "related": "/connectors /browser watch"},
     "notion": {"what": "Notion: list databases, query rows, create pages — through your connected Notion integration.",
             "usage": "/notion dbs [query] | /notion query <db> [text] | /notion add <page-id> <title> [| <body>]",
             "example": "/notion add <page-id> Shopping list | milk | eggs",
@@ -2395,7 +2401,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
     ("media system", ["music", "distribute", "play", "video", "hub", "podcast", "dj", "produce", "like", "dislike", "cookies",
                       "download", "shorts", "caption", "imggen", "sham", "musicnote"]),
     ("execution · archives · builders", ["exec", "zip", "apps", "fix", "deliver"]),
-    ("tools & automation", ["schedule", "db", "artifact", "api", "connectors", "notion",
+    ("tools & automation", ["schedule", "db", "artifact", "api", "connectors", "provision", "notion",
                             "gcal", "trello", "proxy", "workspace", "record",
                             "macro", "file", "publish", "notify", "proactive", "mission",
                             "bet", "finance", "weather", "tz", "email", "gmail", "mail", "inbox", "routine", "home", "store", "track", "untrack", "trip", "travelclient", "contract", "legal", "research", "contracts", "regwatch", "uprofile", "vnote", "match", "cgroup", "challenge", "room", "scamcheck", "passport", "truecost", "value", "valuepick", "watch", "send", "leads", "guardrails", "competitor", "cost", "panel",
@@ -2655,7 +2661,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
      ["schedule", "db", "artifact", "api", "proxy", "workspace", "record", "macro", "file",
       "publish", "notify", "proactive", "mission", "features", "decode", "cookies", "cookielab", "cipher",
       "monitor", "investigate", "bet", "finance", "weather", "tz", "email", "gmail", "mail", "inbox", "routine", "home", "store", "track", "untrack", "trip", "travelclient", "contract", "legal", "contracts", "regwatch", "uprofile", "vnote", "match", "cgroup", "challenge", "room", "scamcheck", "passport", "truecost", "value", "valuepick", "watch", "send", "leads", "panel",
-      "connectors", "notion", "gcal", "trello", "exness", "stripe",
+      "connectors", "provision", "notion", "gcal", "trello", "exness", "stripe",
       "guardrails", "content",
       "tempmail", "checkmail", "vnumber", "checksms", "browser", "paper", "backup"]),
     ("platform control — updates & restarts",
@@ -2884,7 +2890,8 @@ LIST_ONELINERS: dict[str, str] = {
     "checkmail": "read your temp inbox: /checkmail [read <n> | code | forget]",
     "vnumber": "temp number: /vnumber new [country] gets a virtual number for SMS codes, per-user",
     "checksms": "read SMS on your temp number: /checksms [code | forget]",
-    "browser": "the browser tool in chat: /browser open|text|links|forms|headings <url> | takeover [url] | run <url> [goal] (owner-only, background job) | run status [job]",
+    "browser": "the browser tool in chat: /browser open|text|links|forms|headings <url> | takeover [url] | run <url> [goal] (owner-only, background job) | run status [job] | watch [session] — attach a live view to a running browser session (owner-only)",
+    "provision": "self-provisioning: /provision [service] — Devon fetches a missing API key herself (login or account creation; key validated + vaulted, request retried); /provision login <service> <username> hands her an existing login",
     "paper": "paper trading: /paper start <symbol> [market] [capital] | status | stop | list (simulated, never real)",
     "people": "the people spine: /people list | show <name> | add <name> | note <name> <text>",
     "commitments": "the obligation layer: /commitments list | add <what> [by <deadline>] | kept|broken|cancel <id> | overdue | due | reliability | verify",

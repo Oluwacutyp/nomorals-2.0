@@ -18,6 +18,19 @@ checkpoint instead of being bypassed.
 
 from .vault import CredentialVault, Credential, AccountProfile
 from .manager import AccountManager, estimate_secret_strength
+from .provisioning import (
+    PROVISION_REGISTRY,
+    LicenseStep,
+    ProvisionDriver,
+    ProvisionOutcome,
+    ProvisionResult,
+    ProvisionService,
+    bridge_vault_credentials,
+    classify_missing_credential,
+    get_provision_service,
+    provisioned_status,
+    register_provision_service,
+)
 from .browser_login import (
     LoginConfig,
     LoginFailed,
@@ -119,6 +132,17 @@ __all__ = [
     "AccountProfile",
     "AccountManager",
     "estimate_secret_strength",
+    "PROVISION_REGISTRY",
+    "LicenseStep",
+    "ProvisionDriver",
+    "ProvisionOutcome",
+    "ProvisionResult",
+    "ProvisionService",
+    "bridge_vault_credentials",
+    "classify_missing_credential",
+    "get_provision_service",
+    "provisioned_status",
+    "register_provision_service",
     "LoginConfig",
     "LoginFailed",
     "LoginCaptchaRequired",

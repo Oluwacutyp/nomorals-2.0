@@ -437,6 +437,35 @@ class AuthError(NoMoralsError):
     retryable = False
 
 
+class MissingCredentialError(AuthError):
+    """A feature needs a credential that is not configured at all.
+
+    Distinct from a *rejected* credential: nothing was presented, so
+    nothing could be refused. Carries the provisioning coordinates —
+    ``service`` (the provisioning-registry id), ``env_key`` (the
+    environment/config key the feature reads) and ``feature`` (the
+    raising feature) — so the chat layer can offer to provision the
+    credential instead of dead-ending (see
+    :mod:`nomorals.accounts.provisioning`). The message never contains
+    a secret: there is none yet.
+    """
+
+    code = "auth.missing_credential"
+
+    def __init__(self, message: str = "", *, service: str = "",
+                 env_key: str = "", feature: str = "", **kw: Any) -> None:
+        super().__init__(message, **kw)
+        self.service = service
+        self.env_key = env_key
+        self.feature = feature
+        if service:
+            self.details.setdefault("service", service)
+        if env_key:
+            self.details.setdefault("env_key", env_key)
+        if feature:
+            self.details.setdefault("feature", feature)
+
+
 class QuotaExceeded(NoMoralsError):
     """A quota (not a rate window) is exhausted — monthly tokens, seats, storage.
 

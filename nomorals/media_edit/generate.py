@@ -314,6 +314,36 @@ class HFInferenceBackend(GenerativeBackend):
             kwargs["api_key"] = self.token
         return InferenceClient(**kwargs)
 
+    def _raise_translated(self, exc: Exception, action: str) -> None:
+        """Re-raise a provider failure, typed when it is a missing key.
+
+        When no token is configured and the provider refused the call
+        on auth grounds (an HTTP 401/403 via ``is_auth_error``, or the
+        provider's own no-api-key complaint — the fal-ai route answers
+        "You must provide an api_key ..." with no typed signal at all),
+        the actionable fact is "no credential configured": raise
+        :class:`MissingCredentialError` so the caller can offer to
+        provision one (``nomorals.accounts.provisioning``) instead of
+        dead-ending. Token-less calls that SUCCEED (anonymous routes)
+        never reach here. With a token present, the failure is the
+        provider's and stays a plain GenerativeEditError.
+        """
+        from ..core.errors import MissingCredentialError, is_auth_error
+
+        if self.token is None:
+            text = str(exc).lower()
+            if is_auth_error(exc) or "api_key" in text or "api key" in text \
+                    or "hf auth login" in text or "unauthorized" in text \
+                    or "authentication" in text:
+                raise MissingCredentialError(
+                    f"HF {action} needs a Hugging Face token — none is "
+                    f"configured (set HF_TOKEN; model {self.model!r}). "
+                    f"Provider said: {exc}",
+                    service="huggingface", env_key="HF_TOKEN",
+                    feature="media_edit.hf") from exc
+        raise GenerativeEditError(
+            f"HF {action} failed for model {self.model!r}: {exc}") from exc
+
     def edit(self, image: Any, instruction: str, *,
              mask: Any | None = None,
              strength: float = 0.75,
@@ -347,8 +377,7 @@ class HFInferenceBackend(GenerativeBackend):
             result = client.image_to_image(
                 image, prompt=instruction, model=self.model, **params)
         except Exception as exc:
-            raise GenerativeEditError(
-                f"HF inference failed for model {self.model!r}: {exc}") from exc
+            self._raise_translated(exc, "inference")
         return _apply_mask(image, result, mask)
 
     def generate(self, prompt: str, *,
@@ -391,9 +420,7 @@ class HFInferenceBackend(GenerativeBackend):
                     prompt, model=self.model, **p)
                 out.append(result)
         except Exception as exc:
-            raise GenerativeEditError(
-                f"HF text-to-image failed for model {self.model!r}: {exc}"
-            ) from exc
+            self._raise_translated(exc, "text-to-image")
         return out
 
     def img2img(self, image: Any, prompt: str, *,
