@@ -114,10 +114,22 @@ class Studio:
 
     # -- generation --------------------------------------------------
     def generate(self, prompt: str, **kwargs):
-        """Text-to-image. kwargs → PipelineConfig fields + save path."""
-        from .pipeline import PipelineConfig
+        """Text-to-image. kwargs → PipelineConfig fields + save path.
+
+        ``aspect_ratio`` ("16:9", "9:16", …) is accepted and translated
+        to width/height via :func:`resolve_aspect_ratio` — it is not a
+        PipelineConfig field, so without the translation it was
+        silently dropped by the field filter below and a 16:9 request
+        rendered square. Explicit width/height always win.
+        """
+        from .pipeline import PipelineConfig, resolve_aspect_ratio
 
         save_to = kwargs.pop("save_to", None)
+        aspect = kwargs.pop("aspect_ratio", None)
+        if aspect:
+            aw, ah = resolve_aspect_ratio(str(aspect))
+            kwargs.setdefault("width", aw)
+            kwargs.setdefault("height", ah)
         pipe = self.pipeline()
         cfg = PipelineConfig(**{k: v for k, v in kwargs.items()
                                  if k in PipelineConfig.__dataclass_fields__})
@@ -193,6 +205,38 @@ class Studio:
             out = upscale_classical(img, scale=scale)
         return self._finalize([out], f"upscale x{scale}", save_to)
 
+    @staticmethod
+    def _default_name(i: int) -> str:
+        # Nanosecond stamp: the old 1-second name made back-to-back
+        # generations (batch loops, character sheets) overwrite each
+        # other's file AND sidecar prompt.
+        return f"imggen_{time.time_ns()}_{i}.png"
+
+    def _target_name(self, save_to: str | None, i: int, count: int,
+                     out_dir: str) -> str:
+        """Resolve where image ``i`` of ``count`` lands.
+
+        ``save_to`` conventions across callers:
+        - a directory (existing, or trailing "/") → a unique generated
+          name inside it (the tools pass their out-dir this way; the
+          old code treated it as a file path and died in PIL);
+        - a file path with a multi-image batch → indexed siblings
+          (``name_1.png``, ``name_2.png``…) so no image in the batch
+          overwrites another;
+        - a file path, single image → exactly that path;
+        - None → a unique generated name under the default out dir.
+        """
+        if save_to and (os.path.isdir(save_to)
+                        or save_to.endswith(("/", os.sep))):
+            os.makedirs(save_to, exist_ok=True)
+            return os.path.join(save_to, self._default_name(i))
+        if save_to:
+            if count > 1:
+                stem, ext = os.path.splitext(save_to)
+                return f"{stem}_{i + 1}{ext or '.png'}"
+            return save_to
+        return os.path.join(out_dir, self._default_name(i))
+
     def _finalize(self, images, prompt: str,
                   save_to: str | None) -> list[str]:
         out_dir = os.path.expanduser(
@@ -200,8 +244,7 @@ class Studio:
         os.makedirs(out_dir, exist_ok=True)
         paths = []
         for i, img in enumerate(images):
-            name = (save_to or
-                    f"imggen_{int(time.time())}_{i}.png")
+            name = self._target_name(save_to, i, len(images), out_dir)
             if not os.path.isabs(name):
                 name = os.path.join(out_dir, name)
             img.save(name)

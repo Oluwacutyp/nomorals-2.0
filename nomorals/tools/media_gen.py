@@ -111,13 +111,22 @@ def register(registry: Any) -> None:
     )
     def image_outpaint(image_path: str, prompt: str, *,
                        direction: str = "all") -> dict[str, Any]:
-        """Outpainting via the native pipeline."""
+        """Outpainting via the native pipeline.
+
+        ``direction`` (left|right|top|bottom|all) is translated into
+        real canvas extensions sized from the source image — it used
+        to be echoed in the result without ever reaching the studio,
+        so the "outpaint" extended nothing at all.
+        """
         from ..media.imggen.studio import Studio
         src = _sandbox(context, image_path)
+        extensions = _outpaint_extensions(src, direction)
         studio = Studio()
         out = _out_dir(context, "images")
-        paths = studio.outpaint(str(src), prompt, save_to=str(out))
-        return {"paths": paths, "prompt": prompt, "direction": direction}
+        paths = studio.outpaint(str(src), prompt, save_to=str(out),
+                                **extensions)
+        return {"paths": paths, "prompt": prompt, "direction": direction,
+                "extensions": extensions}
 
     @registry.register(
         "image_batch",
@@ -214,3 +223,32 @@ def _apply_style_preset(prompt: str, style: str) -> str:
 def _sandbox(context: Any, path: str) -> Path:
     from .filesystem import safe_path
     return Path(safe_path(context, path))
+
+
+def _outpaint_extensions(src: Path, direction: str) -> dict[str, int]:
+    """Map an outpaint direction word to pixel extensions.
+
+    A named side grows by that side's own length (left/right by the
+    image width, top/bottom by its height — the canvas doubles along
+    that axis); "all" grows every side by half its length. Unknown
+    directions are rejected instead of silently extending nothing.
+    """
+    key = (direction or "all").strip().lower()
+    if key not in ("left", "right", "top", "bottom", "all"):
+        raise ValueError(
+            f"unknown outpaint direction {direction!r} "
+            "(want left|right|top|bottom|all)")
+    from PIL import Image
+
+    with Image.open(src) as img:
+        width, height = img.size
+    if key == "left":
+        return {"left": width}
+    if key == "right":
+        return {"right": width}
+    if key == "top":
+        return {"top": height}
+    if key == "bottom":
+        return {"bottom": height}
+    return {"left": width // 2, "right": width // 2,
+            "top": height // 2, "bottom": height // 2}

@@ -2588,7 +2588,10 @@ class RuntimeMediaMixin:
             import time
             out_dir = Path(self.context.settings.resolve("data/media/generated"))
             out_dir.mkdir(parents=True, exist_ok=True)
-            fname = f"img_{int(time.time())}.png"
+            # Nanosecond stamp: a 1-second name made any two generations
+            # in the same second (any chat) overwrite each other while
+            # both replies named the same file.
+            fname = f"img_{time.time_ns()}.png"
             out_path = out_dir / fname
             img = images[0]
             if hasattr(img, "save"):

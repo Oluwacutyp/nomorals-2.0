@@ -1079,6 +1079,59 @@ def register(registry: Any) -> None:
         return result
 
     @registry.register(
+        "vision_screen",
+        description=(
+            "Screen-reader analysis of a screenshot or image: a vision "
+            "description of the layout, UI elements and their states, "
+            "PLUS the verbatim on-screen text (ocr_text). One source: "
+            "path= (workspace-relative), url=, or reference= (inbox:<id> "
+            "/ room:<slug>:<path> / attachment:<n>). focus= says what to "
+            "pay special attention to. This is the tool behind /look."
+        ),
+        capability=Capability.MODEL_CALL,
+    )
+    def vision_screen(path: str = "", url: str = "", focus: str = "",
+                      reference: str = "") -> dict[str, Any]:
+        from ..vision.seer import UNTRUSTED_VISION_PREFIX
+
+        data, source = _load(path, url, reference=reference)
+        instruction = (
+            "You are a screen reader narrating an image for someone who "
+            "cannot see it. Describe the overall layout, every UI element "
+            "and its state (enabled/disabled/selected/checked), status "
+            "indicators, and anything that needs attention. Be precise "
+            "and factual; do not invent elements that are not visible."
+        )
+        if (focus or "").strip():
+            instruction += f"\nPay special attention to: {focus.strip()}"
+        result = describe(context, data, instruction, cache=cache,
+                          source=source)
+        # Verbatim on-screen text rides alongside the description (the
+        # /look handler prints it as its own delimited OCR section).
+        # read_text is native-first and non-strict here: when no OCR
+        # path exists it returns the model's "[vision unavailable…]"
+        # marker as its text — that's not OCR, so it is dropped rather
+        # than presented as a transcription.
+        ocr_text = ""
+        try:
+            ocr = read_text(context, data, cache=cache, source=source)
+            text = str(ocr.get("text") or "")
+            if text.startswith(UNTRUSTED_VISION_PREFIX):
+                # The handler re-frames this under its own "verbatim
+                # text from the pixels" header; drop the marker line.
+                text = text[len(UNTRUSTED_VISION_PREFIX):]
+            if not text.startswith("[vision unavailable"):
+                ocr_text = text
+        except Exception:  # noqa: BLE001 - OCR is a bonus over describe
+            _log.debug("vision_screen OCR leg failed", exc_info=True)
+        out = dict(result)
+        out["ocr_text"] = ocr_text
+        out["analysis"] = "screen"
+        if (focus or "").strip():
+            out["focus"] = focus.strip()
+        return out
+
+    @registry.register(
         "vision_screenshot",
         description=(
             "PRIVILEGED: capture the local display where Devon runs. Requires "
@@ -1114,6 +1167,16 @@ def register(registry: Any) -> None:
         data, _ = _load(path, url, reference=reference)
         return image_metadata(data)
 
+    #: sniffed header format → the MIME type the data URL must claim.
+    #: The label has to match the actual bytes: an API handed
+    #: ``data:image/png;base64,/9j/…`` (JPEG bytes) may reject or
+    #: misdecode it, so the caller's mime is only a fallback for data
+    #: whose format cannot be sniffed.
+    _FORMAT_MIME = {
+        "png": "image/png", "jpeg": "image/jpeg", "gif": "image/gif",
+        "webp": "image/webp", "bmp": "image/bmp", "tiff": "image/tiff",
+    }
+
     @registry.register(
         "vision_to_base64",
         description="Encode an image as a data URL, for passing to an API by hand.",
@@ -1122,9 +1185,11 @@ def register(registry: Any) -> None:
     def vision_to_base64(path: str = "", url: str = "", mime: str = "image/png",
                          reference: str = "") -> dict[str, Any]:
         data, _ = _load(path, url, reference=reference)
+        detected = image_metadata(data).get("format")
+        effective_mime = _FORMAT_MIME.get(str(detected or ""), mime)
         encoded = base64.b64encode(data).decode("ascii")
-        return {"mime": mime, "bytes": len(data),
-                "data_url": f"data:{mime};base64,{encoded}"}
+        return {"mime": effective_mime, "bytes": len(data),
+                "data_url": f"data:{effective_mime};base64,{encoded}"}
 
 
 # ── inbox contract (Prompt 09 §2) ─────────────────────────────────────────────
