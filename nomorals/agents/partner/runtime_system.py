@@ -586,6 +586,156 @@ class RuntimeSystemMixin:
             return "\n".join(lines)
         return "usage: /db tables | schema <table> | query <select sql> | counts"
 
+    # ── artifacts: /artifact ─────────────────────────────────────────────────
+    def _artifact_store(self) -> Any:
+        """ArtifactStore over the context db, or None when no db is attached.
+
+        Same construction the missions runner uses: the context's database
+        plus a BlobStore in a ``blobs`` directory beside the db file.
+        """
+        from pathlib import Path
+
+        from ...storage.artifacts import ArtifactStore
+        from ...storage.blob import BlobStore
+
+        db = getattr(self.context, "db", None)
+        if db is None:
+            return None
+        db_path = getattr(db, "path", None)
+        blob_dir = (Path(db_path).parent / "blobs" if db_path
+                    else Path("data/blobs"))
+        return ArtifactStore(db, BlobStore(db, blob_dir))
+
+    @staticmethod
+    def _resolve_artifact(store: Any, ref: str) -> Any:
+        """Resolve an artifact id, an ``artifact://`` / ``artm://`` URI,
+        or an alias name to the artifact (None when nothing matches)."""
+        ref = (ref or "").strip()
+        if not ref:
+            return None
+        if ref.lower().startswith("artm://"):
+            ref = "artifact://" + ref[len("artm://"):]
+        art = store.resolve(ref)
+        if art is None:
+            art = store.resolve_alias(ref)
+        return art
+
+    def _artifact_unknown(self, store: Any, ref: str) -> str:
+        """Honest unknown-ref reply: name the miss, show what exists."""
+        lines = [f"unknown artifact {ref!r} — no id, URI, or alias matches."]
+        recent = store.search(limit=5)
+        if recent:
+            lines.append("recent artifacts:")
+            for art in recent:
+                lines.append(f"  {art.id} — {art.type} ({art.size} bytes)")
+        aliases = store.aliases()
+        if aliases:
+            lines.append("aliases: " + ", ".join(sorted(aliases)))
+        if not recent and not aliases:
+            lines.append("the store is empty — nothing has been saved yet.")
+        return "\n".join(lines)
+
+    def _artifact_export_path(self, store: Any, art: Any) -> Any:
+        """Where a send materializes the artifact's bytes: a file named
+        from its metadata (filename/name/title) or ``<type>-<id>``, with
+        an extension from its mime, under ``artifact_exports`` beside
+        the database (the file_send tool needs a real path)."""
+        import mimetypes
+        import re
+        from pathlib import Path
+
+        name = ""
+        for key in ("filename", "name", "title"):
+            value = (art.metadata or {}).get(key)
+            if isinstance(value, str) and value.strip():
+                name = value.strip()
+                break
+        if not name:
+            name = f"{art.type}-{art.id}"
+        name = re.sub(r"[^A-Za-z0-9._-]+", "_", name).strip("._") or art.id
+        if "." not in name:
+            name += mimetypes.guess_extension(art.mime or "") or ".bin"
+        db = getattr(self.context, "db", None)
+        db_path = getattr(db, "path", None)
+        base = Path(db_path).parent if db_path else Path("data")
+        return base / "artifact_exports" / name
+
+    def _control_artifact(self, tail: str, chat_key: str = "") -> str:
+        """Saved artifacts: list, inspect, or send one to this chat.
+
+        /artifact list                 — most recent artifacts + aliases
+        /artifact info <ref>           — metadata card for one artifact
+        /artifact send <ref>           — send its file to the current chat
+
+        <ref> is an artifact id, an artifact:// (or artm://) URI, or an
+        alias. Owner-only (the handle_control grant: /artifact is not a
+        public command). Failures are honest: an unknown ref lists what
+        exists, an unreadable blob reports the error — nothing is ever
+        reported sent that was not.
+        """
+        import time
+
+        parts = (tail or "").split(None, 1)
+        verb = parts[0].lower() if parts else "list"
+        ref = parts[1].strip() if len(parts) > 1 else ""
+        store = self._artifact_store()
+        if store is None:
+            return ("artifacts unavailable: no database is attached to "
+                    "this chat context — artifacts live in the database.")
+        if verb in ("list", "ls"):
+            arts = store.search(limit=20)
+            if not arts:
+                return "no artifacts saved yet."
+            lines = [f"artifacts ({len(arts)} most recent):"]
+            for art in arts:
+                title = str((art.metadata or {}).get("title")
+                            or (art.metadata or {}).get("name") or "")
+                label = f" — {title}" if title else (
+                    f" — by {art.creator}" if art.creator else "")
+                when = (time.strftime("%Y-%m-%d %H:%M",
+                                      time.localtime(art.created_at))
+                        if art.created_at else "")
+                lines.append(f"  {art.id} · {art.type} · {art.size} bytes"
+                             f"{label}" + (f" · {when}" if when else ""))
+            aliases = store.aliases()
+            if aliases:
+                lines.append("aliases:")
+                for name, target in sorted(aliases.items()):
+                    lines.append(f"  {name} → {target}")
+            return "\n".join(lines)
+        if verb == "info":
+            if not ref:
+                return "usage: /artifact info <id|alias|artifact://uri>"
+            art = self._resolve_artifact(store, ref)
+            if art is None:
+                return self._artifact_unknown(store, ref)
+            return store.format_card(art)
+        if verb == "send":
+            if not ref:
+                return "usage: /artifact send <id|alias|artifact://uri>"
+            art = self._resolve_artifact(store, ref)
+            if art is None:
+                return self._artifact_unknown(store, ref)
+            try:
+                data = store.read(art.id)
+            except Exception as exc:  # noqa: BLE001 - honest, never a fake send
+                return (f"couldn't read artifact {art.id} "
+                        f"({art.size} bytes): {exc} — nothing was sent.")
+            path = self._artifact_export_path(store, art)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(data)
+            chat = self._ref_from_key(chat_key)
+            outcome = self.context.tools.call(
+                "file_send", platform=chat.platform, chat_id=chat.chat_id,
+                path=str(path), caption=f"artifact {art.id} ({art.type})")
+            if not outcome.ok:
+                return (f"artifact send failed ({art.size} bytes): "
+                        f"{getattr(outcome.error, 'message', outcome.error)}")
+            return (f"📎 sent {path.name} ({art.size} bytes) — "
+                    f"artifact {art.id} → this chat")
+        return ("usage: /artifact list | info <id|alias|uri> | "
+                "send <id|alias|uri>")
+
     # ── api connectors: /api ─────────────────────────────────────────────────
     def _control_api(self, tail: str) -> str:
         parts = (tail or "").split(None, 1)

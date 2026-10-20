@@ -426,6 +426,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "look": (1, None),       # /look <path|url> [focus] — screen-reader analysis
     "schedule": (0, None),   # /schedule add|list|rm|enable|disable|run|status
     "db": (0, None),         # /db tables | schema <t> | query <sql> | counts
+    "artifact": (0, None),   # /artifact list | info <ref> | send <ref> — saved artifacts, sent to this chat
     "api": (0, None),        # /api list | <connector> [json params]
     "connectors": (0, 2),   # /connectors [list|status|connect] [name] — manage the service connectors
     "notion": (0, None),      # /notion dbs|query|add — Notion reads + page writes
@@ -1979,6 +1980,10 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
     "db": {"what": "inspect the database: tables, schema, counts, or a query.",
            "usage": "/db tables | schema <t> | query <sql> | counts",
            "example": "/db counts", "related": ""},
+    "artifact": {"what": "saved artifacts — agent outputs kept in the artifact store: list them, inspect one, or send its actual file to this chat.",
+                 "usage": "/artifact list | info <id|alias|uri> | send <id|alias|uri>",
+                 "example": "/artifact send latest-report",
+                 "related": "/db /file"},
     "api": {"what": "external API connectors: weather, fx, github, …",
             "usage": "/api list | <connector> [json]", "example": "/api weather city=Lagos",
             "related": ""},
@@ -2390,7 +2395,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
     ("media system", ["music", "distribute", "play", "video", "hub", "podcast", "dj", "produce", "like", "dislike", "cookies",
                       "download", "shorts", "caption", "imggen", "sham", "musicnote"]),
     ("execution · archives · builders", ["exec", "zip", "apps", "fix", "deliver"]),
-    ("tools & automation", ["schedule", "db", "api", "connectors", "notion",
+    ("tools & automation", ["schedule", "db", "artifact", "api", "connectors", "notion",
                             "gcal", "trello", "proxy", "workspace", "record",
                             "macro", "file", "publish", "notify", "proactive", "mission",
                             "bet", "finance", "weather", "tz", "email", "gmail", "mail", "inbox", "routine", "home", "store", "track", "untrack", "trip", "travelclient", "contract", "legal", "research", "contracts", "regwatch", "uprofile", "vnote", "match", "cgroup", "challenge", "room", "scamcheck", "passport", "truecost", "value", "valuepick", "watch", "send", "leads", "guardrails", "competitor", "cost", "panel",
@@ -2623,7 +2628,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
      ["tts", "speak", "stt", "voice", "look", "image", "lens",
       "vision", "voices", "clonevoice", "sing"]),
     ("tools & automation",
-     ["schedule", "db", "api", "proxy", "workspace", "record", "macro", "file",
+     ["schedule", "db", "artifact", "api", "proxy", "workspace", "record", "macro", "file",
       "publish", "notify", "proactive", "mission", "features", "decode", "cookies", "cookielab", "cipher",
       "monitor", "investigate", "bet", "finance", "weather", "tz", "email", "gmail", "mail", "inbox", "routine", "home", "store", "track", "untrack", "trip", "travelclient", "contract", "legal", "contracts", "regwatch", "uprofile", "vnote", "match", "cgroup", "challenge", "room", "scamcheck", "passport", "truecost", "value", "valuepick", "watch", "send", "leads", "panel",
       "connectors", "notion", "gcal", "trello", "exness", "stripe",
@@ -2816,6 +2821,7 @@ LIST_ONELINERS: dict[str, str] = {
     "lens": "reverse image search",
     "schedule": "cron-style in-process jobs",
     "db": "inspect the database (tables|schema|query|counts)",
+    "artifact": "saved artifacts: list, info, or send one to this chat",
     "api": "external API connectors (weather, fx, github, …)",
     "connectors": "manage the service connectors: list, status, connect",
     "shorts": "short-form content empire: make, queue, post vertical videos",

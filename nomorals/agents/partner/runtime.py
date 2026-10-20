@@ -3824,6 +3824,9 @@ class PartnerRuntime(
             return self._control_schedule(command.tail or arg)
         if kind == "db":
             return self._control_db(command.tail or arg)
+        if kind == "artifact":
+            return self._control_artifact(command.tail or arg,
+                                          chat_key=chat_key)
         if kind == "api":
             return self._control_api(command.tail or arg)
         if kind == "connectors":
