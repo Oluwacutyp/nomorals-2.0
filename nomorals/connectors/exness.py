@@ -1050,6 +1050,17 @@ class ExnessConnector(Connector):
             raise ExnessError(
                 f"cannot resume checkpoint stage {state.get('stage')!r}"
             )
+        # The resume must replay the payload the owner approved — no
+        # wider, no different. close_all_positions' profitable filter
+        # and close_position's price used to be dropped here, so a
+        # resumed "close only the losers, at this price" executed as
+        # "close everything at market".
+        ca_params = state.get("params") or {}
+        ca_kwargs: dict[str, Any] = {
+            k: v for k, v in ca_params.items()
+            if k in ("instrument", "side") and v}
+        if ca_params.get("profitable") is not None:
+            ca_kwargs["profitable"] = ca_params["profitable"]
         fn = {
             "open_position": lambda: self.open_position(
                 state["body"]["instrument"], state["body"]["side"],
@@ -1063,11 +1074,10 @@ class ExnessConnector(Connector):
             "close_position": lambda: self.close_position(
                 state["position_id"],
                 volume=_num((state.get("params") or {}).get("volume")),
+                price=_num((state.get("params") or {}).get("price")),
                 confirmed=True, db=db, context=context),
             "close_all_positions": lambda: self.close_all_positions(
-                confirmed=True, db=db, context=context,
-                **{k: v for k, v in (state.get("params") or {}).items()
-                   if k in ("instrument", "side") and v}),
+                confirmed=True, db=db, context=context, **ca_kwargs),
             "place_pending_order": lambda: self.place_pending_order(
                 state["body"]["type"],
                 instrument=state["body"].get("instrument", ""),

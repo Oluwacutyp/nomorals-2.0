@@ -161,12 +161,68 @@ def _daily_live_loss_pct(db: Any) -> float:
             equities.append((float(r["ts"]), eq))
     if len(equities) < 1:
         return 0.0
-    start_eq = next((eq for ts, eq in equities if ts < day_start),
-                    equities[0][1])
+    # The day's baseline is the LAST fill before today (the docstring's
+    # contract) — not the first one in the lookback window: taking the
+    # earliest equity made a losing day read as a gain whenever an older,
+    # smaller equity was on record.
+    start_eq = equities[0][1]
+    for ts, eq in equities:
+        if ts < day_start:
+            start_eq = eq
+        else:
+            break
     current_eq = equities[-1][1]
     if start_eq <= 0:
         return 0.0
     return (start_eq - current_eq) / start_eq
+
+
+def _equity_after_fill(client: Any, fill: Any, symbol: str) -> float:
+    """Best-effort post-fill account equity for the journal.
+
+    ``_daily_live_loss_pct`` reads ``meta.equity_after`` — without a
+    writer the daily-loss kill switch had no data and could never trip.
+    Sources, in order: an equity/balance field on the fill itself, then
+    a ccxt-style ``fetch_balance()`` total in the symbol's quote
+    currency (the same ``client._ex`` handle the price mark uses).
+    Returns 0.0 when nothing trustworthy is available — the journal
+    then simply carries no equity, exactly as before.
+    """
+    if isinstance(fill, dict):
+        for key in ("equity_after", "equity", "balance_after", "balance"):
+            try:
+                val = float(fill.get(key) or 0)
+            except (TypeError, ValueError):
+                continue
+            if val > 0:
+                return val
+    ex = getattr(client, "_ex", None)
+    if ex is not None:
+        try:
+            balance = ex.fetch_balance() or {}
+        except Exception:  # noqa: BLE001 - best effort only
+            return 0.0
+        total = balance.get("total") or {}
+        quote = (symbol.rsplit("/", 1)[-1] if "/" in symbol
+                 else "").strip().upper()
+        for ccy in (quote, "USDT", "USD"):
+            try:
+                val = float(total.get(ccy) or 0)
+            except (TypeError, ValueError):
+                continue
+            if val > 0:
+                return val
+        positives = []
+        for val in total.values():
+            try:
+                val = float(val)
+            except (TypeError, ValueError):
+                continue
+            if val > 0:
+                positives.append(val)
+        if len(positives) == 1:
+            return positives[0]
+    return 0.0
 
 
 def _valid_unlock(db: Any) -> dict[str, Any] | None:
@@ -371,13 +427,26 @@ def live_order(context: Any, symbol: str, side: str, size: float,
         except Exception:  # noqa: BLE001
             pass
         units = size if side == "buy" else -size
+        # Journal the submission BEFORE the exchange call (the desk's
+        # live_open_attempt pattern): if market() raises after the
+        # exchange accepted the order, the attempt row is the honest
+        # record that money may have moved — previously a failed call
+        # left no journal trace at all, and a retry could re-submit
+        # with nothing to reconcile against.
+        _journal(context.db, "live", symbol, side, abs(units), price, "",
+                 "manual live order — submitted (outcome pending)",
+                 {"exchange": exchange, "attempt": True})
         fill = client.market(units, price, tag="devon:manual")
         order_id = str(fill.get("ccxt_id") or fill.get("order_id")
                        or new_id("ord"))
         _reset_errors(context.db)
+        meta: dict[str, Any] = {"exchange": exchange,
+                                "fill": str(fill)[:500]}
+        equity_after = _equity_after_fill(client, fill, symbol)
+        if equity_after > 0:
+            meta["equity_after"] = equity_after
         jid = _journal(context.db, "live", symbol, side, abs(units), price,
-                       order_id, "manual live order",
-                       {"exchange": exchange, "fill": str(fill)[:500]})
+                       order_id, "manual live order", meta)
         _log.warning("LIVE order placed: %s %s %s (%s)", side, units,
                      symbol, order_id)
         return {"ok": True, "order_id": order_id, "journal_id": jid,
@@ -434,13 +503,31 @@ def exness_action(context: Any, action: str, **kw: Any) -> dict[str, Any]:
     if not getattr(_trading_settings(context), "enabled", True):
         return {"ok": False,
                 "error": "trading is disabled (NM_TRADING_ENABLED=0 / settings.trading.enabled=false)"}
-    mode = str(kw.get("mode") or "paper").lower()
+    mode = str(kw.get("mode")
+               or getattr(_trading_settings(context), "mode", "")
+               or "paper").lower()
     if mode not in ("paper", "live"):
         raise bridge.SentinelError("mode must be paper|live")
     try:
         desk = _exness_desk(context, mode=mode)
     except Exception as exc:
         return _fmt_desk_error(exc)
+    # Gate 1 of this module's live contract applies to the desk too:
+    # settings.trading.live_enabled must be true before real money can
+    # move — the desk's own unlock does not override it (the CCXT
+    # live_unlock in this same file refuses on exactly this). Demo
+    # accounts keep the desk's documented exemption. Reads are not
+    # gated: they move no money in either mode.
+    if action == "exness_unlock" or (
+            mode == "live" and action in ("exness_open", "exness_close")):
+        if not getattr(_trading_settings(context), "live_enabled", False) \
+                and not desk._is_demo_account():
+            return {"ok": False,
+                    "error": "live trading is disabled "
+                             "(settings.trading.live_enabled=false) — "
+                             "enable live in config first; the desk "
+                             "unlock does not override it (demo accounts "
+                             "are exempt)"}
 
     def _num(name: str) -> float | None:
         v = kw.get(name)
@@ -475,7 +562,11 @@ def exness_action(context: Any, action: str, **kw: Any) -> dict[str, Any]:
             # Position sizing from real contract specs — never guessed.
             instrument = str(kw.get("symbol") or kw.get("instrument") or "")
             entry, sl = _num("entry"), _num("stop_loss")
-            risk_pct = _num("risk_pct") or 1.0
+            # Default only when absent: `or` also swallowed an explicit
+            # risk_pct=0 and sized at 1% instead of refusing.
+            risk_pct = _num("risk_pct")
+            if risk_pct is None:
+                risk_pct = 1.0
             if not instrument or entry is None or sl is None:
                 raise bridge.SentinelError(
                     "exness_size needs instrument, entry, stop_loss")

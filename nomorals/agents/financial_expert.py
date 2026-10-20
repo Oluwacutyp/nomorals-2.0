@@ -374,7 +374,8 @@ class FinancialExpert:
 
     def backtest(self, symbol: str, market: str = "crypto",
                  strategy: str | None = None,
-                 profile: str = "default") -> BacktestSummary:
+                 profile: str = "default",
+                 timeframe: str = "1h") -> BacktestSummary:
         """Event-driven backtest over the named strategy (or the committee).
 
         Unlike the old engine path, ``strategy`` is actually honored here:
@@ -387,7 +388,7 @@ class FinancialExpert:
         if profile not in ta_risk.PROFILES:
             raise bridge.SentinelError(
                 f"unknown profile {profile!r}")
-        df = self._load_bars(symbol, market, "1h", 2000)
+        df = self._load_bars(symbol, market, timeframe, 2000)
         names: list[str]
         if strategy:
             # Validates the name; KeyError -> clean SentinelError.
@@ -448,8 +449,10 @@ class FinancialExpert:
                   label, passes)
         return out
 
-    def signal(self, symbol: str, market: str = "crypto") -> Signal:
-        rep = self.analyze(symbol, market=market, bars=600)
+    def signal(self, symbol: str, market: str = "crypto",
+               timeframe: str = "1h") -> Signal:
+        rep = self.analyze(symbol, market=market, timeframe=timeframe,
+                           bars=600)
         pos = rep.position_now
         direction = ("bullish" if pos > 0 else
                      "bearish" if pos < 0 else "flat")

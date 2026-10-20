@@ -541,6 +541,12 @@ class ImprovementSettings:
 @dataclass
 class TradingSettings:
     """FinancialExpert / trading gates. Live trading is inert by default."""
+    # NM_TRADING_ENABLED master switch: tools/trading refuses every
+    # trading action (except doctor/kill) when this is false.
+    enabled: bool = True
+    # NM_TRADING_MODE: default desk mode for exness actions when the
+    # caller does not pass one ("paper" unless the owner says "live").
+    mode: str = "paper"
     live_enabled: bool = False
     max_daily_loss_pct: float = 3.0
     min_sharpe: float = 1.0
@@ -922,6 +928,14 @@ _ENV_MAP: dict[str, str] = {
     "NM_VOICE_STT_MODEL": "audio.stt_model",
     "NM_VOICE_STT_PROVIDER": "audio.stt_provider",
     "NM_VOICE_TTS_ENGINE": "audio.tts_engine",
+    # Trading: documented in the env template (NM_TRADING_ENABLED /
+    # NM_TRADING_ALLOW_LIVE / NM_TRADING_MODE) and cited in the trading
+    # tool's own refusal messages, but previously unmapped — the env
+    # values were silently ignored (the master switch did nothing and
+    # ALLOW_LIVE never reached live_enabled).
+    "NM_TRADING_ENABLED": "trading.enabled",
+    "NM_TRADING_ALLOW_LIVE": "trading.live_enabled",
+    "NM_TRADING_MODE": "trading.mode",
     "HF_TOKEN": "llm.hf_token",
     "NM_HF_TOKEN": "llm.hf_token",
     "NM_HF_BASE_URL": "llm.hf_base_url",
