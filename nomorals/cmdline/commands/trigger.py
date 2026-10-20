@@ -196,6 +196,19 @@ def _trigger_add(args: Any, context: Any, rest: list[str]) -> int:
     else:
         print(f"added trigger {trigger.id} ({trigger.source} -> "
               f"{trigger.action})")
+    if source == "webhook":
+        # A secret-less plain webhook is fireable by anyone who can
+        # reach the endpoint — a deliberate opt-in, said out loud at
+        # creation time rather than left silent (pass #51).
+        from ...triggers.models import webhook_protection
+
+        if webhook_protection(trigger.condition) == "none":
+            print(
+                f"warning: webhook trigger {trigger.id} has NO secret "
+                "— anyone who can reach POST /triggers/webhook can "
+                "fire it. Recreate with --secret S (or a github/stripe "
+                "HMAC condition via --condition) to protect it.",
+                file=sys.stderr)
     return 0
 
 
@@ -209,11 +222,19 @@ def _trigger_list(args: Any, context: Any) -> int:
     if not triggers:
         print("no triggers")
         return 0
+    from ...triggers.models import webhook_protection
+
     for t in triggers:
         state = "on" if t.enabled else "off"
         last = (f" last_fired={t.last_fired:.0f}" if t.last_fired else "")
+        open_mark = (
+            " [open webhook: no secret]"
+            if t.source == "webhook"
+            and webhook_protection(t.condition) == "none"
+            else "")
         print(f"{t.id} [{state}] {t.name}: "
-              f"{t.source} -> {t.action} (fires={t.fire_count}{last})")
+              f"{t.source} -> {t.action} (fires={t.fire_count}{last})"
+              f"{open_mark}")
     return 0
 
 

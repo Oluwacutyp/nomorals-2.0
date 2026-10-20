@@ -121,6 +121,10 @@ def format_trigger_line(trigger: Any, *,
         bits.append(f"next {_in_future(next_run, now)}")
     if d.get("mode") not in (None, "parallel"):
         bits.append(f"mode={d.get('mode')}")
+    if d.get("webhook_auth") == "none":
+        # Secret-less plain webhook: fireable by anyone who can reach
+        # the endpoint — flagged on every rendered line (pass #51).
+        bits.append(_c("⚠ open webhook (no secret)", "yellow", theme))
     if d.get("digest_pending"):
         bits.append(f"📦 {d['digest_pending']} buffered")
     return " · ".join(bits)

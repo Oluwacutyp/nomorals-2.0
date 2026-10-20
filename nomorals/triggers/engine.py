@@ -75,6 +75,8 @@ from .models import (
     WEBHOOK_SCHEME_STRIPE,
     Trigger,
     TriggerError,
+    WebhookAuthError,
+    WebhookReplayError,
     new_trigger_id,
     validate_trigger_spec,
 )
@@ -107,9 +109,9 @@ def verify_webhook_signature(secret: str, scheme: str, *,
       ``hmac_sha256(f"{ts}.{body}")``; the timestamp must be within
       ``tolerance_s`` of now (replay protection).
 
-    Raises :class:`TriggerError` on any failure — missing signature,
-    bad HMAC, or stale timestamp.  Uses :func:`hmac.compare_digest`
-    (constant-time).
+    Raises :class:`WebhookAuthError` (a :class:`TriggerError`) on any
+    failure — missing signature, bad HMAC, or stale timestamp.  Uses
+    :func:`hmac.compare_digest` (constant-time).
 
     Note: the API server route passes the parsed JSON body re-encoded;
     true raw-byte verification needs the raw request bytes — see
@@ -122,11 +124,11 @@ def verify_webhook_signature(secret: str, scheme: str, *,
     signature = str(signature or "")
     if scheme == WEBHOOK_SCHEME_GITHUB:
         if not signature:
-            raise TriggerError("missing webhook signature")
+            raise WebhookAuthError("missing webhook signature")
         expected = "sha256=" + hmac.new(
             secret.encode(), body, hashlib.sha256).hexdigest()
         if not hmac.compare_digest(expected, signature):
-            raise TriggerError("bad webhook signature")
+            raise WebhookAuthError("bad webhook signature")
         return
     if scheme == WEBHOOK_SCHEME_STRIPE:
         parts: dict[str, str] = {}
@@ -140,17 +142,17 @@ def verify_webhook_signature(secret: str, scheme: str, *,
         try:
             ts = float(ts_raw)
         except (TypeError, ValueError):
-            raise TriggerError("bad webhook timestamp")
+            raise WebhookAuthError("bad webhook timestamp")
         if abs(now - ts) > tolerance_s:
-            raise TriggerError(
+            raise WebhookAuthError(
                 f"webhook timestamp outside tolerance ({tolerance_s:g}s)")
         signed = f"{ts_raw}.".encode() + body
         expected = hmac.new(secret.encode(), signed,
                             hashlib.sha256).hexdigest()
         if not hmac.compare_digest(expected, v1):
-            raise TriggerError("bad webhook signature")
+            raise WebhookAuthError("bad webhook signature")
         return
-    raise TriggerError(f"unknown webhook scheme {scheme!r}")
+    raise WebhookAuthError(f"unknown webhook scheme {scheme!r}")
 
 
 def _emit(topic: str, data: dict[str, Any]) -> None:
@@ -373,6 +375,13 @@ class TriggerEngine:
                 tz=tz))
         _log.info("wired schedule trigger %s (%s %s)",
                   trigger.id, kind, plan)
+
+    def wire_schedule(self, trigger: Trigger) -> None:
+        """Wire an already-persisted schedule trigger into the
+        scheduler.  Public entry for surfaces that build definitions
+        themselves (the API create route) so their triggers are not
+        persisted-but-dead (pass #51)."""
+        self._wire_schedule(trigger)
 
     def _unwire_schedule(self, trigger_id: str) -> None:
         sch = self._ensure_scheduler()
@@ -720,7 +729,7 @@ class TriggerEngine:
         if scheme == "plain":
             expected = cond.get("secret")
             if expected and not hmac.compare_digest(secret or "", expected):
-                raise TriggerError("bad webhook secret")
+                raise WebhookAuthError("bad webhook secret")
         else:
             body = raw_body or _json.dumps(
                 payload or {}, sort_keys=True,
@@ -730,16 +739,21 @@ class TriggerEngine:
                 signature=signature or str(secret or ""),
                 timestamp=timestamp, body=body,
                 tolerance_s=float(cond.get("tolerance_s") or 300))
-        event_id = str(event_id or "")
-        if event_id and self.store.seen_webhook_event(trigger_id, event_id):
-            raise TriggerError(
-                f"duplicate webhook event {event_id!r} (replay dedup)")
-        if event_id:
-            # note AFTER auth passes, so bad signatures can't pollute the
-            # dedup table and lock out a later legitimate retry
-            self.store.note_webhook_event(trigger_id, event_id)
         if not trigger.enabled:
+            # Checked BEFORE the dedup claim: a delivery that arrives
+            # while the trigger is disabled must not burn its event_id —
+            # after a re-enable, the sender's retry of that same
+            # delivery is legitimate and must fire (pass #51).
             raise TriggerError(f"trigger {trigger_id!r} is disabled")
+        event_id = str(event_id or "")
+        if event_id and not self.store.claim_webhook_event(
+                trigger_id, event_id):
+            # claim AFTER auth passes, so bad signatures can't pollute
+            # the dedup table and lock out a later legitimate retry.
+            # The claim is atomic: concurrent duplicate deliveries
+            # cannot both pass.
+            raise WebhookReplayError(
+                f"duplicate webhook event {event_id!r} (replay dedup)")
         return self._fire(trigger, {"source": "webhook",
                                     "payload": dict(payload or {}),
                                     "event_id": event_id})
@@ -857,7 +871,17 @@ class TriggerEngine:
             for cond in trigger.conditions or []:
                 ctype = cond.get("type")
                 if ctype == CONDITION_TIME_WINDOW:
-                    hhmm = time.strftime("%H:%M", time.localtime(now))
+                    tz_name = cond.get("timezone")
+                    if tz_name:
+                        # Wall-clock in the condition's IANA zone, not
+                        # the server's local time (pass #51).
+                        from datetime import datetime as _dt
+                        from zoneinfo import ZoneInfo
+
+                        hhmm = _dt.fromtimestamp(
+                            now, tz=ZoneInfo(str(tz_name))).strftime("%H:%M")
+                    else:
+                        hhmm = time.strftime("%H:%M", time.localtime(now))
                     after, before = cond["after"], cond["before"]
                     if after <= before:
                         inside = after <= hhmm < before

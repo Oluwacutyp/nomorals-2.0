@@ -68,8 +68,12 @@ from .models import (
     Trigger,
     TriggerError,
     TriggerSpec,
+    WebhookAuthError,
+    WebhookReplayError,
+    public_condition,
     validate_definition,
     validate_trigger_spec,
+    webhook_protection,
 )
 from .sources import to_cloudevent
 from .store import TriggerStore
@@ -81,10 +85,14 @@ __all__ = [
     "Trigger",
     "TriggerError",
     "TriggerSpec",
+    "WebhookAuthError",
+    "WebhookReplayError",
     "attach",
     "message_hook",
+    "public_condition",
     "validate_definition",
     "validate_trigger_spec",
+    "webhook_protection",
     "verify_webhook_signature",
     "to_cloudevent",
     "list_templates",

@@ -895,6 +895,7 @@ class APIServer:
         def triggers_list(body: dict[str, Any], query: dict[str, str]) -> dict[str, Any]:
             principal = server._current_principal()
             _require_capability(principal, Capability.DB_READ)
+            from ..triggers.models import public_condition
             from ..triggers.store import TriggerStore
 
             store = TriggerStore(context.db)
@@ -903,12 +904,16 @@ class APIServer:
                 in ("1", "true", "yes")
             )
             source = str(query.get("source") or "") or None
-            return {
-                "triggers": [
-                    t.to_dict()
-                    for t in store.list(enabled_only=enabled_only, source=source)
-                ]
-            }
+            triggers = []
+            for t in store.list(enabled_only=enabled_only, source=source):
+                # Webhook secrets are credentials: any DB_READ holder
+                # may list triggers, but the secret value itself is
+                # never disclosed (presence stays visible via the mask
+                # + webhook_auth). Pass #51.
+                d = t.to_dict()
+                d["condition"] = public_condition(t.condition)
+                triggers.append(d)
+            return {"triggers": triggers}
 
         @self.route(
             "POST", "/triggers",
@@ -918,7 +923,15 @@ class APIServer:
             principal = server._current_principal()
             _require_capability(principal, Capability.DB_WRITE)
             from ..core.ids import new_short_id
-            from ..triggers.models import Trigger, TriggerError, validate_definition
+            from ..triggers.models import (
+                SOURCE_SCHEDULE,
+                SOURCE_WEBHOOK,
+                Trigger,
+                TriggerError,
+                public_condition,
+                validate_trigger_spec,
+                webhook_protection,
+            )
             from ..triggers.store import TriggerStore
 
             name = str(body.get("name") or "").strip()
@@ -933,12 +946,19 @@ class APIServer:
                     f"cooldown_s must be a number, "
                     f"got {body.get('cooldown_s')!r}") from None
             try:
-                condition, params, cooldown_s = validate_definition(
+                # Full engine parity (pass #51): the spec validator
+                # also normalizes the HA-style conditions / mode /
+                # poll_s — the previous path silently DROPPED them,
+                # so API-created triggers ran without their gates.
+                spec = validate_trigger_spec(
                     source,
                     body.get("condition"),
                     action,
                     body.get("action_params"),
                     cooldown_s=cooldown_s,
+                    conditions=body.get("conditions"),
+                    mode=str(body.get("mode") or "parallel"),
+                    poll_s=body.get("poll_s") or 0.0,
                 )
             except TriggerError as exc:
                 raise NoMoralsError(str(exc)) from exc
@@ -947,13 +967,42 @@ class APIServer:
                 name=name,
                 enabled=bool(body.get("enabled", True)),
                 source=source,
-                condition=condition,
+                condition=spec.condition,
                 action=action,
-                action_params=params,
-                cooldown_s=cooldown_s,
+                action_params=spec.params,
+                cooldown_s=spec.cooldown,
+                conditions=spec.conditions,
+                mode=spec.mode,
+                poll_s=spec.poll_s,
             )
-            TriggerStore(context.db).save(trigger)
-            return {"ok": True, "trigger": trigger.to_dict()}
+            store = TriggerStore(context.db)
+            store.save(trigger)
+            if trigger.enabled and source == SOURCE_SCHEDULE:
+                # Persisted is not wired: without a scheduler job the
+                # trigger could never fire. Wire it like the engine
+                # does; on failure leave nothing half-created behind.
+                from ..triggers.engine import TriggerEngine
+
+                try:
+                    TriggerEngine(context.db, context).wire_schedule(trigger)
+                except Exception as exc:  # noqa: BLE001 - fail the create
+                    store.delete(trigger.id)
+                    raise NoMoralsError(
+                        f"schedule wiring failed: {exc}") from exc
+            out = trigger.to_dict()
+            out["condition"] = public_condition(trigger.condition)
+            payload: dict[str, Any] = {"ok": True, "trigger": out}
+            if (source == SOURCE_WEBHOOK
+                    and webhook_protection(trigger.condition) == "none"):
+                # A secret-less plain webhook is a deliberate opt-in —
+                # say so at creation time, never silently (pass #51).
+                payload["warnings"] = [
+                    "webhook trigger has no secret: anyone who can "
+                    "reach POST /triggers/webhook can fire it. Set a "
+                    "condition.secret (plain) or use the github/stripe "
+                    "HMAC scheme to protect it."
+                ]
+            return payload
 
         @self.route(
             "GET", "/timeline",

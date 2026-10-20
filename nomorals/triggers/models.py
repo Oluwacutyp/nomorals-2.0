@@ -73,6 +73,19 @@ class TriggerError(Exception):
     """Invalid trigger definition or trigger operation failure."""
 
 
+class WebhookAuthError(TriggerError):
+    """Webhook authentication failed: bad/missing secret, bad HMAC
+    signature, or a timestamp outside tolerance.  The HTTP layer maps
+    this to a non-2xx response — a 200 would tell the sender the
+    delivery succeeded (pass #51)."""
+
+
+class WebhookReplayError(TriggerError):
+    """The delivery's ``event_id`` was already claimed (replay dedup).
+    The delivery is authentic but must not fire twice; the HTTP layer
+    acknowledges it without re-firing (pass #51)."""
+
+
 @dataclass
 class Trigger:
     """One event-condition-action rule.
@@ -101,7 +114,7 @@ class Trigger:
     fire_count: int = 0
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        out: dict[str, Any] = {
             "id": self.id,
             "name": self.name,
             "enabled": self.enabled,
@@ -118,6 +131,13 @@ class Trigger:
             "last_outcome": self.last_outcome,
             "fire_count": self.fire_count,
         }
+        if self.source == SOURCE_WEBHOOK:
+            # Make the protection level (or its absence) visible on
+            # every surface that renders a trigger dict — a secret-less
+            # plain webhook must never look identical to a protected
+            # one (pass #51).
+            out["webhook_auth"] = webhook_protection(self.condition)
+        return out
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "Trigger":
@@ -356,6 +376,38 @@ WEBHOOK_SCHEMES = frozenset(
     {WEBHOOK_SCHEME_PLAIN, WEBHOOK_SCHEME_GITHUB, WEBHOOK_SCHEME_STRIPE})
 
 
+#: how API responses mask a stored webhook secret — the value is
+#: never disclosed, but its presence stays visible.
+SECRET_MASK = "********"
+
+
+def webhook_protection(condition: dict[str, Any] | None) -> str:
+    """Classify a webhook condition's authentication strength.
+
+    ``"hmac:github"`` / ``"hmac:stripe"`` (signed deliveries),
+    ``"shared-secret"`` (plain scheme with a secret), or ``"none"``
+    (plain scheme with NO secret — anyone who can reach the webhook
+    endpoint can fire the trigger).  Surfaces use this to make the
+    ``"none"`` exposure explicit instead of silent (pass #51).
+    """
+    cond = condition or {}
+    scheme = str(cond.get("scheme") or WEBHOOK_SCHEME_PLAIN).lower()
+    if scheme in (WEBHOOK_SCHEME_GITHUB, WEBHOOK_SCHEME_STRIPE):
+        return f"hmac:{scheme}"
+    if cond.get("secret"):
+        return "shared-secret"
+    return "none"
+
+
+def public_condition(condition: dict[str, Any] | None) -> dict[str, Any]:
+    """A condition dict safe to return over the API: the webhook
+    ``secret`` is masked (presence visible, value never disclosed)."""
+    out = dict(condition or {})
+    if out.get("secret"):
+        out["secret"] = SECRET_MASK
+    return out
+
+
 def _validate_webhook(condition: dict[str, Any]) -> dict[str, Any]:
     out: dict[str, Any] = {}
     secret = condition.get("secret")
@@ -549,7 +601,9 @@ def _validate_conditions(
     Each condition is ``{"type": ...}``:
 
     * ``time_window`` — ``{"after": "22:00", "before": "06:00"}`` (local
-      time; may span midnight). The trigger only fires inside the window.
+      time; may span midnight; optional ``"timezone"`` IANA name makes
+      the window wall-clock in that zone). The trigger only fires
+      inside the window.
     * ``rate`` — ``{"max": 3, "window_s": 3600}``: at most N fires per
       window (history-backed).
     * ``evidence`` — ``{"match": {...}}``: every key/value must equal the
@@ -578,6 +632,20 @@ def _validate_conditions(
                     raise TriggerError(
                         f"time_window '{key}' {val!r} is out of range")
                 parsed[key] = f"{hh:02d}:{mm:02d}"
+            tz = str(raw.get("timezone") or "").strip()
+            if tz:
+                # Optional IANA zone: the window is wall-clock in THAT
+                # zone, not the server's local time (pass #51).  Fail
+                # fast on a name that can never resolve.
+                from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+                try:
+                    ZoneInfo(tz)
+                except (ZoneInfoNotFoundError, ValueError):
+                    raise TriggerError(
+                        f"time_window 'timezone' {tz!r} is not a known "
+                        "IANA timezone")
+                parsed["timezone"] = tz
             out.append(parsed)
         elif ctype == CONDITION_RATE:
             try:

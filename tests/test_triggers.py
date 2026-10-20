@@ -716,6 +716,7 @@ class WebhookRouteTests(unittest.TestCase):
         return FakeServer(), routes
 
     def test_route_registered_and_fires(self):
+        from nomorals.core.errors import CapabilityDenied, NoMoralsError
         from nomorals.triggers.webhook import (
             WEBHOOK_PATH, register_trigger_routes)
         server, routes = self._server()
@@ -723,10 +724,13 @@ class WebhookRouteTests(unittest.TestCase):
         register_trigger_routes(server, ctx)
         self.assertIn(("POST", WEBHOOK_PATH), routes)
         handler = routes[("POST", WEBHOOK_PATH)]
-        # unknown id -> ok False
-        out = handler({"trigger_id": "trigger_nope"}, {})
-        self.assertEqual(out, {"ok": False, "error": mock.ANY})
-        self.assertIn("unknown trigger", out["error"])
+        # unknown id -> 400-class error (pass #51: rejections are
+        # raised so the API dispatcher answers non-2xx — a returned
+        # {"ok": false} would have gone out as HTTP 200 and told the
+        # sender the delivery succeeded)
+        with self.assertRaises(NoMoralsError) as cm:
+            handler({"trigger_id": "trigger_nope"}, {})
+        self.assertIn("unknown trigger", str(cm.exception))
         # real trigger fires
         from nomorals.triggers import TriggerEngine as TE
         eng = TE(ctx.db, notify_fn=lambda *a: {"sent": True})
@@ -735,10 +739,10 @@ class WebhookRouteTests(unittest.TestCase):
                        "payload": {"k": "v"}}, {})
         self.assertTrue(out["ok"])
         self.assertTrue(out["fired"])
-        # bad secret rejected
-        out = handler({"trigger_id": t.id, "secret": "wrong"}, {})
-        self.assertFalse(out["ok"])
-        self.assertIn("secret", out["error"])
+        # bad secret -> 403-class error (auth failure, non-2xx)
+        with self.assertRaises(CapabilityDenied) as cm:
+            handler({"trigger_id": t.id, "secret": "wrong"}, {})
+        self.assertIn("secret", str(cm.exception))
 
 
 class LifecycleTests(unittest.TestCase):

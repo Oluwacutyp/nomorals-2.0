@@ -307,6 +307,37 @@ class TriggerStore:
                 "DELETE FROM trigger_webhook_events WHERE seen_at < ?",
                 (time.time() - 7 * 24 * 3600,))
 
+    def claim_webhook_event(self, trigger_id: str, event_id: str,
+                            *, ttl_s: float = 24 * 3600) -> bool:
+        """Atomically claim a webhook delivery id.
+
+        Returns ``True`` when this caller owns the delivery (first
+        sight, or the previous claim aged past ``ttl_s``) and
+        ``False`` when it is a replay of a delivery already claimed
+        inside the TTL.  Check-and-set happens inside one write
+        transaction (BEGIN IMMEDIATE), so two concurrent deliveries
+        of the same event cannot both pass — the check-then-note pair
+        it replaces raced and could double-fire (pass #51).
+        """
+        if not event_id:
+            return True
+        now = time.time()
+        with self.db.transaction():
+            row = self.db.query_one(
+                "SELECT seen_at FROM trigger_webhook_events "
+                "WHERE trigger_id = ? AND event_id = ?",
+                (trigger_id, event_id))
+            if row and (now - float(row["seen_at"])) < ttl_s:
+                return False
+            self.db.execute(
+                "INSERT OR REPLACE INTO trigger_webhook_events "
+                "(trigger_id, event_id, seen_at) VALUES (?, ?, ?)",
+                (trigger_id, event_id, now))
+            self.db.execute(
+                "DELETE FROM trigger_webhook_events WHERE seen_at < ?",
+                (now - 7 * 24 * 3600,))
+        return True
+
     # ── digest buffer ────────────────────────────────────────────────
 
     def digest_append(self, trigger_id: str, title: str, text: str) -> int:
