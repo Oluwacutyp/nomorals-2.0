@@ -52,7 +52,17 @@ def ping_owner_dm(settings: Any, text: str) -> bool:
         partner = getattr(settings, "partner", None)
         if partner is not None:
             owner_chats = str(getattr(partner, "owner_chats", "") or "")
-        token = (os.environ.get("NM_CHAT_TELEGRAM_BOT_TOKEN", "") or "").strip()
+        # The token comes from settings FIRST: load_settings reads the
+        # .env FILE into the settings tree without exporting it to
+        # os.environ, so an env-only read misses the token on exactly
+        # the file-based installs this ping exists for. The env var is
+        # the fallback (settings doubles in tests, env-only setups).
+        chat = getattr(settings, "chat", None)
+        if chat is not None:
+            token = str(getattr(chat, "telegram_bot_token", "") or "").strip()
+        if not token:
+            token = (os.environ.get("NM_CHAT_TELEGRAM_BOT_TOKEN", "")
+                     or "").strip()
         if not token:
             return False
         if not owner_chats.strip():

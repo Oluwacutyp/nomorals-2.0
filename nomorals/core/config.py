@@ -31,6 +31,10 @@ __all__ = [
     "reset_settings",
     "set_settings",
     "env_var_path",
+    "config_env_status",
+    "dotted_path_exists",
+    "is_direct_env_key",
+    "direct_env_consumer",
     "diff_settings",
     "config_schema",
     "ConfigWatcher",
@@ -675,6 +679,24 @@ class HubSettings:
     request_timeout: float = 15.0
 
 @dataclass
+class LocationSettings:
+    """Where the owner is — weather places + locale.
+
+    Consumed by ``agency.adapters.places_from_settings`` (which reads
+    ``settings.location.places`` / ``home_place`` / ``work_place``).
+    Env: NM_PLACES (comma-separated), NM_HOME_PLACE, NM_WORK_PLACE,
+    NM_LOCALE. These keys were documented in ``.env.example`` and the
+    EC2 env template for a long time but mapped to nothing — a user's
+    setting was silently ignored and the weather places derivation
+    always came up empty on a real Settings tree.
+    """
+    places: list = field(default_factory=list)
+    home_place: str = ""
+    work_place: str = ""
+    locale: str = ""
+
+
+@dataclass
 class Settings:
     """Root configuration object."""
 
@@ -731,6 +753,8 @@ class Settings:
     hub: "HubSettings" = field(default_factory=lambda: HubSettings())
     takeover: "TakeoverSettings" = field(
         default_factory=lambda: TakeoverSettings())
+    location: "LocationSettings" = field(
+        default_factory=lambda: LocationSettings())
 
     # -- path helpers --------------------------------------------------------
     @property
@@ -918,6 +942,10 @@ _ENV_MAP: dict[str, str] = {
     "NM_LLM_LOCAL_PORT": "llm.local_port",
     "NM_LLM_VERIFY_AT_STARTUP": "llm.verify_at_startup",
     "NM_LLAMA_CPP_URL": "llm.llama_cpp_url",
+    # Legacy alias: the setup wizard wrote this key for GGUF installs
+    # for a long time while nothing read it — those installs sat on
+    # the mock. It names the same thing NM_LLM_LOCAL_MODEL names.
+    "NM_LLAMA_CPP_MODEL": "llm.local_model",
     # Audio STT/TTS: documented in the env template as "Config key read by
     # Devon code" but previously unmapped, so a user's .env setting
     # (e.g. NM_VOICE_STT_PROVIDER=api) was silently ignored.
@@ -928,6 +956,10 @@ _ENV_MAP: dict[str, str] = {
     "NM_VOICE_STT_MODEL": "audio.stt_model",
     "NM_VOICE_STT_PROVIDER": "audio.stt_provider",
     "NM_VOICE_TTS_ENGINE": "audio.tts_engine",
+    # Documented alias for the TTS engine (env template + the Windows
+    # installer's sample .env): previously unmapped, so an owner's
+    # NM_VOICE_TTS_PROVIDER=api was silently ignored.
+    "NM_VOICE_TTS_PROVIDER": "audio.tts_engine",
     # Trading: documented in the env template (NM_TRADING_ENABLED /
     # NM_TRADING_ALLOW_LIVE / NM_TRADING_MODE) and cited in the trading
     # tool's own refusal messages, but previously unmapped — the env
@@ -1029,6 +1061,156 @@ _ENV_MAP: dict[str, str] = {
     "NM_OSINT_SHODAN_KEY": "osint.shodan_key",
     "NM_OSINT_REQUEST_TIMEOUT": "osint.request_timeout",
     "NM_OSINT_CRTSH_DAYS": "osint.crtsh_days",
+    # Location: documented in .env.example + the EC2 template, consumed
+    # via settings.location by the weather places derivation.
+    "NM_PLACES": "location.places",
+    "NM_HOME_PLACE": "location.home_place",
+    "NM_WORK_PLACE": "location.work_place",
+    "NM_LOCALE": "location.locale",
+    # Direct-read keys: no Settings field — the named module reads the
+    # variable itself at runtime. load_settings skips "direct:" entries;
+    # they exist so the doctor's config audit can account for the key
+    # instead of reporting it as ignored.
+    "NM_CAPTCHA_SOLVER": "direct:nomorals/tools/captcha.py",
+    # ── Explicit entries for keys that previously resolved only
+    # via the generic field search (same target load_settings
+    # already applied — registering them makes the mapping
+    # auditable in one place; behavior is unchanged).
+    "NM_API_GITHUB_TOKEN": "api.github_token",
+    "NM_AUTONOMY_DAILY_MODEL_CALLS": "autonomy.daily_model_calls",
+    "NM_AUTONOMY_ENABLED": "autonomy.enabled",
+    "NM_CHAT_WHATSAPP_ENABLED": "chat.whatsapp_enabled",
+    "NM_GITHUB_TOKEN": "api.github_token",
+    "NM_LLM_ALLOW_MOCK_FALLBACK": "llm.allow_mock_fallback",
+    "NM_LLM_LOCAL_LORA": "llm.local_lora",
+    "NM_MASTODON_TOKEN": "social.mastodon_token",
+    "NM_MEDIA_MAX_MB": "chat.media_max_mb",
+    "NM_OCR_BINARY": "vision.ocr_binary",
+    "NM_PARTNER_OWNER_SENDER_IDS": "partner.owner_sender_ids",
+    "NM_PARTNER_POWER_DEFAULT_ON": "partner.power_default_on",
+    "NM_PARTNER_TRAIN_COLLECT": "partner.train_collect",
+    "NM_PARTNER_TYPING_CAP_SECONDS": "partner.typing_cap_seconds",
+    "NM_REASONING_MODE": "reasoning_mode",
+    "NM_SOCIAL_BLUESKY_APP_PASSWORD": "social.bluesky_app_password",
+    "NM_SOCIAL_BLUESKY_HANDLE": "social.bluesky_handle",
+    "NM_SOCIAL_DISCORD_WEBHOOK": "social.discord_webhook",
+    "NM_SOCIAL_MASTODON_DOMAIN": "social.mastodon_domain",
+    "NM_SOCIAL_MASTODON_TOKEN": "social.mastodon_token",
+    "NM_SOCIAL_REDDIT_CLIENT_ID": "social.reddit_client_id",
+    "NM_SOCIAL_REDDIT_CLIENT_SECRET": "social.reddit_client_secret",
+    "NM_SOCIAL_TELEGRAM_TOKEN": "social.telegram_token",
+    "NM_SOCIAL_X_ACCESS_SECRET": "social.x_access_secret",
+    "NM_SOCIAL_X_ACCESS_TOKEN": "social.x_access_token",
+    "NM_SOCIAL_X_API_KEY": "social.x_api_key",
+    "NM_SOCIAL_X_API_SECRET": "social.x_api_secret",
+    "NM_TELEGRAM_API_HASH": "chat.telegram_api_hash",
+    "NM_TELEGRAM_API_ID": "chat.telegram_api_id",
+    "NM_TELEGRAM_BOT_TOKEN": "chat.telegram_bot_token",
+    "NM_TRAINING_BASE_MODEL": "training.base_model",
+    "NM_VISION_OCR_BINARY": "vision.ocr_binary",
+    "NM_WORKERS": "api.workers",
+    # ── Direct-read registry (generated from a verified AST scan of
+    # the package: each key is read by the named module itself, so
+    # load_settings skips it and the doctor accounts for it as
+    # direct-read instead of ignored. Guarded by
+    # test_config_mapping.py::test_direct_entries_have_real_consumers.
+    "NM_AGENTIC_MODE": "direct:nomorals/agents/orchestration/bridge.py",
+    "NM_AGENT_MODES_STORE": "direct:nomorals/agents/modes.py",
+    "NM_ANTHROPIC_API_KEY": "direct:nomorals/agents/context.py",
+    "NM_ARCHIVE_MAX_EXTRACT_FILES": "direct:nomorals/tools/archive.py",
+    "NM_ARCHIVE_MAX_EXTRACT_MB": "direct:nomorals/tools/archive.py",
+    "NM_BACKUP_KEY_B64": "direct:nomorals/backup/__main__.py",
+    "NM_BRAVE_SEARCH_API_KEY": "direct:nomorals/search/web.py",
+    "NM_CAPTCHA_API_MODE": "direct:nomorals/tools/captcha.py",
+    "NM_CAPTCHA_DAILY_CAP_USD": "direct:nomorals/tools/captcha.py",
+    "NM_CAPTCHA_ERROR_COOLDOWN": "direct:nomorals/tools/captcha.py",
+    "NM_CAPTCHA_MONTHLY_CAP_USD": "direct:nomorals/tools/captcha.py",
+    "NM_CAPTCHA_PER_DAY": "direct:nomorals/tools/captcha.py",
+    "NM_CAPTCHA_PER_MINUTE": "direct:nomorals/tools/captcha.py",
+    "NM_CLOUD": "direct:nomorals/core/profile.py",
+    "NM_CODEBEAST_MODEL": "direct:nomorals/llm/defaults.py",
+    "NM_CONSOLE_THEME": "direct:nomorals/agents/partner/runtime.py",
+    "NM_COST_LOG": "direct:nomorals/llm/router.py",
+    "NM_DDGS_BACKEND": "direct:nomorals/search/web.py",
+    "NM_DDGS_KIND": "direct:nomorals/search/web.py",
+    "NM_DDGS_REGION": "direct:nomorals/search/web.py",
+    "NM_DEEPSEEK_API_KEY": "direct:nomorals/agents/context.py",
+    "NM_DISTILL": "direct:nomorals/agents/skill_distillation.py",
+    "NM_EXA_API_KEY": "direct:nomorals/search/web.py",
+    "NM_GEMINI_API_KEY": "direct:nomorals/agents/context.py",
+    "NM_GH_ASKPASS_TOKEN": "direct:nomorals/connectors/github.py",
+    "NM_HF_BASE": "direct:nomorals/training/free_datasets.py",
+    "NM_HF_SERVER": "direct:nomorals/training/free_datasets.py",
+    "NM_HUB_CERT": "direct:nomorals/hub/server.py",
+    "NM_HUB_CORS_ORIGINS": "direct:nomorals/hub/server.py",
+    "NM_HUB_KEY": "direct:nomorals/hub/server.py",
+    "NM_HUB_RATE_LIMIT": "direct:nomorals/hub/server.py",
+    "NM_LLM_CASSETTE": "direct:nomorals/llm/cassette.py",
+    "NM_LLM_CASSETTE_DIR": "direct:nomorals/llm/cassette.py",
+    "NM_LLM_REPLAY": "direct:nomorals/llm/cassette.py",
+    "NM_MEDIA_AUDIO_BITRATE": "direct:nomorals/tools/media_pipeline.py",
+    "NM_MEDIA_IMAGE_MAX_WIDTH": "direct:nomorals/tools/media_pipeline.py",
+    "NM_MEDIA_IMAGE_QUALITY": "direct:nomorals/tools/media_pipeline.py",
+    "NM_MEDIA_VIDEO_CRF": "direct:nomorals/tools/media_pipeline.py",
+    "NM_MEDIA_VIDEO_PRESET": "direct:nomorals/tools/media_pipeline.py",
+    "NM_MISSION_STALE_HEARTBEAT_S": "direct:nomorals/missions/mission.py",
+    "NM_MODELS_DIR": "direct:nomorals/media_edit/_model_cache.py",
+    "NM_NO_COLOR": "direct:nomorals/cmdline/style.py",
+    "NM_OWNER_TZ": "direct:nomorals/pulses/timezone.py",
+    "NM_PLAN_STORE": "direct:nomorals/agents/plan_mode.py",
+    "NM_PLAY_UNLICENSED": "direct:nomorals/media/play_service.py",
+    "NM_PROCESS_WORKERS": "direct:nomorals/agents/runtime.py",
+    "NM_PULSE_TIMEZONE": "direct:nomorals/pulses/timezone.py",
+    "NM_REPO_DIR": "direct:nomorals/cmdline/commands/update.py",
+    "NM_RESEARCH_LOOP_DEDUPE_DAYS": "direct:nomorals/agents/research_loop.py",
+    "NM_RESEARCH_LOOP_HOURS": "direct:nomorals/agents/research_loop.py",
+    "NM_RESEARCH_LOOP_IGNORE_DAYS": "direct:nomorals/agents/research_loop.py",
+    "NM_RESEARCH_LOOP_MAX_PROPOSALS": "direct:nomorals/agents/research_loop.py",
+    "NM_RESOURCE_BATTERY_MIN": "direct:nomorals/os/resources.py",
+    "NM_RESOURCE_BATTERY_THROTTLE": "direct:nomorals/os/resources.py",
+    "NM_RESOURCE_CALM_SECONDS": "direct:nomorals/os/resources.py",
+    "NM_RESOURCE_CPU_CRITICAL": "direct:nomorals/os/resources.py",
+    "NM_RESOURCE_CPU_THROTTLE": "direct:nomorals/os/resources.py",
+    "NM_RESOURCE_DISK_CRITICAL": "direct:nomorals/os/resources.py",
+    "NM_RESOURCE_DISK_THROTTLE": "direct:nomorals/os/resources.py",
+    "NM_RESOURCE_HISTORY": "direct:nomorals/os/resources.py",
+    "NM_RESOURCE_MAX_PRESSURE": "direct:nomorals/os/resources.py",
+    "NM_RESOURCE_MEM_CRITICAL": "direct:nomorals/os/resources.py",
+    "NM_RESOURCE_MEM_THROTTLE": "direct:nomorals/os/resources.py",
+    "NM_RESOURCE_METERED": "direct:nomorals/os/resources.py",
+    "NM_RESOURCE_PSI_MEM_FULL_CRIT": "direct:nomorals/os/resources.py",
+    "NM_RESOURCE_PSI_MEM_WARN": "direct:nomorals/os/resources.py",
+    "NM_RESOURCE_RESERVE_MIN_MB": "direct:nomorals/os/resources.py",
+    "NM_RESOURCE_RESERVE_PCT": "direct:nomorals/os/resources.py",
+    "NM_RESOURCE_STEAL_CRITICAL": "direct:nomorals/os/resources.py",
+    "NM_RESOURCE_STEAL_WARN": "direct:nomorals/os/resources.py",
+    "NM_RESOURCE_THERMAL_HOT_C": "direct:nomorals/os/resources.py",
+    "NM_RESOURCE_THERMAL_WARM_C": "direct:nomorals/os/resources.py",
+    "NM_RESOURCE_UP_TICKS": "direct:nomorals/os/resources.py",
+    "NM_SANDBOX_ROOT": "direct:nomorals/tools/sandbox_code.py",
+    "NM_SEARXNG_CATEGORY": "direct:nomorals/search/web.py",
+    "NM_SEARXNG_ENGINES": "direct:nomorals/search/web.py",
+    "NM_SEARXNG_LANGUAGE": "direct:nomorals/search/web.py",
+    "NM_SEARXNG_TIME_RANGE": "direct:nomorals/search/web.py",
+    "NM_SEARXNG_URL": "direct:nomorals/search/web.py",
+    "NM_SERPER_API_KEY": "direct:nomorals/search/web.py",
+    "NM_SOUNDFONT": "direct:nomorals/media/synth_backend.py",
+    "NM_SPEC_STORE": "direct:nomorals/agents/plan_spec.py",
+    "NM_SVS_DIR": "direct:nomorals/voice/singing.py",
+    "NM_SYNTH_BACKEND": "direct:nomorals/media/synth_backend.py",
+    "NM_TAVILY_API_KEY": "direct:nomorals/search/web.py",
+    "NM_TERMUX_NOTIFY": "direct:nomorals/agents/notifier.py",
+    "NM_TIMEZONE": "direct:nomorals/agents/coremind.py",
+    "NM_VAULT_KEY": "direct:nomorals/agents/cipher.py",
+    "NM_VAULT_PASSPHRASE": "direct:nomorals/agents/coremind.py",
+    "NM_VOICE_PRIVATE": "direct:nomorals/voice/tts.py",
+    "NM_VOICE_PUBLIC": "direct:nomorals/voice/tts.py",
+    "NM_WEB_RERANK": "direct:nomorals/search/web.py",
+    "NM_WEB_TIMEOUT": "direct:nomorals/search/web.py",
+    "NM_WHATSAPP_BRIDGE_HOST": "direct:nomorals/core/verify.py",
+    "NM_WHATSAPP_BRIDGE_PORT": "direct:nomorals/core/verify.py",
+    "NM_WHISPER_CPP_BIN": "direct:nomorals/tools/audio.py",
+    "NM_WHISPER_CPP_MODEL": "direct:nomorals/tools/audio.py",
 }
 
 
@@ -1276,6 +1458,11 @@ def load_settings(
             continue
         if key in _ENV_MAP:
             dotted = _ENV_MAP[key]
+            if dotted.startswith("direct:"):
+                # Consumed directly by the named module at runtime; the
+                # settings tree has no field for it. Applying it as a
+                # dotted path would inject a bogus key and fail the build.
+                continue
             # Empty path fields = not set (template placeholder).
             if _is_path_field(dotted) and not value.strip():
                 continue
@@ -1896,6 +2083,171 @@ def env_var_path(env_var: str) -> str | None:
     # field must resolve to None (silently-ignored env vars were the bug
     # this guard exists to catch).
     return _find_field_path(Settings, remainder.lower())
+
+
+# ── Env-key audit (doctor) ─────────────────────────────────────────────────
+#
+# The doctor's config audit (infra spec §8.1) answers one question for
+# every NM_* key the operator has set: does it DO anything? Three honest
+# outcomes exist:
+#
+# - mapped:  the key lands on a Settings field (via _ENV_MAP or the
+#            generic field search) and load_settings applies it.
+# - direct:  no Settings field — a module reads the variable itself at
+#            runtime. Either registered explicitly in _ENV_MAP as
+#            "direct:<module>", or discovered by scanning the package
+#            for the literal key in a consumption position.
+# - ignored: set, but nothing reads it. Always a bug (owner typo, a
+#            renamed key, or a documented key that was never wired).
+
+_DIRECT_PREFIX = "direct:"
+
+
+def dotted_path_exists(dotted: str) -> bool:
+    """True when ``dotted`` resolves to a real field on the Settings tree."""
+    node: type = Settings
+    parts = dotted.split(".")
+    for i, part in enumerate(parts):
+        names = {f.name for f in fields(node)}  # type: ignore[arg-type]
+        if part not in names:
+            return False
+        if i == len(parts) - 1:
+            return True
+        ftype = _resolved_types(node).get(part)
+        if not (isinstance(ftype, type) and is_dataclass(ftype)):
+            return False
+        node = ftype
+    return False
+
+
+@lru_cache(maxsize=1)
+def _direct_env_readers() -> dict[str, str]:
+    """Map env key -> first module (repo-relative path) that reads it.
+
+    AST scan of the ``nomorals`` package for key-shaped string constants
+    in consumption positions: call arguments, Load subscripts, dict
+    keys/values, tuple/list/set literals, assignments, and comparisons.
+    Comments and docstrings never appear in those positions, so a key
+    that is only *mentioned* in prose does not count as read. This
+    module itself is excluded — it is the registry, not a consumer.
+    """
+    import ast
+    import re
+
+    key_re = re.compile(r"^(?:NM|HF)_[A-Z0-9_]+$")
+    package = Path(__file__).resolve().parent.parent
+    repo_root = package.parent
+    self_path = Path(__file__).resolve()
+    readers: dict[str, str] = {}
+
+    def collect(node: Any, into: set[str]) -> None:
+        for sub in ast.walk(node):
+            if isinstance(sub, ast.Constant) and isinstance(sub.value, str) \
+                    and key_re.match(sub.value):
+                into.add(sub.value)
+
+    for path in sorted(package.rglob("*.py")):
+        if "__pycache__" in path.parts or path.resolve() == self_path:
+            continue
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8",
+                                            errors="replace"))
+        except (OSError, SyntaxError):
+            continue
+        found: set[str] = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call):
+                for arg in list(node.args) + [kw.value for kw in node.keywords]:
+                    collect(arg, found)
+            elif isinstance(node, ast.Subscript) \
+                    and isinstance(node.ctx, ast.Load):
+                collect(node.slice, found)
+            elif isinstance(node, ast.Dict):
+                for item in list(node.keys) + list(node.values):
+                    if item is not None:
+                        collect(item, found)
+            elif isinstance(node, (ast.Tuple, ast.List, ast.Set)):
+                for item in node.elts:
+                    collect(item, found)
+            elif isinstance(node, ast.Assign):
+                collect(node.value, found)
+            elif isinstance(node, ast.AnnAssign) and node.value is not None:
+                collect(node.value, found)
+            elif isinstance(node, ast.Compare):
+                collect(node.left, found)
+                for comparator in node.comparators:
+                    collect(comparator, found)
+        module = path.relative_to(repo_root).as_posix()
+        for key in sorted(found):
+            readers.setdefault(key, module)
+    return readers
+
+
+def _registered_direct(key: str) -> str | None:
+    """The module an explicit ``direct:`` _ENV_MAP entry names, or None."""
+    target = _ENV_MAP.get(key)
+    if target is not None and target.startswith(_DIRECT_PREFIX):
+        return target[len(_DIRECT_PREFIX):]
+    return None
+
+
+def is_direct_env_key(key: str) -> bool:
+    """True when ``key`` is consumed directly by a module (no Settings field)."""
+    if key in _ENV_MAP:
+        return _ENV_MAP[key].startswith(_DIRECT_PREFIX)
+    return key in _direct_env_readers()
+
+
+def direct_env_consumer(key: str) -> str | None:
+    """The module that reads ``key`` directly, or None when nothing does."""
+    registered = _registered_direct(key)
+    if registered is not None:
+        return registered
+    if key in _ENV_MAP:
+        return None
+    return _direct_env_readers().get(key)
+
+
+def config_env_status(
+        env: Mapping[str, str] | None = None) -> dict[str, list[str]]:
+    """Classify every set NM_* key: mapped / direct-read / ignored.
+
+    With no argument, audits the EFFECTIVE environment the runtime
+    boots with — ``os.environ`` merged over the boot ``.env`` file,
+    exactly as :func:`load_settings` resolves it — so the doctor never
+    audits a different configuration than the one that is running.
+
+    Returns ``{"set_mapped": [...], "set_direct": [...],
+    "unset_mapped": [...], "ignored": [...]}`` (all sorted lists).
+    ``unset_mapped`` lists the explicitly-mapped keys that are not set
+    (they fall back to defaults).
+    """
+    if env is None:
+        effective: dict[str, str] = dict(os.environ)
+        for key, value in _read_env_file(effective, Settings().home).items():
+            effective.setdefault(key, value)
+    else:
+        effective = dict(env)
+    readers = _direct_env_readers()
+    set_mapped: list[str] = []
+    set_direct: list[str] = []
+    ignored: list[str] = []
+    for key in sorted(effective):
+        if key not in _ENV_MAP and not key.startswith(_ENV_PREFIX):
+            continue
+        target = _ENV_MAP.get(key)
+        if target is not None:
+            (set_direct if target.startswith(_DIRECT_PREFIX)
+             else set_mapped).append(key)
+        elif env_var_path(key) is not None:
+            set_mapped.append(key)
+        elif key in readers:
+            set_direct.append(key)
+        else:
+            ignored.append(key)
+    unset_mapped = sorted(k for k in _ENV_MAP if k not in effective)
+    return {"set_mapped": set_mapped, "set_direct": set_direct,
+            "unset_mapped": unset_mapped, "ignored": ignored}
 
 
 # ── redaction + validation ───────────────────────────────────────────────────

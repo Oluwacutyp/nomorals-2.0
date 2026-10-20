@@ -527,8 +527,8 @@ class RuntimeMetaMixin:
                                 + ", ".join(sorted(ignored))))
             else:
                 results.append((True, "config: "
-                                f"{status['set_mapped']} set / "
-                                f"{status['unset_mapped']} unset, "
+                                f"{len(status['set_mapped'])} set / "
+                                f"{len(status['unset_mapped'])} unset, "
                                 "0 ignored"))
         except Exception as exc:  # noqa: BLE001 - report, don't crash
             from ...core.errors import exc_str
@@ -578,32 +578,56 @@ class RuntimeMetaMixin:
 
         # ── providers ──
         try:
-            chain = [p.strip().lower() for p in
-                     (os.environ.get("NM_LLM_PROVIDER", "") or "").split(",")
-                     if p.strip()]
-            fallbacks = [p.strip().lower() for p in
-                         (os.environ.get("NM_LLM_FALLBACK_CHAIN", "") or "").split(",")
-                         if p.strip()]
-            for provider in fallbacks:
-                if provider not in chain:
-                    chain.append(provider)
-            key_for = {"groq": "NM_GROQ_API_KEY",
-                       "openrouter": "NM_OPENROUTER_API_KEY",
-                       "hf": "HF_TOKEN",
-                       "huggingface": "HF_TOKEN",
-                       "openai": "OPENAI_API_KEY",
-                       "anthropic": "ANTHROPIC_API_KEY",
-                       "gemini": "GEMINI_API_KEY",
-                       "together": "TOGETHER_API_KEY"}
-            if not chain:
-                results.append((True, "providers: no provider chain "
-                                "configured (local/default brain)"))
+            # Audit the EFFECTIVE settings the runtime was built from —
+            # the same source build_router consumed. Reading os.environ
+            # here audited a different configuration: on a file-based
+            # install (.env read by load_settings, never exported) the
+            # chain looked empty and this check passed vacuously while
+            # a real provider ran, or failed while it worked.
+            llm = getattr(getattr(getattr(self, "context", None),
+                                  "settings", None), "llm", None)
+            if llm is None:
+                results.append((False, "providers: no settings on this "
+                                "runtime — cannot audit the chain"))
             else:
-                missing_keys = [f"{p} needs {key_for[p]} (unset)"
-                                for p in chain
-                                if p in key_for and not os.environ.get(key_for[p])]
-                if missing_keys:
-                    results.append((False, "providers: " + "; ".join(missing_keys)))
+                chain: list[str] = []
+                for raw in [getattr(llm, "provider", "")] + list(
+                        getattr(llm, "fallback_chain", None) or []):
+                    name = str(raw or "").strip().lower()
+                    if name and name not in chain:
+                        chain.append(name)
+
+                def _key_present(provider: str) -> bool | None:
+                    """True/False for key-backed providers; None = keyless."""
+                    if provider == "groq":
+                        return bool(getattr(llm, "groq_api_key", ""))
+                    if provider == "openrouter":
+                        return bool(getattr(llm, "openrouter_api_key", ""))
+                    if provider in ("hf", "huggingface", "hf_serverless",
+                                    "hf_endpoint"):
+                        return bool(getattr(llm, "hf_token", ""))
+                    if provider in ("openai", "openai_compat"):
+                        return bool(getattr(llm, "openai_api_key", ""))
+                    # Env-only providers (no Settings field): mirror
+                    # build_router's own env checks.
+                    if provider == "anthropic":
+                        return bool(os.environ.get("ANTHROPIC_API_KEY")
+                                    or os.environ.get("NM_ANTHROPIC_API_KEY"))
+                    if provider == "gemini":
+                        return bool(os.environ.get("GEMINI_API_KEY")
+                                    or os.environ.get("NM_GEMINI_API_KEY"))
+                    if provider == "deepseek":
+                        return bool(os.environ.get("DEEPSEEK_API_KEY")
+                                    or os.environ.get("NM_DEEPSEEK_API_KEY"))
+                    return None
+
+                missing = [p for p in chain if _key_present(p) is False]
+                if not chain:
+                    results.append((True, "providers: no provider chain "
+                                    "configured (local/default brain)"))
+                elif missing:
+                    results.append((False, "providers: no API key in "
+                                    "settings for: " + ", ".join(missing)))
                 else:
                     results.append((True, "providers: chain "
                                     f"{' → '.join(chain)}, keys present"))

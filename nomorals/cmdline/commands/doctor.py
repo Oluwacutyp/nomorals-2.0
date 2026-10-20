@@ -62,10 +62,37 @@ def _cmd_doctor(args: argparse.Namespace, settings: Any) -> int:
         },
     }
     db.close()
-    payload = {**health, **report}
+    # Tool modules that failed to register + config-key status are
+    # computed BEFORE the report branches: JSON consumers need them too,
+    # and the exit code is a contract — the EC2 deploy script treats a
+    # nonzero `nm doctor` as VERIFY FAILED. Hard failures: a database
+    # that fails its integrity check, tool modules that did not
+    # register, and set-but-ignored config keys (§8.1: ignored must be
+    # zero — a set-but-ignored NM_* key is a bug).
+    _failed: list = []
+    try:
+        from ...tools.registry import ToolRegistry
+        _probe = ToolRegistry().register_builtins()
+        _failed = _probe.failed_modules()
+    except Exception:  # noqa: BLE001 — doctor must always report
+        _failed = []
+    _status = None
+    try:
+        from ...core.config import config_env_status
+        _status = config_env_status()
+    except Exception:  # noqa: BLE001 — doctor must always report
+        _status = None
+    _hard_fail = (
+        health["database"]["integrity"] != "ok"
+        or bool(_failed)
+        or bool(_status and _status["ignored"])
+    )
+    payload = {**health, **report,
+               "tool_modules": {"failed": _failed},
+               "config_keys": _status}
     if args.json:
         print(json.dumps(payload, indent=2, default=str))
-        return 0
+        return 1 if _hard_fail else 0
     print(f"NoMorals Core {__version__}  profile={settings.profile}")
     print(f"database: {health['database']['path']}")
     print(f"  schema v{summary.version}, {health['database']['tables']} tables, "
@@ -78,21 +105,12 @@ def _cmd_doctor(args: argparse.Namespace, settings: Any) -> int:
     print(report_as_text(report))
     # Surface tool modules that failed to register — a broken tool must
     # never vanish invisibly.
-    try:
-        from ...tools.registry import ToolRegistry
-        _probe = ToolRegistry().register_builtins()
-        _failed = _probe.failed_modules()
-        if _failed:
-            print(f"\n{len(_failed)} tool module(s) failed to register:")
-            for entry in _failed:
-                print(f"  ✗ {entry['module']}: {entry['error']}")
-    except Exception:  # noqa: BLE001 — doctor must always report
-        pass
+    if _failed:
+        print(f"\n{len(_failed)} tool module(s) failed to register:")
+        for entry in _failed:
+            print(f"  ✗ {entry['module']}: {entry['error']}")
     # Config-key status (infra spec §8.1): set / unset / direct / ignored.
-    # Ignored must be zero — a set-but-ignored NM_* key is a bug.
-    try:
-        from ...core.config import config_env_status
-        _status = config_env_status()
+    if _status is not None:
         _ignored = _status["ignored"]
         print("\nconfig keys:")
         print(f"  set (via Settings): {len(_status['set_mapped'])}   "
@@ -103,22 +121,37 @@ def _cmd_doctor(args: argparse.Namespace, settings: Any) -> int:
                   f"{', '.join(_ignored)}")
         else:
             print("  ✓ ignored: 0 — every set NM_* key maps to real behavior")
-    except Exception:  # noqa: BLE001 — doctor must always report
-        pass
-    return 0
+    return 1 if _hard_fail else 0
 
 
 def _env_update_home(context: Any, pairs: dict[str, str]) -> "Path":
-    """Set KEY=VALUE lines in the home ``.env`` (replace-or-append, one line
-    per key). The durable contract the next process reads on boot."""
+    """Set KEY=VALUE lines in the ``.env`` the next boot actually reads
+    (replace-or-append, one line per key; every other line — comments,
+    commented-out keys, unrelated settings — is preserved).
+
+    Boot reads the FIRST existing candidate of ``cwd/.env`` then
+    ``$NM_HOME/.env`` (see ``core.config._env_file_candidates``), so the
+    write must land in that same file: writing the home file while a
+    cwd ``.env`` exists would be silently shadowed forever while the
+    caller reports success. Falls back to the home ``.env`` when no
+    candidate exists yet. The durable contract the next process reads
+    on boot."""
     import os
     from pathlib import Path
+
+    from ...core.config import _env_file_candidates
 
     home = Path(os.path.expanduser(os.environ.get("NM_HOME")
                                     or getattr(context.settings, "home",
                                                "~/.nomorals")))
-    home.mkdir(parents=True, exist_ok=True)
-    env_path = home / ".env"
+    env_path = None
+    for candidate in _env_file_candidates(dict(os.environ), str(home)):
+        if candidate.is_file():
+            env_path = candidate
+            break
+    if env_path is None:
+        env_path = home / ".env"
+    env_path.parent.mkdir(parents=True, exist_ok=True)
     lines: list[str] = []
     if env_path.is_file():
         lines = env_path.read_text(encoding="utf-8").splitlines()
@@ -302,17 +335,11 @@ def _cmd_setup(args: argparse.Namespace, context: Any) -> int:
         print("Skipping setup. You can run `nm setup` again later.")
         return 0
     
-    env_file = Path.home() / ".nomorals/.env"
-    env_file.parent.mkdir(parents=True, exist_ok=True)
-    
-    # Load existing .env
-    env_vars = {}
-    if env_file.exists():
-        for line in env_file.read_text().splitlines():
-            if "=" in line and not line.strip().startswith("#"):
-                key, value = line.split("=", 1)
-                env_vars[key.strip()] = value.strip()
-    
+    # Pairs are written via _env_update_home at the end: the file the
+    # next boot actually reads (cwd .env wins over the home .env), with
+    # every unrelated line of the operator's file preserved.
+    env_vars: dict[str, str] = {}
+
     if choice == "1":
         # OpenRouter setup
         print("\n📡 OpenRouter Setup")
@@ -323,8 +350,11 @@ def _cmd_setup(args: argparse.Namespace, context: Any) -> int:
             print("⚠️  Warning: OpenRouter keys should start with 'sk-or-'")
         
         env_vars["NM_LLM_PROVIDER"] = "openrouter"
-        env_vars["NM_OPENAI_API_KEY"] = api_key
-        env_vars["NM_OPENAI_BASE_URL"] = "https://openrouter.ai/api/v1"
+        # build_router's openrouter branch reads the openrouter_*
+        # settings and SKIPS the provider entirely when the key is
+        # empty — writing NM_OPENAI_API_KEY here (the old behavior)
+        # left the install on the mock while reporting success.
+        env_vars["NM_OPENROUTER_API_KEY"] = api_key
         
         # Model selection
         print("\nRecommended free models:")
@@ -344,9 +374,9 @@ def _cmd_setup(args: argparse.Namespace, context: Any) -> int:
             model_id = model_map[model_choice]
         else:
             model_id = input("Enter model ID: ").strip()
-        
-        env_vars["NM_OPENAI_MODEL"] = model_id
-        
+
+        env_vars["NM_OPENROUTER_MODEL"] = model_id
+
     elif choice == "2":
         # Hugging Face setup
         print("\n🤗 Hugging Face Setup")
@@ -399,7 +429,12 @@ def _cmd_setup(args: argparse.Namespace, context: Any) -> int:
             return 1
         
         env_vars["NM_LLM_PROVIDER"] = "llama_cpp"
-        env_vars["NM_LLAMA_CPP_MODEL"] = model_path
+        # The router promotes a local model from llm.local_model
+        # (NM_LLM_LOCAL_MODEL) and auto-starts the server when
+        # NM_LLM_LOCAL_AUTO_START=1 — the same keys `nm models
+        # --promote-local` writes. NM_LLAMA_CPP_MODEL is read nowhere.
+        env_vars["NM_LLM_LOCAL_MODEL"] = model_path
+        env_vars["NM_LLM_LOCAL_AUTO_START"] = "1"
         
     elif choice == "4":
         # OpenAI setup
@@ -411,17 +446,19 @@ def _cmd_setup(args: argparse.Namespace, context: Any) -> int:
             print("⚠️  Warning: OpenAI keys should start with 'sk-'")
         
         env_vars["NM_LLM_PROVIDER"] = "openai"
-        env_vars["OPENAI_API_KEY"] = api_key
+        # The router passes llm.openai_api_key (NM_OPENAI_API_KEY) to
+        # the provider; a bare OPENAI_API_KEY is never read, so the old
+        # write left the provider keyless.
+        env_vars["NM_OPENAI_API_KEY"] = api_key
         env_vars["NM_OPENAI_MODEL"] = "gpt-4o-mini"
-    
-    # Write .env file
-    with open(env_file, "w") as f:
-        for key, value in sorted(env_vars.items()):
-            f.write(f"{key}={value}\n")
-    
-    print(f"\n✅ Configuration written to {env_file}")
-    print("\nTo activate, restart NoMorals AI or run:")
-    print("  source ~/.nomorals/.env")
+
+    # Write to the .env the next boot reads, preserving the rest of
+    # the operator's file (comments, commented-out keys, other settings).
+    written = _env_update_home(context, env_vars)
+
+    print(f"\n✅ Configuration written to {written}")
+    print("\nTo activate, restart NoMorals AI — the bot reads its .env "
+          "only at startup, so the change applies on the next launch.")
     
     # Offer to test
     print("\nTest the configuration now? [Y/n]")
@@ -449,9 +486,20 @@ def _cmd_setup(args: argparse.Namespace, context: Any) -> int:
                 SamplingParams(max_tokens=50),
             task_kind="chat")
             
-            if response.ok and response.text:
+            active = str(getattr(context.router, "active_model", "")
+                         or "")
+            if response.ok and response.text and active \
+                    and active != "mock":
                 print(f"\n✅ Model responded: {response.text}")
-                print(f"Active model: {context.router.active_model}")
+                print(f"Active model: {active}")
+            elif response.ok and response.text:
+                # A mock fallback answers happily — reporting that as
+                # success would bless a configuration that never
+                # registered the chosen provider.
+                print("\n❌ The configured provider did not come up — "
+                      "the router fell back to the scripted mock, so "
+                      "this response is not from your provider.")
+                print("Check the API key and model ID you just entered.")
             else:
                 print(f"\n❌ Model failed: {response.error}")
                 print("Check your API key and model configuration.")
