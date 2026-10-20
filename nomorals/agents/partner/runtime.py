@@ -214,6 +214,8 @@ class PartnerRuntime(
         self._inflight: set[Future] = set()
         self._inflight_guard = threading.Lock()
         self._autonomy: Any = None
+        #: Boot mission-resumption thread (see _start_boot_mission_resume).
+        self._boot_resume_thread: Any = None
         self.stats = {"messages": 0, "replies": 0, "errors": 0, "controls": 0}
         #: Guards ``stats``: the counters are bumped from every chat-pool
         #: worker, the delayed-reply threads, and the control path. ``+=``
@@ -1749,6 +1751,17 @@ class PartnerRuntime(
 
     # ── lifecycle ────────────────────────────────────────────────────────────
     def start(self) -> list[str]:
+        if not self.dry_run:
+            # Boot mission resumption kicks off BEFORE the gateway
+            # begins dispatch: its claims must land before any
+            # /mission status read can reconcile-flip a crashed
+            # mission to FAILED (after which resume is a no-op). The
+            # sweep runs on a background thread — startup and chat
+            # readiness are never blocked by it.
+            try:
+                self._start_boot_mission_resume()
+            except Exception as exc:  # noqa: BLE001 - boot must not fail here
+                _log.warning("boot mission resume not started: %s", exc)
         started = self.gateway.start(self.on_message)
         if self.settings.partner.enabled and not self.dry_run:
             try:
@@ -2281,6 +2294,224 @@ class PartnerRuntime(
                 "update", title, body, force=True, critical=failed)
         except Exception as exc:  # noqa: BLE001 - reporting is best-effort
             _log.warning("update recovery notice not delivered: %s", exc)
+
+    # ── boot mission resumption ─────────────────────────────────────────
+
+    def _start_boot_mission_resume(self) -> None:
+        """Spawn the boot mission-resumption sweep on a daemon thread.
+
+        The pass #54 run-claim is the arbiter: the sweep, a chat
+        ``/mission resume``, the ops watcher's self-heal and a CLI
+        resume can never double-drive a mission — whoever claims it
+        first drives it, the rest are refused. This also composes
+        with the self-update restart path (:meth:`_recover_interrupted_update`):
+        an update restart is just another boot to this sweep, and if
+        update recovery later restores a state snapshot, any mission
+        this sweep drove reverts with that snapshot and is simply
+        resumable again on the next boot.
+        """
+
+        def _job() -> None:
+            try:
+                self._resume_interrupted_missions()
+            except Exception:  # noqa: BLE001 - boot continues regardless
+                _log.exception("boot mission resumption failed")
+            finally:
+                self._release_db_thread()
+
+        self._boot_resume_thread = threading.Thread(
+            target=_job, name="mission-boot-resume", daemon=True)
+        self._boot_resume_thread.start()
+
+    @staticmethod
+    def _mission_driver_live(mission: Any) -> bool:
+        """True when a live driver holds ``mission``, by the runner's
+        own claim-liveness rule (pass #54 ``_claim_is_live``): a
+        foreign live pid is a live driver however fresh its heartbeat,
+        a dead pid's claim is dead however fresh, and a same-process
+        claim is live only while it keeps refreshing. Probes the
+        persisted run claim, falling back to the heartbeat (a driver
+        that died before its claim write — or an older row — still
+        left one)."""
+        from ...missions.runner import MissionRunner
+
+        state = mission.state or {}
+        claim = state.get("run_claim")
+        if not (isinstance(claim, dict) and claim.get("token")):
+            hb = state.get("heartbeat") or {}
+            claim = {"pid": hb.get("pid"), "at": hb.get("at")}
+        return MissionRunner._claim_is_live(claim)
+
+    def _resume_interrupted_missions(self) -> dict[str, Any]:
+        """Resume the missions a previous process left interrupted.
+
+        Selection — deliberately narrower than ``MissionStore.resumable()``
+        (which is every non-terminal row):
+
+        * RUNNING with a dead/stale driver (per the run-claim liveness
+          rule) → driven to completion.
+        * PENDING with drive evidence (a heartbeat, a run claim, or
+          completed steps — it died between create and its first
+          heartbeat flip) → driven; a pristine PENDING was never
+          started and is left alone.
+        * RUNNING with a live driver → skipped; the claim refuses a
+          second driver anyway.
+        * PAUSED → left PAUSED (an explicit owner hold is not boot's
+          to override).
+        * Terminal rows are never revived — including the ones a
+          reconcile-on-read already flipped to FAILED (recognizable
+          by ``state["status_note"]`` starting ``"reconciled:"``);
+          reviving those is the owner's deliberate ``/mission replan``.
+
+        Terminal catch-up rides along first: a mission that finished
+        while Devon was down whose terminal push was never marked
+        delivered gets it re-delivered exactly once (the runner's
+        own catch-up checks the persisted milestone marks).
+        Reconcile-marked failures are excluded — a surface already
+        surfaced that failure when it flipped the row.
+
+        Drives run one thread + one production wired runner per
+        mission (``max_iterations=0``: unlimited, budget-bound — the
+        chat spawner's semantics), so a long mission never delays
+        the fleet's claims and one bad mission never blocks the
+        others. Returns the summary dict; when the sweep actually
+        did something it also emits ONE owner summary through the
+        durable Notifier (see :meth:`_report_boot_mission_resume`).
+        Silence when nothing was resumed.
+        """
+        from ...core.errors import ValidationError
+        from ...missions import MissionStatus, MissionStore, wired_runner
+
+        summary: dict[str, Any] = {
+            "resumed": [], "failed": [], "skipped_live": [],
+            "held_paused": 0, "terminal_caught_up": []}
+        db = getattr(self.context, "db", None)
+        if db is None:
+            return summary
+        store = MissionStore(db)
+
+        # 1) Terminal catch-up.
+        for status in sorted(MissionStatus.TERMINAL):
+            try:
+                rows = store.list(status=status, limit=50)
+            except Exception:  # noqa: BLE001 - one bad read must not kill the sweep
+                continue
+            for mission in rows:
+                state = mission.state or {}
+                if str(state.get("status_note") or "").startswith(
+                        "reconciled:"):
+                    continue
+                marks = state.get("milestones") or []
+                if any(isinstance(e, dict)
+                       and e.get("event") == f"terminal:{mission.status}"
+                       for e in marks):
+                    continue
+                try:
+                    wired_runner(self.context, store=store).run(mission)
+                    summary["terminal_caught_up"].append(mission.id)
+                except Exception as exc:  # noqa: BLE001 - isolated per mission
+                    summary["failed"].append({
+                        "id": mission.id, "name": mission.name,
+                        "error": f"terminal catch-up: {exc}"})
+
+        # 2) Select interrupted missions.
+        targets: list[Any] = []
+        for mission in store.resumable():
+            if mission.status == MissionStatus.PAUSED:
+                summary["held_paused"] += 1
+            elif mission.status == MissionStatus.RUNNING:
+                if self._mission_driver_live(mission):
+                    summary["skipped_live"].append(mission.id)
+                else:
+                    targets.append(mission)
+            elif mission.status == MissionStatus.PENDING:
+                state = mission.state or {}
+                driven = bool(state.get("heartbeat")
+                              or state.get("run_claim")
+                              or state.get("completed_steps"))
+                if driven and not self._mission_driver_live(mission):
+                    targets.append(mission)
+
+        # 3) Drive them — one thread + wired runner per mission.
+        lock = threading.Lock()
+
+        def _drive(mission: Any) -> None:
+            try:
+                result = wired_runner(self.context, store=store).run(
+                    mission, max_iterations=0)
+                with lock:
+                    summary["resumed"].append({
+                        "id": mission.id, "name": mission.name,
+                        "goal": mission.goal, "status": result.status})
+            except ValidationError:
+                # The claim did its job: another driver got there
+                # first. Not a failure.
+                with lock:
+                    summary["skipped_live"].append(mission.id)
+            except Exception as exc:  # noqa: BLE001 - isolated per mission
+                with lock:
+                    summary["failed"].append({
+                        "id": mission.id, "name": mission.name,
+                        "error": str(exc) or type(exc).__name__})
+            finally:
+                self._release_db_thread()
+
+        threads = [
+            threading.Thread(target=_drive, args=(mission,),
+                             name=f"mission-boot-resume-{mission.id[:8]}",
+                             daemon=True)
+            for mission in targets]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        if (summary["resumed"] or summary["failed"]
+                or summary["terminal_caught_up"]):
+            self._report_boot_mission_resume(summary)
+        else:
+            _log.info("boot mission resume: nothing interrupted to resume")
+        return summary
+
+    def _report_boot_mission_resume(self, summary: dict[str, Any]) -> None:
+        """Surface a boot resumption that acted to the owner: one
+        durable Notifier publish (the alert persists even if live
+        delivery fails) plus a log line — the same report-once shape
+        as :meth:`_report_update_recovery`. Never raises."""
+        resumed = summary.get("resumed") or []
+        failed = summary.get("failed") or []
+        caught = summary.get("terminal_caught_up") or []
+        lines: list[str] = []
+        for entry in resumed:
+            lines.append(
+                f"▶ {entry['name']} [{entry['id'][:8]}] — "
+                f"{str(entry.get('goal') or '')[:80]} → {entry['status']}")
+        for entry in failed:
+            lines.append(
+                f"✖ {entry['name']} [{entry['id'][:8]}] — resume "
+                f"failed: {entry['error']}")
+        if caught:
+            lines.append(
+                f"🔔 {len(caught)} finished mission(s) had an "
+                "undelivered completion notice — re-sent.")
+        if summary.get("held_paused"):
+            lines.append(
+                f"⏸ {summary['held_paused']} paused mission(s) left paused.")
+        title = f"missions: resumed {len(resumed)} at boot"
+        if failed:
+            title += f", {len(failed)} failed"
+        body = "\n".join(lines)
+        if failed:
+            _log.warning("boot mission resume acted: %s", title)
+        else:
+            _log.info("boot mission resume acted: %s", title)
+        try:
+            from ..notifier import Notifier
+
+            Notifier(self.context, gateway=self.gateway).publish(
+                "missions", title, body, force=True)
+        except Exception as exc:  # noqa: BLE001 - reporting is best-effort
+            _log.warning("boot mission resume notice not delivered: %s", exc)
 
     def _arena_notify(self, text: str) -> None:
         """Deliver an arena build review to the owner, on every live channel."""

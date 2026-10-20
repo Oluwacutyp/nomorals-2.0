@@ -22,8 +22,9 @@ Flow for every kind (drain → checkpoint → restart → resume):
    ``/restart`` skips the pull.
 4. **Restart + resume.** ``/update``/``/deploy``/``/restart`` return
    ``restart_requested=True``; the runtime performs the actual process
-   restart (stop + exec) and, on boot, :func:`resume_after_restart`
-   reports the resumable missions the runner picks back up.
+   restart (stop + exec) and, on boot, ``PartnerRuntime`` resumes the
+   interrupted missions (dead/stale driver) on a background thread;
+   :func:`resume_after_restart` reports the resumable inventory here.
 
 The controller never restarts the process itself and never touches git
 directly — both are injected callables, so tests prove the gate and the
@@ -98,11 +99,14 @@ def checkpoint_all(mission_store: Any, *, label: str = "pre-restart") -> list[st
 
 
 def resume_after_restart(mission_store: Any) -> str:
-    """Report what the runner picks back up after a restart.
+    """Report the resumable inventory after a restart.
 
-    The runner itself resumes resumable missions at boot; this is the
-    chat-visible inventory of what will resume — never a claim that
-    resumption already happened.
+    On boot, ``PartnerRuntime``'s boot-resumption sweep drives
+    interrupted missions — RUNNING (or PENDING with drive evidence)
+    whose driver is dead or stale — back to completion on a
+    background thread; PAUSED missions stay paused. This function is
+    only the chat-visible inventory of what is resumable — never a
+    claim that resumption already happened.
     """
     if mission_store is None:
         return "no mission store attached — nothing to resume."

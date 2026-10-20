@@ -12,8 +12,13 @@ Public surface::
     runner = wired_runner(context)  # runner + os state-machine hook attached
     result = runner.start("research X and write a report", budget_wall=3600)
 
-    # after a crash, on startup:
-    runner.resume_all()
+    # after a crash, on startup: PartnerRuntime.start kicks off boot
+    # resumption on a background thread — interrupted missions
+    # (RUNNING, or PENDING with drive evidence, whose driver is dead
+    # or stale) are claimed and driven to completion, PAUSED stays
+    # paused, and terminal pushes lost in the save→send gap are
+    # re-delivered exactly once. runner.resume_all() remains the
+    # manual whole-fleet resume (the CLI uses it).
 """
 
 from __future__ import annotations
