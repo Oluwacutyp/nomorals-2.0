@@ -130,7 +130,9 @@ def detect_dialect_detail(text: str) -> dict[str, Any]:
     """
     try:
         ekiti_bank, std_bank, detect_language = _money_markers()
-        lowered = f" {(text or '').lower()} "
+        # NFC: the marker banks are precomposed literals — decomposed
+        # (NFD) input must score the same, not as another dialect.
+        lowered = f" {unicodedata.normalize('NFC', (text or '').lower())} "
         ekiti = _score(lowered, ekiti_bank)
         std = _score(lowered, std_bank)
         if detect_language is not None:
@@ -167,7 +169,7 @@ def suggest_ekiti_fix(text: str) -> str | None:
 
     Returns e.g. "in Ilawe we'd say 'mi lọ', not 'mo lọ'" or None.
     """
-    lowered = f" {(text or '').lower()} "
+    lowered = f" {unicodedata.normalize('NFC', (text or '').lower())} "
     for verb in _MO_MI_VERBS:
         std = f" mo {verb} "
         if std in lowered or lowered.startswith(f"mo {verb} "):
@@ -566,8 +568,14 @@ class EkitiTutor:
         Never raises.
         """
         try:
-            heard_words = (transcript or "").lower().split()
-            exp_words = (expected_text or "").lower().split()
+            # NFC both sides: word identity must not depend on whether
+            # the STT engine / keyboard emitted precomposed or
+            # decomposed diacritics — a perfect recital in NFD scored
+            # 20% before this (tones were fine; bytes were not).
+            heard_words = unicodedata.normalize(
+                "NFC", (transcript or "").lower()).split()
+            exp_words = unicodedata.normalize(
+                "NFC", (expected_text or "").lower()).split()
             words: list[WordFeedback] = []
             hits = 0
             tone_hits = 0

@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import re
 import time
+import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -200,7 +201,10 @@ def detect_language(transcript: str) -> tuple[str, float]:
     Yoruba, Ekiti dialect markers win ties (documented flagship bias);
     Standard markers alone → "yoruba".
     """
-    text = f" {(transcript or '').lower()} "
+    # NFC first: the marker banks are precomposed literals, and the same
+    # text arriving decomposed (NFD — some STT engines / keyboards emit
+    # combining marks) must score identically, not as another language.
+    text = f" {unicodedata.normalize('NFC', transcript or '').lower()} "
     ekiti_hits = _score(text, _EKITI_MARKERS)
     scores = {
         "pidgin": _score(text, _PIDGIN_MARKERS),
@@ -271,7 +275,10 @@ def _extract_recipient(text: str) -> str | None:
 def parse_voice_money(transcript: str) -> MoneyIntent:
     """Parse a voice transcript into a MoneyIntent. Never raises; never
     guesses a money action — unparseable input → kind="unknown"."""
-    raw = transcript or ""
+    # Canonical encoding before any pattern work: the verb/recipient
+    # regexes carry precomposed literals (ránṣẹ́, fún, sí), so NFD input
+    # would silently miss them and degrade a transfer to "unknown".
+    raw = unicodedata.normalize("NFC", transcript or "")
     language, confidence = detect_language(raw)
     amount_kobo = _extract_amount(raw)
     note = raw.strip()

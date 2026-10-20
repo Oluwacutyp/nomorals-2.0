@@ -191,6 +191,22 @@ class RuntimeMemoryMixin:
                   "Ask with /tutor answer <text> to check yourself.")
         return f"{opener}\n\n{turn.prompt}"
 
+    def _ekiti_llm(self, system: str, prompt: str) -> str:
+        """(system, user) -> reply adapter over the runtime brain, for
+        the Ekiti tutor. Raises on failure — EkitiTutor catches that
+        and falls back to its documented scaffolding replies, so a
+        down brain degrades the lesson, never breaks the command."""
+        from ...llm.base import Message, SamplingParams
+        from ...llm.brain import brain_for
+
+        response = brain_for(self.context).chat(
+            [Message.system(system), Message.user(prompt)],
+            SamplingParams(temperature=0.7, max_tokens=300),
+            task_kind="chat")
+        if not response.ok or not response.text:
+            raise RuntimeError(response.error or "empty LLM response")
+        return response.text
+
     def _control_ekiti(self, tail: str, *, chat_key: str = "") -> str:
         """/ekiti — Ekiti/Ilawe Ekiti dialect tutoring. Owner-only.
 
@@ -222,7 +238,7 @@ class RuntimeMemoryMixin:
             if verb == "converse":
                 if not rest:
                     return "usage: /ekiti converse <text in Yoruba/Ekiti>"
-                tutor = get_tutor(chat_key)
+                tutor = get_tutor(chat_key, llm_fn=self._ekiti_llm)
                 turn = tutor.converse(rest)
                 out = turn.response
                 if turn.correction:
@@ -231,14 +247,14 @@ class RuntimeMemoryMixin:
             if verb == "debate":
                 if not rest:
                     return "usage: /ekiti debate <topic>"
-                tutor = get_tutor(chat_key)
+                tutor = get_tutor(chat_key, llm_fn=self._ekiti_llm)
                 turn = tutor.debate(rest)
                 return (f"🥊 round {turn.debate_round} — mi lòdì sí ọ̀!\n\n"
                         f"{turn.response}")
             if verb == "say":
                 if not rest:
                     return "usage: /ekiti say <text>"
-                tutor = get_tutor(chat_key)
+                tutor = get_tutor(chat_key, llm_fn=self._ekiti_llm)
                 try:
                     result = tutor.reference_audio(rest[:500])
                 except Exception as exc:  # noqa: BLE001

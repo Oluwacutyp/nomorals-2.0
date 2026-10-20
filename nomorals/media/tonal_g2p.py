@@ -471,7 +471,10 @@ def _g2p_shallow(word: str, prof: LanguageProfile) -> list[str]:
         if (ch in "aeiouẹọ" and i + 1 < len(plain) and plain[i + 1] == "n"
                 and prof.nasal_vowels):
             nxt = plain[i + 2] if i + 2 < len(plain) else ""
-            if nxt not in "aeiouẹọ":
+            # "" (word end) is not a vowel — but ``"" in "aeiouẹọ"`` is
+            # True in Python, which silently killed every word-final
+            # nasal (àdán, rùn, yẹn) before this check.
+            if nxt == "" or nxt not in "aeiouẹọ":
                 phonemes.append(ch + "̃")  # nasalized vowel phoneme
                 i += 2
                 continue
@@ -838,8 +841,14 @@ def _line_language_scores(line: str) -> dict[str, float]:
     if not words:
         return scores
     # Diacritic evidence: Yoruba/Vietnamese-style marks on Latin text.
+    # Membership is checked on the lowercased NFC form: in decomposed
+    # (NFD) text ẹ/ọ/ṣ exist only as base letter + combining dot-below,
+    # and a sentence-initial capital Ọ/Ẹ/Ṣ never matches the lowercase
+    # literals — testing the raw string silently lost this evidence
+    # both ways.
     nfd = _nfd(text)
-    if "ẹ" in text or "ọ" in text or "ṣ" in text:
+    nfc_low = unicodedata.normalize("NFC", text).lower()
+    if "ẹ" in nfc_low or "ọ" in nfc_low or "ṣ" in nfc_low:
         scores["yo"] = scores.get("yo", 0.0) + 3.0
     if _ACUTE in nfd or _GRAVE in nfd:
         scores["yo"] = scores.get("yo", 0.0) + 0.5
