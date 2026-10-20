@@ -62,7 +62,22 @@ class RoleAgent(Agent):
                 record_tool_denial(self.context, spec.name, name,
                                    denied.reason, str(denied))
                 raise denied
-        outcome = tools.call(name, actor=self.name, capabilities=self.capabilities, **kwargs)
+        # Idempotency: when a runner has scoped this unit of work (a
+        # mission step, a plan step, one inbound chat message — see
+        # nomorals.core.idempotency_keys), derive the registry key from
+        # that scope so a retry of the same step replays this call's
+        # recorded result instead of re-applying its effect. No scope →
+        # unkeyed, exactly as before. An explicit caller-supplied key
+        # always wins.
+        from ...core.idempotency_keys import scoped_idempotency_key
+
+        call_kwargs = dict(kwargs)
+        explicit = call_kwargs.pop("idempotency_key", None)
+        key = explicit or scoped_idempotency_key(name, call_kwargs)
+        if key:
+            call_kwargs["idempotency_key"] = key
+        outcome = tools.call(name, actor=self.name,
+                             capabilities=self.capabilities, **call_kwargs)
         if not outcome.ok:
             raise RuntimeError(f"tool {name} failed: {outcome.error}")
         return outcome.value

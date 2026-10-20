@@ -51,6 +51,7 @@ import json
 import sys
 import threading
 import time
+import uuid
 from typing import Any, Callable
 
 from ..core.logging_setup import get_logger
@@ -295,6 +296,13 @@ class MCPServer:
         # The emit fn for the in-flight request (dispatch installs it per
         # call); used by _notify() and progress reporting.
         self._emit_tls = threading.local()
+        # Session identity for idempotency keys: JSON-RPC request ids
+        # are only unique within a session, so tool_call keys are
+        # scoped to (principal, this server instance's session, request
+        # id) — a client retry of one request replays, while a later
+        # session reusing id 1 for a different call can never collide
+        # with the durable record of an earlier one.
+        self._session_id = uuid.uuid4().hex[:16]
         if self._principal is None and self._principal_resolver is None:
             from .server import DEFAULT_PRINCIPAL
             self._principal = DEFAULT_PRINCIPAL
@@ -420,6 +428,11 @@ class MCPServer:
                     return None
                 return self._err(msg_id, INVALID_PARAMS,
                                  "params must be an object")
+            # The in-flight request id rides the same thread-local as
+            # the emit fn: tool handlers (tool_call) derive their
+            # idempotency key from it.
+            previous_msg_id = getattr(self._emit_tls, "msg_id", None)
+            self._emit_tls.msg_id = msg_id
             try:
                 result = self._handle(method, params, emit)
             except MCPError as exc:
@@ -432,6 +445,8 @@ class MCPServer:
                     return None
                 return self._err(msg_id, INTERNAL_ERROR,
                                  f"{type(exc).__name__}: {exc}")
+            finally:
+                self._emit_tls.msg_id = previous_msg_id
             if msg_id is None:
                 return None
             return self._ok(msg_id, result)
@@ -604,9 +619,28 @@ class MCPServer:
         if self.registry is None:
             return self._tool_error("no tool registry configured")
         from ..core.result import Ok
+        # Idempotency: a client that times out retries the SAME
+        # JSON-RPC request (same id). Key the registry call on
+        # (principal, session, request id) so the retry replays the
+        # recorded result instead of re-applying the effect. A
+        # notification carries no id → no key → unkeyed, as before.
+        call_args = dict(tool_args) if isinstance(tool_args, dict) \
+            else tool_args
+        msg_id = getattr(self._emit_tls, "msg_id", None)
+        if msg_id is not None and isinstance(tool, str) and tool \
+                and isinstance(call_args, dict):
+            from ..core.idempotency_keys import derive_idempotency_key
+
+            principal_name = str(
+                getattr(self.principal, "name", "") or "anon")
+            key = derive_idempotency_key(
+                f"mcp:{principal_name}:{self._session_id}:{msg_id}",
+                tool, call_args)
+            if key:
+                call_args["idempotency_key"] = key
         outcome = self.registry.call(
             tool, actor=f"mcp:{self.principal.name}",
-            capabilities=self.principal.grant, **tool_args)
+            capabilities=self.principal.grant, **call_args)
         if isinstance(outcome, Ok):
             value = outcome.unwrap()
             structured = {"tool": tool, "ok": True}

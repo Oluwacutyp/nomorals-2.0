@@ -146,15 +146,49 @@ class ToolAdapter:
         actor: str = "owner-loop",
         capabilities: CapabilitySet | None = None,
         max_tools_in_prompt: int | None = None,
+        idempotency_scope: str = "",
     ) -> None:
         from ...core.profiles import profile_value
         self.registry = registry
         self.actor = actor
         self.capabilities = capabilities or CapabilitySet.all()
+        #: Scope naming the run these calls belong to (set by
+        #: AgenticLoop.run from the LoopMemory's durable run_id). When
+        #: non-empty, every call derives a registry idempotency key
+        #: from it, so a resumed run re-issuing an identical call
+        #: replays the recorded result instead of re-applying the
+        #: effect. Empty → unkeyed (no run identity to name).
+        self.idempotency_scope = str(idempotency_scope or "")
+        self._key_support: bool | None = None
         self.max_tools_in_prompt = (
             max_tools_in_prompt if max_tools_in_prompt is not None
             else int(profile_value("max_tools_in_prompt", 40))
         )
+
+    def _registry_takes_keys(self) -> bool:
+        """True when the registry's ``call`` declares an explicit
+        ``idempotency_key`` parameter (the real ToolRegistry does).
+
+        The key is passed ONLY then: a registry-shaped double whose
+        ``call(**kwargs)`` forwards kwargs into the tool function
+        would otherwise receive the key as a bogus tool argument.
+        """
+        if self._key_support is None:
+            import inspect
+
+            try:
+                params = inspect.signature(self.registry.call).parameters
+                self._key_support = "idempotency_key" in params
+            except (TypeError, ValueError):
+                self._key_support = False
+        return self._key_support
+
+    def _key_for(self, name: str, args: dict[str, Any]) -> str:
+        if not self.idempotency_scope or not self._registry_takes_keys():
+            return ""
+        from ...core.idempotency_keys import derive_idempotency_key
+
+        return derive_idempotency_key(self.idempotency_scope, name, args)
 
     # ── for the think prompt ─────────────────────────────────────────
 
@@ -223,13 +257,30 @@ class ToolAdapter:
         if not self.has(name):
             return False, f"unknown tool {_scrub_audit_name(name)!r}"
 
+        # A key already on the args (call_many pre-derives per call so
+        # its serial fallback lands on the SAME key) wins; otherwise
+        # derive from this adapter's run scope. The key goes to the
+        # registry as call()'s explicit parameter — never inside the
+        # tool's argument dict.
+        merged = dict(args)
+        key = merged.pop("idempotency_key", None) or self._key_for(
+            name, merged)
         try:
-            outcome: Outcome = self.registry.call(
-                name,
-                actor=self.actor,
-                capabilities=self.capabilities,
-                **args,
-            )
+            if key:
+                outcome: Outcome = self.registry.call(
+                    name,
+                    actor=self.actor,
+                    capabilities=self.capabilities,
+                    idempotency_key=key,
+                    **merged,
+                )
+            else:
+                outcome = self.registry.call(
+                    name,
+                    actor=self.actor,
+                    capabilities=self.capabilities,
+                    **merged,
+                )
         except Exception as exc:  # noqa: BLE001 — registry should not raise, but be safe
             return False, (
                 f"tool {_scrub_audit_name(name)} raised unexpectedly: "
@@ -260,6 +311,12 @@ class ToolAdapter:
             name = str(name or "").strip()
             if not isinstance(args, dict):
                 args = {}
+            key = self._key_for(name, args)
+            if key:
+                # The registry's call_many forwards per-call kwargs to
+                # call(), where idempotency_key binds as the parameter.
+                args = dict(args)
+                args["idempotency_key"] = key
             normed.append((name, args))
         if not normed:
             return []

@@ -12,6 +12,7 @@ fresh — the plan, steps, and history all carry over.
 
 from __future__ import annotations
 
+import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -77,6 +78,12 @@ class LoopMemory:
     """
 
     user_message: str = ""
+    #: Durable identity of THIS run, minted once and carried through
+    #: the resume snapshot: a run that pauses and resumes keeps its id,
+    #: so tool effects it already landed replay instead of re-applying
+    #: (the ToolAdapter derives registry idempotency keys from it). A
+    #: fresh run is a fresh intended effect and gets a fresh id.
+    run_id: str = ""
     history: list[tuple[str, str]] = field(default_factory=list)
     steps: list[StepRecord] = field(default_factory=list)
     plan: str = ""
@@ -88,6 +95,8 @@ class LoopMemory:
 
     def __post_init__(self) -> None:
         from ...core.profiles import profile_value
+        if not self.run_id:
+            self.run_id = f"loop-{uuid.uuid4().hex[:16]}"
         if self.max_history_turns is None:
             self.max_history_turns = int(profile_value("history_turns", 6))
         if self.max_observation_chars is None:
@@ -207,6 +216,7 @@ class LoopMemory:
         """Serialize the full loop state for resuming on a later message."""
         return {
             "user_message": self.user_message,
+            "run_id": self.run_id,
             "history": [[role, text] for role, text in self.history],
             "steps": [s.to_dict() for s in self.steps],
             "plan": self.plan,
@@ -219,6 +229,11 @@ class LoopMemory:
         yields an empty memory rather than raising."""
         d = d if isinstance(d, dict) else {}
         mem = cls(user_message=str(d.get("user_message", "")))
+        # Resume keeps the original run's identity (snapshots written
+        # before run_id existed keep the fresh id __post_init__ minted:
+        # their effects predate keying and cannot be matched anyway).
+        if d.get("run_id"):
+            mem.run_id = str(d["run_id"])
         for h in d.get("history", []) or []:
             if isinstance(h, (list, tuple)) and len(h) == 2:
                 mem.add_history(str(h[0]), str(h[1]))

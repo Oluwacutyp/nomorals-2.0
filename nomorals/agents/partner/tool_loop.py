@@ -153,6 +153,34 @@ def _call_signature(call: "ToolCall") -> str:
     return hashlib.sha256(f"{call.name}\n{canon}".encode()).hexdigest()[:16]
 
 
+def _chat_idempotency_key(loop_ctx: dict[str, Any] | None,
+                          call: "ToolCall") -> str:
+    """Idempotency key for one tool call made under one inbound message.
+
+    Scope = the chat + the platform message id, so a redelivered (or
+    re-driven after a restart) message replays the recorded result of
+    an identical call instead of re-applying its effect, while a
+    distinct call — different tool or different args, in this message
+    or any other — gets a different key and executes. No message id in
+    ``loop_ctx`` → ``""`` (unkeyed): a key must never be invented from
+    material that could collide two distinct effects. When loop_ctx
+    carries no message id, a scope set on the contextvar by the
+    runtime's message processing still applies.
+    """
+    from ...core.idempotency_keys import (
+        derive_idempotency_key,
+        scoped_idempotency_key,
+    )
+
+    if loop_ctx:
+        chat_key = str(loop_ctx.get("chat_key") or "")
+        message_id = str(loop_ctx.get("message_id") or "")
+        if chat_key and message_id:
+            return derive_idempotency_key(
+                f"chat:{chat_key}:{message_id}", call.name, call.args)
+    return scoped_idempotency_key(call.name, call.args)
+
+
 def _scan_balanced(text: str, start: int) -> int:
     """Index just past the closing brace matching ``text[start] == '{'``.
 
@@ -548,8 +576,15 @@ class ToolCallingLoop:
         def _run() -> Any:
             kwargs: dict[str, Any] = {"capabilities": capabilities} \
                 if capabilities is not None else {}
+            tool_args = dict(call.args)
+            key = _chat_idempotency_key(loop_ctx, call)
+            if key:
+                # Caller-derived key wins over any model-supplied one:
+                # the model must not choose the replay identity of its
+                # own effects.
+                tool_args["idempotency_key"] = key
             return self.registry.call(
-                call.name, actor=actor, **kwargs, **call.args)
+                call.name, actor=actor, **kwargs, **tool_args)
 
         # Outcome is Ok/Err — unwrap honestly.
         try:

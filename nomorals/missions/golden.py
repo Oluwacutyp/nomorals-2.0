@@ -594,7 +594,15 @@ class GoldenRunner:
                 _log.debug("golden %s skipping completed step %s",
                            mission.id, step.name)
                 continue
-            report = self._execute_step(mission, step, ctx, outputs)
+            # The completed-step list above replays finished steps, but
+            # a step interrupted mid-run re-executes on resume: scope
+            # its tool calls so the registry replays the ones that
+            # already landed instead of re-applying their effects.
+            from ..core.idempotency_keys import idempotency_scope
+
+            with idempotency_scope(
+                    f"mission:{mission.id}:golden:{step.name}"):
+                report = self._execute_step(mission, step, ctx, outputs)
             step_reports.append(report)
             if report["ok"]:
                 completed.append(step.name)

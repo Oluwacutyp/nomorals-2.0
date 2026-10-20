@@ -604,6 +604,34 @@ class PartnerRuntime(
             return False
 
     def _process(self, message: ChatMessage) -> None:
+        """Inbound entry: process one message under its idempotency scope.
+
+        The scope (chat + platform message id) names every tool effect
+        this message can cause, so a redelivered message — gateway
+        retry, adapter replay, process restart — replays recorded
+        results instead of re-applying effects (see
+        :mod:`nomorals.core.idempotency_keys`). A message with no
+        platform id gets no scope and runs unkeyed: inventing an
+        identity could collide two distinct messages into a false
+        replay.
+        """
+        from ...core.idempotency_keys import idempotency_scope
+
+        scope = ""
+        try:
+            chat_key = str(getattr(message.chat, "key", "") or "")
+            message_id = str(getattr(message, "message_id", "") or "")
+            if chat_key and message_id:
+                scope = f"chat:{chat_key}:{message_id}"
+        except Exception:  # noqa: BLE001 - scoping never breaks chat
+            scope = ""
+        if scope:
+            with idempotency_scope(scope):
+                self._process_inner(message)
+            return
+        self._process_inner(message)
+
+    def _process_inner(self, message: ChatMessage) -> None:
         self._bump("messages")
         # Background /play + /download jobs: surface any that died in
         # this chat without reporting (crashed worker, heartbeat
@@ -4361,9 +4389,21 @@ class PartnerRuntime(
         Human-readable (header + structured ``key: value`` lines), never
         a raw JSON dump.
         """
+        from ...core.idempotency_keys import scoped_idempotency_key
         from ...core.output_style import render_output
 
-        outcome = self.context.tools.call(tool, **kwargs)
+        # Control commands are re-runnable by redelivery of the same
+        # inbound message: under that message's scope (set by
+        # _process), an identical command replays its recorded result
+        # instead of re-applying the effect (e.g. /proxy set landing
+        # twice). Outside message processing there is no scope and the
+        # call runs unkeyed, as before.
+        call_kwargs = dict(kwargs)
+        explicit = call_kwargs.pop("idempotency_key", None)
+        key = explicit or scoped_idempotency_key(tool, call_kwargs)
+        if key:
+            call_kwargs["idempotency_key"] = key
+        outcome = self.context.tools.call(tool, **call_kwargs)
         chat = self._ref_from_key(chat_key)
         if not outcome.ok:
             return f"{tool} failed: {getattr(outcome.error, 'message', outcome.error)}"

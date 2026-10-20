@@ -504,6 +504,12 @@ class PartnerBrain:
             "is_owner": is_owner,
             "gate_mode": gate_mode,
             "sender_id": str(getattr(message, "sender_id", "") or ""),
+            # The replay identity for this turn's tool effects: if the
+            # platform redelivers this message (or the process restarts
+            # mid-turn), identical tool calls replay instead of
+            # re-applying. Empty when the adapter supplied no id — the
+            # loop then runs unkeyed rather than inventing one.
+            "message_id": str(getattr(message, "message_id", "") or ""),
         }
         result = loop.run(
             message.text or "",

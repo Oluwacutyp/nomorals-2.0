@@ -187,6 +187,16 @@ class AgenticLoop:
         if not memory.user_message:
             memory.user_message = message
 
+        # Idempotency: name this run's tool effects after the memory's
+        # durable run_id. A resumed run keeps the same id (the snapshot
+        # carries it), so a call it re-issues after resuming replays
+        # the recorded result instead of re-applying the effect; a
+        # fresh run has a fresh id and executes.
+        try:
+            self.tools.idempotency_scope = f"orch:{memory.run_id}"
+        except Exception:  # noqa: BLE001 - foreign adapter shape: skip
+            pass
+
         tools_called: list[str] = []
 
         for step_num in range(1, self.step_budget + 1):

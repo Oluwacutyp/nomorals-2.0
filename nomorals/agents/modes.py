@@ -905,12 +905,41 @@ class PlanningRunner:
 
     def _submit_step_job(self, fn: Callable[..., Any], step: PlanStep,
                          ctx: dict[str, Any], phase: str):
-        """Run a step phase (execute/verify) as a background job."""
-        return self._jobs.submit(
-            lambda: self._run_step_sync(fn, step, ctx),
-            tool=f"plan:{step.name}:{phase}",
-            args={"step_id": step.step_id},
-            labels={"owner": "planning"})
+        """Run a step phase (execute/verify) as a background job.
+
+        When the run carries an idempotency identity (``run()`` mints
+        one per run), the step job is submitted under the step's
+        idempotency scope — run id + phase + the pass-#15 step
+        fingerprint — so a replanned identical step replays the tool
+        effects it already landed instead of re-applying them, while
+        different work (different fingerprint) gets a different scope
+        and executes. The scope is set only for the submission: the job
+        registry copies the context at submit time, so the worker runs
+        under it and this thread's context is restored immediately.
+        """
+        run_id = str((ctx or {}).get("idempotency_run") or "")
+        if not run_id:
+            return self._jobs.submit(
+                lambda: self._run_step_sync(fn, step, ctx),
+                tool=f"plan:{step.name}:{phase}",
+                args={"step_id": step.step_id},
+                labels={"owner": "planning"})
+        from ..core.idempotency_keys import (
+            reset_idempotency_scope,
+            set_idempotency_scope,
+        )
+
+        fingerprint = json.dumps(_step_spec_key(step), default=str)
+        token = set_idempotency_scope(
+            f"plan:{run_id}:{phase}:{fingerprint}")
+        try:
+            return self._jobs.submit(
+                lambda: self._run_step_sync(fn, step, ctx),
+                tool=f"plan:{step.name}:{phase}",
+                args={"step_id": step.step_id},
+                labels={"owner": "planning"})
+        finally:
+            reset_idempotency_scope(token)
 
     async def _collect_cancel_aware(self, job_id: str,
                                     cancel: Any):
@@ -1001,8 +1030,17 @@ class PlanningRunner:
         # A replanned step that reuses a positional id (``step_{i+1}``)
         # for DIFFERENT work must re-run — the old result is stale.
         done_specs: dict[str, tuple] = {}
+        # One idempotency identity for the whole run (replans included):
+        # _submit_step_job scopes each step job from it, so a step that
+        # a replan re-runs replays the tool effects it already landed
+        # instead of re-applying them. (The identity is per-run and
+        # in-memory, matching PlanningRunner's own lifetime: plan runs
+        # are not persisted, so there is no cross-restart run to join.
+        # A NEW run of the same goal is a new intended effect and gets
+        # a new id.)
         ctx: dict[str, Any] = {"goal": goal, "account": account,
-                               "results": results}
+                               "results": results,
+                               "idempotency_run": new_id("planrun")}
         while True:
             replanned = False
             for batch in self.planner.execution_batches(plan):

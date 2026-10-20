@@ -1871,6 +1871,29 @@ class MissionRunner:
                         policy: dict[str, Any] | None = None) -> StepOutcome:
         """The actual agent invocation for one step (always executes).
 
+        Runs under the step's idempotency scope
+        (``mission:<id>:step:<step key>``): the missions dedupe layer
+        above replays a COMPLETED step wholesale, but a step that dies
+        mid-agent — after some of its tool calls already landed — is
+        retried, and without scoped registry keys those calls would
+        re-apply their effects. The scope is set HERE, not by the
+        caller, because the timed path runs this on a raw daemon thread
+        that inherits no context from the retry loop.
+        """
+        from ..core.idempotency_keys import idempotency_scope
+
+        scope = (f"mission:{mission.id}:step:"
+                 f"{step_idempotency_key(mission.id, step)}")
+        with idempotency_scope(scope):
+            return self._run_step_agent_inner(mission, step, started,
+                                              policy)
+
+    def _run_step_agent_inner(self, mission: Mission, step: Any,
+                              started: float,
+                              policy: dict[str, Any] | None = None
+                              ) -> StepOutcome:
+        """The agent invocation itself (see :meth:`_run_step_agent`).
+
         ``policy`` is optional (older monkeypatches pass three args); when
         it carries ``timeout_s`` the step runs under a hard deadline.
         """
