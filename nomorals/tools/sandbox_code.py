@@ -48,11 +48,29 @@ MAX_TIMEOUT_POWER = 1800.0
 MAX_OUTPUT = 20_000
 
 
-def _session_dir(session: str) -> Path:
+def _session_path(root: Path, session: str) -> Path:
+    """The per-session working directory under ``<root>/work``.
+
+    The sanitizer allows dots (so names like ``project.v2`` work), which
+    means ``"."`` / ``".."`` survive it — and those are path syntax, not
+    session names: session ``".."`` resolved to the sandbox root itself
+    and ``"."`` to the shared work dir, escaping per-session isolation
+    entirely. Dot-only names fall back to the default session, and the
+    resolved path is containment-checked as defense in depth.
+    """
     name = _SAFE_SESSION.sub("_", (session or "default").strip())[:64] or "default"
-    path = SANDBOX_ROOT / "work" / name
+    if not name.strip("."):
+        name = "default"
+    base = (Path(root) / "work").resolve()
+    path = (base / name).resolve()
+    if path.parent != base:
+        path = base / "default"
     path.mkdir(parents=True, exist_ok=True)
     return path
+
+
+def _session_dir(session: str) -> Path:
+    return _session_path(SANDBOX_ROOT, session)
 
 
 def _transform_last_expression(code: str) -> str | None:
@@ -129,10 +147,7 @@ class CodeInterpreter:
         self.max_timeout = MAX_TIMEOUT
 
     def _dir(self, session: str) -> Path:
-        name = _SAFE_SESSION.sub("_", (session or "default").strip())[:64] or "default"
-        path = self.root / "work" / name
-        path.mkdir(parents=True, exist_ok=True)
-        return path
+        return _session_path(self.root, session)
 
     # ── public ──────────────────────────────────────────────────────────────
     def run(
@@ -228,6 +243,10 @@ class CodeInterpreter:
             "files": files,
             "workdir": str(workdir),
             "backend": raw.get("backend", detect_backend(backend)),
+            # which sandbox guarantees actually held for this run (the
+            # rlimit fallback enforces neither) — see tools/shell.py
+            "network_enforced": bool(raw.get("network_enforced", False)),
+            "fs_confined": bool(raw.get("fs_confined", False)),
             "seconds": round(raw.get("seconds", time.perf_counter() - started), 2),
         }
 

@@ -8,13 +8,21 @@ Layered isolation, strongest available first:
 2. ``unshare`` — namespaces without the bwrap dependency, probed the same way.
 3. ``resource.setrlimit`` — CPU seconds, address space, file size, process count.
    Always applied, even under bwrap, because limits are the backstop.
-4. cwd jail — the process starts in the workspace and is never given a path out.
+4. cwd — the process starts in the workdir. Only bwrap makes that a jail
+   (the workdir is bind-mounted as the child's whole writable world);
+   under unshare/rlimit the filesystem stays fully visible.
 
 Plus a hard wall-clock timeout that kills the process group, not just the parent,
 so ``sleep 999 &`` cannot outlive the call.
 
-Network is disabled by default. A code-execution tool with open network access is
-a remote-access trojan the moment an agent is prompt-injected by a page it fetched.
+Network is disabled by default *on the namespace backends*: bwrap drops
+the net namespace, unshare adds ``--net``. Under the rlimit fallback
+``network=False`` only strips proxy variables — the network stays
+reachable. A code-execution tool with open network access is a
+remote-access trojan the moment an agent is prompt-injected by a page
+it fetched, so results carry ``network_enforced`` / ``fs_confined``:
+which of the requested guarantees the backend that actually ran could
+and did provide.
 """
 
 from __future__ import annotations
@@ -290,6 +298,12 @@ def run_sandboxed(
         "seconds": round(elapsed, 3),
         "backend": chosen,
         "network": network,
+        # Which of the requested guarantees the backend that actually
+        # ran enforces. "network" above is the *request*; under the
+        # rlimit fallback network=False blocks nothing (no namespace),
+        # and only bwrap confines the filesystem to the workdir.
+        "network_enforced": chosen in ("bwrap", "unshare"),
+        "fs_confined": chosen == "bwrap",
         "cwd": str(workdir),
     }
 

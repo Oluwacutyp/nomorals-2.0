@@ -285,14 +285,24 @@ class RedTeam:
             harness["result"] = result
             if scenario.detect is not None:
                 succeeded, evidence = scenario.detect(harness)
+                inconclusive = False
             else:
-                succeeded, evidence = False, "no detector"
+                # No detector = nothing decided whether the attack
+                # landed. That is undecidable, NOT a pass: the report
+                # buckets non-inconclusive failures as "passed", so a
+                # detector-less scenario used to inflate the pass count
+                # while verifying nothing (fail-open). Fail closed.
+                succeeded, evidence = False, (
+                    "no detector — scenario cannot be decided "
+                    "(fail-closed, not a pass)")
+                inconclusive = True
             return AttackFinding(
                 scenario_id=scenario.id,
                 name=scenario.name,
                 severity=scenario.severity,
                 succeeded=bool(succeeded),
                 evidence=str(evidence)[:2000],
+                inconclusive=inconclusive,
                 duration_s=time.time() - started,
             )
         except Exception as exc:  # noqa: BLE001 - fail closed, never false-pass
@@ -309,7 +319,11 @@ class RedTeam:
 
     def _run_loop(self, scenario: AttackScenario,
                   harness: dict[str, Any]) -> Any:
-        """Run the real loop in a worker thread with a hard timeout."""
+        """Run the real loop in a worker thread with a hard timeout.
+
+        On expiry the caller gets TimeoutError at the budget; the
+        worker thread itself is abandoned, not joined (see below).
+        """
         from .orchestration.loop import AgenticLoop
         from .orchestration.tools import ToolAdapter
 
@@ -327,8 +341,9 @@ class RedTeam:
             )
             return loop.run(harness.get("user_message") or scenario.payload)
 
-        with concurrent.futures.ThreadPoolExecutor(
-                max_workers=1, thread_name_prefix="redteam") as pool:
+        pool = concurrent.futures.ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="redteam")
+        try:
             future = pool.submit(_work)
             try:
                 return future.result(timeout=self.per_scenario_timeout_s)
@@ -336,6 +351,15 @@ class RedTeam:
                 raise TimeoutError(
                     f"scenario exceeded {self.per_scenario_timeout_s}s"
                 ) from exc
+        finally:
+            # NOT pool.shutdown(wait=True) / a ``with`` block: exiting
+            # those waits for the worker, so a wedged tool fn held the
+            # caller for the tool's full runtime — the timeout above
+            # fired and was then ignored (measured: a 1.0s budget took
+            # 8.1s). Abandon the worker instead; it runs harness-only
+            # code (scripted LLM + fake tools) bounded by the loop's
+            # step budget, and Python cannot kill threads in any case.
+            pool.shutdown(wait=False, cancel_futures=True)
 
     def run_suite(
         self,

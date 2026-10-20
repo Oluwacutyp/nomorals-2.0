@@ -270,6 +270,8 @@ class CodeRunner:
             "seconds": round(float(result.get("seconds", 0.0)), 3),
             "timed_out": timed_out,
             "backend": result.get("backend", ""),
+            "network_enforced": bool(result.get("network_enforced", False)),
+            "fs_confined": bool(result.get("fs_confined", False)),
             "level": result.get("level", "L1"),
             "egress": result.get("egress", {"mode": "L1", "network": False}),
             "workdir": str(work),
@@ -432,17 +434,37 @@ class CodeRunner:
 
     def _run_cmd(self, cmd: list[str], cwd: str,
                  timeout: float) -> dict[str, Any]:
-        t0 = time.perf_counter()
-        proc = subprocess.run(
-            cmd, cwd=cwd, capture_output=True, text=True, encoding="utf-8", errors="replace",
-            timeout=timeout)
+        """Run a project test command INSIDE the sandbox.
+
+        This used to be a bare ``subprocess.run``: the suite inherited
+        the full parent environment (secrets included) and the full
+        filesystem, while the module contract claims CodeRunner extends
+        the sandbox the whole system uses. A project's test suite is
+        exactly the untrusted-input surface the sandbox exists for, so
+        it now runs through :func:`run_sandboxed` like every other
+        execution path — scrubbed env, cwd = the project, network off,
+        rlimits, process-group timeout kill. ``run_sandboxed`` reports
+        timeouts in-band (``timed_out``) instead of raising.
+        """
+        import shlex
+
+        from .tools.shell import run_sandboxed
+
+        result = run_sandboxed(
+            shlex.join([str(part) for part in cmd]),
+            cwd=cwd, timeout=timeout, network=False,
+            max_output=2_000_000)
         return {
-            "exit_code": proc.returncode,
-            "ok": proc.returncode == 0,
-            "stdout": (proc.stdout or "")[-20_000:],
-            "stderr": (proc.stderr or "")[-20_000:],
-            "timed_out": False,
-            "seconds": round(time.perf_counter() - t0, 2),
+            "exit_code": result.get("exit_code", -1),
+            "ok": result.get("exit_code") == 0
+            and not result.get("timed_out"),
+            "stdout": (result.get("stdout") or "")[-20_000:],
+            "stderr": (result.get("stderr") or "")[-20_000:],
+            "timed_out": bool(result.get("timed_out")),
+            "seconds": result.get("seconds", 0.0),
+            "backend": result.get("backend", ""),
+            "network_enforced": bool(result.get("network_enforced", False)),
+            "fs_confined": bool(result.get("fs_confined", False)),
         }
 
     @staticmethod
@@ -565,6 +587,9 @@ class CodeRunner:
 
         Green = exit 0 of the suite: unittest/pytest for Python,
         ``npm test`` for JS projects, the file itself for a plain script.
+        The suite itself runs in the sandbox (see :meth:`_run_cmd`); the
+        model's file rewrites between rounds are host-side by design —
+        fixing the owner's project is the tool's purpose.
         While red, the model gets the failing output + the relevant files
         and rewrites what must change; the suite re-runs each round.
         Without an LLM backend the loop honestly reports the last failure.

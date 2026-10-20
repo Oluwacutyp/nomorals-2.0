@@ -585,7 +585,10 @@ def strip_exif(path: Union[str, Path], *, backup: bool = True) -> dict:
         bak = _unique_backup(p)
         bak.write_bytes(raw)
     p.write_bytes(clean)
-    removed = before.get("removed_detail", {})
+    # Verify the bytes actually written, like clean_copy does: the
+    # summary below is built from the BEFORE scan, so without this the
+    # tool reported "removed" for surgery that may not have removed.
+    verified, residual = verify_clean(clean)
     return {
         "path": str(p),
         "had_exif": before["has_exif"],
@@ -598,6 +601,8 @@ def strip_exif(path: Union[str, Path], *, backup: bool = True) -> dict:
         "bytes_before": len(raw),
         "bytes_after": len(clean),
         "backup": str(bak) if bak else None,
+        "verified_clean": verified,
+        "residual": residual,
     }
 
 

@@ -320,7 +320,11 @@ def _check(rep: NetLeakReport, *, expected_ip: str,
 def format_report(rep: NetLeakReport) -> str:
     """Human-readable rendering (chat/terminal)."""
     L: list[str] = []
-    verdict = ("✅ NO LEAK" if rep.ok and not rep.webrtc_leak
+    # The WebRTC verdict comes from the STUN srflx address. When STUN
+    # was unreachable the check measured nothing on that path — the
+    # note below already says "treat as unknown, not clean", so the
+    # headline must not claim NO LEAK from the HTTP address alone.
+    verdict = ("✅ NO LEAK" if rep.ok and not rep.webrtc_leak and rep.stun_ip
                else "🚨 LEAK DETECTED" if rep.webrtc_leak
                else "⚠️ INCONCLUSIVE")
     L.append(f"🌐 WebRTC/IPv6 leak check — {verdict}")

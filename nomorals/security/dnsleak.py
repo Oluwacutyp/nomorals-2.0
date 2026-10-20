@@ -469,14 +469,28 @@ def _assess(rep: DnsLeakReport, expected_asn: str) -> DnsLeakReport:
         return rep
 
     # ── leak logic ──────────────────────────────────────────────────────
+    unverifiable = False
     if expected_asn:
-        # strict mode: every resolver must belong to the expected ASN
-        bad = [ri for ri in rep.resolver_info
-               if str(ri.get("asn") or "") != expected_asn]
-        if bad:
-            rep.leak = True
-            rep.leak_detail = ("resolvers outside expected ASN "
-                               f"{expected_asn}: " + ", ".join(b["ip"] for b in bad))
+        if not rep.resolver_info:
+            # Strict mode is a guarantee — every resolver's ASN checked
+            # against the expected one. The local-heuristic fallback
+            # never populates resolver_info, so with the probe service
+            # unreachable ZERO resolvers were verified, yet the strict
+            # loop below found no bad ones and the check passed
+            # vacuously. Fail closed: unverified is not ok.
+            unverifiable = True
+            rep.note = (rep.note + " " if rep.note else "") + (
+                "strict ASN check could not be performed: no resolver "
+                "ASN data (probe service unreachable) — refusing to "
+                "pass this check unverified.")
+        else:
+            # strict mode: every resolver must belong to the expected ASN
+            bad = [ri for ri in rep.resolver_info
+                   if str(ri.get("asn") or "") != expected_asn]
+            if bad:
+                rep.leak = True
+                rep.leak_detail = ("resolvers outside expected ASN "
+                                   f"{expected_asn}: " + ", ".join(b["ip"] for b in bad))
     else:
         # heuristic mode: leak if a resolver is NOT a known public resolver
         # AND its ASN differs from the egress ASN (ISP resolver leaking
@@ -494,7 +508,7 @@ def _assess(rep: DnsLeakReport, expected_asn: str) -> DnsLeakReport:
             rep.leak_detail = ("possible ISP resolvers bypassing tunnel: "
                                + ", ".join(f"{b['ip']} ({b.get('org') or b.get('country') or '?'})"
                                            for b in bad))
-    rep.ok = not rep.leak and not rep.hijack
+    rep.ok = not rep.leak and not rep.hijack and not unverifiable
     if not rep.leak and not rep.leak_detail:
         rep.leak_detail = "all detected resolvers look consistent — no leak."
     return rep
@@ -503,7 +517,13 @@ def _assess(rep: DnsLeakReport, expected_asn: str) -> DnsLeakReport:
 def format_report(rep: DnsLeakReport) -> str:
     """Human-readable rendering of a leak report (chat/terminal)."""
     L: list[str] = []
-    verdict = ("✅ NO LEAK" if rep.ok else
+    # "NO LEAK" is a measured claim: only the bash.ws probe path
+    # actually observes which resolvers answered. The local-heuristic
+    # fallback reports configured resolvers only (its own note says it
+    # cannot prove anything), so an ok there is advisory, not a verdict.
+    verdict = ("✅ NO LEAK" if rep.ok and rep.method == "bash.ws" else
+               "⚠️ NO LEAK INDICATED — ADVISORY ONLY (local heuristic, "
+               "not probe-verified)" if rep.ok else
                "🚨 LEAK DETECTED" if rep.leak else
                "⚠️ INCONCLUSIVE")
     L.append(f"🔒 DNS leak check — {verdict}  (method: {rep.method or 'n/a'})")
