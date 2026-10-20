@@ -27,9 +27,13 @@ def test_osint_specs_registered():
 
 def test_temp_mail_providers_registered():
     from nomorals.accounts.temp_mail import PROVIDERS, CASCADE_PROVIDERS
+    assert "mailtm" in PROVIDERS
     assert "1secmail" in PROVIDERS
     assert "guerrillamail" in PROVIDERS
-    assert CASCADE_PROVIDERS[0] == "1secmail"
+    # Cascade order is mail.tm first (see temp_mail.CODE comment and the
+    # /tempmail help text) — this assertion previously pinned the stale
+    # pre-mail.tm order and failed on a clean tree.
+    assert CASCADE_PROVIDERS[0] == "mailtm"
 
 
 def test_mail_message_code_extraction():

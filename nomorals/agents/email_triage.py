@@ -705,11 +705,17 @@ async def ensure_email_triage_job(scheduler: Any, context: Any) -> bool:
         queue = DraftQueue(context=context)
         report = triage(gmail)
         for item in report.drafts_wanted:
+            # Same per-thread dedupe as the chat /email triage path:
+            # triage is read-only (mail stays unread), so without this
+            # the same thread would gain one duplicate draft per day.
+            if any(d.thread_id == item.thread_id and d.status == "pending"
+                   for d in queue.pending()):
+                continue
             try:
                 persona = getattr(context, "persona", None)
                 body = draft_reply(item, persona)
                 queue.add(thread_id=item.thread_id, to=item.sender,
-                          subject=f"Re: {item.subject}", body=body)
+                          subject=_reply_subject(item.subject), body=body)
             except Exception as exc:  # noqa: BLE001
                 _log.debug("triage draft failed for %s: %s", item.id, exc)
         # Drafts are queued for review — never sent here.
@@ -909,6 +915,12 @@ def _validate_recipients(to: str) -> str:
     return ""
 
 
+def _reply_subject(subject: str) -> str:
+    """``Re:``-prefixed subject, never doubled (``Re: Re: X``)."""
+    s = subject or "(no subject)"
+    return s if s.lower().startswith("re:") else f"Re: {s}"
+
+
 def _draft_preview(draft: Draft) -> str:
     return (f"📧 draft `{draft.id}` queued:\nTo: {draft.to}\n"
             f"Subject: {draft.subject}\n\n{draft.body}\n\n"
@@ -997,6 +1009,9 @@ def control_email(arg: str, context: Any) -> str:
             return f"no draft `{draft_id}` — /email drafts lists them"
         if d.status == "sent":
             return f"draft `{draft_id}` already sent."
+        if d.status == "discarded":
+            return (f"draft `{draft_id}` was discarded — it can't be "
+                    "sent. Compose a new one if you still want it.")
         # Arm the explicit-override: the owner's next "send it" in this
         # chat sends exactly this draft, no re-confirmation.
         queue.mark_pending_send(draft_id)
@@ -1025,7 +1040,7 @@ def control_email(arg: str, context: Any) -> str:
                    for d in queue.pending()):
                 continue  # already have a pending draft for this thread
             queue.add(thread_id=item.thread_id, to=item.sender,
-                      subject=f"Re: {item.subject}",
+                      subject=_reply_subject(item.subject),
                       body=draft_reply(item, persona))
             made += 1
         out = report.summary()

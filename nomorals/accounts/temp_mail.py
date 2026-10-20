@@ -5,8 +5,10 @@ creator when a signup flow demands email verification: grab an address,
 hand it to the site, then poll the inbox for the code/link.
 
 Providers (all keyless):
+- mail.tm — modern REST API with JWT accounts; the cascade primary
+  (cleanest keyless REST API).
 - 1secmail — real REST API (getMessages/readMessage/genRandomMailbox),
-  pure GET+JSON, no auth. The primary.
+  pure GET+JSON, no auth.
 - GuerrillaMail — AJAX API with session token, no account needed.
 
 The interface mirrors ``temp_sms`` so callers get the same shape:
