@@ -290,6 +290,10 @@ class MCPServer:
         self._principal_resolver = principal_resolver
         self._memory = memory
         self._lock = threading.RLock()
+        # Explicit per-call principal (dispatch's ``principal=``), used
+        # when the transport cannot share the caller's thread — e.g. a
+        # worker thread — and as the mounted-resolver's fallback base.
+        self._principal_tls = threading.local()
         # logging/setLevel state; None = client never asked for log
         # notifications, so _notify() stays silent.
         self._log_level: str | None = None
@@ -310,11 +314,16 @@ class MCPServer:
     # ── principal / memory ─────────────────────────────────────────────
     @property
     def principal(self) -> Any:
+        override = getattr(self._principal_tls, "principal", None)
+        if override is not None:
+            return override
         if self._principal_resolver is not None:
             try:
-                return self._principal_resolver()
+                resolved = self._principal_resolver()
             except Exception:  # noqa: BLE001 - resolver must never break us
-                pass
+                resolved = None
+            if resolved is not None:
+                return resolved
         return self._principal
 
     @property
@@ -391,18 +400,33 @@ class MCPServer:
         _ = Capability  # namespace import check
         _require_capability(self.principal, capability)
 
-    def dispatch(self, msg: Any, emit: EmitFn) -> dict[str, Any] | None:
+    def dispatch(self, msg: Any, emit: EmitFn, *,
+                 principal: Any = None) -> dict[str, Any] | None:
         """Handle one JSON-RPC message. Never raises.
 
         ``emit`` carries server→client notifications for the duration of
         this call (progress, log messages); it is installed on a
-        thread-local so tool handlers can reach it.
+        thread-local so tool handlers can reach it. ``principal`` pins
+        this call to an explicit principal (transports whose worker
+        thread cannot see the caller's own thread-local); without it the
+        principal resolves per the server configuration.
         """
         previous = getattr(self._emit_tls, "emit", None)
         self._emit_tls.emit = emit
+        previous_principal = getattr(self._principal_tls, "principal", None)
+        if principal is not None:
+            self._principal_tls.principal = principal
         try:
             return self._dispatch_inner(msg, emit)
         finally:
+            if principal is not None:
+                if previous_principal is None:
+                    try:
+                        del self._principal_tls.principal
+                    except AttributeError:
+                        pass
+                else:
+                    self._principal_tls.principal = previous_principal
             if previous is None:
                 try:
                     del self._emit_tls.emit
@@ -454,13 +478,14 @@ class MCPServer:
             _log.exception("mcp: dispatch crashed")
             return self._err(None, INTERNAL_ERROR, f"{type(exc).__name__}")
 
-    def handle_batch(self, msgs: Any, emit: EmitFn) -> Any:
+    def handle_batch(self, msgs: Any, emit: EmitFn, *,
+                     principal: Any = None) -> Any:
         if isinstance(msgs, list):
             if not msgs:
                 return self._err(None, INVALID_REQUEST, "empty batch")
-            out = [self.dispatch(m, emit) for m in msgs]
+            out = [self.dispatch(m, emit, principal=principal) for m in msgs]
             return [r for r in out if r is not None]
-        return self.dispatch(msgs, emit)
+        return self.dispatch(msgs, emit, principal=principal)
 
     # ── method handlers ────────────────────────────────────────────────
     def _handle(self, method: str, params: dict[str, Any],
@@ -618,6 +643,20 @@ class MCPServer:
         tool_args = args.get("arguments") or {}
         if self.registry is None:
             return self._tool_error("no tool registry configured")
+        if not isinstance(tool_args, dict):
+            return self._tool_error("tool 'arguments' must be an object")
+        # These names belong to the registry call frame: splatting them
+        # into registry.call would collide with the frame's own keywords
+        # and surface as an opaque TypeError. ('idempotency_key' is the
+        # one exception — the server derives it below, overwriting any
+        # client value by design.)
+        reserved = sorted({"actor", "capabilities", "confirmation"}
+                          .intersection(tool_args))
+        if reserved:
+            return self._tool_error(
+                "tool arguments must not contain reserved name(s): "
+                f"{', '.join(reserved)} — actor and capabilities come "
+                "from the caller's principal")
         from ..core.result import Ok
         # Idempotency: a client that times out retries the SAME
         # JSON-RPC request (same id). Key the registry call on
@@ -661,21 +700,16 @@ class MCPServer:
             return self._tool_error("no tool registry configured "
                                     "(research needs web_search)")
         from ..research.pipeline import ResearchContext, ResearchJob, run_job
-        job = ResearchJob(topic=topic, queries=list(queries),
-                          max_results=max_results)
+        # ResearchJob requires an id (every other caller passes one);
+        # omitting it made this tool fail with a TypeError on every call.
+        job = ResearchJob(id=f"mcp-{uuid.uuid4().hex[:12]}", topic=topic,
+                          queries=list(queries), max_results=max_results)
         rctx = ResearchContext(db=getattr(self.context, "db", None),
                                registry=self.registry)
         findings = run_job(job, rctx)
-        structured = {
-            "topic": topic,
-            "findings": [
-                {"title": f.title, "url": f.url, "snippet": f.snippet}
-                for f in findings
-            ],
-        }
-        return self._tool_ok(json.dumps(structured, ensure_ascii=False),
-                             structured)
-
+        # Includes 'detail' — the field the tool's own outputSchema
+        # advertises (a second, unreachable copy of this block used to
+        # be the only place it appeared).
         structured = {
             "topic": topic,
             "findings": [
@@ -771,7 +805,10 @@ class MCPServer:
                                RESOURCE_NOT_FOUND)
             payload = fact
         else:
-            raise MCPError(f"unknown resource {uri!r}", INVALID_PARAMS)
+            # A URI this server does not know is a missing RESOURCE
+            # (-32002), the same code the known-prefix/missing-fact case
+            # above already uses — not invalid params.
+            raise MCPError(f"unknown resource {uri!r}", RESOURCE_NOT_FOUND)
         return {"contents": [{
             "uri": uri, "mimeType": "application/json",
             "text": json.dumps(payload, ensure_ascii=False)}]}
@@ -932,7 +969,7 @@ class MCPServer:
         return 0
 
     # ── HTTP transport ─────────────────────────────────────────────────
-    def handle_http(self, body: Any) -> Any:
+    def handle_http(self, body: Any, *, principal: Any = None) -> Any:
         """Buffered HTTP: one JSON-RPC message/batch → response payload.
 
         Server→client notifications (progress, log messages) are only
@@ -942,7 +979,7 @@ class MCPServer:
         def emit(notification: dict[str, Any]) -> None:
             _ = notification
 
-        return self.handle_batch(body, emit)
+        return self.handle_batch(body, emit, principal=principal)
 
 
 # ── mounting on the existing API server ────────────────────────────────
@@ -951,6 +988,25 @@ def register_mcp(api_server: Any, mcp: MCPServer) -> None:
     """Add ``POST /mcp`` (buffered JSON-RPC) to an APIServer, following the
     register_acp pattern."""
     api_server._mcp_server = mcp  # noqa: SLF001 - available for introspection
+    if mcp._principal_resolver is None:  # noqa: SLF001 - mount wiring
+        # The mounted server must act as the principal each HTTP request
+        # resolved to — never as one fixed server-wide principal (that
+        # both escalated narrow named principals to the bounded local
+        # grant and downgraded the owner to it). Outside an in-flight
+        # request (direct handler calls, tests) the server's own
+        # configured principal applies.
+        own = mcp._principal  # noqa: SLF001
+
+        def _resolve_inflight() -> Any:
+            inflight = getattr(api_server, "_inflight_principal", None)
+            resolved = inflight() if inflight is not None else None
+            return resolved if resolved is not None else own
+
+        mcp._principal_resolver = _resolve_inflight  # noqa: SLF001
+    # JSON-RPC batches are valid bodies for this route.
+    batch_routes = getattr(api_server, "_batch_routes", None)
+    if batch_routes is not None:
+        batch_routes.add(("POST", "/mcp"))
 
     @api_server.route("POST", "/mcp",
                       description="Model Context Protocol: JSON-RPC 2.0 "

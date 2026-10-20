@@ -151,6 +151,14 @@ DEFAULT_GRANT = CapabilitySet.of(
 #: auth token. Explicit and bounded — never a silent ``CapabilitySet.all()``.
 DEFAULT_PRINCIPAL = Principal(name="local", grant=DEFAULT_GRANT)
 
+#: Argument names owned by the registry call frame (``actor``,
+#: ``capabilities``, ``confirmation``, ``idempotency_key``). A tool
+#: argument carrying one of these can never reach a tool through a
+#: splatting surface (HTTP /tools/call, MCP tool_call) — the surfaces
+#: reject it with a clear message instead of a keyword-collision crash.
+_RESERVED_ARGUMENT_NAMES = frozenset(
+    {"actor", "capabilities", "confirmation", "idempotency_key"})
+
 
 class ServiceUnavailable(NoMoralsError):
     """The server cannot serve traffic right now (→ 503). Raised by
@@ -423,6 +431,11 @@ class APIServer:
         # liveness only. Anything registered here must return a static
         # payload with no DB, version, or provider facts (see /live).
         self._public_routes: set[tuple[str, str]] = set()
+        # (method, path) keys whose handler accepts a JSON *array* body
+        # (JSON-RPC batch) as well as an object — the protocol mounts
+        # (POST /mcp, POST /acp) register here. Every other route keeps
+        # the object-only rule.
+        self._batch_routes: set[tuple[str, str]] = set()
         self._register_defaults()
 
     # ── principals ─────────────────────────────────────────────────────────
@@ -456,6 +469,13 @@ class APIServer:
 
     def _current_principal(self) -> Principal:
         return getattr(self._tls, "principal", None) or self.default_principal
+
+    def _inflight_principal(self) -> Principal | None:
+        """The principal resolved for the request this thread is currently
+        handling, or ``None`` when no request is in flight on it. Mounted
+        protocol servers (MCP/ACP) resolve through this so an HTTP request
+        runs under ITS principal — never a server-wide default."""
+        return getattr(self._tls, "principal", None)
 
     def _limit_for(self, principal_name: str) -> float:
         """Requests/minute for ``principal_name``; 0 means unlimited.
@@ -614,15 +634,20 @@ class APIServer:
 
         @self.route("GET", "/models", description="List registered LLM models plus registry stats")
         def models(body: dict[str, Any], query: dict[str, str]) -> dict[str, Any]:
+            _require_capability(server._current_principal(), Capability.DB_READ)
             from ..llm.registry import ModelRegistry
 
             registry = ModelRegistry(context.db)
             return {"stats": registry.stats(),
                     "models": [r.__dict__ for r in registry.list(limit=100)]}
 
-        @self.route("GET", "/tools", description="List tool schemas")
+        @self.route("GET", "/tools", description="List tool schemas the principal's grant may call")
         def tools(body: dict[str, Any], query: dict[str, str]) -> dict[str, Any]:
-            return {"tools": context.tools.register_builtins().schemas()}
+            # Filtered to the caller's grant, like ACP's devon/tools: the
+            # catalog must not advertise tools this principal cannot call.
+            principal = server._current_principal()
+            return {"tools": context.tools.register_builtins().schemas(
+                capabilities=principal.grant)}
 
         # Trigger webhooks (nomorals/triggers): POST /triggers/webhook.
         # The server (L7) imports triggers (L5) — downward, layering-safe.
@@ -644,6 +669,20 @@ class APIServer:
             arguments = body.get("arguments") or {}
             if not isinstance(arguments, dict):
                 return {"ok": False, "error": "arguments must be an object"}
+            # These names belong to the registry call frame, not to any
+            # tool: splatting them into the call would collide with the
+            # frame's own keywords and crash with an opaque TypeError.
+            reserved = sorted(
+                _RESERVED_ARGUMENT_NAMES.intersection(arguments))
+            if reserved:
+                return {
+                    "ok": False,
+                    "error": "tool arguments must not contain reserved "
+                             f"name(s): {', '.join(reserved)} — actor and "
+                             "capabilities come from the bearer token; "
+                             "pass confirmation / idempotency_key as "
+                             "top-level body fields",
+                }
             outcome = context.tools.call(
                 name,
                 # Actor comes from the resolved principal, never from the
@@ -651,6 +690,11 @@ class APIServer:
                 actor=f"api:{principal.name}",
                 capabilities=principal.grant,
                 confirmation=str(body.get("confirmation") or "") or None,
+                # A client retrying a timed-out request re-sends the same
+                # key and replays the recorded result instead of
+                # re-applying the effect (same rule as chat/MCP).
+                idempotency_key=str(body.get("idempotency_key") or "")
+                or None,
                 **arguments,
             )
             if outcome.ok:
@@ -661,6 +705,8 @@ class APIServer:
 
         @self.route("POST", "/chat", description="Chat with the model router")
         def chat(body: dict[str, Any], query: dict[str, str]) -> dict[str, Any]:
+            _require_capability(server._current_principal(),
+                                Capability.MODEL_CALL)
             from ..llm.base import Message, SamplingParams
 
             raw = body.get("messages") or [{"role": "user", "content": str(body.get("prompt") or "")}]
@@ -678,6 +724,8 @@ class APIServer:
 
         @self.route("POST", "/memory/remember", description="Store a memory record")
         def remember(body: dict[str, Any], query: dict[str, str]) -> dict[str, Any]:
+            _require_capability(server._current_principal(),
+                                Capability.MEM_WRITE)
             record_id = context.memory.remember(
                 str(body.get("content") or ""),
                 kind=str(body.get("kind") or "episode"),
@@ -688,6 +736,8 @@ class APIServer:
 
         @self.route("POST", "/memory/recall", description="Recall memory records")
         def recall(body: dict[str, Any], query: dict[str, str]) -> dict[str, Any]:
+            _require_capability(server._current_principal(),
+                                Capability.MEM_READ)
             result = context.memory.recall(
                 str(body.get("query") or ""),
                 limit=int(body.get("limit", 8)),
@@ -697,10 +747,16 @@ class APIServer:
 
         @self.route("GET", "/memory/stats", description="Memory statistics snapshot")
         def memory_stats(body: dict[str, Any], query: dict[str, str]) -> dict[str, Any]:
+            _require_capability(server._current_principal(),
+                                Capability.MEM_READ)
             return context.memory.stats_snapshot()
 
         @self.route("POST", "/agents/run", description="Run the master orchestrator toward a goal")
         def run_agent(body: dict[str, Any], query: dict[str, str]) -> dict[str, Any]:
+            # Spawning an autonomous agent is beyond the bounded local
+            # grant by design (agent.spawn is not in DEFAULT_GRANT).
+            _require_capability(server._current_principal(),
+                                Capability.AGENT_SPAWN)
             from ..agents.orchestrator import MasterOrchestrator
 
             goal = str(body.get("goal") or "")
@@ -712,6 +768,10 @@ class APIServer:
 
         @self.route("POST", "/backup", description="Create a database backup, then rotate")
         def backup(body: dict[str, Any], query: dict[str, str]) -> dict[str, Any]:
+            # A backup writes files and rotation deletes old ones —
+            # destructive, so it needs sys.backup (not in DEFAULT_GRANT).
+            _require_capability(server._current_principal(),
+                                Capability.SYS_BACKUP)
             from ..storage.backup import BackupManager
 
             manager = BackupManager(context.db, context.settings.backup_dir)
@@ -721,6 +781,8 @@ class APIServer:
 
         @self.route("GET", "/events", description="Event bus snapshot (static; use /stream for live events)")
         def events(body: dict[str, Any], query: dict[str, str]) -> dict[str, Any]:
+            _require_capability(server._current_principal(),
+                                Capability.DB_READ)
             bus = getattr(context, "bus", None)
             return {"events": bus.snapshot() if bus is not None else []}
 
@@ -1124,6 +1186,10 @@ def _make_handler(server: APIServer) -> type[BaseHTTPRequestHandler]:
             # It is echoed on the response, stamped into error bodies
             # (RFC 9457 ``instance``), and carried in log lines.
             self._request_id = _new_request_id(self.headers)
+            # This thread may be reused for the next keep-alive request:
+            # clear any in-flight principal before this request resolves
+            # its own (it is set again right after resolution below).
+            server._tls.principal = None
             parsed = urlparse(self.path)
             if not _ROUTE.match(parsed.path):
                 self._send_error(400, "malformed path")
@@ -1140,6 +1206,10 @@ def _make_handler(server: APIServer) -> type[BaseHTTPRequestHandler]:
                 if principal is None:
                     self._send_error(401, "missing or invalid bearer token")
                     return
+            # Publish the resolved principal for the rest of this request:
+            # mounted protocol servers (MCP/ACP) resolve through it, and
+            # the SSE special paths below never enter dispatch().
+            server._tls.principal = principal
             # Token-bucket rate limiting (opt-in), keyed by principal name.
             # The owner principal and the tokenless liveness probe are
             # exempt. 401s above never reach this point, so failed logins
@@ -1188,6 +1258,10 @@ def _make_handler(server: APIServer) -> type[BaseHTTPRequestHandler]:
                     self,
                     lambda: _open_timeline(server.context),
                     parse_qs(parsed.query),
+                    # The stream follows THIS server's CORS posture —
+                    # never emit_sse's wildcard default while CORS is
+                    # off here.
+                    cors=self._cors_origin(),
                 )
                 return
             if method == "POST" and parsed.path == "/acp" and \
@@ -1206,7 +1280,11 @@ def _make_handler(server: APIServer) -> type[BaseHTTPRequestHandler]:
                 if error is not None:
                     self._send_error(status, error)
                     return
-                serve_acp_sse(self, server, acp_server, data or b"")
+                # SSE runs the batch on a worker thread where this
+                # request's thread-local principal is invisible — hand
+                # the resolved principal over explicitly.
+                serve_acp_sse(self, server, acp_server, data or b"",
+                              principal=principal)
                 return
             body: dict[str, Any] = {}
             if method != "GET":
@@ -1226,7 +1304,11 @@ def _make_handler(server: APIServer) -> type[BaseHTTPRequestHandler]:
                     except RecursionError:
                         self._send_error(400, "body JSON is nested too deeply")
                         return
-                    if not isinstance(parsed_body, dict):
+                    if not isinstance(parsed_body, dict) and not (
+                        isinstance(parsed_body, list)
+                        and (method.upper(), parsed.path)
+                        in server._batch_routes
+                    ):
                         self._send_error(400, "body must be a JSON object")
                         return
                     limit_error = _json_limit_error(
@@ -1332,7 +1414,15 @@ def serve(
             register_mcp(api, MCPServer(context))
         except Exception:  # noqa: BLE001 - protocol endpoints are additive
             _log.warning("mcp route not mounted", exc_info=True)
-    httpd = ThreadingHTTPServer((host, port), _make_handler(api))
+    try:
+        httpd = ThreadingHTTPServer((host, port), _make_handler(api))
+    except OSError as exc:
+        # A busy port must fail with the address and the cause named —
+        # not a bare errno traceback.
+        raise NoMoralsError(
+            f"api cannot bind {host}:{port}: {exc.strerror or exc} — "
+            "is another server already running on that port?"
+        ) from exc
     httpd.daemon_threads = True
     _log.info("api listening on http://%s:%s", host, port)
     if not token and not context.settings.api.token:

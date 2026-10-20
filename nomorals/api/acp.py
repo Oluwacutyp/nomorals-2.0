@@ -229,6 +229,10 @@ class ACPServer:
         self._turn_fn = turn_fn or self._default_turn
         self._principal = principal
         self._principal_resolver = principal_resolver
+        # Explicit per-call principal (dispatch's ``principal=``) for
+        # transports whose worker thread cannot see the caller's own
+        # thread-local — the SSE path runs the batch on a worker.
+        self._principal_tls = threading.local()
         self.session_ttl_s = session_ttl_s
         self._sessions: dict[str, ACPSession] = {}
         self._lock = threading.RLock()
@@ -246,11 +250,16 @@ class ACPServer:
     # ── principal ─────────────────────────────────────────────────────
     @property
     def principal(self) -> Any:
+        override = getattr(self._principal_tls, "principal", None)
+        if override is not None:
+            return override
         if self._principal_resolver is not None:
             try:
-                return self._principal_resolver()
+                resolved = self._principal_resolver()
             except Exception:  # noqa: BLE001 - resolver must never break us
-                pass
+                resolved = None
+            if resolved is not None:
+                return resolved
         return self._principal
 
     # ── JSON-RPC plumbing ─────────────────────────────────────────────
@@ -502,7 +511,17 @@ class ACPServer:
                 emit: EmitFn) -> Any:
         if method == "initialize":
             requested = params.get("protocolVersion", PROTOCOL_VERSION)
-            version = min(int(requested or PROTOCOL_VERSION), PROTOCOL_VERSION)
+            try:
+                requested_version = (
+                    PROTOCOL_VERSION if requested is None
+                    else int(requested))
+            except (TypeError, ValueError):
+                raise ACPError(
+                    f"protocolVersion must be an integer, got "
+                    f"{requested!r}", INVALID_PARAMS) from None
+            if requested_version < 1:
+                requested_version = PROTOCOL_VERSION
+            version = min(requested_version, PROTOCOL_VERSION)
             # Record what the client can do (fs.readTextFile/writeTextFile,
             # terminal, auth, elicitation) for future agent→client calls.
             client_caps = params.get("clientCapabilities")
@@ -603,9 +622,32 @@ class ACPServer:
         raise ACPError(f"method not found: {method}", METHOD_NOT_FOUND)
 
     # ── transport-agnostic dispatch ───────────────────────────────────
-    def dispatch(self, msg: Any, emit: EmitFn) -> dict[str, Any] | None:
+    def dispatch(self, msg: Any, emit: EmitFn, *,
+                 principal: Any = None) -> dict[str, Any] | None:
         """Handle one JSON-RPC message. Returns the response dict, or
-        ``None`` for notifications (never respond to those). Never raises."""
+        ``None`` for notifications (never respond to those). Never raises.
+
+        ``principal`` pins this call to an explicit principal (the SSE
+        transport's worker thread cannot see the HTTP request's own
+        thread-local); without it the principal resolves per the server
+        configuration.
+        """
+        previous_principal = getattr(self._principal_tls, "principal", None)
+        if principal is not None:
+            self._principal_tls.principal = principal
+        try:
+            return self._dispatch_inner(msg, emit)
+        finally:
+            if principal is not None:
+                if previous_principal is None:
+                    try:
+                        del self._principal_tls.principal
+                    except AttributeError:
+                        pass
+                else:
+                    self._principal_tls.principal = previous_principal
+
+    def _dispatch_inner(self, msg: Any, emit: EmitFn) -> dict[str, Any] | None:
         try:
             if not isinstance(msg, dict):
                 return self._err(None, INVALID_REQUEST,
@@ -641,14 +683,15 @@ class ACPServer:
             _log.exception("acp: dispatch crashed")
             return self._err(None, INTERNAL_ERROR, f"{type(exc).__name__}")
 
-    def handle_batch(self, msgs: Any, emit: EmitFn) -> Any:
+    def handle_batch(self, msgs: Any, emit: EmitFn, *,
+                     principal: Any = None) -> Any:
         """A single message or a batch list → response or list of them."""
         if isinstance(msgs, list):
             if not msgs:
                 return self._err(None, INVALID_REQUEST, "empty batch")
-            out = [self.dispatch(m, emit) for m in msgs]
+            out = [self.dispatch(m, emit, principal=principal) for m in msgs]
             return [r for r in out if r is not None]
-        return self.dispatch(msgs, emit)
+        return self.dispatch(msgs, emit, principal=principal)
 
     # ── stdio transport ───────────────────────────────────────────────
     @staticmethod
@@ -713,7 +756,7 @@ class ACPServer:
         return 0
 
     # ── HTTP transport ────────────────────────────────────────────────
-    def handle_http(self, body: Any) -> Any:
+    def handle_http(self, body: Any, *, principal: Any = None) -> Any:
         """Buffered HTTP: one JSON-RPC message/batch → response payload.
         session/update notifications are only delivered over stdio or SSE;
         buffered HTTP returns just the final response (documented)."""
@@ -722,9 +765,9 @@ class ACPServer:
         def emit(notification: dict[str, Any]) -> None:
             dropped.append(notification)
 
-        return self.handle_batch(body, emit)
+        return self.handle_batch(body, emit, principal=principal)
 
-    def iter_sse(self, body: Any) -> Any:
+    def iter_sse(self, body: Any, *, principal: Any = None) -> Any:
         """SSE streaming for POST /acp with ``Accept: text/event-stream``.
 
         Yields ``data: <json>`` frames: first every session/update
@@ -738,7 +781,8 @@ class ACPServer:
 
         def worker() -> None:
             try:
-                result_box["response"] = self.handle_batch(body, emit)
+                result_box["response"] = self.handle_batch(
+                    body, emit, principal=principal)
             except Exception as exc:  # noqa: BLE001
                 result_box["response"] = self._err(None, INTERNAL_ERROR,
                                                    f"{type(exc).__name__}")
@@ -766,6 +810,25 @@ def register_acp(api_server: Any, acp: ACPServer) -> None:
     route pattern. SSE streaming is wired by a small special-case in the
     HTTP handler (see ``serve_acp_sse``), mirroring the /stream precedent."""
     api_server._acp_server = acp  # noqa: SLF001 - read by the SSE special-case
+    if acp._principal_resolver is None:  # noqa: SLF001 - mount wiring
+        # The mounted server must act as the principal each HTTP request
+        # resolved to — never as one fixed server-wide principal (that
+        # both escalated narrow named principals to the bounded local
+        # grant and downgraded the owner to it). Outside an in-flight
+        # request (direct handler calls, tests) the server's own
+        # configured principal applies.
+        own = acp._principal  # noqa: SLF001
+
+        def _resolve_inflight() -> Any:
+            inflight = getattr(api_server, "_inflight_principal", None)
+            resolved = inflight() if inflight is not None else None
+            return resolved if resolved is not None else own
+
+        acp._principal_resolver = _resolve_inflight  # noqa: SLF001
+    # JSON-RPC batches are valid bodies for this route.
+    batch_routes = getattr(api_server, "_batch_routes", None)
+    if batch_routes is not None:
+        batch_routes.add(("POST", "/acp"))
 
     @api_server.route("POST", "/acp",
                       description="Agent Client Protocol: JSON-RPC 2.0 "
@@ -779,7 +842,7 @@ def register_acp(api_server: Any, acp: ACPServer) -> None:
 
 
 def serve_acp_sse(handler: Any, api_server: Any, acp: ACPServer,
-                  raw_body: bytes) -> None:
+                  raw_body: bytes, *, principal: Any = None) -> None:
     """Serve one SSE stream for POST /acp. Called from the HTTP handler's
     special-case (mirrors the /stream SSE precedent in server.py)."""
     try:
@@ -801,7 +864,7 @@ def serve_acp_sse(handler: Any, api_server: Any, acp: ACPServer,
         handler.send_header("X-Request-ID", request_id)
     handler.end_headers()
     try:
-        for frame in acp.iter_sse(body):
+        for frame in acp.iter_sse(body, principal=principal):
             handler.wfile.write(frame.encode("utf-8"))
             handler.wfile.flush()
     except (BrokenPipeError, ConnectionResetError):

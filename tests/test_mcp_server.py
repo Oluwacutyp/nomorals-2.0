@@ -146,7 +146,10 @@ def test_resources_read_timeline(mem_server):
 def test_resources_read_unknown_uri(mem_server):
     srv, _ = mem_server
     r = _call(srv, 12, "resources/read", {"uri": "devon://nope"})
-    assert r["error"]["code"] == -32602
+    # Pass #50: a resource this server does not know is RESOURCE_NOT_FOUND
+    # (-32002, the code the spec reserves for it and the one the
+    # known-prefix/missing-fact case already used) — not INVALID_PARAMS.
+    assert r["error"]["code"] == -32002
 
 
 def test_prompts_list_and_get(server):
