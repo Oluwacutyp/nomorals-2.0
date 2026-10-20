@@ -270,7 +270,10 @@ def plan_book(topic: str, notes: str, context: Any,
         if not title or not isinstance(raw_chapters, list) or not raw_chapters:
             return None
         chapters = []
-        for item in raw_chapters[:24]:
+        # the ceiling is the organic safety backstop (same scale as
+        # MAX_ORGANIC_CHAPTERS), not a shape decision: the prompt above
+        # tells the model the book decides its own chapter count.
+        for item in raw_chapters[:outline_mod.MAX_ORGANIC_CHAPTERS]:
             if not isinstance(item, dict):
                 continue
             ct = str(item.get("title", "")).strip()
@@ -310,7 +313,10 @@ def infer_chapter_count(topic: str, context: Any = None,
                 SamplingParams(temperature=0.2, max_tokens=8),
             task_kind="creative")
             n = int(re.search(r"\d+", getattr(response, "text", "") or "").group())
-            if response.ok and 3 <= n <= 24:
+            # the model's decision is the dynamic shape: accept anything
+            # sane (the backstop scale is the organic ceiling), never
+            # silently re-shrink it to a smaller range.
+            if response.ok and 3 <= n <= outline_mod.MAX_ORGANIC_CHAPTERS:
                 return n
         except Exception:  # noqa: BLE001 - heuristic fallback below
             pass
@@ -474,8 +480,12 @@ class BookForge:
             _log.info("book created: %s (%d chapters planned)", slug,
                       len(book.chapters))
         else:
-            outline_mod.make_outline(book, n_chapters=max(3, min(explicit, 24)),
-                                     context=self.context)
+            # explicit owner count is the owner's decision: honored up to the
+            # organic safety backstop, never silently shrunk to a range.
+            outline_mod.make_outline(
+                book, n_chapters=max(3, min(explicit,
+                                            outline_mod.MAX_ORGANIC_CHAPTERS)),
+                context=self.context)
             _log.info("book created: %s (%d chapters planned)", slug,
                       len(book.chapters))
         self.save(book)

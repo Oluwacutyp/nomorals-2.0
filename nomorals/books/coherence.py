@@ -22,7 +22,7 @@ from .continuity import ContinuityEngine, ContinuityState, Finding
 
 __all__ = ["CoherenceReport", "analyze_coherence", "contradiction_scan"]
 
-_AGE_RE = re.compile(r"\b([A-Z][a-z]+)\b[^.]{0,60}?\b(?:aged?|age)\s+"
+_AGE_RE = re.compile(r"\b(?-i:([A-Z][a-z]+))\b[^.]{0,60}?\b(?:aged?|age)\s+"
                      r"(\d{1,3})\b", re.IGNORECASE)
 _AGE_RE2 = re.compile(r"\b(\d{1,3})-year-old\s+([A-Z][a-z]+)\b")
 _YEAR_RE = re.compile(r"\b(1[0-9]{3}|20[0-9]{2})\b")
@@ -31,8 +31,20 @@ _SEASON_RE = re.compile(r"\b(spring|summer|autumn|fall|winter)\b",
                         re.IGNORECASE)
 _TRAVEL_RE = re.compile(r"\b(\d+)\s+(days?|weeks?|months?)\s+(later|"
                         r"of travel|on the road|journey)\b", re.IGNORECASE)
-_DEAD_RE = re.compile(r"\b([A-Z][a-z]+)\b[^.]{0,50}?\b(died|was dead|"
-                      r"lay dead|killed)\b", re.IGNORECASE)
+_DEAD_RE = re.compile(r"\b(?-i:([A-Z][a-z]+))\b[^.]{0,50}?\b(died|was dead|"
+                       r"lay dead|killed)\b", re.IGNORECASE)
+#: Sentence openers / function words the name capture can land on when
+#: it scans a lazy window ("The old man died" captures "The").  They are
+#: never character names; a capture in this set is discarded, not
+#: reported — a false "error" finding is worse than a missed one.
+_NOT_A_NAME = frozenset({
+    "The", "A", "An", "He", "She", "It", "They", "We", "This", "That",
+    "These", "Those", "His", "Her", "Their", "Its", "But", "And", "When",
+    "Then", "As", "In", "On", "At", "To", "For", "From", "With", "By",
+    "After", "Before", "While", "Until", "Since", "If", "So", "Yet",
+    "Or", "Nor", "Now", "Here", "There", "Once", "Just", "Still",
+    "Even", "One", "Two", "Every", "Each", "All", "Some", "Many",
+})
 _ALIVE_VERBS = ("said", "asked", "walked", "ran", "laughed", "shouted",
                 "whispered", "looked", "turned", "nodded", "smiled")
 
@@ -162,6 +174,8 @@ def _timeline(state: ContinuityState,
         # ages: a named character must not get younger
         for m in _AGE_RE.finditer(text or ""):
             name, age = m.group(1), int(m.group(2))
+            if name in _NOT_A_NAME:
+                continue
             if name in ages and age < ages[name]:
                 out.append(Finding(
                     kind="timeline_age_regression", severity="error",
@@ -173,6 +187,8 @@ def _timeline(state: ContinuityState,
                 ages[name] = age
         for m in _AGE_RE2.finditer(text or ""):
             age, name = int(m.group(1)), m.group(2)
+            if name in _NOT_A_NAME:
+                continue
             if name in ages and age < ages[name]:
                 out.append(Finding(
                     kind="timeline_age_regression", severity="error",
@@ -272,7 +288,13 @@ def contradiction_scan(chapters: Sequence[tuple[int, str]],
     for number, text in sorted(chapters, key=lambda c: c[0]):
         text = text or ""
         for m in _DEAD_RE.finditer(text):
-            dead_at[m.group(1)] = number
+            name = m.group(1)
+            # a sentence opener ("The") or a lowercase word matched under
+            # the keyword's IGNORECASE is not a character — discarding it
+            # is strictly better than a false contradiction error.
+            if name in _NOT_A_NAME or not name[0].isupper():
+                continue
+            dead_at[name] = number
         for name, died_ch in list(dead_at.items()):
             if number <= died_ch:
                 continue

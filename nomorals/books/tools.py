@@ -870,7 +870,7 @@ def register(registry: Any) -> None:
     def branch_fork(story_slug: str, branch: str, from_chapter: int,
                     premise: str) -> dict[str, Any]:
         from .branches import StoryBranch
-        return StoryBranch(story_slug, branch).fork(from_chapter, premise)
+        return StoryBranch(story_slug, branch, context=context).fork(from_chapter, premise)
 
     @registry.register(
         "branch_write",
@@ -884,7 +884,7 @@ def register(registry: Any) -> None:
     def branch_write(story_slug: str, branch: str, text: str,
                      title: str = "") -> dict[str, Any]:
         from .branches import StoryBranch
-        return StoryBranch(story_slug, branch).add_chapter(text, title)
+        return StoryBranch(story_slug, branch, context=context).add_chapter(text, title)
 
     @registry.register(
         "branch_list",
@@ -894,7 +894,7 @@ def register(registry: Any) -> None:
     )
     def branch_list(story_slug: str) -> dict[str, Any]:
         from .branches import list_branches
-        return {"branches": list_branches(story_slug)}
+        return {"branches": list_branches(story_slug, context=context)}
 
     @registry.register(
         "branch_merge",
@@ -911,7 +911,7 @@ def register(registry: Any) -> None:
     def branch_merge(story_slug: str, branch: str,
                      action: str = "merge") -> dict[str, Any]:
         from .branches import StoryBranch
-        b = StoryBranch(story_slug, branch)
+        b = StoryBranch(story_slug, branch, context=context)
         if action.strip().lower() == "abandon":
             return b.abandon()
         return b.merge()
@@ -935,7 +935,7 @@ def register(registry: Any) -> None:
     def publish_start(story_slug: str, cadence: str = "daily", title: str = "",
                       announce_chat: str = "") -> dict[str, Any]:
         from .publish import SerialPublication
-        return SerialPublication(story_slug).start(cadence, title, announce_chat)
+        return SerialPublication(story_slug, context=context).start(cadence, title, announce_chat)
 
     @registry.register(
         "publish_release",
@@ -948,7 +948,7 @@ def register(registry: Any) -> None:
     )
     def publish_release(story_slug: str) -> dict[str, Any]:
         from .publish import SerialPublication
-        return SerialPublication(story_slug).release()
+        return SerialPublication(story_slug, context=context).release()
 
     @registry.register(
         "publish_status",
@@ -958,7 +958,7 @@ def register(registry: Any) -> None:
     )
     def publish_status(story_slug: str) -> dict[str, Any]:
         from .publish import SerialPublication
-        return SerialPublication(story_slug).status()
+        return SerialPublication(story_slug, context=context).status()
 
     @registry.register(
         "publish_follow",
@@ -972,7 +972,7 @@ def register(registry: Any) -> None:
     def publish_follow(story_slug: str, reader: str,
                        action: str = "follow") -> dict[str, Any]:
         from .publish import SerialPublication
-        pub = SerialPublication(story_slug)
+        pub = SerialPublication(story_slug, context=context)
         if action.strip().lower() == "unfollow":
             return pub.unfollow(reader)
         return pub.follow(reader)
@@ -993,7 +993,7 @@ def register(registry: Any) -> None:
     def publish_feedback(story_slug: str, reader: str, chapter: int,
                          reaction: str, comment: str = "") -> dict[str, Any]:
         from .publish import SerialPublication
-        return SerialPublication(story_slug).feedback(reader, chapter, reaction, comment)
+        return SerialPublication(story_slug, context=context).feedback(reader, chapter, reaction, comment)
 
     @registry.register(
         "publish_feedback_summary",
@@ -1006,7 +1006,7 @@ def register(registry: Any) -> None:
     )
     def publish_feedback_summary(story_slug: str) -> dict[str, Any]:
         from .publish import SerialPublication
-        return SerialPublication(story_slug).feedback_summary()
+        return SerialPublication(story_slug, context=context).feedback_summary()
 
     # ── sweep additions: lorebook, beats, epub, stats, branches, publish ──
 
@@ -1122,7 +1122,7 @@ def register(registry: Any) -> None:
     def branch_tree(story_slug: str) -> dict[str, Any]:
         from .branches import tree
         from .styles import render_tree
-        t = tree(story_slug)
+        t = tree(story_slug, context=context)
         return {"ok": True, "tree": t, "rendered": render_tree(t)}
 
     @registry.register(
@@ -1147,7 +1147,7 @@ def register(registry: Any) -> None:
                       options: str = "", choice_id: int = 0,
                       pick: str = "") -> dict[str, Any]:
         from .branches import StoryBranch
-        b = StoryBranch(story_slug, branch)
+        b = StoryBranch(story_slug, branch, context=context)
         if action == "add":
             return b.add_choice(after_chapter, prompt,
                                 [o for o in options.split(",") if o.strip()])
@@ -1166,7 +1166,7 @@ def register(registry: Any) -> None:
     )
     def branch_diff(story_slug: str, branch: str) -> dict[str, Any]:
         from .branches import StoryBranch
-        return StoryBranch(story_slug, branch).diff()
+        return StoryBranch(story_slug, branch, context=context).diff()
 
     @registry.register(
         "publish_launch_plan",
@@ -1183,7 +1183,7 @@ def register(registry: Any) -> None:
     def publish_launch_plan(story_slug: str,
                             day_one: int = 10) -> dict[str, Any]:
         from .publish import SerialPublication
-        pub = SerialPublication(story_slug)
+        pub = SerialPublication(story_slug, context=context)
         plan = pub.launch_plan(day_one=day_one)
         plan["buffer"] = pub.buffer_status()
         return plan
@@ -1200,7 +1200,7 @@ def register(registry: Any) -> None:
     def publish_retention(story_slug: str) -> dict[str, Any]:
         from .publish import SerialPublication
         from .styles import render_retention
-        rc = SerialPublication(story_slug).retention_curve()
+        rc = SerialPublication(story_slug, context=context).retention_curve()
         if rc.get("ok"):
             rc["rendered"] = render_retention(rc["curve"])
         return rc
@@ -1216,7 +1216,7 @@ def register(registry: Any) -> None:
     )
     def publish_buffer(story_slug: str) -> dict[str, Any]:
         from .publish import SerialPublication
-        return SerialPublication(story_slug).buffer_status()
+        return SerialPublication(story_slug, context=context).buffer_status()
 
     @registry.register(
         "publish_author_note",
@@ -1229,7 +1229,7 @@ def register(registry: Any) -> None:
     def publish_author_note(story_slug: str, chapter: int,
                             note: str) -> dict[str, Any]:
         from .publish import SerialPublication
-        return SerialPublication(story_slug).set_author_note(chapter, note)
+        return SerialPublication(story_slug, context=context).set_author_note(chapter, note)
 
     @registry.register(
         "library_stats",

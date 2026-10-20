@@ -110,9 +110,11 @@ class SerialManager:
                     for_whom: dict[str, Any] | None = None,
                     wisdom_theme: str = "") -> dict[str, Any]:
         """Start a complete novel. ``chapters`` 0 = the book decides
-        its own shape from premise complexity."""
+        its own shape from premise complexity; a positive value is the
+        owner's explicit shape and is planned exactly."""
         result = self.fiction.start(
             premise, genre=genre, mode="novel",
+            chapters=int(chapters or 0),
             theme=wisdom_theme or "")
         slug = result["slug"]
         meta = self._load_meta(slug)

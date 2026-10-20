@@ -1406,10 +1406,15 @@ class FictionWriter:
     def start(self, premise: str, genre: str = "fantasy",
               mode: str = "novel", title: str = "",
               theme: str = "", *,
+              chapters: int = 0,
               for_whom: dict[str, Any] | None = None,
               owner_texts: list[str] | None = None) -> dict[str, Any]:
         """Begin a story: shape it, plan arcs, weave wisdom, write ch.1.
 
+        ``chapters`` 0 (default) = the book decides its own shape from
+        premise complexity (:meth:`decide_shape`).  A positive value is
+        an explicit owner decision and overrides the estimate — it is
+        never silently ignored.
         ``for_whom`` is the humane ``for:`` field (name / relationship /
         occasion) stored on the state; ``owner_texts`` are the owner's
         own prose, measured into ``state.style["owner_voiceprint"]`` —
@@ -1421,6 +1426,11 @@ class FictionWriter:
             raise ValueError("mode must be novel | serial")
         slug = slugify(f"{title or premise[:40]}-{genre}", fallback="story")
         total, shape_note = self.decide_shape(premise, genre, mode)
+        if chapters and int(chapters) > 0:
+            suggested = total
+            total = int(chapters)
+            shape_note = (f"owner-set shape: {total} chapters "
+                          f"(premise complexity suggested ~{suggested})")
         engine = engine_for(genre, seed=hash(slug) & 0xFFFFFFFF)
         state = StoryState(
             slug=slug, title=title or premise[:60], premise=premise,

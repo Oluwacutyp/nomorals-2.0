@@ -194,7 +194,8 @@ def template_outline(book: Book, *, n_chapters: int) -> list[Chapter]:
         subject = subject[0].title() if subject else book.topic.strip()[:60]
     # anchor chapters are fixed; the middle deep dives absorb the rest.
     # n=3 drops the synthesis chapter (intro + foundations + mastery).
-    n = max(3, min(int(n_chapters), 24))
+    # The ceiling is the organic safety backstop, not a shape decision.
+    n = max(3, min(int(n_chapters), MAX_ORGANIC_CHAPTERS))
     chapters: list[Chapter] = []
 
     def add(title: str, beats: list[str], coverage: str = "") -> None:
@@ -217,6 +218,28 @@ def template_outline(book: Book, *, n_chapters: int) -> list[Chapter]:
         if len(deep_topics) >= middle:
             break
         deep_topics.append(aspect)
+    # terms and aspects alone can run out before ``middle`` does — the
+    # outline must still deliver exactly n chapters, never silently
+    # fewer.  Remaining slots pair each key term with each aspect: a
+    # genuinely different chapter (this term, through that lens), with
+    # its own beats — structure, not filler.
+    for t in terms:
+        if len(deep_topics) >= middle:
+            break
+        for aspect in _ASPECTS:
+            if len(deep_topics) >= middle:
+                break
+            label = f"{t} — {aspect}"
+            if label not in deep_topics:
+                deep_topics.append(label)
+    # last resort for very long books on narrow topics: applied
+    # workshop chapters cycling the key terms — still distinct,
+    # beat-bearing chapters, so the count is honored at any n.
+    k = 0
+    while len(deep_topics) < middle:
+        t = terms[k % len(terms)]
+        deep_topics.append(f"{t} — workshop {k // len(terms) + 1}")
+        k += 1
     for topic in deep_topics:
         add(f"Deep Dive: {topic.title()}", _deep_dive_beats(topic), topic)
     # penultimate — putting it together (dropped only at n=3)

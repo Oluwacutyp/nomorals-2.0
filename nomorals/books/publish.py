@@ -23,7 +23,50 @@ from typing import Any
 
 
 def _books_root() -> Path:
-    return Path.home() / "workspace" / "devon" / "books_data"
+    """The FictionWriter story root — where real stories actually live.
+
+    Publications attach to FictionWriter stories
+    (``<workspace>/books/fiction/<slug>``), the same slugs ``/novel
+    write`` creates.  Resolved from Settings exactly like
+    :meth:`FictionWriter._workspace` resolves its context settings;
+    tests may monkeypatch this function to relocate the root.
+    """
+    try:
+        from ..core.config import Settings
+        ws = Settings().workspace_dir
+    except Exception:  # noqa: BLE001 - settings unavailable (bare import)
+        ws = Path.cwd() / "workspace"
+    return Path(ws) / "books" / "fiction"
+
+
+def _root_for(context: Any = None) -> Path:
+    """Root for an explicit context, else the Settings-resolved root."""
+    settings = getattr(context, "settings", None) if context is not None else None
+    ws = getattr(settings, "workspace_dir", None) if settings else None
+    if ws:
+        return Path(ws) / "books" / "fiction"
+    return _books_root()
+
+
+def _canon_chapters(story_dir: Path) -> dict[int, Path]:
+    """Canon chapter files of a story: number → path.
+
+    FictionWriter layout (``chapters/0001.md``) first; the legacy flat
+    layout (``chapter_001.md`` in the story root) is still recognized so
+    older story directories keep working.
+    """
+    out: dict[int, Path] = {}
+    chapters_dir = story_dir / "chapters"
+    if chapters_dir.is_dir():
+        for p in sorted(chapters_dir.glob("*.md")):
+            if p.stem.isdigit():
+                out[int(p.stem)] = p
+    for p in sorted(story_dir.glob("chapter_*.md")):
+        try:
+            out.setdefault(int(p.stem.split("_")[1]), p)
+        except (IndexError, ValueError):
+            continue
+    return out
 
 
 _WEEKDAYS = {"mon": 0, "tue": 1, "wed": 2, "thu": 3,
@@ -87,9 +130,9 @@ def _next_due_ts(cadence: dict[str, Any], from_ts: float | None = None,
 class SerialPublication:
     """A drip-publish schedule for a story."""
 
-    def __init__(self, story_slug: str) -> None:
+    def __init__(self, story_slug: str, context: Any = None) -> None:
         self.story_slug = story_slug
-        self._dir = _books_root() / story_slug
+        self._dir = _root_for(context) / story_slug
         self._pub_file = self._dir / "publication.json"
 
     @property
@@ -140,13 +183,7 @@ class SerialPublication:
 
     def _story_chapters(self) -> list[int]:
         """Chapter numbers available in the story."""
-        out = []
-        for child in sorted(self._dir.glob("chapter_*.md")):
-            try:
-                out.append(int(child.stem.split("_")[1]))
-            except (IndexError, ValueError):
-                continue
-        return out
+        return sorted(_canon_chapters(self._dir))
 
     def due(self) -> dict[str, Any]:
         """Check if a chapter release is due. Returns release info or not-due."""
@@ -176,8 +213,8 @@ class SerialPublication:
         if not d.get("due"):
             return {"ok": False, "reason": d.get("reason", "not due")}
         ch_n = d["chapter"]
-        ch_path = self._dir / f"chapter_{ch_n:03d}.md"
-        text = ch_path.read_text() if ch_path.exists() else ""
+        ch_path = _canon_chapters(self._dir).get(ch_n)
+        text = ch_path.read_text(encoding="utf-8") if ch_path else ""
         pub["released"].append(ch_n)
         parsed = pub.get("cadence_parsed") or {"kind": "manual", "weekdays": []}
         pub["next_due"] = _next_due_ts(parsed, from_ts=time.time())

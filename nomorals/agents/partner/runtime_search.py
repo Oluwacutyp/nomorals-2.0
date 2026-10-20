@@ -484,7 +484,7 @@ class RuntimeSearchMixin:
                         "/novel branch <slug> list | /novel branch <slug> merge|abandon <name>")
             slug, action = bits[0], bits[1].lower()
             if action == "list":
-                branches = list_branches(slug)
+                branches = list_branches(slug, context=self.context)
                 if not branches:
                     return f"no branches for '{slug}'"
                 return "\n".join(
@@ -500,7 +500,7 @@ class RuntimeSearchMixin:
                 name = name_ch[0]
                 from_ch = int(name_ch[1].split(None, 1)[0])
                 premise = name_ch[1].split(None, 1)[1] if len(name_ch[1].split(None, 1)) > 1 else bits[3]
-                r = StoryBranch(slug, name).fork(from_ch, premise)
+                r = StoryBranch(slug, name, context=self.context).fork(from_ch, premise)
                 if not r.get("ok"):
                     return f"fork failed: {r.get('reason')}"
                 return (f"🌿 branched '{name}' from ch {from_ch}: {premise[:100]} — "
@@ -508,8 +508,8 @@ class RuntimeSearchMixin:
             if action in ("merge", "abandon"):
                 if len(bits) < 3:
                     return f"usage: /novel branch <slug> {action} <name>"
-                r = StoryBranch(slug, bits[2]).merge() if action == "merge" \
-                    else StoryBranch(slug, bits[2]).abandon()
+                r = StoryBranch(slug, bits[2], context=self.context).merge() if action == "merge" \
+                    else StoryBranch(slug, bits[2], context=self.context).abandon()
                 if not r.get("ok"):
                     return f"{action} failed: {r.get('reason')}"
                 return f"🌿 branch '{bits[2]}' {action}ed."
@@ -524,7 +524,7 @@ class RuntimeSearchMixin:
                 return ("usage: /novel publish <slug> start [daily|weekly|manual] | "
                         "/novel publish <slug> release | /novel publish <slug> status")
             slug, action = bits[0], bits[1].lower()
-            pub = SerialPublication(slug)
+            pub = SerialPublication(slug, context=self.context)
             if action == "start":
                 cadence = bits[2].strip().lower() if len(bits) > 2 else "daily"
                 r = pub.start(cadence)

@@ -440,6 +440,8 @@ class Library:
                     return m.group(1).strip().strip("\"'")
         lines = [ln.strip() for ln in raw.splitlines() if ln.strip()]
         for ln in lines[:12]:
+            if ln.startswith("#"):
+                continue  # a markdown heading is a chapter, not the title
             if len(ln) < 80 and not ln.endswith((".", ",")) and \
                     not re.match(r"^(chapter|part|prologue|by |copyright|isbn)", ln, re.I):
                 if re.search(r"[A-Za-z]{3,}", ln):
@@ -603,7 +605,11 @@ class Library:
 
     # ── read ──────────────────────────────────────────────────────────
     def read(self, slug: str, chapter: int = 0, limit: int = 4000) -> dict[str, Any]:
-        b = self.load(slug)
+        # an explicit chapter goes through the same range check as
+        # bookmarks/notes: out-of-range is an honest LibraryError, never
+        # a raw IndexError — and never Python's negative indexing, which
+        # silently served (and recorded progress for) the wrong chapter.
+        b = self._check_chapter(slug, chapter) if chapter else self.load(slug)
         ch = b["chapters"][chapter - 1] if chapter else None
         out = {
             "slug": b["slug"], "title": b["title"], "author": b["author"],

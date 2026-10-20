@@ -21,16 +21,65 @@ from typing import Any
 
 
 def _books_root() -> Path:
-    return Path.home() / "workspace" / "devon" / "books_data"
+    """The FictionWriter story root — where real stories actually live.
+
+    Branches and publications attach to FictionWriter stories
+    (``<workspace>/books/fiction/<slug>``), the same slugs ``/novel
+    write`` creates.  Resolved from Settings exactly like
+    :meth:`FictionWriter._workspace` resolves its context settings;
+    tests may monkeypatch this function to relocate the root.
+    """
+    try:
+        from ..core.config import Settings
+        ws = Settings().workspace_dir
+    except Exception:  # noqa: BLE001 - settings unavailable (bare import)
+        ws = Path.cwd() / "workspace"
+    return Path(ws) / "books" / "fiction"
+
+
+def _root_for(context: Any = None) -> Path:
+    """Root for an explicit context, else the Settings-resolved root."""
+    settings = getattr(context, "settings", None) if context is not None else None
+    ws = getattr(settings, "workspace_dir", None) if settings else None
+    if ws:
+        return Path(ws) / "books" / "fiction"
+    return _books_root()
+
+
+def _canon_chapters(story_dir: Path) -> dict[int, Path]:
+    """Canon chapter files of a story: number → path.
+
+    FictionWriter layout (``chapters/0001.md``) first; the legacy flat
+    layout (``chapter_001.md`` in the story root) is still recognized so
+    older story directories keep working.
+    """
+    out: dict[int, Path] = {}
+    chapters_dir = story_dir / "chapters"
+    if chapters_dir.is_dir():
+        for p in sorted(chapters_dir.glob("*.md")):
+            if p.stem.isdigit():
+                out[int(p.stem)] = p
+    for p in sorted(story_dir.glob("chapter_*.md")):
+        try:
+            out.setdefault(int(p.stem.split("_")[1]), p)
+        except (IndexError, ValueError):
+            continue
+    return out
 
 
 class StoryBranch:
     """A what-if timeline forked from a story at a chapter."""
 
-    def __init__(self, story_slug: str, branch_name: str) -> None:
+    def __init__(self, story_slug: str, branch_name: str,
+                 context: Any = None) -> None:
         self.story_slug = story_slug
         self.branch_name = branch_name
-        self._dir = _books_root() / story_slug / "branches" / branch_name
+        self._context = context
+        self._dir = (_root_for(context) / story_slug / "branches" /
+                     branch_name)
+
+    def _story_dir(self) -> Path:
+        return _root_for(self._context) / self.story_slug
 
     @property
     def exists(self) -> bool:
@@ -38,7 +87,7 @@ class StoryBranch:
 
     def fork(self, from_chapter: int, premise: str) -> dict[str, Any]:
         """Fork a new timeline from a chapter with a what-if premise."""
-        story_dir = _books_root() / self.story_slug
+        story_dir = self._story_dir()
         if not story_dir.exists():
             return {"ok": False, "reason": f"story '{self.story_slug}' not found"}
         self._dir.mkdir(parents=True, exist_ok=True)
@@ -118,7 +167,7 @@ class StoryBranch:
             return {"ok": False, "reason": "new name required"}
         if not self.exists:
             return {"ok": False, "reason": "branch does not exist"}
-        target = _books_root() / self.story_slug / "branches" / new_name
+        target = self._story_dir() / "branches" / new_name
         if target.exists():
             return {"ok": False, "reason": f"branch {new_name!r} exists"}
         meta = json.loads((self._dir / "branch.json").read_text())
@@ -182,16 +231,17 @@ class StoryBranch:
         if not self.exists:
             return {"ok": False, "reason": "branch does not exist"}
         meta = json.loads((self._dir / "branch.json").read_text())
-        story_dir = _books_root() / self.story_slug
+        story_dir = self._story_dir()
         fork = meta["forked_from_chapter"]
-        # canon chapters: files chapter_*.md next to story.json-style layout
+        # canon chapters in the story's real layout (see _canon_chapters)
+        canon_files = _canon_chapters(story_dir)
         canon_words: dict[int, int] = {}
-        for child in sorted(story_dir.glob("chapter_*.md")):
+        canon_texts: dict[int, str] = {}
+        for n, p in canon_files.items():
             try:
-                n = int(child.stem.split("_")[1])
-                canon_words[n] = len(child.read_text(
-                    encoding="utf-8").split())
-            except (IndexError, ValueError, OSError):
+                canon_texts[n] = p.read_text(encoding="utf-8")
+                canon_words[n] = len(canon_texts[n].split())
+            except OSError:
                 continue
         rows = []
         for c in meta["chapters"]:
@@ -204,15 +254,7 @@ class StoryBranch:
                                    encoding="utf-8")
             except OSError:
                 pass
-            canon_text = ""
-            if cw is not None:
-                try:
-                    canon_text = next(
-                        p for p in story_dir.glob("chapter_*.md")
-                        if int(p.stem.split("_")[1]) == canon_n).read_text(
-                            encoding="utf-8")
-                except (StopIteration, OSError, IndexError, ValueError):
-                    pass
+            canon_text = canon_texts.get(canon_n, "")
             diverged = cw is None
             if not diverged and branch_text and canon_text:
                 # Jaccard word overlap: <0.5 = genuinely different telling
@@ -243,9 +285,9 @@ class StoryBranch:
         return {"ok": True, "branch": self.branch_name, "abandoned": True}
 
 
-def list_branches(story_slug: str) -> list[dict[str, Any]]:
+def list_branches(story_slug: str, context: Any = None) -> list[dict[str, Any]]:
     """All branches for a story."""
-    bdir = _books_root() / story_slug / "branches"
+    bdir = _root_for(context) / story_slug / "branches"
     if not bdir.exists():
         return []
     out = []
@@ -267,25 +309,20 @@ def list_branches(story_slug: str) -> list[dict[str, Any]]:
     return out
 
 
-def tree(story_slug: str) -> dict[str, Any]:
+def tree(story_slug: str, context: Any = None) -> dict[str, Any]:
     """The whole story as a tree: canon trunk + branch limbs + choice nodes.
 
     AI-Dungeon story-tree style: every fork point, branch, and pending
     decision in one structure, renderable with ``styles.render_tree``.
     """
-    story_dir = _books_root() / story_slug
-    canon: list[int] = []
-    for child in sorted(story_dir.glob("chapter_*.md")):
-        try:
-            canon.append(int(child.stem.split("_")[1]))
-        except (IndexError, ValueError):
-            continue
+    story_dir = _root_for(context) / story_slug
+    canon: list[int] = sorted(_canon_chapters(story_dir))
     root: dict[str, Any] = {
         "name": f"canon ({story_slug})",
         "info": f"{len(canon)} chapters" if canon else "no chapters yet",
         "children": [],
     }
-    for b in list_branches(story_slug):
+    for b in list_branches(story_slug, context=context):
         node: dict[str, Any] = {
             "name": f"⑂ {b['branch']}",
             "info": (f"fork@{b['forked_from']} · {b['chapters']} ch · "
