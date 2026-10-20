@@ -239,6 +239,19 @@ class BackupCoordinator:
                     pass
             entries.append({"backup_id": child.name, "created_at": created,
                             "staging_dir": str(child)})
+        # A generation still queued in the outbox has NOT shipped —
+        # its local blobs are the only copy. Retention must never
+        # delete it, however old it is; unqueued generations prune
+        # under the normal policy.
+        queued_ids = Outbox(work / "outbox").queued_ids()
+        if queued_ids:
+            spared = [e["backup_id"] for e in entries
+                      if e["backup_id"] in queued_ids]
+            if spared:
+                _log.info("retention: sparing outbox-queued "
+                          "generation(s) from prune: %s", spared)
+            entries = [e for e in entries
+                       if e["backup_id"] not in queued_ids]
         pruned = prune_local(entries)
         # Prune GitHub releases under the same policy (best effort: a
         # retention failure must not fail the backup that just shipped).

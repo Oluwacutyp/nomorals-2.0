@@ -22,6 +22,7 @@ import base64
 import gzip
 import hashlib
 import os
+import re
 import secrets
 from dataclasses import dataclass
 from pathlib import Path
@@ -225,11 +226,27 @@ def split_encrypted(path: Path, *, max_bytes: int = SPLIT_BYTES) -> list[Path]:
     return _split_archive(path, max_bytes / (1024 * 1024))
 
 
+_PART_NAME_RE = re.compile(r"\.part(\d+)of\d+")
+
+
+def _part_order(path: Path) -> tuple[int, int, str]:
+    """Sort key for split parts: by NUMERIC part index.
+
+    Plain name order breaks past 99 parts — ``.part100of128`` sorts
+    before ``.part99of128`` lexicographically — which reassembles the
+    ciphertext in the wrong order. Non-part names keep name order.
+    """
+    match = _PART_NAME_RE.search(path.name)
+    if match:
+        return (0, int(match.group(1)), path.name)
+    return (1, 0, path.name)
+
+
 def join_parts(parts: list[Path], dest: Path) -> Path:
-    """Reassemble split parts (sorted by part name) into ``dest``."""
+    """Reassemble split parts (numeric part order) into ``dest``."""
     dest.parent.mkdir(parents=True, exist_ok=True)
     with dest.open("wb") as out:
-        for part in sorted(parts, key=lambda p: p.name):
+        for part in sorted(parts, key=_part_order):
             with part.open("rb") as fh:
                 out.write(fh.read())
     return dest

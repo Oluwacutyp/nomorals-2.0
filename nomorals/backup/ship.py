@@ -362,9 +362,22 @@ class Outbox:
             return []
         try:
             data = json.loads(self._file.read_text(encoding="utf-8"))
-            return list(data) if isinstance(data, list) else []
-        except (json.JSONDecodeError, OSError):
-            return []
+        except (json.JSONDecodeError, OSError) as exc:
+            # A corrupt queue must never read as an EMPTY queue: that
+            # would silently drop every queued backup — the exact
+            # silent skip this outbox exists to prevent. Fail loud.
+            raise BackupError(
+                f"backup outbox {self._file} is unreadable/corrupt "
+                f"({exc}) — refusing to treat queued backups as gone; "
+                "repair or remove the file to proceed"
+            ) from exc
+        if not isinstance(data, list):
+            raise BackupError(
+                f"backup outbox {self._file} does not hold a queue "
+                "(expected a JSON list) — refusing to treat queued "
+                "backups as gone; repair or remove the file to proceed"
+            )
+        return list(data)
 
     def _save(self, items: list[dict[str, Any]]) -> None:
         tmp = self._file.with_name(self._file.name + ".tmp")
@@ -384,6 +397,15 @@ class Outbox:
     def pending(self, *, now: float | None = None) -> list[dict[str, Any]]:
         now = time.time() if now is None else now
         return [i for i in self._load() if i.get("next_retry_at", 0) <= now]
+
+    def queued_ids(self) -> set[str]:
+        """Every backup id still owed a ship, due or not.
+
+        Retention uses this: a queued generation's local blobs are the
+        only copy until it ships, so they must survive pruning.
+        """
+        return {str(i.get("backup_id")) for i in self._load()
+                if i.get("backup_id")}
 
     def mark_sent(self, backup_id: str) -> None:
         self._save([i for i in self._load()
@@ -436,6 +458,7 @@ def ship_snapshot(
     failure the exception propagates (typed) and nothing is marked sent.
     """
     tag = release_tag_for(str(manifest.get("backup_id", "")))
+    reused = False
     try:
         release = create_release_for_backup(connector, full_name, tag, manifest)
     except Exception as exc:  # noqa: BLE001 - queue only network failures
@@ -449,19 +472,56 @@ def ship_snapshot(
             return {"shipped": False, "queued": True, "release": None,
                     "assets": [], "outbox_entry": entry,
                     "reason": f"network down — queued for retry: {exc}"}
-        # 422 "already_exists": a previous attempt created the release but
-        # died before uploading — reuse it, never duplicate the tag.
+        # 422 "already_exists": a previous attempt created the release
+        # but died before finishing — reuse it, never duplicate the tag.
         if _status_of(exc) == 422 or "already_exists" in str(exc):
             try:
                 release = connector._api(  # noqa: SLF001
                     "GET", f"/repos/{full_name}/releases/tags/{tag}"
                 )
+                reused = True
             except Exception:
                 raise exc from None
         else:
             raise
+    # A reused release may already hold assets from the attempt that
+    # died mid-upload. GitHub rejects a duplicate asset name with 422,
+    # so re-uploading blindly would poison the generation forever:
+    # keep assets whose name AND size match the local blob, delete a
+    # same-name asset whose size differs (wrong bytes — re-upload),
+    # and upload only what is missing.
+    existing: dict[str, dict[str, Any]] = {}
+    if reused and release.get("id") is not None:
+        try:
+            for asset in connector._api(  # noqa: SLF001
+                "GET",
+                f"/repos/{full_name}/releases/{release['id']}/assets",
+                params={"per_page": 100},
+            ):
+                existing[str(asset.get("name", ""))] = asset
+        except Exception as exc:  # noqa: BLE001 - listing is best effort
+            if _status_of(exc) == 401:
+                raise TokenExpiredError(
+                    "token rejected listing release assets") from exc
+            _log.warning(
+                "could not list existing assets for release %s (%s) — "
+                "upload errors will surface honestly", tag, exc)
     assets: list[dict[str, Any]] = []
     for blob in blob_files:
+        prior = existing.get(Path(blob).name)
+        if prior is not None:
+            if int(prior.get("size", -1)) == Path(blob).stat().st_size:
+                _log.info("release %s already holds %s (%d bytes) — "
+                          "keeping it", tag, Path(blob).name,
+                          Path(blob).stat().st_size)
+                assets.append(prior)
+                continue
+            connector._api(  # noqa: SLF001
+                "DELETE",
+                f"/repos/{full_name}/releases/assets/{int(prior['id'])}",
+            )
+            _log.warning("release %s held %s with the wrong size — "
+                         "deleted, re-uploading", tag, Path(blob).name)
         assets.append(upload_release_asset(connector, release, blob))
     return {"shipped": True, "queued": False, "release": release,
             "assets": assets,

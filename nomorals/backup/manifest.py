@@ -26,6 +26,7 @@ __all__ = [
     "build_manifest",
     "write_manifest",
     "load_manifest",
+    "resolve_blob_path",
     "verify_manifest_files",
     "render_restore_recipe",
 ]
@@ -149,6 +150,26 @@ def load_manifest(path: str | Path) -> dict[str, Any]:
     return data
 
 
+def resolve_blob_path(base_dir: str | Path, candidate: str) -> Path:
+    """Resolve a manifest blob reference against a local directory.
+
+    Manifests record the path a blob had when it was protected —
+    absolute, on the machine that made the backup. A generation
+    restored or moved elsewhere (the from-zero restore on a clean
+    machine) keeps the same filenames under the new directory, so a
+    blob that exists under ``base_dir`` (directly, or under its
+    ``protected/`` subdir when ``base_dir`` is a generation dir) wins
+    over the recorded path. The recorded path is only the fallback
+    for blobs that are not present locally at all.
+    """
+    base = Path(base_dir)
+    recorded = Path(str(candidate))
+    for option in (base / recorded.name, base / "protected" / recorded.name):
+        if option.is_file():
+            return option
+    return recorded if recorded.is_absolute() else base / recorded.name
+
+
 def verify_manifest_files(
     base_dir: str | Path, manifest: dict[str, Any]
 ) -> list[str]:
@@ -166,9 +187,7 @@ def verify_manifest_files(
         for candidate in entry.get("parts", []) or [
             entry.get("encrypted_path", "")
         ]:
-            path = Path(candidate)
-            if not path.is_absolute():
-                path = base / path.name
+            path = resolve_blob_path(base, candidate)
             if not path.is_file():
                 problems.append(f"missing: {path.name}")
                 continue

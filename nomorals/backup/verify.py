@@ -32,7 +32,7 @@ from typing import Any
 
 from ..core.logging_setup import get_logger
 from .errors import ChecksumMismatchError
-from .manifest import load_manifest, verify_manifest_files
+from .manifest import load_manifest, resolve_blob_path, verify_manifest_files
 from .protect import decrypt_bytes, join_parts
 
 __all__ = ["DrillStep", "DrillReport", "verify_database_file", "drill", "run_monthly_drill"]
@@ -162,10 +162,8 @@ def drill(
         for entry in manifest.get("files", []):
             rel = str(entry.get("rel", "?"))
             parts = entry.get("parts") or [entry.get("encrypted_path", "")]
-            part_paths = []
-            for candidate in parts:
-                p = Path(str(candidate))
-                part_paths.append(p if p.is_absolute() else blobs / p.name)
+            part_paths = [resolve_blob_path(blobs, candidate)
+                          for candidate in parts]
             joined = tmp / (Path(rel.replace("/", "__")).name + ".joined.enc")
             try:
                 join_parts(part_paths, joined)
