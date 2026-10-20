@@ -21,7 +21,7 @@ from typing import Any
 from unittest import mock
 
 from nomorals.accounts import provisioning
-from nomorals.accounts.creator import AccountCreator
+from nomorals.accounts.creator import AccountCreator, CreatedAccount
 from nomorals.accounts.provisioning import (
     ProvisionDriver,
     ProvisionOutcome,
@@ -37,6 +37,23 @@ from nomorals.storage.db import Database
 
 FAKE_TOKEN = "hf_" + "T" * 30
 OWNER_PW = "owner-login-password-123"
+GEN_EMAIL = "gen.persona@mailo.plus"
+
+
+def _fake_email_mint(calls: list):
+    """Stand-in for AccountCreator.create_email_account — the ONE
+    network seam in the generated-identity path (tempmail.plus). Same
+    contract as the real mint: a CreatedAccount carrying a real,
+    provider-issued address, or status "failed" with no address."""
+
+    async def _mint(self, *, provider="guerrilla", username=None):
+        calls.append(provider)
+        return CreatedAccount(
+            service="email_tempmail", username=GEN_EMAIL, password="",
+            email=GEN_EMAIL, status="created",
+            notes="fake mint (test seam)")
+
+    return _mint
 
 
 def _vault(tmp: str) -> CredentialVault:
@@ -286,11 +303,182 @@ class DriveTests(unittest.TestCase):
         # creation was NOT attempted: no checkpoint, no credentials
         self.assertEqual(self.vault.list_all(service="huggingface"), [])
 
-    def test_creation_without_owner_identity(self):
+    def test_creation_without_owner_identity_uses_generated(self):
+        """Owner's rule (2026-10-20): no recorded identity is NOT a
+        dead-end — creation proceeds on the service's self-generated
+        IdentityBank persona, and the result says so plainly."""
+        from nomorals.accounts.identity_bank import IdentityBank
+
+        mints: list = []
         driver = _driver(self.vault)
-        result = driver.provision("hf")
+        with mock.patch.object(AccountCreator, "create_email_account",
+                               _fake_email_mint(mints)):
+            result = driver.provision("hf")
+        # creation proceeded to the human-step checkpoint (the real
+        # creator's accounts-policy pause) — not NEEDS_OWNER_IDENTITY
         self.assertEqual(result.outcome,
-                         ProvisionOutcome.NEEDS_OWNER_IDENTITY)
+                         ProvisionOutcome.CREATION_CHECKPOINT,
+                         result.message)
+        # the mint went through the trial flow's provider seam, once
+        self.assertEqual(mints, ["tempmail"])
+        # exactly one persona exists for the service, carrying the
+        # minted address (persisted, so retries reuse it)
+        personas = IdentityBank(db=self.vault.db, vault=self.vault).list(
+            "huggingface")
+        self.assertEqual(len(personas), 1)
+        persona = personas[0]
+        self.assertEqual(persona.email, GEN_EMAIL)
+        # transparency: the message names the generated identity
+        self.assertIn("self-generated", result.message)
+        self.assertIn(persona.name, result.message)
+        self.assertIn(GEN_EMAIL, result.message)
+        # ...and the creation was set up with that identity's address
+        self.assertIn(GEN_EMAIL, result.checkpoint["instructions"])
+        # ...and the audit trail records the generated identity
+        self.assertTrue(any(
+            r.get("step") == "create" and r.get("identity") == "generated"
+            for r in driver.audit_trail), driver.audit_trail)
+
+    def test_generated_creation_resume_provisions_and_discloses(self):
+        """Checkpoint → owner finishes the human step → the drive
+        provisions, and the final summary STILL discloses that the
+        account was created with a generated identity."""
+        mints: list = []
+        driver = _driver(self.vault)
+        with mock.patch.object(AccountCreator, "create_email_account",
+                               _fake_email_mint(mints)):
+            first = driver.provision("hf")
+        self.assertEqual(first.outcome,
+                         ProvisionOutcome.CREATION_CHECKPOINT)
+        # while paused, a re-run reports the same checkpoint WITH the
+        # generated-identity disclosure (from the creation marker)
+        second = driver.provision("hf")
+        self.assertEqual(second.outcome,
+                         ProvisionOutcome.CREATION_CHECKPOINT)
+        self.assertEqual(second.checkpoint["id"], first.checkpoint["id"])
+        self.assertIn("self-generated", second.message)
+        # owner completes the human step → credentials land in the vault
+        creator = AccountCreator(self.vault, db=self.vault.db)
+        finalized = creator.resume_checkpoint(first.checkpoint["id"])
+        # the account was finalized under the generated address
+        self.assertEqual(finalized.email, GEN_EMAIL)
+        with _NoSleep():
+            third = driver.provision("hf")
+        self.assertEqual(third.outcome, ProvisionOutcome.PROVISIONED,
+                         third.message)
+        self.assertTrue(third.account_created, third.message)
+        self.assertIn("created a new account", third.message)
+        self.assertIn("self-generated", third.message)
+        self.assertIn(GEN_EMAIL, third.message)
+
+    def test_generated_persona_reused_across_attempts(self):
+        """A cancelled creation retried later reuses the SAME bank
+        persona and the SAME minted address — no re-mint, ever."""
+        from nomorals.accounts.identity_bank import IdentityBank
+
+        mints: list = []
+        driver = _driver(self.vault)
+        with mock.patch.object(AccountCreator, "create_email_account",
+                               _fake_email_mint(mints)):
+            first = driver.provision("hf")
+            self.assertEqual(first.outcome,
+                             ProvisionOutcome.CREATION_CHECKPOINT)
+            # owner abandons the human step; creation starts over
+            creator = AccountCreator(self.vault, db=self.vault.db)
+            creator.cancel_checkpoint(first.checkpoint["id"])
+            second = driver.provision("hf")
+        self.assertEqual(second.outcome,
+                         ProvisionOutcome.CREATION_CHECKPOINT,
+                         second.message)
+        self.assertNotEqual(second.checkpoint["id"],
+                            first.checkpoint["id"])
+        self.assertIn(GEN_EMAIL, second.checkpoint["instructions"])
+        # still exactly one persona, and the address was minted once
+        personas = IdentityBank(db=self.vault.db, vault=self.vault).list(
+            "huggingface")
+        self.assertEqual(len(personas), 1)
+        self.assertEqual(mints, ["tempmail"])
+
+    def test_generated_mint_failure_is_honest_not_a_dead_end(self):
+        """If the temp-mail mint itself fails, the result says so —
+        it does NOT fall back to demanding the owner's identity and
+        does NOT invent an address."""
+        async def _failed_mint(self, *, provider="guerrilla",
+                               username=None):
+            return CreatedAccount(
+                service="email_tempmail", username="", password="",
+                email="", status="failed",
+                notes="tempmail.plus error: provider down")
+
+        driver = _driver(self.vault)
+        with mock.patch.object(AccountCreator, "create_email_account",
+                               _failed_mint):
+            result = driver.provision("hf")
+        self.assertEqual(result.outcome,
+                         ProvisionOutcome.IDENTITY_MINT_FAILED,
+                         result.message)
+        self.assertNotIn("record your", result.message.lower())
+        # nothing was created: no credentials, no checkpoint
+        self.assertEqual(self.vault.list_all(service="huggingface"), [])
+        from nomorals.accounts.creator import CheckpointStore
+        self.assertEqual(
+            CheckpointStore(self.vault.db).list_pending(
+                service="huggingface"), [])
+
+    def test_generated_identity_sync_completion_full_drive(self):
+        """A creator that completes synchronously drives straight to
+        a provisioned key, with the generated identity disclosed."""
+        captured: dict = {}
+
+        class _SyncCreator:
+            def __init__(self, vault, db=None, captcha_solver=None):
+                self.vault = vault
+
+            def get_owner_identity(self):
+                return None
+
+            async def create_email_account(self, *, provider="guerrilla",
+                                           username=None):
+                captured["provider"] = provider
+                captured["mint_username"] = username
+                return CreatedAccount(
+                    service="email_tempmail", username=GEN_EMAIL,
+                    password="", email=GEN_EMAIL, status="created")
+
+            async def create_account(self, service, **kwargs):
+                captured["create_kwargs"] = dict(kwargs)
+                username = kwargs.get("username") or "genuser"
+                self.vault.store(
+                    service, username, "gen-password-123",
+                    credential_type="password",
+                    metadata={
+                        "login_url": "https://huggingface.co/login"})
+                return CreatedAccount(
+                    service=service, username=username,
+                    password="gen-password-123",
+                    email=kwargs.get("email", ""), status="created")
+
+        fake = _SyncCreator(self.vault)
+        driver = _driver(
+            self.vault,
+            creator_factory=lambda vault, db=None, captcha_solver=None: fake)
+        with _NoSleep():
+            result = driver.provision("hf")
+        self.assertEqual(result.outcome, ProvisionOutcome.PROVISIONED,
+                         result.message)
+        self.assertTrue(result.account_created)
+        # creation ran on the persona: minted address via the trial
+        # provider seam, persona username + password passed through
+        self.assertEqual(captured["provider"], "tempmail")
+        self.assertEqual(captured["create_kwargs"]["email"], GEN_EMAIL)
+        self.assertEqual(captured["create_kwargs"]["username"],
+                         captured["mint_username"])
+        self.assertTrue(captured["create_kwargs"]["password"])
+        # disclosure in the final summary + audit
+        self.assertIn("self-generated", result.message)
+        self.assertIn(GEN_EMAIL, result.message)
+        self.assertTrue(any(r.get("identity") == "generated"
+                            for r in driver.audit_trail))
 
     def test_creation_checkpoint_then_resume_provisions(self):
         creator = AccountCreator(self.vault, db=self.vault.db)
@@ -300,6 +488,16 @@ class DriveTests(unittest.TestCase):
         self.assertEqual(first.outcome,
                          ProvisionOutcome.CREATION_CHECKPOINT, first.message)
         self.assertIsNotNone(first.checkpoint)
+        # the RECORDED owner identity was used, exactly as before:
+        # its address is on the creation, and nothing claims a
+        # generated identity anywhere
+        self.assertIn("owner@example.com", first.checkpoint["instructions"])
+        self.assertNotIn("self-generated", first.message)
+        self.assertTrue(any(
+            r.get("step") == "create" and r.get("identity") == "owner"
+            for r in driver.audit_trail), driver.audit_trail)
+        self.assertFalse(any(
+            r.get("identity") == "generated" for r in driver.audit_trail))
         # still pending: a second call reports the SAME checkpoint,
         # never a duplicate creation
         second = driver.provision("hf")
@@ -314,6 +512,7 @@ class DriveTests(unittest.TestCase):
                          third.message)
         self.assertTrue(third.account_created, third.message)
         self.assertIn("created a new account", third.message)
+        self.assertNotIn("self-generated", third.message)
 
     def test_validation_rejected_keeps_nothing(self):
         self._seed_login()

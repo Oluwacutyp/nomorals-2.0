@@ -20,10 +20,17 @@ This module is the service-general machinery:
   the feature reads it (no restart where the seam reads env per call).
 * Account-creation fallback: when no login exists and none is handed
   over, the driver falls into :class:`creator.AccountCreator` — the
-  accounts-policy path (OWNER identity, one account per service,
-  human verification pauses on a persisted checkpoint). It never
-  creates a duplicate when a login already exists, and never uses the
-  trial path's temp identities.
+  accounts-policy path (one account per service, human verification
+  pauses on a persisted checkpoint). It never creates a duplicate
+  when a login already exists. Identity resolution (owner's rule,
+  2026-10-20 — "not limited to my provided identity"): a RECORDED
+  owner identity is preferred when one exists; when none is
+  recorded, the driver resolves the service's self-generated
+  :class:`~nomorals.accounts.identity_bank.IdentityBank` persona
+  (one per service, reused across retries) and mints its real
+  disposable email through the same temp-mail path the trial signup
+  driver uses — creation proceeds instead of dead-ending, and the
+  result/audit state plainly that a generated identity was used.
 * Audit: every step is logged (service, step, outcome) through the
   module logger and the driver's ``audit_trail``. Secret VALUES never
   appear in any log line, result, or audit record — only their
@@ -81,6 +88,13 @@ _log = get_logger(__name__)
 #: to make, so the post-checkpoint drive can report "account CREATED"
 #: (vs a key fetched on an account the owner already had).
 _CREATED_MARKER_PREFIX = "provisioning.created_pending."
+
+#: Temp-mail provider used to mint a generated persona's real address.
+#: Matches the trial signup driver's default (``SignupDriver``'s
+#: ``temp_email_provider``) — the mint itself is the creator's
+#: ``create_email_account``, the exact call ``SignupDriver._ensure_email``
+#: makes; nothing about the address is constructed locally.
+_GENERATED_EMAIL_PROVIDER = "tempmail"
 
 
 # ── registry ─────────────────────────────────────────────────────────
@@ -185,7 +199,11 @@ class ProvisionOutcome(StrEnum):
     PROVISIONED = "provisioned"
     ALREADY_PROVISIONED = "already_provisioned"
     NEEDS_OWNER_LOGIN = "needs_owner_login"
+    #: retained for result compatibility — the driver no longer
+    #: dead-ends on a missing owner identity (owner's rule 2026-10-20:
+    #: creation falls back to a self-generated identity instead).
     NEEDS_OWNER_IDENTITY = "needs_owner_identity"
+    IDENTITY_MINT_FAILED = "identity_mint_failed"
     CREATION_CHECKPOINT = "creation_checkpoint"
     LOGIN_FAILED = "login_failed"
     VERIFICATION_BLOCKED = "verification_blocked"
@@ -697,12 +715,14 @@ class ProvisionDriver:
         if pending is not None:
             self._audit("create", svc.id, "checkpoint_pending",
                         checkpoint=pending.get("id", ""))
+            note = self._created_marker_note(svc)
             return ProvisionResult(
                 ProvisionOutcome.CREATION_CHECKPOINT, svc.id,
                 f"account creation for {svc.display} is paused at a "
                 f"human step ({pending.get('kind', 'checkpoint')}): "
                 f"{pending.get('title', '')} — finish it, then run "
-                f"/provision {svc.id} again and I'll pick up from there.",
+                f"/provision {svc.id} again and I'll pick up from there."
+                + (f"\n{note}" if note else ""),
                 checkpoint=pending)
 
         # 4. The owner is known to hold an account → handoff, never a
@@ -753,6 +773,60 @@ class ProvisionDriver:
             _log.debug("pending-creation probe failed", exc_info=True)
         return None
 
+    # -- identity resolution for creation --------------------------------
+
+    def _generated_identity(self, svc: ProvisionService,
+                            creator: Any) -> tuple[Any, str, str]:
+        """Resolve the service's SELF-GENERATED identity.
+
+        Returns ``(persona, email, mint_failure_detail)``. The persona
+        comes from the IdentityBank via ``get_or_mint`` — one persona
+        per service, reused across retries, never re-minted per
+        attempt. A bank persona's email starts as an EMPTY slot (it is
+        not an address); a real disposable address is minted through
+        the creator's ``create_email_account`` — the exact call the
+        trial signup driver's ``_ensure_email`` makes — and persisted
+        back onto the persona so retries reuse the same address. When
+        minting fails, ``email`` is "" and the third element says why;
+        no address is ever constructed locally.
+        """
+        from .identity_bank import IdentityBank
+
+        bank = IdentityBank(db=self.vault.db, vault=self.vault)
+        persona = bank.get_or_mint(svc.vault_service)
+        if persona.email:
+            return persona, persona.email, ""
+        username = (persona.username_variants[0]
+                    if persona.username_variants else None)
+        account = _run_coro(creator.create_email_account(
+            provider=_GENERATED_EMAIL_PROVIDER, username=username))
+        if getattr(account, "status", "") != "created" \
+                or not getattr(account, "email", ""):
+            detail = (getattr(account, "notes", "") or "no address returned")
+            self._audit("create", svc.id, "generated_email_failed",
+                        persona_id=persona.id, detail=str(detail)[:200])
+            return persona, "", str(detail)
+        persona.email = account.email
+        persona.email_provider = _GENERATED_EMAIL_PROVIDER
+        bank._save(persona)  # persist the address onto the stored persona
+        self._audit("create", svc.id, "generated_email_minted",
+                    persona_id=persona.id, email=persona.email)
+        return persona, persona.email, ""
+
+    @staticmethod
+    def _generated_note(svc: ProvisionService, name: str,
+                        email: str) -> str:
+        """The plain disclosure used in results/audit whenever a
+        self-generated identity carried a creation (transparency:
+        the owner always hears when Devon did NOT use their recorded
+        identity, and as whom)."""
+        return (
+            f"Identity: self-generated — no owner identity is recorded, "
+            f"so this account is being created as {name} <{email}> "
+            f"(a disposable persona from the vault identity bank, "
+            f"reused for {svc.display} on retries; a recorded owner "
+            f"identity stays preferred whenever one is set).")
+
     def _create_then_drive(self, svc: ProvisionService) -> ProvisionResult:
         from .creator import (
             AccountCheckpointPending,
@@ -762,31 +836,54 @@ class ProvisionDriver:
 
         creator = self._make_creator()
         identity = creator.get_owner_identity()
-        if not identity or not identity.get("email"):
-            self._audit("create", svc.id, "needs_owner_identity")
-            return ProvisionResult(
-                ProvisionOutcome.NEEDS_OWNER_IDENTITY, svc.id,
-                f"creating a {svc.display} account needs your real "
-                "identity (name + email) and none is recorded — Devon "
-                "never invents one. Record it once (nm account create "
-                "asks for it, or set it via the creator's owner identity) "
-                f"and run /provision {svc.id} again.")
-        email = identity["email"]
-        self._audit("create", svc.id, "begin", email=email)
+        creation_note = ""
+        create_kwargs: dict[str, Any] = {}
+        if identity and identity.get("email"):
+            # 1. A recorded owner identity stays PREFERRED — unchanged.
+            email = identity["email"]
+            create_kwargs["email"] = email
+            self._audit("create", svc.id, "begin", email=email,
+                        identity="owner")
+        else:
+            # 2. No recorded identity → self-generated (owner's rule
+            #    2026-10-20: "not limited to my provided identity").
+            persona, email, mint_failure = self._generated_identity(
+                svc, creator)
+            if not email:
+                return ProvisionResult(
+                    ProvisionOutcome.IDENTITY_MINT_FAILED, svc.id,
+                    f"creating a {svc.display} account with a "
+                    f"self-generated identity stalled: minting its "
+                    f"disposable email address failed ({mint_failure}) "
+                    "— nothing was created and no address was invented. "
+                    "This is a temp-mail problem, not an identity "
+                    f"problem; run /provision {svc.id} again and the "
+                    "same persona will be reused.")
+            create_kwargs["email"] = email
+            if persona.username_variants:
+                create_kwargs["username"] = persona.username_variants[0]
+            if persona.password:
+                create_kwargs["password"] = persona.password
+            creation_note = self._generated_note(svc, persona.name, email)
+            self._audit("create", svc.id, "begin", email=email,
+                        identity="generated", persona_id=persona.id,
+                        persona_name=persona.name)
         try:
             created = _run_coro(creator.create_account(
-                svc.vault_service, email=email))
+                svc.vault_service, **create_kwargs))
         except AccountExistsError:
             # A login landed meanwhile — the drive can proceed.
             self._audit("create", svc.id, "already_exists")
-            return self._drive_with_login(svc, account_created=False)
+            return self._drive_with_login(svc, account_created=False,
+                                          creation_note=creation_note)
         except AccountCheckpointPending as pending:
             cp = pending.checkpoint
             try:
                 KVStore(self.vault.db).set(
                     _CREATED_MARKER_PREFIX + svc.id,
                     {"checkpoint_id": cp.id,
-                     "email": email, "created_at": time.time()})
+                     "email": email, "created_at": time.time(),
+                     "creation_note": creation_note})
             except Exception:  # noqa: BLE001 - marker is bookkeeping
                 _log.debug("created-marker write failed", exc_info=True)
             self._audit("create", svc.id, "checkpoint",
@@ -797,7 +894,8 @@ class ProvisionDriver:
                 f"step ({cp.kind.value}): {cp.title}\n{cp.instructions}\n"
                 "When it's done, run "
                 f"/provision {svc.id} again — the credentials will be in "
-                "the vault and I'll fetch the key from there.",
+                "the vault and I'll fetch the key from there."
+                + (f"\n{creation_note}" if creation_note else ""),
                 checkpoint={"id": cp.id, "kind": cp.kind.value,
                             "title": cp.title,
                             "instructions": cp.instructions})
@@ -805,29 +903,49 @@ class ProvisionDriver:
         # exists in the vault — continue into the drive.
         self._audit("create", svc.id, "created",
                     username=getattr(created, "username", ""))
-        return self._drive_with_login(svc, account_created=True)
+        return self._drive_with_login(svc, account_created=True,
+                                      creation_note=creation_note)
 
-    def _consume_created_marker(self, svc: ProvisionService) -> bool:
-        """True (once) when the login in the vault came from a creation
-        this driver started — so the summary can say CREATED."""
+    def _created_marker(self, svc: ProvisionService, *,
+                        consume: bool = False) -> dict[str, Any] | None:
+        """The pending-creation marker for this service, if any."""
         try:
             from ..storage.kv import KVStore
 
             store = KVStore(self.vault.db)
             marker = store.get(_CREATED_MARKER_PREFIX + svc.id)
-            if marker:
+            if marker and consume:
                 store.delete(_CREATED_MARKER_PREFIX + svc.id)
-                return True
+            return marker if isinstance(marker, dict) else None
         except Exception:  # noqa: BLE001 - bookkeeping only
             _log.debug("created-marker read failed", exc_info=True)
-        return False
+            return None
+
+    def _created_marker_note(self, svc: ProvisionService) -> str:
+        """The creation disclosure recorded with the pending marker
+        ("" for owner-identity creations and when no marker exists)."""
+        marker = self._created_marker(svc)
+        return str((marker or {}).get("creation_note") or "")
 
     # -- the drive ---------------------------------------------------------
 
     def _drive_with_login(self, svc: ProvisionService, *,
-                          account_created: bool) -> ProvisionResult:
+                          account_created: bool,
+                          creation_note: str = "") -> ProvisionResult:
         if not account_created:
-            account_created = self._consume_created_marker(svc)
+            marker = self._created_marker(svc, consume=True)
+            account_created = bool(marker)
+            if marker:
+                marker_note = str(marker.get("creation_note") or "")
+                if marker_note:
+                    # The creation happened in an earlier run — keep
+                    # THIS run's audit trail honest about the identity
+                    # the account was created with.
+                    self._audit("create", svc.id,
+                                "resumed_generated_creation",
+                                note=marker_note[:300])
+                    if not creation_note:
+                        creation_note = marker_note
         login = self._login_cred(svc)
         username = login.username if login is not None else ""
         self._audit("login", svc.id, "begin", username=username)
@@ -956,6 +1074,8 @@ class ProvisionDriver:
             "needed for features that read it per call.")
         if validation.detail:
             message += f" Validation: {validation.detail}."
+        if creation_note:
+            message += f"\n{creation_note}"
         return ProvisionResult(
             ProvisionOutcome.PROVISIONED, svc.id, message,
             account_created=account_created, username=username,
