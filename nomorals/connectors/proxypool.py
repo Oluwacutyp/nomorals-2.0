@@ -1214,11 +1214,17 @@ class ProxyPoolConnector(Connector):
         Same shape as :meth:`rotate` (includes ``proxy_url`` with auth —
         treat the result as secret), in insertion order, for consumers
         that need protocol-aware selection instead of blind round-robin.
+        Quarantined proxies are excluded, exactly as in
+        :meth:`select`/:meth:`rotate` — a proxy parked for a
+        BLOCK/CHALLENGE cooldown must not keep receiving traffic
+        through this surface either.
         """
+        now = time.time()
         out: list[dict[str, Any]] = []
         for cred in sorted(self._load_all(), key=lambda c: c.id):
-            if ((cred.metadata or {}).get("health") or {}).get("status") \
-                    == HEALTHY:
+            health = (cred.metadata or {}).get("health") or {}
+            if health.get("status") == HEALTHY \
+                    and not self._quarantined(health, now):
                 full = self.vault.get(self._service, cred.username,
                                       mark_used=False)
                 out.append(self._details(full, include_secret=True))

@@ -17,6 +17,7 @@ installed; without it the manager says so instead of failing mysteriously).
 from __future__ import annotations
 
 import json
+import re
 import time
 from typing import Any
 
@@ -38,6 +39,23 @@ __all__ = ["ProxyManager", "parse_proxy_url", "register"]
 
 _KV_KEY = "proxy.active"
 _SCHEMES = ("http://", "https://", "socks5://", "socks5h://")
+
+#: ``scheme://user:password@`` inside a proxy URL (or a text blob that
+#: mentions one, e.g. an HttpClient error).  Owner proxy URLs normally
+#: embed credentials — the password must never reach status output,
+#: probe results, error strings or logs (the pool connector and the
+#: media downloader mask the same way).
+_URL_CRED_RE = re.compile(r"(://[^:/@\s]+):[^@\s]*@")
+
+
+def _mask_proxy_url(url: str) -> str:
+    """Owner-safe rendering of a proxy URL: password → ``***``."""
+    return _URL_CRED_RE.sub(r"\1:***@", url or "")
+
+
+def _scrub(text: str) -> str:
+    """Mask any credentialed proxy URL embedded in free text."""
+    return _URL_CRED_RE.sub(r"\1:***@", text or "")
 
 
 def parse_proxy_url(raw: str) -> str:
@@ -107,8 +125,9 @@ class ProxyManager:
     def status(self) -> dict[str, Any]:
         active = self._active or get_default_proxy()
         return {
-            "active": active or "direct (no proxy)",
-            "known": self.known(),
+            "active": _mask_proxy_url(active) if active
+                      else "direct (no proxy)",
+            "known": [_mask_proxy_url(u) for u in self.known()],
             "socks5_supported": _socks_available(),
             "raw_sockets_routed": active.lower().startswith(("socks5://", "socks5h://"))
             and _socks_available(),
@@ -130,8 +149,9 @@ class ProxyManager:
 
     def _test_one(self, url: str, timeout: float) -> dict[str, Any]:
         candidate = parse_proxy_url(url)
+        shown = _mask_proxy_url(candidate)
         if candidate.lower().startswith(("socks5", "socks5h")) and not _socks_available():
-            return {"proxy": candidate, "ok": False,
+            return {"proxy": shown, "ok": False,
                     "error": "SOCKS5 needs PySocks: pip install pysocks"}
         probe = HttpClient(timeout=timeout, proxy_url=candidate)
         started = time.monotonic()
@@ -140,14 +160,14 @@ class ProxyManager:
             latency = round((time.monotonic() - started) * 1000)
             egress = (response.text or "").strip()[:64]
             return {
-                "proxy": candidate, "ok": response.ok,
+                "proxy": shown, "ok": response.ok,
                 "status": response.status, "latency_ms": latency,
                 "egress_ip": egress,
             }
         except Exception as exc:  # noqa: BLE001 - a dead proxy is a result
             latency = round((time.monotonic() - started) * 1000)
-            return {"proxy": candidate, "ok": False, "latency_ms": latency,
-                    "error": str(exc)[:200]}
+            return {"proxy": shown, "ok": False, "latency_ms": latency,
+                    "error": _scrub(str(exc))[:200]}
 
     # ── applying ─────────────────────────────────────────────────────────────
     def set_active(self, url: str, *, verify: bool = False) -> dict[str, Any]:
@@ -162,14 +182,15 @@ class ProxyManager:
             if verify:
                 probe = self._test_one(url, self.probe_timeout)
                 if not probe.get("ok"):
-                    raise ToolError(f"proxy {url} failed its probe: {probe.get('error') or probe.get('status')}")
+                    raise ToolError(f"proxy {_mask_proxy_url(url)} failed its probe: {probe.get('error') or probe.get('status')}")
         self._active = url
         set_default_proxy(url)
         # SOCKS proxies additionally need the global PySocks patch so that
         # urllib and raw-socket code (OSINT, request crafting, …) route too.
         if url and url.lower().startswith(("socks5://", "socks5h://")):
             if apply_socks_proxy(url):
-                _log.info("raw-socket traffic now routed through %s", url)
+                _log.info("raw-socket traffic now routed through %s",
+                          _mask_proxy_url(url))
             else:
                 _log.warning("SOCKS5 selected but PySocks is missing — only "
                              "HttpClient routes; pip install pysocks")
@@ -181,8 +202,9 @@ class ProxyManager:
                 KVStore(db).set(_KV_KEY, {"proxy": url})
             except Exception:  # noqa: BLE001 - apply anyway; persistence is best-effort
                 _log.warning("could not persist proxy choice", exc_info=True)
-        _log.info("outbound proxy set to %s", url or "direct")
-        return {"active": url or "direct", "persisted": db is not None,
+        _log.info("outbound proxy set to %s", _mask_proxy_url(url) or "direct")
+        return {"active": _mask_proxy_url(url) or "direct",
+                "persisted": db is not None,
                 "note": "all new HttpClient instances now route through it" if url else "direct routing restored"}
 
     def clear(self) -> dict[str, Any]:
@@ -207,7 +229,7 @@ def register(registry: Any) -> None:
     )
     def proxy_list() -> dict[str, Any]:
         manager = ProxyManager(context)
-        return {"proxies": manager.known()}
+        return {"proxies": [_mask_proxy_url(u) for u in manager.known()]}
 
     @registry.register(
         "proxy_test",

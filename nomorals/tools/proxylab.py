@@ -1487,6 +1487,9 @@ class ProxyLab:
         self.store = ProxyStore(Path(os.path.expanduser(home)) / "proxies")
         from .proxysources import SourceRegistry
         self.registry = SourceRegistry(self.store.dir / "sources.json")
+        from .proxy_sources import SourceYieldTracker
+        self.yield_tracker = SourceYieldTracker(
+            self.store.dir / "source_yield.json")
         self._profile = detect_profile(context)
         self._scraper = ProxyScraper(sources=self.registry.sources(),
                                      profile=self._profile)
@@ -1508,8 +1511,18 @@ class ProxyLab:
                limit: int = 2000,
                sources: list[tuple[str, str, str]] | None = None) -> dict[str, Any]:
         pool = sources or self.registry.sources()
+        # yield quarantine (proxy_sources.SourceYieldTracker): a source
+        # whose measured live rate collapsed sits out until its 24h
+        # quarantine expires — separate signal from the registry's
+        # fetch-failure disable, and reported, never silent.
+        yield_quarantined = [n for (n, _u, _k) in pool
+                             if self.yield_tracker.quarantined(n)]
+        if yield_quarantined:
+            skip = set(yield_quarantined)
+            pool = [s for s in pool if s[0] not in skip]
         self._scraper.sources = pool
         report = self._scraper.scrape(schemes, sources=pool, limit=limit)
+        report["yield_quarantined"] = yield_quarantined
         try:
             self.store.save([], candidates=report["proxies"])
         except OSError as exc:
@@ -1547,7 +1560,8 @@ class ProxyLab:
 
     def source_health(self) -> dict[str, Any]:
         return {"sources": self.registry.health(),
-                "stats": self.registry.stats()}
+                "stats": self.registry.stats(),
+                "yield": self.yield_tracker.snapshot()}
 
     def refresh(self, schemes: str = "http,https,socks4,socks5",
                 limit: int = 150, *, detect_country: bool = True,
@@ -1562,10 +1576,43 @@ class ProxyLab:
             candidates = report["proxies"]
             scraped = report["total"]
             errors = report.get("errors", {})
+        # per-source probe discipline (proxy_sources.SourceYieldTracker):
+        # budgets are per round — a round tests at most probe_budget
+        # proxies from any one source (0%-yield feeds get near-zero),
+        # and yield-quarantined sources are not probed at all, so a
+        # collapsed feed stops burning the round.  Untagged candidates
+        # (no source attribution) are never capped.
+        self.yield_tracker.reset_budget()
+        spend: dict[str, int] = {}
+        kept: list[Proxy] = []
+        for p in candidates:
+            src = p.source or ""
+            if src:
+                if self.yield_tracker.quarantined(src):
+                    continue
+                if spend.get(src, 0) >= \
+                        self.yield_tracker.probe_budget_for(src):
+                    continue
+                spend[src] = spend.get(src, 0) + 1
+            kept.append(p)
+        candidates = kept
+        for src, n in spend.items():
+            self.yield_tracker.record_probes(src, n)
         ranked_in = rank_proxies(candidates)  # fastest-known first
         tester = self.tester()
         tester.detect_country = bool(detect_country)
         tested = tester.test_many(ranked_in, limit=limit)
+        # the round's real results feed the per-source yield tracker:
+        # live rate + EWMA per source; three dead rounds (or an EWMA
+        # collapse) quarantine the source for 24h.
+        by_src: dict[str, list[Proxy]] = {}
+        for p in tested:
+            if p.source:
+                by_src.setdefault(p.source, []).append(p)
+        for src, group in by_src.items():
+            self.yield_tracker.record_scrape(
+                src, scraped=len(group),
+                alive=sum(1 for p in group if p.alive))
         working = self.store.load_working()
         by_key = {p.key: p for p in working}
         for p in tested:
@@ -1588,6 +1635,9 @@ class ProxyLab:
             "errors": errors,
             "best": [p.to_dict() for p in fresh[:10]],
             "store": str(self.store.dir),
+            "yield_quarantined": [n for n, e in
+                                  self.yield_tracker.snapshot().items()
+                                  if e["quarantined"]],
         }
 
     def pool(self, **filters: Any) -> list[dict[str, Any]]:

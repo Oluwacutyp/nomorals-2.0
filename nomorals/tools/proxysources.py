@@ -621,13 +621,21 @@ class SourceRegistry:
 
     def add_discovered(self, name: str, url: str, kind: str, *,
                        seed: str = "", found: int = 0) -> dict[str, Any]:
-        """Register a source the internet taught us about."""
+        """Register a source the internet taught us about.
+
+        ``last_ok`` is stamped only when the discovery actually
+        harvested proxies (``found > 0``): a source that was merely
+        registered — never scraped — has never succeeded, and stamping
+        it would report a fresh success in health/staleness views for
+        an endpoint nobody has fetched yet.
+        """
         self._load()
         entry = self._entry(name, url, kind, origin="discovered")
         entry["seed"] = seed
         entry["fails"] = 0
         entry["disabled_until"] = 0.0
-        entry["last_ok"] = time.time()
+        if found > 0:
+            entry["last_ok"] = time.time()
         entry["last_found"] = int(found)
         self._save()
         return entry
