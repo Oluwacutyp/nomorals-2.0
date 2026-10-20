@@ -385,6 +385,32 @@ class PreferenceStore:
                     for value, weight in values.items():
                         if isinstance(weight, (int, float)):
                             store.update_weight(domain, axis, value, float(weight))
+        # Restore the signal log too — to_dict exports it, and a
+        # round-trip that silently drops it loses the audit trail
+        # the weights were learned from. Rows are inserted verbatim
+        # (original created_at kept), mirroring log_signal's shape.
+        signals = raw.get("signals") or []
+        if isinstance(signals, list):
+            for entry in signals:
+                if not isinstance(entry, dict):
+                    continue
+                try:
+                    item_json = json.dumps(entry.get("item"),
+                                           default=str,
+                                           ensure_ascii=False)[:2000]
+                except (TypeError, ValueError):
+                    item_json = "{}"
+                with store._lock:
+                    store._conn.execute(
+                        "INSERT INTO preference_signals (domain, item_json,"
+                        " approve, delta, source, created_at)"
+                        " VALUES (?, ?, ?, ?, ?, ?)",
+                        (str(entry.get("domain", "")), item_json,
+                         1 if entry.get("approve") else 0,
+                         float(entry.get("delta") or 0.0),
+                         str(entry.get("source", "")),
+                         float(entry.get("created_at") or time.time())))
+            store._conn.commit()
         return store
 
     def close(self) -> None:

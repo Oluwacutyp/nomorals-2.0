@@ -343,17 +343,27 @@ def build_weekly_review(*, commitments: Any = None, decisions: Any = None,
 
     focus_totals = dict(base.get("focus_summary") or {})
 
-    # ── reliability: kept / (kept + broken) from the commitment rows ──
-    # Count from the focus builder's normalised view where possible:
-    # wins carry kept promises, but broken is not in the focus review,
-    # so count from the raw commitment rows when available.
+    # ── reliability: kept / (kept + broken) resolved THIS week ──
+    # The focus builder scopes its wins to the week (closed_at inside
+    # [week_start, week_end)); the counts here must use the same
+    # window, or a resolution from months ago inflates every later
+    # week's reliability and the monthly trend counts one resolution
+    # once per week. Rows without a closed_at cannot be proven to
+    # have resolved this week and are not counted — same rule the
+    # focus builder applies to wins.
+    def _resolved_this_week(row: Any, status: str) -> bool:
+        if _get(row, "status", default="open") != status:
+            return False
+        closed_at = _get(row, "closed_at")
+        return (closed_at is not None
+                and week_start_f <= float(closed_at) < week_end_f)
+
     kept = broken = 0
     seen_ids: set[str] = set()
     for row in _rows_of(commitments, "commitments"):
-        status = _get(row, "status", default="open")
-        if status == "kept":
+        if _resolved_this_week(row, "kept"):
             kept += 1
-        elif status == "broken":
+        elif _resolved_this_week(row, "broken"):
             broken += 1
         seen_ids.add(str(_get(row, "id", default="")))
     # If the caller passed a ledger object, _rows_of(commitments) may
@@ -365,10 +375,9 @@ def build_weekly_review(*, commitments: Any = None, decisions: Any = None,
             rid = str(_get(row, "id", default=""))
             if rid in seen_ids:
                 continue
-            status = _get(row, "status", default="open")
-            if status == "kept":
+            if _resolved_this_week(row, "kept"):
                 kept += 1
-            elif status == "broken":
+            elif _resolved_this_week(row, "broken"):
                 broken += 1
             seen_ids.add(rid)
     resolved = kept + broken

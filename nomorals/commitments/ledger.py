@@ -265,7 +265,7 @@ _HEDGES = (
     "i'll try", "i will try", "ill try", "i will attempt", "i'll attempt",
     "i should", "i should probably", "i wish", "i'd like to",
     "if i have time", "if i can", "if i get time", "if i get a chance",
-    "i'll see", "i will see", "i'll check", "i might", "i could",
+    "i'll see", "i will see", "i'll check", "i will check", "i might", "i could",
     "i'll think about", "i will think about", "i'll consider",
     "try to", "attempt to", "aim to", "plan to", "intend to",
     "god willing", "insha allah", "in sha allah", "by god's grace",
@@ -335,6 +335,31 @@ def _all_months() -> dict[str, int]:
     return merged
 
 
+def _parse_time_of_day(expr: str) -> tuple[int, int] | None:
+    """Parse a bare time-of-day expression (``5pm``, ``17:00``, ``noon``).
+
+    Returns ``(hour, minute)`` or ``None``. Used when a deadline
+    clause contains nothing but a time — the date is the reference
+    day (rolled forward a day when that time has already passed).
+    """
+    text = (expr or "").strip().strip(".,;")
+    if text in _TIME_OF_DAY:
+        return _TIME_OF_DAY[text]
+    m = re.fullmatch(r"(\d{1,2})(?::(\d{2}))?\s*(am|pm)?", text)
+    if not m:
+        return None
+    hour = int(m.group(1))
+    minute = int(m.group(2) or 0)
+    suffix = m.group(3)
+    if suffix == "pm" and hour < 12:
+        hour += 12
+    elif suffix == "am" and hour == 12:
+        hour = 0
+    if hour > 23 or minute > 59:
+        return None
+    return hour, minute
+
+
 def parse_deadline(text: str, ref_ts: float | None = None) -> float | None:
     """Parse a deadline expression out of ``text`` (folded internally).
 
@@ -357,7 +382,14 @@ def parse_deadline(text: str, ref_ts: float | None = None) -> float | None:
         tz=_dt.timezone.utc)
     hour, minute = 17, 0  # default: end of the working day
     # Time-of-day overrides (checked first, applies to any date found).
-    tod = re.search(r"\bby\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\b", folded)
+    # The digits must be a clock time, not a day-of-month: "by 20 Oct"
+    # is a date (at the 17:00 default), not 20:00 — refuse the override
+    # when a month name follows the number.
+    _month_alt = "|".join(
+        re.escape(n) for n in sorted(_all_months(), key=len, reverse=True))
+    tod = re.search(
+        r"\bby\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\b"
+        rf"(?!\s*(?:{_month_alt})\b)", folded)
     if tod:
         h = int(tod.group(1))
         minute = int(tod.group(2) or 0)
@@ -381,6 +413,20 @@ def parse_deadline(text: str, ref_ts: float | None = None) -> float | None:
                                  bare_allowed=True)
         if inner is not None:
             return inner
+        # A clause that is ONLY a time of day ("by 5pm", "before
+        # noon") is a deadline on the reference day at that time —
+        # rolled to the next day when that time has already passed
+        # ("by midnight" said at 09:00 means the coming midnight,
+        # never 00:00 today, which is already gone).
+        pure_time = _parse_time_of_day(clause.group(1))
+        if pure_time is not None:
+            ts = _epoch(ref.year, ref.month, ref.day,
+                        pure_time[0], pure_time[1])
+            if ts <= ref.timestamp():
+                nxt = ref + _dt.timedelta(days=1)
+                ts = _epoch(nxt.year, nxt.month, nxt.day,
+                            pure_time[0], pure_time[1])
+            return ts
         # A by/on/before with no parseable date is still not a licence
         # to fall through and grab a weekday from the noun phrase.
         return None
