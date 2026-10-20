@@ -536,7 +536,11 @@ class RuntimeMediaMixin:
                             exc, chat)
                     if chat is not None and added:
                         out = f"queued 1:\n  - {added[0].get('title')}"
-                        return self._play_send_in_chat(engine, added[0], out, chat)
+                        return self._play_download_bg(
+                            chat, chat_key, out,
+                            lambda: self._play_send_in_chat_result(
+                                engine, added[0], out, chat),
+                            title=str(added[0].get("title") or ""))
                     # CLI: play the item _add_youtube just enqueued.
                     # Do NOT call engine.play_youtube(rest) — it
                     # re-adds the same video, double-enqueuing it.
@@ -658,8 +662,12 @@ class RuntimeMediaMixin:
                         for c in (cands or [])]
                     merged = self._merge_search_attempts(
                         resolution.attempts, detailed)
-                    return self._play_send_with_fallthrough(
-                        engine, added[0], fallbacks, merged, out, chat)
+                    return self._play_download_bg(
+                        chat, chat_key, out,
+                        lambda: (self._play_send_with_fallthrough(
+                            engine, added[0], fallbacks, merged, out, chat),
+                                 False),
+                        title=str(added[0].get("title") or "audio"))
                 # Sources tried — visible, so the user sees MANY sources
                 # were consulted, not 1–2.  Attempts already record
                 # every strategy in order (failed + the winner).
@@ -668,7 +676,11 @@ class RuntimeMediaMixin:
                     out += ("\nsources tried "
                             f"({len(tried)}): " + "; ".join(tried))
                 if action == "play" and chat is not None:
-                    return self._play_send_in_chat(engine, added[0], out, chat)
+                    return self._play_download_bg(
+                        chat, chat_key, out,
+                        lambda: self._play_send_in_chat_result(
+                            engine, added[0], out, chat),
+                        title=str(added[0].get("title") or ""))
                 if action == "play":
                     st = engine.play()
                     if st.get("status") == "playing":
@@ -771,11 +783,16 @@ class RuntimeMediaMixin:
             return f"couldn't queue “{cand.title}”: {exc}"
         out = f"picked {n}/{len(cands)}:\n  - {cand.title}"
         if chat is not None:
-            text, sent = self._play_send_in_chat_result(
-                engine, item, out, chat)
-            if sent:
-                PickCache.consume(token)
-            return text
+            # Background: the pick is consumed on the job thread ONLY
+            # when the file actually went out (on_sent) — a failed
+            # download leaves the list alive for another try, exactly
+            # like the old synchronous peek-don't-consume rule.
+            return self._play_download_bg(
+                chat, chat_key, out,
+                lambda: self._play_send_in_chat_result(
+                    engine, item, out, chat),
+                on_sent=lambda: PickCache.consume(token),
+                title=str(cand.title or ""))
         try:
             st = engine.play()
             if st.get("status") == "playing":
@@ -855,6 +872,42 @@ class RuntimeMediaMixin:
             return f"Spotify couldn't play {query[:80]!r}: {exc}"
         return self._fmt_started(res, engine)
 
+    def _download_produce(self, url: str, audio_only: bool,
+                          chat: Any) -> tuple[str, bool]:
+        """The /download download+send body — runs on the job worker
+        thread in chat mode, synchronously on CLI.  Returns (reply
+        text, sent): ``sent`` is True only when the file actually
+        went out.  Never raises."""
+        from ...core.jobs import report_progress
+        from ...media.downloader import MediaDownloader
+
+        downloader = MediaDownloader(self.context)
+        report_progress(f"downloading {url[:80]}")
+        report = downloader.download(url, audio_only=audio_only)
+        if not report.ok:
+            lines = [f"couldn't download {url[:80]}:"]
+            for stage in report.stages:
+                err = stage.error or "failed"
+                lines.append(f"  {stage.stage}: {err[:120]}")
+            if report.hint:
+                lines.append(f"hint: {report.hint}")
+            return "\n".join(lines), False
+
+        path = report.path
+        title = report.title or "download"
+        emoji = "🎵" if audio_only else "🎬"
+        if chat is not None:
+            try:
+                self.gateway.send_file(
+                    chat.platform, f"{chat.platform}:{chat.chat_id}",
+                    path, caption=f"{emoji} {title}"[:1024])
+                return (f"{emoji} downloaded “{title}” "
+                        f"({report.size_bytes // 1024}KB) — sent to this chat."), True
+            except Exception as exc:  # noqa: BLE001
+                return (f"downloaded “{title}” to {path} "
+                        f"but couldn't send it: {exc}"), False
+        return f"{emoji} downloaded: {path}", False
+
     def _control_download(self, tail: str, chat_key: str = "") -> str:
         """/download <url> [audio] — download any media URL and send it here.
 
@@ -865,9 +918,11 @@ class RuntimeMediaMixin:
 
         /download <url>          → best quality video (or whatever the URL is)
         /download <url> audio    → audio only (mp3)
-        """
-        from ...media.downloader import MediaDownloader
 
+        In chat the download runs as a background job (owner decision
+        2026-10-19): the handler returns an ack immediately and the
+        file is sent to the chat when the download lands.
+        """
         tail = (tail or "").strip()
         if not tail:
             return ("usage: /download <url> [audio]\n"
@@ -884,31 +939,176 @@ class RuntimeMediaMixin:
                     "paste the full link starting with https://")
 
         chat = self._ref_from_key(chat_key) if chat_key else None
-        downloader = MediaDownloader(self.context)
-        report = downloader.download(url, audio_only=audio_only)
-        if not report.ok:
-            lines = [f"couldn't download {url[:80]}:"]
-            for stage in report.stages:
-                err = stage.error or "failed"
-                lines.append(f"  {stage.stage}: {err[:120]}")
-            if report.hint:
-                lines.append(f"hint: {report.hint}")
-            return "\n".join(lines)
-
-        path = report.path
-        title = report.title or "download"
-        emoji = "🎵" if audio_only else "🎬"
         if chat is not None:
+            return self._play_download_bg(
+                chat, chat_key,
+                f"⏳ downloading {url[:60]} in the background — I'll "
+                "send the file here when it's ready.",
+                lambda: self._download_produce(url, audio_only, chat),
+                title=url[:80])
+        text, _sent = self._download_produce(url, audio_only, None)
+        return text
+
+    # ── background downloads (owner decision 2026-10-19) ────────────────
+    #
+    # Long downloads run as background jobs on the shared JobRegistry
+    # and get SENT once done: the chat handler never blocks on a
+    # multi-minute download again.  The job body is the EXISTING
+    # synchronous download+send (``_play_send_in_chat_result`` /
+    # ``_play_send_with_fallthrough`` / the /download body) — every
+    # pass-#6 behavior (fall-through, honest wording, tried-list,
+    # queue hygiene, hints) is preserved because the same code runs,
+    # just on the job's worker thread instead of the chat pump thread.
+
+    #: Label marking a job as a chat download; the _process harvester
+    #: filters on it (+ the chat key) so outcomes surface per chat.
+    _PLAY_DL_JOB_OWNER = "play"
+
+    @staticmethod
+    def _play_job_delta_text(out_prefix: str, full_text: str) -> str:
+        """Follow-up text for a finished download job: the part of the
+        synchronous reply past what the ack already showed.  The ack
+        prints the queue line; the follow-up carries the outcome
+        (tried-list, sent confirmation, or honest failure).  Defensive:
+        when the body didn't start with the ack prefix, return the
+        whole text rather than a mangled slice.  Never raises."""
+        try:
+            if out_prefix and full_text.startswith(out_prefix):
+                delta = full_text[len(out_prefix):].lstrip("\n")
+                if delta:
+                    return delta
+            return full_text
+        except Exception:  # noqa: BLE001
+            return full_text
+
+    def _play_download_bg(self, chat: Any, chat_key: str,
+                          out_prefix: str, produce: Any, *,
+                          on_sent: Any = None, title: str = "") -> str:
+        """Start a chat download+send as a background job; return the ack.
+
+        ``produce()`` returns ``(full_text, sent)`` — the synchronous
+        download+send body, run on the job's worker thread.  It sends
+        the FILE itself; this wrapper then posts the body's outcome
+        text (only the delta past ``out_prefix`` — the ack already
+        showed the queue line) to the SAME chat.  ``on_sent`` runs on
+        the worker thread only when the file actually went out (e.g.
+        consuming a pick-list).  The result dict records ``delivered``
+        so :meth:`_harvest_play_downloads` never double-reports an
+        outcome the body already posted.
+
+        If the registry itself refuses the job, fall back to running
+        the body synchronously (today's behavior) rather than dropping
+        the download.  Never raises.
+        """
+        from ...core.jobs import (
+            current_job, report_progress, shared_registry)
+
+        def _body() -> dict[str, Any]:
             try:
-                self.gateway.send_file(
-                    chat.platform, f"{chat.platform}:{chat.chat_id}",
-                    path, caption=f"{emoji} {title}"[:1024])
-                return (f"{emoji} downloaded “{title}” "
-                        f"({report.size_bytes // 1024}KB) — sent to this chat.")
-            except Exception as exc:  # noqa: BLE001
-                return (f"downloaded “{title}” to {path} "
-                        f"but couldn't send it: {exc}")
-        return f"{emoji} downloaded: {path}"
+                report_progress("download started")
+                text, sent = produce()
+            except Exception as exc:  # noqa: BLE001 - failure is data
+                return {"ok": False, "delivered": False, "sent": False,
+                        "title": title, "text": "",
+                        "error": f"{type(exc).__name__}: {exc}"[:300]}
+            if sent and on_sent is not None:
+                try:
+                    on_sent()
+                except Exception:  # noqa: BLE001 - bookkeeping only
+                    pass
+            final = self._play_job_delta_text(out_prefix, text)
+            late = False
+            job_now = current_job()
+            if job_now is not None:
+                with job_now.lock:
+                    late = job_now.status == "presumed-dead"
+            if late and final:
+                final = ("⏳ that download finished late — the quiet "
+                         "stretch was it still working, not a drop:\n"
+                         + final)
+            delivered = False
+            if final:
+                try:
+                    self.gateway.send(chat.platform, chat, final)
+                    delivered = True
+                except Exception:  # noqa: BLE001 - harvest retries
+                    delivered = False
+            return {"ok": True, "delivered": delivered,
+                    "sent": bool(sent), "title": title, "text": final,
+                    "late": late}
+
+        try:
+            job = shared_registry().submit(
+                _body, tool="play-download",
+                labels={"owner": self._PLAY_DL_JOB_OWNER,
+                        "chat": chat_key or "",
+                        "title": (title or "")[:80]})
+        except Exception:  # noqa: BLE001 - registry down: degrade to sync
+            text, _sent = produce()
+            return text
+        return (out_prefix
+                + "\n⏳ downloading in the background — I'll send it "
+                  f"here when it's ready. [job {job.id}]")
+
+    def _harvest_play_downloads(self, chat_key: str, chat: Any) -> None:
+        """Surface this chat's download jobs that never got to report.
+
+        The job body delivers its own outcome (file + follow-up text)
+        on success AND on honest download failure — those need no
+        harvest.  What remains:
+
+        - ``failed``: the worker crashed before it could report;
+        - ``presumed-dead``: heartbeat silence — honest UNKNOWN (the
+          download may still be running; never a fake failure, never
+          a blind retry);
+        - ``done``/late results whose own follow-up send failed:
+          re-send the body's stored text.
+
+        Collected exactly once (``collect_ready`` marks collected).
+        Runs on every inbound message for the chat.  Never raises.
+        """
+        from ...core.jobs import shared_registry
+
+        try:
+            jobs = shared_registry().collect_ready(
+                labels={"owner": self._PLAY_DL_JOB_OWNER,
+                        "chat": chat_key or ""})
+        except Exception:  # noqa: BLE001 - harvest never breaks chat
+            return
+        target = f"{chat.platform}:{chat.chat_id}"
+        for job in jobs:
+            try:
+                res = job.result if isinstance(job.result, dict) else {}
+                if res.get("delivered"):
+                    continue  # body already reported — never twice
+                title = str(job.labels.get("title")
+                            or res.get("title") or "download")
+                if job.status == "failed":
+                    self.gateway.send(
+                        chat.platform, target,
+                        f"⚠️ the background download “{title}” broke "
+                        f"before it could report: "
+                        f"{job.error or 'unknown error'}")
+                elif job.status == "presumed-dead" \
+                        and not job.late_result:
+                    self.gateway.send(
+                        chat.platform, target,
+                        f"⏳ “{title}” went quiet while downloading "
+                        "(no heartbeat) — outcome unknown: it may "
+                        "still be running, so I won't retry it "
+                        "blindly. Run /play again if you want it "
+                        "re-queued.")
+                else:
+                    # done-but-undelivered, or a late finish whose own
+                    # follow-up never landed: replay the body's text.
+                    text = str(res.get("text") or "")
+                    if not text:
+                        text = (f"⚠️ the background download of "
+                                f"“{title}” finished, but its report "
+                                "never reached this chat.")
+                    self.gateway.send(chat.platform, target, text)
+            except Exception:  # noqa: BLE001 - one job never blocks rest
+                continue
 
     def _play_send_in_chat(self, engine: Any, item: dict[str, Any],
                            out: str, chat: Any) -> str:
@@ -932,8 +1132,13 @@ class RuntimeMediaMixin:
         (e.g. the pick-list) need the signal, not a string search.
         ``sent`` is True only when send_file succeeded.  Never raises.
         """
+        from ...core.jobs import report_progress
         from ...media.cookies import (
             BOT_COOKIE_SHORT_HELP, is_bot_detection_error)
+        # Progress note: counts as a heartbeat when this runs as a
+        # background job; a no-op on the synchronous path.
+        report_progress(
+            f"downloading {item.get('title') or 'audio'}")
         try:
             dl = engine.download(item)
         except Exception as exc:  # noqa: BLE001 - download() shouldn't raise, belt and braces
@@ -1114,7 +1319,7 @@ class RuntimeMediaMixin:
                     and is_bot_detection_error(attempt):
                 youtube_bot_blocked = True
         youtube_already_attempted = False
-        for item in items:
+        for cand_no, item in enumerate(items, start=1):
             kind = str(item.get("kind", ""))
             name = self._KIND_TO_ATTEMPT_NAME.get(
                 kind, f"{kind}-search" if kind else "unknown")
@@ -1128,6 +1333,11 @@ class RuntimeMediaMixin:
             if item.get("downloadable") is False:
                 outcomes[name] = "not downloadable (protected streams)"
                 continue
+            # Progress note per candidate: counts as a heartbeat when
+            # this runs as a background job; a no-op synchronously.
+            from ...core.jobs import report_progress
+            report_progress(
+                f"trying {name} ({cand_no} of {len(items)})")
             try:
                 dl = engine.download(item)
             except Exception as exc:  # noqa: BLE001

@@ -271,6 +271,26 @@ class _FakePickEngine:
         return {}
 
 
+def _wait_play_job(ack: str, timeout: float = 10.0):
+    """Collect the background play-download job an ack announced."""
+    import re
+    from nomorals.core.jobs import shared_registry
+
+    m = re.search(r"\[job (job[0-9a-f]+)\]", ack or "")
+    assert m, f"ack carries no job id: {ack!r}"
+    job = shared_registry().collect(m.group(1), timeout=timeout)
+    assert job is not None and job.done(), \
+        f"job never finished: {job.status if job else None}"
+    return job
+
+
+def _followup_texts(rt) -> list:
+    """Texts the job body posted to the chat (the synchronous reply
+    minus the part the ack already showed)."""
+    return [c.args[2] for c in rt.gateway.send.call_args_list
+            if len(c.args) > 2]
+
+
 def test_pick_failed_download_keeps_list():
     PickCache.clear()
     rt = _handler()
@@ -281,15 +301,18 @@ def test_pick_failed_download_keeps_list():
     assert token
     _FakePickEngine.downloads = [{"ok": False, "reason": "DRM protected"}]
     with mock.patch("nomorals.media.playback.PlaybackEngine", _FakePickEngine):
-        out1 = rt._play_pick(f"{token} 1", "telegram:12345")
-    assert "couldn't download" in out1
+        ack1 = rt._play_pick(f"{token} 1", "telegram:12345")
+    assert "downloading in the background" in ack1
+    _wait_play_job(ack1)
+    assert any("couldn't download" in t for t in _followup_texts(rt))
     # Failed pick must NOT consume the list — the user can pick again.
     assert PickCache.get(token) is not None
     _FakePickEngine.downloads = [{"ok": True, "path": "/tmp/s.mp3",
                                    "title": "Song"}]
     with mock.patch("nomorals.media.playback.PlaybackEngine", _FakePickEngine):
-        out2 = rt._play_pick(f"{token} 1", "telegram:12345")
-    assert "sent" in out2
+        ack2 = rt._play_pick(f"{token} 1", "telegram:12345")
+    _wait_play_job(ack2)
+    assert any("sent" in t for t in _followup_texts(rt))
     # Successful pick consumes the list.
     assert PickCache.get(token) is None
     PickCache.clear()

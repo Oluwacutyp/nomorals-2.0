@@ -51,6 +51,24 @@ def _item(kind, path, title):
     return {"kind": kind, "path": path, "title": title, "artist": "Ayo Maff"}
 
 
+def _wait_play_job(ack: str, timeout: float = 10.0):
+    """Collect the background play-download job an ack announced."""
+    import re
+    from nomorals.core.jobs import shared_registry
+
+    m = re.search(r"\[job (job[0-9a-f]+)\]", ack or "")
+    assert m, f"ack carries no job id: {ack!r}"
+    job = shared_registry().collect(m.group(1), timeout=timeout)
+    assert job is not None and job.done(), \
+        f"job never finished: {job.status if job else None}"
+    return job
+
+
+def _followup_texts(rt) -> list:
+    return [c.args[2] for c in rt.gateway.send.call_args_list
+            if len(c.args) > 2]
+
+
 SC_ITEM = _item("soundcloud",
                 "https://soundcloud.com/ayorinde-mafoluku/lifestyle-ya-man",
                 "Lifestyle (YA MAN)")
@@ -382,10 +400,13 @@ def test_control_play_chat_falls_through_to_youtube():
         SR.return_value.resolve.return_value = sc_res
         SR.return_value.search_candidates_detailed.return_value = (
             [sc_cand, yt_cand], detailed_attempts)
-        text = rt._control_play("lifestyle (YA MAN)", "chat-key")
+        ack = rt._control_play("lifestyle (YA MAN)", "chat-key")
+    assert "downloading in the background" in ack
+    _wait_play_job(ack)
     assert engine.download.call_count == 2
     rt.gateway.send_file.assert_called_once()
     assert "/tmp/yt-song.mp3" in rt.gateway.send_file.call_args[0]
+    text = "\n".join(_followup_texts(rt))
     assert "sent" in text
     assert "couldn't download" not in text
     assert "couldn't send" not in text

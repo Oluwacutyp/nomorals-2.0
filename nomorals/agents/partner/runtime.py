@@ -605,6 +605,14 @@ class PartnerRuntime(
 
     def _process(self, message: ChatMessage) -> None:
         self._bump("messages")
+        # Background /play + /download jobs: surface any that died in
+        # this chat without reporting (crashed worker, heartbeat
+        # silence).  The happy path delivers itself from the job
+        # thread; this only handles outcomes the job never posted.
+        try:
+            self._harvest_play_downloads(message.chat.key, message.chat)
+        except Exception:  # noqa: BLE001 - harvest never breaks chat
+            pass
         # Autonomy: every inbound message resets the idle clock and feeds
         # the pattern/interest models. Cheap, never blocks.
         try:
