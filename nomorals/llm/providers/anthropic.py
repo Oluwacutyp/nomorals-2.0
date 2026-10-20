@@ -186,6 +186,9 @@ class AnthropicProvider(LLMProvider):
         started = time.perf_counter()
         messages = validate_messages(messages, who="anthropic.chat")
         sampling = (params or SamplingParams()).clamped()
+        # A per-call timeout (router verify) bounds the HTTP call —
+        # never a wire field in the payload.
+        req_timeout = kw.pop("timeout", None)
         system, turns = self._to_anthropic_messages(messages)
         payload: dict[str, Any] = {
             "model": self.model,
@@ -202,7 +205,10 @@ class AnthropicProvider(LLMProvider):
             payload["top_p"] = sampling.top_p
         try:
             raw = retry_call(
-                lambda: self.http.post_json(ANTHROPIC_API_URL, payload),
+                lambda: self.http.post_json(
+                    ANTHROPIC_API_URL, payload,
+                    **({"timeout": req_timeout}
+                       if req_timeout is not None else {})),
                 policy=self._policy,
             )
         except Exception as exc:  # noqa: BLE001

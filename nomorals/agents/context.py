@@ -8,6 +8,7 @@ tests can build two independent contexts and they cannot interfere.
 
 from __future__ import annotations
 
+import os
 import threading
 import time
 from dataclasses import dataclass, field
@@ -475,6 +476,17 @@ def build_router(settings: Settings, bus: EventBus, *, db: Any | None = None,
             }
         if kind in {"mock", "offline", "test"}:
             return {**common, "model": llm.openai_model or "mock-7b"}
+        if kind in {"anthropic", "gemini", "deepseek"}:
+            # These providers own their endpoint, default model and env
+            # key fallback (ANTHROPIC_API_KEY / GEMINI_API_KEY /
+            # DEEPSEEK_API_KEY, NM_-prefixed twins included).  Feeding
+            # them the OpenAI base_url/key/model — the default branch
+            # below — registers a "gemini" that actually talks to the
+            # local Ollama shim, and kills Anthropic outright (its
+            # constructor takes no base_url, so registration raised and
+            # the chain booted model-less).  Pass only the shared
+            # timeout; each provider's own defaults apply.
+            return {**common}
         return {
             **common,
             "base_url": llm.openai_base_url,
@@ -497,6 +509,19 @@ def build_router(settings: Settings, bus: EventBus, *, db: Any | None = None,
         if kind == "openrouter" and not llm.openrouter_api_key:
             _log.info("skipping openrouter fallback: NM_OPENROUTER_API_KEY not set")
             return
+        # Same rule for the providers whose keys live only in the env
+        # (no LLMSettings field): no key → skip quietly, never register
+        # a provider that can only 401 at call time.
+        for keyed, env_names in (
+            ("anthropic", ("ANTHROPIC_API_KEY", "NM_ANTHROPIC_API_KEY")),
+            ("gemini", ("GEMINI_API_KEY", "NM_GEMINI_API_KEY")),
+            ("deepseek", ("DEEPSEEK_API_KEY", "NM_DEEPSEEK_API_KEY")),
+        ):
+            if kind == keyed and not any(
+                    os.environ.get(n) for n in env_names):
+                _log.info("skipping %s fallback: %s not set",
+                          kind, env_names[0])
+                return
         try:
             router.add(build_provider(kind, **kwargs_for(kind)), primary=primary, name=kind)
             registered.add(kind)

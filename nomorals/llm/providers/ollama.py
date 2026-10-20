@@ -125,8 +125,12 @@ class OllamaProvider(LLMProvider):
     ) -> LLMResponse:
         started = time.perf_counter()
         messages = validate_messages(messages, who="ollama.chat")
+        # A per-call timeout (router verify) bounds the HTTP call —
+        # never a wire field in the payload.
+        req_timeout = kw.pop("timeout", None)
         payload = self._chat_payload(messages, params, **kw)
-        data = self._post("/api/chat", payload, operation="chat")
+        data = self._post("/api/chat", payload, operation="chat",
+                          timeout=req_timeout)
         message = data.get("message") or {}
         return self._record(
             LLMResponse(
@@ -144,6 +148,7 @@ class OllamaProvider(LLMProvider):
 
     def complete(self, prompt: str, params: SamplingParams | None = None, **kw: Any) -> LLMResponse:
         started = time.perf_counter()
+        req_timeout = kw.pop("timeout", None)
         payload: dict[str, Any] = {
             "model": self.model,
             "prompt": prompt,
@@ -152,7 +157,8 @@ class OllamaProvider(LLMProvider):
             "options": {**_options(params or SamplingParams()), **kw.pop("options", {})},
             **kw,
         }
-        data = self._post("/api/generate", payload, operation="complete")
+        data = self._post("/api/generate", payload, operation="complete",
+                          timeout=req_timeout)
         return self._record(
             LLMResponse(
                 text=data.get("response") or "",
@@ -188,8 +194,10 @@ class OllamaProvider(LLMProvider):
             content=prompt or "Describe this image in detail.",
             images=[encoded],
         )
+        req_timeout = kw.pop("timeout", None)
         payload = self._chat_payload([message], params, **kw)
-        data = self._post("/api/chat", payload, operation="vision")
+        data = self._post("/api/chat", payload, operation="vision",
+                          timeout=req_timeout)
         content = (data.get("message") or {}).get("content") or ""
         return self._record(
             LLMResponse(text=content, model=data.get("model", self.model), raw=data),

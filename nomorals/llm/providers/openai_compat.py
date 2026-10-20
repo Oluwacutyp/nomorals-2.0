@@ -223,6 +223,10 @@ class OpenAICompatProvider(LLMProvider):
         started = time.perf_counter()
         messages = validate_messages(messages, who="openai_compat.chat")
         sampling = (params or SamplingParams()).clamped()
+        # A per-call timeout (the router's startup verify passes one)
+        # bounds the HTTP call — it must never leak into the wire
+        # payload, where strict APIs reject unknown fields.
+        req_timeout = kw.pop("timeout", None)
         payload: dict[str, Any] = {
             "model": self.model,
             "messages": [m.to_openai() for m in messages],
@@ -239,7 +243,10 @@ class OpenAICompatProvider(LLMProvider):
             payload["model"] = model_id
             try:
                 raw = retry_call(
-                    lambda: self.http.post_json(f"{self.base_url}/chat/completions", payload),
+                    lambda: self.http.post_json(
+                        f"{self.base_url}/chat/completions", payload,
+                        **({"timeout": req_timeout}
+                           if req_timeout is not None else {})),
                     policy=self._policy,
                 )
             except Exception as exc:  # noqa: BLE001
@@ -318,6 +325,7 @@ class OpenAICompatProvider(LLMProvider):
         """Send an image through the chat endpoint using the data-URL convention."""
         encoded = base64.b64encode(image).decode("ascii")
         mime = kw.pop("mime", "image/png")
+        req_timeout = kw.pop("timeout", None)
         messages = [
             Message(
                 role="user",
@@ -351,7 +359,10 @@ class OpenAICompatProvider(LLMProvider):
         payload = {"model": model, "messages": payload_messages, **sampling.to_openai()}
         try:
             raw = retry_call(
-                lambda: http.post_json(f"{base}/chat/completions", payload),
+                lambda: http.post_json(
+                    f"{base}/chat/completions", payload,
+                    **({"timeout": req_timeout}
+                       if req_timeout is not None else {})),
                 policy=self._policy,
             )
         except Exception as exc:  # noqa: BLE001

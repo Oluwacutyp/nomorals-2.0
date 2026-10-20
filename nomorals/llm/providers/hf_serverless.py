@@ -112,8 +112,12 @@ class HFServerlessProvider(LLMProvider):
         self.use_chat_endpoint = use_chat_endpoint
         self.embed_model = embed_model or "sentence-transformers/all-MiniLM-L6-v2"
         headers: dict[str, str] = {}
-        if token:
-            headers["Authorization"] = f"Bearer {token}"
+        if self.token:
+            # Gate on the RESOLVED token, not the constructor argument:
+            # a token that arrived via HF_TOKEN / NM_HF_TOKEN must be
+            # sent too — gating on the raw argument left every env-only
+            # configuration calling the API unauthenticated (401s).
+            headers["Authorization"] = f"Bearer {self.token}"
         self.http = HttpClient(timeout=timeout, headers=headers)
         self._policy = BackoffPolicy(max_attempts=max(1, max_retries), cap=60.0)
 
@@ -235,12 +239,23 @@ class HFServerlessProvider(LLMProvider):
         messages = validate_messages(messages, who="hf_serverless.chat")
         sampling = (params or SamplingParams()).clamped()
         payload = self.build_chat_payload(messages, sampling)
+        # A per-call timeout (the router's startup verify passes one)
+        # bounds the HTTP call — it is not a wire field.
+        post_kw: dict[str, Any] = {}
+        if kw.get("timeout") is not None:
+            post_kw["timeout"] = kw["timeout"]
 
         # Try with current model first
         attempts: list[tuple[str, str]] = []  # (model, error) for the final report
         try:
-            raw = self._post_checked(self.chat_url(), payload)
-            return self._record(self._parse_chat(raw), started)
+            raw = self._post_checked(self.chat_url(), payload, **post_kw)
+            result = self._parse_chat(raw)
+            if not result.error:
+                return self._record(result, started)
+            # 2xx body carrying an error (model loading / not hosted):
+            # same recovery as a raised failure — heal across models
+            # instead of returning it as the answer.
+            raise ProviderError(result.error)
         except Exception as exc:  # noqa: BLE001
             # Don't heal on authentication errors (401/403) — swapping models
             # won't fix a bad or unauthorized key.  Status comes from the
@@ -260,8 +275,14 @@ class HFServerlessProvider(LLMProvider):
             last_error = exc
             for new_model in candidates[:3]:  # cap at 3 swaps per call
                 self.model = new_model
+                # The payload was built with the original model baked
+                # in — re-point it, or the "healed" call still names
+                # the dead model in the body (the URL alone does not
+                # decide which model serves an OpenAI-shaped request).
+                payload["model"] = new_model
                 try:
-                    raw = self._post_checked(self.chat_url(), payload)
+                    raw = self._post_checked(self.chat_url(), payload,
+                                             **post_kw)
                     result = self._parse_chat(raw)
                     if result.error:
                         last_error = Exception(result.error)
@@ -372,6 +393,17 @@ class HFServerlessProvider(LLMProvider):
                 started,
             )
         data = raw.json()
+        if isinstance(data, dict) and data.get("error"):
+            # Same honesty rule as chat: a 200-with-error body is a
+            # failure, not an empty completion.
+            err = data["error"]
+            message = err.get("message") if isinstance(err, dict) \
+                else str(err)
+            return self._record(
+                LLMResponse(text="", model=self.model,
+                            error=f"hf_serverless: {message}", raw=data),
+                started,
+            )
         text = self._parse_text_generation(data)
         return self._record(
             LLMResponse(
@@ -464,6 +496,19 @@ class HFServerlessProvider(LLMProvider):
                 finish_reason=first.get("finish_reason", "stop"),
                 raw=data,
             )
+        # An HTTP-200 body can still be an error ({"error": ...} —
+        # model loading, not hosted, …).  Parsing it as an empty
+        # completion would report a provider failure as success.
+        error = data.get("error")
+        if error:
+            message = error.get("message") if isinstance(error, dict) \
+                else str(error)
+            return LLMResponse(
+                text="",
+                model=self.model,
+                error=f"hf_serverless: {message}",
+                raw=data,
+            )
         # Text-generation shape: [{"generated_text": "..."}] or {"generated_text": ...}
         return LLMResponse(
             text=self._parse_text_generation(data),
@@ -527,18 +572,16 @@ class HFServerlessProvider(LLMProvider):
 
 
     def _post_checked(self, url: str, payload: dict, **kwargs) -> dict:
-        """Post a request and check the response.
-        
-        Args:
-            url: The URL to post to
-            payload: The payload to send
-            **kwargs: Additional arguments to pass to post_json
-        
-        Returns:
-            The response data
+        """Post a request and return the parsed JSON body.
+
+        ``post_json`` raises on HTTP error statuses, so a returned body
+        is a 2xx payload.  Returning the raw ``HttpResponse`` here (the
+        old behaviour) sent it into ``_parse_chat``, which is written
+        for a dict — every successful chat came back as the response
+        object's repr for its text, with zeroed usage.
         """
         response = self.http.post_json(url, payload, **kwargs)
-        return response
+        return response.json()
 
     @staticmethod
     def _discover_catalog_model(catalog: list[dict], exclude: str = "") -> str:
