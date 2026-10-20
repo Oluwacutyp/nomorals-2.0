@@ -61,5 +61,15 @@ def _cmd_project(args: argparse.Namespace, context: Any) -> int:
         payload = res.to_dict() if hasattr(res, "to_dict") else res
         _emit(args, payload, f"{action}: {pid}")
         return 0
+    if action in ("update", "delete"):
+        # The parser advertises these two, but ProjectManager has no
+        # update/delete operation at all (no method, no row-deletion
+        # path) — there is nothing in the organ to wire to. Answer
+        # honestly (exit 1, the command-failed code) instead of the
+        # old "unknown action" with the usage-error code 2, which
+        # claimed a parser-valid verb did not exist.
+        print(f"project: {action} is not supported — ProjectManager "
+              f"has no {action} operation", file=sys.stderr)
+        return 1
     print(f"project: unknown action {action}", file=sys.stderr)
     return 2

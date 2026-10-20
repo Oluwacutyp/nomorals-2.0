@@ -28,7 +28,6 @@ def _cmd_cards(args: argparse.Namespace, context: Any) -> int:
 
     connector = VirtualCardsConnector(
         vault=vault,  # type: ignore[arg-type]
-        db=db,
     )
 
     if action == "status":
@@ -59,6 +58,29 @@ def _cmd_cards(args: argparse.Namespace, context: Any) -> int:
         _emit(args, card, f"Created card: {card.get('id', '?')}")
         return 0
 
+    if action in ("pause", "close"):
+        # pause = the connector's reversible block_card; close = its
+        # permanent terminate_card. --token carries the card id (it is
+        # the only card identifier the parser offers). Both actions
+        # were in the argparse choices but fell through to "unknown
+        # action" — the connector methods were never called.
+        if not token:
+            _emit(args, {"error": "card token required"},
+                  f"Usage: nm cards {action} --token <card-id>")
+            return 1
+        try:
+            if action == "pause":
+                card = connector.block_card(token)
+            else:
+                card = connector.terminate_card(token)
+        except Exception as exc:
+            _emit(args, {"error": str(exc)}, f"Failed to {action} card: {exc}")
+            return 1
+        verb = "Paused" if action == "pause" else "Closed"
+        card_id = card.get("id", token) if isinstance(card, dict) else token
+        _emit(args, card, f"{verb} card: {card_id}")
+        return 0
+
     _emit(args, {"error": f"unknown action: {action}"},
-          f"Unknown action: {action}. Use: status|list|create")
+          f"Unknown action: {action}. Use: status|list|create|pause|close")
     return 1
