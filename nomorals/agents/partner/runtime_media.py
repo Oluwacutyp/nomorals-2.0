@@ -660,12 +660,32 @@ class RuntimeMediaMixin:
                          "duration": c.duration or 0.0,
                          "downloadable": c.downloadable}
                         for c in (cands or [])]
+                    # The chain winner can carry the raw search query
+                    # as its "title" (the YouTube search strategies do
+                    # this) — the candidate sweep has the SAME track
+                    # with its real metadata; prefer it, so nothing
+                    # downstream ever displays or delivers the query
+                    # text as if it were the track's name.
+                    first_item = dict(added[0])
+                    for c in (cands or []):
+                        if c.kind == first_item.get("kind") \
+                                and c.path_or_url == first_item.get("path"):
+                            cur = str(first_item.get("title") or "")
+                            if c.title and (not cur
+                                            or cur.strip().lower() in (
+                                                search_q.strip().lower(),
+                                                rest.strip().lower())):
+                                first_item["title"] = c.title
+                            if c.artist and not first_item.get("artist"):
+                                first_item["artist"] = c.artist
+                            break
                     merged = self._merge_search_attempts(
                         resolution.attempts, detailed)
                     return self._play_download_bg(
                         chat, chat_key, out,
                         lambda: (self._play_send_with_fallthrough(
-                            engine, added[0], fallbacks, merged, out, chat),
+                            engine, first_item, fallbacks, merged, out,
+                            chat, match=(title_q, artist_q), query=rest),
                                  False),
                         title=str(added[0].get("title") or "audio"))
                 # Sources tried — visible, so the user sees MANY sources
@@ -1344,10 +1364,12 @@ class RuntimeMediaMixin:
             return msg, False
         path = dl["path"]
         title = dl.get("title") or item.get("title", "audio")
+        send_path = self._delivery_path(
+            path, str(title), str(item.get("artist", "") or ""))
         try:
             self.gateway.send_file(
                 chat.platform, f"{chat.platform}:{chat.chat_id}",
-                path, caption=f"🎵 {title}")
+                send_path, caption=f"🎵 {title}")
             return out + f"\n▶ sent “{title}” to this chat.", True
         except Exception as exc:  # noqa: BLE001
             return out + f"\nhad the file ({path}) but couldn't send it: {exc}", False
@@ -1388,6 +1410,54 @@ class RuntimeMediaMixin:
                 engine.remove(idx)
         except Exception:  # noqa: BLE001
             pass
+
+    @staticmethod
+    def _delivery_path(path: str, title: str, artist: str) -> str:
+        """The path to actually SEND for a downloaded track.
+
+        The delivered file must carry the track's real identity
+        (owner delivery contract, 2026-10-20): a download whose name
+        already carries the title — yt-dlp's normal
+        ``"<title> [<id>].<ext>"`` — goes out as-is.  A downloader
+        template artifact (``playlist [playlist].mp3``) or any other
+        title-free name would show the user garbage and "Unknown
+        artist", so a copy named ``"<Artist> - <Title>.<ext>"`` is
+        staged NEXT TO the original and sent instead.  The original
+        is a cache file (e.g. YouTube's id-keyed cache) — copied,
+        never renamed.  Never raises: any failure returns *path*.
+        """
+        try:
+            if not path or not os.path.isfile(path):
+                return path
+            title_tokens = {w for w in re.findall(
+                r"[a-z0-9]+", (title or "").lower()) if len(w) > 1}
+            if not title_tokens:
+                return path
+            stem = os.path.splitext(os.path.basename(path))[0]
+            stem_tokens = {w for w in re.findall(
+                r"[a-z0-9]+", stem.lower()) if len(w) > 1}
+            if title_tokens <= stem_tokens:
+                return path
+            from ...core.text import safe_filename
+
+            label = (f"{artist} - {title}"
+                     if (artist or "").strip() else (title or ""))
+            ext = os.path.splitext(path)[1] or ".mp3"
+            name = safe_filename(f"{label}{ext}", fallback="")
+            if not name:
+                return path
+            target = os.path.join(os.path.dirname(path), name)
+            if os.path.abspath(target) == os.path.abspath(path):
+                return path
+            if not (os.path.isfile(target)
+                    and os.path.getsize(target) == os.path.getsize(path)):
+                import shutil
+
+                shutil.copyfile(path, target)
+            return target
+        except Exception:  # noqa: BLE001 - identity staging never
+            # breaks a delivery that would otherwise succeed
+            return path
 
     @classmethod
     def _replace_queued_with(cls, engine: Any, old_item: dict[str, Any],
@@ -1474,7 +1544,7 @@ class RuntimeMediaMixin:
     def _play_send_with_fallthrough(
             self, engine: Any, first_item: dict[str, Any],
             fallbacks: Any, search_attempts: Any, out: str,
-            chat: Any) -> str:
+            chat: Any, *, match: Any = None, query: str = "") -> str:
         """Chat path: try candidates in order until one DOWNLOADS.
 
         A source whose search succeeded but whose download failed is a
@@ -1485,6 +1555,18 @@ class RuntimeMediaMixin:
         download" (never "couldn't send") on total failure, and shows
         the short /cookies hint ONLY when YouTube was actually
         attempted AND bot-blocked.  Never raises.
+
+        Delivery contract (owner, 2026-10-20): when ``match`` is a
+        ``(title, artist)`` pair parsed from the request, ONLY
+        candidates that confidently match it
+        (:func:`nomorals.media.picklist.is_confident_match`) are
+        download-attempted for auto-delivery — a found-but-blocked
+        match keeps the chain trying OTHER sources for the SAME
+        track.  Candidates that don't match are never silently
+        substituted: when nothing confident downloads, the owner
+        gets the found-but-blocked report plus a pick-list of the
+        rest, and their pick downloads exactly what they chose.
+        Without ``match`` the behaviour is the historical one.
         """
         from ...media.cookies import (
             BOT_COOKIE_SHORT_HELP, is_bot_detection_error)
@@ -1500,6 +1582,33 @@ class RuntimeMediaMixin:
                 continue
             seen.add(key)
             items.append(it)
+        # ── delivery-contract partition ─────────────────────────────
+        # Confident matches are attempted (best score first, chain
+        # order breaking ties); everything else downloadable becomes
+        # the pick-list if no match lands.  blocked_matches collects
+        # the found-but-blocked facts for the final report.
+        attempt_items = items
+        pick_items: list[dict[str, Any]] = []
+        blocked_matches: list[tuple[dict[str, Any], str]] = []
+        gated = match is not None
+        if gated:
+            from ...media.picklist import (
+                is_confident_match, match_confidence)
+
+            q_title = str((match or ("", ""))[0] or "")
+            q_artist = str((match or ("", ""))[1] or "")
+            confident: list[tuple[float, dict[str, Any]]] = []
+            for it in items:
+                it_title = str(it.get("title", "") or "")
+                it_artist = str(it.get("artist", "") or "")
+                if is_confident_match(it_title, it_artist,
+                                      q_title, q_artist):
+                    confident.append((match_confidence(
+                        it_title, it_artist, q_title, q_artist), it))
+                elif it.get("downloadable") is not False:
+                    pick_items.append(it)
+            confident.sort(key=lambda pair: -pair[0])
+            attempt_items = [it for _score, it in confident]
         outcomes: dict[str, str] = {}
         youtube_bot_blocked = False
         for attempt in (search_attempts or []):
@@ -1508,7 +1617,7 @@ class RuntimeMediaMixin:
                     and is_bot_detection_error(attempt):
                 youtube_bot_blocked = True
         youtube_already_attempted = False
-        for cand_no, item in enumerate(items, start=1):
+        for cand_no, item in enumerate(attempt_items, start=1):
             kind = str(item.get("kind", ""))
             name = self._KIND_TO_ATTEMPT_NAME.get(
                 kind, f"{kind}-search" if kind else "unknown")
@@ -1521,12 +1630,15 @@ class RuntimeMediaMixin:
                 continue
             if item.get("downloadable") is False:
                 outcomes[name] = "not downloadable (protected streams)"
+                if gated:
+                    blocked_matches.append(
+                        (item, "not downloadable (protected streams)"))
                 continue
             # Progress note per candidate: counts as a heartbeat when
             # this runs as a background job; a no-op synchronously.
             from ...core.jobs import report_progress
             report_progress(
-                f"trying {name} ({cand_no} of {len(items)})")
+                f"trying {name} ({cand_no} of {len(attempt_items)})")
             try:
                 dl = engine.download(item)
             except Exception as exc:  # noqa: BLE001
@@ -1541,10 +1653,13 @@ class RuntimeMediaMixin:
                 note = dl.get("note")
                 if note:
                     suffix += f"\n({note})"
+                send_path = self._delivery_path(
+                    path, str(dl_title),
+                    str(item.get("artist", "") or ""))
                 try:
                     self.gateway.send_file(
                         chat.platform, f"{chat.platform}:{chat.chat_id}",
-                        path, caption=f"🎵 {dl_title}")
+                        send_path, caption=f"🎵 {dl_title}")
                     # The queue must hold what was actually sent: if
                     # the winner differs from the first pick, swap
                     # the queued row so a later /play next doesn't
@@ -1559,6 +1674,8 @@ class RuntimeMediaMixin:
                     return (out + suffix + f"\nhad the file ({path}) "
                             f"but couldn't send it: {exc}")
             reason = str(dl.get("reason", "unknown error"))
+            if gated:
+                blocked_matches.append((item, reason))
             if dl.get("youtube_fallback_attempted"):
                 youtube_already_attempted = True
                 if is_bot_detection_error(reason):
@@ -1579,12 +1696,96 @@ class RuntimeMediaMixin:
         # drop its queue row like the single-send path does, so the
         # durable queue doesn't keep a broken item.
         self._drop_matching_queued(engine, first_item)
+        if gated and pick_items:
+            # Nothing that MATCHES could be downloaded, but other
+            # results exist: they are the owner's to choose from —
+            # never auto-sent as if they were the request.
+            offer = self._play_picklist_offer(
+                pick_items, blocked_matches, out, tried,
+                query or title, chat,
+                youtube_bot_blocked=youtube_bot_blocked)
+            if offer:
+                return offer
         msg = (out + f"\nsources tried ({len(tried)}): "
                + "; ".join(tried))
         msg += f"\ncouldn't download {title!r} from any source."
         if youtube_bot_blocked:
             msg += f"\n{BOT_COOKIE_SHORT_HELP}"
         return msg
+
+    def _play_picklist_offer(
+            self, pick_items: list[dict[str, Any]],
+            blocked_matches: list[tuple[dict[str, Any], str]],
+            out: str, tried: list[str], query: str, chat: Any,
+            *, youtube_bot_blocked: bool = False) -> str:
+        """The no-confident-download outcome: honest report + choice.
+
+        The reply carries (1) the full tried-list, (2) every
+        found-but-blocked match BY NAME with its block reason, and
+        (3) the standard pick-list over the remaining downloadable
+        results, stored in the PickCache so a number reply or a
+        button tap downloads exactly the chosen candidate.  Returns
+        "" when the pick-list can't be stored (caller falls back to
+        the plain failure report).  Never raises.
+        """
+        try:
+            from ...media.cookies import BOT_COOKIE_SHORT_HELP
+            from ...media.picklist import (
+                PICK_LIMIT, PickCache, format_picklist)
+            from ...media.picklist import _KIND_LABELS
+            from ...media.resolver import ResolvedAudio
+
+            cands = [
+                ResolvedAudio(
+                    ok=True, path_or_url=str(it.get("path", "") or ""),
+                    title=str(it.get("title", "") or it.get("path", "")),
+                    artist=str(it.get("artist", "") or ""),
+                    duration=float(it.get("duration", 0.0) or 0.0),
+                    kind=str(it.get("kind", "") or ""),
+                    source_name=str(it.get("kind", "") or ""),
+                    downloadable=True)
+                for it in pick_items[:PICK_LIMIT]]
+            if not cands:
+                return ""
+            chat_key = ""
+            try:
+                # The chat's own key (thread-aware) so the
+                # number-reply hook finds this list; fall back to the
+                # plain platform:id form.
+                chat_key = str(getattr(chat, "key", "") or "")
+                if not chat_key:
+                    chat_key = f"{chat.platform}:{chat.chat_id}"
+            except Exception:  # noqa: BLE001
+                chat_key = ""
+            token = PickCache.store(cands, chat_key) if chat_key else ""
+            if not token:
+                return ""
+            lines = [out,
+                     f"sources tried ({len(tried)}): " + "; ".join(tried)]
+            if blocked_matches:
+                for it, reason in blocked_matches:
+                    kind = str(it.get("kind", "") or "")
+                    label = _KIND_LABELS.get(kind, "") or kind
+                    who = (f" — {it.get('artist')}"
+                           if it.get("artist") else "")
+                    lines.append(
+                        f"⚠ found “{it.get('title', '')}”{who} on "
+                        f"{label} — but couldn't download it "
+                        f"({str(reason)[:120]}).")
+                lines.append(
+                    "the other results didn't match your request "
+                    "closely enough to send one blind — pick one:")
+            else:
+                lines.append(
+                    "none of the results matched your request closely "
+                    "enough to send one blind — pick one:")
+            if youtube_bot_blocked:
+                lines.append(BOT_COOKIE_SHORT_HELP)
+            lines.append(format_picklist(cands, query, token))
+            return "\n".join(lines)
+        except Exception:  # noqa: BLE001 - the offer never breaks
+            # the honest failure report the caller still has
+            return ""
 
     @staticmethod
     def _fmt_started(res: dict[str, Any], engine: Any) -> str:

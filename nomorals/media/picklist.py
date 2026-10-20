@@ -29,9 +29,13 @@ _log = get_logger(__name__)
 __all__ = [
     "PICK_TTL",
     "PICK_LIMIT",
+    "MATCH_RECALL_FLOOR",
+    "MATCH_SCORE_FLOOR",
     "PickCache",
     "PickEntry",
     "is_specific",
+    "match_confidence",
+    "is_confident_match",
     "parse_title_artist",
     "search_query_for",
     "format_picklist",
@@ -206,6 +210,95 @@ def parse_title_artist(query: str) -> tuple[str, str]:
     except Exception:  # noqa: BLE001
         q = (query or "").strip()
         return q, ""
+
+
+#: Auto-delivery confidence floors (owner delivery contract,
+#: 2026-10-20).  A candidate is only auto-sent when it covers at
+#: least this fraction of the requested title's significant words
+#: AND its title F1 clears the score floor AND (below) the head-word
+#: and artist gates pass.  Anything less goes to the pick-list —
+#: never a silent substitution, never a hard refusal either.
+MATCH_RECALL_FLOOR = 0.6
+MATCH_SCORE_FLOOR = 0.5
+
+
+def _match_tokens(text: str) -> list[str]:
+    """Significant tokens of a title/artist string, in order.
+
+    Same tokenisation the specificity heuristic uses (lowercase
+    alnum words, >1 char, non-stopword) so the whole module shares
+    one notion of what a word is.  Never raises.
+    """
+    try:
+        return [w for w in re.findall(r"[a-z0-9]+", (text or "").lower())
+                if len(w) > 1 and w not in _STOPWORDS]
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def match_confidence(cand_title: str, cand_artist: str,
+                     query_title: str, query_artist: str) -> float:
+    """How well a candidate matches a parsed request, 0.0–1.0.
+
+    Title F1 over significant tokens: recall = how much of the
+    requested title the candidate covers (its artist counts toward
+    coverage — uploaders put the artist in the title and the title
+    in the channel name), precision = how much of the candidate's
+    title is actually the requested title.  This is the same
+    word-overlap notion the resolver's workspace scan thresholds
+    local files with, applied to search candidates.  Never raises.
+    """
+    try:
+        qt = set(_match_tokens(query_title))
+        if not qt:
+            return 0.0
+        ct = set(_match_tokens(cand_title))
+        hay = ct | set(_match_tokens(cand_artist))
+        recall = len(qt & hay) / len(qt)
+        precision = (len(qt & ct) / len(ct)) if ct else 0.0
+        if recall <= 0.0 or precision <= 0.0:
+            return 0.0
+        return round(2.0 * recall * precision / (recall + precision), 3)
+    except Exception:  # noqa: BLE001
+        return 0.0
+
+
+def is_confident_match(cand_title: str, cand_artist: str,
+                       query_title: str, query_artist: str) -> bool:
+    """May this candidate be auto-delivered for the request?
+
+    All of these must hold:
+
+    * the request's HEAD word is present — a namesake that only
+      shares the parenthetical ("Ya Man Ain't Me" for "Lifestyle
+      (YA MAN)") is a different song, however many words overlap;
+    * title recall clears :data:`MATCH_RECALL_FLOOR`;
+    * when the request named an artist, the candidate's
+      title/artist covers at least half of it;
+    * the F1 clears :data:`MATCH_SCORE_FLOOR`.
+
+    Borderline fails CLOSED to the pick-list, never to a coin flip.
+    Never raises.
+    """
+    try:
+        qt = _match_tokens(query_title)
+        if not qt:
+            return False
+        ct = set(_match_tokens(cand_title))
+        hay = ct | set(_match_tokens(cand_artist))
+        if qt[0] not in hay:
+            return False
+        qset = set(qt)
+        if len(qset & hay) / len(qset) < MATCH_RECALL_FLOOR:
+            return False
+        qa = set(_match_tokens(query_artist))
+        if qa and len(qa & hay) / len(qa) < 0.5:
+            return False
+        return match_confidence(
+            cand_title, cand_artist, query_title,
+            query_artist) >= MATCH_SCORE_FLOOR
+    except Exception:  # noqa: BLE001
+        return False
 
 
 def search_query_for(title: str, artist: str) -> str:
