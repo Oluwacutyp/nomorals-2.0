@@ -29,7 +29,8 @@ from typing import Any
 
 from . import roles as roles_mod
 from .locales import DEFAULT_LOCALE
-from .store import PerPersonStore, default_family_root, sanitize_person_id
+from .store import (PerPersonStore, atomic_write_text, default_family_root,
+                    root_lock, sanitize_person_id)
 
 __all__ = ["Household", "Member"]
 
@@ -45,6 +46,7 @@ class Household:
         self.root = Path(root) if root is not None else default_family_root()
         self.root.mkdir(parents=True, exist_ok=True)
         self.store = PerPersonStore(self.root)
+        self._lock = root_lock(self.root)
 
     # ── persistence ──────────────────────────────────────────────
     def _members_path(self) -> Path:
@@ -60,8 +62,30 @@ class Household:
         return json.loads(p.read_text(encoding="utf-8"))
 
     def _save_members(self, members: dict[str, dict[str, Any]]) -> None:
-        self._members_path().write_text(
-            json.dumps(members, indent=2, sort_keys=True), encoding="utf-8")
+        atomic_write_text(
+            self._members_path(),
+            json.dumps(members, indent=2, sort_keys=True))
+
+    def _require_manager(self, actor_id: str,
+                         members: dict[str, dict[str, Any]]) -> dict[str, Any]:
+        """Verify the actor may manage members — from the ROSTER record.
+
+        The caller's claimed ``actor_role`` is never trusted: authority
+        is whatever role the roster holds for ``actor_id``, and the
+        actor must be an active member. (A claimed role once let any
+        active member — or, for revoke/set_role, any caller at all —
+        perform owner-only membership changes.)
+        """
+        record = members.get(actor_id)
+        if record is None or record.get("status") != "active":
+            raise PermissionError("only an active owner may manage members")
+        try:
+            role = roles_mod.validate_role(str(record.get("role", "")))
+        except ValueError:
+            raise PermissionError(
+                f"member {actor_id!r} has no valid roster role") from None
+        roles_mod.require(role, "manage_members")
+        return record
 
     def _audit(self, actor_id: str, action: str, target: str = "",
                detail: str = "") -> dict[str, Any]:
@@ -78,15 +102,24 @@ class Household:
                    person_id: str, display_name: str,
                    role: str, locale: str = DEFAULT_LOCALE) -> dict[str, Any]:
         """Add a member. OWNER-only, except the bootstrap first owner."""
+        with self._lock:
+            return self._add_person(actor_id=actor_id, actor_role=actor_role,
+                                    person_id=person_id,
+                                    display_name=display_name, role=role,
+                                    locale=locale)
+
+    def _add_person(self, *, actor_id: str, actor_role: str,
+                    person_id: str, display_name: str,
+                    role: str, locale: str = DEFAULT_LOCALE) -> dict[str, Any]:
         role = roles_mod.validate_role(role)
+        # Validate the new id BEFORE any state change: a reserved or
+        # invalid id must refuse cleanly, never half-add a member.
+        pid = sanitize_person_id(person_id)
         members = self._load_members()
         if members:
-            roles_mod.require(actor_role, "manage_members")
-            if actor_id not in members or members[actor_id].get("status") != "active":
-                raise PermissionError("only an active owner may add members")
+            self._require_manager(actor_id, members)
         elif role != roles_mod.OWNER:
             raise ValueError("the first household member must be an owner")
-        pid = sanitize_person_id(person_id)
         if pid in members and members[pid].get("status") == "active":
             raise ValueError(f"person {pid!r} is already a member")
         now = time.time()
@@ -104,8 +137,15 @@ class Household:
     def revoke_person(self, *, actor_id: str, actor_role: str,
                       person_id: str, reason: str = "") -> dict[str, Any]:
         """Revoke a member: immediate access cut, data kept owner-only."""
-        roles_mod.require(actor_role, "manage_members")
+        with self._lock:
+            return self._revoke_person(actor_id=actor_id,
+                                       actor_role=actor_role,
+                                       person_id=person_id, reason=reason)
+
+    def _revoke_person(self, *, actor_id: str, actor_role: str,
+                       person_id: str, reason: str = "") -> dict[str, Any]:
         members = self._load_members()
+        self._require_manager(actor_id, members)
         pid = sanitize_person_id(person_id)
         target = members.get(pid)
         if target is None or target.get("status") != "active":
@@ -127,9 +167,15 @@ class Household:
     def set_role(self, *, actor_id: str, actor_role: str,
                  person_id: str, role: str) -> dict[str, Any]:
         """Change a member's role. OWNER-only; cannot demote the last owner."""
-        roles_mod.require(actor_role, "manage_members")
+        with self._lock:
+            return self._set_role(actor_id=actor_id, actor_role=actor_role,
+                                  person_id=person_id, role=role)
+
+    def _set_role(self, *, actor_id: str, actor_role: str,
+                  person_id: str, role: str) -> dict[str, Any]:
         role = roles_mod.validate_role(role)
         members = self._load_members()
+        self._require_manager(actor_id, members)
         pid = sanitize_person_id(person_id)
         target = members.get(pid)
         if target is None or target.get("status") != "active":
@@ -170,9 +216,26 @@ class Household:
         return bool(m and m.get("status") == "active")
 
     # ── audit ────────────────────────────────────────────────────
-    def audit_log(self, *, actor_role: str) -> list[dict[str, Any]]:
-        """Read the audit log. OWNER-only."""
-        roles_mod.require(actor_role, "view_audit")
+    def audit_log(self, *, actor_role: str,
+                  actor_id: str | None = None) -> list[dict[str, Any]]:
+        """Read the audit log. OWNER-only.
+
+        When ``actor_id`` is given, authority is the actor's RECORDED
+        roster role (the claimed ``actor_role`` is not trusted). The
+        claimed-role path remains only for callers with no actor id.
+        """
+        if actor_id is not None:
+            record = self._load_members().get(actor_id)
+            if record is None or record.get("status") != "active":
+                raise PermissionError("only an active owner may read the audit log")
+            try:
+                role = roles_mod.validate_role(str(record.get("role", "")))
+            except ValueError:
+                raise PermissionError(
+                    f"member {actor_id!r} has no valid roster role") from None
+            roles_mod.require(role, "view_audit")
+        else:
+            roles_mod.require(actor_role, "view_audit")
         p = self._audit_path()
         if not p.exists():
             return []

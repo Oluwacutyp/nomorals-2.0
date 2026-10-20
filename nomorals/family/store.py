@@ -21,7 +21,9 @@ vaults, or connectors — there is no path to them.
 from __future__ import annotations
 
 import json
+import os
 import re
+import threading
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -40,6 +42,15 @@ def default_family_root() -> Path:
 
 _PERSON_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 
+#: Household-structural filenames that live AT the family root. A person
+#: id equal to one of these would make the person's directory collide
+#: with the roster / audit log / shared-layer DB file itself.
+_RESERVED_PERSON_IDS = frozenset({
+    "members.json",      # members.py roster file
+    "audit.jsonl",       # members.py audit log
+    "household_shared.db",  # household shared-layer SQLite file
+})
+
 
 def sanitize_person_id(person_id: str) -> str:
     """Reject anything that could escape the person's directory."""
@@ -47,9 +58,45 @@ def sanitize_person_id(person_id: str) -> str:
         raise ValueError("person_id must be a non-empty string")
     if person_id in (".", "..") or "/" in person_id or "\\" in person_id:
         raise ValueError(f"invalid person_id {person_id!r}")
+    if person_id.lower() in _RESERVED_PERSON_IDS:
+        raise ValueError(
+            f"person_id {person_id!r} collides with a household file name")
     if not _PERSON_RE.match(person_id):
         raise ValueError(f"invalid person_id {person_id!r}")
     return person_id
+
+
+_ROOT_LOCKS: dict[str, threading.RLock] = {}
+_ROOT_LOCKS_GUARD = threading.Lock()
+
+
+def root_lock(root: Path | str) -> threading.RLock:
+    """The one lock per family root, shared by every store on that root.
+
+    Item and roster files are whole-file JSON: a load-modify-save from
+    two store/household instances over the same root must serialise,
+    or the later save silently drops the earlier one's changes.
+    """
+    key = str(Path(root).resolve())
+    with _ROOT_LOCKS_GUARD:
+        lock = _ROOT_LOCKS.get(key)
+        if lock is None:
+            lock = threading.RLock()
+            _ROOT_LOCKS[key] = lock
+        return lock
+
+
+def atomic_write_text(path: Path, text: str) -> None:
+    """Write ``text`` to ``path`` atomically (tmp file + ``os.replace``).
+
+    A crash mid-write must never leave a truncated JSON file behind:
+    the previous complete file stays in place until the new one is
+    fully written, so a reader can never observe a torn state file.
+    """
+    tmp = path.with_name(
+        f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+    tmp.write_text(text, encoding="utf-8")
+    os.replace(tmp, path)
 
 
 @dataclass
@@ -94,6 +141,7 @@ class PerPersonStore:
     def __init__(self, root: Path | str | None = None) -> None:
         self.root = Path(root) if root is not None else default_family_root()
         self.root.mkdir(parents=True, exist_ok=True)
+        self._lock = root_lock(self.root)
 
     # ── paths (per-person only) ──────────────────────────────────────
     def person_dir(self, person_id: str) -> Path:
@@ -107,14 +155,16 @@ class PerPersonStore:
 
     # ── profiles ─────────────────────────────────────────────────────
     def put_profile(self, person_id: str, profile: dict[str, Any]) -> dict[str, Any]:
-        d = self.person_dir(person_id)
-        d.mkdir(parents=True, exist_ok=True)
-        data = dict(profile)
-        data["person_id"] = sanitize_person_id(person_id)
-        data["updated_ts"] = time.time()
-        self._profile_path(person_id).write_text(
-            json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
-        return data
+        with self._lock:
+            d = self.person_dir(person_id)
+            d.mkdir(parents=True, exist_ok=True)
+            data = dict(profile)
+            data["person_id"] = sanitize_person_id(person_id)
+            data["updated_ts"] = time.time()
+            atomic_write_text(
+                self._profile_path(person_id),
+                json.dumps(data, indent=2, sort_keys=True))
+            return data
 
     def get_profile(self, person_id: str) -> dict[str, Any] | None:
         p = self._profile_path(person_id)
@@ -140,9 +190,9 @@ class PerPersonStore:
     def _save_items(self, person_id: str, items: list[FamilyItem]) -> None:
         d = self.person_dir(person_id)
         d.mkdir(parents=True, exist_ok=True)
-        self._items_path(person_id).write_text(
-            json.dumps([it.to_dict() for it in items], indent=2, sort_keys=True),
-            encoding="utf-8")
+        atomic_write_text(
+            self._items_path(person_id),
+            json.dumps([it.to_dict() for it in items], indent=2, sort_keys=True))
 
     def put_item(self, item: FamilyItem, *, requester_role: str) -> FamilyItem:
         """Store an item. Kid-safe rules enforced for teen/child writers.
@@ -169,15 +219,19 @@ class PerPersonStore:
         if not item.created_ts:
             item.created_ts = now
         item.updated_ts = now
-        items = self._load_items(item.owner_id)
-        for i, existing in enumerate(items):
-            if existing.id == item.id:
-                items[i] = item
-                self._save_items(item.owner_id, items)
-                return item
-        items.append(item)
-        self._save_items(item.owner_id, items)
-        return item
+        # Load-modify-save under the per-root lock: two store instances
+        # over one root must not interleave, or one save drops the
+        # other's items.
+        with self._lock:
+            items = self._load_items(item.owner_id)
+            for i, existing in enumerate(items):
+                if existing.id == item.id:
+                    items[i] = item
+                    self._save_items(item.owner_id, items)
+                    return item
+            items.append(item)
+            self._save_items(item.owner_id, items)
+            return item
 
     def get_item(self, person_id: str, item_id: str, *,
                  requester_id: str, requester_role: str,
@@ -231,12 +285,13 @@ class PerPersonStore:
                     requester_id: str, requester_role: str) -> bool:
         """Delete your own item (owners may delete any household item)."""
         role = roles_mod.validate_role(requester_role)
-        items = self._load_items(person_id)
-        for i, it in enumerate(items):
-            if it.id == item_id:
-                if requester_id != person_id and role != roles_mod.OWNER:
-                    raise PermissionError("cannot delete another member's item")
-                del items[i]
-                self._save_items(person_id, items)
-                return True
-        return False
+        with self._lock:
+            items = self._load_items(person_id)
+            for i, it in enumerate(items):
+                if it.id == item_id:
+                    if requester_id != person_id and role != roles_mod.OWNER:
+                        raise PermissionError("cannot delete another member's item")
+                    del items[i]
+                    self._save_items(person_id, items)
+                    return True
+            return False
