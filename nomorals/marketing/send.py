@@ -1206,6 +1206,17 @@ class SendEngine:
                 out["by_status"][r["status"]] = out["by_status"].get(r["status"], 0) + c
                 p = out["by_provider"].setdefault(r["provider"], {})
                 p[r["status"]] = p.get(r["status"], 0) + c
+            # Spend: this campaign's SENT rows priced at each provider's
+            # cost_kobo — the same basis _record_cost charges the daily
+            # budget on. (send_costs rows carry no campaign_id, so the
+            # per-provider rate is the honest source.)
+            costs = {r["name"]: int(r["cost_kobo"] or 0) for r in
+                     self._db.execute(
+                         "SELECT name, cost_kobo FROM send_providers"
+                     ).fetchall()}
+            out["spent_kobo"] = sum(
+                int(r["c"]) * costs.get(r["provider"], 0)
+                for r in rows if r["status"] == "sent")
             return out
         except Exception:  # noqa: BLE001
             return out

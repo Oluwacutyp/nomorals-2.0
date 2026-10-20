@@ -246,8 +246,8 @@ def _flashcards(rest: str, *, chat_key: str = "") -> str:
             return "grade must be 1-4."
         if not nb.review(parts[0], grade):
             return f"no card with id {parts[0]}."
-        return (f"✅ graded card {parts[0]}: {grade}/4 "
-                "(in-session; run /learn flashcards export <path> to save).")
+        return (f"✅ graded card {parts[0]}: {grade}/4 (saved — "
+                "the grade is in your mistake notebook).")
     if verb == "export":
         if not tail:
             return "usage: /learn flashcards export <path>"

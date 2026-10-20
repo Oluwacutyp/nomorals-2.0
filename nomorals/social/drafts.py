@@ -87,6 +87,12 @@ class Draft:
 
 EXPLICIT_POST_PATTERNS: list[tuple[str, str]] = [
     # (regex, action) — action is "post" or "schedule"
+    # A stated time wins over the bare verb, and it is checked FIRST:
+    # "post it at 6" is a schedule for 6, not an order to post now.
+    # Dropping the owner's stated time and posting immediately is the
+    # one outcome this list must never produce.
+    (r"\bpost\s+(?:(?:it|this|that)\s+)?at\s+(\d{1,2})"
+     r"(?::(\d{2}))?\s*(am|pm)?\b", "schedule"),
     (r"\bpost\s+this\b", "post"),
     (r"\bpost\s+it\b", "post"),
     (r"\bpost\s+that\b", "post"),
@@ -95,14 +101,14 @@ EXPLICIT_POST_PATTERNS: list[tuple[str, str]] = [
     (r"\bsend\s+it\b", "post"),
     (r"\breply\s+now\b", "post"),
     (r"\bsubmit\b", "post"),
-    (r"\bpost\s+at\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\b", "schedule"),
     (r"\bschedule\s+(this|it|that)\b", "schedule"),
     (r"\bpost\s+it\s+for\s+engagement\b", "post"),
     (r"\bpost\s+for\s+engagement\b", "post"),
 ]
 
 _AT_RE = re.compile(
-    r"\bpost\s+at\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\b", re.IGNORECASE)
+    r"\bpost\s+(?:(?:it|this|that)\s+)?at\s+(\d{1,2})"
+    r"(?::(\d{2}))?\s*(am|pm)?\b", re.IGNORECASE)
 
 
 def parse_post_time(text: str, *, now: datetime | None = None) -> float | None:

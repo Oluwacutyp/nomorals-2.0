@@ -298,6 +298,11 @@ class MistakeNotebook:
         self.scheduler = scheduler
         self.fsrs = fsrs or FSRS()
         self._cards: dict[str, MistakeCard] = {}
+        # Set by load()/save(path): when known, every mutation persists
+        # itself, so a card recorded or graded through ANY surface (chat
+        # tutor, /learn flashcards, JAMB) is durable and visible to all
+        # of them instead of living only in one process's memory.
+        self._path: Path | None = None
 
     # -- recording ---------------------------------------------------------
     def record(self, question: str, student_answer: str, correct: str,
@@ -312,6 +317,7 @@ class MistakeNotebook:
                 self.scheduler.schedule(card.id, f"{card.front}\n---\n{card.back}")
             except Exception:  # noqa: BLE001
                 _log.debug("flashcard scheduling failed", exc_info=True)
+        self._autosave()
         return card
 
     def review(self, card_id: str, grade: int,
@@ -332,6 +338,7 @@ class MistakeNotebook:
                 self.scheduler.review(card_id, card.last_grade)
             except Exception:  # noqa: BLE001
                 _log.debug("flashcard review failed", exc_info=True)
+        self._autosave()
         return True
 
     # -- retrieval practice --------------------------------------------------
@@ -441,8 +448,23 @@ class MistakeNotebook:
         return str(p)
 
     # -- persistence ---------------------------------------------------------------
+    def _autosave(self) -> None:
+        """Persist after a mutation when this notebook knows its store.
+
+        Best-effort: a failed write must never break tutoring (the class
+        contract); explicit save() still raises for callers that ask.
+        """
+        if self._path is None:
+            return
+        try:
+            self.save()
+        except Exception:  # noqa: BLE001
+            _log.debug("notebook autosave failed", exc_info=True)
+
     def save(self, path: str | Path | None = None) -> str:
-        p = Path(path) if path else notebooks_dir() / "default.json"
+        p = (Path(path) if path else
+             self._path or notebooks_dir() / "default.json")
+        self._path = p
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(json.dumps(
             {"cards": [c.to_dict() for c in self._cards.values()]},
@@ -454,6 +476,7 @@ class MistakeNotebook:
              scheduler: Any | None = None) -> "MistakeNotebook":
         nb = cls(scheduler=scheduler)
         p = Path(path) if path else notebooks_dir() / "default.json"
+        nb._path = p
         if not p.is_file():
             return nb
         try:

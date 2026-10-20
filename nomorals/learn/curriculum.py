@@ -1117,6 +1117,11 @@ class ExamSim:
         elapsed = time.time() - (self._q_started[index]
                                  if index < len(self._q_started) else time.time())
         verdict, detail = self._grade(q, response)
+        # One scored answer per question: re-answering REPLACES the prior
+        # attempt (a candidate changing their answer). Appending every
+        # attempt let finish() count more answers than questions and
+        # report scores above 100%.
+        self._answers = [a for a in self._answers if a["index"] != index]
         self._answers.append({"index": index, "response": response,
                               "verdict": verdict, "detail": detail,
                               "seconds": round(elapsed, 1),

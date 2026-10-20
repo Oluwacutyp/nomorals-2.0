@@ -400,8 +400,15 @@ class CodeWorkspace:
         actually removes (``git clean -fd``)."""
         args = ["clean", "-fd" if force else "-nd"]
         proc = self._checked(args, "git clean")
-        removed = [l[13:] for l in proc.stdout.splitlines()
-                   if l.startswith("Would remove ")]
+        # git phrases the two modes differently: a dry run prints
+        # "Would remove X", a real clean prints "Removing X". Parse both —
+        # a forced clean that deleted files must not report removed=[].
+        removed = []
+        for line in proc.stdout.splitlines():
+            if line.startswith("Would remove "):
+                removed.append(line[len("Would remove "):])
+            elif line.startswith("Removing "):
+                removed.append(line[len("Removing "):])
         return {"removed": removed, "dry_run": not force}
 
     # ── commit / sync (extended) ────────────────────────────────────────

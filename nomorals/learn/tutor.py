@@ -1004,14 +1004,20 @@ def restore_session(chat_key: str, *,
 
 
 def get_notebook(chat_key: str = "") -> Any:
-    """The mistake notebook (shared process-wide by default)."""
+    """The mistake notebook (shared process-wide by default).
+
+    Loaded from the SAME on-disk store ``/learn flashcards`` reads, and
+    auto-saved on every mutation — a mistake the tutor notes here is the
+    card the flashcards surface reviews, and it survives a restart.
+    """
     from .flashcards import MistakeNotebook
     if chat_key not in _NOTEBOOKS:
         try:
             from ..memory.repetition import RepetitionScheduler
-            _NOTEBOOKS[chat_key] = MistakeNotebook(RepetitionScheduler())
+            _NOTEBOOKS[chat_key] = MistakeNotebook.load(
+                scheduler=RepetitionScheduler())
         except Exception:  # noqa: BLE001
-            _NOTEBOOKS[chat_key] = MistakeNotebook(None)
+            _NOTEBOOKS[chat_key] = MistakeNotebook.load()
     return _NOTEBOOKS[chat_key]
 
 
