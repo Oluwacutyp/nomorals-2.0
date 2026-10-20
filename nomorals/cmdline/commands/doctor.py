@@ -173,6 +173,17 @@ def _cmd_models(args: argparse.Namespace, context: Any) -> int:
     if getattr(args, "promote_local", ""):
         path = str(args.promote_local).strip()
         lora = str(getattr(args, "lora", "") or "").strip()
+        # Promoting a path that does not exist writes a boot contract
+        # the next boot cannot serve (llama_cpp primary, no server,
+        # model-less chats) while reporting success — refuse it the
+        # way the setup wizard's GGUF branch refuses a missing file.
+        if not Path(path).expanduser().is_file():
+            _emit(args, {"ok": False, "local_model": path,
+                         "error": "no such GGUF file"},
+                  f"cannot promote {path}: no GGUF file there — "
+                  "download or copy the model first, then re-run. "
+                  "Nothing was written.")
+            return 1
         update = {
             "NM_LLM_PROVIDER": "llama_cpp",
             "NM_LLM_LOCAL_MODEL": path,
@@ -180,7 +191,7 @@ def _cmd_models(args: argparse.Namespace, context: Any) -> int:
         }
         if lora:
             update["NM_LLM_LOCAL_LORA"] = lora
-        _env_update_home(context, update)
+        written = _env_update_home(context, update)
         try:
             context.settings.llm.provider = "llama_cpp"
             context.settings.llm.local_model = path
@@ -193,8 +204,8 @@ def _cmd_models(args: argparse.Namespace, context: Any) -> int:
         lora_line = f"  lora on top: {lora}\n" if lora else ""
         _emit(args, payload,
               f"local model promoted: {path}\n" + lora_line +
-              "  provider -> llama_cpp, auto-start on — written to the home "
-              ".env; the next boot runs entirely on it")
+              f"  provider -> llama_cpp, auto-start on — written to "
+              f"{written}; the next boot runs entirely on it")
         return 0
     if args.activate:
         record = registry.activate(args.activate)
@@ -302,11 +313,38 @@ def _cmd_models_doctor(args: argparse.Namespace, context: Any) -> int:
     return rc
 
 
+class _SetupAborted(Exception):
+    """The wizard's stdin closed (EOF / Ctrl-C) before a choice was made."""
+
+
 def _cmd_setup(args: argparse.Namespace, context: Any) -> int:
     """Guided model setup wizard."""
+    try:
+        return _cmd_setup_interactive(args, context)
+    except _SetupAborted:
+        # Aborts can only arise before the write step (the test prompt
+        # handles its own EOF), so nothing has been written yet.
+        print("\nSetup aborted — no configuration was written.")
+        return 1
+
+
+def _cmd_setup_interactive(args: argparse.Namespace, context: Any) -> int:
     import os
     from pathlib import Path
-    
+
+    def _ask(prompt: str = "") -> str:
+        """input() that turns EOF / Ctrl-C into a clean abort.
+
+        A wizard whose stdin closes mid-flow (piped input, Ctrl-D)
+        must stop with a sentence, not an EOFError traceback — and
+        must never fall through to writing a configuration the user
+        did not finish choosing.
+        """
+        try:
+            return input(prompt)
+        except (EOFError, KeyboardInterrupt):
+            raise _SetupAborted from None
+
     print("🧙 NoMorals AI - Guided Model Setup\n")
     print("This wizard will help you configure an LLM provider.\n")
     
@@ -314,7 +352,7 @@ def _cmd_setup(args: argparse.Namespace, context: Any) -> int:
     active = context.router.active_model
     if active and active != "mock":
         print(f"Current active model: {active}")
-        choice = input("Reconfigure? [y/N] ").strip().lower()
+        choice = _ask("Reconfigure? [y/N] ").strip().lower()
         if choice != "y":
             print("Keeping current configuration.")
             return 0
@@ -329,12 +367,18 @@ def _cmd_setup(args: argparse.Namespace, context: Any) -> int:
     print("  4. OpenAI (requires paid API key)")
     print("  5. Skip (keep mock provider)\n")
     
-    choice = input("Select [1-5]: ").strip()
-    
+    choice = _ask("Select [1-5]: ").strip()
+
     if choice == "5" or not choice:
         print("Skipping setup. You can run `nm setup` again later.")
         return 0
-    
+    if choice not in ("1", "2", "3", "4"):
+        # Falling through with an empty env_vars used to print
+        # "✅ Configuration written" over a write of nothing.
+        print(f"❌ Unknown selection {choice!r} — enter 1-5. "
+              "Nothing was written.")
+        return 1
+
     # Pairs are written via _env_update_home at the end: the file the
     # next boot actually reads (cwd .env wins over the home .env), with
     # every unrelated line of the operator's file preserved.
@@ -344,8 +388,12 @@ def _cmd_setup(args: argparse.Namespace, context: Any) -> int:
         # OpenRouter setup
         print("\n📡 OpenRouter Setup")
         print("Get your API key at: https://openrouter.ai/keys\n")
-        api_key = input("Enter your OpenRouter API key: ").strip()
-        
+        api_key = _ask("Enter your OpenRouter API key: ").strip()
+
+        if not api_key:
+            print("❌ No API key entered — nothing was written. "
+                  "Re-run `nm setup` when you have the key.")
+            return 1
         if not api_key.startswith("sk-or-"):
             print("⚠️  Warning: OpenRouter keys should start with 'sk-or-'")
         
@@ -363,17 +411,17 @@ def _cmd_setup(args: argparse.Namespace, context: Any) -> int:
         print("  3. google/gemma-4-31b-it:free (vision)")
         print("  4. Enter custom model ID\n")
         
-        model_choice = input("Select [1-4]: ").strip()
+        model_choice = _ask("Select [1-4]: ").strip()
         model_map = {
             "1": "nvidia/nemotron-3-ultra-550b-a55b:free",
             "2": "openai/gpt-oss-120b:free",
             "3": "google/gemma-4-31b-it:free",
         }
-        
+
         if model_choice in model_map:
             model_id = model_map[model_choice]
         else:
-            model_id = input("Enter model ID: ").strip()
+            model_id = _ask("Enter model ID: ").strip()
 
         env_vars["NM_OPENROUTER_MODEL"] = model_id
 
@@ -381,8 +429,13 @@ def _cmd_setup(args: argparse.Namespace, context: Any) -> int:
         # Hugging Face setup
         print("\n🤗 Hugging Face Setup")
         print("Get your token at: https://huggingface.co/settings/tokens\n")
-        token = input("Enter your HF token: ").strip()
-        
+        token = _ask("Enter your HF token: ").strip()
+
+        if not token:
+            print("❌ No token entered — nothing was written. "
+                  "Re-run `nm setup` when you have the token.")
+            return 1
+
         env_vars["HF_TOKEN"] = token
         env_vars["NM_LLM_PROVIDER"] = "hf_serverless"
         
@@ -391,16 +444,16 @@ def _cmd_setup(args: argparse.Namespace, context: Any) -> int:
         print("  2. Qwen/Qwen3-8B")
         print("  3. Enter custom model ID\n")
         
-        model_choice = input("Select [1-3]: ").strip()
+        model_choice = _ask("Select [1-3]: ").strip()
         model_map = {
             "1": "Sao10K/L3-8B-Stheno-v3.2",
             "2": "Qwen/Qwen3-8B",
         }
-        
+
         if model_choice in model_map:
             model_id = model_map[model_choice]
         else:
-            model_id = input("Enter model ID: ").strip()
+            model_id = _ask("Enter model ID: ").strip()
         
         env_vars["NM_HF_MODEL"] = model_id
         
@@ -413,16 +466,16 @@ def _cmd_setup(args: argparse.Namespace, context: Any) -> int:
         print("  2. Llama-3.2-3B-Instruct (3B, ~2GB Q4_K_M)")
         print("  3. Enter path to existing GGUF file\n")
         
-        model_choice = input("Select [1-3]: ").strip()
-        
+        model_choice = _ask("Select [1-3]: ").strip()
+
         if model_choice == "3":
-            model_path = input("Enter path to GGUF file: ").strip()
+            model_path = _ask("Enter path to GGUF file: ").strip()
         else:
             print("\nTo download a model:")
             print("  1. Go to https://huggingface.co/models?search=gguf")
             print("  2. Download a Q4_K_M quantized model")
             print("  3. Place it in ~/.nomorals/models/")
-            model_path = input("\nEnter path to downloaded GGUF file: ").strip()
+            model_path = _ask("\nEnter path to downloaded GGUF file: ").strip()
         
         if not Path(model_path).exists():
             print(f"⚠️  File not found: {model_path}")
@@ -440,17 +493,26 @@ def _cmd_setup(args: argparse.Namespace, context: Any) -> int:
         # OpenAI setup
         print("\n🤖 OpenAI Setup")
         print("Get your API key at: https://platform.openai.com/api-keys\n")
-        api_key = input("Enter your OpenAI API key: ").strip()
-        
+        api_key = _ask("Enter your OpenAI API key: ").strip()
+
+        if not api_key:
+            print("❌ No API key entered — nothing was written. "
+                  "Re-run `nm setup` when you have the key.")
+            return 1
         if not api_key.startswith("sk-"):
             print("⚠️  Warning: OpenAI keys should start with 'sk-'")
-        
+
         env_vars["NM_LLM_PROVIDER"] = "openai"
         # The router passes llm.openai_api_key (NM_OPENAI_API_KEY) to
         # the provider; a bare OPENAI_API_KEY is never read, so the old
         # write left the provider keyless.
         env_vars["NM_OPENAI_API_KEY"] = api_key
         env_vars["NM_OPENAI_MODEL"] = "gpt-4o-mini"
+        # llm.openai_base_url DEFAULTS to the local Ollama shim
+        # (http://localhost:11434/v1) — without this line the booted
+        # "openai" provider sends the owner's OpenAI key to localhost
+        # with an OpenAI model name, and every chat fails there.
+        env_vars["NM_OPENAI_BASE_URL"] = "https://api.openai.com/v1"
 
     # Write to the .env the next boot reads, preserving the rest of
     # the operator's file (comments, commented-out keys, other settings).
@@ -462,7 +524,13 @@ def _cmd_setup(args: argparse.Namespace, context: Any) -> int:
     
     # Offer to test
     print("\nTest the configuration now? [Y/n]")
-    test_choice = input().strip().lower()
+    try:
+        test_choice = input().strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        # The configuration IS written at this point; a closed stdin
+        # just means "don't test", never an abort and never a crash.
+        test_choice = "n"
+        print("(no input available — skipping the test)")
     
     if test_choice != "n":
         print("\n🧪 Testing configuration...")
