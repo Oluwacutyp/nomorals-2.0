@@ -1,17 +1,16 @@
-"""Pass #16 — commerce/money guards: the money_apply tool must not submit.
+"""Pass #16 (owner-corrected 2026-10-19) — commerce/money: money_apply
+follows the owner's design.
 
-The ``money_apply`` tool is registered with ``capability=NET_OUT``
-(non-confirmable) and took ``submit: bool`` — prose said "pass
-submit=true with an explicit user instruction", but nothing enforced
-it. An LLM setting ``submit=True`` on its own initiative submitted a
-gig application in the owner's name with no confirmation gate, no
-trial-pattern go-ahead, bypassing the entire authority design that
-``GigsAdapter.submit`` (explicit per-gig go-ahead) and the
-``/money apply <gig_id> submit`` chat path (owner-only, user typed the
-word) enforce.
+The owner's design: ``money_apply`` drafts AND submits. ``submit=true``
+is passed with an explicit user instruction and the tool submits
+immediately via ``GigApplier.submit(explicit=True)``. The default
+(``submit`` omitted/False) is draft/show only — never a surprise
+submission. An unknown gig with submit=true gets an honest error, not
+a submission attempt.
 
-The tool is now draft/show only. Submission stays on the two gated
-paths.
+(An earlier pass removed the submit parameter on the auditor's own
+call; the owner corrected it — "That was my design" — and it was
+restored. These tests pin the design as the owner specified it.)
 """
 
 import unittest
@@ -38,44 +37,52 @@ def _registered():
     return reg.calls
 
 
-class MoneyApplyToolGateTests(unittest.TestCase):
-    def test_no_submit_parameter_exposed(self):
-        """The tool schema must not offer a submit knob to the model."""
+class MoneyApplyDesignTests(unittest.TestCase):
+    def test_submit_parameter_exposed(self):
+        """Owner design: the tool schema offers submit for use with an
+        explicit user instruction."""
         calls = _registered()
         self.assertIn("money_apply", calls)
         params = calls["money_apply"].get("parameters") or {}
-        self.assertNotIn(
+        self.assertIn(
             "submit", params,
-            "money_apply must not expose submit — an LLM-set bool is not "
-            "an explicit user instruction")
+            "money_apply must expose submit (owner design: submit=true "
+            "with an explicit user instruction submits immediately)")
 
-    def test_tool_fn_has_no_submit_kwarg(self):
-        """The underlying function must not accept a submit flag either."""
+    def test_tool_fn_accepts_submit(self):
         import inspect
         calls = _registered()
         fn = calls["money_apply"]["fn"]
-        self.assertNotIn(
-            "submit", inspect.signature(fn).parameters,
-            "money_apply() must not take submit — draft/show only")
+        sig = inspect.signature(fn)
+        self.assertIn("submit", sig.parameters)
+        self.assertEqual(sig.parameters["submit"].default, False)
 
-    def test_tool_never_submits(self):
-        """Even a crafted call cannot flip the tool into submitting."""
+    def test_default_is_draft_only(self):
+        """Omitting submit must never submit."""
         calls = _registered()
         fn = calls["money_apply"]["fn"]
-        # No registered board submitters in this env → but the point is
-        # the tool must not even attempt a submit path.
         res = fn(gig_id="nonexistent-gig")
         self.assertIsInstance(res, dict)
         self.assertNotEqual(res.get("status"), "submitted")
-        self.assertFalse(res.get("ok") and res.get("status") == "submitted")
 
-    def test_description_points_to_explicit_path(self):
-        """The tool description must direct explicit submits to the
-        owner-typed command, not invite submit=true."""
+    def test_submit_unknown_gig_honest_error(self):
+        """submit=true on an unknown gig: honest 'no gig' error, and no
+        submission is attempted."""
+        calls = _registered()
+        fn = calls["money_apply"]["fn"]
+        res = fn(gig_id="nonexistent-gig", submit=True)
+        self.assertIsInstance(res, dict)
+        self.assertFalse(res.get("ok"))
+        self.assertIn("no gig", (res.get("error") or ""))
+        self.assertNotEqual(res.get("status"), "submitted")
+
+    def test_description_names_explicit_instruction(self):
+        """The description must tie submit=true to an explicit user
+        instruction (the owner's design contract)."""
         calls = _registered()
         desc = (calls["money_apply"].get("description") or "").lower()
-        self.assertNotIn("submit=true", desc)
-        self.assertNotIn("submit immediately", desc)
+        self.assertIn("submit=true", desc)
+        self.assertIn("explicit user instruction", desc)
 
 
 class ExplicitChatPathPinTests(unittest.TestCase):
