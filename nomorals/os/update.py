@@ -11,14 +11,23 @@
 If *any* step fails, the pre-update snapshot is restored automatically and
 the report says so.  The system is never left half-updated: a failed pull
 leaves the tree untouched (``--ff-only`` is all-or-nothing), and a failed
-health check triggers a full state restore.
+migration or health check restores BOTH the state snapshot and the code
+tree (the files the pull changed are put back and HEAD returns to the
+pre-update commit).
+
+The owner's own uncommitted changes are never silently destroyed: before
+pulling, the update fetches and refuses up front when a locally modified
+file collides with the incoming change set; disjoint local edits are left
+untouched by the apply, by a rollback, and by crash recovery (the tree
+restore only ever touches files the pull itself changed).
 
 Crash recovery: every run appends to an update journal
 (``<home>/update-journal.jsonl``).  :meth:`recover_interrupted` replays the
 journal at boot — a run with no terminal event whose last step reached a
-dangerous point (migrations applied) is rolled back automatically; a run
-that died before that is marked aborted.  Failed versions are quarantined
-so a bad update is never retried blindly.
+dangerous point (migrations begun/applied, health checks running) is
+rolled back automatically; a run that died before that is marked aborted.
+Failed versions are quarantined so a bad update is never retried blindly,
+and a pull that lands on a quarantined version is undone again.
 
 Health checks are plain callables ``() -> (ok: bool, detail: str)`` so tests
 can inject a broken one to prove the rollback path.
@@ -29,6 +38,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 import time
 import uuid
 from collections.abc import Callable
@@ -36,6 +46,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from ..core.filelock import lock_exclusive_nb, unlock as _unlock_file
 from ..core.logging_setup import get_logger
 from .snapshots import SnapshotManager
 
@@ -54,6 +65,7 @@ HealthCheckFn = Callable[[], "tuple[bool, str]"]
 JOURNAL_FILENAME = "update-journal.jsonl"
 HISTORY_FILENAME = "update-history.jsonl"
 QUARANTINE_FILENAME = "update-quarantine.json"
+UPDATE_LOCK_FILENAME = "update.lock"
 
 #: Steps at/after which a crash leaves the system in a state that must be
 #: rolled back (migrations may have partially applied).
@@ -119,15 +131,51 @@ def default_health_checks(
     """
     checks: list[HealthCheckFn] = []
 
-    def _import() -> tuple[bool, str]:
-        try:
-            import nomorals  # noqa: F401
+    if repo_dir is not None:
 
-            from ..version import __version__
+        def _import() -> tuple[bool, str]:
+            # Exercise the code IN THE TREE, in a fresh interpreter. This
+            # process already imported the OLD nomorals before the pull,
+            # so an in-process `import nomorals` would return the cached
+            # (pre-update) package and the check would pass vacuously
+            # even when the pulled code cannot import at all.
+            env = dict(os.environ)
+            existing = env.get("PYTHONPATH", "")
+            env["PYTHONPATH"] = str(repo_dir) + (
+                os.pathsep + existing if existing else "")
+            try:
+                proc = subprocess.run(
+                    [sys.executable, "-c",
+                     "import nomorals;"
+                     " from nomorals.version import __version__;"
+                     " print(__version__)"],
+                    cwd=str(repo_dir), env=env,
+                    capture_output=True, text=True, encoding="utf-8",
+                    errors="replace", timeout=180,
+                )
+            except subprocess.TimeoutExpired:
+                return False, "import check timed out after 180s"
+            except Exception as exc:  # noqa: BLE001 - the check IS the report
+                return False, f"import check could not run: {exc}"
+            if proc.returncode != 0:
+                tail = "\n".join(
+                    (proc.stderr or "").strip().splitlines()[-3:])
+                return False, f"import failed in tree: {tail}"
+            version = (proc.stdout or "").strip().splitlines()
+            return True, (f"nomorals {version[-1] if version else '?'}"
+                          " imports (fresh interpreter, tree code)")
 
-            return True, f"nomorals {__version__} imports"
-        except Exception as exc:  # noqa: BLE001 - the check IS the report
-            return False, f"import failed: {exc}"
+    else:
+
+        def _import() -> tuple[bool, str]:
+            try:
+                import nomorals  # noqa: F401
+
+                from ..version import __version__
+
+                return True, f"nomorals {__version__} imports"
+            except Exception as exc:  # noqa: BLE001 - the check IS the report
+                return False, f"import failed: {exc}"
 
     checks.append(_import)
 
@@ -207,11 +255,56 @@ class UpdateManager:
         self.journal_path = home / JOURNAL_FILENAME
         self.history_path = home / HISTORY_FILENAME
         self.quarantine_path = home / QUARANTINE_FILENAME
+        self.lock_path = home / UPDATE_LOCK_FILENAME
+        #: Code-move bookkeeping for the transaction in flight ("" when
+        #: this run did not move the tree): the commit to restore on
+        #: rollback and the commit the pull landed on.
+        self._tx_from_sha = ""
+        self._tx_to_sha = ""
 
     # ── public ─────────────────────────────────────────────────────────────
 
     def run(self, *, pull: bool = True) -> UpdateReport:
-        """Execute the update transaction. Never raises on update failure."""
+        """Execute the update transaction. Never raises on update failure.
+
+        One update at a time per install home: a second concurrent run
+        is refused (two transactions interleaving pulls, migrations and
+        rollbacks over one tree/journal cannot both be honest).
+        """
+        lock_fd = self._acquire_update_lock()
+        if lock_fd is None:
+            report = UpdateReport()
+            report.error = ("another update is already running over this "
+                            "install — refusing to run two updates at once")
+            report.record("lock", False, report.error)
+            self._append_history(report)
+            return report
+        try:
+            return self._run(pull=pull)
+        finally:
+            self._release_update_lock(lock_fd)
+
+    def _acquire_update_lock(self) -> int | None:
+        """Take the per-home update lock (non-blocking). None = held."""
+        try:
+            self.lock_path.parent.mkdir(parents=True, exist_ok=True)
+            fd = os.open(self.lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+        except OSError:
+            _log.debug("could not open update lock", exc_info=True)
+            return None
+        if lock_exclusive_nb(fd):
+            return fd
+        os.close(fd)
+        return None
+
+    @staticmethod
+    def _release_update_lock(fd: int) -> None:
+        try:
+            _unlock_file(fd)
+        finally:
+            os.close(fd)
+
+    def _run(self, *, pull: bool = True) -> UpdateReport:
         started = time.time()
         report = UpdateReport()
         run_id = uuid.uuid4().hex[:12]
@@ -219,6 +312,26 @@ class UpdateManager:
 
         # Step 0: snapshot of the current tree sha (for post-pull checks).
         previous_sha = self._git_sha() if pull else ""
+        self._tx_from_sha = previous_sha
+        self._tx_to_sha = ""
+
+        # Step 0.5: preflight — never destroy the owner's uncommitted
+        # work. A locally modified file that the incoming update also
+        # changes refuses the update up front (nothing is pulled);
+        # disjoint local edits are fine: neither the pull nor a later
+        # tree restore touches them.
+        if pull:
+            proceed, detail = self._preflight_pull()
+            if not proceed:
+                report.record("working_tree", False, detail)
+                report.error = detail
+                report.seconds = time.time() - started
+                self._journal({"run_id": run_id, "event": "aborted",
+                               "ts": time.time(), "error": report.error})
+                self._append_history(report)
+                return report
+            if detail:
+                report.record("working_tree", True, detail)
 
         # Step 1: pre-update snapshot — the rollback anchor.
         try:
@@ -242,9 +355,10 @@ class UpdateManager:
         if pull:
             ok, detail = self._git_pull()
             report.record("git_pull", ok, detail)
-            self._journal({"run_id": run_id, "event": "step", "step": "git_pull",
-                           "ts": time.time(), "ok": ok, "detail": detail})
             if not ok:
+                self._journal({"run_id": run_id, "event": "step",
+                               "step": "git_pull", "ts": time.time(),
+                               "ok": ok, "detail": detail})
                 report.error = f"git pull failed: {detail}"
                 report.seconds = time.time() - started
                 self._journal({"run_id": run_id, "event": "aborted",
@@ -252,13 +366,28 @@ class UpdateManager:
                 self._append_history(report)
                 return report
             new_sha = self._git_sha()
+            self._tx_to_sha = new_sha
+            self._journal({"run_id": run_id, "event": "step", "step": "git_pull",
+                           "ts": time.time(), "ok": ok, "detail": detail,
+                           "from_sha": previous_sha, "to_sha": new_sha})
             if new_sha and self._is_quarantined(new_sha):
+                # Undo the pull: the tree must not be left sitting on a
+                # version already known to fail — any restart would run
+                # it. The restore only touches files the pull changed.
+                undone, undo_detail = (
+                    False, "tree was already at the quarantined commit "
+                    "before this run; nothing to undo")
+                if previous_sha and new_sha != previous_sha:
+                    undone, undo_detail = self._restore_tree(previous_sha)
+                report.record("git_restore", undone, undo_detail)
                 report.error = (
                     f"pulled version {new_sha[:12]} is quarantined"
                     " (it failed a previous update) — refusing to apply it."
-                    + (f" Undo the pull with: git -C {self.repo_dir} reset"
+                    + (f" The pull was undone; the tree is back at"
+                       f" {previous_sha[:12]}." if undone else
+                       f" Undo the pull with: git -C {self.repo_dir} reset"
                        f" --hard {previous_sha[:12]}" if previous_sha else "")
-                    + " Or clear the quarantine explicitly to retry.")
+                    + " Clear the quarantine explicitly to retry.")
                 report.seconds = time.time() - started
                 self._journal({"run_id": run_id, "event": "aborted",
                                "ts": time.time(), "error": report.error})
@@ -270,7 +399,14 @@ class UpdateManager:
                            "ts": time.time(), "ok": True,
                            "detail": "skipped (--no-pull)"})
 
-        # Step 3: migrations.
+        # Step 3: migrations. The begin entry is journaled BEFORE the
+        # step runs: a crash inside the migration itself is the most
+        # dangerous interruption there is (schema half-applied), and
+        # crash recovery can only know that if the journal says the
+        # step was entered — journaling only the outcome would mark a
+        # mid-migration death as "died before dangerous steps".
+        self._journal({"run_id": run_id, "event": "step", "step": "migrate",
+                       "ts": time.time(), "phase": "begin"})
         try:
             applied, version = self._migrate()
             report.record(
@@ -369,22 +505,38 @@ class UpdateManager:
         if terminal is not None:
             return {"recovered": False, "reason": "last run terminated cleanly",
                     "run_id": last["run_id"]}
-        steps = [e.get("step", "").split(":", 1)[-1] for e in events
+        steps = [str(e.get("step", "")) for e in events
                  if e.get("event") == "step"]
+        # "health:<name>" steps belong to the health phase; a bare
+        # prefix test keeps them dangerous without mangling the names.
+        dangerous = any(
+            s in _DANGEROUS_STEPS or s.split(":", 1)[0] in _DANGEROUS_STEPS
+            for s in steps)
         snap_id = next((e.get("snapshot") for e in events
                         if e.get("event") == "step"
                         and e.get("step") == "snapshot"), "")
+        from_sha = next((str(e.get("from_sha", "")) for e in events
+                         if e.get("event") == "step"
+                         and e.get("step") == "git_pull"), "")
         receipt: dict[str, Any] = {
             "recovered": True, "run_id": last["run_id"],
             "last_steps": steps, "snapshot": snap_id,
         }
-        if snap_id and any(s in _DANGEROUS_STEPS for s in steps):
+        if snap_id and dangerous:
             try:
                 self.snapshots.restore(snap_id, force=True)
                 receipt["action"] = "rolled_back"
                 receipt["restored_snapshot"] = snap_id
                 _log.warning("crash recovery: rolled back interrupted update"
                              " %s to %s", last["run_id"], snap_id)
+                if from_sha:
+                    tree_ok, tree_detail = self._restore_tree(from_sha)
+                    receipt["code_restored"] = tree_ok
+                    if not tree_ok:
+                        receipt["action"] = "rolled_back_state_only"
+                        receipt["code_restore_error"] = tree_detail
+                        _log.error("crash recovery tree restore failed: %s",
+                                   tree_detail)
             except Exception as exc:  # noqa: BLE001 — recovery must report
                 receipt["action"] = "rollback_failed"
                 receipt["error"] = f"{type(exc).__name__}: {exc}"
@@ -499,6 +651,120 @@ class UpdateManager:
             return []
         return [{"run_id": rid, "events": runs[rid]} for rid in order]
 
+    # ── git helpers ──────────────────────────────────────────────────────
+
+    def _git_out(self, args: list[str], timeout: int = 60) -> tuple[int, str, str]:
+        """Run git in the repo; (returncode, stdout, stderr). Never raises."""
+        try:
+            proc = subprocess.run(
+                [self.git_bin, "-C", str(self.repo_dir), *args],
+                capture_output=True, text=True, encoding="utf-8",
+                errors="replace", timeout=timeout,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+            return 1, "", str(exc)
+        return proc.returncode, proc.stdout or "", proc.stderr or ""
+
+    def _dirty_tracked_files(self) -> list[str]:
+        """Locally modified tracked files (untracked files excluded:
+        neither a pull nor a tree restore can destroy those)."""
+        rc, out, _ = self._git_out(
+            ["status", "--porcelain", "--untracked-files=no"])
+        if rc != 0:
+            return []  # not a repo / git missing — the pull reports it
+        files: list[str] = []
+        for line in out.splitlines():
+            if len(line) < 4:
+                continue
+            path = line[3:].strip()
+            if " -> " in path:  # rename: the destination is what's dirty
+                path = path.split(" -> ", 1)[1]
+            files.append(path.strip('"'))
+        return files
+
+    def _git_changed_files(self, from_ref: str, to_ref: str) -> list[str]:
+        rc, out, _ = self._git_out(["diff", "--name-only", from_ref, to_ref])
+        if rc != 0:
+            return []
+        return [line.strip() for line in out.splitlines() if line.strip()]
+
+    def _preflight_pull(self) -> tuple[bool, str]:
+        """Decide whether pulling is safe for the owner's local changes.
+
+        Returns (proceed, detail). No local tracked changes → proceed
+        silently. Changes that collide with the incoming change set →
+        refuse (detail explains; nothing has been pulled or restored).
+        Disjoint changes → proceed, with the detail naming what is
+        being preserved.
+        """
+        dirty = self._dirty_tracked_files()
+        if not dirty:
+            return True, ""
+        rc, _out, err = self._git_out(["fetch", "--quiet"], timeout=300)
+        if rc != 0:
+            return False, (
+                "uncommitted local changes present and the incoming "
+                "update could not be fetched to check them against it "
+                f"(git fetch failed: {err.strip().splitlines()[-1] if err.strip() else 'unknown error'})"
+                " — refusing to pull blind. Commit or stash the local "
+                "changes and retry.")
+        rc, upstream, _ = self._git_out(["rev-parse", "@{upstream}"])
+        upstream = upstream.strip()
+        if rc != 0 or not upstream:
+            return False, (
+                "uncommitted local changes present but the upstream "
+                "branch cannot be determined to check them against the "
+                "incoming update — refusing to pull blind. Commit or "
+                "stash the local changes and retry.")
+        incoming = self._git_changed_files("HEAD", upstream)
+        collisions = sorted(set(dirty) & set(incoming))
+        if collisions:
+            return False, (
+                "uncommitted local changes collide with the incoming "
+                "update: " + ", ".join(collisions)
+                + " — commit or stash them first; nothing was pulled "
+                "and nothing was overwritten.")
+        return True, ("local changes preserved (untouched by this "
+                      "update): " + ", ".join(sorted(dirty)))
+
+    def _restore_tree(self, from_sha: str) -> tuple[bool, str]:
+        """Put the code tree back to ``from_sha``.
+
+        Only files that differ between the current HEAD and
+        ``from_sha`` are touched (checked out from ``from_sha``, or
+        removed when the update added them), so uncommitted local
+        edits to any other file survive. HEAD and the index are then
+        moved with ``reset --mixed``, which never touches the working
+        tree. Returns (ok, detail).
+        """
+        if not from_sha:
+            return False, "no pre-update commit recorded"
+        current = self._git_sha()
+        if not current:
+            return False, "cannot read current HEAD"
+        if current == from_sha:
+            return True, f"tree already at {from_sha[:12]}"
+        changed = self._git_changed_files(from_sha, current)
+        for name in changed:
+            rc, _, _ = self._git_out(["cat-file", "-e", f"{from_sha}:{name}"])
+            if rc == 0:
+                rc, _, err = self._git_out(["checkout", from_sha, "--", name])
+                if rc != 0:
+                    return False, f"checkout of {name} failed: {err.strip()}"
+            else:
+                # Added by the update: remove it from the working tree.
+                try:
+                    (self.repo_dir / name).unlink(missing_ok=True)
+                except OSError as exc:
+                    return False, f"could not remove added file {name}: {exc}"
+        rc, _, err = self._git_out(["reset", "--mixed", from_sha])
+        if rc != 0:
+            return False, f"git reset --mixed {from_sha[:12]} failed: {err.strip()}"
+        if self._git_sha() != from_sha:
+            return False, "HEAD did not return to the pre-update commit"
+        return True, (f"tree restored to {from_sha[:12]} "
+                      f"({len(changed)} file(s) put back)")
+
     # ── steps ──────────────────────────────────────────────────────────────
 
     def _git_pull(self) -> tuple[bool, str]:
@@ -533,18 +799,32 @@ class UpdateManager:
         self, report: UpdateReport, started: float, error: str, *,
         run_id: str = "", quarantine_sha: str = "",
     ) -> UpdateReport:
-        """Restore the pre-update snapshot. The update is NOT ok."""
+        """Restore the pre-update snapshot AND the pre-update code tree.
+
+        The update is NOT ok, and it only counts as rolled back when
+        both halves are back: state (snapshot) and code (the files the
+        pull changed, with HEAD returned to the pre-pull commit). A
+        state-only restore would leave the new — failed — code in
+        place for the next boot to run.
+        """
         report.error = error
+        state_ok = False
         try:
             self.snapshots.restore(report.pre_update_snapshot, force=True)
-            report.rolled_back = True
+            state_ok = True
             report.record("rollback", True,
                           f"restored {report.pre_update_snapshot}")
             _log.warning("update rolled back: %s", error)
         except Exception as exc:  # noqa: BLE001 - rollback failure is critical
-            report.rolled_back = False
             report.record("rollback", False, f"{type(exc).__name__}: {exc}")
             _log.error("ROLLBACK FAILED: %s", exc, exc_info=True)
+        tree_ok = True
+        if self._tx_from_sha:
+            tree_ok, detail = self._restore_tree(self._tx_from_sha)
+            report.record("git_restore", tree_ok, detail)
+            if not tree_ok:
+                _log.error("TREE ROLLBACK FAILED: %s", detail)
+        report.rolled_back = state_ok and tree_ok
         if quarantine_sha:
             self._quarantine_add(quarantine_sha, error)
             report.quarantined = quarantine_sha
