@@ -55,6 +55,17 @@ sample names no single process to arrest — arrest stays the manual
 ``/immune arrest <id> system`` path; nothing is fabricated here.
 An extra ``enforce_fn`` may be injected (tests, future wiring); it
 runs after the incident response is already in place.
+
+**Reporting contract (Pass 3):** the sampler job's name carries the
+scheduler's routine-tick marker, so the scheduler's generic per-run
+success alert never fires for it — a tick that sampled nothing (or
+learned routinely, or quarantined under an already-announced
+incident) is a NON-event and reaches no chat surface. Real events —
+an enforcement, an announcement (fever start, incident close, the
+baseline becoming ready), a tick error — are classified by
+:func:`summarize_tick_event` and published once by the sampler tool
+itself. Silent ticks still persist the store and are recorded as
+the job's result: silence is a chat rule, not deleted evidence.
 """
 
 from __future__ import annotations
@@ -81,6 +92,7 @@ __all__ = [
     "STORE_ENV_VAR",
     "STORE_VERSION",
     "IMMUNE_SAMPLER_JOB",
+    "LEGACY_IMMUNE_SAMPLER_JOB",
     "IMMUNE_SAMPLER_TOOL",
     "IMMUNE_SAMPLER_SPEC",
     "IMMUNE_SAMPLER_INTERVAL_S",
@@ -91,6 +103,7 @@ __all__ = [
     "shared_monitor",
     "reset_shared_monitors",
     "ensure_immune_sampler_job",
+    "summarize_tick_event",
 ]
 
 _log = logging.getLogger(__name__)
@@ -111,8 +124,20 @@ STORE_VERSION = 1
 
 #: Durable sampler job: name, tool payload, cadence. One minute: the
 #: process population is cheap to read from /proc, and a runaway is
-#: visible within a minute of starting.
-IMMUNE_SAMPLER_JOB = "immune baseline sampler"
+#: visible within a minute of starting. The name carries the
+#: scheduler's routine-tick marker ("tick" — the same convention as
+#: "agent modes tick" / "improvement tick"), so the scheduler's
+#: generic per-run success alert stays silent for this job: a
+#: sampler tick is telemetry, not news. Real immune events are
+#: published by the sampler tool itself (see
+#: :func:`summarize_tick_event`); genuine job failures still alert
+#: through the scheduler's failure-transition path.
+IMMUNE_SAMPLER_JOB = "immune sampler tick"
+#: The pre-Pass-3 job name. Deployments that registered the sampler
+#: under it still carry that durable row; ``ensure_immune_sampler_job``
+#: retires it so the old (alerting) job does not run alongside the new
+#: one.
+LEGACY_IMMUNE_SAMPLER_JOB = "immune baseline sampler"
 IMMUNE_SAMPLER_TOOL = "__immune_sampler__"
 IMMUNE_SAMPLER_SPEC = "every 1m"
 IMMUNE_SAMPLER_INTERVAL_S = 60.0
@@ -268,6 +293,11 @@ class ImmuneMonitor:
         self._gate_incident = False
         self._fever_started_by_gate = False
         self.announcements: List[str] = []
+        #: Announcements not yet handed to a delivery surface. The
+        #: sampler tool drains these once per tick and publishes the
+        #: real events; without a drainer they simply wait here (the
+        #: full history stays in ``announcements`` / the log).
+        self._pending_announcements: List[str] = []
         self.receipts: List[Any] = []
         self.last_enforcement: Optional[Dict[str, Any]] = None
 
@@ -293,7 +323,22 @@ class ImmuneMonitor:
     def _announce(self, message: str) -> None:
         self.announcements.append(message)
         del self.announcements[:-_MAX_ANNOUNCEMENTS]
+        self._pending_announcements.append(message)
+        del self._pending_announcements[:-_MAX_ANNOUNCEMENTS]
         _log.info("immune: %s", message)
+
+    def drain_announcements(self) -> List[str]:
+        """Announcements made since the last drain (and clear them).
+
+        The delivery handoff for the monitor's news: fever starts,
+        incident closes, the baseline becoming ready. Announcements
+        also stay in :attr:`announcements` (history) and the log —
+        draining decides *notification*, never the evidence.
+        """
+        with self._lock:
+            pending = list(self._pending_announcements)
+            self._pending_announcements.clear()
+            return pending
 
     def _enforce(self, sample: Dict[str, Any]) -> None:
         """The real enforcer handed to the adaptive gate.
@@ -412,7 +457,21 @@ class ImmuneMonitor:
                         "samples": len(self.baseline),
                         "sample": dict(live),
                         "reason": result["reason"]}
+            was_ready = self.baseline.thresholds().status == "ready"
             self.baseline.record(live)
+            if not was_ready and \
+                    self.baseline.thresholds().status == "ready":
+                # A discrete learning milestone — the baseline just
+                # became able to enforce. Announced (so it is news
+                # exactly once); routine samples into an already-warm
+                # baseline announce nothing.
+                th = self.baseline.thresholds()
+                self._announce(
+                    "immune baseline ready — "
+                    f"{len(self.baseline)} samples learned "
+                    f"(spawned p95 {th.spawned_p95:g}, "
+                    f"growth p95 {th.growth_p95:g}); "
+                    "the adaptive gate can now enforce")
             self._persist()
             return {"ok": True, "sampled": True, "learned": True,
                     "enforced": False, "incident": False,
@@ -489,6 +548,67 @@ class ImmuneMonitor:
                 "receipts": len(self.receipts),
                 "last_enforcement": self.last_enforcement,
             }
+
+
+# ── the tick reporting contract ───────────────────────────────────
+
+def _sample_desc(sample: Any) -> str:
+    if not isinstance(sample, dict):
+        return ""
+    try:
+        return (f"spawned {float(sample.get('processes_spawned', 0) or 0):g}, "
+                f"growth {float(sample.get('process_growth', 0) or 0):g}")
+    except (TypeError, ValueError):
+        return ""
+
+
+def summarize_tick_event(result: Any,
+                         announcements: Any = None) -> Optional[Dict[str, Any]]:
+    """Compose THE owner notification for one sampler tick, or None.
+
+    The reporting contract: a tick is news only when something
+    actually happened —
+
+    * the tick **errored** (an error is an event),
+    * the gate **enforced** (critical: an incident opened),
+    * the monitor **announced** (a fever started, an incident
+      closed, the baseline became ready).
+
+    Everything else is a non-event and returns None: no live sample
+    on this platform, a routine sample learned into an already-warm
+    baseline, a sample quarantined under an already-announced
+    incident. Non-events are still recorded — the tick result is the
+    job's ``last_result`` and the baseline store keeps the tick and
+    sample timestamps — silence is a chat-surface rule, not deleted
+    evidence.
+
+    Returns ``{"title": str, "body": str, "critical": bool}``.
+    """
+    if not isinstance(result, dict):
+        return None
+    notes = [str(a).strip() for a in (announcements or []) if str(a).strip()]
+    if result.get("ok") is False or result.get("error"):
+        return {"title": "❌ immune sampler error",
+                "body": str(result.get("error") or "unknown error"),
+                "critical": False}
+    context: List[str] = []
+    desc = _sample_desc(result.get("sample"))
+    if desc:
+        context.append(f"sample: {desc}")
+    context.append(
+        f"quarantined: {result.get('quarantined', 0)} · "
+        f"baseline samples: {result.get('samples', 0)}")
+    if result.get("enforced"):
+        lines = [str(result.get("reason") or "the adaptive gate enforced")]
+        lines += context
+        lines += notes
+        return {"title": "🛡️ immune gate ENFORCED",
+                "body": "\n".join(lines), "critical": True}
+    if notes:
+        return {"title": f"🛡️ {notes[0]}",
+                "body": "\n".join(notes[1:] + context),
+                "critical": False}
+    return None
 
 
 # ── shared monitor ────────────────────────────────────────────────
@@ -572,13 +692,22 @@ def ensure_immune_sampler_job(scheduler: Any, *,
     """Register the durable immune-baseline sampler job. Idempotent.
 
     A job with the sampler's name already at the requested cadence is
-    returned as-is; a stale one is replaced. Best-effort: never
-    raises (a missing scheduler just means no scheduled sampling —
-    ``/immune gate`` still samples on demand).
+    returned as-is; a stale one is replaced. A job still carrying the
+    legacy (pre-Pass-3) name is retired first, so an upgraded
+    deployment does not run the old alerting job alongside the new
+    silent one. Best-effort: never raises (a missing scheduler just
+    means no scheduled sampling — ``/immune gate`` still samples on
+    demand).
     """
     if scheduler is None:
         return None
     try:
+        for job in (scheduler.list_jobs() or []):
+            if _job_field(job, "name") == LEGACY_IMMUNE_SAMPLER_JOB:
+                try:
+                    scheduler.remove(_job_field(job, "id"))
+                except Exception:  # noqa: BLE001 - legacy cleanup is
+                    pass  # best-effort; the new job still registers
         for job in (scheduler.list_jobs() or []):
             if _job_field(job, "name") == IMMUNE_SAMPLER_JOB:
                 if _spec_matches(_job_field(job, "spec"), spec):

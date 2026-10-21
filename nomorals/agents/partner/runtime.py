@@ -2165,8 +2165,8 @@ class PartnerRuntime(
                 except Exception as exc:  # noqa: BLE001 - optional
                     _log.warning(
                         "agent modes tick not registered: %s", exc)
-                # Immune adaptive gate: one durable "immune baseline
-                # sampler" job (every 1m) collecting real process
+                # Immune adaptive gate: one durable "immune sampler
+                # tick" job (every 1m) collecting real process
                 # samples into the persisted adaptive baseline, so the
                 # cancer gate learns from live behaviour and can
                 # actually arm — before this wiring nothing recorded

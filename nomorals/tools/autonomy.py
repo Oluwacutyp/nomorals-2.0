@@ -41,6 +41,10 @@ nervous system through plain language:
   (immune/wiring.py), consulting the adaptive cancer gate. Same
   closure pattern. The monitor is shared per store path, so the
   sampler, ``/immune`` chat and ``nm immune`` all see one baseline.
+  Reporting: the job is a routine tick (silent at the scheduler);
+  the tool itself publishes real immune events (enforcement,
+  incident close, baseline ready, tick error) via the Notifier —
+  non-event ticks publish nothing.
 """
 
 from __future__ import annotations
@@ -384,6 +388,30 @@ def register(registry: Any) -> None:
 
         monitor = wiring.shared_monitor(wiring.default_store_path(_context))
         try:
-            return monitor.tick()
+            result = monitor.tick()
         except Exception as exc:  # noqa: BLE001 - one bad tick never kills the job
-            return {"ok": False, "error": f"immune sampler tick failed: {exc}"}
+            result = {"ok": False,
+                      "error": f"immune sampler tick failed: {exc}"}
+        # Reporting contract (Pass 3): the sampler job is a routine
+        # tick, so the scheduler's generic per-run alert stays silent
+        # for it — real immune events are published HERE, by the
+        # immune system itself, exactly once per event (an
+        # enforcement, a fever/incident/baseline-ready announcement,
+        # a tick error). Non-events — no live sample on this
+        # platform, a routine learned sample, a quarantine under an
+        # already-announced incident — publish NOTHING. The tick
+        # result still returns to the scheduler, which records it as
+        # the job's last_result and in the run ledger: silence is a
+        # chat-surface rule, not deleted evidence.
+        try:
+            event = wiring.summarize_tick_event(
+                result, monitor.drain_announcements())
+            if event is not None:
+                from ..agents.notifier import Notifier
+
+                Notifier(_context).publish(
+                    "immune", event["title"], event["body"],
+                    critical=bool(event.get("critical")))
+        except Exception:  # noqa: BLE001 - reporting never breaks the tick
+            pass
+        return result

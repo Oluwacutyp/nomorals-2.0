@@ -42,12 +42,14 @@ from .wiring import (
     IMMUNE_SAMPLER_JOB,
     IMMUNE_SAMPLER_SPEC,
     IMMUNE_SAMPLER_TOOL,
+    LEGACY_IMMUNE_SAMPLER_JOB,
     BaselineStore,
     ImmuneMonitor,
     default_store_path,
     ensure_immune_sampler_job,
     reset_shared_monitors,
     shared_monitor,
+    summarize_tick_event,
 )
 from .antibodies import AntibodyStore
 from .casefile import CaseFile, build_case
@@ -128,7 +130,9 @@ __all__ = [
     "shared_monitor",
     "reset_shared_monitors",
     "ensure_immune_sampler_job",
+    "summarize_tick_event",
     "IMMUNE_SAMPLER_JOB",
+    "LEGACY_IMMUNE_SAMPLER_JOB",
     "IMMUNE_SAMPLER_TOOL",
     "IMMUNE_SAMPLER_SPEC",
     "IMMUNE_SAMPLER_INTERVAL_S",
