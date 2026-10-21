@@ -2164,7 +2164,8 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
                          "an honest ETA, and — when stuck — the concrete "
                          "stall reason. Milestones (started / step / stalled / "
                          "done) also push proactively through the notifier."),
-                "usage": ("/mission status [id|name] | /mission list | "
+                "usage": ("/mission status [id|name] | /mission results [id|name] | "
+                         "/mission list | "
                          "/mission stall <id> <code> <message> | /mission clear <id> | "
                          "/mission pause <id> | /mission resume <id> | "
                          "/mission cancel <id> [reason] | /mission retry <id> | "

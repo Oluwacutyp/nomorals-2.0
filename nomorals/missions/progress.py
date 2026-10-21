@@ -57,6 +57,9 @@ __all__ = [
     "fmt_duration",
     "MissionMilestones",
     "MissionWatchers",
+    "final_result_digest",
+    "output_step_order",
+    "payload_text",
     "real_plan_steps",
     "box_lines",
     "record_stall",
@@ -64,6 +67,7 @@ __all__ = [
     "render_mission_table",
     "render_progress_bar",
     "render_result_card",
+    "render_results_text",
     "render_sparkline",
     "render_status_card",
     "render_status_text",
@@ -513,6 +517,11 @@ def render_status_text(detail: dict[str, Any], *, style: str = "full") -> str:
         lines.append("state: making progress")
     if p.get("last_error"):
         lines.append(f"last error: {str(p['last_error'])[:160]}")
+    if detail.get("has_outputs") \
+            and str(m.get("status") or "") in {"done", "failed", "cancelled"}:
+        # terminal + stored outputs: point at the deliverable itself —
+        # the status card is telemetry, the results are the product.
+        lines.append(f"results: /mission results {m.get('id')}")
     return "\n".join(ln for ln in lines if ln)
 
 
@@ -647,6 +656,163 @@ def render_result_card(result: dict[str, Any], *, width: int = 62) -> str:
     if result.get("error"):
         lines.append(f"error     {str(result['error'])[:52]}")
     return "\n".join(_box_lines(title, lines, width=width))
+
+
+# ── stored results (the deliverable) ────────────────────────────────────────
+#
+# Step outputs persist in ``mission.state["outputs"]`` (the runner stores
+# each settled step's payload there). The status card above is telemetry —
+# this section is the product: what the mission actually produced, readable
+# in chat via ``/mission results`` / ``nm missions --results``.
+
+#: Per-step output cap for the chat results view — the same bound the
+#: partner reach surface puts on an email body in chat
+#: (``runtime_reach._MAX_BODY_CHARS = 2000``): readable, never a raw dump.
+RESULT_STEP_CAP = 2000
+
+#: Excerpt cap for the terminal milestone push digest. A push is a
+#: notification, not the deliverable — the full text lives behind
+#: ``/mission results <id>``.
+RESULT_DIGEST_CAP = 600
+
+#: Payload keys that carry a step's readable result, in preference order.
+_PAYLOAD_TEXT_KEYS = ("text", "output", "result", "summary", "findings",
+                      "report", "content")
+
+
+def _compact_value(value: Any) -> str:
+    """One-line rendering of a non-text payload value (JSON for nests)."""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, (dict, list, tuple)):
+        try:
+            return json.dumps(value, default=str, sort_keys=True)
+        except (TypeError, ValueError):
+            return str(value)
+    return str(value)
+
+
+def payload_text(payload: Any) -> str:
+    """Readable text for one step's stored payload.
+
+    Agent payloads are dicts (``agent.run`` output, capped at 20 keys by
+    the runner). The readable result wins: the first non-empty of the
+    text-like keys (``text`` / ``output`` / ``result`` / ``summary`` /
+    ``findings`` / ``report`` / ``content``), recursing into a nested
+    dict/list under such a key. With no text-like key, the payload
+    renders as compact ``key: value`` lines — every stored fact visible,
+    never a raw dict repr. Strings pass through; lists join per item.
+    """
+    if payload is None:
+        return ""
+    if isinstance(payload, str):
+        return payload
+    if isinstance(payload, (list, tuple)):
+        return "\n".join(t for t in (payload_text(i) for i in payload) if t)
+    if isinstance(payload, dict):
+        for key in _PAYLOAD_TEXT_KEYS:
+            value = payload.get(key)
+            if isinstance(value, str) and value.strip():
+                return value
+            if isinstance(value, (list, tuple, dict)) and value:
+                text = payload_text(value)
+                if text.strip():
+                    return text
+        lines = []
+        for key, value in payload.items():
+            if value is None or value == "" or value == {} or value == []:
+                continue
+            lines.append(f"{key}: {_compact_value(value)}")
+        return "\n".join(lines)
+    return str(payload)
+
+
+def output_step_order(mission: Any) -> list[str]:
+    """Step names with stored outputs, in plan order.
+
+    Steps outside the plan (or a mission with no stored plan) keep their
+    stored order after the planned ones. Empty when nothing is stored.
+    """
+    state = getattr(mission, "state", None) or {}
+    outputs = state.get("outputs") or {}
+    if not isinstance(outputs, dict) or not outputs:
+        return []
+    ordered: list[str] = []
+    for entry in real_plan_steps(state.get("plan")):
+        name = _step_name(entry)
+        if name and name in outputs and name not in ordered:
+            ordered.append(name)
+    for name in outputs:
+        if name not in ordered:
+            ordered.append(str(name))
+    return ordered
+
+
+def render_results_text(mission: Any, *,
+                        per_step_cap: int = RESULT_STEP_CAP) -> str:
+    """A mission's stored step outputs as one chat-readable block.
+
+    Per-step sections in plan order; each step's text is capped at
+    ``per_step_cap`` with an honest ``…truncated — N chars total``
+    marker. Honest states, never dressed up: a mission with no stored
+    outputs says so plainly (a terminal one notes its steps completed
+    without storing payloads), and a live mission's results are labeled
+    partial with the completed-step count.
+    """
+    name = getattr(mission, "name", "") or "mission"
+    status = str(getattr(mission, "status", "?") or "?")
+    state = getattr(mission, "state", None) or {}
+    outputs = state.get("outputs") or {}
+    if not isinstance(outputs, dict):
+        outputs = {}
+    head = f"📄 results: {name} [{status}]"
+    if not outputs:
+        if bool(getattr(mission, "terminal", False)):
+            return (f"{head}\nno results stored for this mission — its "
+                    "steps completed without storing step outputs, so "
+                    "there is nothing to show.")
+        return (f"{head}\nno results stored yet — no step has completed "
+                "and stored an output.")
+    order = output_step_order(mission)
+    lines = [head]
+    if not bool(getattr(mission, "terminal", False)):
+        plan = real_plan_steps(state.get("plan"))
+        completed = set(state.get("completed_steps") or [])
+        done = (sum(1 for s in plan if _step_name(s) in completed)
+                if plan else len(order))
+        total = len(plan) if plan else len(order)
+        lines.append(f"partial results — {done} of {total} steps "
+                     f"completed so far (mission is {status})")
+    for step in order:
+        text = payload_text(outputs.get(step)).strip()
+        lines.append(f"── {step}")
+        if not text:
+            lines.append("(step stored an empty output)")
+        elif len(text) > per_step_cap:
+            lines.append(text[:per_step_cap])
+            lines.append(f"…truncated — {len(text)} chars total")
+        else:
+            lines.append(text)
+    return "\n".join(lines)
+
+
+def final_result_digest(mission: Any, *,
+                        cap: int = RESULT_DIGEST_CAP) -> str:
+    """Short excerpt of the final step's stored output ('' when none).
+
+    For the terminal milestone push: proof of the deliverable in the
+    notification itself, with the full text one command away.
+    """
+    order = output_step_order(mission)
+    if not order:
+        return ""
+    outputs = (getattr(mission, "state", None) or {}).get("outputs") or {}
+    text = payload_text(outputs.get(order[-1])).strip()
+    if not text:
+        return ""
+    if len(text) > cap:
+        return text[:cap] + f"\n…truncated — {len(text)} chars total"
+    return text
 
 
 # ── milestone pushes ─────────────────────────────────────────────────────────
@@ -942,6 +1108,18 @@ class MissionMilestones:
             body = render_status_text(detail)
             if error:
                 body += f"\nerror: {error[:200]}"
+            # the deliverable rides the verdict push: an excerpt of the
+            # final step's stored output + where the full results live.
+            # Computed inside the same try as every other milestone —
+            # telemetry never breaks a run, and the exactly-once mark
+            # below is untouched, so a catch-up re-delivery behaves
+            # exactly as before.
+            outputs = (mission.state or {}).get("outputs") or {}
+            if isinstance(outputs, dict) and outputs:
+                digest = final_result_digest(mission)
+                if digest:
+                    body += f"\nresult: {digest}"
+                body += f"\nfull results: /mission results {mission.id}"
             res = self._notifier.publish(self.KIND, title, body)
             self._fanout(mission, title, body)
             self._mark(mission, key, title)

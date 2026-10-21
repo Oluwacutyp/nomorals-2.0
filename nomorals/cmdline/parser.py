@@ -419,6 +419,8 @@ def _parser() -> argparse.ArgumentParser:
                           help="resume a paused/failed mission with the replan policy forced on")
     missions.add_argument("--status", default="", help="filter by status")
     missions.add_argument("--show", default="", help="show one mission's detail and checkpoints")
+    missions.add_argument("--results", default="",
+                          help="print one mission's stored step results (the deliverable)")
     missions.add_argument("--max-iterations", type=int, default=8)
     missions.add_argument("--budget-wall", type=float, default=0.0)
     missions.add_argument("--budget-tokens", type=int, default=0)

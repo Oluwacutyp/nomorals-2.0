@@ -17,6 +17,7 @@ class RuntimeMissionMixin:
         """Mission progress and control, from persisted state.
 
         /mission status [id|name] — % complete, current step, ETA, stall reason
+        /mission results [id|name] — the stored step outputs (the deliverable)
         /mission list             — active missions at a glance
         /mission stall <id> <code> <message> — record a concrete blocker
         /mission clear <id>       — drop the stall record (progress resumed)
@@ -36,6 +37,7 @@ class RuntimeMissionMixin:
             MissionStore,
             MissionWatchers,
             StallCode,
+            render_results_text,
             render_status_text,
             wired_runner,
         )
@@ -55,7 +57,8 @@ class RuntimeMissionMixin:
             except AmbiguousRef as exc:
                 return None, str(exc)
 
-        usage = ("usage: /mission status [id|name] | /mission list | "
+        usage = ("usage: /mission status [id|name] | /mission results [id|name] | "
+                 "/mission list | "
                  "/mission stall <id> <code> <message> | /mission clear <id> | "
                  "/mission pause <id> | /mission resume <id> | "
                  "/mission cancel <id> [reason] | /mission retry <id> | "
@@ -103,6 +106,19 @@ class RuntimeMissionMixin:
                 text = (f"⚠️ reconciled: stale 'running' → {rec['status']}: "
                         f"{rec['reason']}\n{text}")
             return text
+
+        if verb == "results":
+            mission, _amb = _resolve(rest)
+            if _amb:
+                return _amb
+            if mission is None:
+                return (f"no mission matching {rest!r} — "
+                        "/mission list to see the active ones.")
+            # reconcile on read, same as status: a dead runner must not
+            # label a finished mission's stored outputs "partial".
+            store.reconcile(mission.id)
+            mission = store.get(mission.id)
+            return render_results_text(mission)
 
         if verb == "stall":
             sub = rest.split(None, 2)

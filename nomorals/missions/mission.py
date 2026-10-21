@@ -31,6 +31,7 @@ from .progress import (
     estimate_eta,
     eta_breakdown,
     fmt_duration,
+    output_step_order,
     real_plan_steps,
     record_stall as _record_stall_entry,
 )
@@ -671,6 +672,7 @@ class MissionStore:
         """
         mission = self.get(mission_id)  # raises NotFound when unknown
         eta_seconds, eta_note = estimate_eta(mission, self.db)
+        output_steps = output_step_order(mission)
         return {
             "mission": mission.to_dict(),
             "progress": self.progress(mission_id),
@@ -684,6 +686,12 @@ class MissionStore:
             # real step executions per step (idempotency replays don't
             # count) — powers "/mission status" retry visibility.
             "attempts": dict(mission.state.get("step_attempts") or {}),
+            # stored step outputs (the deliverable behind /mission
+            # results): availability + step names in plan order. The
+            # payloads themselves stay out of detail() — they can be
+            # large; render_results_text reads them from the mission.
+            "has_outputs": bool(output_steps),
+            "output_steps": output_steps,
             "recent_checkpoints": [
                 c.to_row() for c in self.checkpoint_history(mission_id, limit=5)
             ],

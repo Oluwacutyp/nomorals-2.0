@@ -119,6 +119,35 @@ def _cmd_missions(args: argparse.Namespace, context: Any) -> int:
               + _render_result(result))
         return 0 if result.ok else 1
 
+    # getattr: bare Namespaces (tests, embedders) may not carry the flag
+    # at all — the same convention cmdline/emit.py uses for --json.
+    if getattr(args, "results", ""):
+        # the deliverable: stored step outputs — the same renderer the
+        # chat /mission results verb uses, so CLI and chat never drift.
+        from ...missions import (
+            output_step_order,
+            payload_text,
+            render_results_text,
+        )
+
+        try:
+            # reconcile on read: a dead runner must not report "running"
+            store.reconcile(args.results)
+            mission = store.get(args.results)
+        except (KeyError, ValueError, NoMoralsError) as exc:
+            print(f"missions: {exc}", file=sys.stderr)
+            return 2
+        outputs = mission.state.get("outputs") or {}
+        payload = {
+            "mission": mission.to_dict(),
+            "results": {
+                step: payload_text(outputs.get(step))
+                for step in output_step_order(mission)
+            },
+        }
+        _emit(args, payload, render_results_text(mission))
+        return 0
+
     if args.show:
         # reconcile on read: a dead runner must not report "running"
         store.reconcile(args.show)
