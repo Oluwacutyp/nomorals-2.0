@@ -399,7 +399,18 @@ class RuntimeMissionMixin:
                 return ("usage: /mission new <template> <args>\n"
                         "templates: research <topic> | build <what> | "
                         "fix <target>")
-            mission = store.create_new(**spec)
+            # Chat creation flows through the same role validation as
+            # every other authoring path — a template step without a
+            # valid role is rejected here, naming the step, instead of
+            # creating a mission that can only fail at run time.
+            from ...missions.mission import validate_plan_roles
+
+            try:
+                validate_plan_roles(spec["state"]["plan"],
+                                    source="template plan")
+                mission = store.create_new(**spec)
+            except (NoMoralsError, ValueError) as exc:
+                return f"couldn't create mission: {exc}"
             return (f"🚀 mission created: {mission.name} [{mission.id}] — "
                     f"{mission.goal}\n"
                     f"/mission resume {mission.id} to start it.")
@@ -412,12 +423,26 @@ class RuntimeMissionMixin:
 
         Returns the kwargs for ``MissionStore.create_new``, or None when
         the template is unknown.
+
+        Every step declares the role that will execute it, matched to
+        the work the step names: goal-driven agents (research, coding,
+        critic) that can act on the step's goal text. The shell-only
+        execution role is never assigned here — stamping every step
+        "execution" is what made chat research missions "complete"
+        with echo payloads and zero work done.
         """
         t = (template or "").lower()
         plans = {
-            "research": ["gather sources", "synthesize findings", "write report"],
-            "build": ["design", "implement", "verify with tests"],
-            "fix": ["reproduce", "root-cause", "patch", "verify"],
+            "research": [("gather sources", "research"),
+                         ("synthesize findings", "research"),
+                         ("write report", "research")],
+            "build": [("design", "coding"),
+                      ("implement", "coding"),
+                      ("verify with tests", "critic")],
+            "fix": [("reproduce", "coding"),
+                    ("root-cause", "research"),
+                    ("patch", "coding"),
+                    ("verify", "critic")],
         }
         if t not in plans or not args.strip():
             return None
@@ -434,9 +459,9 @@ class RuntimeMissionMixin:
             "name": f"{t} — {arg[:48]}",
             "state": {
                 "plan": [
-                    {"name": s, "goal": s, "role": "execution",
+                    {"name": s, "goal": s, "role": role,
                      "kind": "io", "depends_on": []}
-                    for s in plans[t]
+                    for s, role in plans[t]
                 ]
             },
             "metadata": {"template": t, "template_args": arg[:200]},

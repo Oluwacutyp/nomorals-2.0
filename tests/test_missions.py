@@ -262,13 +262,31 @@ class MissionRunnerTests(unittest.TestCase):
     def test_cancel_mid_run_stops_before_the_next_step(self):
         # Cancelling from a step callback is the realistic path: an operator or a
         # watchdog interrupts a mission that is already working.
+        # The mission runs an explicit plan of memory steps: they do
+        # real work against the real context (consolidation), so the
+        # first step genuinely succeeds and the cancel lands mid-run.
+        # (This used to ride the planner's fallback research step,
+        # which "succeeded" offline only because a research step that
+        # retrieved nothing settled as a hollow success — the
+        # hollow-mission fix removed that, so the setup now names
+        # steps that can honestly complete.)
+        mission = self.store.create_new("alpha then beta then gamma")
+        mission.state["plan"] = [
+            {"name": name, "goal": f"consolidate {name}",
+             "role": "memory", "kind": "io",
+             "depends_on": [prev] if prev else []}
+            for name, prev in (("one", ""), ("two", "one"),
+                               ("three", "two"))
+        ]
+        mission.metadata["replan_policy"] = "off"
+        self.store.save(mission)
         runner = MissionRunner(self.context, store=self.store)
 
         def on_step(mission, outcome):
             runner.cancel("operator stopped it")
 
         runner.on_step = on_step
-        result = runner.start("alpha then beta then gamma", max_iterations=6, reflect=False)
+        result = runner.run(mission, max_iterations=6, reflect=False)
         self.assertEqual(result.status, MissionStatus.CANCELLED)
         self.assertEqual(self.store.get(result.mission_id).status, MissionStatus.CANCELLED)
 

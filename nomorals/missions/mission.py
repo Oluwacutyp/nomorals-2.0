@@ -47,6 +47,9 @@ __all__ = [
     "mission_liveness",
     "MISSION_TEMPLATES",
     "list_mission_templates",
+    "known_step_roles",
+    "step_role_problem",
+    "validate_plan_roles",
 ]
 
 _log = get_logger(__name__)
@@ -457,6 +460,67 @@ def list_mission_templates() -> list[dict[str, Any]]:
     ]
 
 
+def known_step_roles() -> frozenset[str]:
+    """The real role catalog a mission step may name.
+
+    Sourced from ``agents.roles.ROLES`` (the same registry
+    :func:`~nomorals.agents.roles.build_agent` instantiates from),
+    imported lazily — the runner already treats agents as a lazy
+    dependency, and a top-level import here would invert the layering.
+    """
+    from ..agents.roles import ROLES
+
+    return frozenset(ROLES)
+
+
+def step_role_problem(step: Any) -> str:
+    """Why this plan step's role cannot run, or ``""`` when it can.
+
+    Accepts a persisted plan entry (dict) or a step object with
+    ``name`` / ``role`` attributes. A step must carry an explicit role
+    from the catalog — there is no default role anywhere in the
+    mission chain, because the old silent ``"execution"`` default is
+    what routed research steps to a shell-only agent that "completed"
+    them without doing anything.
+    """
+    if isinstance(step, dict):
+        name = str(step.get("name") or "step")
+        raw = step.get("role")
+    else:
+        name = str(getattr(step, "name", "") or "step")
+        raw = getattr(step, "role", None)
+    role = str(raw or "").strip().lower()
+    if not role:
+        return f"step {name!r} has no role recorded"
+    if role not in known_step_roles():
+        return (f"step {name!r} has unknown role {role!r} — "
+                f"one of: {', '.join(sorted(known_step_roles()))}")
+    return ""
+
+
+def validate_plan_roles(plan: Any, *, source: str = "plan") -> None:
+    """Reject a plan whose steps do not all carry a valid role.
+
+    Raises :class:`ValidationError` naming the first offending step.
+    Called at the plan-authoring points — template materialization,
+    the chat template spec, and the runner's fresh-decomposition and
+    replan paths — so a role-less or unknown-role step fails fast
+    before any step runs. Persisted or copied plans are NOT validated
+    here: the runner settles their bad steps as failures at execution
+    time instead (see :func:`step_role_problem`).
+    """
+    for entry in plan or []:
+        if isinstance(entry, dict) and "__plan_error__" in entry:
+            continue  # degradation marker, not a step
+        problem = step_role_problem(entry)
+        if problem:
+            raise ValidationError(
+                f"invalid mission {source}: {problem} — every step "
+                "must name the role that will execute it",
+                field="plan",
+            )
+
+
 class MissionStore:
     """Persistence for missions and their checkpoints."""
 
@@ -476,6 +540,15 @@ class MissionStore:
     # ── missions ─────────────────────────────────────────────────────────────
 
     def create(self, mission: Mission) -> Mission:
+        # Deliberately no plan-role validation at this funnel: create()
+        # is also the copy path for recorded plans (os redrive copies a
+        # historical plan verbatim into a fresh mission, retry does the
+        # same), and a copied plan's steps must reach the runner —
+        # whose execution gate settles any role-less or unknown-role
+        # step as FAILED — rather than being un-copyable. Validation
+        # lives at the authoring points: create_from_template (below),
+        # the chat template spec, and the runner's decomposition /
+        # replan validation.
         self.missions.create(mission.to_row())
         _log.info("mission %s created: %s", mission.id, mission.goal[:60])
         return mission
@@ -544,13 +617,17 @@ class MissionStore:
             step = {
                 "name": entry.get("name", "step"),
                 "goal": entry.get("goal", ""),
-                "role": entry.get("role", "execution"),
+                "role": entry.get("role", ""),
                 "kind": entry.get("kind", "io"),
                 "depends_on": list(entry.get("depends_on") or []),
             }
             if entry.get("policy"):
                 step["policy"] = dict(entry["policy"])
             plan.append(step)
+        # A template that forgets a step's role fails here, naming the
+        # step — templates carry explicit roles by design (see
+        # MISSION_TEMPLATES), never a silent default.
+        validate_plan_roles(plan, source=f"template {template_key!r} plan")
         state["plan"] = plan
         tags = list(kwargs.pop("tags", None) or []) or list(spec.get("tags") or [])
         name = kwargs.pop("name", "") or spec.get("name", template_key)

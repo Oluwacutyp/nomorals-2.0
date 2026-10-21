@@ -114,7 +114,12 @@ class ResearchAgent(RoleAgent):
             if fetched.get("text"):
                 pages.append({"url": url, "title": fetched.get("title", ""), "text": fetched["text"][:4000]})
         if not pages:
-            return {"goal": goal, "sources": [], "summary": "no sources retrieved"}
+            # A research step that retrieved nothing has not done its
+            # job — report failure (the mission runner settles a
+            # top-level "error" as a failed step), never a hollow
+            # success with an empty summary.
+            return {"goal": goal, "sources": [],
+                    "error": f"no sources retrieved for research step: {goal}"}
         summary = self._summarize(goal, pages)
         memory = getattr(self.context, "memory", None) if self.context else None
         if memory is not None:
@@ -160,6 +165,11 @@ class CodingAgent(RoleAgent):
         spec = task_input.payload if isinstance(task_input, Task) else {}
         language = spec.get("language", "python")
         code = self._generate(goal, language)
+        if not code.strip():
+            # No model output (or no model at all): writing and
+            # "running" an empty file would settle as a hollow success.
+            return {"goal": goal, "language": language,
+                    "error": f"code generation produced no code for: {goal}"}
         if not spec.get("execute", True):
             return {"goal": goal, "language": language, "code": code, "executed": False}
 
@@ -176,7 +186,10 @@ class CodingAgent(RoleAgent):
     def _generate(self, goal: str, language: str) -> str:
         router = getattr(self.context, "router", None) if self.context else None
         if router is None:
-            return f"# No model available to generate code for: {goal}\n"
+            # No model: no code. work() turns the empty result into an
+            # honest failure instead of shipping a placeholder comment
+            # as if it were the deliverable.
+            return ""
         from ...llm.base import Message, SamplingParams
 
         response = brain_for(self.context).chat(
@@ -196,6 +209,8 @@ class VisionAgent(RoleAgent):
 
     def work(self, task_input: Any) -> Any:
         spec = task_input.payload if isinstance(task_input, Task) else {"path": task_input}
+        if not spec.get("path") and not spec.get("url"):
+            return {"error": "vision step has no image 'path' or 'url' to describe"}
         self.check_cancelled()
         return self._call_tool(
             "vision_describe",
@@ -233,6 +248,8 @@ class TrainingAgent(RoleAgent):
 
     def work(self, task_input: Any) -> Any:
         spec = task_input.payload if isinstance(task_input, Task) else {}
+        if not spec.get("dataset"):
+            return {"error": "training step has no 'dataset' to train on"}
         self.check_cancelled()
         return self._call_tool(
             "training_run",
@@ -252,6 +269,11 @@ class SocialAgent(RoleAgent):
 
     def work(self, task_input: Any) -> Any:
         spec = task_input.payload if isinstance(task_input, Task) else {}
+        missing = [field for field in ("platform", "content")
+                   if not spec.get(field)]
+        if missing:
+            return {"error": "social step is missing required input: "
+                             + ", ".join(missing)}
         self.check_cancelled()
         return self._call_tool(
             "social_post",
@@ -274,7 +296,13 @@ class ExecutionAgent(RoleAgent):
         if command:
             self.check_cancelled()
             return self._call_tool("shell_run", command=command, timeout=float(spec.get("timeout", 60)))
-        return {"goal": self._task_goal(task_input), "status": "no action specified"}
+        # No command means this step cannot do anything — an execution
+        # agent runs shell commands, nothing else. Report the failure;
+        # returning a success-shaped echo here is what let hollow
+        # missions "complete" without executing a single step.
+        return {"goal": self._task_goal(task_input),
+                "error": "no action specified: execution step received "
+                         "no 'command' to run"}
 
 
 class MemoryAgent(RoleAgent):
@@ -315,7 +343,9 @@ class CriticAgent(RoleAgent):
         output = spec.get("output", "")
         router = getattr(self.context, "router", None) if self.context else None
         if router is None:
-            return {"score": 0.5, "verdict": "no model available to critique", "issues": []}
+            # A verdict that was never produced must not be fabricated:
+            # a made-up 0.5 score would read as a real critique.
+            return {"error": "no model available to critique"}
         from ...llm.base import Message, SamplingParams
 
         response = brain_for(self.context).chat(
@@ -330,7 +360,7 @@ class CriticAgent(RoleAgent):
         task_kind="chat")
         self.budget.charge_tokens(response.usage.total_tokens)
         if not response.ok:
-            return {"score": 0.5, "verdict": "critique unavailable", "issues": []}
+            return {"error": "critique unavailable: the model call did not succeed"}
         from .orchestrator_helpers import parse_json_loose
 
         data = parse_json_loose(response.text) or {}
@@ -348,7 +378,7 @@ class ReflectionAgent(RoleAgent):
     def work(self, task_input: Any) -> Any:
         memory = getattr(self.context, "memory", None) if self.context else None
         if memory is None:
-            return {"lessons": []}
+            return {"error": "no memory subsystem"}
         self.check_cancelled()
         # Additive: reflection distils lessons without deleting the
         # episodes they came from — "forget only on explicit command".

@@ -235,9 +235,15 @@ class MasterOrchestrator:
             "Decompose the goal into at most "
             f"{self.max_steps} concrete steps. Reply with JSON only, shaped as "
             '{"rationale": "...", "steps": [{"name": "short_id", "goal": "...", '
-            '"role": "research|coding|vision|data_collection|execution|social", '
+            '"role": "research|coding|vision|data_collection|training|social|'
+            'execution|memory|critic|reflection", '
             '"kind": "io|cpu|async", "depends_on": ["short_id"], '
             '"debate": true}]}.\n'
+            'Every step MUST name the role that will execute it — a step '
+            'without a valid role is rejected, never reassigned. Match the '
+            'role to the step\'s work: "research" gathers and synthesizes '
+            'sources, "coding" writes and runs code, "execution" runs one '
+            'explicit shell command, "critic" verifies a deliverable.\n'
             'Set "debate": true only on high-stakes steps whose output must '
             'survive a critic before it counts as done.\n'
             f"Goal: {goal}"
@@ -335,7 +341,12 @@ class MasterOrchestrator:
                 PlanStep(
                     name=name,
                     goal=str(entry.get("goal") or name),
-                    role=str(entry.get("role") or "execution"),
+                    # The brain picks the role; code never invents one.
+                    # A missing role stays missing so the mission
+                    # layer's validation can reject the step by name —
+                    # coercing it to "execution" here is what silently
+                    # routed research steps to a shell-only agent.
+                    role=str(entry.get("role") or "").strip().lower(),
                     kind=kind,
                     depends_on=[str(d) for d in deps] if isinstance(deps, list) else [],
                     payload=payload,

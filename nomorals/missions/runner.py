@@ -50,6 +50,8 @@ from .mission import (
     _process_alive,
     _stale_heartbeat_after,
     mission_liveness,
+    step_role_problem,
+    validate_plan_roles,
 )
 from .idempotency import (
     IdempotencyStore,
@@ -1060,6 +1062,11 @@ class MissionRunner:
                 warnings.append(f"plan invalid: {exc}")
         for step in steps:
             step_name = str(getattr(step, "name", "") or "step")
+            role_problem = step_role_problem(step)
+            if role_problem:
+                warnings.append(
+                    f"{role_problem} — the mission would fail fast "
+                    "before this step runs")
             policy = _step_policy(step)
             if policy["retries"] and self.idempotency is None:
                 warnings.append(
@@ -1793,6 +1800,23 @@ class MissionRunner:
             clean.append(step)
         if not clean:
             return None
+        # A replanned step gets its role from the same assignment
+        # machinery as the original plan (the brain's decomposition) —
+        # and the same validation. A role-less or unknown-role
+        # replacement step rejects the replan loudly (ledger + log,
+        # naming the step) instead of inheriting a silent default.
+        role_problems = [p for p in
+                         (step_role_problem(s) for s in clean) if p]
+        if role_problems:
+            _log.warning("mission %s replan rejected: %s",
+                         mission.id, "; ".join(role_problems))
+            self._ledger("replan_rejected", mission,
+                         "replan rejected: " + "; ".join(role_problems),
+                         ok=False,
+                         learned=failure_detail[:200],
+                         metadata={"failed_step": failed_step_name,
+                                   "role_problems": role_problems})
+            return None
         from types import SimpleNamespace
 
         combined = ([s for s in plan_steps
@@ -1987,6 +2011,15 @@ class MissionRunner:
         max_steps = int(mission.metadata.get("max_steps", 8))
         orchestrator = self._new_orchestrator(max_steps)
         plan = orchestrator.plan(mission.goal)
+        # Fail fast, before any step runs: every decomposed step must
+        # carry a role from the real catalog (the brain picks it; this
+        # verifies it). A role-less or unknown-role step raises
+        # ValidationError naming the step — the same fail-fast posture
+        # _topo_levels takes for a broken dependency graph. (The
+        # persisted-plan path above is exempt on purpose: legacy plans
+        # rehydrate as-is and their bad steps settle as failures at
+        # execution time.)
+        validate_plan_roles(getattr(plan, "steps", None), source="plan")
         plan_error = getattr(plan, "plan_error", "") or ""
         if plan_error:
             mission.state["plan_error"] = plan_error
@@ -2164,6 +2197,26 @@ class MissionRunner:
         ``policy`` is optional (older monkeypatches pass three args); when
         it carries ``timeout_s`` the step runs under a hard deadline.
         """
+        # Role gate, before anything runs: a step whose role is missing
+        # (a persisted legacy plan) or unknown settles FAILED here —
+        # it is never handed to a default agent. Fresh plans are
+        # validated earlier (see _plan); this is the execution-time
+        # backstop that legacy rows and replans also pass through.
+        role = str(getattr(step, "role", "") or "").strip().lower()
+        if not role:
+            return StepOutcome(
+                step=step.name,
+                ok=False,
+                detail="no role recorded for step",
+                seconds=self._clock() - started,
+            )
+        if step_role_problem(step):
+            return StepOutcome(
+                step=step.name,
+                ok=False,
+                detail=f"unknown role recorded for step: {role!r}",
+                seconds=self._clock() - started,
+            )
         timeout_s = (policy or {}).get("timeout_s") or 0.0
         if timeout_s > 0:
             return self._run_step_agent_timed(mission, step, started,
@@ -2173,7 +2226,7 @@ class MissionRunner:
 
         prompt = _step_prompt(mission, step)
         try:
-            agent = build_agent(step.role, name=f"{mission.id[:8]}-{step.name}", context=self.context)
+            agent = build_agent(role, name=f"{mission.id[:8]}-{step.name}", context=self.context)
             result = agent.run(prompt)
         except Exception as exc:  # noqa: BLE001 - a step failure is a result
             return StepOutcome(
@@ -2183,10 +2236,23 @@ class MissionRunner:
                 seconds=self._clock() - started,
             )
         output = result.output if isinstance(result.output, dict) else {"text": result.output}
+        ok = bool(result.ok)
+        detail = result.error or ""
+        if ok and isinstance(result.output, dict):
+            # Agents report "nothing was done / the required input was
+            # absent" as a top-level "error" dict (MemoryAgent's
+            # long-standing shape). Agent.run treats any normal return
+            # as ok, so without this classification a hollow outcome
+            # settles as a completed step — settle it as the failure
+            # it declares itself to be.
+            error = result.output.get("error")
+            if error:
+                ok = False
+                detail = str(error)
         return StepOutcome(
             step=step.name,
-            ok=bool(result.ok),
-            detail=result.error or "",
+            ok=ok,
+            detail=detail,
             seconds=self._clock() - started,
             tokens=int(result.tokens or 0),
             payload={k: v for k, v in list(output.items())[:20]},
@@ -2330,8 +2396,17 @@ class MissionRunner:
             output = result.output
             text = (json.dumps(output, ensure_ascii=False, default=str)
                     if isinstance(output, dict) else str(output or ""))
-            return {"ok": bool(result.ok),
-                    "detail": (result.error or text[:300])}
+            ok = bool(result.ok)
+            detail = result.error or ""
+            if ok and isinstance(output, dict) and output.get("error"):
+                # Same classification as step outcomes: an agent that
+                # reports a top-level "error" did not do the work —
+                # the compensation is recorded as failed, not as a
+                # successful undo that never happened.
+                ok = False
+                detail = str(output["error"])
+            return {"ok": ok,
+                    "detail": detail or text[:300]}
 
         outcome: dict[str, Any] = {"ok": False, "detail": "not run"}
         try:
@@ -2668,7 +2743,11 @@ def _rehydrate_plan(goal: str, raw: Iterable[dict[str, Any]]) -> list[Any]:
             PlanStep(
                 name=str(entry.get("name") or "step"),
                 goal=str(entry.get("goal") or ""),
-                role=str(entry.get("role") or "execution"),
+                # No default: a legacy entry without a role stays
+                # role-less, and the runner settles that step as FAILED
+                # ("no role recorded for step") instead of silently
+                # resurrecting it as an execution step.
+                role=str(entry.get("role") or "").strip().lower(),
                 kind=kind,
                 depends_on=list(entry.get("depends_on") or []),
                 payload=payload,
