@@ -82,6 +82,15 @@ def render_plan(plan: CodePlan) -> str:
         tag = "new" if spec.get("new_file") else "edit"
         why = str(spec.get("why", ""))[:100]
         lines.append(f"  [{tag}] {spec.get('path')} — {why}")
+        # Pass #60: a step plan shows its steps — the instructions the
+        # executor will follow and the check each step must pass — not
+        # just the file list the owner is approving.
+        instr = str(spec.get("instructions", "")).strip()
+        if instr and instr != why:
+            lines.append(f"        ↳ {instr[:140]}")
+        acc = str(spec.get("acceptance", "")).strip()
+        if acc:
+            lines.append(f"        ✓ accepted when: {acc[:120]}")
     if plan.approach:
         lines.append("")
         lines.append("APPROACH:")

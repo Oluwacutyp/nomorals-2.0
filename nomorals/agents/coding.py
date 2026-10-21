@@ -272,6 +272,17 @@ class CodingResult:
     # pause, no-code draft).  Never let a smoke/unverified run dress
     # itself up as tested.
     verification: str = ""
+    # Pass #60 (W4): per-step outcomes — one dict per step EVER in the
+    # run (steps superseded by a re-plan stay in the list, marked
+    # "skipped", so the weak step is named in the result instead of
+    # only post-mortem): {id, path, files, status, reason, attempts,
+    # instructions, acceptance, depends_on} with status one of
+    # "planned" / "done" / "failed" / "skipped".  Empty when no plan
+    # ran (defensive default).
+    steps: list[dict[str, Any]] = field(default_factory=list)
+    # Pass #60 (W4): how many times the run re-planned its remaining
+    # steps after a step failed repeatedly (0 or 1 — never more).
+    replans: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -286,7 +297,126 @@ class CodingResult:
             "plan_id": self.plan_id,
             "plan_text": self.plan_text,
             "verification": self.verification,
+            "steps": self.steps,
+            "replans": self.replans,
         }
+
+
+# Pass #60 (W4): a plan is a list of STEPS, not a bare file list.  A step
+# spec extends the historical {path, why, new_file} dict additively:
+#   id           stable step id ("s1", "s2", ...) — dependencies and
+#                per-step status refer to steps by id
+#   instructions concrete per-step direction: what to change and how
+#   depends_on   ids of steps that must complete before this one
+#   acceptance   the check this step must satisfy — it rides every draft
+#                call for the step, so the model works to a criterion
+#   files        every file the step claims; "path" is the primary
+#                target the edit loop drafts (the loop's unit of work
+#                has always been one primary file per plan entry)
+def _normalize_steps(specs: list[dict[str, Any]], *,
+                     used_ids: set[str] | None = None) -> list[dict[str, Any]]:
+    """Assign ids/defaults to raw plan specs; order dependencies first.
+
+    Ids the planner emitted are positional (``s1``..``sn`` in array
+    order).  When ``used_ids`` is given (a re-plan joining a run that
+    already has step history), colliding ids are renumbered to the next
+    free ``sK`` and ``depends_on`` references are rewritten through the
+    same map, so history ids stay unique.  A stable topological order
+    puts dependencies before their dependents; a dependency cycle keeps
+    the original relative order instead of raising.  Specs are deduped
+    by primary path (first wins), matching the planner's own rule.
+    """
+    used = set(used_ids or ())
+    raw: list[dict[str, Any]] = []
+    seen_paths: set[str] = set()
+    for item in specs or []:
+        if not isinstance(item, dict):
+            continue
+        rel = str(item.get("path", "")).strip()
+        if not rel or rel in seen_paths:
+            continue
+        seen_paths.add(rel)
+        raw.append(item)
+    # pass 1: tentative positional ids -> final collision-free ids
+    final_id: dict[int, str] = {}
+    counter = 0
+    for idx, item in enumerate(raw):
+        tentative = str(item.get("id") or f"s{idx + 1}").strip() or f"s{idx + 1}"
+        candidate = tentative
+        while candidate in used:
+            counter += 1
+            candidate = f"s{counter}"
+            while candidate in used:
+                counter += 1
+                candidate = f"s{counter}"
+        if candidate == tentative and tentative.startswith("s") \
+                and tentative[1:].isdigit():
+            counter = max(counter, int(tentative[1:]))
+        used.add(candidate)
+        final_id[idx] = candidate
+    tentative_to_final = {
+        (str(item.get("id") or f"s{idx + 1}").strip() or f"s{idx + 1}"):
+        final_id[idx]
+        for idx, item in enumerate(raw)}
+    out: list[dict[str, Any]] = []
+    for idx, item in enumerate(raw):
+        rel = str(item.get("path", "")).strip()
+        deps: list[str] = []
+        for dep in item.get("depends_on") or []:
+            dep_id = tentative_to_final.get(str(dep).strip())
+            if dep_id and dep_id != final_id[idx] and dep_id not in deps:
+                deps.append(dep_id)
+        files: list[str] = []
+        for f in item.get("files") or []:
+            f = str(f).strip()
+            if f and f not in files:
+                files.append(f)
+        if rel not in files:
+            files.insert(0, rel)
+        out.append({
+            "path": rel,
+            "why": str(item.get("why", "")),
+            "new_file": bool(item.get("new_file")),
+            "id": final_id[idx],
+            "instructions": str(item.get("instructions", "")),
+            "depends_on": deps,
+            "acceptance": str(item.get("acceptance", "")),
+            "files": files,
+        })
+    # stable topological order: dependencies before dependents
+    by_id = {s["id"]: s for s in out}
+    ordered: list[dict[str, Any]] = []
+    placed: set[str] = set()
+    remaining = list(out)
+    while remaining:
+        progressed = False
+        for spec in list(remaining):
+            if all(d in placed or d not in by_id
+                   for d in spec["depends_on"]):
+                ordered.append(spec)
+                placed.add(spec["id"])
+                remaining.remove(spec)
+                progressed = True
+        if not progressed:  # dependency cycle — keep original order
+            ordered.extend(remaining)
+            break
+    return ordered
+
+
+def _step_task(task: str, spec: dict[str, Any]) -> str:
+    """The draft prompt for one step: the run's task plus the step's own
+    instructions and acceptance check, so each draft works to its step's
+    criterion instead of re-deriving intent from the bare task."""
+    extra: list[str] = []
+    instr = str(spec.get("instructions") or "").strip()
+    if instr:
+        extra.append(f"Step {spec.get('id', '')} instructions: {instr}")
+    acc = str(spec.get("acceptance") or "").strip()
+    if acc:
+        extra.append(f"Step {spec.get('id', '')} is accepted when: {acc}")
+    if not extra:
+        return task
+    return task + "\n\n" + "\n".join(extra)
 
 
 class CodingAgent:
@@ -796,6 +926,19 @@ class CodingAgent:
         plan_text=...)`` with NO files touched — approve with
         :meth:`approve_and_execute` or :meth:`execute_plan` after
         :meth:`PlanStore.approve`.
+
+        The plan is a STEP plan (pass #60, W4): each step carries its
+        target file(s), concrete instructions, dependencies on other
+        steps, and an acceptance check that rides the step's draft
+        calls.  ``CodingResult.steps`` reports every step's outcome
+        (planned/done/failed/skipped + reason + attempts) — including
+        steps superseded by the one mid-run re-plan the loop performs
+        when a step fails two rounds running (never inside an approved
+        plan's scope).  The iteration budget (W2) is a per-file minimum
+        (a draft + at least one repair) plus a shared repair pool the
+        whole run draws from — it is NOT ``max_iterations`` divided by
+        the file count, so multi-file plans keep real repair rounds at
+        the chat caller's budget.
         """
         from ..tools import lint as _lint_mod
         from ..tools import pytest_runner as _pytest_mod
@@ -854,6 +997,10 @@ class CodingAgent:
         # ── plan step: which files change and why ──
         plan = _plan if _plan is not None else self._plan_files(
             draft_task, filename, workdir)
+        # Pass #60 (W4): normalize whatever plan arrived (planner output,
+        # the fallback, or an approved plan replayed by execute_plan)
+        # into STEP specs — ids, instructions, dependencies, acceptance.
+        plan = _normalize_steps(plan)
         # ── plan-mode gate (item #4): non-trivial plans pause for owner
         # approval BEFORE any file is touched.  _plan is set only by
         # execute_plan() on an already-approved plan, so it skips the gate.
@@ -874,12 +1021,140 @@ class CodingAgent:
                     plan_id=code_plan.id,
                     plan_text=render_plan(code_plan),
                     seconds=round(time.perf_counter() - started, 2),
+                    steps=[{
+                        "id": s["id"], "path": s["path"],
+                        "files": list(s["files"]),
+                        "status": "planned",
+                        "reason": "plan awaiting approval",
+                        "attempts": 0,
+                        "instructions": s.get("instructions", ""),
+                        "acceptance": s.get("acceptance", ""),
+                        "depends_on": list(s.get("depends_on") or []),
+                    } for s in plan],
                 )
         self._last_scope = [str(s.get("path", "")) if isinstance(s, dict)
                             else str(s["path"])
                             for s in plan if s.get("path")]
-        per_file = max(1, max_iterations // max(1, len(plan)))
-        budgets = {spec["path"]: per_file for spec in plan}
+        # Pass #60 (W2): the budget is a per-file MINIMUM plus a shared
+        # repair pool — never max_iterations sliced by file count.  The
+        # old per_file = max_iterations // len(plan) gave a 5-file plan
+        # at the chat budget (5) ONE draft per file and zero repair
+        # rounds: the bigger (realer) the job, the less iteration it
+        # got.  Now every step is guaranteed min_budget attempts (a
+        # draft plus at least one repair), and attempts past the
+        # minimum draw from a pool the whole run shares — spent only by
+        # steps that keep failing, never pre-sliced by file count.
+        # Rounds (verify cycles) still cap at max_iterations and a step
+        # drafts at most once per round, so a small plan cannot inflate
+        # the caller's budget either: the pool only ever funds repairs
+        # for steps that are actually failing.
+        min_budget = 2 if max_iterations >= 2 else 1
+        repair_pool = max(1, max_iterations)
+        spent: dict[str, int] = {}
+        # Pass #60 (W4): per-step run state.  step_history holds EVERY
+        # step the run has had (a re-plan appends; superseded steps stay
+        # for the report), step_state/by_id index the live records.
+        step_state: dict[str, dict[str, Any]] = {}
+        step_history: list[dict[str, Any]] = []
+        by_id: dict[str, dict[str, Any]] = {}
+
+        def _register_steps(specs: list[dict[str, Any]]) -> None:
+            for spec in specs:
+                rel = spec["path"]
+                if rel in step_state:
+                    continue
+                rec: dict[str, Any] = {
+                    "spec": spec, "status": "planned", "reason": "",
+                    "fail_streak": 0}
+                step_state[rel] = rec
+                by_id[spec["id"]] = rec
+                step_history.append(rec)
+                spent.setdefault(rel, 0)
+
+        _register_steps(plan)
+
+        def _pool_left() -> int:
+            used = sum(max(0, n - min_budget) for n in spent.values())
+            return repair_pool - used
+
+        def _can_draft(rel: str) -> bool:
+            return spent.get(rel, 0) < min_budget or _pool_left() > 0
+
+        def _spend(rel: str) -> None:
+            spent[rel] = spent.get(rel, 0) + 1
+
+        def _dep_dead(spec: dict[str, Any]) -> str:
+            """Id of a dependency of ``spec`` that can never complete
+            (itself failed/skipped, or out of drafting budget with a
+            residual error), or "" when every dependency can still land."""
+            for dep_id in spec.get("depends_on") or []:
+                rec = by_id.get(dep_id)
+                if rec is None:
+                    continue
+                if rec["status"] in ("failed", "skipped"):
+                    return dep_id
+                dep_rel = rec["spec"]["path"]
+                if not _can_draft(dep_rel) and file_errors.get(dep_rel):
+                    return dep_id
+            return ""
+
+        def _finalize_steps(green: bool) -> list[dict[str, Any]]:
+            """Resolve every step record into the result's step report.
+
+            Steps explicitly resolved mid-run (dependency-skipped,
+            superseded by a re-plan, fatal draft failure) keep their
+            status; the rest resolve from how the run ended: attempted
+            + green = done; attempted with a residual error on a failed
+            run = failed (the weak step, named); attempted cleanly but
+            never verified = skipped (its changes were rolled back);
+            never attempted = skipped with the reason."""
+            out: list[dict[str, Any]] = []
+            for rec in step_history:
+                spec = rec["spec"]
+                rel = spec["path"]
+                status = rec["status"]
+                reason = rec["reason"]
+                if status == "planned":
+                    if spent.get(rel, 0) == 0:
+                        status = "skipped"
+                        dead = _dep_dead(spec)
+                        if dead:
+                            reason = (f"dependency {dead} "
+                                      f"({by_id[dead]['spec']['path']}) "
+                                      "did not complete")
+                        elif green:
+                            reason = ("not attempted — verification "
+                                      "passed without it")
+                        else:
+                            reason = ("run ended before this step "
+                                      "was attempted")
+                    elif green:
+                        status = "done"
+                        reason = ""
+                    elif file_errors.get(rel):
+                        status = "failed"
+                        reason = str(file_errors[rel])[-300:]
+                    else:
+                        status = "skipped"
+                        reason = ("drafted cleanly but the run failed "
+                                  "before this step's acceptance could "
+                                  "be verified (changes rolled back)")
+                    # Write the resolution back: step_history is in
+                    # dependency order, so a later step's _dep_dead check
+                    # sees its dependency's FINAL state, not "planned".
+                    rec["status"] = status
+                    rec["reason"] = reason
+                out.append({
+                    "id": spec["id"], "path": rel,
+                    "files": list(spec.get("files") or [rel]),
+                    "status": status, "reason": reason,
+                    "attempts": spent.get(rel, 0),
+                    "instructions": spec.get("instructions", ""),
+                    "acceptance": spec.get("acceptance", ""),
+                    "depends_on": list(spec.get("depends_on") or []),
+                })
+            return out
+
         # Phase D: explore phase reads all planned files in one parallel
         # call_many block instead of N sequential reads.
         texts = self._explore_reads(plan)
@@ -888,6 +1163,11 @@ class CodingAgent:
         last_error = ""
         verification = ""
         rounds = max(1, max_iterations)
+        # Pass #60 (W4): re-plan bookkeeping — steps attempted last round
+        # (for fail streaks) and the one-shot re-plan flags.
+        prev_attempted: set[str] = set()
+        replans = 0
+        replan_tried = False
         # Phase C: diff-review gate state.  all_diffs keeps the latest diff
         # per file across attempts so the critic always sees the full
         # change; review_rounds bounds the critic->rework loop at 2.
@@ -898,13 +1178,103 @@ class CodingAgent:
 
         for attempt in range(1, rounds + 1):
             self._last_iterations = attempt  # item #17: checkpoint state
-            if not any(v > 0 for v in budgets.values()):
-                break  # every file spent its budget — stop, don't re-verify
+            if attempt > 1:
+                # Pass #60 (W4): fail streaks from last round's attempts
+                # — a step attempted and still carrying an error grows
+                # its streak; a clean attempt resets it.
+                for rel in prev_attempted:
+                    rec = step_state.get(rel)
+                    if rec is not None:
+                        rec["fail_streak"] = (
+                            rec["fail_streak"] + 1
+                            if file_errors.get(rel) else 0)
+                # Pass #60 (W4): a step failing round after round means
+                # the PLAN is wrong, not just the code — re-plan the
+                # remaining steps ONCE instead of grinding the dead plan
+                # to exhaustion.  Never inside an approved plan's scope
+                # (execute_plan): that scope is the owner's, not the
+                # agent's to redraw.
+                if (not replan_tried and self._plan_scope is None
+                        and attempt < rounds):
+                    failing = [rec for rec in step_history
+                               if rec["status"] == "planned"
+                               and rec["fail_streak"] >= 2]
+                    if failing:
+                        replan_tried = True
+                        worst = max(failing,
+                                    key=lambda r: r["fail_streak"])
+                        wspec = worst["spec"]
+                        replan_task = (
+                            draft_task
+                            + "\n\nRE-PLAN: the previous step plan is "
+                            "failing — step "
+                            f"{wspec['id']} ({wspec['path']}) has failed "
+                            f"{worst['fail_streak']} rounds in a row. "
+                            "Latest error:\n"
+                            + str(file_errors.get(wspec["path"])
+                                  or last_error)[-800:]
+                            + "\nFiles already changed on disk: "
+                            + (", ".join(changed) or "none")
+                            + "\nProduce a REVISED step plan for the "
+                            "REMAINING work: keep steps whose files are "
+                            "already changed and working; replace or "
+                            "split the failing approach instead of "
+                            "repeating it.")
+                        new_specs = self._plan_steps_model(
+                            replan_task, filename, workdir,
+                            used_ids=set(by_id))
+                        if new_specs:
+                            new_paths = {s["path"] for s in new_specs}
+                            for rec in step_history:
+                                if (rec["status"] == "planned"
+                                        and rec["spec"]["path"]
+                                        not in new_paths
+                                        and rec["spec"]["path"]
+                                        not in changed):
+                                    rec["status"] = "skipped"
+                                    rec["reason"] = ("superseded by "
+                                                      "re-plan")
+                            for spec in new_specs:
+                                rel = spec["path"]
+                                rec = step_state.get(rel)
+                                if rec is None:
+                                    _register_steps([spec])
+                                else:
+                                    by_id.pop(rec["spec"]["id"], None)
+                                    rec["spec"] = spec
+                                    rec["fail_streak"] = 0
+                                    by_id[spec["id"]] = rec
+                                file_errors.setdefault(rel, "")
+                                if rel not in texts:
+                                    texts.update(
+                                        self._explore_reads([spec]))
+                            plan = new_specs
+                            self._last_scope = [s["path"] for s in plan]
+                            replans = 1
+                            _log.info(
+                                "coding agent re-planned after step %s "
+                                "failed %d rounds", wspec["id"],
+                                worst["fail_streak"])
+            if not any(step_state[spec["path"]]["status"] == "planned"
+                       and _can_draft(spec["path"]) and not _dep_dead(spec)
+                       for spec in plan):
+                break  # every step spent, done, or dependency-blocked
+            spent_before = dict(spent)
             diffs: dict[str, str] = {}
             touched: list[str] = []
             for spec in plan:
                 rel = spec["path"]
-                if budgets[rel] <= 0:
+                rec = step_state[rel]
+                if rec["status"] != "planned":
+                    continue
+                dead = _dep_dead(spec)
+                if dead:
+                    rec["status"] = "skipped"
+                    rec["reason"] = (
+                        f"dependency {dead} "
+                        f"({by_id[dead]['spec']['path']}) did not complete")
+                    continue
+                if not _can_draft(rel):
                     continue
                 path = self._resolve(rel)
                 before = path.read_text(encoding="utf-8") if path.is_file() else ""
@@ -913,10 +1283,13 @@ class CodingAgent:
                     # New files may still be drafted whole.
                     seeded = bool(seed_code) and rel == filename and attempt == 1
                     code = self._draft(
-                        draft_task, rel,
+                        _step_task(draft_task, spec), rel,
                         (seed_code if seeded else texts[rel] or ""),
                         file_errors[rel] or last_error, attempt, seeded=seeded)
                     if not code:
+                        rec["status"] = "failed"
+                        rec["reason"] = ("model returned no code for "
+                                         "this step")
                         rb_note = self._rollback_after_failure(changed)
                         return CodingResult(
                             ok=False,
@@ -924,6 +1297,8 @@ class CodingAgent:
                             error=("model returned no code block (check the "
                                    "active provider in /status)") + rb_note,
                             seconds=time.perf_counter() - started,
+                            steps=_finalize_steps(False),
+                            replans=replans,
                         )
                     if attempt == 1:
                         code = self._reason_review_code(draft_task, code)
@@ -931,11 +1306,11 @@ class CodingAgent:
                     texts[rel] = code
                 else:
                     change = self._draft_change(
-                        draft_task, rel, texts[rel] or "",
+                        _step_task(draft_task, spec), rel, texts[rel] or "",
                         file_errors[rel] or last_error, attempt, workdir)
                     if change is None:
                         file_errors[rel] = "model returned no usable edits"
-                        budgets[rel] -= 1
+                        _spend(rel)
                         continue
                     kind, payload = change
                     if kind == "patch":
@@ -943,7 +1318,7 @@ class CodingAgent:
                         # diff (possibly multi-file); apply it directly.
                         patch_ok, patch_err = self._apply_model_patch(
                             payload, workdir, texts, diffs, touched, changed)
-                        budgets[rel] -= 1
+                        _spend(rel)
                         if not patch_ok:
                             file_errors[rel] = patch_err
                             continue
@@ -973,10 +1348,10 @@ class CodingAgent:
                     if apply_errors:
                         file_errors[rel] = ("edit application failed: "
                                            + "; ".join(apply_errors))
-                        budgets[rel] -= 1
+                        _spend(rel)
                         continue
                     file_errors[rel] = ""
-                budgets[rel] -= 1
+                _spend(rel)
                 after = path.read_text(encoding="utf-8") if path.is_file() else ""
                 diff_text = _unified_diff(before, after, rel)
                 if not diff_text.strip():
@@ -993,6 +1368,13 @@ class CodingAgent:
                     file_errors[rel] = (
                         "reviewer found flaws in the applied diff: "
                         + "; ".join(flaws))
+
+            # Pass #60: which steps actually drafted this round — the
+            # next round's fail-streak update reads this.  Recorded
+            # BEFORE verify so the lint/review continue paths below
+            # cannot skip it.
+            prev_attempted = {rel for rel, n in spent.items()
+                              if n > spent_before.get(rel, 0)}
 
             # ── verify ──
             bg_lint_res: Any = None
@@ -1170,6 +1552,8 @@ class CodingAgent:
                             "rounds": review_rounds,
                             "objections": review_objections},
                     verification=verification,
+                    steps=_finalize_steps(True),
+                    replans=replans,
                 )
             last_error = verify_err
             for rel in touched:
@@ -1191,9 +1575,11 @@ class CodingAgent:
                         "rounds": review_rounds,
                         "objections": review_objections},
                 verification=verification,
+                steps=_finalize_steps(True),
+                replans=replans,
             )
-        stuck = [s["path"] for s in plan
-                 if budgets[s["path"]] <= 0 and file_errors[s["path"]]]
+        final_steps = _finalize_steps(False)
+        stuck = [s["path"] for s in final_steps if s["status"] == "failed"]
         error = f"still failing after {rounds} attempts: {last_error[-500:]}"
         if stuck:
             error += f" | files that did not converge: {', '.join(stuck)}"
@@ -1217,6 +1603,8 @@ class CodingAgent:
                     "rounds": review_rounds,
                     "objections": review_objections + exhausted_objections},
             verification=verification,
+            steps=final_steps,
+            replans=replans,
         )
 
     # ── plan mode: approve → execute (item #4) ────────────────────────
@@ -1248,11 +1636,30 @@ class CodingAgent:
                 self._last_spec_id = spec.key
         except Exception:  # noqa: BLE001
             pass
-        specs = [{"path": str(f.get("path", "")),
-                  "why": str(f.get("why", "")),
-                  "new_file": bool(f.get("new_file"))}
-                 for f in plan.files if f.get("path")]
-        self._plan_scope = {s["path"] for s in specs}
+        # Pass #60: an approved plan's STEP fields ride through to
+        # execution (ids, instructions, dependencies, acceptance) —
+        # approving a step plan and then executing a bare file list
+        # would silently drop everything the owner approved beyond the
+        # paths.  The scope covers each step's declared files too.
+        specs = []
+        for f in plan.files:
+            if not f.get("path"):
+                continue
+            spec = {"path": str(f.get("path", "")),
+                    "why": str(f.get("why", "")),
+                    "new_file": bool(f.get("new_file"))}
+            for key in ("id", "instructions", "acceptance"):
+                if f.get(key):
+                    spec[key] = str(f[key])
+            if f.get("depends_on"):
+                spec["depends_on"] = [str(d) for d in f["depends_on"]]
+            if f.get("files"):
+                spec["files"] = [str(x) for x in f["files"]]
+            specs.append(spec)
+        self._plan_scope = set()
+        for s in specs:
+            self._plan_scope.add(s["path"])
+            self._plan_scope.update(s.get("files") or [])
         # Item #17: checkpoint the pre-execution state (after the approval
         # check) so a bad run rewinds cleanly.  Never kills the run.
         try:
@@ -1356,19 +1763,41 @@ class CodingAgent:
 
     def _plan_files(self, task: str, default: str,
                     workdir: Path) -> list[dict[str, Any]]:
-        """Ask the model which files the task touches (Phase B plan step).
+        """Ask the model for the step plan (Phase B plan step, pass #60).
 
-        Returns ``[{path, why, new_file}]``. Falls back to the single
-        default file when the model gives nothing usable — the loop stays
-        single-file then, exactly like Phase A.
+        Returns normalized step dicts (see :func:`_normalize_steps`).
+        Falls back to the single default file when the model gives
+        nothing usable — the loop stays single-file then, exactly like
+        Phase A.
         """
+        specs = self._plan_steps_model(task, default, workdir)
+        if specs is not None:
+            return specs
+        return self._default_plan(default, workdir)
+
+    def _plan_steps_model(self, task: str, default: str,
+                          workdir: Path,
+                          used_ids: set[str] | None = None
+                          ) -> list[dict[str, Any]] | None:
+        """The planner model call only — normalized steps, or None when
+        the model gave nothing parseable.  Split from :meth:`_plan_files`
+        so the mid-run re-plan (pass #60) can tell a real revised plan
+        from the single-file fallback and never silently shrink a
+        multi-step plan to the default file."""
         system = (
-            "You are a build planner. Decide which files must be created or "
-            "modified to complete the task. Respond with EXACTLY ONE fenced "
-            "```json block shaped like "
-            '{"files": [{"path": "relative/path.py", "why": "one line", '
-            '"new_file": false}]} — paths are relative to the project root. '
-            "No prose outside the block."
+            "You are a build planner. Break the task into STEPS — one "
+            "step per file created or modified, in the order they should "
+            "be done. Respond with EXACTLY ONE fenced ```json block "
+            "shaped like "
+            '{"steps": [{"path": "relative/path.py", "why": "one line", '
+            '"new_file": false, '
+            '"instructions": "concrete: what to change in this file and '
+            'how", "depends_on": ["s1"], '
+            '"acceptance": "the check this step must satisfy"}]} '
+            "— paths are relative to the project root. Steps are numbered "
+            "s1, s2, ... in array order; depends_on lists the ids of "
+            "steps that must be completed before this one (omit or use "
+            "[] when there are none). No prose outside the block."
         )
         # Repo map as mission context: the planner sees the real layout
         # (top-level dirs, file purposes, symbol counts) instead of
@@ -1388,13 +1817,14 @@ class CodingAgent:
             [Message.system(system), Message.user(user)],
             SamplingParams(temperature=0.2),
         )
-        specs = self._default_plan(default, workdir)
         if not getattr(response, "ok", False):
-            return specs
+            return None
         data = _parse_json_block(response.text)
-        items = data.get("files") if isinstance(data, dict) else None
+        items = None
+        if isinstance(data, dict):
+            items = data.get("steps") or data.get("files")
         if not items:
-            return specs
+            return None
         seen: set[str] = set()
         out: list[dict[str, Any]] = []
         for item in items[:12]:
@@ -1410,15 +1840,30 @@ class CodingAgent:
             if rel in seen:
                 continue
             seen.add(rel)
-            out.append({"path": rel, "why": str(item.get("why", ""))[:200],
-                        "new_file": bool(item.get("new_file"))
-                        and not (workdir / rel).is_file()})
-        return out or specs
+            out.append({
+                "path": rel,
+                "why": str(item.get("why", ""))[:200],
+                "new_file": bool(item.get("new_file"))
+                and not (workdir / rel).is_file(),
+                "id": str(item.get("id", "")),
+                "instructions": str(item.get("instructions", ""))[:1000],
+                "depends_on": [str(d) for d in item.get("depends_on") or []],
+                "acceptance": str(item.get("acceptance", ""))[:400],
+                "files": [str(f) for f in item.get("files") or []],
+            })
+        if not out:
+            return None
+        return _normalize_steps(out, used_ids=used_ids)
 
     def _default_plan(self, default: str,
                       workdir: Path) -> list[dict[str, Any]]:
-        return [{"path": default, "why": "default target (plan step fallback)",
-                 "new_file": not (workdir / default).is_file()}]
+        return _normalize_steps([{
+            "path": default,
+            "why": "default target (plan step fallback)",
+            "new_file": not (workdir / default).is_file(),
+            "instructions": "",
+            "acceptance": "the run's verification passes for this file",
+        }])
 
     def _draft_change(self, task: str, rel: str, current: str,
                       last_error: str, attempt: int,
