@@ -723,10 +723,15 @@ class NativeBackend(GenerativeBackend):
     def available() -> bool:
         try:
             from ..media.imggen import TORCH_AVAILABLE
-            from ..media.imggen.pipeline import list_native_checkpoints
+            from ..media.imggen.registry import list_models
         except Exception:
             return False
-        return bool(TORCH_AVAILABLE and list_native_checkpoints())
+        if not TORCH_AVAILABLE:
+            return False
+        try:
+            return any(e["loadable"] for e in list_models())
+        except Exception:
+            return False
 
     @staticmethod
     def readiness() -> tuple[bool, str]:
@@ -739,15 +744,40 @@ class NativeBackend(GenerativeBackend):
             return False, ("torch not installed — native image "
                            "generation needs it: pip install torch")
         try:
-            from ..media.imggen.pipeline import list_native_checkpoints
+            from ..media.imggen.registry import list_models
         except Exception as exc:
             return False, f"native pipeline broken: {exc}"
-        cks = list_native_checkpoints()
-        if not cks:
-            return False, ("no native checkpoint yet — train one: "
-                           "`nm imggen train --data <photo-folder>` "
-                           "(tiny 64px model trains on CPU in minutes)")
-        return True, f"{len(cks)} checkpoint(s), newest: {cks[0]['run']}"
+        entries = list_models()
+        loadable = [e for e in entries if e["loadable"]]
+        if loadable:
+            first = loadable[0]
+            msg = (f"{len(loadable)} loadable image model(s) in "
+                   f"Devon's registry; default: {first['name']} "
+                   f"({first['model_class']})")
+            if first["model_class"] == "sd15":
+                try:
+                    from ..media.imggen.tokenizers import (
+                        load_clip_tokenizer)
+
+                    tok = load_clip_tokenizer(first["path"])
+                except Exception:
+                    tok = None
+                msg += ("; tokenizer: CLIP BPE" if tok is not None
+                        else "; tokenizer: hashing fallback (reduced "
+                             "prompt fidelity — add vocab.json + "
+                             "merges.txt next to the checkpoint)")
+            return True, msg
+        if entries:
+            named = "; ".join(
+                f"{e['name']} ({e['model_class']}): "
+                f"{e['loadable_reason']}" for e in entries[:3])
+            return False, ("no loadable image checkpoint yet — "
+                           f"installed but not loadable: {named}")
+        return False, ("no native checkpoint yet — train one: "
+                       "`nm imggen train --data <photo-folder>` "
+                       "(tiny 64px model trains on CPU in minutes), "
+                       "or drop an SD1.5 .safetensors into the imggen "
+                       "checkpoint dir")
 
     def generate(self, prompt: str, *,
                  seed: int | None = None,

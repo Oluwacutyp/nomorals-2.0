@@ -334,7 +334,17 @@ def extend_background(image: Image.Image, target_w: int, target_h: int,
 
 
 def _find_pipeline():
-    """Locate a usable SD pipeline: env var, then common paths."""
+    """Locate a usable SD1.5 pipeline via the imggen registry.
+
+    Env var ``DEVON_SD_CKPT`` first, then the standard
+    ~/.devon-models locations. Each candidate is resolved through
+    the imggen registry and, when it classifies as a loadable SD1.5
+    checkpoint, loaded with Devon's own SD pipeline (previously this
+    called the native-format loader, which rejected every real SD
+    file — the load failed silently and the neural path never ran).
+    Absence stays graceful: no checkpoint → None, and the caller
+    falls back to its CPU extension path.
+    """
     import os
     from pathlib import Path as _P
     cand = os.environ.get("DEVON_SD_CKPT", "")
@@ -345,8 +355,16 @@ def _find_pipeline():
     for p in paths:
         if p and os.path.exists(p):
             try:
-                from ..imggen.pipeline import load_native_checkpoint
-                return load_native_checkpoint(p)
+                from ..imggen.registry import resolve
+                from ..imggen.sdcompat import (
+                    SD15Pipeline, SD15StudioAdapter)
+
+                entry = resolve(p)
+                if entry is None or not entry["loadable"] \
+                        or entry["model_class"] != "sd15":
+                    return None
+                return SD15StudioAdapter(
+                    SD15Pipeline.from_safetensors(entry["path"]))
             except Exception:
                 return None
     return None

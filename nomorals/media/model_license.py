@@ -20,6 +20,11 @@ Registry (verified against upstream licenses):
   release embedding Matchering must comply with GPL-3 (source
   availability). Labelled, not blocked.
 - MusicGen — CC-BY-NC 4.0 — commercial_use False. Personal AI: fine.
+- Stable Diffusion 1.5 — CreativeML Open RAIL-M — commercial_use True
+  with use-based restrictions (the RAIL-M conditions travel with the
+  weights; outputs are otherwise the user's). Covers the whole SD1.5
+  checkpoint family Devon loads locally through her own imggen
+  implementation — the weights are data, this label is metadata.
 - XTTS v2 — CPML / non-commercial — commercial_use False. Personal: fine.
 - Suno / Udio — proprietary, API terms — NOT IN THIS PIPELINE; listed
   so `nm models` can answer "why not Suno?" honestly: raw fidelity
@@ -103,6 +108,13 @@ MODEL_LICENSES: dict[str, ModelLicense] = {
         "commercial_use False: private/personal use only. Personal AI: fine.",
         "speech TTS / voice cloning (private surfaces only)",
         "https://github.com/coqui-ai/TTS"),
+    "sd15": ModelLicense(
+        "sd15", "CreativeML Open RAIL-M", True,
+        "Use-based restrictions apply (the RAIL-M conditions travel "
+        "with the weights — no illegal/harmful use categories); "
+        "outputs are otherwise the user's to ship.",
+        "image generation (SD1.5 family, local weights via imggen)",
+        "https://github.com/CompVis/stable-diffusion/blob/main/LICENSE"),
     "suno": ModelLicense(
         "suno", "Proprietary (API terms)", False,
         "Not in this pipeline. One-shot pop fidelity is where Suno wins; "

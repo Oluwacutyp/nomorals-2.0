@@ -48,7 +48,8 @@ def _profile_kind() -> str:
 class StudioConfig:
     """Studio-wide defaults, overridable per call."""
 
-    checkpoint: str = ""      # path or run name; "" = newest native
+    checkpoint: str = ""      # run name, registry model name, or path;
+                              # "" = registry default (native, then SD1.5)
     lora: str = ""            # LoRA adapter name to apply
     lora_scale: float = 1.0
     device: str = ""
@@ -61,31 +62,62 @@ class Studio:
         self.config = config or StudioConfig()
         self._pipeline = None
         self._pipeline_key: tuple = ()
+        #: Disclosures from the most recent generate() (e.g. the
+        #: hashing-tokenizer fallback warning for SD1.5 models whose
+        #: checkpoint has no BPE vocab nearby). Also written into the
+        #: output sidecar and the imggen log — never silent.
+        self.last_warnings: list[str] = []
 
     # -- pipeline ----------------------------------------------------
-    def _resolve_checkpoint(self) -> str:
-        from .pipeline import list_native_checkpoints
+    def _resolve_entry(self) -> dict:
+        """Resolve StudioConfig.checkpoint through the registry.
+
+        Accepts a native run name, a registry model name, or a path.
+        "" (default) picks the registry's default loadable model —
+        Devon's native class first, then SD1.5. A registered but
+        not-yet-loadable model (SDXL/FLUX in this pass) raises with
+        its registry reason instead of vanishing.
+        """
+        from .registry import list_models, resolve
 
         want = self.config.checkpoint
-        cks = list_native_checkpoints()
-        if not cks:
+        if want:
+            entry = resolve(want)
+            if entry is None:
+                names = ", ".join(e["name"] for e in list_models()) \
+                    or "none installed"
+                raise ImgGenError(
+                    f"checkpoint {want!r} not found in the imggen "
+                    f"registry; available: {names}")
+            if not entry["loadable"]:
+                raise ImgGenError(
+                    f"{entry['name']} ({entry['model_class']}) is "
+                    f"installed but not loadable: "
+                    f"{entry['loadable_reason']}")
+            return entry
+        entries = list_models()
+        loadable = [e for e in entries if e["loadable"]]
+        if loadable:
+            return loadable[0]
+        if entries:
+            first = entries[0]
             raise ImgGenError(
-                "no native checkpoint yet — train one with "
-                "`nm imggen train --data <folder>` (needs torch; "
-                "a tiny 64px model trains on CPU in minutes)")
-        if not want:
-            return cks[0]["path"]
-        for c in cks:
-            if want in (c["path"], c["run"]):
-                return c["path"]
-        if os.path.exists(want):
-            return want
+                f"image models are installed but none is loadable "
+                f"yet — e.g. {first['name']} ({first['model_class']}): "
+                f"{first['loadable_reason']}")
         raise ImgGenError(
-            f"checkpoint {want!r} not found; "
-            f"available runs: {', '.join(c['run'] for c in cks)}")
+            "no native checkpoint yet — train one with "
+            "`nm imggen train --data <folder>` (needs torch; "
+            "a tiny 64px model trains on CPU in minutes), or drop an "
+            "SD1.5 .safetensors into the imggen checkpoint dir")
 
     def pipeline(self):
-        """The native pipeline, built once and cached."""
+        """The resolved pipeline, built once and cached.
+
+        Native entries load through the original native loader;
+        SD1.5 entries load through Devon's own SD implementation
+        behind the Studio-protocol adapter.
+        """
         from .pipeline import load_native_checkpoint
 
         key = (self.config.checkpoint, self.config.device)
@@ -94,9 +126,21 @@ class Studio:
                 raise ImgGenError(
                     "native image generation needs torch: "
                     "pip install torch")
-            path = self._resolve_checkpoint()
-            self._pipeline = load_native_checkpoint(
-                path, device=self.config.device)
+            entry = self._resolve_entry()
+            if entry["model_class"] == "native":
+                self._pipeline = load_native_checkpoint(
+                    entry["path"], device=self.config.device)
+            elif entry["model_class"] == "sd15":
+                from .sdcompat import SD15Pipeline, SD15StudioAdapter
+
+                self._pipeline = SD15StudioAdapter(
+                    SD15Pipeline.from_safetensors(
+                        entry["path"], device=self.config.device))
+            else:  # registry said loadable; classes are native|sd15
+                raise ImgGenError(
+                    f"registry marks {entry['name']} "
+                    f"({entry['model_class']}) loadable but Studio has "
+                    f"no loader for that class")
             self._pipeline_key = key
         return self._pipeline
 
@@ -134,6 +178,14 @@ class Studio:
         cfg = PipelineConfig(**{k: v for k, v in kwargs.items()
                                  if k in PipelineConfig.__dataclass_fields__})
         images = pipe.generate(prompt, cfg)
+        self.last_warnings = list(
+            getattr(pipe, "last_warnings", None) or [])
+        if self.last_warnings:
+            import logging
+
+            log = logging.getLogger("nomorals.media.imggen")
+            for w in self.last_warnings:
+                log.warning("studio generate: %s", w)
         return self._finalize(images, prompt, save_to)
 
     def batch(self, prompts: list[str], **kwargs) -> list[str]:
@@ -248,9 +300,13 @@ class Studio:
             if not os.path.isabs(name):
                 name = os.path.join(out_dir, name)
             img.save(name)
-            # Sidecar prompt for reproducibility.
+            # Sidecar prompt for reproducibility — plus any standing
+            # disclosures from the pipeline (e.g. tokenizer fallback),
+            # so a saved image never hides how it was made.
             with open(name + ".txt", "w") as f:
                 f.write(prompt)
+                for w in self.last_warnings:
+                    f.write(f"\nwarning: {w}")
             paths.append(name)
         return paths
 

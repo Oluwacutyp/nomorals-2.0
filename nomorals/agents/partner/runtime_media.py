@@ -3028,16 +3028,23 @@ class RuntimeMediaMixin:
         rest = parts[1] if len(parts) > 1 else ""
         try:
             if action == "checkpoints":
-                from ...media.imggen.pipeline import (
-                    list_native_checkpoints)
+                from ...media.imggen.registry import list_models
 
-                cks = list_native_checkpoints()
-                if not cks:
+                entries = list_models()
+                if not entries:
                     return ("no native checkpoints yet — train one: "
-                            "`nm imggen train --data <photo-folder>`")
-                return "\n".join(
-                    f"• {c['run']}: {c['path']} "
-                    f"({c['bytes'] / 1e6:.1f} MB)" for c in cks)
+                            "`nm imggen train --data <photo-folder>`, "
+                            "or drop an SD1.5 .safetensors into "
+                            "~/.nomorals/imggen")
+                lines = []
+                for e in entries:
+                    status = ("loadable" if e["loadable"] else
+                              f"not loadable: {e['loadable_reason']}")
+                    lines.append(
+                        f"• {e['name']} [{e['model_class']}]: "
+                        f"{e['path']} ({e['bytes'] / 1e6:.1f} MB) "
+                        f"— {status}")
+                return "\n".join(lines)
             if action == "dashboard":
                 from ...media.imggen.studio import training_dashboard
 
