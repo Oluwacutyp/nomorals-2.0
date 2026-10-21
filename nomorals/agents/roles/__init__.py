@@ -4,6 +4,14 @@ Each role is small on purpose: the intelligence lives in the tools and the model
 the role declares *what it is allowed to do* and *how it turns a task into tool
 calls*. Capability narrowing is the interesting part — a critic agent genuinely
 cannot write to disk, which is what makes its verdict trustworthy.
+
+One exception, by design: the ``coding`` role is a bridge, not an engine.
+:class:`MissionCodingAgent` drives the real
+:class:`nomorals.agents.coding.CodingAgent` loop (plan → draft → verify →
+repair → gates), so a mission coding step gets exactly the same machinery
+as every other coding path. :class:`SnippetWriterAgent` is the retired
+single-shot writer, kept for direct lightweight use and deliberately
+unregistered — see pass #61 (W3).
 """
 
 from __future__ import annotations
@@ -256,8 +264,167 @@ class ResearchAgent(RoleAgent):
         return response.text
 
 
-class CodingAgent(RoleAgent):
+#: Mission-context budget for the real coding loop: the chat caller's
+#: iteration budget (5) at the chat NL caller's timeout (300s). Mission
+#: steps are long-running autonomous units of work, not chat turns, so
+#: they deliberately get the generous end of the existing callers'
+#: ranges (chat /code: 5×120s, projects: 3×60s). A step's payload may
+#: override either via "max_iterations" / "timeout".
+_MISSION_CODING_MAX_ITERATIONS = 5
+_MISSION_CODING_TIMEOUT_S = 300.0
+
+
+class MissionCodingAgent(RoleAgent):
+    """The ``coding`` role: a bridge to the real CodingAgent loop.
+
+    Mission (and swarm-delegated) coding steps execute through
+    :class:`nomorals.agents.coding.CodingAgent` — plan → draft →
+    verify → repair → lint/review gates — never through a single-shot
+    generator. This class only translates: the step's goal/spec
+    becomes the loop's task, a step-carried ``accept`` command becomes
+    the run's accept check, and the loop's ``CodingResult`` becomes
+    the role-result dict the mission runner settles:
+
+    - loop green → an evidence dict (files, the loop's own per-step
+      status from pass #60, verification mode, review verdict) with NO
+      top-level ``error``;
+    - loop red → the same evidence plus a top-level ``error`` naming
+      the loop's reason (and its failed step, when it has one) — the
+      runner settles that shape as a FAILED step. A coding step is
+      done only when the real loop says it is done.
+
+    ``plan_mode`` is forced off: a mission step is pre-authorized work
+    executing autonomously — a plan-approval pause would strand the
+    step with nothing done and nobody able to approve it. The step's
+    payload reaches the bridge via :meth:`bind_step`, which the
+    mission runner calls when the agent it built provides it.
+    """
+
     role = "coding"
+    required_capabilities = (
+        Capability.FS_READ, Capability.FS_WRITE, Capability.EXEC_CODE,
+        Capability.EXEC_SHELL, Capability.MEM_READ, Capability.MEM_WRITE,
+        Capability.MODEL_CALL, Capability.DB_WRITE,
+    )
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self._step_payload: dict[str, Any] = {}
+
+    def bind_step(self, step: Any) -> None:
+        """Receive the mission step being executed (runner hook).
+
+        The mission runner calls this when the built agent provides
+        it, so the step's payload — its ``accept`` command and budget
+        overrides — reaches the loop. Accepts a PlanStep, a persisted
+        plan-entry dict, or anything carrying a ``payload`` mapping.
+        """
+        payload = getattr(step, "payload", None)
+        if payload is None and isinstance(step, dict):
+            payload = step.get("payload") or step.get("policy")
+        self._step_payload = dict(payload) if isinstance(payload, dict) else {}
+
+    def work(self, task_input: Any) -> Any:
+        goal, spec = self._goal_and_spec(task_input)
+        # The bound step's payload is the base spec; what the caller
+        # passed explicitly for THIS run wins over it.
+        merged = {**self._step_payload, **spec}
+        if not goal:
+            goal = str(merged.get("goal") or merged.get("task") or "")
+        if not goal.strip():
+            return {"error": "coding step has no goal/task to execute"}
+        self.check_cancelled()
+        accept = str(merged.get("accept") or merged.get("accept_command") or "")
+        root = merged.get("root") or None
+        try:
+            max_iterations = int(merged.get("max_iterations")
+                                 or _MISSION_CODING_MAX_ITERATIONS)
+            timeout = float(merged.get("timeout")
+                            or _MISSION_CODING_TIMEOUT_S)
+        except (TypeError, ValueError):
+            return {"goal": goal,
+                    "error": "coding step carries a non-numeric "
+                             "max_iterations/timeout budget"}
+        from ..coding import CodingAgent as _LoopCodingAgent
+
+        try:
+            loop = (_LoopCodingAgent(self.context, root=str(root))
+                    if root else _LoopCodingAgent(self.context))
+            result = loop.run(
+                goal,
+                accept=accept,
+                max_iterations=max_iterations,
+                timeout=timeout,
+                plan_mode=False,
+            )
+        except Exception as exc:  # noqa: BLE001 - a step failure is a result
+            return {"goal": goal, "engine": "coding_agent",
+                    "error": f"coding loop could not run: "
+                             f"{type(exc).__name__}: {exc}"}
+        return self._settle(goal, result)
+
+    @staticmethod
+    def _goal_and_spec(task_input: Any) -> tuple[str, dict[str, Any]]:
+        if isinstance(task_input, Task):
+            spec = dict(task_input.payload or {})
+            return (str(spec.get("goal") or spec.get("task")
+                        or task_input.name or ""), spec)
+        if isinstance(task_input, dict):
+            spec = dict(task_input)
+            return (str(spec.get("goal") or spec.get("task") or ""), spec)
+        return (str(task_input or ""), {})
+
+    @staticmethod
+    def _settle(goal: str, result: Any) -> dict[str, Any]:
+        steps = list(getattr(result, "steps", None) or [])
+        out: dict[str, Any] = {
+            "goal": goal,
+            "engine": "coding_agent",
+            "ok": bool(result.ok),
+            "files": list(result.files or []),
+            "iterations": int(result.iterations or 0),
+            "verification": str(result.verification or ""),
+            "steps": steps,
+            "replans": int(result.replans or 0),
+            "review": dict(result.review or {}),
+            "output": str(result.output or "")[-2000:],
+            "seconds": round(float(result.seconds or 0.0), 2),
+        }
+        if result.ok:
+            return out
+        reason = str(result.error or "").strip()
+        if not reason and getattr(result, "needs_approval", False):
+            reason = ("coding run paused for plan approval, which a "
+                      "mission step cannot answer")
+        if not reason:
+            failed = [s for s in steps
+                      if isinstance(s, dict) and s.get("status") == "failed"]
+            if failed:
+                step = failed[0]
+                reason = (f"coding step {step.get('id', '?')} "
+                          f"({step.get('path', '?')}) failed: "
+                          f"{step.get('reason') or 'no reason recorded'}")
+            else:
+                reason = "coding run finished without verifying green"
+        out["error"] = reason
+        return out
+
+
+class SnippetWriterAgent(RoleAgent):
+    """Lightweight single-shot snippet writer — NOT the CodingAgent.
+
+    Generates ONE file from a goal and, by default, runs it. No plan,
+    no tests, no lint, no review, no rollback: that is exactly why it
+    exists (a quick throwaway snippet) and exactly why it must never
+    be the engine behind a mission or swarm coding step — those route
+    to :class:`MissionCodingAgent`, which drives the real loop. This
+    class kept the old shadow's behavior verbatim when it was demoted
+    (pass #61, W3); it is deliberately absent from :data:`ROLES`, so
+    no registry, route, or log line can mistake it for the CodingAgent
+    again.
+    """
+
+    role = "snippet"
     required_capabilities = (
         Capability.FS_READ, Capability.FS_WRITE, Capability.EXEC_CODE,
         Capability.EXEC_SHELL, Capability.MEM_READ, Capability.MEM_WRITE,
@@ -494,7 +661,7 @@ class ReflectionAgent(RoleAgent):
 ROLES: dict[str, type[Agent]] = {
     cls.role: cls
     for cls in (
-        ResearchAgent, CodingAgent, VisionAgent, DataCollectionAgent, TrainingAgent,
+        ResearchAgent, MissionCodingAgent, VisionAgent, DataCollectionAgent, TrainingAgent,
         SocialAgent, ExecutionAgent, MemoryAgent, CriticAgent, ReflectionAgent,
     )
 }
@@ -534,14 +701,15 @@ def _strip_code_fence(text: str) -> str:
 
 __all__ = [
     "ROLES",
-    "CodingAgent",
     "CriticAgent",
     "DataCollectionAgent",
     "ExecutionAgent",
     "MemoryAgent",
+    "MissionCodingAgent",
     "ReflectionAgent",
     "ResearchAgent",
     "RoleAgent",
+    "SnippetWriterAgent",
     "SocialAgent",
     "TrainingAgent",
     "VisionAgent",

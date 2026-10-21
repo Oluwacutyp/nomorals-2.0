@@ -25,10 +25,10 @@ from types import SimpleNamespace
 from nomorals.agents.orchestrator import Plan, PlanStep
 from nomorals.agents.partner import PartnerRuntime
 from nomorals.agents.roles import (
-    CodingAgent,
     CriticAgent,
     ExecutionAgent,
     MemoryAgent,
+    MissionCodingAgent,
     ReflectionAgent,
     ResearchAgent,
     SocialAgent,
@@ -171,7 +171,10 @@ class RoleAgentHollowTests(unittest.TestCase):
         self.assertEqual(out.get("error"), "no memory subsystem")
 
     def test_coding_without_model_produces_no_fake_code(self):
-        agent = CodingAgent(context=_ctx(router=None))
+        # Pass #61: the coding role is the bridge to the real
+        # CodingAgent loop — with no model the loop cannot draft, so
+        # the step fails honestly instead of fabricating code.
+        agent = MissionCodingAgent(context=_ctx(router=None))
         out = agent.work(Task(name="code",
                               payload={"goal": "write fizzbuzz"}))
         self.assertIn("error", out)

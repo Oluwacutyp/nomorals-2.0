@@ -2227,6 +2227,13 @@ class MissionRunner:
         prompt = _step_prompt(mission, step)
         try:
             agent = build_agent(role, name=f"{mission.id[:8]}-{step.name}", context=self.context)
+            # Agents that execute from the step itself (not just its
+            # prompt) opt in via bind_step — the coding bridge uses it
+            # to carry the step's payload (accept command, budget
+            # overrides) into the real CodingAgent loop (pass #61).
+            bind_step = getattr(agent, "bind_step", None)
+            if callable(bind_step):
+                bind_step(step)
             result = agent.run(prompt)
         except Exception as exc:  # noqa: BLE001 - a step failure is a result
             return StepOutcome(
@@ -2714,7 +2721,7 @@ def _serialize_plan(plan: Any, *, plan_error: str = "") -> list[dict[str, Any]]:
             policy = {k: payload[k] for k in (
                 "optional", "on_failure", "retries", "retry_backoff_s",
                 "retry_on", "timeout_s", "schedule_timeout_s",
-                "needs_approval", "compensate") if k in payload}
+                "needs_approval", "compensate", "accept") if k in payload}
             if policy:
                 entry["policy"] = policy
         entries.append(entry)
