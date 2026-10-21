@@ -123,6 +123,12 @@ class ThreeFileFixTests(unittest.TestCase):
                       "def test_total():\n    assert b.total() == 25\n")
         self.hash_before = {f: _hash(self.fx.root / f) for f in ("c.py", "d.py")}
 
+        # Pass #63: the diff reviewer runs on EVERY applied diff (plus
+        # the gate) regardless of reasoning_mode — the script therefore
+        # carries a clean reviewer verdict after each edit response and
+        # one for the gate.  (Pre-#63 the reviewer was gated off under
+        # reasoning_mode="off", so the script needed none.)
+        verdict = _json_block({"passed": True, "flaws": []})
         router = ScriptedRouter([
             _json_block({"files": [
                 {"path": "a.py", "why": "OFFSET is wrong", "new_file": False},
@@ -130,9 +136,12 @@ class ThreeFileFixTests(unittest.TestCase):
             ]}),
             _json_block({"edits": [
                 {"old_text": "OFFSET = 1", "new_text": "OFFSET = 10"}]}),
+            verdict,
             _json_block({"edits": [
                 {"old_text": "return OFFSET + 5",
                  "new_text": "return OFFSET * 2 + 5"}]}),
+            verdict,
+            verdict,  # the diff-review gate
         ])
         self.agent = CodingAgent(StubContext(router), root=str(self.fx.root))
 
@@ -191,15 +200,22 @@ class LintGateTests(unittest.TestCase):
         self.fx.write("tests/__init__.py", "")
         self.fx.write("tests/test_fix.py",
                       "import fix\n\n\ndef test_value():\n    assert fix.VALUE == 2\n")
+        # Pass #63: reviewer verdicts interleave the edit responses —
+        # the diff reviewer now runs on every applied diff and at the
+        # gate even with reasoning_mode="off" (see ThreeFileFixTests).
+        verdict = _json_block({"passed": True, "flaws": []})
         router = ScriptedRouter([
             _json_block({"files": [
                 {"path": "fix.py", "why": "wrong value", "new_file": False}]}),
             # round 1: fixes the value but leaves the unused import
             _json_block({"edits": [
                 {"old_text": "VALUE = 1", "new_text": "VALUE = 2"}]}),
+            verdict,
             # round 2 (lint feedback): removes the unused import
             _json_block({"edits": [
                 {"old_text": "import os\n\n\n", "new_text": ""}]}),
+            verdict,
+            verdict,  # the diff-review gate
         ])
         self.ctx = StubContext(router)
         self.agent = CodingAgent(self.ctx, root=str(self.fx.root))

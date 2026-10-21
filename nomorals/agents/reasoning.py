@@ -822,12 +822,20 @@ def _knowledge_block(context: Any, query: str) -> str:
 
 
 def review_text(context: Any, text: str, *, focus: str = "",
-                max_calls: int | None = None) -> list[str]:
+                max_calls: int | None = None,
+                status: dict[str, Any] | None = None) -> list[str]:
     """One harsh-reviewer pass over an artifact (a plan, a tool sequence,
     a code draft).  Returns the list of flaws — empty when it passed.
 
     Never raises: a failed review means "no flaws found", which is the
     conservative outcome (the original artifact stays as-is).
+
+    Pass #63: callers that must distinguish "reviewed and clean" from
+    "the review could not run" pass a ``status`` dict; it is filled with
+    ``{"available": bool, "error": str}`` — available=False (model error,
+    empty or unparseable verdict) means the [] return is NO VERDICT, not
+    a clean pass.  Callers that ignore ``status`` keep the lossy
+    contract above.
     """
     calls, seconds = _hook_budget(context)
     if max_calls is not None:
@@ -849,13 +857,21 @@ def review_text(context: Any, text: str, *, focus: str = "",
         raw = engine._llm(prompt)
         data = _extract_json(raw)
         if not isinstance(data, dict):
+            if status is not None:
+                status.update(available=False,
+                              error="reviewer returned no parseable verdict")
             return []
+        if status is not None:
+            status.update(available=True, error="")
         if data.get("passed") is True and not data.get("flaws"):
             return []
         return [str(f).strip()[:200] for f in (data.get("flaws") or [])
                 if str(f).strip()][:5]
-    except Exception:  # noqa: BLE001 — review must never break the agent
+    except Exception as exc:  # noqa: BLE001 — review must never break the agent
         _log.debug("reasoning review failed", exc_info=True)
+        if status is not None:
+            status.update(available=False,
+                          error=f"{type(exc).__name__}: {exc}"[:200])
         return []
 
 

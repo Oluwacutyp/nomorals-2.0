@@ -107,17 +107,24 @@ def _cmd_code_run(args: argparse.Namespace, context: Any, task: str) -> int:
 
 def _critic_verdict(context: Any, diff_text: str) -> tuple[str, list[str]]:
     """Run the harsh reviewer over a diff.  Never raises — a failed review
-    means 'no verdict', which is the conservative outcome."""
+    means 'no verdict', which is the conservative outcome.  Pass #63: the
+    critic always runs (it is no longer gated by reasoning mode or by
+    the canned task string's length), and an unavailable critic is
+    reported as unavailable — never dressed up as a PASS."""
     if not diff_text.strip():
         return "no changes — nothing to review", []
     try:
         from ...agents.coding import CodingAgent, _DIFF_REVIEW_FOCUS
 
-        flaws = CodingAgent(context)._review_flaws(
+        agent = CodingAgent(context)
+        flaws = agent._review_flaws(
             "review the working tree diff", diff_text,
             focus=_DIFF_REVIEW_FOCUS)
+        outcome = agent._last_review
     except Exception:  # noqa: BLE001 — review must never break the CLI
         return "critic unavailable", []
+    if outcome is not None and not outcome.available:
+        return f"critic unavailable: {outcome.error}", []
     if flaws:
         return "VERDICT: FAIL — do not commit as-is", flaws
     return "VERDICT: PASS", []

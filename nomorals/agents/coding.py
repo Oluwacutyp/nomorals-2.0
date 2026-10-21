@@ -238,6 +238,213 @@ _DIFF_REVIEW_FOCUS = (
     "does any hunk break something the diff touches or contradict the "
     "task's acceptance criteria")
 
+
+# ── Pass #63 (W5): diff review always on, depth scaled by the DIFF ──────
+#
+# Before this pass, _review_flaws returned [] unless reasoning mode was
+# on AND the task text "looked complex" (core >= 80 chars or analytical
+# markers): a short task — "fix the parser bug" — silently disabled the
+# per-diff review AND the Phase C gate no matter how risky the applied
+# diff was, and the result still claimed review passed=True.  Now every
+# applied diff is reviewed; WHAT is reviewed decides HOW DEEPLY:
+#
+#   tier      rule (first match wins)                        review calls
+#   --------  ---------------------------------------------  ----------------
+#   deep      a hard risk signal (sensitive path, public-    1 per file
+#             API change, whole-file deletion, heavy         (cap 6) + 1
+#             deletion) OR >= 5 files OR >= 400 changed      combined
+#             lines
+#   standard  >= 2 files OR >= 80 changed lines OR            1 combined
+#             >= 30 deleted lines
+#   focused   anything smaller                               1, max_calls=1,
+#                                                            text cap 4000
+#
+# Reasoning mode may only RAISE the floor: mode "always" or an active
+# power mode floors the tier at standard.  It never lowers a tier and
+# never switches review off — "off"/"auto" simply contribute no floor.
+# Risk signals are diff-structure facts (paths in the diff headers,
+# +/- line shapes), never prompt keywords.
+
+#: top-level def/class lines added or removed by a diff = public surface
+_API_DEF_RE = re.compile(r"^(?:async\s+def|def|class)\s+[A-Za-z_]\w*")
+
+#: path segments / file stems that make a touched file credential- or
+#: config-adjacent (a diff there deserves the deep read)
+_SENSITIVE_SEGMENTS = {"auth", "credentials", "secrets", "vault", ".ssh"}
+_SENSITIVE_STEMS = {"config", "settings", "secrets", "credentials",
+                    "auth", "vault", "password", "passwords", "token",
+                    "tokens", "api_key", "apikey"}
+_SENSITIVE_SUFFIXES = (".pem", ".key", ".p12", ".pfx", ".env")
+
+#: extra reviewer checks appended to the focus when a risk signal fires
+_RISK_CHECKS = {
+    "sensitive-path": (
+        "this diff touches credential/config-adjacent paths — check "
+        "that no secret values are introduced, logged, written to "
+        "insecure defaults, or exposed to callers that lacked them"),
+    "public-api-change": (
+        "the public API surface changes (top-level def/class added or "
+        "removed, __all__ edited) — check existing callers still work "
+        "or are updated inside this same diff"),
+    "file-deletion": (
+        "a whole file is deleted — check nothing still imports, "
+        "references, or depends on it"),
+    "heavy-deletion": (
+        "deletions dominate this diff — check the removed behavior is "
+        "not still referenced or required elsewhere"),
+    "wide-change": (
+        "this is a wide multi-file change — check cross-file "
+        "consistency: names, signatures, and imports agree across "
+        "every file the diff touches"),
+}
+
+#: per-file review-call cap at deep tier (plus one combined call)
+_DEEP_FILE_CAP = 6
+
+
+def _sensitive_path(path: str) -> bool:
+    """True when a diff-touched path is credential/config-adjacent."""
+    parts = [p for p in re.split(r"[/\\]+", path.lower()) if p]
+    if not parts:
+        return False
+    name = parts[-1]
+    if name == ".env" or name.startswith(".env."):
+        return True
+    if name.endswith(_SENSITIVE_SUFFIXES):
+        return True
+    stem = name.rsplit(".", 1)[0] if "." in name else name
+    return (stem in _SENSITIVE_STEMS
+            or any(p in _SENSITIVE_SEGMENTS for p in parts))
+
+
+def _diff_metrics(text: str) -> dict[str, Any]:
+    """Structural facts about a diff (or a raw draft, treated as one
+    new file): touched files, added/deleted line counts, risk signals.
+    Pure function of the text — the prompt is never consulted."""
+    files: list[str] = []
+    added = deleted = 0
+    api_change = file_deleted = False
+    saw_structure = False
+    pending_src = ""
+    for line in (text or "").splitlines():
+        if line.startswith("--- "):
+            saw_structure = True
+            src = line[4:].strip()
+            pending_src = src[2:] if src.startswith("a/") else src
+        elif line.startswith("+++ "):
+            saw_structure = True
+            target = line[4:].strip()
+            if target == "/dev/null":
+                file_deleted = True
+                if pending_src and pending_src not in files:
+                    files.append(pending_src)
+            else:
+                path = (target[2:] if target.startswith(("a/", "b/"))
+                        else target)
+                if path and path not in files:
+                    files.append(path)
+            pending_src = ""
+        elif line.startswith("+") and not line.startswith("+++"):
+            added += 1
+            body = line[1:]
+            if _API_DEF_RE.match(body) or "__all__" in body:
+                api_change = True
+        elif line.startswith("-") and not line.startswith("---"):
+            deleted += 1
+            body = line[1:]
+            if _API_DEF_RE.match(body) or "__all__" in body:
+                api_change = True
+    risks: list[str] = []
+    if any(_sensitive_path(p) for p in files):
+        risks.append("sensitive-path")
+    if api_change:
+        risks.append("public-api-change")
+    if file_deleted:
+        risks.append("file-deletion")
+    if deleted >= 50 and deleted >= added:
+        risks.append("heavy-deletion")
+    file_count = len(files)
+    if not saw_structure and not files and (text or "").strip():
+        # Not a diff at all (a raw code draft): one implicit new file,
+        # sized by its line count; no +/- structure, so no risk signals.
+        file_count = 1
+        added = len((text or "").splitlines())
+    if file_count >= 5 or (added + deleted) >= 400:
+        risks.append("wide-change")
+    return {"files": files, "file_count": file_count, "added": added,
+            "deleted": deleted, "risks": risks}
+
+
+def _review_tier(metrics: dict[str, Any]) -> str:
+    """The scaling table from the pass-#63 block comment, as code."""
+    hard = {"sensitive-path", "public-api-change", "file-deletion",
+            "heavy-deletion"}
+    if (hard & set(metrics["risks"]) or metrics["file_count"] >= 5
+            or (metrics["added"] + metrics["deleted"]) >= 400):
+        return "deep"
+    if (metrics["file_count"] >= 2 or metrics["deleted"] >= 30
+            or (metrics["added"] + metrics["deleted"]) >= 80):
+        return "standard"
+    return "focused"
+
+
+def _split_unified_diff(text: str) -> list[tuple[str, str]]:
+    """Split a multi-file unified diff into (path, chunk) per file.
+
+    Chunks start at "diff --git" or "--- a/…" headers — the shapes
+    _unified_diff and git both emit.  Returns [] when the text carries
+    no per-file structure (single-file or non-diff text)."""
+    chunks: list[tuple[str, list[str]]] = []
+    current: list[str] | None = None
+    path = ""
+    for line in (text or "").splitlines():
+        if line.startswith("diff --git "):
+            if current is not None:
+                chunks.append((path, current))
+            current, path = [line], line.split(" b/", 1)[-1].strip()
+        elif line.startswith("--- a/") or line.startswith("--- /dev"):
+            if current is not None and any(
+                    ln.startswith("+++ ") for ln in current):
+                chunks.append((path, current))
+                current = None
+            if current is None:
+                current, path = [line], line[6:].strip()
+            else:
+                current.append(line)
+        elif line.startswith("+++ "):
+            target = line[4:].strip()
+            if target.startswith("b/"):
+                path = target[2:]
+            if current is not None:
+                current.append(line)
+        elif current is not None:
+            current.append(line)
+    if current is not None:
+        chunks.append((path, current))
+    return [(p, "\n".join(lines)) for p, lines in chunks if lines]
+
+
+@dataclass
+class DiffReview:
+    """One diff review's full outcome (pass #63).
+
+    ``available`` False means the review could NOT run (model error,
+    unparseable verdict): ``flaws`` is then empty because there is NO
+    verdict — never read it as a clean pass.  ``depth`` is the tier the
+    diff's own size/risk selected; ``calls`` counts reviewer model
+    calls actually spent."""
+
+    flaws: list[str] = field(default_factory=list)
+    available: bool = True
+    error: str = ""
+    depth: str = "focused"
+    files: int = 0
+    added: int = 0
+    deleted: int = 0
+    risks: list[str] = field(default_factory=list)
+    calls: int = 0
+
+
 def _format_lint_result(lint_res: dict[str, Any]) -> str:
     """Lint violations as fix-loop feedback."""
     lines = ["ruff lint failed:"]
@@ -257,6 +464,10 @@ class CodingResult:
     seconds: float = 0.0
     # Phase C: diff-review gate verdict — {"passed": bool, "rounds": int,
     # "objections": [str]}.  Empty when the gate never ran.
+    # Pass #63 (W5): plus "available" (bool — False means the gate review
+    # could NOT run; "passed" is then False too, never a silent clean
+    # pass), "depth" (the tier the diff selected: focused|standard|deep)
+    # and "notes" (review-unavailability notes from the whole run).
     review: dict[str, Any] = field(default_factory=dict)
     # Plan mode (item #4): when True the task paused BEFORE any file was
     # touched — the owner must approve plan_text (plan_id) before
@@ -456,6 +667,10 @@ class CodingAgent:
         self._last_spec_id: str = ""
         self._last_scope: list[str] = []
         self._last_iterations: int = 0
+        # Pass #63: the most recent _review_diff outcome, harvested by
+        # run() right after each _review_flaws call (notes/availability
+        # for the result) — the loop is single-threaded per run.
+        self._last_review: DiffReview | None = None
         # Spec-first (#4 extension): generation prompts carry the
         # backend-included block by default; set False to opt out.
         self._backend_included: bool = True
@@ -1197,6 +1412,13 @@ class CodingAgent:
         review_rounds = 0
         review_objections: list[str] = []
         gate_exhausted = False
+        # Pass #63: review honesty state — unavailability notes from
+        # every review that could not run, plus the gate's own outcome.
+        # gate_available stays True when no review was attempted
+        # because there was no diff to review (nothing to report).
+        review_notes: list[str] = []
+        gate_available = True
+        gate_depth = ""
 
         for attempt in range(1, rounds + 1):
             self._last_iterations = attempt  # item #17: checkpoint state
@@ -1346,10 +1568,18 @@ class CodingAgent:
                             continue
                         file_errors[rel] = ""
                         # Phase B: the harsh reviewer runs over patch diffs
-                        # too, not just surgical-edit diffs.
+                        # too, not just surgical-edit diffs.  Pass #63: it
+                        # runs ALWAYS; an unavailable reviewer is noted on
+                        # the result, never mistaken for a clean review.
                         if diffs.get(rel):
                             flaws = self._review_flaws(
                                 draft_task, diffs[rel])
+                            last = self._last_review
+                            if last is not None and not last.available:
+                                note = (f"per-diff review unavailable "
+                                        f"for {rel}: {last.error}")
+                                review_notes.append(note)
+                                _log.warning("coding agent: %s", note)
                             if flaws:
                                 file_errors[rel] = (
                                     "reviewer found flaws in the applied "
@@ -1384,8 +1614,15 @@ class CodingAgent:
                     changed.append(rel)
                 # Phase B: the harsh reviewer runs over EVERY applied diff,
                 # not just attempt-1 new-file drafts. Flaws become next
-                # round's fix prompt for that file.
+                # round's fix prompt for that file.  Pass #63: an
+                # unavailable reviewer is noted, never a silent clean pass.
                 flaws = self._review_flaws(draft_task, diff_text)
+                last = self._last_review
+                if last is not None and not last.available:
+                    note = (f"per-diff review unavailable for {rel}: "
+                            f"{last.error}")
+                    review_notes.append(note)
+                    _log.warning("coding agent: %s", note)
                 if flaws:
                     file_errors[rel] = (
                         "reviewer found flaws in the applied diff: "
@@ -1553,6 +1790,18 @@ class CodingAgent:
                     if full_diff.strip():
                         gate_flaws = self._review_flaws(
                             draft_task, full_diff, focus=_DIFF_REVIEW_FOCUS)
+                        # Pass #63: the gate always RUNS on a real diff
+                        # now — record whether it produced a verdict.  An
+                        # unavailable gate ships the green diff WITHOUT a
+                        # clean-review claim (see the result below).
+                        last = self._last_review
+                        if last is not None:
+                            gate_available = last.available
+                            gate_depth = last.depth
+                            if not last.available:
+                                review_notes.append(
+                                    "diff-review gate unavailable: "
+                                    f"{last.error}")
                 if gate_flaws:
                     review_objections.extend(gate_flaws)
                     review_rounds += 1
@@ -1587,9 +1836,12 @@ class CodingAgent:
                     files=changed or [filename],
                     output=verify_out[-2000:],
                     seconds=time.perf_counter() - started,
-                    review={"passed": not gate_flaws,
+                    review={"passed": not gate_flaws and gate_available,
                             "rounds": review_rounds,
-                            "objections": review_objections},
+                            "objections": review_objections,
+                            "available": gate_available,
+                            "depth": gate_depth,
+                            "notes": review_notes},
                     verification=verification,
                     steps=_finalize_steps(True),
                     replans=replans,
@@ -1613,7 +1865,10 @@ class CodingAgent:
                 seconds=time.perf_counter() - started,
                 review={"passed": False,
                         "rounds": review_rounds,
-                        "objections": review_objections},
+                        "objections": review_objections,
+                        "available": gate_available,
+                        "depth": gate_depth,
+                        "notes": review_notes},
                 verification=verification,
                 steps=_finalize_steps(True),
                 replans=replans,
@@ -1627,22 +1882,38 @@ class CodingAgent:
         # Failed mission after making changes: restore the pre-mission state.
         error += self._rollback_after_failure(changed)
         # Phase C: report-only critic on exhausted runs — the diff is still
-        # reviewed, but no rework is scheduled.
+        # reviewed, but no rework is scheduled.  Pass #63: if that review
+        # could not run, the result says so — "passed" never claims a
+        # clean review that never happened.
         exhausted_objections: list[str] = []
+        exhausted_available = True
+        exhausted_depth = ""
         if changed:
             full_diff = "\n".join(all_diffs.get(rel, "") for rel in changed
                                   if all_diffs.get(rel))
             if full_diff.strip():
                 exhausted_objections = self._review_flaws(
                     draft_task, full_diff, focus=_DIFF_REVIEW_FOCUS)
+                last = self._last_review
+                if last is not None:
+                    exhausted_available = last.available
+                    exhausted_depth = last.depth
+                    if not last.available:
+                        review_notes.append(
+                            "final review unavailable: "
+                            f"{last.error}")
         return CodingResult(
             ok=False,
             iterations=rounds,
             error=error,
             seconds=time.perf_counter() - started,
-            review={"passed": not exhausted_objections,
+            review={"passed": (exhausted_available
+                               and not exhausted_objections),
                     "rounds": review_rounds,
-                    "objections": review_objections + exhausted_objections},
+                    "objections": review_objections + exhausted_objections,
+                    "available": exhausted_available,
+                    "depth": exhausted_depth,
+                    "notes": review_notes},
             verification=verification,
             steps=final_steps,
             replans=replans,
@@ -2019,23 +2290,142 @@ class CodingAgent:
                     changed.append(target_rel)
         return True, ""
 
+    def _review_floor(self) -> bool:
+        """Pass #63: should reasoning mode RAISE this review's floor?
+
+        Mode "always" or an active power mode floors the depth tier at
+        standard.  That is all mode does now — it never lowers a tier
+        the diff earned and never switches review off."""
+        try:
+            mode = str(getattr(self.context.settings, "reasoning_mode",
+                               "auto") or "auto").strip().lower()
+        except Exception:  # noqa: BLE001 — bad config must never kill agents
+            mode = "auto"
+        if mode == "always":
+            return True
+        try:
+            from .power import power_mode_for
+            return bool(power_mode_for(self.context).active)
+        except Exception:  # noqa: BLE001
+            return False
+
+    def _call_reviewer(self, text: str, focus: str,
+                       max_calls: int | None) -> tuple[list[str], bool, str]:
+        """One reviewer call → (flaws, available, error).
+
+        Uses review_text's pass-#63 status channel.  A reviewer double
+        written against the pre-#63 signature (test fixtures patch
+        review_text with (context, text, *, focus, max_calls)) rejects
+        the extra kwarg — retry without it and take its verdict at face
+        value, exactly as the loop did before this pass."""
+        from .reasoning import review_text
+
+        status: dict[str, Any] = {}
+        try:
+            flaws = review_text(self.context, text, focus=focus,
+                                max_calls=max_calls, status=status)
+        except TypeError as exc:
+            if "unexpected keyword argument 'status'" not in str(exc):
+                return [], False, f"reviewer failed: {exc}"[:200]
+            try:
+                flaws = review_text(self.context, text, focus=focus,
+                                    max_calls=max_calls)
+            except Exception as exc2:  # noqa: BLE001
+                return [], False, f"reviewer failed: {exc2}"[:200]
+            return list(flaws or []), True, ""
+        except Exception as exc:  # noqa: BLE001 — never break the loop
+            return [], False, f"reviewer failed: {exc}"[:200]
+        if not status:
+            # The call returned without reporting status (a stand-in
+            # reviewer): its verdict stands at face value.
+            return list(flaws or []), True, ""
+        return (list(flaws or []), bool(status.get("available")),
+                str(status.get("error") or ""))
+
+    def _review_diff(self, task: str, text: str,
+                     focus: str | None = None) -> DiffReview:
+        """The harsh reviewer over an applied diff — ALWAYS runs
+        (pass #63, W5).  Depth is a function of the diff itself; see
+        the scaling table at the DiffReview definition.  ``task`` is
+        accepted for signature stability and reviewer context only —
+        it no longer gates or sizes anything."""
+        base_focus = focus or (
+            "the applied diff below: undefined names, wrong indices, "
+            "unhandled edge cases, or changes that break the task's "
+            "acceptance criteria")
+        metrics = _diff_metrics(text)
+        tier = _review_tier(metrics)
+        if tier == "focused" and self._review_floor():
+            tier = "standard"
+        outcome = DiffReview(
+            depth=tier, files=metrics["file_count"],
+            added=metrics["added"], deleted=metrics["deleted"],
+            risks=list(metrics["risks"]))
+        checks = "; ".join(_RISK_CHECKS[r] for r in metrics["risks"]
+                           if r in _RISK_CHECKS)
+        deep_focus = base_focus + (f" Also check: {checks}" if checks
+                                   else "")
+
+        failed_calls = 0
+
+        def absorb(flaws: list[str], available: bool, error: str,
+                   prefix: str = "") -> None:
+            nonlocal failed_calls
+            outcome.calls += 1
+            for f in flaws:
+                f = f"{prefix}{f}" if prefix else f
+                if f not in outcome.flaws:
+                    outcome.flaws.append(f)
+            if not available:
+                failed_calls += 1
+                if not outcome.error:
+                    outcome.error = error
+
+        if tier == "focused":
+            absorb(*self._call_reviewer(text[:4000], base_focus,
+                                        max_calls=1))
+        elif tier == "standard":
+            absorb(*self._call_reviewer(text, deep_focus, max_calls=None))
+        else:  # deep
+            chunks = _split_unified_diff(text)
+            if len(chunks) >= 2:
+                per_file_focus = (
+                    "the applied diff for ONE file below: undefined "
+                    "names, wrong indices, unhandled edge cases, broken "
+                    "internal consistency")
+                for path, chunk in chunks[:_DEEP_FILE_CAP]:
+                    absorb(*self._call_reviewer(
+                        chunk, per_file_focus, max_calls=None),
+                        prefix=f"[{path}] " if path else "")
+                if len(chunks) > _DEEP_FILE_CAP:
+                    rest = "\n".join(c for _, c in
+                                     chunks[_DEEP_FILE_CAP:])
+                    absorb(*self._call_reviewer(rest, deep_focus,
+                                                max_calls=None))
+                absorb(*self._call_reviewer(text, deep_focus,
+                                            max_calls=None))
+            else:
+                absorb(*self._call_reviewer(text, deep_focus,
+                                            max_calls=None))
+        if failed_calls and failed_calls >= outcome.calls:
+            outcome.available = False  # no call produced a verdict
+        elif failed_calls:
+            note = (f"{failed_calls} of {outcome.calls} review calls "
+                    "unavailable")
+            outcome.error = (f"{note}: {outcome.error}" if outcome.error
+                             else note)
+            outcome.available = True  # the rest DID produce a verdict
+        return outcome
+
     def _review_flaws(self, task: str, text: str,
                       focus: str | None = None) -> list[str]:
-        """The harsh reviewer, factored out so Phase B can run it over
-        every applied diff — not just attempt-1 new-file drafts."""
-        from .reasoning import looks_complex, reasoning_enabled, review_text
-
-        # gate on the CORE request (see core_request above)
-        core = core_request(task)
-        if not reasoning_enabled(self.context,
-                                 complex_ok=looks_complex(core)
-                                 or len(core) >= 80):
-            return []
-        return review_text(
-            self.context, text,
-            focus=focus or "the applied diff below: undefined names, wrong "
-                           "indices, unhandled edge cases, or changes that "
-                           "break the task's acceptance criteria") or []
+        """The harsh reviewer's flaw list for a diff (pass #63: always
+        runs — depth scaled by the diff, never gated by prompt shape or
+        reasoning mode).  The full outcome (availability, depth, risks)
+        lands on ``self._last_review`` for callers that report it."""
+        outcome = self._review_diff(task, text, focus=focus)
+        self._last_review = outcome
+        return outcome.flaws
 
     def sessions(self, limit: int = 10) -> list[dict[str, Any]]:
         """Recent iterations, newest first (for inspection after the fact)."""
@@ -2222,8 +2612,10 @@ class CodingAgent:
     def _reason_review_code(self, task: str, code: str) -> str:
         """Review the draft before it runs: a harsh reviewer finds real
         bugs (wrong indices, undefined names, missing edge cases); if it
-        finds any, the code is revised once. Gated by NM_REASONING_MODE;
-        power mode reviews every draft with a relaxed budget."""
+        finds any, the code is revised once.  Pass #63: always runs —
+        depth scales with the draft's size; reasoning mode can only
+        deepen it.  An unavailable reviewer leaves the draft unrevised
+        (the applied-diff reviews and the gate still cover the run)."""
         from .reasoning import revise_text
 
         flaws = self._review_flaws(
@@ -2231,6 +2623,10 @@ class CodingAgent:
             focus="python code that must run without error: undefined "
                   "names, wrong indices, unhandled edge cases the task "
                   "implies")
+        last = self._last_review
+        if last is not None and not last.available:
+            _log.info("coding draft review unavailable (%s); draft "
+                      "stands unrevised", last.error)
         if not flaws:
             return code
         _log.info("coding draft review found %d flaw(s); revising", len(flaws))
