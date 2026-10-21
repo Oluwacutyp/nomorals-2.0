@@ -36,9 +36,21 @@ _log = get_logger(__name__)
 
 __all__ = [
     "StoryBible", "BibleCharacter", "PlotThread",
-    "BibleBuilder", "build_bible",
-    "LorebookEntry", "Progression",
+    "BibleBuilder", "build_bible", "bible_needs_redigest",
+    "LorebookEntry", "Progression", "ArcRecap", "BibleLocation",
+    "DIGESTION_VERSION",
 ]
+
+#: Digestion generations.  0 = legacy digestion (pre-grounding): it
+#: mined cast, threads and rules and claimed every chapter digested,
+#: but it never produced the grounding fields — character states, arc
+#: recaps, locations, current situation — so a bible from that era can
+#: claim chapter 2,545 digested while its memory is the story's
+#: opening.  1 = the grounding fold (:meth:`BibleBuilder._fold_digest`).
+#: build/update stamp the generation when their fold completes;
+#: bibles stamped current are never re-digested (see
+#: :func:`bible_needs_redigest`).
+DIGESTION_VERSION = 1
 
 
 # ── lorebook (NovelAI-style keyed entries) ────────────────────────────────────
@@ -160,9 +172,54 @@ class BibleCharacter:
     relationships: list[str] = field(default_factory=list)
     first_seen: int = 0
     mentions: int = 0
+    #: CURRENT state as of the last digested chapter — the latest
+    #: state-bearing sentence about this character (injury, possession,
+    #: whereabouts, status change).  Empty until digestion finds one.
+    #: This is what stops a continuation from writing chapter 2,545's
+    #: hero as his chapter-1 self.
+    state: str = ""
+    state_chapter: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+
+@dataclass
+class ArcRecap:
+    """One digested segment of the story: chapters ``start``–``end``.
+
+    Built incrementally as chapters are digested (never just from the
+    opening), so the bible remembers the LATEST arcs, not only how the
+    story began.
+    """
+    start: int = 0
+    end: int = 0
+    text: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> "ArcRecap":
+        return cls(start=int(d.get("start", 0)), end=int(d.get("end", 0)),
+                   text=str(d.get("text", "")))
+
+
+@dataclass
+class BibleLocation:
+    """A place the story actually visits, with its latest context."""
+    name: str = ""
+    note: str = ""                    # latest sentence placing action there
+    last_seen: int = 0
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> "BibleLocation":
+        return cls(name=str(d.get("name", "")),
+                   note=str(d.get("note", "")),
+                   last_seen=int(d.get("last_seen", 0)))
 
 
 @dataclass
@@ -191,6 +248,23 @@ class StoryBible:
     world_rules: list[str] = field(default_factory=list)
     arc_summary: str = ""
     chapters_digested: int = 0
+    #: per-segment recaps from digestion, in chapter order — the
+    #: bible's memory of the WHOLE story, latest arcs included
+    recaps: list[ArcRecap] = field(default_factory=list)
+    #: places the story visits, with latest context per place
+    locations: list[BibleLocation] = field(default_factory=list)
+    #: where the story STOPPED at the last digested chapter — the
+    #: closing beat of the newest chapter, refreshed by every digest
+    current_situation: str = ""
+    #: digestion generation that produced this bible's grounding
+    #: (see DIGESTION_VERSION); absent/0 in bible files written
+    #: before the grounding fold existed
+    digestion_version: int = 0
+    #: highest chapter the grounding fold has covered, in order.
+    #: Equals chapters_digested whenever grounding is current; it
+    #: lags behind only while a legacy re-digest is in flight, and
+    #: tells that re-digest exactly where to resume.
+    grounding_through: int = 0
     built_at: str = ""
     #: NovelAI-style keyed entries (working memory for generation)
     lore: list[LorebookEntry] = field(default_factory=list)
@@ -234,10 +308,15 @@ class StoryBible:
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> "StoryBible":
-        chars = [BibleCharacter(**c) for c in d.get("characters", [])]
+        chars = [BibleCharacter(**{k: v for k, v in c.items()
+                                   if k in BibleCharacter.__dataclass_fields__})
+                 for c in d.get("characters", [])]
         threads = [PlotThread(**t) for t in d.get("threads", [])]
         lore = [LorebookEntry.from_dict(e) for e in d.get("lore", [])]
         progs = [Progression.from_dict(p) for p in d.get("progressions", [])]
+        recaps = [ArcRecap.from_dict(r) for r in d.get("recaps", [])]
+        locations = [BibleLocation.from_dict(x)
+                     for x in d.get("locations", [])]
         return cls(
             story_slug=d.get("story_slug", ""), title=d.get("title", ""),
             pov=d.get("pov", "third"), tense=d.get("tense", "past"),
@@ -247,6 +326,10 @@ class StoryBible:
             arc_summary=d.get("arc_summary", ""),
             chapters_digested=int(d.get("chapters_digested", 0)),
             built_at=d.get("built_at", ""), lore=lore, progressions=progs,
+            recaps=recaps, locations=locations,
+            current_situation=str(d.get("current_situation", "")),
+            digestion_version=int(d.get("digestion_version", 0) or 0),
+            grounding_through=int(d.get("grounding_through", 0) or 0),
             voiceprint=dict(d.get("voiceprint") or {}))
 
     def character(self, name: str) -> BibleCharacter | None:
@@ -258,6 +341,20 @@ class StoryBible:
 
     def open_threads(self) -> list[PlotThread]:
         return [t for t in self.threads if t.status == "open"]
+
+    def grounding_reaches_end(self) -> bool:
+        """True when the recorded grounding demonstrably covers the
+        last digested chapter: the latest recap ends there and the
+        current situation is that chapter's closing beat.  Only the
+        grounding fold produces either, so a bible passing this check
+        was grounded by it — the data backstop for bibles written
+        before the digestion_version stamp existed."""
+        if self.chapters_digested < 1 or not self.recaps:
+            return False
+        if self.recaps[-1].end < self.chapters_digested:
+            return False
+        return self.current_situation.startswith(
+            f"End of chapter {self.chapters_digested}:")
 
     def brief(self) -> str:
         """Compact steering text for generation prompts."""
@@ -276,12 +373,27 @@ class StoryBible:
                 rel = f" ({'; '.join(c.relationships[:3])})" if c.relationships else ""
                 lines.append(f"  - {c.name} [{c.role}]{rel}: "
                              f"{c.description[:160]}")
+                if c.state:
+                    lines.append(f"    now (ch.{c.state_chapter}): "
+                                 f"{c.state[:180]}")
         open_t = self.open_threads()
         if open_t:
             lines.append("Open plot threads:")
             lines += [f"  - {t.summary[:160]}" for t in open_t[:10]]
+        if self.locations:
+            recent = sorted(self.locations, key=lambda x: x.last_seen,
+                            reverse=True)[:6]
+            lines.append("Places: " + "; ".join(
+                f"{x.name} (ch.{x.last_seen})" for x in recent))
         if self.arc_summary:
             lines.append("So far: " + self.arc_summary[:800])
+        if self.recaps:
+            lines.append("Latest arcs:")
+            lines += [f"  - ch.{r.start}–{r.end}: {r.text[:200]}"
+                      for r in self.recaps[-3:]]
+        if self.current_situation:
+            lines.append("Where the story stopped: "
+                         + self.current_situation[:400])
         return "\n".join(lines)
 
     # ── lorebook ──────────────────────────────────────────────────────
@@ -423,6 +535,25 @@ class StoryBible:
                 have.add(e.name.lower())
                 added += 1
         return added
+
+
+def bible_needs_redigest(bible: StoryBible) -> bool:
+    """True for a LEGACY bible: it claims chapters digested, but its
+    grounding predates the grounding fold — character states, recaps,
+    locations and the current situation stand empty or frozen behind
+    the claimed end, so continuations ground on the story's opening.
+
+    Never misfires on a grounded bible: one stamped with the current
+    DIGESTION_VERSION is current by construction, and an unstamped
+    one whose grounding demonstrably reaches its last digested
+    chapter (written by the fold before the stamp existed) is
+    recognised from its data and only gets stamped, never refolded.
+    """
+    if bible.digestion_version >= DIGESTION_VERSION:
+        return False
+    if bible.chapters_digested < 1:
+        return False
+    return not bible.grounding_reaches_end()
 
 
 # ── heuristic floor ──────────────────────────────────────────────────────────
@@ -598,6 +729,8 @@ def _mine_characters(chapters: list[tuple[int, str, str]]) -> list[BibleCharacte
     return characters
 
 
+_GOAL_RES: list[re.Pattern] = []
+
 _GOAL_PATTERNS = (
     r"\b[Ii] must\s+([^.!?]{8,120})",
     r"\b[Ww]e must\s+([^.!?]{8,120})",
@@ -610,6 +743,8 @@ _GOAL_PATTERNS = (
     r"\b[Ss]wore (?:to|that)\s+([^.!?]{8,120})",
     r"\bvow(?:ed)?\s+([^.!?]{8,120})",
 )
+
+_GOAL_RES = [re.compile(p) for p in _GOAL_PATTERNS]
 
 
 def _mine_threads(chapters: list[tuple[int, str, str]]) -> list[PlotThread]:
@@ -675,6 +810,166 @@ def _mine_rules(chapters: list[tuple[int, str, str]]) -> list[str]:
         if len(rules) >= 24:
             break
     return rules
+
+
+# ── digest fold: state, places, recaps, situation ─────────────────────────────
+#
+# Digestion must ADVANCE the bible's memory, not just accumulate names.
+# These miners run on every digested batch (build and update alike) and
+# keep four things current: each character's latest state, the places
+# the story has been, a recap of the segment just digested, and the
+# closing beat of the newest chapter.  Without them a bible built from
+# chapter 1-6 sample describes the story's OPENING forever, and a
+# continuation written from it re-stages the beginning.
+
+_STATE_MARKERS = (
+    "injur", "wound", "scar", "crush", "broken", "bleed", "dead",
+    "died", "alive", "captur", "fled", "escap", "arriv", "reach",
+    "carries", "carrying", "wield", "holding", "took the", "took a",
+    "gained", "lost his", "lost her", "lost the", "became", "blind",
+    "deaf", "poison", "curs", "exil", "banish", "missing", "now stood",
+    "now sat", "now lay", "no longer", "swore", "vowed", "promot",
+    "level", "rank",
+)
+
+#: markers strong enough to be timeline facts (Progressions)
+_STRONG_STATE_MARKERS = (
+    "injur", "wound", "scar", "crush", "broken", "dead", "died",
+    "captur", "took the", "gained", "lost his", "lost her", "blind",
+    "poison", "exil", "missing",
+)
+
+
+def _name_forms(name: str) -> list[str]:
+    forms = [name]
+    first = name.split()[0] if name.split() else ""
+    if first and len(first) > 2 and first != name:
+        forms.append(first)
+    return forms
+
+
+def _mentions(sentence: str, name: str) -> bool:
+    return any(re.search(r"\b" + re.escape(f) + r"\b", sentence)
+               for f in _name_forms(name))
+
+
+def _mine_character_states(
+        chapters: list[tuple[int, str, str]],
+        names: list[str]) -> dict[str, tuple[str, int, bool]]:
+    """Latest state-bearing sentence per character in this batch.
+
+    Returns ``{name: (sentence, chapter, strong)}`` — only characters
+    with a genuinely state-bearing sentence (injury, possession,
+    whereabouts, status change) appear; a batch that says nothing
+    about a character's state leaves their recorded state untouched.
+    """
+    out: dict[str, tuple[str, int, bool]] = {}
+    for number, _title, text in chapters:
+        for sent in _sentences(text):
+            low = sent.lower()
+            marker = next((m for m in _STATE_MARKERS if m in low), None)
+            if marker is None:
+                continue
+            strong = any(m in low for m in _STRONG_STATE_MARKERS)
+            for name in names:
+                if _mentions(sent, name):
+                    out[name] = (re.sub(r"\s+", " ", sent).strip()[:240],
+                                 number, strong)
+    return out
+
+
+_LOCATION_PREPS = (
+    "in", "at", "to", "into", "inside", "outside", "beneath", "across",
+    "toward", "towards", "reached", "arrived at", "entered", "left",
+)
+
+# prepositions match lower- or sentence-initial Capitalized form; the
+# PLACE itself must be Capitalized (case-sensitive classes on purpose)
+_LOCATION_RE = re.compile(
+    r"\b(?:" + "|".join(
+        re.escape(v) for w in _LOCATION_PREPS
+        for v in (w, w.capitalize())) + r")"
+    r"\s+(?:the\s+|a\s+|an\s+)?"
+    r"([A-Z][a-z]{2,}(?:[ \t]+[A-Z][a-z]{2,}){0,2})")
+
+
+def _mine_locations(
+        chapters: list[tuple[int, str, str]],
+        known_names: set[str]) -> list[BibleLocation]:
+    """Capitalized places action happens in/at, latest context kept."""
+    counts: Counter = Counter()
+    latest: dict[str, tuple[str, int]] = {}
+    chapters_seen: dict[str, set[int]] = {}
+    for number, _title, text in chapters:
+        for sent in _sentences(text):
+            for m in _LOCATION_RE.finditer(sent):
+                place = m.group(1).strip()
+                words = place.split()
+                if not place or place in known_names:
+                    continue
+                if any(w in _STOP_NAMES or w in _TITLE_WORDS
+                       for w in words):
+                    continue
+                if any(place == n or place in _name_forms(n)
+                       for n in known_names):
+                    continue
+                counts[place] += 1
+                chapters_seen.setdefault(place, set()).add(number)
+                latest[place] = (re.sub(r"\s+", " ", sent).strip()[:200],
+                                 number)
+    out = []
+    for place, count in counts.most_common(24):
+        if count < 2 and len(chapters_seen.get(place, set())) < 2:
+            continue
+        note, seen = latest[place]
+        out.append(BibleLocation(name=place, note=note, last_seen=seen))
+    return out[:12]
+
+
+def _batch_recap(chapters: list[tuple[int, str, str]],
+                 names: list[str]) -> str:
+    """Extractive recap of one digested segment: the sentences that
+    carry cast, goals, conflict and resolution, in story order."""
+    scored: list[tuple[int, int, str]] = []
+    seq = 0
+    for _number, _title, text in chapters:
+        for sent in _sentences(text):
+            low = sent.lower()
+            score = 0
+            if any(_mentions(sent, n) for n in names):
+                score += 2
+            if _CONFLICT_WORDS & set(re.findall(r"[a-z]+", low)):
+                score += 2
+            if _RESOLVE_WORDS & set(re.findall(r"[a-z]+", low)):
+                score += 1
+            if any(p.search(sent) for p in _GOAL_RES):
+                score += 2
+            if 40 <= len(sent) <= 220:
+                score += 1
+            scored.append((seq, score, re.sub(r"\s+", " ", sent).strip()))
+            seq += 1
+    if not scored:
+        return ""
+    top = sorted(scored, key=lambda s: s[1], reverse=True)[:3]
+    if all(s[1] == 0 for s in top):
+        first = scored[0][2]
+        last = scored[-1][2]
+        return (first + " " + last)[:340].strip()
+    top.sort(key=lambda s: s[0])
+    return " ".join(s[2] for s in top)[:340].strip()
+
+
+def _closing_situation(text: str, number: int) -> str:
+    """Where a chapter STOPPED: its closing beat, verbatim-trimmed."""
+    paras = [p.strip() for p in re.split(r"\n\s*\n", text or "")
+             if p.strip() and not p.strip().startswith("#")]
+    if not paras:
+        return ""
+    last = re.sub(r"\s+", " ", paras[-1]).strip()
+    sents = [s.strip() for s in
+             re.split(r"(?<=[.!?])\s+", last) if len(s.strip()) > 8]
+    beat = " ".join(sents[-3:]) if sents else last
+    return f"End of chapter {number}: {beat[:420]}"
 
 
 def _profile_style(chapters: list[tuple[int, str, str]]) -> dict[str, Any]:
@@ -813,10 +1108,81 @@ class BibleBuilder:
                                      len(chapters))
         else:
             bible = self._from_heuristics(story_slug, title, chapters)
-        self._measure_voiceprint(bible, chapters)
+        self._fold_digest(bible, chapters)
+        bible.digestion_version = DIGESTION_VERSION
+        bible.grounding_through = max(
+            bible.grounding_through, max(n for n, _, _ in chapters))
         self._sync_lorebook(bible)
         self.save(bible)
         return bible
+
+    def _fold_digest(self, bible: StoryBible,
+                     chapters: list[tuple[int, str, str]]) -> None:
+        """Advance the bible's memory with one digested batch.
+
+        Runs on build AND on every incremental update, so the bible's
+        picture of the story is always as of the LAST digested
+        chapter — never frozen at the opening sample:
+
+        * each character's CURRENT state (latest state-bearing
+          sentence; strong changes also become Progressions — the
+          timeline machinery finally wired into digestion);
+        * locations, refreshed with their latest context;
+        * an :class:`ArcRecap` for this segment;
+        * ``current_situation`` — the closing beat of the newest
+          chapter in the batch;
+        * the voiceprint, re-measured from THIS batch, so the voice
+          target tracks the story's current voice, not its first
+          chapters forever.
+        """
+        if not chapters:
+            return
+        chapters = sorted(chapters, key=lambda c: c[0])
+        names = [c.name for c in bible.characters if c.name]
+        if names:
+            states = _mine_character_states(chapters, names)
+            by_name = {c.name: c for c in bible.characters}
+            have_prog = {(p.name.lower(), p.detail[:60].lower())
+                         for p in bible.progressions}
+            for name, (sentence, number, strong) in states.items():
+                char = by_name.get(name)
+                if char is None:
+                    continue
+                if number >= char.state_chapter:
+                    char.state = sentence
+                    char.state_chapter = number
+                if strong:
+                    key = (name.lower(), sentence[:60].lower())
+                    if key not in have_prog:
+                        bible.add_progression(name, sentence,
+                                              chapter=number)
+                        have_prog.add(key)
+        known = {c.name for c in bible.characters}
+        by_place = {x.name.lower(): x for x in bible.locations}
+        for loc in _mine_locations(chapters, known):
+            existing = by_place.get(loc.name.lower())
+            if existing is None:
+                bible.locations.append(loc)
+                by_place[loc.name.lower()] = loc
+            elif loc.last_seen >= existing.last_seen:
+                existing.note = loc.note
+                existing.last_seen = loc.last_seen
+        recap = _batch_recap(chapters, names)
+        if recap:
+            # a segment's recap REPLACES itself on a re-fold, so
+            # refolding digested chapters (the legacy re-digest)
+            # never duplicates the bible's memory of a segment
+            seg = (chapters[0][0], chapters[-1][0])
+            bible.recaps = [r for r in bible.recaps
+                            if (r.start, r.end) != seg]
+            bible.recaps.append(ArcRecap(
+                start=seg[0], end=seg[1], text=recap))
+            bible.recaps.sort(key=lambda r: (r.start, r.end))
+        last_n, _t, last_text = chapters[-1]
+        situation = _closing_situation(last_text, last_n)
+        if situation:
+            bible.current_situation = situation
+        self._measure_voiceprint(bible, chapters)
 
     @staticmethod
     def _measure_voiceprint(bible: StoryBible,
@@ -878,9 +1244,49 @@ class BibleBuilder:
         bible.chapters_digested = max(
             bible.chapters_digested,
             max(n for n, _, _ in new_chapters))
-        # first update fills a voiceprint that build never measured
-        if not bible.voiceprint:
-            self._measure_voiceprint(bible, new_chapters)
+        # digestion advances the bible's memory (states, places,
+        # recaps, current situation, current voice) — not just names
+        self._fold_digest(bible, new_chapters)
+        # grounding coverage advances only across a CONTIGUOUS fold,
+        # and the version stamp asserts the fold covers everything
+        # the bible claims digested — a tail-only fold over a legacy
+        # bible must not certify chapters it never grounded (those
+        # are the re-digest's job, via StoryContinuer.prepare)
+        if min(n for n, _, _ in new_chapters) <= bible.grounding_through + 1:
+            bible.grounding_through = max(
+                bible.grounding_through,
+                max(n for n, _, _ in new_chapters))
+        if bible.grounding_through >= bible.chapters_digested:
+            bible.digestion_version = DIGESTION_VERSION
+        self._sync_lorebook(bible)
+        self.save(bible)
+        return bible
+
+    def refold(self, story_slug: str,
+               chapters: list[tuple[int, str, str]]) -> StoryBible:
+        """Re-run ONLY the grounding fold over chapters a bible
+        already claims digested — the legacy re-digest.
+
+        Unlike :meth:`update` this mines nothing new (no double-
+        counted mentions, no duplicated threads): the fold is
+        idempotent over a segment — character states key on chapter,
+        progressions dedupe on content, locations refresh by last
+        sighting, a segment's recap replaces itself, and the current
+        situation + voiceprint track the newest chapter folded.
+        ``grounding_through`` advances and is saved per call, so an
+        interrupted re-digest resumes where it stopped; stamping
+        ``digestion_version`` is the caller's job, once the whole
+        claimed range has been folded.
+        """
+        bible = self.load(story_slug)
+        if bible is None:
+            raise ValueError(
+                f"no bible for {story_slug!r} — build one first")
+        if not chapters:
+            return bible
+        self._fold_digest(bible, chapters)
+        bible.grounding_through = max(
+            bible.grounding_through, max(n for n, _, _ in chapters))
         self._sync_lorebook(bible)
         self.save(bible)
         return bible

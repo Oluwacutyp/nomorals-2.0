@@ -4,8 +4,15 @@ Given a story Devon has read (fetched chapters via the reader, or text
 pasted by the owner), ``StoryContinuer`` writes the next chapter(s):
 
 * the story bible (auto-built/updated from the read chapters) steers
-  voice, cast, open threads, and world rules;
-* the last two chapters ride along for immediate continuity;
+  voice, cast, open threads, and world rules — and digestion keeps
+  its memory CURRENT: character states, places, per-arc recaps, the
+  story's closing situation, and a voiceprint measured from the
+  latest chapters, so chapter 2,546 is steered by the story as it
+  stands, not by its opening;
+* the last three chapters ride along for immediate continuity, the
+  final one near-full, plus an explicit final-scene anchor (who is on
+  stage, the literal closing lines) with a no-recap, no-re-introduction
+  instruction;
 * the model writes when one is answering; the heuristic composer — real
   prose assembled from the bible's threads and beats, never placeholder —
   is the floor;
@@ -28,7 +35,8 @@ from pathlib import Path
 from typing import Any
 
 from ..core.logging_setup import get_logger
-from .bible import BibleBuilder, StoryBible
+from .bible import (DIGESTION_VERSION, BibleBuilder, StoryBible,
+                    bible_needs_redigest)
 from .model import count_words, slugify
 from .voiceprint import compare, fingerprint
 from .reader import ReaderError, StoryReader
@@ -131,11 +139,18 @@ class StoryContinuer:
         so continuing a story read only at chapter 1 produced a
         "Chapter 2" from a near-empty bible.  ``chapters`` is retained
         for call compatibility; digestion now always runs to the end.
+
+        A LEGACY bible — one written before the grounding fold
+        existed — already claims the end, so the batch loop above
+        would never touch it and its grounding would stay empty
+        forever; :meth:`_ensure_grounding` re-digests it once.
         """
         story = self.reader._load(slug)
         slug = story.slug
         final = self._ensure_library(slug)
         bible = self.bibles.load(slug)
+        if bible is not None:
+            bible = self._ensure_grounding(slug, bible)
         have = bible.chapters_digested if bible else 0
         if have < final:
             batch: list[tuple[int, str, str]] = []
@@ -163,6 +178,69 @@ class StoryContinuer:
         if bible is None:
             raise ContinuationError(
                 f"no chapters readable for {slug!r} — read some first")
+        return bible
+
+    def _ensure_grounding(self, slug: str,
+                          bible: StoryBible) -> StoryBible:
+        """Bring a LEGACY bible's grounding current — once.
+
+        Bibles written before the grounding fold claim every chapter
+        digested while their character states, arc recaps, locations
+        and current situation stand empty: prepare's incremental loop
+        keys off chapters_digested, so without this the books the
+        owner has followed longest would keep grounding
+        continuations on their openings forever.
+
+        The re-digest folds the already-ingested LOCAL chapters
+        through the fold in prepare's usual batches — no chapter is
+        refetched, the reader's position is untouched, and the
+        claimed digested range does not move.  Progress is saved per
+        batch (``grounding_through``), so an interrupted rebuild
+        resumes where it stopped and is only stamped current
+        (``digestion_version``) when the whole claimed range is
+        folded.  A bible stamped current is never re-digested; an
+        unstamped one whose grounding demonstrably reaches its end
+        (written by the fold before the stamp existed) is only
+        stamped.  If a chapter cannot be read locally the rebuild
+        PAUSES and the bible serves as it stands — older fields plus
+        the prompt's true-end anchors — rather than blocking the
+        continuation; the next prepare resumes it.
+        """
+        if bible.digestion_version >= DIGESTION_VERSION:
+            return bible
+        if not bible_needs_redigest(bible):
+            # grounding folded before the stamp existed: mark
+            # current from the data, never re-digest
+            bible.digestion_version = DIGESTION_VERSION
+            bible.grounding_through = bible.chapters_digested
+            self.bibles.save(bible)
+            return bible
+        start = (bible.grounding_through or 0) + 1
+        end = bible.chapters_digested
+        batch: list[tuple[int, str, str]] = []
+        try:
+            for n in range(start, end + 1):
+                text = self.reader.chapter_text(slug, n)
+                title = text.split("\n", 1)[0].lstrip("# ").strip()[:120]
+                batch.append((n, title, text))
+                if len(batch) >= 24:
+                    bible = self.bibles.refold(slug, batch)
+                    batch = []
+            if batch:
+                bible = self.bibles.refold(slug, batch)
+        except ReaderError as exc:
+            _log.warning(
+                "story bible re-digest for %s paused after chapter "
+                "%d of %d: %s — serving the bible as it stands; the "
+                "rebuild resumes on the next prepare",
+                slug, bible.grounding_through, end, exc)
+            return bible
+        bible.digestion_version = DIGESTION_VERSION
+        self.bibles.save(bible)
+        _log.info(
+            "story bible rebuilt for %s: re-digested chapters %d–%d "
+            "through the grounding fold (legacy bible predated "
+            "grounding digestion)", slug, start, end)
         return bible
 
     def prepare_from_text(self, title: str, text: str) -> StoryBible:
@@ -270,26 +348,58 @@ class StoryContinuer:
                 "final_chapter": final,
                 "bible": self.bibles.bible_path(slug).as_posix()}
 
+    @staticmethod
+    def _final_scene_anchor(text: str, bible: StoryBible) -> dict[str, Any]:
+        """Where the story physically STOPPED at the end of ``text``.
+
+        Cast members present in the closing stretch, and the literal
+        closing lines — the anchor the continuation must pick up
+        mid-flow instead of re-staging the story from its beginning.
+        """
+        tail = (text or "")[-1800:]
+        present: list[str] = []
+        for c in bible.characters:
+            forms = [c.name] + ([c.name.split()[0]]
+                                if len(c.name.split()) > 1 else [])
+            if any(re.search(r"\b" + re.escape(f) + r"\b", tail)
+                   for f in forms if len(f) > 2):
+                present.append(c.name)
+        paras = [p.strip() for p in re.split(r"\n\s*\n", text or "")
+                 if p.strip() and not p.strip().startswith("#")]
+        last_lines = re.sub(r"\s+", " ", paras[-1]).strip()[:700] \
+            if paras else ""
+        return {"present": present[:8], "last_lines": last_lines}
+
     def _write_one(self, slug: str, title: str, bible: StoryBible,
                    chapter_no: int, *, words: int,
                    direction: str, takes: int = 1,
                    final: int = 0) -> dict[str, Any]:
-        # immediate continuity: tails of the last two chapters — the
+        # immediate continuity: tails of the last three chapters — the
         # story's actual last chapters (source tail, then any chapters
-        # Devon already wrote beyond it)
+        # Devon already wrote beyond it).  The final chapter rides
+        # near-full: its scene setup (who is present, where, mid-action)
+        # is exactly what a starved tail used to cut away.
         tails: list[str] = []
-        for n in (chapter_no - 2, chapter_no - 1):
+        anchor_text = ""
+        for n in (chapter_no - 3, chapter_no - 2, chapter_no - 1):
             if n < 1:
                 continue
             try:
-                tails.append(_tail(self._any_chapter_text(slug, n, final)))
+                text_n = self._any_chapter_text(slug, n, final)
             except ReaderError:
                 continue
+            if n == chapter_no - 1:
+                anchor_text = text_n
+                tails.append(_tail(text_n, 8000))
+            else:
+                tails.append(_tail(text_n, 3000))
+        scene = self._final_scene_anchor(anchor_text, bible) \
+            if anchor_text else None
         candidates: list[str] = []
         for take_i in range(max(1, takes)):
             text = self._model_continuation(
                 bible, chapter_no, tails, words, direction,
-                temperature=0.7 + 0.1 * take_i)
+                temperature=0.7 + 0.1 * take_i, scene=scene)
             if not text:
                 text = self._compose_continuation(
                     bible, chapter_no, tails, words, direction,
@@ -324,32 +434,46 @@ class StoryContinuer:
                 f"# {ch_title} ({alt['label']})\n\n{text and '' or ''}"
                 f"*alternate take — score {alt['score']}*\n\n{alt['text']}\n",
                 encoding="utf-8")
+        from .ai_tells import scan_ai_tells
         return {"number": chapter_no, "title": ch_title,
                 "words": count_words(text), "path": path.as_posix(),
                 "text": text, "takes": alt_takes,
                 "take_scores": [round(s, 3) for s, _ in scored],
                 # voice drift vs the bible's target, on every chapter
-                "voice_drift": self.validate_voice(text, bible)}
+                "voice_drift": self.validate_voice(text, bible),
+                # AI-tell scan (fiction.validate's machinery): counts +
+                # locations, reported, never blocking
+                "ai_tells": scan_ai_tells(text)}
 
     def _assemble_prompt(self, bible: StoryBible, chapter_no: int,
                          tails: list[str], words: int,
-                         direction: str) -> tuple[str, str]:
+                         direction: str,
+                         scene: dict[str, Any] | None = None
+                         ) -> tuple[str, str]:
         """Build (system, user) prompt in the canonical AI-Dungeon order.
 
         AI Instructions → Plot Essentials (always-on) → Story Cards
-        (keyed lorebook hits) → Story Summary → hot threads (memory) →
-        History (tails) → Author's Note (voice lock) → the ask → buffer.
+        (keyed lorebook hits) → Story Summary → timeline + recent arcs →
+        hot threads (memory) → current situation (cast states, places) →
+        voice target → History (tails) → final-scene anchor →
+        Author's Note (voice lock) → the ask → buffer.
         """
-        recent = "\n\n".join(tails[-2:])
+        recent = "\n\n".join(tails)
         # 1. plot essentials: always-on lorebook entries only
         essentials = bible.inject("", max_chars=1200)
         # 2. story cards: keyed hits from the recent tail
         cards = bible.inject(recent, max_chars=1500)
         # 3. rolling summary
-        summary = (bible.arc_summary or "").strip()[:1200]
-        # 4. memory: hottest open threads
-        hot = sorted(bible.open_threads(), key=lambda t: t.heat,
-                     reverse=True)[:4]
+        summary = (bible.arc_summary or "").strip()[:2400]
+        # 4. memory: hottest open threads + the most recently touched
+        open_t = bible.open_threads()
+        hot = sorted(open_t, key=lambda t: t.heat, reverse=True)[:4]
+        seen_ids = {t.id for t in hot}
+        for t in sorted(open_t, key=lambda t: t.last_seen,
+                        reverse=True)[:2]:
+            if t.id not in seen_ids and len(hot) < 5:
+                hot.append(t)
+                seen_ids.add(t.id)
         memory = "\n".join(f"- {t.summary[:180]}" for t in hot)
         system = (
             "You are the original author's ghostwriter. You continue the "
@@ -363,14 +487,67 @@ class StoryContinuer:
             parts.append(f"WORLD LORE (relevant now):\n{cards}")
         if summary:
             parts.append(f"STORY SO FAR:\n{summary}")
+        # timeline position + the latest arcs — the story's memory of
+        # where it has actually reached, not only how it began
+        timeline = []
+        if bible.chapters_digested:
+            timeline.append(
+                f"TIMELINE: this story has run {bible.chapters_digested} "
+                f"chapters. You are writing chapter {chapter_no} — deep "
+                f"in the story, NOT a new beginning.")
+        if bible.recaps:
+            timeline.append("RECENT ARCS (what actually happened "
+                            "lately):")
+            timeline += [f"  - ch.{r.start}–{r.end}: {r.text[:260]}"
+                         for r in bible.recaps[-3:]]
+        if timeline:
+            parts.append("\n".join(timeline))
         if memory:
             parts.append(f"OPEN THREADS (advance, don't drop):\n{memory}")
+        # current situation: where everyone is NOW — latest recorded
+        # character states (scene cast first), the closing beat of the
+        # last digested chapter, and the latest places
+        situation: list[str] = []
+        present = list((scene or {}).get("present") or [])
+        stated = [c for c in bible.characters if c.state]
+        stated.sort(key=lambda c: (c.name not in present,
+                                   -c.state_chapter))
+        for c in stated[:6]:
+            situation.append(
+                f"  - {c.name} — {c.state[:220]} "
+                f"(as of ch.{c.state_chapter})")
+        if bible.current_situation:
+            situation.append(f"  {bible.current_situation[:420]}")
+        if bible.locations:
+            recent_places = sorted(bible.locations,
+                                   key=lambda x: x.last_seen,
+                                   reverse=True)[:3]
+            situation.append("  Places lately: " + "; ".join(
+                f"{x.name} (ch.{x.last_seen})" for x in recent_places))
+        if situation:
+            parts.append("CURRENT SITUATION — where everyone is NOW "
+                         "(these facts outrank anything older):\n"
+                         + "\n".join(situation))
         # voice-target lines: the measured voice steers generation
         voice_lines = (bible.voice_target()
                        if hasattr(bible, "voice_target") else [])
         if voice_lines:
             parts.append("\n".join(voice_lines))
-        parts.append(f"RECENT STORY:\n{recent[-3500:] or '(beginning)'}")
+        parts.append(f"RECENT STORY:\n{recent[-14000:] or '(beginning)'}")
+        # final-scene anchor: the exact moment to pick up, with the
+        # anti-restart instruction stated as law, not a hint
+        if scene and (scene.get("last_lines") or scene.get("present")):
+            on_stage = ", ".join(scene.get("present") or []) \
+                or "the cast of the recent story"
+            parts.append(
+                f"WHERE THE STORY STOPPED — end of chapter "
+                f"{chapter_no - 1}. On stage: {on_stage}. The final "
+                f"lines were:\n\u201c{scene.get('last_lines', '')}\u201d\n"
+                f"Continue from that exact moment, mid-flow. Do NOT "
+                f"recap what has already happened. Do NOT re-introduce "
+                f"established characters or explain who anyone is — "
+                f"the reader has read all {chapter_no - 1} chapters. "
+                f"Do NOT re-stage, echo, or re-write earlier scenes.")
         # author's note: short, by position — right before the ask
         parts.append(
             f"[Author's note: write in {bible.pov}-person, {bible.tense} "
@@ -378,8 +555,10 @@ class StoryContinuer:
             f"Voice: {(bible.voice_notes or 'as established')[:200]}]")
         parts.append(
             f"Write CHAPTER {chapter_no} continuing RIGHT where the recent "
-            f"story left off — same voice, characters behaving like "
-            f"themselves, open threads advanced, world rules obeyed. "
+            f"story left off — begin inside the ongoing action, not with "
+            f"scene-setting or backstory. Same voice, characters behaving "
+            f"like themselves as they are NOW, open threads advanced, "
+            f"world rules obeyed. "
             f"~{words} words of real prose with dialogue and action.")
         if direction:
             parts.append(f"Story direction for this chapter: {direction}")
@@ -447,7 +626,8 @@ class StoryContinuer:
     # -- model path -----------------------------------------------------------
     def _model_continuation(self, bible: StoryBible, chapter_no: int,
                             tails: list[str], words: int,
-                            direction: str, temperature: float = 0.75) -> str:
+                            direction: str, temperature: float = 0.75,
+                            scene: dict[str, Any] | None = None) -> str:
         try:
             from ..llm.base import Message, SamplingParams
             from ..llm.brain import brain_for
@@ -457,7 +637,7 @@ class StoryContinuer:
         if not model_available(self.context):
             return ""
         system, user = self._assemble_prompt(bible, chapter_no, tails,
-                                             words, direction)
+                                             words, direction, scene=scene)
         try:
             response = brain_for(self.context).chat(
                 [Message.system(system), Message.user(user)],
