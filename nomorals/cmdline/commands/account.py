@@ -5,22 +5,23 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json as _json
-import os as _os
 import sys
 from typing import Any
 
 
 def _vault(context: Any):
-    """The accounts credential vault, unlocked via NM_VAULT_PASSPHRASE."""
-    from ...accounts.vault import CredentialVault
+    """The accounts credential vault, unlocked by any owner credential.
 
-    passphrase = _os.environ.get("NM_VAULT_PASSPHRASE", "")
-    if not passphrase:
-        raise _AccountCliError(
-            "vault is locked: set the NM_VAULT_PASSPHRASE environment variable "
-            "to create accounts"
-        )
-    return CredentialVault(context.db, master_passphrase=passphrase)
+    Owner seal, power key (partner.owner_key / NM_PARTNER_OWNER_KEY),
+    or the legacy NM_VAULT_PASSPHRASE — whichever is available opens
+    it (see :func:`nomorals.accounts.vault.open_vault`)."""
+    from ...accounts.vault import VaultLockedError, open_vault
+
+    try:
+        return open_vault(context.db, context=context,
+                          actor="account-cli")
+    except VaultLockedError as exc:
+        raise _AccountCliError(str(exc)) from exc
 
 
 class _AccountCliError(Exception):

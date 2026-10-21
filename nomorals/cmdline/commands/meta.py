@@ -284,18 +284,18 @@ def _cmd_zip(args: argparse.Namespace, context: Any) -> int:
 
 
 def _connector_vault(context: Any):
-    """The encrypted vault, unlocked via NM_VAULT_PASSPHRASE. Fail fast."""
-    import os
+    """The encrypted vault, unlocked by any owner credential. Fail fast.
 
-    from ...accounts.vault import CredentialVault
+    Owner seal, power key (partner.owner_key / NM_PARTNER_OWNER_KEY),
+    or the legacy NM_VAULT_PASSPHRASE — see
+    :func:`nomorals.accounts.vault.open_vault`."""
+    from ...accounts.vault import VaultLockedError, open_vault
 
-    passphrase = os.environ.get("NM_VAULT_PASSPHRASE", "")
-    if not passphrase:
-        raise _ConnectorCliError(
-            "vault is locked: set the NM_VAULT_PASSPHRASE environment variable "
-            "to manage connector credentials"
-        )
-    return CredentialVault(context.db, master_passphrase=passphrase)
+    try:
+        return open_vault(context.db, context=context,
+                          actor="connectors-cli")
+    except VaultLockedError as exc:
+        raise _ConnectorCliError(str(exc)) from exc
 
 
 class _ConnectorCliError(Exception):

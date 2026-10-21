@@ -12,7 +12,6 @@ still play).
 
 from __future__ import annotations
 
-import os
 from typing import Any
 
 from ..core.logging_setup import get_logger
@@ -33,15 +32,13 @@ def wire_streaming_adapters(context: Any) -> dict[str, str]:
             getattr(context, "soundcloud_adapter", None) is not None:
         return {"spotify": "ok", "soundcloud": "ok"}
     result: dict[str, str] = {}
-    passphrase = os.environ.get("NM_VAULT_PASSPHRASE", "")
     vault = None
-    if passphrase:
-        try:
-            from ..accounts.vault import CredentialVault
-            vault = CredentialVault(
-                getattr(context, "db", None), master_passphrase=passphrase)
-        except Exception as exc:  # noqa: BLE001 - locked vault, skip
-            _log.debug("streaming wiring: vault unavailable: %s", exc)
+    try:
+        from ..accounts.vault import open_vault
+        vault = open_vault(getattr(context, "db", None), context=context,
+                           actor="streaming-wiring")
+    except Exception as exc:  # noqa: BLE001 - locked vault, skip
+        _log.debug("streaming wiring: vault unavailable: %s", exc)
     # SoundCloud is keyless — the connector never reads the vault, so a
     # missing/locked vault is fine for it.
     if getattr(context, "soundcloud_adapter", None) is None:
@@ -56,7 +53,8 @@ def wire_streaming_adapters(context: Any) -> dict[str, str]:
     if getattr(context, "spotify_adapter", None) is None:
         if vault is None:
             # Spotify's OAuth tokens live in the vault — locked, skip.
-            result["spotify"] = "skipped: vault locked (no NM_VAULT_PASSPHRASE)"
+            result["spotify"] = ("skipped: vault locked (no owner "
+                                 "credential could open it)")
         else:
             try:
                 context.spotify_adapter = create_connector("spotify", vault)
@@ -73,14 +71,11 @@ def spotify_connector(context: Any) -> Any | None:
     adapter = getattr(context, "spotify_adapter", None)
     if adapter is not None:
         return adapter
-    passphrase = os.environ.get("NM_VAULT_PASSPHRASE", "")
-    if not passphrase:
-        return None
     try:
-        from ..accounts.vault import CredentialVault
+        from ..accounts.vault import open_vault
         from .registry import create_connector
-        vault = CredentialVault(getattr(context, "db", None),
-                                master_passphrase=passphrase)
+        vault = open_vault(getattr(context, "db", None), context=context,
+                           actor="spotify-connector")
         return create_connector("spotify", vault)
     except Exception:  # noqa: BLE001 - best-effort
         return None

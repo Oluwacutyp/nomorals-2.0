@@ -761,24 +761,25 @@ class RuntimeSystemMixin:
     def _connectors_vault(self) -> Any:
         """The encrypted vault for chat-side connector management.
 
-        Same vault `nm connectors` uses (context db + NM_VAULT_PASSPHRASE).
-        Raises a plain, actionable message when it can't be built.
+        Same vault `nm connectors` uses.  Opens with ANY owner
+        credential — the power key (partner.owner_key), a presented
+        owner seal passphrase, or the legacy NM_VAULT_PASSPHRASE —
+        via :func:`nomorals.accounts.vault.open_vault`.  Raises a
+        plain, actionable message (naming every source checked) when
+        no credential can open it.
         """
-        import os
+        from ...accounts.vault import VaultLockedError, open_vault
 
-        from ...accounts.vault import CredentialVault
-
-        passphrase = os.environ.get("NM_VAULT_PASSPHRASE", "")
         db = getattr(self.context, "db", None)
-        if not passphrase:
-            raise _ConnectorsChatError(
-                "the credential vault is locked: set NM_VAULT_PASSPHRASE "
-                "in the bot's environment, then retry")
         if db is None:
             raise _ConnectorsChatError(
                 "no database is attached to this chat context — connector "
                 "management needs the vault database")
-        return CredentialVault(db, master_passphrase=passphrase)
+        try:
+            return open_vault(db, context=self.context,
+                              actor="connectors-chat")
+        except VaultLockedError as exc:
+            raise _ConnectorsChatError(str(exc)) from exc
 
     def _control_connectors(self, tail: str) -> str:
         """Manage the service connectors from chat (whatever the registry holds).

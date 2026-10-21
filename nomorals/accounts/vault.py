@@ -3,6 +3,19 @@
 Credentials are encrypted at rest using AES-256-CTR with HMAC authentication.
 The master key is derived from a passphrase via PBKDF2 (100k iterations).
 
+Multi-credential unlock (Pass 4): the vault's master key can additionally
+be *wrapped* (AES-encrypted under a key derived from another owner
+credential) for each of the owner's standing credentials — the legacy
+passphrase, the owner seal passphrase (``nomorals.core.owner``), and the
+power-mode key (``partner.owner_key``).  :meth:`CredentialVault.unlock`
+tries every available credential: any one whose wrap opens (or, for a
+pre-wrap legacy vault, the passphrase whose derived key authenticates
+against stored rows) unlocks the vault, and a successful unlock wraps
+the master key under every other available verified credential, so
+existing vaults migrate forward without a passphrase ceremony.  A wrong
+credential fails closed — unwrapping is HMAC-authenticated, exactly as
+hard as a wrong passphrase always was.
+
 Security model:
 - Credentials never stored in plaintext
 - Each credential gets its own encryption key derived from master key + credential ID
@@ -32,21 +45,68 @@ Usage:
 from __future__ import annotations
 
 import json
+import os
+import secrets
 import time
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
-from ..core.cipher import aes_decrypt, aes_encrypt, derive_key
+from ..core.cipher import CipherError, aes_decrypt, aes_encrypt, derive_key
 from ..core.errors import NotFound, StorageError
 from ..core.logging_setup import get_logger
 from ..storage.db import Database
 
-__all__ = ["CredentialVault", "Credential", "AccountProfile"]
+__all__ = [
+    "CredentialVault", "Credential", "AccountProfile",
+    "VaultLockedError", "open_vault", "VAULT_CREDENTIAL_TYPES",
+]
 
 # PBKDF2 iterations for vault key derivation (matches the cipher tool default).
 _KDF_ITERATIONS = 100_000
 
 _log = get_logger(__name__)
+
+#: Credential types that may unwrap the vault master key.  The owner set
+#: all three: the legacy vault passphrase, the owner seal passphrase, and
+#: the power-mode key — any ONE of them opens the vault.
+VAULT_CREDENTIAL_TYPES = ("passphrase", "owner_seal", "power_key")
+
+#: Human label + where the credential lives, per type — used in locked
+#: error reports so an operator knows exactly what was checked where.
+_CREDENTIAL_SOURCES = {
+    "passphrase": "passphrase (NM_VAULT_PASSPHRASE environment variable)",
+    "owner_seal": "owner seal (passphrase baked via `nm owner seal` "
+                  "into nomorals/core/owner.py)",
+    "power_key": "power key (partner.owner_key setting, env "
+                 "NM_PARTNER_OWNER_KEY)",
+}
+
+_WRAP_SALT_PREFIX = b"nomorals-vault-wrap"
+_VERIFIER_PLAINTEXT = b"nomorals-vault-verifier-v1"
+_VERIFIER_SALT = b"nomorals-vault-verify"
+
+
+class VaultLockedError(StorageError):
+    """No available owner credential could open the vault.
+
+    ``checks`` carries one line per credential source describing what
+    was looked for and what happened, so the message is actionable
+    without reading code.  Credential VALUES never appear in it.
+    """
+
+    code = "storage.vault_locked"
+    retryable = False
+
+    def __init__(self, checks: list[str]) -> None:
+        self.checks = list(checks)
+        lines = ["the credential vault is locked — no owner credential "
+                 "could open it. Checked:"]
+        lines.extend(f"  - {line}" for line in self.checks)
+        lines.append(
+            "any ONE of these opens the vault: the owner seal passphrase, "
+            "the power key (partner.owner_key / NM_PARTNER_OWNER_KEY), or "
+            "the legacy vault passphrase (NM_VAULT_PASSPHRASE).")
+        super().__init__("\n".join(lines))
 
 @dataclass
 class Credential:
@@ -200,7 +260,352 @@ class CredentialVault:
                 CREATE INDEX IF NOT EXISTS idx_profile_credentials_cred
                 ON profile_credentials(credential_id)
             """)
+            # Multi-credential unlock: the master key, wrapped once per
+            # accepted owner credential, plus a verifier blob that lets
+            # an unlock attempt prove a candidate master key is right
+            # without touching credential rows.
+            self.db.execute("""
+                CREATE TABLE IF NOT EXISTS vault_key_wraps (
+                    credential_type TEXT PRIMARY KEY,
+                    salt TEXT NOT NULL,
+                    wrapped_key TEXT NOT NULL,
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL
+                )
+            """)
+            self.db.execute("""
+                CREATE TABLE IF NOT EXISTS vault_meta (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL
+                )
+            """)
     
+    # ── multi-credential unlock: key wraps, verifier, audit ────────
+    #
+    # The master key itself never changes when credentials are added:
+    # each accepted owner credential gets one row in vault_key_wraps —
+    # the master key AES-encrypted under a key derived from that
+    # credential (per-wrap random salt).  Unwrapping is authenticated
+    # (CipherError on a wrong credential), so acceptance is real
+    # cryptography, never a bypass flag.
+
+    def _audit_unlock(self, actor: str, via: str, *, ok: bool,
+                      why: str = "") -> None:
+        """Audit-log an unlock outcome by credential TYPE only.
+
+        The credential value is never written anywhere — ``via`` is one
+        of :data:`VAULT_CREDENTIAL_TYPES` (or ``vault.migrate``)."""
+        detail: dict[str, Any] = {"via": via}
+        if why:
+            detail["why"] = why
+        try:
+            from ..core.ids import ulid_now
+
+            self.db.execute(
+                "INSERT INTO audit_log (id, ts, actor, action, capability,"
+                " decision, detail) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (ulid_now(), time.time(), actor or "vault",
+                 "vault.unlock" if ok else "vault.unlock_denied",
+                 "credential-vault", "allow" if ok else "deny",
+                 json.dumps(detail)),
+            )
+        except Exception:  # noqa: BLE001 - audit must never break an unlock
+            _log.debug("vault unlock audit write failed", exc_info=True)
+        if ok:
+            _log.info("vault unlocked via %s", via)
+        else:
+            _log.info("vault unlock denied via %s (%s)", via, why)
+
+    def _wraps(self) -> dict[str, Any]:
+        rows = self.db.query(
+            "SELECT credential_type, salt, wrapped_key FROM vault_key_wraps")
+        return {r["credential_type"]: r for r in rows}
+
+    def wrapped_credential_types(self) -> list[str]:
+        """Credential types that currently hold a master-key wrap."""
+        return sorted(self._wraps().keys())
+
+    def _has_credentials(self) -> bool:
+        row = self.db.query_one("SELECT COUNT(*) AS n FROM credentials")
+        return bool(row and row["n"])
+
+    @staticmethod
+    def _wrap_kek(credential_type: str, secret: str, salt: bytes) -> bytes:
+        return derive_key(
+            secret,
+            salt=_WRAP_SALT_PREFIX + b":" + credential_type.encode("utf-8")
+                 + b":" + salt,
+            iterations=_KDF_ITERATIONS)
+
+    def _wrap_master(self, credential_type: str, secret: str,
+                     master_hex: str) -> None:
+        salt = secrets.token_bytes(16)
+        kek = self._wrap_kek(credential_type, secret, salt)
+        wrapped = aes_encrypt(master_hex.encode("utf-8"), key=kek)
+        now = time.time()
+        with self.db.transaction():
+            self.db.execute(
+                """INSERT OR REPLACE INTO vault_key_wraps
+                   (credential_type, salt, wrapped_key, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (credential_type, salt.hex(), wrapped, now, now))
+
+    def _unwrap_master(self, credential_type: str,
+                       secret: str) -> str | None:
+        """The master key unwrapped by ``secret``, or None when the
+        credential is wrong (authentication failure) or no wrap exists."""
+        row = self.db.query_one(
+            "SELECT salt, wrapped_key FROM vault_key_wraps "
+            "WHERE credential_type = ?", (credential_type,))
+        if not row:
+            return None
+        try:
+            salt = bytes.fromhex(row["salt"])
+        except ValueError:
+            return None
+        kek = self._wrap_kek(credential_type, secret, salt)
+        try:
+            return aes_decrypt(row["wrapped_key"], key=kek).decode("utf-8")
+        except (CipherError, UnicodeDecodeError):
+            return None
+
+    def add_key_wrap(self, credential_type: str, secret: str) -> None:
+        """Wrap this vault's master key under another owner credential.
+
+        After this call, ``secret`` (of the named type) alone can open
+        the vault via :meth:`unlock`."""
+        if credential_type not in VAULT_CREDENTIAL_TYPES:
+            raise ValueError(
+                f"unknown credential type {credential_type!r} — expected "
+                f"one of {', '.join(VAULT_CREDENTIAL_TYPES)}")
+        if not secret:
+            raise ValueError("secret must be non-empty")
+        self._wrap_master(credential_type, secret, self._master_key)
+        _log.info("vault key wrap added for %s", credential_type)
+
+    def remove_key_wrap(self, credential_type: str) -> None:
+        """Drop a credential's wrap (it can no longer open the vault)."""
+        with self.db.transaction():
+            self.db.execute(
+                "DELETE FROM vault_key_wraps WHERE credential_type = ?",
+                (credential_type,))
+
+    def _write_verifier(self, master_hex: str) -> None:
+        key = derive_key(master_hex, salt=_VERIFIER_SALT,
+                         iterations=_KDF_ITERATIONS)
+        blob = aes_encrypt(_VERIFIER_PLAINTEXT, key=key)
+        with self.db.transaction():
+            self.db.execute(
+                "INSERT OR REPLACE INTO vault_meta (key, value) "
+                "VALUES ('verifier', ?)", (blob,))
+
+    def _master_verified(self, master_hex: str) -> bool:
+        """Prove a candidate master key is this vault's real one.
+
+        Uses the verifier blob when present; otherwise authenticates
+        against the first stored credential row.  An empty vault with
+        no verifier contradicts nothing, so the candidate stands."""
+        row = self.db.query_one(
+            "SELECT value FROM vault_meta WHERE key = 'verifier'")
+        if row:
+            key = derive_key(master_hex, salt=_VERIFIER_SALT,
+                             iterations=_KDF_ITERATIONS)
+            try:
+                return aes_decrypt(row["value"], key=key) == _VERIFIER_PLAINTEXT
+            except CipherError:
+                return False
+        row = self.db.query_one(
+            "SELECT id, password_encrypted FROM credentials "
+            "ORDER BY id LIMIT 1")
+        if not row:
+            return True
+        key = derive_key(master_hex,
+                         salt=f"credential-{row['id']}".encode(),
+                         iterations=_KDF_ITERATIONS)
+        try:
+            aes_decrypt(row["password_encrypted"], key=key)
+            return True
+        except CipherError:
+            return False
+
+    def _ensure_wraps(self, available: dict[str, str]) -> list[str]:
+        """Migration: wrap the master key under every available owner
+        credential that lacks a wrap, and (re)write the verifier.
+        Returns the credential types a wrap was added for."""
+        added: list[str] = []
+        existing = set(self.wrapped_credential_types())
+        for ctype in VAULT_CREDENTIAL_TYPES:
+            secret = available.get(ctype)
+            if secret and ctype not in existing:
+                self._wrap_master(ctype, secret, self._master_key)
+                added.append(ctype)
+        self._write_verifier(self._master_key)
+        return added
+
+    @classmethod
+    def unlock(cls, db: Database, *, passphrase: str | None = None,
+               seal_secret: str | None = None, power_key: str | None = None,
+               seal_identity: str = "",
+               actor: str = "vault") -> "CredentialVault":
+        """Open the vault with ANY one owner credential.
+
+        Candidates are tried in owner order — owner seal, power key,
+        passphrase — against the vault's key wraps.  A legacy vault
+        (no wraps yet) opens with its passphrase exactly as before and
+        is then migrated: wraps are created for every other available
+        verified credential.  A brand-new vault with only an owner
+        credential available gets a random master key wrapped under
+        the credentials at hand.
+
+        Args:
+            db: The vault database
+            passphrase: Legacy vault passphrase; None falls back to the
+                ``NM_VAULT_PASSPHRASE`` environment variable
+            seal_secret: The owner seal passphrase, as presented by the
+                owner (verified against the baked seal before use —
+                an unverified secret is never tried against a wrap)
+            power_key: The power-mode key value (``partner.owner_key``)
+            seal_identity: Owner identity claim for the seal check
+            actor: Audit-log actor name
+
+        Raises:
+            VaultLockedError: Every source failed; the message names
+                what was checked and where, per source
+        """
+        if db is None:
+            raise VaultLockedError(
+                ["database: no database is attached to this context"])
+        shell = cls.__new__(cls)
+        shell.db = db
+        shell._master_key = ""
+        shell._ensure_schema()
+        checks: list[str] = []
+
+        # ── resolve candidate credentials (values never leave here) ──
+        from ..core import owner as _owner
+
+        seal_state = ""
+        seal_verified = False
+        if not _owner.seal_configured():
+            seal_state = ("not configured — no seal is baked in "
+                          "(create one with `nm owner seal`)")
+        elif not seal_secret:
+            seal_state = ("configured, but no seal passphrase was "
+                          "presented with this request")
+        elif seal_identity and not _owner.verify_owner(seal_identity,
+                                                       seal_secret):
+            seal_state = ("a seal passphrase was presented but failed "
+                          "verification against the baked seal")
+        elif not seal_identity and not _owner.verify_passphrase(seal_secret):
+            seal_state = ("a seal passphrase was presented but failed "
+                          "verification against the baked seal")
+        else:
+            seal_verified = True
+
+        if passphrase is None:
+            passphrase = os.environ.get("NM_VAULT_PASSPHRASE", "")
+        available: dict[str, str] = {}
+        if seal_verified:
+            available["owner_seal"] = seal_secret or ""
+        if power_key:
+            available["power_key"] = power_key
+        if passphrase:
+            available["passphrase"] = passphrase
+
+        wraps = shell._wraps()
+        has_rows = shell._has_credentials()
+
+        def _finish(master_hex: str, via: str) -> "CredentialVault":
+            vault = cls.__new__(cls)
+            vault.db = db
+            vault._master_key = master_hex
+            vault._ensure_schema()
+            added = vault._ensure_wraps(available)
+            vault._audit_unlock(actor, via, ok=True)
+            if added:
+                vault._audit_unlock(
+                    actor, "vault.migrate", ok=True,
+                    why="master key wrapped for: " + ", ".join(added))
+                _log.info("vault migration: master key wrapped for %s",
+                          ", ".join(added))
+            return vault
+
+        # ── route 1: wraps exist — they are authoritative ────────────
+        if wraps:
+            for ctype in VAULT_CREDENTIAL_TYPES:
+                label = _CREDENTIAL_SOURCES[ctype]
+                secret = available.get(ctype)
+                if secret is None:
+                    if ctype == "owner_seal":
+                        checks.append(f"{label}: {seal_state}")
+                    elif ctype == "power_key":
+                        checks.append(
+                            f"{label}: not configured — partner.owner_key "
+                            "(env NM_PARTNER_OWNER_KEY) is empty")
+                    else:
+                        checks.append(
+                            f"{label}: not set — NM_VAULT_PASSPHRASE is "
+                            "absent from the environment and none was supplied")
+                    continue
+                if ctype not in wraps:
+                    checks.append(
+                        f"{label}: accepted, but this vault has no "
+                        f"{ctype} key wrap yet — one unlock with an "
+                        "already-wrapped credential adds it")
+                    continue
+                master = shell._unwrap_master(ctype, secret)
+                if master is not None and shell._master_verified(master):
+                    return _finish(master, ctype)
+                shell._audit_unlock(actor, ctype, ok=False,
+                                    why="key unwrap failed")
+                checks.append(
+                    f"{label}: the presented credential does not open "
+                    "this vault (key unwrap failed)")
+            raise VaultLockedError(checks)
+
+        # ── route 2: legacy vault (no wraps) — passphrase derivation ──
+        if passphrase:
+            vault = cls(db, master_passphrase=passphrase)
+            if vault._master_verified(vault._master_key):
+                return _finish(vault._master_key, "passphrase")
+            shell._audit_unlock(actor, "passphrase", ok=False,
+                                why="derived key failed verification")
+            checks.append(
+                f"{_CREDENTIAL_SOURCES['passphrase']}: a passphrase was "
+                "supplied but it does not match this vault (stored "
+                "credentials fail authentication under it)")
+        elif has_rows:
+            checks.append(
+                f"{_CREDENTIAL_SOURCES['passphrase']}: not set — "
+                "NM_VAULT_PASSPHRASE is absent from the environment and "
+                "none was supplied")
+            for ctype in ("owner_seal", "power_key"):
+                if ctype in available:
+                    checks.append(
+                        f"{_CREDENTIAL_SOURCES[ctype]}: available, but "
+                        "this vault predates multi-credential unlock — "
+                        "unlock once with its passphrase and wraps are "
+                        "created for the owner credentials automatically")
+        else:
+            # ── route 3: brand-new vault, owner credential only ──────
+            for ctype in ("owner_seal", "power_key"):
+                if ctype in available:
+                    return _finish(secrets.token_hex(32), ctype)
+            checks.append(
+                f"{_CREDENTIAL_SOURCES['passphrase']}: not set — "
+                "NM_VAULT_PASSPHRASE is absent from the environment and "
+                "none was supplied")
+
+        if seal_state and not any("owner seal" in line for line in checks):
+            checks.insert(
+                0, f"{_CREDENTIAL_SOURCES['owner_seal']}: {seal_state}")
+        if "power_key" not in available and not any(
+                "power key" in line for line in checks):
+            checks.append(
+                f"{_CREDENTIAL_SOURCES['power_key']}: not configured — "
+                "partner.owner_key (env NM_PARTNER_OWNER_KEY) is empty")
+        raise VaultLockedError(checks)
+
     def _encrypt_password(self, password: str, credential_id: int) -> str:
         """Encrypt password with a key derived from master + credential ID.
 
@@ -718,6 +1123,15 @@ class CredentialVault:
         new_master = derive_key(
             new_passphrase, salt=b"nomorals-vault-master",
             iterations=_KDF_ITERATIONS).hex()
+        # Key wraps and the verifier reference the master key: after a
+        # rotation the old wraps would wrap a dead key, so below they
+        # are dropped and a fresh passphrase wrap is written.  The other
+        # owner credentials' wraps are re-created automatically by the
+        # next passphrase unlock through CredentialVault.unlock (its
+        # migration step), or explicitly via add_key_wrap.
+        had_wraps = bool(self.wrapped_credential_types())
+        had_verifier = self.db.query_one(
+            "SELECT key FROM vault_meta WHERE key = 'verifier'") is not None
 
         def _old_cred_key(cred_id: int) -> str:
             return derive_key(old_master,
@@ -759,6 +1173,12 @@ class CredentialVault:
                               key_column=("service", "username"),
                               purpose="sessions")
         self._master_key = new_master
+        if had_wraps:
+            with self.db.transaction():
+                self.db.execute("DELETE FROM vault_key_wraps")
+            self.add_key_wrap("passphrase", new_passphrase)
+        if had_wraps or had_verifier:
+            self._write_verifier(new_master)
         _log.info("vault master passphrase rotated (%d credential(s))",
                   len(rotated))
 
@@ -956,3 +1376,40 @@ class CredentialVault:
             credentials=credentials,
             metadata=json.loads(row["metadata"] or "{}"),
         )
+
+
+def open_vault(db: Database, context: Any = None, *,
+               seal_secret: str | None = None, seal_identity: str = "",
+               actor: str = "vault") -> CredentialVault:
+    """Open the accounts vault with whatever owner credential is at hand.
+
+    The shared unlock path for owner-facing surfaces (chat
+    provisioning/connectors, the account and connectors CLIs, account
+    creation): gathers the power key from ``context.settings.partner``
+    (env ``NM_PARTNER_OWNER_KEY``), a presented seal passphrase (the
+    argument, or ``context.extras["vault_seal_secret"]`` when a flow
+    collected one), and the legacy ``NM_VAULT_PASSPHRASE`` env fallback,
+    then delegates to :meth:`CredentialVault.unlock`.  Any ONE accepted
+    credential opens the vault — the passphrase is no longer the only
+    way in.
+
+    Raises:
+        VaultLockedError: No credential could open the vault; the
+            message names every source checked and what happened.
+    """
+    power_key = ""
+    settings = getattr(context, "settings", None) if context is not None \
+        else None
+    partner = getattr(settings, "partner", None) if settings is not None \
+        else None
+    if partner is not None:
+        power_key = str(getattr(partner, "owner_key", "") or "")
+    if seal_secret is None and context is not None:
+        extras = getattr(context, "extras", None)
+        if isinstance(extras, dict):
+            presented = extras.get("vault_seal_secret")
+            if presented:
+                seal_secret = str(presented)
+    return CredentialVault.unlock(
+        db, seal_secret=seal_secret, seal_identity=seal_identity,
+        power_key=power_key or None, actor=actor)

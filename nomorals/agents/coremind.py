@@ -2058,18 +2058,15 @@ class CoreMind:
                 AccountCreator,
                 AccountExistsError,
             )
-            from ..accounts.vault import CredentialVault
+            from ..accounts.vault import VaultLockedError, open_vault
             from ..tools.captcha import creator_solver_adapter
 
-            passphrase = os.environ.get("NM_VAULT_PASSPHRASE", "")
-            if not passphrase:
-                return (
-                    "❌ vault is locked: set the NM_VAULT_PASSPHRASE "
-                    "environment variable so I can store the new "
-                    "credentials, then ask me again."
-                )
-            vault = CredentialVault(self.context.db,
-                                    master_passphrase=passphrase)
+            try:
+                vault = open_vault(self.context.db,
+                                    context=self.context,
+                                    actor="coremind-account-create")
+            except VaultLockedError as exc:
+                return f"❌ {exc}"
             settings = getattr(self.context, "settings", None)
             creator = AccountCreator(
                 vault,
