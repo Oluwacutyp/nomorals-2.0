@@ -100,13 +100,19 @@ class RuntimeVoiceMixin:
         # Voice-note path (default): OGG/Opus + voice-note type, so it
         # lands as a playable bubble, not a document. file=on skips it.
         if not file_mode:
-            voice_result = self._send_tts_voice_note(chat, info["path"])
-            if voice_result is True:
+            delivery = self._send_tts_voice_note(chat, info["path"])
+            if delivery.ok and delivery.voice_note:
                 return (f"🎙️ voice note sent ({info.get('engine')}, {info.get('bytes', 0) // 1024} KB, "
                         f"{info.get('seconds')}s){note}")
-            # Honest fallback: conversion/send failed — the file still
-            # goes out, but labelled as a FILE, never as a voice note.
-            note += f" — voice-note send failed ({voice_result}); sent as file instead"
+            if delivery.ok and delivery.degraded:
+                # The transport already delivered the artifact as a
+                # file — say so, with the reason, never as a voice note.
+                return (f"🔊 spoken ({info.get('engine')}, {info.get('bytes', 0) // 1024} KB, "
+                        f"{info.get('seconds')}s){note} — ⚠️ DEGRADED: sent as a "
+                        f"file, not a voice note ({delivery.reason})")
+            # Total delivery failure — try the plain file route below,
+            # labelled honestly as a file, never as a voice note.
+            note += f" — voice-note send failed ({delivery.reason}); sent as file instead"
         try:
             result = self.gateway.send_file(chat.platform, chat, info["path"],
                                             caption=f"[{info.get('engine')}]")
@@ -117,38 +123,27 @@ class RuntimeVoiceMixin:
             pass
         return f"🔊 spoken ({info.get('engine')}) — saved at {info.get('path')}{note}"
 
-    def _send_tts_voice_note(self, chat: Any, audio_path: str) -> bool | str:
-        """Send TTS audio as a voice-note bubble. True on success.
+    def _send_tts_voice_note(self, chat: Any, audio_path: str):
+        """Send TTS audio as a voice note via the surface's own transport.
 
-        Converts to OGG/Opus (WhatsApp/Telegram voice notes) and sends
-        with the voice-note type (Telegram ``voice_note=True``, WhatsApp
-        ``ptt=True``). On failure returns the reason string — the caller
-        falls back to a file send labelled honestly as a file.
+        Returns a ``VoiceDelivery`` (social.chat.voice_transport): the
+        transport converts to OGG/Opus and sends with the voice-note
+        type native to the chat's surface (Bot API ``sendVoice`` /
+        MTProto ``send_file(voice_note=True)`` / WhatsApp ``ptt``).
+        ``voice_note`` is True only when a real bubble landed;
+        ``degraded`` (with ``reason``) when the artifact went out as a
+        labelled file instead; ``ok`` False when nothing was sent.
         """
-        from ...tools.audio import wav_to_voice_ogg
+        from ...social.chat.voice_transport import VoiceDelivery, send_voice_note
 
-        try:
-            ogg_path, mime = wav_to_voice_ogg(audio_path)
-        except Exception as exc:  # noqa: BLE001 - conversion is best-effort
-            return f"conversion error: {exc}"
-        if mime != "audio/ogg":
-            return "ffmpeg not available for WAV → OGG/Opus conversion"
         try:
             adapter = self.gateway._adapter_for(chat.platform)
         except Exception as exc:  # noqa: BLE001 - no adapter, fall back
-            return f"no adapter: {exc}"
+            return VoiceDelivery(ok=False, reason=f"no adapter: {exc}")
         if adapter is None:
-            return f"no adapter for {chat.platform!r}"
-        try:
-            from ...social.chat.base import MediaRef
-            media = MediaRef(path=ogg_path, kind="voice", name="voice.ogg",
-                             mime="audio/ogg", voice_note=True)
-            result = adapter.send_media(chat, media)
-        except Exception as exc:  # noqa: BLE001 - fall back to file send
-            return f"send_media failed: {exc}"
-        if getattr(result, "ok", False):
-            return True
-        return str(getattr(result, "error", "adapter rejected voice note"))
+            return VoiceDelivery(
+                ok=False, reason=f"no adapter for {chat.platform!r}")
+        return send_voice_note(adapter, chat, audio_path)
 
     def _tts_engines_report(self) -> str:
         """Which /tts engine is in use here, and what tags it supports."""
@@ -295,55 +290,59 @@ class RuntimeVoiceMixin:
         if not outcome.ok:
             return f"speak failed: {getattr(outcome.error, 'message', outcome.error)}"
         v = outcome.value
-        ref = self._ref_from_key(chat_key)
-        gateway = self.context.extras.get("gateway")
-        sent = False
-        if gateway is not None and ref.platform in getattr(gateway, "adapters", {}):
-            try:
-                # Caption ceiling is ~1024 chars on the platforms; the full
-                # transcript rides beside the voice note so it's readable
-                # and searchable in chat.
-                result = gateway.send_file(ref.platform, ref, v["path"],
-                                           caption=text[:1024])
-                sent = bool(getattr(result, "ok", False))
-                if sent and len(text) > 1024:
-                    try:
-                        gateway.send(ref.platform, ref, text)
-                    except Exception:  # noqa: BLE001 - transcript is a bonus
-                        _log.debug("voice-note transcript send failed",
-                                   exc_info=True)
-            except Exception:  # noqa: BLE001 - report the file, don't crash
-                sent = False
         backend = v.get("backend", "?")
         return self._deliver_voice_note(chat_key, v["path"], text, backend,
                                         size_kb=v["bytes"] // 1024)
 
     def _deliver_voice_note(self, chat_key: str, path: str, text: str,
                             backend: str, size_kb: int = 0) -> str:
-        """Send a wav back into the chat as a voice note; reply text."""
+        """Send a wav back into the chat as a voice note; reply text.
+
+        Delivery goes through the surface's voice transport (conversion
+        + native voice send). The reply only claims "voice note" when a
+        real bubble landed; a degraded file delivery is labelled as a
+        file, with the reason.
+        """
         ref = self._ref_from_key(chat_key)
         gateway = self.context.extras.get("gateway")
-        sent = False
+        delivery = None
         if gateway is not None and ref.platform in getattr(gateway, "adapters", {}):
             try:
-                # Caption ceiling is ~1024 chars on the platforms; the full
-                # transcript rides beside the voice note so it's readable
-                # and searchable in chat.
-                result = gateway.send_file(ref.platform, ref, path,
-                                           caption=text[:1024])
-                sent = bool(getattr(result, "ok", False))
-                if sent and len(text) > 1024:
-                    try:
-                        gateway.send(ref.platform, ref, text)
-                    except Exception:  # noqa: BLE001 - transcript is a bonus
-                        _log.debug("voice-note transcript send failed",
-                                   exc_info=True)
+                from ...social.chat.voice_transport import send_voice_note
+                adapter = gateway._adapter_for(ref.platform)
+                if adapter is not None:
+                    # Caption ceiling is ~1024 chars on the platforms;
+                    # the full transcript rides beside the voice note
+                    # so it's readable and searchable in chat.
+                    delivery = send_voice_note(adapter, ref, path,
+                                               caption=text[:1024])
             except Exception:  # noqa: BLE001 - report the file, don't crash
-                sent = False
+                delivery = None
+            if delivery is not None and delivery.ok and len(text) > 1024:
+                try:
+                    gateway.send(ref.platform, ref, text)
+                except Exception:  # noqa: BLE001 - transcript is a bonus
+                    _log.debug("voice-note transcript send failed",
+                               exc_info=True)
         if not size_kb and os.path.exists(path):
             size_kb = os.path.getsize(path) // 1024
-        if sent:
+        if delivery is not None and delivery.ok and delivery.voice_note:
             return f"🎙️ said it ({backend}, {size_kb} KB voice note)"
+        if delivery is not None and delivery.ok and delivery.degraded:
+            return (f"🎙️ said it ({backend}, {size_kb} KB) — ⚠️ DEGRADED: "
+                    f"sent as a file, not a voice note ({delivery.reason})")
+        if delivery is not None and not delivery.ok and gateway is not None:
+            # No voice bubble was possible (e.g. no ffmpeg): the
+            # artifact still goes out as a file, labelled as one.
+            try:
+                result = gateway.send_file(ref.platform, ref, path,
+                                           caption=text[:1024])
+                if getattr(result, "ok", False):
+                    return (f"🎙️ said it ({backend}, {size_kb} KB) — "
+                            f"⚠️ DEGRADED: sent as file instead, not a "
+                            f"voice note ({delivery.reason})")
+            except Exception:  # noqa: BLE001 - fall through to ready line
+                pass
         return (f"🎙️ voice note ready ({backend}, {size_kb} KB): {path}")
 
     # ── voice catalogue: /voice (Telegram / WhatsApp / console) ─────────────

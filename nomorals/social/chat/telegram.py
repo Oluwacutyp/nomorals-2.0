@@ -625,6 +625,20 @@ class TelegramAdapter(ChatAdapter):
             mid = 0
         return mid not in self._sent_ids
 
+    def saved_messages_ref(self) -> ChatRef | None:
+        """ChatRef for the owner's Saved Messages (their self-chat).
+
+        Generated artifacts on this personal surface default here (see
+        ``social.chat.voice_transport``). The self-chat is addressed by
+        the account's own user id — the same id the inbound self-chat
+        gate keys on. None until connect() has learned the id: a send
+        must never guess the destination.
+        """
+        if not self._me_id:
+            return None
+        return ChatRef(platform=self.name, chat_id=str(self._me_id),
+                       kind=ChatKind.DM, title="Saved Messages")
+
     def _sender_is_bot(self, event: Any, message: Any) -> bool:
         """True iff the sender of this inbound message is a bot account.
 
@@ -2061,11 +2075,45 @@ class TelegramBotAdapter(ChatAdapter):
 
     # ── HTTP ────────────────────────────────────────────────────────────────
     def _sess(self) -> Any:
+        """The adapter's ONE session contract: the core ``HttpClient``
+        surface (``post_json`` / ``get`` / ``post_multipart``).
+
+        Every Bot API call — JSON posts AND media uploads — goes through
+        that contract and nothing else. Media sends used to call a
+        requests-style ``session.post(url, data=, files=)`` here; no
+        production factory injects a session, so the session was always
+        the core HttpClient, which has no ``.post`` — every media send
+        died with ``'HttpClient' object has no attribute 'post'`` while
+        text sends (``post_json``) worked. An injected ``session`` must
+        implement the same HttpClient surface.
+        """
         if self._session is None:
             from ...core.http import HttpClient
 
             self._session = HttpClient()
         return self._session
+
+    def _api_upload(self, method: str, fields: dict[str, Any],
+                    file_field: str, path: Path, *,
+                    file_name: str = "") -> dict[str, Any]:
+        """One Bot API multipart upload, via ``post_multipart`` only.
+
+        ``fields`` are the form fields (chat_id, caption, …); the file
+        rides as ``file_field`` with an explicit multipart filename
+        (Bot API decides media type from the filename extension).
+        Returns the API ``result`` object; raises ValidationError with
+        Telegram's description when the API rejects the upload.
+        """
+        url = _BOT_API.format(token=self.token, method=method)
+        resp = self._sess().post_multipart(
+            url, fields,
+            files=[(file_field, path, _mime_for(str(path)),
+                    file_name or path.name)],
+            timeout=120)
+        result = resp.json()
+        if not result.get("ok"):
+            raise ValidationError(result.get("description", "send failed"))
+        return result.get("result") or {}
 
     #: how many times _api replays a request after a 429 before giving up
     _API_429_MAX_RETRIES = 2
@@ -2845,19 +2893,13 @@ class TelegramBotAdapter(ChatAdapter):
         field = {"sendPhoto": "photo", "sendVideo": "video",
                  "sendVoice": "voice", "sendAudio": "audio"}.get(method, "document")
         try:
-            url = _BOT_API.format(token=self.token, method=method)
             data: dict[str, Any] = {"chat_id": chat.chat_id}
             if caption:
                 data["caption"] = caption[:for_platform("telegram-bot").max_caption]
-            with open(path, "rb") as fh:
-                files = {field: (path.name, fh, _mime_for(str(path)))}
-                resp = self._sess().post(url, data=data, files=files, timeout=120)
-            result = resp.json()
-            if not result.get("ok"):
-                raise ValidationError(result.get("description", "send failed"))
+            result = self._api_upload(method, data, field, path)
             self.stats["sent"] += 1
             return SendResult(ok=True, platform=self.name,
-                              message_id=str(result["result"].get("message_id", "")),
+                              message_id=str(result.get("message_id", "")),
                               seconds=time.perf_counter() - started)
         except Exception as exc:  # noqa: BLE001
             self.stats["send_errors"] += 1
@@ -2873,7 +2915,6 @@ class TelegramBotAdapter(ChatAdapter):
             return SendResult(ok=False, platform=self.name,
                               error=f"media file not found: {media.path}")
         try:
-            url = _BOT_API.format(token=self.token, method="editMessageMedia")
             media_obj = {"type": "photo",
                          "media": f"attach://{path.name}"}
             if caption:
@@ -2881,16 +2922,11 @@ class TelegramBotAdapter(ChatAdapter):
             data = {"chat_id": chat.chat_id,
                     "message_id": message_id,
                     "media": json.dumps(media_obj)}
-            with open(path, "rb") as fh:
-                files = {path.name: (path.name, fh, _mime_for(str(path)))}
-                resp = self._sess().post(url, data=data, files=files,
-                                         timeout=120)
-            result = resp.json()
-            if not result.get("ok"):
-                raise ValidationError(result.get("description", "edit failed"))
+            result = self._api_upload("editMessageMedia", data, path.name,
+                                      path, file_name=path.name)
             self.stats["sent"] += 1
             return SendResult(ok=True, platform=self.name,
-                              message_id=str(result["result"].get("message_id", message_id)),
+                              message_id=str(result.get("message_id", message_id)),
                               seconds=time.perf_counter() - started)
         except Exception as exc:  # noqa: BLE001
             self.stats["send_errors"] += 1

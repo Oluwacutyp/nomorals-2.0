@@ -55,6 +55,19 @@ class FakeSession:
             return FakeResponse({"ok": True, "result": {"message_id": 43}})
         return FakeResponse({"ok": True, "result": True})
 
+    def post_multipart(self, url: str, fields: dict | None = None,
+                       files: object = None,
+                       timeout: float = 30) -> FakeResponse:
+        # The adapter's declared session contract (core HttpClient
+        # surface): media uploads arrive here, not via .post.
+        method = url.rsplit("/", 1)[-1]
+        self.calls.append((method, {"params": dict(fields or {}),
+                                    "files": bool(files)}))
+        if method in ("sendPhoto", "sendDocument", "sendVideo",
+                      "sendVoice", "sendAudio", "editMessageMedia"):
+            return FakeResponse({"ok": True, "result": {"message_id": 43}})
+        return FakeResponse({"ok": True, "result": True})
+
     def post_json(self, url: str, params: dict, timeout: float = 30) -> FakeResponse:
         return self.post(url, json=params)
 

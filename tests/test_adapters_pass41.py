@@ -400,13 +400,28 @@ class TestDiscordInboundMediaKinds:
 # ── Telegram bots: voice notes must go out as voice bubbles ────────────────
 
 class _FakeBotSession:
+    """The adapter's declared session contract (core HttpClient surface:
+    post_json / get / post_multipart). Deliberately NO requests-style
+    ``.post`` — media sends must go through ``post_multipart``."""
+
     def __init__(self):
         self.posts: list[dict] = []
 
-    def post(self, url, data=None, files=None, timeout=None):
-        self.posts.append({"url": url, "data": data, "files": files})
+    def post_multipart(self, url, fields=None, files=None, timeout=None):
+        self.posts.append({
+            "url": url, "data": fields,
+            "files": {entry[0]: entry for entry in (files or [])}})
         return SimpleNamespace(
             json=lambda: {"ok": True, "result": {"message_id": 9}})
+
+    def post_json(self, url, params, timeout=None):
+        self.posts.append({"url": url, "data": params, "files": {}})
+        return SimpleNamespace(
+            json=lambda: {"ok": True, "result": {"message_id": 9}})
+
+    def get(self, url, timeout=None):
+        return SimpleNamespace(
+            json=lambda: {"ok": True, "result": {}})
 
 
 class TestTelegramBotVoiceSend:
