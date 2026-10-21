@@ -4,21 +4,32 @@ The old ``media_download`` path was single-shot: yt-dlp → direct HTTP,
 and a failure died there.  This module turns every download into a
 four-stage chain that keeps trying instead of erroring out:
 
+0. **resolve** — a short link (vt.tiktok.com and the other shortener
+   hosts) is expanded to its canonical URL before any stage runs:
+   stages extract from the page the link MEANS, not the redirector.
+   Expansion failure is a note, never a stopper.
 1. **direct** — the current behavior (yt-dlp python API → CLI → direct
    HTTP), wrapped with retry + exponential backoff on transient
    (network) failures only.  A bot-block is not retried: retrying a
-   bot check three times is just slower failure.
+   bot check three times is just slower failure.  yt-dlp is handed the
+   best cookies file for the URL — the owner's exported file, or
+   Devon's own browser-profile cookies when she has logged in there.
 2. **proxy** — retry through the proxy lab (:class:`ProxyPoolConnector`
    via :meth:`healthy_proxies`, protocol-aware ordering).  A proxy that
    fails is *demoted* (``record_failure``) and the chain moves to the
    next one — a dead proxy never kills the download.
 3. **browser** — open the source page in a persistent
-   :class:`BrowserSession` (cookies survive across downloads), extract
-   the real media URL (og:video/og:audio meta, ``<video>``/``<audio>``/
-   ``<source>`` tags, download links/buttons — clicked when needed),
-   then fetch the bytes through the session so the site's cookies and
-   headers ride along.  This is the stage the user's complaint asked
-   for: the download no longer dies when the direct fetch errors.
+   :class:`BrowserSession` (cookies survive across downloads — the
+   session is seeded from the same persisted browser profile the
+   interactive browser tool uses, so a login earned there counts
+   here), extract the real media URL (og:video/og:audio meta,
+   ``<video>``/``<audio>``/``<source>`` tags, embedded JSON state —
+   ``playAddr``/``downloadAddr``/``contentUrl``, which is what
+   SPA players like TikTok actually serve — and download
+   links/buttons, clicked when needed), then fetch the bytes through
+   the session so the site's cookies and headers ride along.  This is
+   the stage the user's complaint asked for: the download no longer
+   dies when the direct fetch errors.
 4. **honest failure** — a structured :class:`DownloadReport` naming every
    stage tried, what each returned, and the most likely cause.  Never a
    bare "download failed".
@@ -38,6 +49,7 @@ everywhere.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import sys
@@ -214,6 +226,7 @@ class DownloadReport:
 
     ok: bool = False
     url: str = ""
+    resolved_url: str = ""      # canonical URL when a short link expanded
     path: str = ""
     size_bytes: int = 0
     title: str = ""
@@ -238,10 +251,12 @@ class DownloadReport:
             return (f"downloaded {self.title or self.url} "
                     f"({self.size_bytes} bytes) via "
                     f"{' → '.join(self.tried()) or 'direct'}")
+        from ..core.text import strip_ansi
         lines = [f"download failed: {self.url or '(no url)'}"]
         for i, s in enumerate(self.stages, 1):
             detail = f"{s.error_class}: {s.error}" if s.error else (
                 s.note or "ok")
+            detail = strip_ansi(detail)
             proxy = f" [proxy {s.proxy}]" if s.proxy else ""
             lines.append(
                 f"  {i}. {s.stage}{proxy} — {detail[:160]} "
@@ -315,6 +330,129 @@ def _mask_proxy(proxy_url: str) -> str:
         return "(proxy)"
 
 
+def _err_text(exc: Any, limit: int = 400) -> str:
+    """Stage-error text: the exception message with terminal escapes
+    stripped (yt-dlp colorizes its errors; a StageLog is a chat-bound
+    report, not a terminal)."""
+    from ..core.text import strip_ansi
+    return strip_ansi(str(exc or ""))[:limit]
+
+
+# ── short links (stage zero) ─────────────────────────────────────────
+
+#: Hosts whose URLs are redirectors, not pages: the link only MEANS
+#: its destination.  Extraction attempted on the short URL itself
+#: fails in instructive-looking but useless ways (the TikTok app-link
+#: interstitial exposes no media at all), so these expand first.
+_SHORTENER_HOSTS = frozenset({
+    "vt.tiktok.com", "vm.tiktok.com", "tiktok.com",
+    "bit.ly", "bitly.is", "t.co", "tinyurl.com", "goo.gl", "is.gd",
+    "v.gd", "rb.gy", "buff.ly", "cutt.ly", "shorturl.at", "s.id",
+    "ow.ly", "dlvr.it", "lnkd.in", "shorte.st", "bc.vc", "rebrand.ly",
+    "bl.ink", "short.io", "trib.al", "yourls.org",
+})
+
+
+def is_short_link(url: str) -> bool:
+    """True when *url*'s host is a link shortener (or a TikTok /t/
+    share path, which is a short link wearing the main domain)."""
+    try:
+        parsed = urllib.parse.urlparse(str(url or ""))
+        host = (parsed.hostname or "").lower()
+        if host.startswith("www."):
+            host = host[4:]
+        if host in _SHORTENER_HOSTS:
+            # tiktok.com itself is a content host — only its /t/
+            # share paths are short links.
+            if host == "tiktok.com":
+                return parsed.path.startswith("/t/")
+            return True
+        return False
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def expand_short_url(url: str) -> str:
+    """Follow a short link to its canonical URL.  Returns the final
+    URL, or the input unchanged when expansion fails (dead shortener,
+    no redirect) — expansion is step zero, never a new way to die.
+    Never raises."""
+    try:
+        from ..core.http import HttpClient
+        client = HttpClient(timeout=10.0)
+        for method in ("head", "get"):
+            try:
+                response = getattr(client, method)(url)
+            except Exception:  # noqa: BLE001 - try the other verb
+                continue
+            final = str(getattr(response, "url", "") or "")
+            if final and final != url:
+                return final
+        return url
+    except Exception:  # noqa: BLE001
+        return url
+
+
+# ── embedded-JSON media mining (browser stage) ───────────────────────
+
+#: JSON keys under which SPA players (TikTok's rehydration state,
+#: JSON-LD VideoObject, most embedded players) carry the actual media
+#: URL.  og tags are the exception on such pages, not the rule.
+_EMBEDDED_URL_KEYS = (
+    "playAddr", "downloadAddr", "playUrl", "contentUrl", "videoUrl",
+    "audioUrl", "sourceUrl",
+)
+
+_EMBEDDED_KV_RE = re.compile(
+    r'"(' + "|".join(_EMBEDDED_URL_KEYS) + r')"\s*:\s*"((?:[^"\\]|\\.)*)"')
+
+_LD_JSON_RE = re.compile(
+    r'(?is)<script[^>]+type=["\']application/ld\+json["\'][^>]*>'
+    r'(.*?)</script>')
+
+
+def _embedded_media_urls(markup: str) -> list[str]:
+    """Media URLs embedded in a page's JSON state: JSON-LD
+    ``contentUrl`` plus ``playAddr``-style keys in hydration blobs.
+    Values are JSON-unescaped (``\\/`` → ``/``).  Order-preserving,
+    deduped, http(s) only.  Never raises."""
+    out: list[str] = []
+    seen: set[str] = set()
+
+    def add(value: Any) -> None:
+        if isinstance(value, str) and \
+                value.startswith(("http://", "https://")) \
+                and value not in seen:
+            seen.add(value)
+            out.append(value)
+
+    if not markup:
+        return out
+    for block in _LD_JSON_RE.finditer(markup):
+        try:
+            data = json.loads(block.group(1))
+        except Exception:  # noqa: BLE001 - a broken block is skipped
+            continue
+        stack = [data]
+        while stack:
+            node = stack.pop()
+            if isinstance(node, dict):
+                for key, value in node.items():
+                    if key in _EMBEDDED_URL_KEYS:
+                        add(value)
+                    elif isinstance(value, (dict, list)):
+                        stack.append(value)
+            elif isinstance(node, list):
+                stack.extend(node)
+    for match in _EMBEDDED_KV_RE.finditer(markup):
+        raw = match.group(2)
+        try:
+            add(json.loads(f'"{raw}"'))
+        except Exception:  # noqa: BLE001 - hand-unescape the common case
+            add(raw.replace("\\/", "/").replace("\\u0026", "&"))
+    return out
+
+
 @contextmanager
 def _proxy_env(proxy_url: str):
     """Route subprocess/yt-dlp traffic through a proxy, then restore.
@@ -375,22 +513,41 @@ class MediaDownloader:
 
         _log.info("download start url=%s profile=%s audio_only=%s",
                   url, self.profile, audio_only)
+        # Stage zero: a short link expands to the page it MEANS before
+        # any extractor sees it.  Failure to expand is a note in the
+        # report — the chain continues with the original URL.
+        work_url = url
+        if is_short_link(url):
+            resolved = expand_short_url(url)
+            if resolved and resolved != url:
+                report.resolved_url = resolved
+                report.stages.append(StageLog(
+                    stage="resolve", url=url, ok=True,
+                    note=f"short link expanded → {resolved}"))
+                _log.info("download stage=resolve url=%s resolved=%s",
+                          url, resolved)
+                work_url = resolved
+            else:
+                report.stages.append(StageLog(
+                    stage="resolve", url=url,
+                    note="short link could not be expanded; continuing "
+                         "with the original URL"))
         try:
-            if self._stage_direct(report, url, target_dir, audio_only,
+            if self._stage_direct(report, work_url, target_dir, audio_only,
                                   format_spec, timeout, budget):
                 return self._finish(report, started)
-            if self._stage_proxy(report, url, target_dir, audio_only,
+            if self._stage_proxy(report, work_url, target_dir, audio_only,
                                  format_spec, timeout, budget):
                 return self._finish(report, started)
-            if self._stage_browser(report, url, target_dir, audio_only,
-                                   page_url or url, budget):
+            if self._stage_browser(report, work_url, target_dir, audio_only,
+                                   page_url or work_url, budget):
                 return self._finish(report, started)
         except Exception as exc:  # noqa: BLE001 — the chain never raises
             _log.warning("downloader crashed mid-chain on %s: %s",
                          url, exc)
             report.stages.append(StageLog(
                 stage="chain", url=url, error_class="site_error",
-                error=f"orchestrator error: {exc}"))
+                error=f"orchestrator error: {_err_text(exc, 380)}"))
         self._finish_failure(report)
         return self._finish(report, started)
 
@@ -413,6 +570,7 @@ class MediaDownloader:
                 result = direct_download(
                     url, target_dir, format_spec=format_spec,
                     audio_only=audio_only, timeout=timeout,
+                    cookies_file=self._cookies_file(url),
                     progress=self._job_progress("direct"))
             except Exception as exc:  # noqa: BLE001
                 kind = classify_failure(exc)
@@ -420,9 +578,9 @@ class MediaDownloader:
                 report.stages.append(StageLog(
                     stage="direct", url=url, attempt=attempt,
                     latency_s=lat, error_class=kind.value,
-                    error=str(exc)[:400]))
+                    error=_err_text(exc)))
                 self._log_stage("direct", url, "", lat, 0, kind,
-                                str(exc)[:200], attempt)
+                                _err_text(exc, 200), attempt)
                 if kind is FailureKind.NETWORK_FAILURE \
                         and attempt < self.direct_retries:
                     backoff = 2.0 ** (attempt - 1)
@@ -459,6 +617,32 @@ class MediaDownloader:
             self._fill_success(report, result, size)
             return True
         return False
+
+    # ── context-derived helpers ──────────────────────────────────────
+
+    def _session_dir(self) -> str:
+        """The browser-profile sessions dir, resolved exactly like
+        the browser tool resolves it ("" when no settings are wired —
+        persistence is then off, as before)."""
+        settings = getattr(self.context, "settings", None) \
+            if self.context is not None else None
+        resolve = getattr(settings, "resolve", None)
+        if callable(resolve):
+            try:
+                return str(resolve("data/browser/sessions"))
+            except Exception:  # noqa: BLE001 - persistence is optional
+                return ""
+        return ""
+
+    def _cookies_file(self, url: str) -> str:
+        """Best cookies file for *url*: the owner's exported file, or
+        Devon's own browser-profile export when she holds a login for
+        the host (see :mod:`nomorals.media.cookies`).  "" when none."""
+        try:
+            from .cookies import cookies_file_for
+            return cookies_file_for(url, self._session_dir()) or ""
+        except Exception:  # noqa: BLE001 - cookies are an enhancement
+            return ""
 
     # ── stage 2: proxy lab ────────────────────────────────────────────
 
@@ -525,7 +709,8 @@ class MediaDownloader:
         except Exception as exc:  # noqa: BLE001
             report.stages.append(StageLog(
                 stage="proxy", url=url,
-                note=f"could not list healthy proxies: {exc}"))
+                note=f"could not list healthy proxies: "
+                     f"{_err_text(exc, 200)}"))
             return False
         if not proxies:
             report.stages.append(StageLog(
@@ -562,21 +747,24 @@ class MediaDownloader:
                     result = direct_download(
                         url, target_dir, format_spec=format_spec,
                         audio_only=audio_only, timeout=timeout,
+                        cookies_file=self._cookies_file(url),
                         progress=self._job_progress("proxy"))
             except Exception as exc:  # noqa: BLE001 — demote, don't die
                 kind = classify_failure(exc)
                 lat = time.perf_counter() - t0
                 try:
-                    pool.record_failure(pid, f"{kind.value}: {exc}"[:300])
+                    pool.record_failure(
+                        pid, f"{kind.value}: {_err_text(exc, 280)}")
                 except Exception as demote_exc:  # noqa: BLE001
                     _log.debug("proxy demote failed for %s: %s",
                                pid, demote_exc)
                 report.stages.append(StageLog(
                     stage="proxy", url=url, proxy=masked, latency_s=lat,
-                    error_class=kind.value, error=str(exc)[:400],
-                    note=f"proxy demoted; trying next"))
+                    error_class=kind.value, error=_err_text(exc),
+                    note=f"proxy {pid or '?'} ({proto}) demoted; "
+                         f"trying next"))
                 self._log_stage("proxy", url, masked, lat, 0, kind,
-                                str(exc)[:200])
+                                _err_text(exc, 200))
                 continue
             lat = time.perf_counter() - t0
             landed = self._verify_landed(result)
@@ -616,7 +804,21 @@ class MediaDownloader:
 
     def _browser_session(self) -> Any | None:
         try:
-            from ..tools.browser import get_session
+            from ..tools.browser import get_session, \
+                seed_session_from_persisted
+            session_dir = self._session_dir()
+            if session_dir:
+                # Same persisted profile the interactive browser tool
+                # uses: this session restores its own saved cookies,
+                # and adopts the whole profile's — a login earned in
+                # ANY session serves the download.
+                session = get_session("downloader",
+                                      session_dir=session_dir)
+                adopted = seed_session_from_persisted(session, session_dir)
+                if adopted:
+                    _log.debug("downloader: browser session adopted %d "
+                               "persisted cookie(s)", adopted)
+                return session
             return get_session("downloader")
         except Exception as exc:  # noqa: BLE001
             _log.debug("downloader: browser session unavailable: %s", exc)
@@ -656,6 +858,11 @@ class MediaDownloader:
             raw_html = ""
         for m in _SRC_TAG_RE.finditer(raw_html or ""):
             add(m.group(1))
+        # Embedded JSON state: SPA players (TikTok above all) ship the
+        # media URL inside hydration JSON / JSON-LD, with no og:video
+        # and no <video src> anywhere in the served HTML.
+        for media_url in _embedded_media_urls(raw_html or ""):
+            add(media_url)
         try:
             links = (session.links(max_links=200) or {}).get("links", [])
         except Exception:  # noqa: BLE001
@@ -691,10 +898,10 @@ class MediaDownloader:
             lat = time.perf_counter() - t0
             report.stages.append(StageLog(
                 stage="browser", url=page_url, latency_s=lat,
-                error_class=kind.value, error=str(exc)[:400],
+                error_class=kind.value, error=_err_text(exc),
                 note="could not open the source page in the browser"))
             self._log_stage("browser", page_url, "", lat, 0, kind,
-                            str(exc)[:200])
+                            _err_text(exc, 200))
             return False
         if not opened.get("ok"):
             lat = time.perf_counter() - t0
@@ -721,8 +928,8 @@ class MediaDownloader:
             report.stages.append(StageLog(
                 stage="browser", url=page_url,
                 error_class=FailureKind.NO_MEDIA_FOUND.value,
-                error="page has no og:video/og:audio, media tags, or "
-                      "download links"))
+                error="page has no og:video/og:audio, media tags, "
+                      "embedded media JSON, or download links"))
             return False
         fetch = getattr(session, "fetch_bytes", None)
         if not callable(fetch):
@@ -780,9 +987,9 @@ class MediaDownloader:
             lat = time.perf_counter() - t0
             report.stages.append(StageLog(
                 stage="browser", url=media_url, latency_s=lat,
-                error_class=kind.value, error=str(exc)[:400]))
+                error_class=kind.value, error=_err_text(exc)))
             self._log_stage("browser", media_url, "", lat, 0, kind,
-                            str(exc)[:200])
+                            _err_text(exc, 200))
             return False
         lat = time.perf_counter() - t0
         size = int(got.get("bytes") or 0)
@@ -884,9 +1091,11 @@ class MediaDownloader:
                 "the source page loaded in the browser but exposed no "
                 "downloadable media link (JS-rendered player or "
                 "login-walled stream)")
-            report.hint = ("if the page needs login, sign in once in the "
-                           "browser session (`nm browser`) so its cookies "
-                           "persist, then retry")
+            report.hint = ("the browser stage already ran with your "
+                           "saved browser-session cookies; if the page "
+                           "needs a FRESH login, open it once in the "
+                           "browser (`nm browser`) and retry — new "
+                           "cookies are picked up automatically")
         elif "proxy pool has no healthy proxies" in notes \
                 or "proxy pool unavailable" in notes:
             if kinds and all(k == FailureKind.NETWORK_FAILURE.value

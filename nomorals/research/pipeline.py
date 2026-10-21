@@ -538,7 +538,11 @@ def run_job(job: ResearchJob, rctx: ResearchContext,
             continue
         any_ok = True
         for item in payload.get("results", []):
-            url = str(item.get("url", "")).strip()
+            # Producers other than web_search can hand over raw
+            # click-tracking URLs — resolve them at intake so the
+            # depth fetch never chases a tracker into a robots veto.
+            from ..core.http import unwrap_redirect_url
+            url = unwrap_redirect_url(str(item.get("url", "")).strip())
             if not url or url in seen_urls:
                 continue
             seen_urls.add(url)

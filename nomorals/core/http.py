@@ -39,7 +39,7 @@ from .errors import NoMoralsError, ProviderError, RateLimited, TimeoutError_, cl
 from .logging_setup import get_logger
 
 __all__ = ["HttpClient", "HttpResponse", "RequestError", "download",
-           "tls_cafile", "url_filename"]
+           "tls_cafile", "unwrap_redirect_url", "url_filename"]
 
 _log = get_logger(__name__)
 
@@ -677,6 +677,65 @@ def url_filename(url: str, default: str = "download.bin") -> str:
     path = urllib.parse.urlparse(url).path
     name = Path(path).name
     return name or default
+
+
+def _b64url_text(raw: str) -> str:
+    """Decode a base64url blob to text ("" when it isn't one)."""
+    import base64
+    try:
+        padded = raw + "=" * (-len(raw) % 4)
+        return base64.urlsafe_b64decode(padded.encode("ascii")).decode(
+            "utf-8", errors="strict")
+    except Exception:  # noqa: BLE001 - a non-base64 payload is not a target
+        return ""
+
+
+def unwrap_redirect_url(url: str) -> str:
+    """Resolve a search-engine click-tracking URL to its real destination.
+
+    Search engines wrap outbound results in tracker URLs — Bing
+    ``/ck/a?!&&p=…&u=a1<base64url>``, DuckDuckGo ``/l/?uddg=…``,
+    Google ``/url?q=…``, Yahoo ``/RU=<encoded>/RK=…``.  Fetching the
+    tracker raw is doubly wrong: the tracker host's robots.txt often
+    disallows the path outright (killing a research fetch for no
+    reason), and the page behind it is a redirect hop, not content.
+
+    Returns the destination when *url* is a known wrapper and the
+    destination parses as an http(s) URL; otherwise returns *url*
+    unchanged.  Pure string work — no network.  Never raises.
+    """
+    try:
+        text = str(url or "").strip()
+        if not text:
+            return text
+        if text.startswith("//"):
+            text = "https:" + text
+        parsed = urllib.parse.urlparse(text)
+        host = (parsed.netloc or "").lower()
+        path = parsed.path or ""
+        params = urllib.parse.parse_qs(parsed.query)
+        target = ""
+        if "duckduckgo.com" in host and path.startswith("/l/"):
+            target = params.get("uddg", [""])[0]
+        elif host.endswith("bing.com") and path.startswith("/ck/"):
+            raw_u = params.get("u", [""])[0]
+            if raw_u.startswith("a1") and len(raw_u) > 2:
+                target = _b64url_text(raw_u[2:])
+            elif raw_u.startswith(("http://", "https://")):
+                target = raw_u
+        elif "google." in host and path in ("/url", "/url/"):
+            target = params.get("q", [""])[0] or params.get("url", [""])[0]
+        elif "search.yahoo.com" in host or host.startswith("r.search.yahoo"):
+            match = re.search(r"/RU=([^/]+)", path)
+            if match:
+                target = urllib.parse.unquote(match.group(1))
+        if target:
+            tparsed = urllib.parse.urlparse(target)
+            if tparsed.scheme in {"http", "https"} and tparsed.netloc:
+                return target
+        return text
+    except Exception:  # noqa: BLE001 - unwrapping must never break a caller
+        return str(url or "")
 
 
 def default_proxy_handler() -> dict[str, Any] | None:

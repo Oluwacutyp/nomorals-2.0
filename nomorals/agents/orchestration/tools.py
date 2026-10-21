@@ -42,7 +42,8 @@ _SCRUBBED_VALUE = "[REDACTED]"
 def _scrub_audit_text(text: Any) -> str:
     """Scrub secret-shaped content from audit-bound text. Never raises."""
     try:
-        return scrub_secrets(str(text))
+        from ...core.text import strip_ansi
+        return strip_ansi(scrub_secrets(str(text)))
     except Exception:  # noqa: BLE001 — auditing never breaks a tool call
         try:
             return str(text)

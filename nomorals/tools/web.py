@@ -25,7 +25,7 @@ import urllib.robotparser
 from typing import Any
 
 from ..core.errors import ToolError, classify
-from ..core.http import HttpClient
+from ..core.http import HttpClient, unwrap_redirect_url
 from ..core.logging_setup import get_logger
 from ..core.policy import Capability
 from ..core.text import approx_token_count, normalize_text
@@ -112,6 +112,10 @@ def web_extract(
 
     Returns title + best content + word count. Raises ToolError when
     robots.txt disallows the URL."""
+    # A click-tracking URL (Bing /ck/a, Google /url, …) is never the
+    # destination — resolve it before the robots check so the tracker
+    # host's robots.txt can't veto a page it doesn't own.
+    url = unwrap_redirect_url(url)
     client = client or HttpClient(timeout=30.0)
     if respect_robots and not _robots.allowed(url, user_agent, client):
         raise ToolError(f"robots.txt disallows {url}")
@@ -153,6 +157,7 @@ def register(registry: Any) -> None:
     def web_fetch(url: str, *, max_chars: int = 40000, raw: bool = False, extract: bool = False) -> dict[str, Any]:
         """Fetch a URL; charset-detected, robots-checked. ``extract=True``
         returns the readability-style article body instead of full-page text."""
+        url = unwrap_redirect_url(url)  # trackers resolve before robots
         if respect_robots and not _robots.allowed(url, user_agent, client):
             raise ToolError(f"robots.txt disallows {url}")
         response = client.get(url)
@@ -196,6 +201,11 @@ def register(registry: Any) -> None:
         needle = f"{query} site:{site}" if site else query
         results, engines_used, engines_failed = _run_engines(
             search_client, needle)
+        # No click-tracking URL leaves the search layer: every result
+        # names the real destination, so downstream fetchers never chase
+        # a tracker into its host's robots.txt.
+        for item in results:
+            item["url"] = unwrap_redirect_url(item.get("url", ""))
         results = _dedupe_results(results)
         return {
             "query": needle,
@@ -597,6 +607,9 @@ def _parse_bing(markup: str) -> list[dict[str, str]]:
         parsed = urllib.parse.urlparse(href)
         if parsed.scheme not in {"http", "https"} or not parsed.netloc:
             continue
+        # Bing wraps results in /ck/a click-tracking URLs — emit the
+        # destination, never the tracker.
+        href = unwrap_redirect_url(href)
         snippet = ""
         caption = re.search(r'(?is)<div\b[^>]*class="b_caption"[^>]*>(.*?)</div>', inner)
         if caption:
@@ -659,6 +672,10 @@ def _parse_generic(markup: str) -> list[dict[str, str]]:
         parsed = urllib.parse.urlparse(href)
         if parsed.scheme not in {"http", "https"} or not parsed.netloc:
             continue
+        # Unwrap first: the chrome test below judges the DESTINATION's
+        # host, not the tracker's — a wrapped result is a result.
+        href = unwrap_redirect_url(href)
+        parsed = urllib.parse.urlparse(href)
         host = parsed.netloc.lower()
         if any(chrome in host for chrome in _ENGINE_CHROME_HOSTS):
             continue

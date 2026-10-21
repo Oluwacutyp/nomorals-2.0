@@ -19,14 +19,20 @@ from typing import Any
 
 __all__ = [
     "find_cookies_file",
+    "browser_session_dirs",
+    "export_browser_cookies",
+    "cookies_file_for",
     "ytdlp_cookie_opts",
     "ytdlp_cookie_args",
+    "ytdlp_cookie_opts_for",
+    "ytdlp_cookie_args_for",
     "is_bot_detection_error",
     "cookies_status",
     "BOT_COOKIE_HELP",
     "BOT_COOKIE_SHORT_HELP",
     "YTDLP_INSTALL_HELP",
     "COOKIES_ENV",
+    "BROWSER_COOKIES_NAME",
 ]
 
 #: Env var override — path to a Netscape-format cookies file.
@@ -119,6 +125,171 @@ def find_cookies_file() -> str | None:
         return None
 
 
+# ── browser-profile cookies ─────────────────────────────────────────
+#
+# The browser tool persists every session's cookie jar to disk
+# (``data/browser/sessions/<name>.json`` under the data home) — that IS
+# Devon's own browser profile: a login she earned there (TikTok,
+# Instagram, …) should serve downloads too, instead of the downloader
+# asking the owner to "sign in once in the browser" and then never
+# using the result.  These helpers export the persisted jars to the
+# Netscape format yt-dlp reads.
+
+#: Export filename, written inside the sessions dir it came from.
+BROWSER_COOKIES_NAME = "browser-cookies.txt"
+
+
+def _data_home() -> Path:
+    """Data home root: ``$NM_HOME`` or ``~/.nomorals`` (config default)."""
+    return Path(os.environ.get("NM_HOME") or "~/.nomorals").expanduser()
+
+
+def browser_session_dirs(session_dir: str = "") -> list[Path]:
+    """Where persisted browser session cookie files live.
+
+    An explicit *session_dir* (resolved by a context-aware caller from
+    its settings, mirroring the browser tool) comes first; the default
+    data-home location is always a candidate.
+    """
+    out: list[Path] = []
+    if session_dir:
+        out.append(Path(session_dir).expanduser())
+    default = _data_home() / "data" / "browser" / "sessions"
+    if default not in out:
+        out.append(default)
+    return out
+
+
+def _session_cookie_entries(session_file: Path) -> list[dict[str, Any]]:
+    """Cookie state dicts from one persisted browser session file."""
+    import json
+    try:
+        payload = json.loads(session_file.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001 - a corrupt file means no cookies
+        return []
+    if not isinstance(payload, list):
+        return []
+    return [e for e in payload
+            if isinstance(e, dict) and e.get("name") and e.get("domain")]
+
+
+def _netscape_line(entry: dict[str, Any]) -> str | None:
+    domain = str(entry.get("domain") or "").strip()
+    name = str(entry.get("name") or "").strip()
+    if not domain or not name:
+        return None
+    tailmatch = "TRUE" if (domain.startswith(".")
+                           or entry.get("domain_initial_dot")) else "FALSE"
+    path = str(entry.get("path") or "/")
+    secure = "TRUE" if entry.get("secure") else "FALSE"
+    try:
+        expires = int(entry.get("expires") or 0)
+    except (TypeError, ValueError):
+        expires = 0
+    if expires < 0:
+        expires = 0
+    value = str(entry.get("value") or "")
+    return "\t".join([domain, tailmatch, path, secure, str(expires),
+                      name, value])
+
+
+def export_browser_cookies(session_dir: str = "") -> str | None:
+    """Merge all persisted browser-session cookies into one Netscape
+    cookies file for yt-dlp.  Returns its path, or None when the
+    browser profile holds no cookies.
+
+    The export is cached: it is rewritten only when a session file is
+    newer than the export.  Never raises.
+    """
+    try:
+        for directory in browser_session_dirs(session_dir):
+            try:
+                files = sorted(directory.glob("*.json"))
+            except OSError:
+                continue
+            if not files:
+                continue
+            export = directory / BROWSER_COOKIES_NAME
+            try:
+                newest = max(f.stat().st_mtime for f in files)
+                if export.is_file() and \
+                        export.stat().st_mtime >= newest:
+                    return str(export)
+            except OSError:
+                pass
+            rows: dict[tuple[str, str, str], str] = {}
+            for f in files:
+                for entry in _session_cookie_entries(f):
+                    line = _netscape_line(entry)
+                    if line is None:
+                        continue
+                    key = (str(entry.get("domain") or ""),
+                           str(entry.get("path") or "/"),
+                           str(entry.get("name") or ""))
+                    rows[key] = line  # later sessions win a name clash
+            if not rows:
+                continue
+            text = ("# Netscape HTTP Cookie File\n"
+                    "# Exported from Devon's own browser profile "
+                    "(persisted browser sessions) for yt-dlp.\n"
+                    + "\n".join(rows.values()) + "\n")
+            try:
+                export.write_text(text, encoding="utf-8")
+            except OSError:
+                return None
+            return str(export)
+        return None
+    except Exception:  # noqa: BLE001 - cookie export must never break callers
+        return None
+
+
+def _file_has_cookie_for(path: str, host: str) -> bool:
+    """True when a Netscape cookies file holds a cookie for *host*
+    (exact domain or a parent domain of it)."""
+    if not host:
+        return False
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                parts = line.split("\t")
+                if len(parts) < 7:
+                    continue
+                domain = parts[0].strip().lower().lstrip(".")
+                if domain and (host == domain
+                               or host.endswith("." + domain)):
+                    return True
+    except Exception:  # noqa: BLE001
+        return False
+    return False
+
+
+def cookies_file_for(url: str, session_dir: str = "") -> str | None:
+    """The best cookies file for downloading *url*.
+
+    A file that actually holds a cookie for the URL's host wins: the
+    browser-profile export when it covers the host, else the
+    user-provided file, else the export (a jar with other domains'
+    cookies is ignored by yt-dlp for this host, and may still help an
+    extractor's API path).  None when no cookies exist anywhere.
+    Never raises.
+    """
+    try:
+        from urllib.parse import urlparse
+        host = (urlparse(str(url or "")).hostname or "").lower()
+        user_file = find_cookies_file()
+        export = export_browser_cookies(session_dir)
+        if export and host and _file_has_cookie_for(export, host):
+            return export
+        if user_file:
+            return user_file
+        return export
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def ytdlp_cookie_opts() -> dict[str, Any]:
     """Extra kwargs for ``yt_dlp.YoutubeDL({...})``. Empty when no file."""
     path = find_cookies_file()
@@ -128,6 +299,19 @@ def ytdlp_cookie_opts() -> dict[str, Any]:
 def ytdlp_cookie_args() -> list[str]:
     """Extra argv for the ``yt-dlp`` CLI. Empty when no file."""
     path = find_cookies_file()
+    return ["--cookies", path] if path else []
+
+
+def ytdlp_cookie_opts_for(url: str, session_dir: str = "") -> dict[str, Any]:
+    """Per-URL kwargs: the best cookies file for *url*'s host (the
+    browser-profile export included).  Empty when no cookies exist."""
+    path = cookies_file_for(url, session_dir)
+    return {"cookiefile": path} if path else {}
+
+
+def ytdlp_cookie_args_for(url: str, session_dir: str = "") -> list[str]:
+    """Per-URL argv: companion to :func:`ytdlp_cookie_opts_for`."""
+    path = cookies_file_for(url, session_dir)
     return ["--cookies", path] if path else []
 
 

@@ -34,6 +34,7 @@ __all__ = [
     "shingle",
     "similarity",
     "slugify",
+    "strip_ansi",
     "tokenize_bpe_bytes",
     "truncate",
     "truncate_to_tokens",
@@ -41,6 +42,31 @@ __all__ = [
 ]
 
 # ── Normalization ──────────────────────────────────────────────────────────────
+
+#: ANSI/VT escape sequences: CSI (``ESC [ … final``), OSC (``ESC ] …
+#: BEL/ST``), charset/designate escapes, and lone ESC.  Tools that shell
+#: out (yt-dlp above all) emit these into stderr even when piped; left
+#: in, they land raw in chat messages and mission reports.
+_ANSI_RE = re.compile(
+    r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)|\([0-9A-B]|[=>#][0-9]?|.)"
+    r"|\x9b[0-?]*[ -/]*[@-~]"
+)
+
+
+def strip_ansi(text: str) -> str:
+    """Remove ANSI/VT escape sequences from *text*.
+
+    The shared sanitizer for tool/subprocess output on its way to a
+    human surface (chat, mission detail, reports).  Plain text passes
+    through unchanged; never raises.
+    """
+    if not text:
+        return ""
+    try:
+        return _ANSI_RE.sub("", str(text))
+    except Exception:  # noqa: BLE001 - sanitizing must never break a surface
+        return str(text)
+
 
 _WS_RE = re.compile(r"[ \t\f\v]+")
 _BLANK_LINES_RE = re.compile(r"\n{3,}")

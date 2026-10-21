@@ -79,7 +79,12 @@ class RoleAgent(Agent):
         outcome = tools.call(name, actor=self.name,
                              capabilities=self.capabilities, **call_kwargs)
         if not outcome.ok:
-            raise RuntimeError(f"tool {name} failed: {outcome.error}")
+            # This message is what mission reports (and chat) show —
+            # strip terminal escapes subprocess tools leak into errors.
+            from ...core.text import strip_ansi
+            raise RuntimeError(
+                f"tool {name} failed: "
+                f"{strip_ansi(str(outcome.error))[:500]}")
         return outcome.value
 
     def _task_goal(self, task_input: Any) -> str:
@@ -98,28 +103,118 @@ class ResearchAgent(RoleAgent):
         Capability.MEM_WRITE, Capability.MODEL_CALL, Capability.DB_WRITE,
     )
 
+    def _fetch_failures(self) -> dict[str, str]:
+        """Run-scoped ledger of URLs whose fetch already failed.
+
+        Keyed by the current idempotency scope (one mission step / one
+        unit of work) inside ``context.extras`` so a step RETRY sees
+        the same ledger the failed attempt wrote: a dead URL is never
+        fetched identically twice in a run — it is skipped, or retried
+        only through a different route.  Falls back to an instance
+        dict when the context carries no extras mapping.
+        """
+        extras = getattr(self.context, "extras", None) \
+            if self.context is not None else None
+        if isinstance(extras, dict):
+            from ...core.idempotency_keys import current_idempotency_scope
+            scope = current_idempotency_scope() or "unscoped"
+            ledgers = extras.setdefault("research_fetch_failures", {})
+            if isinstance(ledgers, dict):
+                ledger = ledgers.setdefault(scope, {})
+                if isinstance(ledger, dict):
+                    return ledger
+        local = getattr(self, "_fetch_failure_local", None)
+        if local is None:
+            local = self._fetch_failure_local = {}
+        return local
+
+    def _fetch_via_browser(self, url: str) -> dict[str, Any] | None:
+        """Alternate route for a page ``web_fetch`` could not read:
+        the rendered browser session.  Returns a page dict or None.
+        Never raises — this is a fallback, not a second way to die."""
+        try:
+            self._call_tool("browser", action="open", url=url,
+                            session="research")
+            out = self._call_tool("browser", action="text",
+                                  session="research", max_chars=6000)
+        except Exception:  # noqa: BLE001 - fallback failure = skip
+            return None
+        text = ""
+        if isinstance(out, dict):
+            text = str(out.get("text") or "")
+        elif isinstance(out, str):
+            text = out
+        if not text.strip():
+            return None
+        return {"url": url, "title": "", "text": text[:4000]}
+
     def work(self, task_input: Any) -> Any:
         goal = self._task_goal(task_input)
         self.check_cancelled()
         # adaptive breadth: the goal's own phrasing sets the result count
         search = self._call_tool("web_search", query=goal,
                                  max_results=adaptive_result_limit(goal))
-        pages = []
-        for hit in (search.get("results") or [])[:4]:
+        from ...core.http import unwrap_redirect_url
+        from ...core.text import strip_ansi
+        failures = self._fetch_failures()
+        pages: list[dict[str, Any]] = []
+        skipped: list[dict[str, str]] = []
+        seen: set[str] = set()
+        for hit in (search.get("results") or []):
+            if len(pages) >= 4:
+                break
             self.check_cancelled()
-            url = hit.get("url")
-            if not url:
+            raw_url = hit.get("url")
+            if not raw_url:
                 continue
-            fetched = self._call_tool("web_fetch", url=url)
-            if fetched.get("text"):
-                pages.append({"url": url, "title": fetched.get("title", ""), "text": fetched["text"][:4000]})
+            # Search results can carry click-tracking URLs — the real
+            # destination is what gets fetched (and ledgered).
+            url = unwrap_redirect_url(str(raw_url))
+            if not url or url in seen:
+                continue
+            seen.add(url)
+            if url in failures:
+                # Already failed in this run (e.g. a step retry): never
+                # fetch it identically again — record the skip and move
+                # on to sources that still have a chance.
+                skipped.append({"url": url,
+                                "reason": failures[url]})
+                continue
+            try:
+                fetched = self._call_tool("web_fetch", url=url)
+            except Exception as exc:  # noqa: BLE001 - one bad source
+                # must never kill the step: robots vetoes, dead hosts
+                # and bot walls are per-source facts, not step facts.
+                reason = strip_ansi(str(exc))[:300]
+                page = self._fetch_via_browser(url)
+                if page is not None:
+                    page["title"] = str(hit.get("title") or "")
+                    pages.append(page)
+                    continue
+                failures[url] = reason
+                skipped.append({"url": url, "reason": reason})
+                continue
+            if isinstance(fetched, dict) and fetched.get("text"):
+                pages.append({"url": url,
+                              "title": fetched.get("title", ""),
+                              "text": fetched["text"][:4000]})
+            else:
+                reason = "fetch returned no text"
+                failures[url] = reason
+                skipped.append({"url": url, "reason": reason})
         if not pages:
             # A research step that retrieved nothing has not done its
             # job — report failure (the mission runner settles a
             # top-level "error" as a failed step), never a hollow
-            # success with an empty summary.
-            return {"goal": goal, "sources": [],
-                    "error": f"no sources retrieved for research step: {goal}"}
+            # success with an empty summary.  The skips ride along so
+            # the report names WHY each source was unusable.
+            detail = ""
+            if skipped:
+                detail = "; skipped: " + "; ".join(
+                    f"{s['url']} — {s['reason']}" for s in skipped[:4])
+            return {"goal": goal, "sources": [], "skipped": skipped,
+                    "error": f"no sources retrieved for research step: "
+                             f"{goal}{detail}"}
         summary = self._summarize(goal, pages)
         memory = getattr(self.context, "memory", None) if self.context else None
         if memory is not None:
@@ -129,7 +224,17 @@ class ResearchAgent(RoleAgent):
                     kind="episode", importance=0.4, source="research",
                     metadata={"url": page["url"]},
                 )
-        return {"goal": goal, "sources": [{"url": p["url"], "title": p["title"]} for p in pages], "summary": summary}
+        result: dict[str, Any] = {
+            "goal": goal,
+            "sources": [{"url": p["url"], "title": p["title"]}
+                        for p in pages],
+            "summary": summary,
+        }
+        if skipped:
+            # Journaled, not fatal: the step succeeded on the sources
+            # that answered; these were skipped and why.
+            result["skipped"] = skipped
+        return result
 
     def _summarize(self, goal: str, pages: list[dict[str, Any]]) -> str:
         router = getattr(self.context, "router", None) if self.context else None

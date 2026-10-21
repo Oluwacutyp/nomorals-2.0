@@ -213,6 +213,37 @@ def node_to_markdown(node: Node, *, depth: int = 0) -> str:
 # ── the session ──────────────────────────────────────────────────────────────
 
 
+#: Fields of a ``http.cookiejar.Cookie`` state dump (the persisted
+#: session format) that are safe to restore onto a fresh Cookie.
+_COOKIE_STATE_FIELDS = frozenset({
+    "version", "name", "value", "port", "port_specified",
+    "domain", "domain_specified", "domain_initial_dot",
+    "path", "path_specified", "secure", "expires", "discard",
+    "comment", "comment_url", "rest", "rfc2109",
+})
+
+
+def cookies_from_payload(payload: Any) -> list[Any]:
+    """Rebuild ``http.cookiejar.Cookie`` objects from a persisted
+    session payload (list of ``Cookie.__getstate__`` dicts).
+    Half-formed entries are skipped; never raises."""
+    out: list[Any] = []
+    if not isinstance(payload, list):
+        return out
+    for entry in payload:
+        if not isinstance(entry, dict):
+            continue
+        cookie = http.cookiejar.Cookie.__new__(http.cookiejar.Cookie)
+        for key, value in entry.items():
+            if key in _COOKIE_STATE_FIELDS:
+                setattr(cookie, key, value)
+        if not getattr(cookie, "name", "") or \
+                not getattr(cookie, "domain", ""):
+            continue  # half-formed entry: skip, keep the rest
+        out.append(cookie)
+    return out
+
+
 class BrowserSession:
     """One cookie-kept web session with a current page and parsed DOM."""
 
@@ -1152,21 +1183,8 @@ class BrowserSession:
         try:
             with open(path, encoding="utf-8") as fh:
                 payload = json.load(fh)
-            fields = {"version", "name", "value", "port", "port_specified",
-                      "domain", "domain_specified", "domain_initial_dot",
-                      "path", "path_specified", "secure", "expires", "discard",
-                      "comment", "comment_url", "rest", "rfc2109"}
             count = 0
-            for entry in payload:
-                if not isinstance(entry, dict):
-                    continue
-                cookie = http.cookiejar.Cookie.__new__(http.cookiejar.Cookie)
-                for key, value in entry.items():
-                    if key in fields:
-                        setattr(cookie, key, value)
-                if not getattr(cookie, "name", "") or \
-                        not getattr(cookie, "domain", ""):
-                    continue  # half-formed entry: skip, keep the rest
+            for cookie in cookies_from_payload(payload):
                 self.cookie_jar.set_cookie(cookie)
                 count += 1
             if count:
@@ -1776,6 +1794,34 @@ def get_session(name: str = "default", **settings: Any) -> BrowserSession:
 def drop_session(name: str = "default") -> bool:
     with _sessions_lock:
         return _sessions.pop(name or "default", None) is not None
+
+
+def seed_session_from_persisted(session: Any, session_dir: str) -> int:
+    """Merge every persisted session's cookies in *session_dir* into
+    *session*'s jar; returns how many cookies were adopted.
+
+    One browser profile, many session names: a login earned in the
+    interactive ``default`` session is Devon's cookie, whoever spends
+    it — the downloader's session included — instead of each named
+    session starting from an empty jar.  The session's own file is
+    included (idempotent: ``set_cookie`` replaces same-name cookies).
+    Never raises.
+    """
+    try:
+        import glob as _glob
+        count = 0
+        for path in sorted(_glob.glob(os.path.join(session_dir, "*.json"))):
+            try:
+                with open(path, encoding="utf-8") as fh:
+                    payload = json.load(fh)
+            except Exception:  # noqa: BLE001 - one bad file skips alone
+                continue
+            for cookie in cookies_from_payload(payload):
+                session.cookie_jar.set_cookie(cookie)
+                count += 1
+        return count
+    except Exception:  # noqa: BLE001 - seeding is best-effort
+        return 0
 
 
 # ── tool registration ────────────────────────────────────────────────────────

@@ -905,13 +905,17 @@ class RuntimeMediaMixin:
         report_progress(f"downloading {url[:80]}")
         report = downloader.download(url, audio_only=audio_only)
         if not report.ok:
+            # The report's own summary is the canonical per-leg account
+            # (stage, proxy, error class + reason or the leg's note,
+            # likely cause, hint).  The hand-rolled loop this replaces
+            # printed the bare word "failed" for every note-only leg
+            # (proxy pool unavailable, browser page opened) — the
+            # owner saw four legs and learned nothing from three.
+            from ...core.text import strip_ansi
+            body = report.summary().splitlines()[1:]  # skip its header
             lines = [f"couldn't download {url[:80]}:"]
-            for stage in report.stages:
-                err = stage.error or "failed"
-                lines.append(f"  {stage.stage}: {err[:120]}")
-            if report.hint:
-                lines.append(f"hint: {report.hint}")
-            return "\n".join(lines), False
+            lines.extend(f"  {ln.strip()}" for ln in body if ln.strip())
+            return strip_ansi("\n".join(lines)), False
 
         path = report.path
         title = report.title or "download"

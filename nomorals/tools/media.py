@@ -135,14 +135,16 @@ def _looks_like_media(head: bytes) -> bool:
     return len(head) >= 2 and head[0] == 0xFF and (head[1] & 0xE0) == 0xE0
 
 
-def probe(url: str, *, timeout: float = 60.0) -> dict[str, Any]:
+def probe(url: str, *, timeout: float = 60.0,
+          cookies_file: str = "") -> dict[str, Any]:
     """Fetch metadata without downloading."""
-    from ..media.cookies import ytdlp_cookie_args, ytdlp_cookie_opts
+    from ..media.cookies import ytdlp_cookie_args_for, ytdlp_cookie_opts_for
     module = load_optional("yt_dlp")
     if module is not None:
         try:
             opts = {"quiet": True, "no_warnings": True, "skip_download": True}
-            opts.update(ytdlp_cookie_opts())
+            opts.update({"cookiefile": cookies_file} if cookies_file
+                        else ytdlp_cookie_opts_for(url))
             with module.YoutubeDL(opts) as ydl:
                 info = ydl.extract_info(url, download=False)
             return _summarize(info)
@@ -151,7 +153,8 @@ def probe(url: str, *, timeout: float = 60.0) -> dict[str, Any]:
     if which("yt-dlp"):
         try:
             argv = (["yt-dlp", "--dump-single-json", "--no-download"]
-                    + ytdlp_cookie_args() + [url])
+                    + (["--cookies", cookies_file] if cookies_file
+                       else ytdlp_cookie_args_for(url)) + [url])
             completed = subprocess.run(
                 argv,
                 capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout, check=False,
@@ -187,8 +190,14 @@ def download(
     audio_only: bool = False,
     progress: Callable[[str], None] | None = None,
     timeout: float = 1800.0,
+    cookies_file: str = "",
 ) -> dict[str, Any]:
-    """Download media, preferring yt-dlp and falling back to direct HTTP."""
+    """Download media, preferring yt-dlp and falling back to direct HTTP.
+
+    ``cookies_file`` pins the Netscape cookies file yt-dlp should use;
+    empty means per-URL discovery (user-provided file, then Devon's
+    own browser-profile export — see :mod:`nomorals.media.cookies`).
+    """
     target_dir = Path(destination).expanduser()
     target_dir.mkdir(parents=True, exist_ok=True)
     started = time.perf_counter()
@@ -198,9 +207,9 @@ def download(
 
     module = load_optional("yt_dlp")
     if module is not None:
-        return _download_python_api(module, url, target_dir, format_spec, audio_only, progress, started)
+        return _download_python_api(module, url, target_dir, format_spec, audio_only, progress, started, cookies_file)
     if which("yt-dlp"):
-        return _download_cli(url, target_dir, format_spec, audio_only, timeout, started)
+        return _download_cli(url, target_dir, format_spec, audio_only, timeout, started, cookies_file)
     return _download_direct(url, target_dir, progress, started)
 
 
@@ -212,6 +221,7 @@ def _download_python_api(
     audio_only: bool,
     progress: Callable[[str], None] | None,
     started: float,
+    cookies_file: str = "",
 ) -> dict[str, Any]:
     options: dict[str, Any] = {
         "outtmpl": str(target_dir / "%(title).120B [%(id)s].%(ext)s"),
@@ -223,8 +233,9 @@ def _download_python_api(
         "concurrent_fragment_downloads": 4,
         "continuedl": True,
     }
-    from ..media.cookies import ytdlp_cookie_opts
-    _cookie_opts = ytdlp_cookie_opts()
+    from ..media.cookies import ytdlp_cookie_opts_for
+    _cookie_opts = ({"cookiefile": cookies_file} if cookies_file
+                    else ytdlp_cookie_opts_for(url))
     if _cookie_opts:
         options.update(_cookie_opts)
         _log.debug("yt-dlp: using cookies from %s",
@@ -252,7 +263,11 @@ def _download_python_api(
     except MediaError:
         raise
     except Exception as exc:  # noqa: BLE001
-        raise MediaError(f"download failed: {exc}") from exc
+        # yt-dlp error text can carry terminal escapes — this message
+        # is what chat surfaces show, so it leaves here clean.
+        from ..core.text import strip_ansi
+        raise MediaError(
+            f"download failed: {strip_ansi(str(exc))}") from exc
 
     # Attribute the result to THIS download.  Preference order: the
     # filepath yt-dlp reports for the finished item, the prepared
@@ -294,9 +309,11 @@ def _download_cli(
     audio_only: bool,
     timeout: float,
     started: float,
+    cookies_file: str = "",
 ) -> dict[str, Any]:
-    from ..media.cookies import ytdlp_cookie_args
-    _cookie_args = ytdlp_cookie_args()
+    from ..media.cookies import ytdlp_cookie_args_for
+    _cookie_args = (["--cookies", cookies_file] if cookies_file
+                    else ytdlp_cookie_args_for(url))
     if _cookie_args:
         _log.debug("yt-dlp: using cookies from %s", _cookie_args[-1])
     argv = [
@@ -342,8 +359,13 @@ def _download_cli(
                 raise MediaError(
                     f"download timed out after {timeout}s") from None
     if proc.returncode != 0:
+        # yt-dlp colorizes stderr even when piped — strip the escapes
+        # here, at the last point before the text becomes an error
+        # message a chat surface will show.
+        from ..core.text import strip_ansi
         raise MediaError(
-            f"yt-dlp failed: {(stderr_text or '').strip()[-400:]}")
+            f"yt-dlp failed: "
+            f"{strip_ansi((stderr_text or '').strip())[-400:]}")
     # Attribute the result to THIS run: files yt-dlp named on stdout
     # (Destination / already-downloaded / merge target) inside the
     # target dir win; otherwise the largest file that is new/changed
