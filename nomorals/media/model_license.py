@@ -25,6 +25,16 @@ Registry (verified against upstream licenses):
   weights; outputs are otherwise the user's). Covers the whole SD1.5
   checkpoint family Devon loads locally through her own imggen
   implementation — the weights are data, this label is metadata.
+- Wan 2.2 — Apache-2.0 — commercial_use True. The video backend's
+  TI2V-5B checkpoint (``Wan-AI/Wan2.2-TI2V-5B-Diffusers``); the
+  cleanest licence of any strong open video model.
+- LTX-Video 0.9.7 — Lightricks open-weights terms — commercial_use
+  True with conditions. NOTE: this labels the checkpoint the videogen
+  LTX backend actually loads (LTX-Video 0.9.7, base + distilled). The
+  "LTX-2 Community License (free <$10M revenue)" wording elsewhere in
+  the tree (media_edit/video_models.py) describes the NEWER LTX-2
+  model line on the ComfyUI surface — a different model generation,
+  not this checkpoint.
 - XTTS v2 — CPML / non-commercial — commercial_use False. Personal: fine.
 - Suno / Udio — proprietary, API terms — NOT IN THIS PIPELINE; listed
   so `nm models` can answer "why not Suno?" honestly: raw fidelity
@@ -115,6 +125,21 @@ MODEL_LICENSES: dict[str, ModelLicense] = {
         "outputs are otherwise the user's to ship.",
         "image generation (SD1.5 family, local weights via imggen)",
         "https://github.com/CompVis/stable-diffusion/blob/main/LICENSE"),
+    "wan": ModelLicense(
+        "wan", "Apache-2.0", True,
+        "Apache-2.0 — output is yours.",
+        "video generation (Wan 2.2 TI2V-5B, local weights via videogen)",
+        "https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers"),
+    "ltx": ModelLicense(
+        "ltx", "Lightricks LTX-Video Open Weights License", True,
+        "Labels LTX-Video 0.9.7 (the videogen backend's checkpoint, "
+        "base + distilled) under Lightricks' open-weights terms — "
+        "commercial use permitted under those terms. Do not confuse "
+        "with the 'LTX-2 Community License' label in "
+        "media_edit/video_models.py: that is the newer LTX-2 model "
+        "line on the ComfyUI surface, a different generation.",
+        "video generation (LTX-Video 2B, local weights via videogen)",
+        "https://huggingface.co/Lightricks/LTX-Video-0.9.7-distilled"),
     "suno": ModelLicense(
         "suno", "Proprietary (API terms)", False,
         "Not in this pipeline. One-shot pop fidelity is where Suno wins; "

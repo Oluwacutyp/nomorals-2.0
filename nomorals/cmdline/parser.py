@@ -2261,6 +2261,15 @@ def _parser() -> argparse.ArgumentParser:
     sh_est = sh_sub.add_parser("estimate", help="render time/cost estimate")
     sh_est.add_argument("niche")
     sh_est.add_argument("topic")
+    sh_hero = sh_sub.add_parser("hero", help="one neural hero clip (videogen)")
+    sh_hero.add_argument("prompt", help="text prompt for the hero clip")
+    sh_hero.add_argument("--seconds", type=float, default=5.0)
+    sh_hero.add_argument("--seed", type=int, default=0)
+    sh_hero.add_argument("--model", default="",
+                         help="registry model name / local dir / HF repo id")
+    sh_hero.add_argument("--lora", action="append", default=None,
+                         help="LoRA name or path, optionally NAME:WEIGHT; "
+                              "repeatable")
 
     video = sub.add_parser("video", aliases=CLI_ALIASES["video"],
         help="Devon Studio: neural + motion-graphics video generation",
@@ -2286,6 +2295,13 @@ def _parser() -> argparse.ArgumentParser:
     v_gen.add_argument("--seconds", type=float, default=5.0)
     v_gen.add_argument("--seed", type=int, default=0)
     v_gen.add_argument("--out", default="")
+    v_gen.add_argument("--model", default="",
+                       help="registry model name (see: nm video capability), "
+                            "local diffusers dir, or HF repo id (with "
+                            "--backend ltx|wan)")
+    v_gen.add_argument("--lora", action="append", default=None,
+                       help="LoRA name or path, optionally NAME:WEIGHT; "
+                            "repeatable")
     v_mo = v_sub.add_parser("motion", help="motion-studio products (CPU-only)")
     mo_sub = v_mo.add_subparsers(dest="motion_action", required=True)
     mo_ly = mo_sub.add_parser("lyric", help="kinetic lyric video")

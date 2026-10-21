@@ -56,6 +56,8 @@ class SceneResult:
     path: str
     engine: str          # "ltx" | "wan" | "kenburns" | "typography"
     prompt: str
+    model: str = ""      # model source actually used (neural scenes)
+    loras: list = field(default_factory=list)  # [{name, source, weight}]
 
 
 @dataclass
@@ -77,8 +79,13 @@ class ChainReport:
                            f"{self.neural_scenes} neural / "
                            f"{self.motion_scenes} motion-graphics")]
         for s in self.scenes:
-            lines.append(f"  [{s.index + 1}] [{s.engine}] "
-                         f"{s.prompt[:64]}")
+            line = f"  [{s.index + 1}] [{s.engine}] {s.prompt[:64]}"
+            if s.model:
+                line += f"\n      model: {s.model}"
+            if s.loras:
+                line += ("\n      loras: " + ", ".join(
+                    f"{l['name']}@{l['weight']:g}" for l in s.loras))
+            lines.append(line)
         bnds = (self.consistency or {}).get("boundaries") or []
         if bnds:
             lines.append(th.section("Boundary consistency"))
@@ -95,11 +102,21 @@ class ChainReport:
 
 
 def _backend(name: str):
+    return _make_backend(name, "", (), True)
+
+
+def _make_backend(name: str, source: str, loras: Any, distilled: bool):
+    """Construct a backend for one resolved selection.
+
+    ``loras``: normalized registry dicts ({name, source, weight,
+    backend}) — the backend constructors take (source, weight) pairs.
+    """
     from .ltx_backend import LTXBackend
     from .wan_backend import WanBackend
+    pairs = tuple((l["source"], l["weight"]) for l in loras)
     if name == "wan":
-        return WanBackend()
-    return LTXBackend()
+        return WanBackend(model_id=source, loras=pairs)
+    return LTXBackend(model_id=source, distilled=distilled, loras=pairs)
 
 
 def chain_scenes(scenes: Sequence[dict[str, Any] | str],
@@ -114,12 +131,20 @@ def chain_scenes(scenes: Sequence[dict[str, Any] | str],
                  fps: float | None = None,
                  consistency: bool = True,
                  carry_seed: bool = True,
-                 carry_reference: bool = True) -> ChainReport:
+                 carry_reference: bool = True,
+                 model: str | None = None,
+                 lora: Any = None) -> ChainReport:
     """Assemble a multi-scene film. Returns a :class:`ChainReport`.
 
     Each scene: ``{"prompt", "mode": "t2v"|"i2v"|"image"|"text",
     "image"|"text", "duration_s", "seed"}`` — or a bare prompt string
     (t2v, 5s). ``backend``: auto | ltx | wan | motion (force motion studio).
+    ``model``/``lora``: chain-level registry selection (see
+    :func:`pipeline.generate`); a scene may override them (and
+    ``backend``) per scene — the chain choice stays the default, and
+    :class:`SceneResult` records the model/LoRAs each scene actually
+    used. A scene whose selected backend/model is unavailable on this
+    host fails the chain with the scene named — never a silent swap.
     ``consistency``: grade each clip's opening frames toward the
     previous clip's closing frame so cuts don't pop (color + structure
     matched on the boundary frames; skipped honestly without ffmpeg).
@@ -142,16 +167,80 @@ def chain_scenes(scenes: Sequence[dict[str, Any] | str],
         return seed + i * 17
 
     suffix = STYLE_SUFFIXES.get(style, STYLE_SUFFIXES["cinematic"])
-    cap = neural_capability(prefer="auto" if backend == "auto" else backend)
+
+    from .pipeline import _check_lora_backend, _resolve_selection
+    # chain-level selection: model/lora defaults every scene inherits
+    default_sel = _resolve_selection(backend, model, lora)
+    if backend == "motion" and (model or default_sel["loras"]):
+        raise VideogenError(
+            "model/LoRA selection needs a neural backend — "
+            "backend='motion' renders with the motion studio, which "
+            "has no diffusion model to select")
+    default_pref = default_sel["backend"] or backend
+    cap = neural_capability(
+        prefer="auto" if default_pref == "auto" else default_pref,
+        min_vram_gb=default_sel["floor"])
     use_neural = cap.available and backend != "motion"
     engine_name = cap.backend if use_neural else "motion"
     note = ""
     if backend != "motion" and not use_neural:
         note = (f"neural unavailable ({cap.reason}); all scenes rendered "
                 f"with the motion studio")
-    gen = _backend(cap.backend) if use_neural else None
-    if gen is not None:
-        gen.require()
+
+    # backend instances are cached per distinct selection — most chains
+    # use exactly one; per-scene overrides create only what they need
+    _instances: dict[tuple, Any] = {}
+
+    def _instance_for(sel: dict, backend_name: str):
+        key = (backend_name, sel["source"],
+               tuple((l["source"], l["weight"]) for l in sel["loras"]))
+        gen = _instances.get(key)
+        if gen is None:
+            gen = _make_backend(backend_name, sel["source"],
+                                sel["loras"], sel["distilled"])
+            gen.require()
+            _instances[key] = gen
+        return gen
+
+    def _plan_for(i: int, spec: dict) -> tuple[Any, str, dict]:
+        """Resolve scene ``i``'s (backend instance, engine name, sel).
+
+        No scene-level override → the chain-level plan. An override
+        whose backend/model can't run here raises naming the scene —
+        the chain never silently swaps a scene's model.
+        """
+        if not any(spec.get(k) is not None
+                   for k in ("backend", "model", "lora")):
+            return (_instance_for(default_sel, cap.backend),
+                    cap.backend, default_sel)
+        # the chain backend is a default, not a demand: a scene model
+        # override picks its own backend unless the scene ALSO names a
+        # backend (then a genuine conflict raises, via _resolve_selection)
+        pref = str(spec.get("backend")
+                   or ("auto" if spec.get("model") else backend))
+        try:
+            sel = _resolve_selection(
+                pref,
+                spec.get("model") if spec.get("model") is not None
+                else model,
+                spec.get("lora") if spec.get("lora") is not None else lora)
+        except VideogenError as exc:
+            raise VideogenError(f"scene {i}: {exc}") from exc
+        s_backend = sel["backend"] or (
+            pref if pref in ("ltx", "wan") else cap.backend)
+        if sel["backend"] or sel["floor"] is not None \
+                or s_backend != cap.backend:
+            s_cap = neural_capability(prefer=s_backend,
+                                      min_vram_gb=sel["floor"])
+            if not s_cap.available:
+                label = sel["label"] or s_backend
+                raise VideogenError(
+                    f"scene {i}: selected model/backend {label!r} "
+                    f"unavailable — {s_cap.reason}")
+            s_backend = s_cap.backend
+        _check_lora_backend(sel["loras"], s_backend,
+                            sel["label"] or s_backend)
+        return _instance_for(sel, s_backend), s_backend, sel
 
     results: list[SceneResult] = []
     neural_n = motion_n = 0
@@ -188,10 +277,14 @@ def chain_scenes(scenes: Sequence[dict[str, Any] | str],
                             f"scene {i}: reference carried from scene {i - 1}"
                 except Exception as exc:  # noqa: BLE001 — chain goes on
                     _log.info("chain: reference carryover skipped: %s", exc)
+            gen, _eng, sel = _plan_for(i, spec)
             path = gen.generate(full_prompt, mode=ref_mode,
                                 image=ref_image,
                                 duration_s=dur, seed=sseed)
-            results.append(SceneResult(i, path, gen.name, prompt))
+            results.append(SceneResult(
+                i, path, gen.name, prompt, model=gen.model_id,
+                loras=[{"name": l["name"], "source": l["source"],
+                        "weight": l["weight"]} for l in sel["loras"]]))
             neural_n += 1
         elif mode == "image" and spec.get("image"):
             path = kenburns(spec["image"], duration=dur, move="auto",
@@ -217,9 +310,17 @@ def chain_scenes(scenes: Sequence[dict[str, Any] | str],
             if not frames:
                 raise VideogenError(
                     f"scene {i}: could not grab the last frame of scene {i - 1}")
+            gen, _eng, sel = _plan_for(i, spec)
+            if gen.name != "ltx":
+                raise VideogenError(
+                    f"scene {i}: extend mode needs the LTX backend, "
+                    f"this scene resolved to {gen.name!r}")
             path = gen.generate(full_prompt, mode="extend", image=frames[-1],
                                 duration_s=dur, seed=sseed)
-            results.append(SceneResult(i, path, gen.name, prompt))
+            results.append(SceneResult(
+                i, path, gen.name, prompt, model=gen.model_id,
+                loras=[{"name": l["name"], "source": l["source"],
+                        "weight": l["weight"]} for l in sel["loras"]]))
             neural_n += 1
         else:
             raise VideogenError(
@@ -261,7 +362,7 @@ def chain_scenes(scenes: Sequence[dict[str, Any] | str],
         dest.parent.mkdir(parents=True, exist_ok=True)
         shutil.move(final, dest)
         final = str(dest)
-    if gen is not None:
+    for gen in _instances.values():
         gen.unload()
 
     report = ChainReport(final_path=final, scenes=results,

@@ -2459,6 +2459,7 @@ class RuntimeMediaMixin:
         import re
         from ...media.videogen import generate
         # /video gen "<prompt>" [--backend X] [--seconds N] [--seed N]
+        #   [--model NAME] [--lora NAME[:W]] [--lora NAME2 ...]
         m = re.match(r'"([^"]+)"\s*(.*)$', tail) or re.match(r"'([^']+)'\s*(.*)$", tail)
         if m:
             prompt, flags = m.group(1), m.group(2)
@@ -2467,7 +2468,8 @@ class RuntimeMediaMixin:
             prompt, flags = parts[0].strip(), ("--" + parts[1] if len(parts) > 1 else "")
         if not prompt:
             return ('usage: /video gen "<prompt>" [--backend auto|ltx|wan|motion] '
-                    '[--seconds N] [--seed N]')
+                    '[--seconds N] [--seed N] [--model NAME] '
+                    '[--lora NAME[:WEIGHT]] [--lora NAME2 ...]')
         backend = "auto"
         seconds = 5.0
         seed = 0
@@ -2480,7 +2482,11 @@ class RuntimeMediaMixin:
         nm = re.search(r"--seed\s+(\d+)", flags)
         if nm:
             seed = int(nm.group(1))
-        res = generate(prompt, backend=backend, duration_s=seconds, seed=seed)
+        mm = re.search(r"--model\s+(\S+)", flags)
+        model = mm.group(1) if mm else None
+        loras = re.findall(r"--lora\s+(\S+)", flags)
+        res = generate(prompt, backend=backend, duration_s=seconds,
+                       seed=seed, model=model, lora=loras or None)
         return res.message()
 
     def _video_studio_motion(self, tail: str) -> str:
@@ -3112,6 +3118,8 @@ class RuntimeMediaMixin:
         /shorts calendar [--due]                   — content calendar
         /shorts ledger                             — what got posted where
         /shorts estimate <niche> "<topic>"         — time/cost estimate
+        /shorts hero "<prompt>" [--seconds N] [--seed N] [--model NAME]
+            — one neural hero clip (videogen), or its honest decline
         """
         import shlex
 
@@ -3122,15 +3130,18 @@ class RuntimeMediaMixin:
                     "/shorts niches — list content niches\n"
                     "/shorts status [job] · /shorts resume <run_id>\n"
                     "/shorts calendar [--due] · /shorts ledger\n"
-                    "/shorts estimate <niche> \"<topic>\"")
+                    "/shorts estimate <niche> \"<topic>\"\n"
+                    "/shorts hero \"<prompt>\" — one neural hero clip")
         try:
             toks = shlex.split(ref)
         except ValueError:
             toks = ref.split()
         if not toks:
-            return "usage: /shorts make|status|resume|niches|calendar|ledger|estimate ..."
+            return "usage: /shorts make|status|resume|niches|calendar|ledger|estimate|hero ..."
         action = toks[0].lower()
         rest = toks[1:]
+        if action == "hero":
+            return self._shorts_hero(rest)
         try:
             from ...media.contentops.pipeline import ShortPipeline
 
@@ -3216,6 +3227,50 @@ class RuntimeMediaMixin:
             return f"unknown /shorts action {action!r}"
         except Exception as exc:  # noqa: BLE001 - chat never raises
             return f"shorts failed: {exc}"
+
+    def _shorts_hero(self, toks: list) -> str:
+        """``/shorts hero "<prompt>" [--seconds N] [--seed N] [--model M]
+        [--lora NAME[:W]]…`` — one neural hero clip via videogen.
+
+        Returns the clip path, or the honest decline (reason +
+        suggestion) verbatim — a hero shot is never faked with motion
+        graphics under a neural label.
+        """
+        import re
+        from ...media.videogen import request_hero_clip
+        text = " ".join(toks)
+        seconds = 5.0
+        seed = 0
+        model = None
+        sm = re.search(r"--seconds\s+([\d.]+)", text)
+        if sm:
+            seconds = float(sm.group(1))
+            text = text[:sm.start()] + text[sm.end():]
+        nm = re.search(r"--seed\s+(\d+)", text)
+        if nm:
+            seed = int(nm.group(1))
+            text = text[:nm.start()] + text[nm.end():]
+        mm = re.search(r"--model\s+(\S+)", text)
+        if mm:
+            model = mm.group(1)
+            text = text[:mm.start()] + text[mm.end():]
+        loras = re.findall(r"--lora\s+(\S+)", text)
+        text = re.sub(r"--lora\s+\S+", "", text)
+        prompt = text.strip().strip("\"'").strip()
+        if not prompt:
+            return ('usage: /shorts hero "<prompt>" [--seconds N] '
+                    '[--seed N] [--model NAME] [--lora NAME[:W]]')
+        res = request_hero_clip(prompt, duration_s=seconds, seed=seed,
+                                model=model, lora=loras or None)
+        if res.get("ok"):
+            extra = f" · model: {res['model']}" if res.get("model") else ""
+            if res.get("loras"):
+                extra += f" · loras: {', '.join(res['loras'])}"
+            return f"🎬 hero clip → {res['path']} ({res['backend']}{extra})"
+        out = f"🎬 hero clip unavailable: {res.get('reason', 'unknown')}"
+        if res.get("suggestion"):
+            out += f"\n   plan B: {res['suggestion']}"
+        return out
 
     def _control_lens(self, tail: str) -> str:
         ref = (tail or "").strip()

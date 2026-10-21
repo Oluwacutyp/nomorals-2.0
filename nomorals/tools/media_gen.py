@@ -156,23 +156,30 @@ def register(registry: Any) -> None:
         description=("Generate a short video clip from a text prompt "
                      "('a drone shot over Lagos at sunset'). "
                      "Neural diffusion when the hardware allows, motion-studio "
-                     "fallback otherwise. duration_s in seconds."),
+                     "fallback otherwise. duration_s in seconds. "
+                     "model: a videogen registry model name (optional). "
+                     "lora: comma-separated LoRA names, optionally "
+                     "NAME:WEIGHT (optional)."),
         capability=Capability.FS_WRITE,
     )
     def video_generate(prompt: str, *, duration_s: float = 5.0,
                        width: int = 0, height: int = 0,
-                       seed: int = 0) -> dict[str, Any]:
+                       seed: int = 0, model: str = "",
+                       lora: str = "") -> dict[str, Any]:
         """Text-to-video via videogen (neural → motion fallback)."""
         from ..media.videogen.pipeline import generate
         if not (prompt or "").strip():
             raise ValueError("prompt is required")
         out = _out_dir(context, "videos")
+        loras = [s.strip() for s in (lora or "").split(",") if s.strip()]
         result = generate(prompt, duration_s=duration_s, seed=seed,
                           out=str(out / "clip.mp4"),
+                          model=model or None, lora=loras or None,
                           **({"width": width} if width else {}),
                           **({"height": height} if height else {}))
         return {"path": result.path, "engine": result.engine,
                 "routed": result.routed, "note": result.note,
+                "model": result.meta.get("model", ""),
                 "prompt": prompt}
 
     @registry.register(

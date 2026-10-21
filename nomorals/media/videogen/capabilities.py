@@ -77,11 +77,18 @@ class NeuralCapability:
         return f"neural video unavailable: {self.reason}"
 
 
-def neural_capability(prefer: str = "auto") -> NeuralCapability:
+def neural_capability(prefer: str = "auto",
+                      *, min_vram_gb: float | None = None
+                      ) -> NeuralCapability:
     """Probe what neural video this machine can actually run.
 
     ``prefer``: "auto" | "ltx" | "wan". Auto picks the best backend the
     VRAM supports (wan for quality when ≥16GB, else ltx).
+
+    ``min_vram_gb``: a selected model's own VRAM floor (from the video
+    registry) replacing the backend's stock floor for the prefer
+    branch — a big local fine-tune can need more than the stock
+    checkpoint, and the decline must name that floor, not the stock one.
     """
     profile = get_profile_kind()
     vram = cuda_vram_gb()
@@ -102,19 +109,37 @@ def neural_capability(prefer: str = "auto") -> NeuralCapability:
             "motion studio instead")
     vram = vram or 0.0
     if prefer == "wan":
-        if vram >= WAN_MIN_VRAM_GB:
-            return NeuralCapability(True, "wan", vram, profile, True,
-                f"{vram:.0f}GB VRAM clears the 16GB Wan 2.2 TI2V-5B floor")
+        floor = WAN_MIN_VRAM_GB if min_vram_gb is None else float(min_vram_gb)
+        if vram >= floor:
+            reason = (f"{vram:.0f}GB VRAM clears the 16GB Wan 2.2 TI2V-5B "
+                      "floor" if min_vram_gb is None else
+                      f"{vram:.0f}GB VRAM clears the {floor:g}GB floor of "
+                      "the selected model")
+            return NeuralCapability(True, "wan", vram, profile, True, reason)
+        if min_vram_gb is None:
+            return NeuralCapability(False, "none", vram, profile, True,
+                f"Wan 2.2 needs ≥16GB VRAM, this machine has {vram:.0f}GB; "
+                "motion studio instead (or pick backend=ltx)")
         return NeuralCapability(False, "none", vram, profile, True,
-            f"Wan 2.2 needs ≥16GB VRAM, this machine has {vram:.0f}GB; "
-            "motion studio instead (or pick backend=ltx)")
+            f"the selected model needs ≥{floor:g}GB VRAM, this machine "
+            f"has {vram:.0f}GB; motion studio instead (or pick a smaller "
+            "model)")
     if prefer == "ltx":
-        if vram >= LTX_MIN_VRAM_GB:
-            return NeuralCapability(True, "ltx", vram, profile, True,
-                f"{vram:.0f}GB VRAM clears the 8GB LTX-Video 2B floor")
+        floor = LTX_MIN_VRAM_GB if min_vram_gb is None else float(min_vram_gb)
+        if vram >= floor:
+            reason = (f"{vram:.0f}GB VRAM clears the 8GB LTX-Video 2B "
+                      "floor" if min_vram_gb is None else
+                      f"{vram:.0f}GB VRAM clears the {floor:g}GB floor of "
+                      "the selected model")
+            return NeuralCapability(True, "ltx", vram, profile, True, reason)
+        if min_vram_gb is None:
+            return NeuralCapability(False, "none", vram, profile, True,
+                f"LTX-Video 2B needs ≥8GB VRAM, this machine has "
+                f"{vram:.0f}GB; motion studio instead")
         return NeuralCapability(False, "none", vram, profile, True,
-            f"LTX-Video 2B needs ≥8GB VRAM, this machine has {vram:.0f}GB; "
-            "motion studio instead")
+            f"the selected model needs ≥{floor:g}GB VRAM, this machine "
+            f"has {vram:.0f}GB; motion studio instead (or pick a smaller "
+            "model)")
     # auto: best quality the VRAM supports
     if vram >= WAN_MIN_VRAM_GB:
         return NeuralCapability(True, "wan", vram, profile, True,

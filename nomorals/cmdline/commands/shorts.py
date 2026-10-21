@@ -263,6 +263,24 @@ def _cmd_estimate(args: argparse.Namespace, context) -> int:
         return _err(str(exc))
 
 
+def _cmd_hero(args: argparse.Namespace, context) -> int:
+    """One neural hero clip via videogen — or its honest decline."""
+    from ...media.videogen import request_hero_clip
+    res = request_hero_clip(
+        args.prompt, duration_s=args.seconds, seed=args.seed,
+        model=getattr(args, "model", "") or None,
+        lora=getattr(args, "lora", None) or None)
+    if res.get("ok"):
+        extra = f" · model: {res['model']}" if res.get("model") else ""
+        if res.get("loras"):
+            extra += f" · loras: {', '.join(res['loras'])}"
+        return _ok(f"hero clip → {res['path']} ({res['backend']}{extra})")
+    msg = f"hero clip unavailable: {res.get('reason', 'unknown')}"
+    if res.get("suggestion"):
+        msg += f"\nplan B: {res['suggestion']}"
+    return _err(msg)
+
+
 HANDLERS = {
     "make": _cmd_make,
     "queue": _cmd_queue,
@@ -274,6 +292,7 @@ HANDLERS = {
     "calendar": _cmd_calendar,
     "ledger": _cmd_ledger,
     "estimate": _cmd_estimate,
+    "hero": _cmd_hero,
 }
 
 

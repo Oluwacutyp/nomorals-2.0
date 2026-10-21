@@ -88,12 +88,58 @@ class LTXBackend:
     name = "ltx"
     min_vram_gb = LTX_MIN_VRAM_GB
 
-    def __init__(self, *, model_id: str = "", distilled: bool = True):
+    def __init__(self, *, model_id: str = "", distilled: bool = True,
+                 loras: Any = ()):
         self.model_id = model_id or (DISTILLED_MODEL_ID if distilled
                                      else BASE_MODEL_ID)
         self.distilled = distilled
+        #: (source, weight) pairs applied to every loaded pipeline —
+        #: sources are LoRA dirs or single .safetensors files, already
+        #: resolved by the caller (pipeline / registry).
+        self._loras: tuple[tuple[str, float], ...] = tuple(
+            (str(src), float(w)) for src, w in loras)
         self._pipe: Any = None
         self._i2v_pipe: Any = None
+
+    # -- LoRA --------------------------------------------------------------
+
+    def _apply_loras(self, pipe: Any) -> Any:
+        """Apply this backend's LoRAs to a freshly loaded pipeline.
+
+        Multi-adapter: each LoRA loads under its own adapter name, then
+        ``set_adapters`` activates all of them with their weights. A
+        LoRA that fails to load raises :class:`VideogenError` naming
+        the LoRA source — never a silent skip.
+        """
+        if not self._loras:
+            return pipe
+        names: list[str] = []
+        weights: list[float] = []
+        for i, (source, weight) in enumerate(self._loras):
+            name = f"devon_lora_{i}"
+            try:
+                if os.path.isdir(source):
+                    pipe.load_lora_weights(source, adapter_name=name)
+                else:
+                    pipe.load_lora_weights(
+                        os.path.dirname(source) or ".",
+                        weight_name=os.path.basename(source),
+                        adapter_name=name)
+            except Exception as exc:  # noqa: BLE001 - name it, don't skip
+                raise VideogenError(
+                    f"LoRA {source!r} failed to load into the LTX "
+                    f"pipeline: {exc}") from exc
+            names.append(name)
+            weights.append(weight)
+        try:
+            pipe.set_adapters(names, adapter_weights=weights)
+        except Exception as exc:  # noqa: BLE001
+            raise VideogenError(
+                f"activating LoRA adapters {names} on the LTX pipeline "
+                f"failed: {exc}") from exc
+        _log.info("LTX: applied %d LoRA(s): %s", len(names),
+                  ", ".join(f"{s}@{w}" for s, w in self._loras))
+        return pipe
 
     # -- capability ------------------------------------------------------
 
@@ -145,6 +191,7 @@ class LTXBackend:
             pipe.vae.enable_slicing()
         except Exception:  # noqa: BLE001
             pass
+        pipe = self._apply_loras(pipe)
         if for_i2v:
             self._i2v_pipe = pipe
         else:
@@ -167,7 +214,7 @@ class LTXBackend:
                     pipe.enable_model_cpu_offload()
                 except Exception:  # noqa: BLE001
                     pipe.to("cuda")
-                self._i2v_pipe = pipe
+                self._i2v_pipe = self._apply_loras(pipe)
             return self._i2v_pipe, "native-i2v"
         except Exception:  # noqa: BLE001 - fall back to conditioning
             _log.info("LTXImageToVideoPipeline unavailable, "
@@ -183,6 +230,7 @@ class LTXBackend:
                 pipe.enable_model_cpu_offload()
             except Exception:  # noqa: BLE001
                 pipe.to("cuda")
+            pipe = self._apply_loras(pipe)
             return (pipe, "condition",
                     LTXVideoCondition, export_to_video, load_image, load_video)
 
@@ -265,6 +313,7 @@ class LTXBackend:
         export_to_video(frames, str(out_path), fps=req.fps)
         record_ledger({"kind": "videogen.ltx", "path": str(out_path),
                        "mode": mode, "model": self.model_id,
+                       "loras": [s for s, _w in self._loras],
                        "frames": num_frames, "steps": steps,
                        "width": width, "height": height,
                        "duration_s": req.duration_s,

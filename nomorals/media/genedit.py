@@ -70,10 +70,10 @@ def text_to_shot(prompt: str, *, duration_s: float = 5.0,
     if structure_prompt:
         prompt, neg = _structure_prompt(prompt, "ltx", duration_s)
     try:
-        result = generate(prompt, duration_s=duration_s, out_path=out,
+        result = generate(prompt, duration_s=duration_s, out=out,
                           negative_prompt=neg or None)
         return GenShot(path=result.path, mode="t2v", prompt=prompt,
-                       duration_s=duration_s, backend=result.backend)
+                       duration_s=duration_s, backend=result.engine)
     except Exception as exc:
         raise RuntimeError(f"text_to_shot failed: {exc}") from exc
 
@@ -91,7 +91,7 @@ def image_to_shot(image: str, prompt: str = "", *,
     out = _out_path(workdir, "i2v_shot")
     if info["available"]:
         clip = backend.generate(prompt, mode="i2v", image=image,
-                                duration_s=duration_s, out_path=out)
+                                duration_s=duration_s, out=out)
         return GenShot(path=clip, mode="i2v", prompt=prompt,
                        duration_s=duration_s, backend="ltx")
     # CPU fallback: kenburns-style motion on the still
@@ -209,7 +209,7 @@ def extend_shot(video: str, prompt: str = "", *, seconds: float = 4.0,
         check=True, capture_output=True, timeout=60)
     out = _out_path(str(wd), "extend_shot")
     clip = backend.generate(prompt, mode="extend", image=seed,
-                            duration_s=seconds, out_path=out)
+                            duration_s=seconds, out=out)
     return GenShot(path=clip, mode="extend", prompt=prompt,
                    duration_s=seconds, backend="ltx")
 

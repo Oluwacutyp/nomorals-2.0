@@ -39,7 +39,9 @@ def _cmd_generate(args: argparse.Namespace, context) -> int:
         res = generate(
             args.prompt, backend=args.backend, mode=args.mode,
             image=args.image or None, duration_s=args.seconds,
-            seed=args.seed, out=args.out or None)
+            seed=args.seed, out=args.out or None,
+            model=getattr(args, "model", "") or None,
+            lora=getattr(args, "lora", None) or None)
     except VideogenError as exc:
         return _err(str(exc))
     except Exception as exc:  # noqa: BLE001 - CLI surfaces as text
