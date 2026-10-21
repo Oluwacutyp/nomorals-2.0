@@ -466,7 +466,7 @@ class ToolRegistry:
             "edit_loop",
             "errorsys",  # system health / error budgets / incident history
             "error_scan",
-            "macros", "media", "media_edit", "media_gen", "media_pipeline", "metadata",
+            "macros", "media", "media_edit", "media_gen", "media_director", "media_pipeline", "metadata",
             "music", "studio",
             "network", "osint", "osint_people", "parsers",
             "proxy", "proxylab", "pytest_runner", "sandbox_code", "scriptgen",

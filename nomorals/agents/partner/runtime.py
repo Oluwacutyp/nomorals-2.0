@@ -4041,6 +4041,8 @@ class PartnerRuntime(
             return self._control_download(command.tail or arg, chat_key=chat_key)
         if kind == "video":
             return self._control_video(command.tail or arg)
+        if kind == "director":
+            return self._control_director(command.tail or arg)
         if kind == "caption":
             return self._control_caption(command.tail or arg,
                                          chat_key=chat_key,

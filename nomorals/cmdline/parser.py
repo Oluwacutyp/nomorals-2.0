@@ -2370,6 +2370,46 @@ def _parser() -> argparse.ArgumentParser:
     v_ls = v_sub.add_parser("list", help="recent studio renders")
     v_ls.add_argument("--json", action="store_true")
 
+    director = sub.add_parser("director",
+        help="Devon directs: coverage → breakdown + design → shoot → QA",
+        description=("nm director cover <script-file>\n"
+                     "nm director plan <script-file> [--style neutral|naturalist|noir|neon|golden] [--refine]\n"
+                     "nm director shoot <production-id> [--backend auto|ltx|wan|motion] [--model NAME] [--lora NAME[:W]] [--shots 1.1,2.3] [--no-qa]\n"
+                     "nm director regen <production-id> <shot-id>\n"
+                     "nm director show [production-id] | nm director styles"),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    d_sub = director.add_subparsers(dest="director_action", required=True)
+    d_cov = d_sub.add_parser("cover", help="professional script coverage")
+    d_cov.add_argument("script", help="screenplay file (standard format or prose)")
+    d_pl = d_sub.add_parser("plan", help="breakdown + per-shot design")
+    d_pl.add_argument("script", help="screenplay file")
+    d_pl.add_argument("--style", default="neutral",
+                      help="style pack: neutral|naturalist|noir|neon|golden")
+    d_pl.add_argument("--refine", action="store_true",
+                      help="let the brain re-pick design values (vocabulary-validated)")
+    d_sh = d_sub.add_parser("shoot", help="generate shots + QA loop")
+    d_sh.add_argument("production", help="production id from `plan`")
+    d_sh.add_argument("--backend", default="auto",
+                      help="auto|ltx|wan|motion (default: auto)")
+    d_sh.add_argument("--model", default="",
+                      help="registry model name (see: nm video capability)")
+    d_sh.add_argument("--lora", action="append", default=None,
+                      help="LoRA name or path, optionally NAME:WEIGHT; repeatable")
+    d_sh.add_argument("--shots", default="",
+                      help="comma-separated shot ids (default: all planned)")
+    d_sh.add_argument("--no-qa", action="store_true",
+                      help="skip the frame/Seer QA loop")
+    d_rg = d_sub.add_parser("regen", help="one regeneration for a failed shot")
+    d_rg.add_argument("production", help="production id")
+    d_rg.add_argument("shot", help="shot id, e.g. 2.3")
+    d_rg.add_argument("--backend", default="auto")
+    d_rg.add_argument("--model", default="")
+    d_sw = d_sub.add_parser("show", help="production + QA status")
+    d_sw.add_argument("production", nargs="?", default="",
+                      help="production id (default: newest)")
+    d_sub.add_parser("styles", help="list the director style packs")
+
     audio = sub.add_parser("audio", aliases=CLI_ALIASES["audio"],
         help="Devon's own audio toolkit: enhance, effects, analysis, recognition",
         description=("nm audio enhance <file> [--profile voice|music|light] [--engine auto|ffmpeg|devon]\n"

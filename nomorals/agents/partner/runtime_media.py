@@ -2554,6 +2554,123 @@ class RuntimeMediaMixin:
             return f"🎬 trailer → {path}"
         return f"unknown /video motion kind {kind!r}"
 
+    def _control_director(self, tail: str) -> str:
+        """/director — Devon directs: coverage → plan → shoot → QA.
+
+        /director cover <script-file>                 reader's coverage
+        /director plan <script-file> [--style PACK] [--refine]
+        /director shoot <production-id> [--backend X] [--model M]
+                        [--shots 1.1,2.3] [--no-qa]
+        /director regen <production-id> <shot-id>
+        /director show [production-id] | /director styles
+        Never raises."""
+        import re
+        import shlex
+        from pathlib import Path
+
+        from ...media.director import Director, DirectorError, STYLE_PACKS
+
+        usage = (
+            "🎬 /director — coverage → breakdown + design → shoot → QA\n"
+            "  /director cover <script-file>\n"
+            "  /director plan <script-file> [--style neutral|naturalist|"
+            "noir|neon|golden] [--refine]\n"
+            "  /director shoot <production-id> [--backend auto|ltx|wan|"
+            "motion] [--model M] [--shots 1.1,2.3] [--no-qa]\n"
+            "  /director regen <production-id> <shot-id>\n"
+            "  /director show [production-id] | /director styles")
+        try:
+            parts = shlex.split(tail or "")
+        except ValueError:
+            parts = (tail or "").split()
+        if not parts:
+            return usage
+        action = parts[0].lower()
+        rest = parts[1:]
+        director = Director(context=self.context)
+
+        def read_script(path_arg: str) -> str:
+            p = Path(path_arg)
+            if not p.is_file():
+                ws = getattr(self.context, "workspace", None)
+                if ws and (Path(ws) / path_arg).is_file():
+                    p = Path(ws) / path_arg
+                else:
+                    raise DirectorError(f"script file not found: {path_arg}")
+            return p.read_text(encoding="utf-8", errors="replace")
+
+        def flag(name: str, default: str = "") -> str:
+            m = re.search(rf"--{name}\s+(\S+)", " ".join(rest))
+            return m.group(1) if m else default
+
+        try:
+            if action == "styles":
+                lines = ["🎞️ director style packs (data over the "
+                         "design primitives — the engine bakes no look):"]
+                for name, pack in sorted(STYLE_PACKS.items()):
+                    lines.append(f"  {name:12} {pack['label']}")
+                return "\n".join(lines)
+            if action == "cover":
+                if not rest:
+                    return "usage: /director cover <script-file>"
+                text = read_script(rest[0])
+                cov = director.cover(text)
+                path = director.save_coverage(cov)
+                return cov.report() + f"\n\nsaved: {path}"
+            if action == "plan":
+                if not rest:
+                    return ("usage: /director plan <script-file> "
+                            "[--style PACK] [--refine]")
+                text = read_script(rest[0])
+                prod = director.plan(
+                    text, style_pack=flag("style", "neutral"),
+                    refine="--refine" in rest)
+                lines = [f"🎬 production {prod.id} — {prod.title}",
+                         f"style pack: {prod.style_pack} · "
+                         f"{len(prod.screenplay.scenes)} scenes · "
+                         f"{len(prod.shots)} shots designed"]
+                for s in prod.shots:
+                    frag = ""
+                    if s.design:
+                        frag = (f" [{s.design.camera.shot_size}, "
+                                f"{s.design.lighting.key_source}]")
+                    lines.append(f"  {s.id} {s.kind}: "
+                                 f"{s.description[:70]}{frag}")
+                lines.append(f"plan: {prod.dir}/report.md")
+                lines.append(f"shoot it: /director shoot {prod.id}")
+                return "\n".join(lines)
+            if action == "shoot":
+                if not rest:
+                    return ("usage: /director shoot <production-id> "
+                            "[--shots 1.1,2.3] [--no-qa]")
+                shot_ids = [s for s in flag("shots").split(",") if s]
+                prod = director.shoot(
+                    rest[0], shot_ids=shot_ids or None,
+                    backend=flag("backend", "auto"),
+                    model=flag("model") or None,
+                    qa="--no-qa" not in rest)
+                return director.summary(prod.id)
+            if action == "regen":
+                if len(rest) < 2:
+                    return ("usage: /director regen <production-id> "
+                            "<shot-id>")
+                prod = director.regen(rest[0], rest[1],
+                                      backend=flag("backend", "auto"),
+                                      model=flag("model") or None)
+                shot = prod.shot(rest[1])
+                return (f"🎬 shot {shot.id} regenerated → {shot.status}\n"
+                        f"clip: {shot.clip_path}\n"
+                        f"QA: {shot.qa.get('notes', '')}")
+            if action == "show":
+                return director.summary(rest[0] if rest else "")
+            return f"unknown /director action {action!r}\n{usage}"
+        except DirectorError as exc:
+            return f"director: {exc}"
+        except ValueError as exc:  # unknown style pack etc.
+            return f"director: {exc}"
+        except Exception as exc:  # noqa: BLE001 - chat surfaces as text
+            return f"director error: {exc}"
+
     def _control_caption(self, tail: str, chat_key: str = "",
                          message: Any = None) -> str:
         """`/caption [style]` — burn AI subtitles into a video.

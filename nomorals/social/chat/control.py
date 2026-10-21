@@ -496,6 +496,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "play": (0, None),       # /play <paths…> | status | queue | pause | …
     "download": (1, None),   # /download <url> [audio] — any-URL media downloader
     "video": (0, None),      # /video <query> | download <url> | platforms
+    "director": (0, None),   # /director cover|plan|shoot|regen|show — coverage → design → shoot → QA
     "caption": (0, 1),       # /caption [style] — burn AI subtitles into a video (attach or path)
     "vision": (0, None),     # /vision [question] — analyze an image (attach or path/URL)
     "exec": (0, None),       # /exec <code> | languages — multi-language sandbox
@@ -719,6 +720,11 @@ _HELP_TEXT = "\n".join(
         "  /play seek <s> | volume <n> | remove <n> | clear",
         "  /video <query> [platform]               find videos across the web (ranked)",
         "  /video download <url> [audio]           download it (yt-dlp)",
+        "  /director cover <script>                professional coverage (verdict: pass/consider/recommend)",
+        "  /director plan <script> [--style noir]  breakdown + lighting/camera design per shot",
+        "  /director shoot <production-id>         generate the shots (videogen) + frame/Seer QA",
+        "  /director regen <prod-id> <shot-id>     one regeneration for a failed shot",
+        "  /director show [production-id]          production + QA status",
         "  — execution · archives · builders —",
         "  /exec <code> [lang]                     run code sandboxed (py/js/bash/c/…)",
         "  /exec languages                         what's installed here",
@@ -2267,6 +2273,15 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
               "usage": "/video <query> [platform] | /video download <url> [audio] | /video platforms",
               "example": "/video lofi beats for studying youtube",
               "related": "/searchdeep · nm video on the console"},
+    "director": {"what": "Devon directs: professional script coverage, "
+                      "scene/shot breakdown, lighting + camera design "
+                      "per shot (primitives composed by style packs — "
+                      "the engine bakes no look), generation through "
+                      "the videogen registry, and a frame/Seer QA loop "
+                      "with one flagged regeneration per failed shot.",
+              "usage": "/director cover <script> | plan <script> [--style PACK] | shoot <production-id> | regen <prod-id> <shot-id> | show [prod-id]",
+              "example": "/director plan the-letter.txt --style noir",
+              "related": "/video gen (single clips) · nm director on the console"},
     "caption": {"what": "Burn AI subtitles into a video: faster-whisper transcription → styled captions → FFmpeg burn-in.",
               "usage": "/caption [style] — attach a video or pass a path",
               "example": "/caption karaoke",
@@ -2399,7 +2414,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
                         "vision", "voices", "clonevoice", "sing"]),
     ("decoding & crypto", ["decode", "cookies", "cookielab", "structure", "cipher",
                            "monitor", "investigate"]),
-    ("media system", ["music", "distribute", "play", "video", "hub", "podcast", "dj", "produce", "like", "dislike", "cookies",
+    ("media system", ["music", "distribute", "play", "video", "director", "hub", "podcast", "dj", "produce", "like", "dislike", "cookies",
                       "download", "shorts", "caption", "imggen", "sham", "musicnote"]),
     ("execution · archives · builders", ["exec", "zip", "apps", "fix", "deliver"]),
     ("tools & automation", ["schedule", "db", "artifact", "api", "connectors", "provision", "notion",
@@ -2636,7 +2651,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
       "upgrade", "arena", "trial", "identity", "book", "exec", "apps", "fix", "structure",
       "deliver", "checkpoint", "checkpoints", "rewind", "novel", "books"]),
     ("media system — music · playback · video · podcast",
-     ["music", "play", "video", "hub", "podcast", "zip", "audio", "overview", "character", "audiobook",
+     ["music", "play", "video", "director", "hub", "podcast", "zip", "audio", "overview", "character", "audiobook",
       "distribute", "dj", "download", "produce", "like", "dislike",
       "shorts", "caption", "imggen", "sham", "musicnote"]),
     ("memory & thinking",
@@ -2877,6 +2892,7 @@ LIST_ONELINERS: dict[str, str] = {
     "music": "compose a real song: lyrics + chords + playable MIDI",
     "play": "media player: queue + transport (mpv when installed)",
     "video": "find videos across the web (ranked, enriched) + download",
+    "director": "Devon directs: coverage → breakdown + shot design → shoot → QA",
     "exec": "run code sandboxed: py/js/bash/c/… with real output",
     "zip": "archives: create/list/info/extract (safe against zip-slip)",
     "deliver": "create-and-deliver: styled report → zip → send to chat",
