@@ -281,7 +281,7 @@ class BackgroundTestRun:
         # (nothing collected) reports ok=True with zero executed tests;
         # consumers certifying work must see that explicitly.
         ran = passed + len(failed_items) + errors
-        return {
+        result = {
             "ok": ok,
             "passed": passed,
             "failed": failed_items,
@@ -297,6 +297,13 @@ class BackgroundTestRun:
             "note": ("killed after exceeding the cap — partial results"
                      if (self._timed_out or self._killed) else None),
         }
+        # pass #62: when this run was started from changed-file
+        # selection, carry its provenance (see background_run_tests).
+        reasons = getattr(self, "selection_reasons", None)
+        if reasons is not None:
+            result["selection_reasons"] = reasons
+            result["selection"] = getattr(self, "selection_meta", {})
+        return result
 
 
 def background_run_tests(
@@ -305,24 +312,34 @@ def background_run_tests(
     paths: list[str] | None = None,
     changed_only: bool = False,
     cap_seconds: float = DEFAULT_CAP_SECONDS,
+    changed_files: list[str] | None = None,
 ) -> BackgroundTestRun | dict[str, Any]:
     """Background twin of ``pytest_runner.run_tests``: same command
     construction, but the suite runs in the background.
 
     Returns a ``BackgroundTestRun`` — or a plain result dict when
     ``changed_only`` matches nothing (honest skip, same as ``run_tests``).
+    ``changed_files`` scopes the changed-only selection explicitly
+    (pass #62); a started run carries ``selection_reasons`` into its
+    ``result()``.
     """
     from ..tools import pytest_runner as _pytest_mod
 
     root = _pytest_mod._repo_root(repo)
     selected: list[str] | None = list(paths) if paths else None
+    sel_reasons: dict[str, str] | None = None
+    sel_meta: dict[str, Any] | None = None
     if changed_only:
-        selected = _pytest_mod.select_changed_tests(str(root))
+        selected, sel_reasons, sel_meta = \
+            _pytest_mod.select_changed_tests_detailed(str(root),
+                                                      changed_files)
         if not selected:
             return {"ok": True, "passed": 0, "failed": [], "errors": 0,
                     "ran": 0, "nothing_ran": True,
                     "seconds": 0.0, "selected": [],
                     "runner": "background",
+                    "selection_reasons": sel_reasons,
+                    "selection": _pytest_mod._selection_meta_public(sel_meta),
                     "note": "no tests matched the changed files — nothing ran"}
     if _pytest_mod._has_pytest():
         targets = selected or (["tests"] if (root / "tests").is_dir()
@@ -339,7 +356,11 @@ def background_run_tests(
                 "seconds": 0.0, "selected": [],
                 "runner": "background",
                 "note": "no tests directory — nothing ran"}
-    return BackgroundTestRun(argv, cwd=root, cap_seconds=cap_seconds)
+    run = BackgroundTestRun(argv, cwd=root, cap_seconds=cap_seconds)
+    if sel_reasons is not None and sel_meta is not None:
+        run.selection_reasons = sel_reasons  # type: ignore[attr-defined]
+        run.selection_meta = _pytest_mod._selection_meta_public(sel_meta)  # type: ignore[attr-defined]
+    return run
 
 
 __all__ = ["BackgroundTestRun", "background_run_tests",

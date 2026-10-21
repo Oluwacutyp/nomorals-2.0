@@ -6,9 +6,22 @@ repo's own ``unittest discover`` command otherwise — same result schema
 either way.
 
 ``changed_only=True`` selects the tests that touch files changed in the
-working tree (``git diff --name-only`` + untracked files), mapped to test
-modules by filename stem.  The coding loop calls this instead of a raw
+working tree (``git diff --name-only`` + untracked files).  Selection is
+the UNION of two pickers (pass #62): the filename-stem heuristic, and
+:mod:`nomorals.tools.import_graph` — tests that actually import a changed
+module, directly or transitively.  The graph only ever ADDS tests; a
+graph build failure degrades to stem selection with the degradation
+noted in the result.  Every selection-driven result records
+``selection_reasons`` (test -> why: self / stem / graph-direct /
+graph-transitive) so a verify verdict can be audited.  Callers may pass
+``changed_files`` to scope selection explicitly instead of deriving the
+changed set from git.  The coding loop calls this instead of a raw
 accept command.
+
+``full_suite_gate=True`` (default off) opts a selection run into a
+final gate: after the selection goes green, the FULL suite runs once
+and is reported as a distinct verdict (``final_gate``) — it never
+rewrites the selection run's own ``ok``.
 """
 
 from __future__ import annotations
@@ -26,7 +39,8 @@ from ..core.logging_setup import get_logger
 
 _log = get_logger(__name__)
 
-__all__ = ["run_tests", "select_changed_tests", "format_test_result",
+__all__ = ["run_tests", "select_changed_tests",
+           "select_changed_tests_detailed", "format_test_result",
            "parse_chunk", "slice_chunk",
            "register"]
 
@@ -123,27 +137,23 @@ def _git_changed_files(root: Path) -> list[str]:
     return out
 
 
-def select_changed_tests(repo: str | None = None) -> list[str]:
-    """Test files (repo-relative) covering the working tree's changed files.
+def _stem_selection(root: Path, changed: list[str]) -> dict[str, set[str]]:
+    """Filename-stem selection as {test relpath: {"self"|"stem"}}.
 
     Heuristic: a changed module ``pkg/mod.py`` maps to test files whose
     filename contains the module stem (``tests/test_mod*.py``,
     ``tests/**/test_*mod*.py``); a changed test file maps to itself.
     """
-    root = _repo_root(repo)
-    changed = _git_changed_files(root)
-    if not changed:
-        return []
+    labels: dict[str, set[str]] = {}
     test_dirs = [d for d in (root / "tests", root / "test") if d.is_dir()]
     if not test_dirs:
-        return []
-    selected: list[str] = []
+        return labels
     for rel in changed:
         p = Path(rel)
         if "test" in p.name.lower() and p.suffix == ".py":
             candidate = root / rel
             if candidate.is_file():
-                selected.append(rel)
+                labels.setdefault(rel, set()).add("self")
             continue
         stem = p.stem
         if not stem or stem.startswith("_"):
@@ -151,9 +161,78 @@ def select_changed_tests(repo: str | None = None) -> list[str]:
         for tdir in test_dirs:
             for tf in tdir.rglob("test_*.py"):
                 if stem in tf.stem and tf.name != "__init__.py":
-                    selected.append(str(tf.relative_to(root)))
-    seen: set[str] = set()
-    return [s for s in selected if not (s in seen or seen.add(s))]  # type: ignore[func-returns-value]
+                    labels.setdefault(
+                        str(tf.relative_to(root)), set()).add("stem")
+    return labels
+
+
+#: Selection-reason labels, in the order they are joined for display.
+_REASON_ORDER = ("self", "graph-direct", "graph-transitive", "stem")
+
+
+def select_changed_tests_detailed(
+        repo: str | None = None,
+        changed_files: list[str] | None = None,
+) -> tuple[list[str], dict[str, str], dict[str, Any]]:
+    """Selection with provenance: ``(selected, reasons, meta)``.
+
+    ``selected`` is the UNION of stem selection and import-graph
+    selection (pass #62) — the graph adds tests whose imports cover a
+    changed module; it never removes a stem pick.  ``reasons`` maps each
+    selected test to a ``+``-joined label set drawn from ``self`` /
+    ``stem`` / ``graph-direct`` / ``graph-transitive``.  ``meta``
+    carries the changed-file list and the graph status: ``"ok"``,
+    ``"degraded"`` (graph build failed; stem selection used alone, with
+    ``graph_error`` saying why), or ``"not-run"`` (no changes).
+
+    ``changed_files`` scopes the selection to an explicit changed set
+    (repo-relative paths); None derives it from git, as before.
+    """
+    root = _repo_root(repo)
+    changed = ([str(c) for c in changed_files]
+               if changed_files is not None else _git_changed_files(root))
+    meta: dict[str, Any] = {"changed_files": list(changed),
+                            "graph_status": "not-run", "graph_error": "",
+                            "counts": {}}
+    labels: dict[str, set[str]] = {}
+    if changed:
+        labels = _stem_selection(root, changed)
+        try:
+            from . import import_graph as _import_graph
+
+            graph_selection = _import_graph.graph_test_selection(
+                root, changed)
+            meta["graph_status"] = "ok"
+            for rel, reason in graph_selection.items():
+                labels.setdefault(rel, set()).add(reason)
+        except Exception as exc:  # noqa: BLE001 — degrade, never crash
+            meta["graph_status"] = "degraded"
+            meta["graph_error"] = f"{type(exc).__name__}: {exc}"
+            _log.warning("import-graph selection degraded to stem-only: %s",
+                         exc)
+    selected = list(labels)
+    reasons = {
+        rel: "+".join(sorted(ls, key=_REASON_ORDER.index))
+        for rel, ls in labels.items()
+    }
+    meta["counts"] = {
+        label: sum(1 for ls in labels.values() if label in ls)
+        for label in _REASON_ORDER
+    }
+    return selected, reasons, meta
+
+
+def select_changed_tests(repo: str | None = None,
+                         changed_files: list[str] | None = None) -> list[str]:
+    """Test files (repo-relative) covering the changed files.
+
+    Union of the filename-stem heuristic and import-graph selection —
+    see :func:`select_changed_tests_detailed` for the provenance-
+    carrying variant.
+    """
+    selected, _reasons, _meta = select_changed_tests_detailed(
+        repo, changed_files)
+    return selected
 
 
 def _has_pytest() -> bool:
@@ -184,6 +263,19 @@ def format_test_result(tres: dict[str, Any]) -> str:
     if len(failed) > 3:
         lines.append(_style.colorize(
             f"… and {len(failed) - 3} more failures", "dim"))
+    gate = tres.get("final_gate")
+    if isinstance(gate, dict) and gate.get("ran"):
+        verdict = str(gate.get("verdict", "?")).upper()
+        mark = _style.OK if verdict == "PASS" else _style.FAIL
+        gate_line = (f"final gate (full suite): {verdict} — "
+                     f"{gate.get('passed', 0)} passed")
+        gate_failed = gate.get("failed") or []
+        if gate_failed:
+            gate_line += f", {len(gate_failed)} failed: " + ", ".join(
+                str(t) for t in gate_failed[:3])
+            if len(gate_failed) > 3:
+                gate_line += f", … +{len(gate_failed) - 3}"
+        lines.append(_style.status_line(mark, gate_line))
     note = tres.get("note")
     if note:
         lines.append(str(note))
@@ -205,11 +297,14 @@ def _failure_snippet(output: str, limit: int = 1200) -> str:
 
 
 def _run_pytest(root: Path, paths: list[str] | None,
-                timeout: float) -> dict[str, Any]:
+                timeout: float, *,
+                stop_on_fail: bool = True) -> dict[str, Any]:
     t0 = time.perf_counter()
     targets = paths or (["tests"] if (root / "tests").is_dir() else ["."])
-    cmd = [sys.executable, "-m", "pytest", "-x", "-q", "--tb=short",
-           "-rf", *targets]
+    cmd = [sys.executable, "-m", "pytest", "-q", "--tb=short", "-rf"]
+    if stop_on_fail:
+        cmd.append("-x")
+    cmd.extend(targets)
     try:
         proc = subprocess.run(cmd, cwd=str(root), capture_output=True,
                               text=True, encoding="utf-8", errors="replace", timeout=timeout)
@@ -391,16 +486,86 @@ def _run_unittest(root: Path, paths: list[str] | None,
             "ran": ran, "_n_failed_hint": n_failed}
 
 
+def _selection_meta_public(meta: dict[str, Any]) -> dict[str, Any]:
+    """The auditable slice of selection meta recorded on results."""
+    out: dict[str, Any] = {
+        "graph_status": meta.get("graph_status", "not-run"),
+        "counts": meta.get("counts", {}),
+        "changed_files": meta.get("changed_files", []),
+    }
+    if meta.get("graph_error"):
+        out["graph_error"] = meta["graph_error"]
+    return out
+
+
+def _skipped_gate(reason: str) -> dict[str, Any]:
+    return {"ran": False, "verdict": "skipped", "reason": reason}
+
+
+def _final_gate(root: Path, primary: dict[str, Any], *,
+                chunked: bool, primary_full_suite: bool,
+                timeout: float, gate_timeout: float | None,
+                ) -> dict[str, Any]:
+    """The optional full-suite final gate (pass #62): a DISTINCT verdict.
+
+    Runs the whole suite once, only after a selection run went green.
+    The gate's verdict (``pass`` / ``fail`` / ``unavailable`` /
+    ``skipped``) is reported alongside the selection verdict — it never
+    rewrites it: a full-suite failure lists the failing tests so
+    pre-existing breakage is attributable instead of poisoning the
+    verdict on the change under review.
+    """
+    if chunked:
+        return _skipped_gate(
+            "a chunked run does not run the final gate "
+            "(a slice of the suite is not the suite)")
+    if primary.get("nothing_ran"):
+        return _skipped_gate("the selection run executed no tests")
+    if not primary.get("ok") or primary.get("failed") \
+            or primary.get("errors"):
+        return _skipped_gate("the selection run was not green")
+    if primary_full_suite:
+        return _skipped_gate(
+            "the primary run already covered the full suite")
+    budget = gate_timeout if gate_timeout is not None else timeout
+    if _has_pytest():
+        # No -x here: attribution needs EVERY failing test, not the
+        # first one.
+        gate = _run_pytest(root, None, budget, stop_on_fail=False)
+    else:
+        gate = _run_unittest(root, None, budget)
+    failed_ids = [str(f.get("test_id")) for f in gate.get("failed", [])]
+    note = str(gate.get("note") or "")
+    if note.startswith("stopped after"):
+        verdict = "unavailable"
+    elif gate.get("ok") and not failed_ids and not gate.get("errors"):
+        verdict = "pass"
+    else:
+        verdict = "fail"
+    return {"ran": True, "verdict": verdict,
+            "runner": gate.get("runner"),
+            "passed": gate.get("passed", 0),
+            "failed": failed_ids,
+            "errors": gate.get("errors", 0),
+            "seconds": gate.get("seconds", 0.0),
+            "note": note or None}
+
+
 def run_tests(paths: list[str] | None = None,
               changed_only: bool = False,
               repo: str | None = None,
               timeout: float = 300.0,
-              chunk: str | None = None) -> dict[str, Any]:
+              chunk: str | None = None,
+              changed_files: list[str] | None = None,
+              full_suite_gate: bool = False,
+              gate_timeout: float | None = None) -> dict[str, Any]:
     """Run the test suite and return a structured result.
 
-    ``changed_only`` selects tests via ``select_changed_tests``; when
-    nothing matches, the run is skipped honestly (no silent full-suite
-    run, no fake pass).
+    ``changed_only`` selects tests via ``select_changed_tests_detailed``
+    (stem ∪ import graph, pass #62); when nothing matches, the run is
+    skipped honestly (no silent full-suite run, no fake pass).
+    ``changed_files`` scopes that selection to an explicit changed set
+    instead of deriving it from git.
 
     No ``paths`` and no ``changed_only`` → targeted by default: the
     tests touching changed files. A bare call used to run the FULL suite
@@ -413,6 +578,12 @@ def run_tests(paths: list[str] | None = None,
     ``nothing_ran`` (``ran == 0``).  ``ok`` stays True for an honest
     nothing-ran skip — but a caller certifying work must check
     ``nothing_ran``: zero executed tests is not a pass (pass #58).
+
+    Selection-driven results also carry ``selection_reasons`` (test ->
+    why it was picked) and ``selection`` (graph status + per-reason
+    counts).  ``full_suite_gate=True`` adds ``final_gate`` +
+    ``final_gate_verdict`` after a green selection run — a separate
+    verdict that never rewrites this result's ``ok``.
     """
     root = _repo_root(repo)
     if isinstance(paths, str):
@@ -421,16 +592,29 @@ def run_tests(paths: list[str] | None = None,
         paths = [paths]
     selected: list[str] | None = list(paths) if paths else None
     targeted = False
+    sel_reasons: dict[str, str] = {}
+    sel_meta: dict[str, Any] | None = None
+    gate_skip: dict[str, Any] = {}
+    if full_suite_gate:
+        gate_skip = {
+            "final_gate": _skipped_gate(
+                "the selection run executed no tests"),
+            "final_gate_verdict": "skipped"}
     if changed_only:
-        selected = select_changed_tests(str(root))
+        selected, sel_reasons, sel_meta = select_changed_tests_detailed(
+            str(root), changed_files)
         if not selected:
             return _annotate_ran(
                 {"ok": True, "passed": 0, "failed": [], "errors": 0,
                  "seconds": 0.0, "selected": [],
                  "runner": "pytest" if _has_pytest() else "unittest",
+                 "selection_reasons": sel_reasons,
+                 "selection": _selection_meta_public(sel_meta),
+                 **gate_skip,
                  "note": "no tests matched the changed files — nothing ran"})
     elif selected is None:
-        selected = select_changed_tests(str(root))
+        selected, sel_reasons, sel_meta = select_changed_tests_detailed(
+            str(root), changed_files)
         if selected:
             targeted = True
         else:
@@ -438,6 +622,9 @@ def run_tests(paths: list[str] | None = None,
                 {"ok": True, "passed": 0, "failed": [], "errors": 0,
                  "seconds": 0.0, "selected": [],
                  "runner": "pytest" if _has_pytest() else "unittest",
+                 "selection_reasons": sel_reasons,
+                 "selection": _selection_meta_public(sel_meta),
+                 **gate_skip,
                  "note": ("no tests matched the changed files — nothing ran. "
                           "Pass paths=['tests'] for the full suite "
                           "(chunk='i/n' slices, e.g. 1/4 … 4/4) or "
@@ -450,11 +637,19 @@ def run_tests(paths: list[str] | None = None,
         if not selected:
             # An empty slice must NOT fall through to _run_pytest's
             # ["tests"] default — that would run the whole suite.
+            chunk_gate: dict[str, Any] = {}
+            if full_suite_gate:
+                chunk_gate = {
+                    "final_gate": _skipped_gate(
+                        "a chunked run does not run the final gate "
+                        "(a slice of the suite is not the suite)"),
+                    "final_gate_verdict": "skipped"}
             return _annotate_ran(
                 {"ok": True, "passed": 0, "failed": [], "errors": 0,
                  "seconds": 0.0, "selected": [],
                  "runner": "pytest" if _has_pytest() else "unittest",
                  "chunk": chunk, "chunk_of": f"{chunk_parsed[0]}/{chunk_parsed[1]}",
+                 **chunk_gate,
                  "note": (f"chunk {chunk} is empty — only "
                           f"{len(expanded)} test file(s) exist")})
     if _has_pytest():
@@ -477,7 +672,31 @@ def run_tests(paths: list[str] | None = None,
         result["note"] = (
             f"full-suite run: {n_files} test files — pass chunk='i/n' "
             "(e.g. 1/4 … 4/4) to run one slice per call")
-    return _annotate_ran(result)
+    if sel_meta is not None:
+        result["selection_reasons"] = sel_reasons
+        result["selection"] = _selection_meta_public(sel_meta)
+        if sel_meta.get("graph_status") == "degraded":
+            base = result.get("note") or ""
+            result["note"] = (
+                f"import-graph selection degraded "
+                f"({sel_meta.get('graph_error')}) — stem selection used"
+                + (f" — {base}" if base else ""))
+    _annotate_ran(result)
+    if full_suite_gate:
+        gate = _final_gate(root, result, chunked=chunk_parsed is not None,
+                           primary_full_suite=full_suite,
+                           timeout=timeout, gate_timeout=gate_timeout)
+        result["final_gate"] = gate
+        result["final_gate_verdict"] = gate["verdict"]
+        if gate.get("ran"):
+            base = result.get("note") or ""
+            gate_line = (f"final gate: {str(gate['verdict']).upper()} — "
+                         f"full suite {gate.get('passed', 0)} passed, "
+                         f"{len(gate.get('failed') or [])} failed")
+            if gate["verdict"] == "fail":
+                gate_line += " (selection verdict above is unchanged)"
+            result["note"] = gate_line + (f" — {base}" if base else "")
+    return result
 
 
 def register(registry: Any) -> None:
@@ -501,12 +720,22 @@ def register(registry: Any) -> None:
             "timeout": "float (optional, 300) — seconds per run; full-suite "
                        "runs should use chunk= instead of a huge timeout",
             "chunk": "str (optional, 'i/n') — run one slice of the suite",
+            "changed_files": "list[str] (optional) — explicit changed set "
+                             "for selection instead of deriving it from git",
+            "full_suite_gate": "bool (optional, False) — after a green "
+                               "selection run, run the full suite once and "
+                               "report it as final_gate (a distinct "
+                               "verdict; never rewrites ok)",
         },
     )
     def _run_tests(paths: list[str] | None = None,
                    changed_only: bool = False,
                    repo: str | None = None,
                    timeout: float = 300.0,
-                   chunk: str | None = None) -> dict[str, Any]:
+                   chunk: str | None = None,
+                   changed_files: list[str] | None = None,
+                   full_suite_gate: bool = False) -> dict[str, Any]:
         return run_tests(paths=paths, changed_only=changed_only, repo=repo,
-                         timeout=timeout, chunk=chunk)
+                         timeout=timeout, chunk=chunk,
+                         changed_files=changed_files,
+                         full_suite_gate=full_suite_gate)

@@ -283,6 +283,14 @@ class CodingResult:
     # Pass #60 (W4): how many times the run re-planned its remaining
     # steps after a step failed repeatedly (0 or 1 — never more).
     replans: int = 0
+    # Pass #62: the runner's full-suite final gate verdict, when the
+    # caller opted in (``final_gate`` on run()) and a verify round went
+    # green — {"ran", "verdict", "failed", ...}.  A DISTINCT verdict:
+    # a gate failure (e.g. pre-existing breakage elsewhere in the
+    # suite) is reported here and never rewrites ``ok``/``verification``,
+    # which belong to the change's own selection run.  Empty when the
+    # gate never ran.
+    final_gate: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -299,6 +307,7 @@ class CodingResult:
             "verification": self.verification,
             "steps": self.steps,
             "replans": self.replans,
+            "final_gate": self.final_gate,
         }
 
 
@@ -899,6 +908,7 @@ class CodingAgent:
         background_tests: bool = False,
         test_cap_seconds: float = 900.0,
         plan_mode: Any = "auto",
+        full_suite_gate: bool = False,
         _plan: list[dict[str, Any]] | None = None,
     ) -> CodingResult:
         """Run the surgical multi-file edit loop (audit Phase B).
@@ -939,6 +949,15 @@ class CodingAgent:
         whole run draws from — it is NOT ``max_iterations`` divided by
         the file count, so multi-file plans keep real repair rounds at
         the chat caller's budget.
+
+        Verify selection (pass #62) is import-graph aware: the round's
+        verify passes the run's accumulated changed files to the
+        runner, which selects the tests that actually import them
+        (unioned with the filename-stem picks).  ``full_suite_gate``
+        (default off) opts the run into the runner's final gate: after
+        a green selection run, the full suite runs once and its
+        distinct verdict lands on ``CodingResult.final_gate`` — a gate
+        failure never rewrites the run's own verdict.
         """
         from ..tools import lint as _lint_mod
         from ..tools import pytest_runner as _pytest_mod
@@ -1162,6 +1181,9 @@ class CodingAgent:
         changed: list[str] = []
         last_error = ""
         verification = ""
+        # Pass #62: captured from the green verify round's runner
+        # result when the caller opted into the final gate.
+        final_gate: dict[str, Any] = {}
         rounds = max(1, max_iterations)
         # Pass #60 (W4): re-plan bookkeeping — steps attempted last round
         # (for fail streaks) and the one-shot re-plan flags.
@@ -1394,9 +1416,19 @@ class CodingAgent:
                             changed or [filename], repo=str(workdir))
                         tres = bg.wait(on_progress=_bg_progress)
                 else:
+                    # Pass #62: selection follows the work — the runner
+                    # gets the run's accumulated changed files (this
+                    # round's touches included) instead of re-deriving
+                    # the set from git, so selection also works in
+                    # non-git workdirs; its import-graph ∪ stem picks
+                    # cover those files.  The background path above
+                    # keeps targeting the whole tests directory by
+                    # design and needs no scoping.
                     tres = _pytest_mod.run_tests(
                         repo=str(workdir),
-                        timeout=min(max(timeout * 5.0, 60.0), 600.0))
+                        timeout=min(max(timeout * 5.0, 60.0), 600.0),
+                        changed_files=list(changed) or None,
+                        full_suite_gate=full_suite_gate)
                 # Pass #58: ZERO executed tests is never green.  The
                 # runner reports an honest skip (ok=True, passed=0) when
                 # its stem-heuristic selection matches nothing — the
@@ -1434,6 +1466,13 @@ class CodingAgent:
                     green = (tres["ok"] and not tres["failed"]
                              and not tres["errors"])
                     verification = "tests"
+                    # Pass #62: keep the gate's distinct verdict for
+                    # the result (format_test_result already renders
+                    # its line into verify_out).  It never touches
+                    # `green` — the selection verdict stands alone.
+                    if isinstance(tres.get("final_gate"), dict) \
+                            and tres["final_gate"]:
+                        final_gate = tres["final_gate"]
                     verify_out = _pytest_mod.format_test_result(tres)
                     verify_err = "" if green else verify_out
             else:
@@ -1554,6 +1593,7 @@ class CodingAgent:
                     verification=verification,
                     steps=_finalize_steps(True),
                     replans=replans,
+                    final_gate=final_gate,
                 )
             last_error = verify_err
             for rel in touched:
@@ -1577,6 +1617,7 @@ class CodingAgent:
                 verification=verification,
                 steps=_finalize_steps(True),
                 replans=replans,
+                final_gate=final_gate,
             )
         final_steps = _finalize_steps(False)
         stuck = [s["path"] for s in final_steps if s["status"] == "failed"]
@@ -1605,6 +1646,7 @@ class CodingAgent:
             verification=verification,
             steps=final_steps,
             replans=replans,
+            final_gate=final_gate,
         )
 
     # ── plan mode: approve → execute (item #4) ────────────────────────
