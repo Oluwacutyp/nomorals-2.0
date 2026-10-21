@@ -69,6 +69,27 @@ def _repo_root(repo: str | None) -> Path:
     return Path(repo).expanduser().resolve() if repo else Path.cwd().resolve()
 
 
+def _annotate_ran(result: dict[str, Any]) -> dict[str, Any]:
+    """Add the explicit ran-count signal to a runner result (pass #58).
+
+    ``ran`` = how many tests actually executed; ``nothing_ran`` is True
+    when zero did.  ``ok`` deliberately keeps its old meaning (a
+    nothing-ran skip is not a runner failure) — but consumers that
+    certify work (the coding loop) must never read a zero-ran result as
+    verification, so the signal is explicit instead of leaving them to
+    infer it from ``passed == 0`` plus a prose note.  A pre-existing
+    ``ran`` (the unittest fallback reports one) is respected.
+    """
+    ran = result.get("ran")
+    if ran is None:
+        ran = (int(result.get("passed") or 0)
+               + len(result.get("failed") or [])
+               + int(result.get("errors") or 0))
+    result["ran"] = int(ran)
+    result["nothing_ran"] = int(ran) == 0
+    return result
+
+
 def _git_changed_files(root: Path) -> list[str]:
     """Changed + untracked files, repo-relative. [] when not a git repo."""
     git = shutil.which("git")
@@ -387,6 +408,11 @@ def run_tests(paths: list[str] | None = None,
     caller had — a 120s cap guaranteed a timeout that looked like a
     hang. To run the whole suite, pass ``paths=["tests"]`` with
     ``chunk="i/n"`` (e.g. 1/4 … 4/4), one slice per call.
+
+    Every result carries ``ran`` (tests actually executed) and
+    ``nothing_ran`` (``ran == 0``).  ``ok`` stays True for an honest
+    nothing-ran skip — but a caller certifying work must check
+    ``nothing_ran``: zero executed tests is not a pass (pass #58).
     """
     root = _repo_root(repo)
     if isinstance(paths, str):
@@ -398,22 +424,24 @@ def run_tests(paths: list[str] | None = None,
     if changed_only:
         selected = select_changed_tests(str(root))
         if not selected:
-            return {"ok": True, "passed": 0, "failed": [], "errors": 0,
-                    "seconds": 0.0, "selected": [],
-                    "runner": "pytest" if _has_pytest() else "unittest",
-                    "note": "no tests matched the changed files — nothing ran"}
+            return _annotate_ran(
+                {"ok": True, "passed": 0, "failed": [], "errors": 0,
+                 "seconds": 0.0, "selected": [],
+                 "runner": "pytest" if _has_pytest() else "unittest",
+                 "note": "no tests matched the changed files — nothing ran"})
     elif selected is None:
         selected = select_changed_tests(str(root))
         if selected:
             targeted = True
         else:
-            return {"ok": True, "passed": 0, "failed": [], "errors": 0,
-                    "seconds": 0.0, "selected": [],
-                    "runner": "pytest" if _has_pytest() else "unittest",
-                    "note": ("no tests matched the changed files — nothing ran. "
-                             "Pass paths=['tests'] for the full suite "
-                             "(chunk='i/n' slices, e.g. 1/4 … 4/4) or "
-                             "paths=[...] for specific files.")}
+            return _annotate_ran(
+                {"ok": True, "passed": 0, "failed": [], "errors": 0,
+                 "seconds": 0.0, "selected": [],
+                 "runner": "pytest" if _has_pytest() else "unittest",
+                 "note": ("no tests matched the changed files — nothing ran. "
+                          "Pass paths=['tests'] for the full suite "
+                          "(chunk='i/n' slices, e.g. 1/4 … 4/4) or "
+                          "paths=[...] for specific files.")})
     chunk_parsed = parse_chunk(chunk)
     full_suite = _is_dir_target(root, selected)
     if chunk_parsed is not None:
@@ -422,12 +450,13 @@ def run_tests(paths: list[str] | None = None,
         if not selected:
             # An empty slice must NOT fall through to _run_pytest's
             # ["tests"] default — that would run the whole suite.
-            return {"ok": True, "passed": 0, "failed": [], "errors": 0,
-                    "seconds": 0.0, "selected": [],
-                    "runner": "pytest" if _has_pytest() else "unittest",
-                    "chunk": chunk, "chunk_of": f"{chunk_parsed[0]}/{chunk_parsed[1]}",
-                    "note": (f"chunk {chunk} is empty — only "
-                             f"{len(expanded)} test file(s) exist")}
+            return _annotate_ran(
+                {"ok": True, "passed": 0, "failed": [], "errors": 0,
+                 "seconds": 0.0, "selected": [],
+                 "runner": "pytest" if _has_pytest() else "unittest",
+                 "chunk": chunk, "chunk_of": f"{chunk_parsed[0]}/{chunk_parsed[1]}",
+                 "note": (f"chunk {chunk} is empty — only "
+                          f"{len(expanded)} test file(s) exist")})
     if _has_pytest():
         result = _run_pytest(root, selected, timeout)
     else:
@@ -448,7 +477,7 @@ def run_tests(paths: list[str] | None = None,
         result["note"] = (
             f"full-suite run: {n_files} test files — pass chunk='i/n' "
             "(e.g. 1/4 … 4/4) to run one slice per call")
-    return result
+    return _annotate_ran(result)
 
 
 def register(registry: Any) -> None:
@@ -462,7 +491,8 @@ def register(registry: Any) -> None:
                      "files. No paths → targeted run (changed files only); "
                      "pass paths=['tests'] + chunk='i/n' for one slice of the "
                      "full suite (~85 min). Returns {ok, passed, failed:"
-                     "[{test_id, file, error_snippet}], errors, seconds}."),
+                     "[{test_id, file, error_snippet}], errors, seconds, "
+                     "ran, nothing_ran}."),
         capability=Capability.EXEC_SHELL,
         parameters={
             "paths": "list[str] (optional) — test files/dirs to run",

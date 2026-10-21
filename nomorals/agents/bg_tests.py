@@ -277,11 +277,17 @@ class BackgroundTestRun:
                 "error_snippet": st["output_tail"][-800:],
             })
         ok = (self._exit_code in (0, 5)) and not self._timed_out
+        # pass #58: same ran signal as pytest_runner — an exit-5 run
+        # (nothing collected) reports ok=True with zero executed tests;
+        # consumers certifying work must see that explicitly.
+        ran = passed + len(failed_items) + errors
         return {
             "ok": ok,
             "passed": passed,
             "failed": failed_items,
             "errors": errors,
+            "ran": ran,
+            "nothing_ran": ran == 0,
             "seconds": st["seconds"],
             "selected": [self.label],
             "runner": "background",
@@ -314,6 +320,7 @@ def background_run_tests(
         selected = _pytest_mod.select_changed_tests(str(root))
         if not selected:
             return {"ok": True, "passed": 0, "failed": [], "errors": 0,
+                    "ran": 0, "nothing_ran": True,
                     "seconds": 0.0, "selected": [],
                     "runner": "background",
                     "note": "no tests matched the changed files — nothing ran"}
@@ -328,6 +335,7 @@ def background_run_tests(
     if argv is None:
         # honest skip, same as run_tests: no tests is not a failure.
         return {"ok": True, "passed": 0, "failed": [], "errors": 0,
+                "ran": 0, "nothing_ran": True,
                 "seconds": 0.0, "selected": [],
                 "runner": "background",
                 "note": "no tests directory — nothing ran"}

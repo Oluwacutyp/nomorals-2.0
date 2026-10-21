@@ -152,6 +152,25 @@ def _bg_progress(status: dict[str, Any]) -> None:
               status["errors"], status["seconds"])
 
 
+def _tests_nothing_ran(tres: dict[str, Any]) -> bool:
+    """Did this runner result execute ZERO tests? (pass #58)
+
+    Prefers the runner's explicit ``nothing_ran``/``ran`` signal;
+    derives the count from passed/failed/errors for result dicts that
+    predate the signal (e.g. monkeypatched runners in older tests).
+    A zero-ran result is an honest skip at the runner level — but it
+    must never certify a coding run as verified.
+    """
+    if tres.get("nothing_ran") is not None:
+        return bool(tres["nothing_ran"])
+    ran = tres.get("ran")
+    if ran is None:
+        ran = (int(tres.get("passed") or 0)
+               + len(tres.get("failed") or [])
+               + int(tres.get("errors") or 0))
+    return int(ran) == 0
+
+
 def _workdir_has_tests(workdir: Any) -> bool:
     """Does this workdir actually contain tests?  A simple single-file
     script (no tests/ dir, no test_*.py) should just run — not go through
@@ -245,6 +264,14 @@ class CodingResult:
     needs_approval: bool = False
     plan_id: str = ""
     plan_text: str = ""
+    # Pass #58: how the run was actually verified — "tests" (the runner
+    # executed ≥1 test), "accept" (an explicit accept command decided),
+    # "smoke" (no tests exist in the workdir; the default accept merely
+    # executed the file), "unverified" (nothing could verify the change
+    # and the run failed honestly), "" (no verify round ran — plan
+    # pause, no-code draft).  Never let a smoke/unverified run dress
+    # itself up as tested.
+    verification: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -258,6 +285,7 @@ class CodingResult:
             "needs_approval": self.needs_approval,
             "plan_id": self.plan_id,
             "plan_text": self.plan_text,
+            "verification": self.verification,
         }
 
 
@@ -750,7 +778,12 @@ class CodingAgent:
         existing files), verify with the pytest-aware runner, and gate on
         lint.  An explicitly passed ``accept`` command overrides the test
         runner (the ``--accept`` escape hatch for non-Python / exotic
-        cases).  ``seed_code`` pre-loads the default file on round 1.
+        cases).  A verify round in which zero tests executed is never
+        green (pass #58): the loop makes one widened attempt (the repo's
+        test directories wholesale), then fails the round honestly as
+        UNVERIFIED.  ``CodingResult.verification`` records how the run
+        was actually verified ("tests" / "accept" / "smoke" /
+        "unverified").  ``seed_code`` pre-loads the default file on round 1.
         ``background_tests`` (Phase D) runs the suite in the background
         while the lint gate runs concurrently, instead of blocking on it;
         ``test_cap_seconds`` caps the background run (default 15 min).
@@ -769,6 +802,7 @@ class CodingAgent:
         from ..tools.edit_loop import EditLoop
 
         started = time.perf_counter()
+        explicit_accept = bool(accept)
         use_runner = not accept
         accept = accept or f'python3 "{filename}"'
         # wave 68: a long/multi-clause build ask is structured into a
@@ -795,6 +829,17 @@ class CodingAgent:
         # "nothing ran" output confuses more than it helps.
         if use_runner and not _workdir_has_tests(workdir):
             use_runner = False
+        # Pass #58: how rounds will be verified.  "runner" and "accept"
+        # are real verification; "smoke" means the workdir has NO tests
+        # and no accept command was given, so the default accept merely
+        # executes the file — disclosed on the result, never dressed up
+        # as tested (see CodingResult.verification).
+        if explicit_accept:
+            verify_mode = "accept"
+        elif use_runner:
+            verify_mode = "runner"
+        else:
+            verify_mode = "smoke"
         # Git mission rollback: snapshot the workdir before any change is
         # made.  A failed snapshot must never kill the mission — it just
         # means rollback() becomes a no-op (loudly logged).
@@ -841,6 +886,7 @@ class CodingAgent:
         file_errors = {spec["path"]: "" for spec in plan}
         changed: list[str] = []
         last_error = ""
+        verification = ""
         rounds = max(1, max_iterations)
         # Phase C: diff-review gate state.  all_diffs keeps the latest diff
         # per file across attempts so the critic always sees the full
@@ -969,10 +1015,45 @@ class CodingAgent:
                     tres = _pytest_mod.run_tests(
                         repo=str(workdir),
                         timeout=min(max(timeout * 5.0, 60.0), 600.0))
-                green = (tres["ok"] and not tres["failed"]
-                         and not tres["errors"])
-                verify_out = _pytest_mod.format_test_result(tres)
-                verify_err = "" if green else verify_out
+                # Pass #58: ZERO executed tests is never green.  The
+                # runner reports an honest skip (ok=True, passed=0) when
+                # its stem-heuristic selection matches nothing — the
+                # loop used to certify that as a pass.  An explicit
+                # accept command can't occur here (use_runner is False
+                # whenever one was given, so the accept branch below is
+                # already the (a) fallback for those runs).  Otherwise
+                # make ONE widened attempt: the repo's test directories
+                # wholesale instead of the targeted selection.  The
+                # background path needs no widening — it already targets
+                # the whole tests directory (or ".").  Still nothing →
+                # the round fails honestly as UNVERIFIED below.
+                if _tests_nothing_ran(tres) and not background_tests:
+                    wide_paths = [d for d in ("tests", "test")
+                                  if (workdir / d).is_dir()] or ["."]
+                    wide = _pytest_mod.run_tests(
+                        paths=wide_paths, repo=str(workdir),
+                        timeout=min(max(timeout * 5.0, 60.0), 600.0))
+                    if not _tests_nothing_ran(wide):
+                        tres = wide
+                if _tests_nothing_ran(tres):
+                    green = False
+                    verification = "unverified"
+                    verify_err = (
+                        "UNVERIFIED — no tests ran for this change: "
+                        + str(tres.get("note")
+                              or "the runner matched no tests")
+                        + ". Zero executed tests cannot certify a "
+                        "change; this round is NOT green. Add tests "
+                        "covering the changed files or pass an explicit "
+                        "accept command.")
+                    verify_out = (verify_err + "\n"
+                                  + _pytest_mod.format_test_result(tres))
+                else:
+                    green = (tres["ok"] and not tres["failed"]
+                             and not tres["errors"])
+                    verification = "tests"
+                    verify_out = _pytest_mod.format_test_result(tres)
+                    verify_err = "" if green else verify_out
             else:
                 raw = self._run(accept, workdir, timeout)
                 out_text = (raw.get("stdout") or "").strip()
@@ -999,6 +1080,16 @@ class CodingAgent:
                     else:
                         verify_out = (f"accept command failed "
                                       f"(exit {raw.get('exit_code')}):\n{verify_err}")
+                verification = verify_mode
+                if verify_mode == "smoke":
+                    # No tests exist here and nobody gave an accept
+                    # command: the file was EXECUTED, not tested.  Say
+                    # so on the result instead of letting a green read
+                    # as test-verified (pass #58).
+                    verify_out += (
+                        "\n[verification: smoke run only — this workdir "
+                        "has no tests and no accept command was given; "
+                        "the file was executed, not tested]")
             vresult = {"exit_code": 0 if green else 1, "timed_out": False,
                        "stdout": verify_out, "stderr": verify_err}
             for rel in touched:
@@ -1078,6 +1169,7 @@ class CodingAgent:
                     review={"passed": not gate_flaws,
                             "rounds": review_rounds,
                             "objections": review_objections},
+                    verification=verification,
                 )
             last_error = verify_err
             for rel in touched:
@@ -1098,6 +1190,7 @@ class CodingAgent:
                 review={"passed": False,
                         "rounds": review_rounds,
                         "objections": review_objections},
+                verification=verification,
             )
         stuck = [s["path"] for s in plan
                  if budgets[s["path"]] <= 0 and file_errors[s["path"]]]
@@ -1123,6 +1216,7 @@ class CodingAgent:
             review={"passed": not exhausted_objections,
                     "rounds": review_rounds,
                     "objections": review_objections + exhausted_objections},
+            verification=verification,
         )
 
     # ── plan mode: approve → execute (item #4) ────────────────────────
