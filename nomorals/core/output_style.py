@@ -14,8 +14,11 @@ chats. This module is the output side of the style system:
 Layering: this module lives in ``core/`` so the scheduler (``agents/``)
 can use it. It therefore does NOT import ``partner.style`` (partner
 depends on core, not the other way round). Output formatting here is
-plain-text (no markdown/HTML) because the Telegram send path defaults to
-no ``parse_mode`` — a ``**bold**`` header would arrive literally.
+plain-text (no markdown/HTML) BY DESIGN — structured outputs read as
+documents, not chat. (Since formatting pass F1 the Telegram send path
+itself converts the house dialect and sets ``parse_mode`` at the
+gateway, so this choice is now a style decision, not a workaround
+for a transport that dropped markup.)
 
 Conversational replies keep the persona's own voice passes
 (``normalize_formatting`` / ``humanize_emoji`` / ``apply_texting_voice`` /

@@ -9,9 +9,10 @@ One canonical text in, correct rendering per platform out::
 Platform rules (verified against real client behavior):
 
 * **telegram** — HTML (``<b>``, ``<code>``, ``<i>``) with ``parse_mode="HTML"``.
-  Canonical ``**bold**`` / `` `code` `` are upgraded to HTML when no HTML
-  is already present. Passthrough otherwise — existing Telegram
-  formatting is never broken.
+  Canonical ``**bold**`` / `` `code` `` spans are upgraded to HTML and
+  everything else is escaped, so literal text can never break the
+  entity parse or inject tags. Paired HTML elements a producer
+  authored directly pass through verbatim — never double-processed.
 * **whatsapp** — ``*bold*``, ``_italic_``, `` ```mono``` ``, ``~strike~``.
   HTML tags are converted (``<b>`` → ``*`` …), unknown tags stripped,
   ``[text](url)`` links flattened to ``text: url`` (WhatsApp auto-links
@@ -141,15 +142,70 @@ def to_whatsapp(text: str) -> str:
         return str(text or "")
 
 
+#: Paired Telegram-HTML elements a producer may have authored directly
+#: (``social/chat/style.py`` helpers emit these). They pass through
+#: :func:`to_telegram` verbatim — their inner text is already markup.
+_HTML_SPAN = re.compile(
+    r"<(b|strong|i|em|u|ins|s|strike|del|code|pre|blockquote|tg-spoiler)"
+    r"(\s[^>]*)?>.*?</\1>",
+    re.S | re.I)
+_HTML_LINK = re.compile(
+    r"<a\s[^>]*href\s*=\s*\"[^\"]*\"[^>]*>.*?</a>", re.S | re.I)
+_MD_FENCE = re.compile(r"```(?:[A-Za-z0-9_+-]*\n)?(.*?)```", re.S)
+
+
 def to_telegram(text: str) -> str:
-    """Canonical markdown → Telegram HTML. HTML input passes through. Never raises."""
+    """Canonical house dialect → Telegram HTML, escaping-correct.
+
+    The house dialect is markdown-ish: ``**bold**``, `` `code` ``,
+    ```` ``` ```` fences, ``[text](url)`` links. Everything that is not
+    one of those spans — and not a paired Telegram-HTML element a
+    producer authored directly — is HTML-escaped, so user-derived
+    content interpolated into a title or body can neither break the
+    entity parse (a stray ``<`` used to fail the whole Bot API send)
+    nor inject tags. Paired HTML elements pass through verbatim.
+    Unpaired markers (a stray ``**``) stay literal — content fidelity
+    over cleverness. Never raises.
+    """
     try:
         out = str(text or "")
-        if "<b>" in out or "<code>" in out or "<i>" in out:
-            return out  # already Telegram HTML — never double-process
-        out = _MD_LINK.sub(r'<a href="\2">\1</a>', out)
-        out = _MD_BOLD.sub(r"<b>\1</b>", out)
-        out = _MD_CODE.sub(r"<code>\1</code>", out)
+        stash: dict[str, str] = {}
+
+        def _keep(html_text: str) -> str:
+            key = f"\x00TG{len(stash)}\x00"
+            stash[key] = html_text
+            return key
+
+        # 1. Producer-authored HTML elements pass through untouched.
+        out = _HTML_LINK.sub(lambda m: _keep(m.group(0)), out)
+        out = _HTML_SPAN.sub(lambda m: _keep(m.group(0)), out)
+        # 2. Code first: its content is literal, never markdown.
+        out = _MD_FENCE.sub(
+            lambda m: _keep(
+                f"<pre>{_html.escape(m.group(1))}</pre>"), out)
+        out = _MD_CODE.sub(
+            lambda m: _keep(
+                f"<code>{_html.escape(m.group(1))}</code>"), out)
+        # 3. Links: label may itself carry **bold**; the URL is escaped
+        #    for the attribute.
+        def _link(m: re.Match[str]) -> str:
+            label = _MD_BOLD.sub(r"<b>\1</b>", _html.escape(m.group(1)))
+            url = _html.escape(m.group(2), quote=True)
+            return _keep(f'<a href="{url}">{label}</a>')
+
+        out = _MD_LINK.sub(_link, out)
+        # 4. Bold spans (content escaped — user text inside a banner
+        #    title is still user text).
+        out = _MD_BOLD.sub(
+            lambda m: _keep(f"<b>{_html.escape(m.group(1))}</b>"), out)
+        # 5. Everything left is literal text: escape it.
+        out = _html.escape(out)
+        # 6. Restore the stashed markup, outermost first: a span
+        #    stashed later may contain an earlier span's key inside it
+        #    (code inside bold), and that inner key is only reachable
+        #    once the outer span is back in the text.
+        for key in reversed(list(stash)):
+            out = out.replace(key, stash[key])
         return out
     except Exception:  # noqa: BLE001
         return str(text or "")

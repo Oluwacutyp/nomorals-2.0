@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import threading
 import time
 from dataclasses import dataclass
@@ -56,6 +57,50 @@ __all__ = ["ChatGateway", "OwnerTarget", "parse_chat_keys",
            "resolve_owner_targets"]
 
 _log = get_logger(__name__)
+
+#: Signals that a text is written in the house dialect (markdown-ish:
+#: ``**bold**``, `` `code` ``, ``[text](url)``) or already carries
+#: producer-authored Telegram HTML. Plain text with none of these is
+#: NOT the gateway's business — it passes through byte-identical.
+_HOUSE_DIALECT = re.compile(
+    r"\*\*|`|\[[^\]\n]+\]\([^)\n]+\)"
+    r"|<(?:b|strong|i|em|u|ins|s|strike|del|code|pre|a|blockquote|"
+    r"tg-spoiler)[\s>]")
+
+
+def _present_outbound(platform: str, text: str,
+                      parse_mode: str) -> tuple[str, str]:
+    """Present ``text`` for ``platform`` at the send boundary (F1).
+
+    The bug this closes: producers write one markdown-ish dialect
+    (``agents/render.py`` wraps every notification title in ``**…**``)
+    but the push path never set a parse mode, so the Bot API printed
+    the asterisks literally while Telethon's markdown default rendered
+    the same bytes bold — one message, two faces. Here, for platforms
+    with an HTML parse mode (the Telegram family), dialect text is
+    converted to Bot API HTML (:func:`.platforms.to_telegram`,
+    escaping-correct) and ``parse_mode="HTML"`` is set explicitly —
+    for the personal adapter too, whose implicit markdown default was
+    the other half of the split.
+
+    An explicit caller ``parse_mode`` always wins untouched. Platforms
+    without HTML (WhatsApp self-converts in its adapter; Discord
+    renders the markdown dialect natively; local/SMS are plain) and
+    texts with no dialect signal pass through byte-identical, so
+    unformatted callers are unaffected. Never raises.
+    """
+    if parse_mode or not text:
+        return text, parse_mode
+    try:
+        if not for_platform(platform).supports_html:
+            return text, parse_mode
+        if not _HOUSE_DIALECT.search(text):
+            return text, parse_mode
+        from .platforms import to_telegram
+
+        return to_telegram(text), "HTML"
+    except Exception:  # noqa: BLE001 - presentation never breaks a send
+        return text, parse_mode
 
 
 class _HourWindow:
@@ -640,9 +685,34 @@ class ChatGateway:
             parse_mode=str(payload.get("parse_mode") or ""),
         )
 
-    def _chunked(self, chat: ChatRef, text: str) -> list[str]:
+    def _chunked(self, chat: ChatRef, text: str, *,
+                 formatted: bool = False) -> list[str]:
         """Labelled chunks for ``text`` on this chat's platform. SMS is
-        returned as a single chunk — its adapter owns segmentation."""
+        returned as a single chunk — its adapter owns segmentation.
+
+        Formatted (parse-mode) sends on the Telegram family chunk with
+        the markup-balanced splitter (:func:`..format_conformance.chunk`)
+        instead of the lossless content chunker: a formatted chunk must
+        be *independently valid* HTML — the lossless chunker can split
+        inside a ``<b>…</b>`` span, and the Bot API rejects the
+        unbalanced half. Unformatted sends keep the exact lossless
+        chunking they have always had.
+        """
+        if formatted:
+            try:
+                limits = for_platform(chat.platform)
+                if limits.supports_html:
+                    from ..format_conformance import chunk as _balanced
+
+                    # Reserve room for the " (i/n)" labels appended
+                    # below (the lossless chunker reserves it itself).
+                    budget = max(64, int(limits.max_text) - 10)
+                    chunks = _balanced(text, chat.platform, max_len=budget)
+                    if chunks:
+                        return label_chunks(chunks)
+            except Exception:  # noqa: BLE001 - fall back to lossless
+                _log.debug("gateway: balanced chunking failed; "
+                           "using lossless chunker", exc_info=True)
         chunks = chunk_for_platform(text, chat.platform)
         return label_chunks(chunks)
 
@@ -665,7 +735,7 @@ class ChatGateway:
         if adapter is None:
             return SendResult(ok=False, platform=platform,
                               error=f"no adapter for {platform!r}")
-        chunks = self._chunked(chat, text)
+        chunks = self._chunked(chat, text, formatted=bool(parse_mode))
         total = len(chunks)
 
         def _do() -> SendResult:
@@ -678,7 +748,10 @@ class ChatGateway:
                     reply_to=reply_to if i == 0 else "",
                     buttons=buttons if is_last else None,
                     reply_keyboard=reply_keyboard if is_last else None,
-                    parse_mode=parse_mode if is_last else "",
+                    # EVERY chunk carries the parse mode — applying it
+                    # to the last chunk only left chunks 1..n-1 of a
+                    # formatted send rendering literally.
+                    parse_mode=parse_mode,
                 )
                 if not result.ok:
                     return SendResult(
@@ -710,7 +783,7 @@ class ChatGateway:
         ``durable_drain_sync`` is on, else a receipt handle (the first
         job id) for ``nm sent``."""
         assert self.outbox is not None  # noqa: S101 - caller checked
-        chunks = self._chunked(chat, text)
+        chunks = self._chunked(chat, text, formatted=bool(parse_mode))
         total = len(chunks)
         group_id = new_id("send")
 
@@ -723,7 +796,9 @@ class ChatGateway:
                     reply_to=reply_to if i == 0 else "",
                     buttons=buttons if is_last else None,
                     reply_keyboard=reply_keyboard if is_last else None,
-                    parse_mode=parse_mode if is_last else "",
+                    # Every chunk row carries the parse mode (see
+                    # _send_direct) — the drain sends each row as-is.
+                    parse_mode=parse_mode,
                     durable_kind=durable_kind, group_id=group_id,
                 ))
             return job_ids
@@ -845,6 +920,14 @@ class ChatGateway:
             self._bump("dry_run_sends")
             _log.info("DRY-RUN send %s: %s", chat.key, text[:120])
             return SendResult(ok=True, platform=platform, message_id=new_short_id("dry"))
+
+        # F1 presentation: house-dialect text bound for the Telegram
+        # family is converted to Bot API HTML here (see
+        # _present_outbound) so EVERY producer — the Notifier above
+        # all — renders formatted with zero producer changes. Explicit
+        # parse modes and non-HTML platforms pass through untouched.
+        text, parse_mode = _present_outbound(chat.platform, text,
+                                             parse_mode)
 
         use_durable = durable if durable is not None else self.durable_outbox
         if use_durable and self.outbox is not None:

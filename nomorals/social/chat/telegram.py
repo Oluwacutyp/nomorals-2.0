@@ -40,6 +40,26 @@ from ...core.text import safe_filename
 from .base import ChatAdapter, ChatKind, ChatMessage, ChatRef, IncomingHandler, MediaRef, SendResult
 from .platform_limits import for_platform
 
+
+def _is_entity_parse_error(exc: BaseException) -> bool:
+    """True when a send failure is the API rejecting the *formatting*.
+
+    The Bot API answers malformed entities with ``Bad Request: can't
+    parse entities: …``. The adapters retry such a send once as PLAIN
+    text rather than losing the message — a formatting failure must
+    never eat an alert (F1). Deliberately narrow: peer-resolution
+    errors ("Cannot find any entity corresponding to…") are about the
+    *chat*, not the markup, and must not trigger the fallback.
+    """
+    s = str(exc or "").lower()
+    if "corresponding to" in s:
+        return False
+    return ("can't parse entities" in s
+            or "can not parse entities" in s
+            or "cannot parse entities" in s
+            or "parse entities" in s
+            or "entity offset" in s)
+
 __all__ = ["TelegramAdapter", "TelegramBotAdapter"]
 
 _log = get_logger(__name__)
@@ -1485,21 +1505,46 @@ class TelegramAdapter(ChatAdapter):
                            exc_info=True)
         chunks = _chunk_text(text, for_platform("telegram").max_text)
         result = None
+        plain_fallback = False
         for i, chunk in enumerate(chunks):
             # The keyboard goes on the last chunk only — it replaces the
             # chat's current keyboard, so an earlier chunk carrying it
             # would be immediately superseded anyway.
             if markup is not None and i == len(chunks) - 1:
                 kwargs["buttons"] = markup
-            async def _one() -> Any:
+            if plain_fallback:
+                from .platforms import strip_html
+
+                chunk = strip_html(chunk)
+
+            async def _one(body: str = chunk) -> Any:
                 try:
-                    return await client.send_message(entity, chunk, **kwargs)
+                    return await client.send_message(entity, body, **kwargs)
                 except TypeError:  # older Telethon without message_thread_id
                     thread = kwargs.pop("message_thread_id", None)
                     if thread is not None and not kwargs.get("reply_to"):
                         kwargs["reply_to"] = thread
-                    return await client.send_message(entity, chunk, **kwargs)
-            result = await self._send_with_flood_retry(_one, "send_message")
+                    return await client.send_message(entity, body, **kwargs)
+
+            try:
+                result = await self._send_with_flood_retry(_one, "send_message")
+            except Exception as exc:  # noqa: BLE001 - classified below
+                if not ("parse_mode" in kwargs and not plain_fallback
+                        and _is_entity_parse_error(exc)):
+                    raise
+                # Telethon rejected the markup: retry this chunk as
+                # PLAIN text (tags stripped) and keep the rest of the
+                # message plain — a formatting failure must never eat
+                # the message (mirrors the bot adapter's fallback).
+                _log.warning(
+                    "telegram: entity parse rejected (%s) — retrying "
+                    "chunk %d/%d as plain text", exc, i + 1, len(chunks))
+                plain_fallback = True
+                kwargs.pop("parse_mode", None)
+                from .platforms import strip_html
+
+                result = await self._send_with_flood_retry(
+                    lambda: _one(strip_html(chunk)), "send_message")
             # Only the first chunk carries the reply/thread reference.
             kwargs.pop("reply_to", None)
             kwargs.pop("message_thread_id", None)
@@ -2771,6 +2816,12 @@ class TelegramBotAdapter(ChatAdapter):
 
         # Long output goes out as ONE document, not 40 chunks.
         if LongOutput().route(text)[0] == "document":
+            if parse_mode:
+                # A .txt document renders no markup — file the plain
+                # text (tags stripped), not the HTML wire form.
+                from .platforms import strip_html
+
+                text = strip_html(text)
             return self.send_long(chat, text, reply_to=reply_to)
         started = time.perf_counter()
         last_id = ""
@@ -2841,8 +2892,11 @@ class TelegramBotAdapter(ChatAdapter):
                                          "callback_data": self._sign_callback(data)})
                         keyboard.append(krow)
             chunks = _chunk_text(text, self.MAX_TEXT)
+            plain_fallback = False
             for i, chunk in enumerate(chunks):
                 params = dict(params_base)
+                if plain_fallback:
+                    params.pop("parse_mode", None)
                 # The keyboard goes on the last chunk only — every chunk
                 # carrying it would repeat the buttons N times.
                 if keyboard and i == len(chunks) - 1:
@@ -2850,7 +2904,24 @@ class TelegramBotAdapter(ChatAdapter):
                         params["reply_markup"] = keyboard
                     else:
                         params["reply_markup"] = {"inline_keyboard": keyboard}
-                result = self._api("sendMessage", text=chunk, **params)
+                try:
+                    result = self._api("sendMessage", text=chunk, **params)
+                except Exception as exc:  # noqa: BLE001 - classified below
+                    if not (parse_mode and not plain_fallback
+                            and _is_entity_parse_error(exc)):
+                        raise
+                    # The API rejected the markup itself: retry this
+                    # chunk as PLAIN text (and keep the rest of the
+                    # message plain — half-formatted reads worse than
+                    # plain). A formatting failure must never eat the
+                    # message.
+                    _log.warning(
+                        "telegram-bot: entity parse rejected (%s) — "
+                        "retrying chunk %d/%d as plain text",
+                        exc, i + 1, len(chunks))
+                    plain_fallback = True
+                    params.pop("parse_mode", None)
+                    result = self._api("sendMessage", text=chunk, **params)
                 last_id = str(result.get("message_id", ""))
                 # Only the first chunk carries the reply reference.
                 params_base.pop("reply_parameters", None)
