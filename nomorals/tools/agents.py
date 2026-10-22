@@ -55,6 +55,8 @@ AGENT_TOOL_MODULES = (
     "news",
     "os.verifiers",
     "osint_graph",
+    "opportunities",
+    "opportunity_hunt",
     "planner",
     "projects",
     "reasoning",

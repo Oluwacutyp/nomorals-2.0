@@ -2042,6 +2042,18 @@ class PartnerRuntime(
                     ensure_betdesk_jobs(self._scheduler)
                 except Exception as exc:  # noqa: BLE001 - optional
                     _log.warning("betdesk jobs not registered: %s", exc)
+                # Opportunity hunt: the weekly paid-task scan
+                # (Mondays 05:30 — ahead of the 07:00 briefing) that
+                # vets the OpportunityHunter's finds for Nigerian
+                # signup + payout and stocks the briefing's Paid
+                # Tasks section.  Idempotent by name; routine (its
+                # output rides the briefing).
+                try:
+                    from ..opportunity_jobs import ensure_opportunity_jobs
+                    ensure_opportunity_jobs(self._scheduler)
+                except Exception as exc:  # noqa: BLE001 - optional
+                    _log.warning("opportunity hunt job not registered: "
+                                 "%s", exc)
                 # Motivation class: randomized Lagos-anchored one-shots
                 # (self-rescheduling inside the 05:00–06:00 WAT morning
                 # window + the evening window) drawing on the Teachings

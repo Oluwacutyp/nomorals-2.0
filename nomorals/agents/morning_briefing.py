@@ -947,6 +947,91 @@ class RealTalkProvider(_Provider):
             lines=lines)
 
 
+class PaidTasksProvider(_Provider):
+    """The week's vetted paid tasks (weekly OpportunityHunter layer):
+    the Monday hunt (``agents/opportunity_hunt.py``) scans global paid
+    tasks and verifies each against its source page — Nigerian signup
+    eligibility AND a payout method that works from Nigeria,
+    fail-closed — and this provider renders the stored shortlist.
+    Nothing is hunted or vetted at compose time.  A week whose scan
+    verified nothing still gets its honest line (the scan ran, the
+    list is empty) rather than silence that looks like a dead job;
+    no run inside the freshness window → no section at all.  Never
+    raises."""
+    name = "paid_tasks"
+    title = "💰 Paid tasks this week"
+    priority = 75  # after Research (70), before FromYourPast (90)
+    source = "opportunities"
+
+    def collect(self, ctx: Any, since: float) -> BriefingSection | None:
+        try:
+            return self._collect(ctx)
+        except Exception as exc:  # noqa: BLE001 — a section never sinks it
+            _log.debug("paid tasks provider skipped: %s", exc)
+            return None
+
+    def _collect(self, ctx: Any) -> BriefingSection | None:
+        import datetime as _dt
+
+        from .opportunity_hunt import FRESH_S, WeeklyOpportunityHunt
+
+        hunt = WeeklyOpportunityHunt.from_context(ctx)
+        state = hunt.load_state()
+        latest = state.get("latest") or {}
+        run_at = float(latest.get("run_at") or 0)
+        if not run_at or time.time() - run_at > FRESH_S:
+            return None
+        when = _dt.datetime.fromtimestamp(run_at).strftime("%a %d %b")
+        entries = latest.get("entries") or []
+        lines: list[str] = []
+        items: list[dict[str, Any]] = []
+        error = str(latest.get("error") or "")
+        if error:
+            lines.append(
+                f"• This week's paid-task scan failed ({error}) — "
+                "nothing was vetted, so nothing is guessed here.")
+        elif entries:
+            for e in entries:
+                pay = (f" — {e['payout_text']}" if e.get("payout_text")
+                       else "")
+                lines.append(
+                    f"• {e.get('title', '')}{pay} · pays via "
+                    f"{e.get('rail', '')}\n    ↳ {e.get('url', '')}")
+                items.append({
+                    "id": str(e.get("id") or ""),
+                    "title": str(e.get("title") or ""),
+                    "body": (f"pays via {e.get('rail', '')}; "
+                             f"vetted {when}")[:300],
+                })
+            for host in latest.get("newly_accepting") or []:
+                lines.append(
+                    f"• 🆕 {host} passed the Nigeria signup + payout "
+                    "checks this week after failing them before.")
+        else:
+            lines.append(
+                f"• The weekly paid-task scan ran {when} and nothing "
+                "passed the Nigeria signup + payout checks — the "
+                "list is empty rather than padded.")
+        # A month of empty/failed weeks is a dried-up well, not a
+        # rhythm: hand it back with the offer to pause (the section
+        # itself is the handover — delivery stays owner-only).
+        runs = state.get("runs") or []
+        trailing_empty = 0
+        for r in reversed(runs):
+            if r.get("error") or not r.get("verified"):
+                trailing_empty += 1
+            else:
+                break
+        if trailing_empty >= 4:
+            lines.append(
+                f"• That's {trailing_empty} weeks running with "
+                "nothing eligible surfacing. Say the word and the "
+                "weekly hunt pauses.")
+        return BriefingSection(
+            name=self.name, title=self.title, priority=self.priority,
+            source=self.source, items=items, lines=lines)
+
+
 class GoalsProvider(_Provider):
     """Goal triage: overdue + due-soon goals, then the mission-control
     pick with its next action.  The "what needs attention today" content
@@ -1079,6 +1164,13 @@ class BriefingComposer:
         # no grounded material → provider returns None.
         try:
             self.providers.append(RealTalkProvider())
+        except Exception:  # noqa: BLE001
+            pass
+        # Paid tasks (weekly OpportunityHunter layer): local class,
+        # constructed defensively like real talk — no fresh weekly
+        # shortlist in state → provider returns None.
+        try:
+            self.providers.append(PaidTasksProvider())
         except Exception:  # noqa: BLE001
             pass
         # Readiness (health coaching, build-map #53): lazy import to avoid
