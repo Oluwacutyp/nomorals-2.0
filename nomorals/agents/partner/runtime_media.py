@@ -2479,13 +2479,18 @@ class RuntimeMediaMixin:
                 from ...media.videogen import capability_report
                 return capability_report()
             if action == "list":
-                from ...media.motion_studio._core import read_ledger
-                ledger = read_ledger()
+                from ...media.motion_studio._core import ledger_status, \
+                    read_ledger
+                ledger = read_ledger(limit=10)
                 if not ledger:
                     return "no studio renders yet."
                 lines = ["🎬 recent studio renders:"]
-                for e in ledger[-10:]:
+                for e in ledger:
                     lines.append(f"  {e.get('kind', '?'):22} {e.get('path', '?')}")
+                total = ledger_status()["total_entries"]
+                if total > len(ledger):
+                    lines.append(f"  …and {total - len(ledger)} more in the "
+                                 f"full ledger ({total} total)")
                 return "\n".join(lines)
             if action == "chain":
                 return ("usage: /video chain needs a scenes JSON file — "

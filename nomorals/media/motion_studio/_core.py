@@ -66,6 +66,8 @@ __all__ = [
     "new_render_path",
     "record_ledger",
     "read_ledger",
+    "ledger_status",
+    "LEDGER_WINDOW_SIZE",
     "encode_frames",
     "render_sequence",
     "decode_audio_mono",
@@ -240,17 +242,22 @@ def new_render_path(prefix: str, ext: str = "mp4") -> Path:
         workdir() / f"{prefix}-{stamp}.{ext}"
 
 
-def record_ledger(entry: dict) -> None:
-    """Append a render record (best-effort; never breaks a render)."""
-    try:
-        ledger = read_ledger()
-        ledger.append(entry)
-        LEDGER_PATH.write_text(json.dumps(ledger[-500:], indent=1))
-    except Exception:  # noqa: BLE001
-        _log.debug("ledger write failed", exc_info=True)
+#: How many entries the live ``ledger.json`` window holds. This is a
+#: *display/compat* window only — the full history lives in the
+#: append-only archive (see below) and is never truncated.
+LEDGER_WINDOW_SIZE = 500
 
 
-def read_ledger() -> list[dict]:
+def _archive_path() -> Path:
+    return LEDGER_PATH.with_name(LEDGER_PATH.stem + ".archive.jsonl")
+
+
+def _meta_path() -> Path:
+    return LEDGER_PATH.with_name(LEDGER_PATH.stem + ".meta.json")
+
+
+def _read_window_file() -> list[dict]:
+    """The live window file exactly as stored (legacy read semantics)."""
     try:
         if LEDGER_PATH.exists():
             data = json.loads(LEDGER_PATH.read_text())
@@ -258,6 +265,173 @@ def read_ledger() -> list[dict]:
     except Exception:  # noqa: BLE001
         pass
     return []
+
+
+def _read_archive() -> list[dict] | None:
+    """All archived entries in record order; None when no archive exists."""
+    archive = _archive_path()
+    if not archive.exists():
+        return None
+    entries: list[dict] = []
+    try:
+        for line in archive.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                row = json.loads(line)
+            except Exception:  # noqa: BLE001 - skip a torn line, keep the rest
+                continue
+            if isinstance(row, dict):
+                entries.append(row)
+    except Exception:  # noqa: BLE001
+        return None
+    return entries
+
+
+def _read_meta() -> dict:
+    try:
+        data = json.loads(_meta_path().read_text())
+        return data if isinstance(data, dict) else {}
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def _write_meta(meta: dict) -> None:
+    _meta_path().write_text(json.dumps(meta, indent=1))
+
+
+def _ensure_archive() -> bool:
+    """Guarantee the archive holds every window entry (one-time migration).
+
+    The pre-#82 ledger was ONLY the window file, rewritten as
+    ``ledger[-500:]`` per record — history past 500 was silently dropped.
+    On first contact the surviving window is seeded into the append-only
+    archive (atomically, via a temp file + rename) so nothing that still
+    exists is ever lost again. Returns True when appends may proceed.
+    """
+    archive = _archive_path()
+    if archive.exists() and archive.stat().st_size > 0:
+        return True
+    window = _read_window_file()
+    if not window:
+        return True  # fresh install: the first append creates the archive
+    tmp = archive.with_name(archive.name + ".tmp")
+    with open(tmp, "w", encoding="utf-8") as fh:
+        for row in window:
+            fh.write(json.dumps(row) + "\n")
+    os.replace(tmp, archive)
+    meta = _read_meta()
+    meta.update({"migrated_from_legacy": True,
+                 "migrated_entries": len(window)})
+    _write_meta(meta)
+    _log.info("motion ledger: migrated %d existing entries into the "
+              "append-only archive %s", len(window), archive)
+    return True
+
+
+def _note_overflow(count: int) -> None:
+    """Record (meta + log) that entries rotated out of the live window.
+
+    Rotating out of the *window* is not data loss — the entries are in
+    the archive — but it is never silent either: the event is counted in
+    the ledger meta and surfaced by :func:`ledger_status`.
+    """
+    meta = _read_meta()
+    total = int(meta.get("rotated_out_total") or 0) + count
+    meta["rotated_out_total"] = total
+    now = datetime.now(timezone.utc).isoformat()
+    meta.setdefault("first_rotated_out_at", now)
+    meta["last_rotated_out_at"] = now
+    _write_meta(meta)
+    _log.info("motion ledger: %d entr%s rotated out of the live window "
+              "into the archive (%d archived total)",
+              count, "y" if count == 1 else "ies", total)
+
+
+def record_ledger(entry: dict) -> None:
+    """Append a render record (best-effort; never breaks a render).
+
+    Every entry is appended to the append-only archive
+    (``ledger.archive.jsonl``, the download-kit IntegrityLedger pattern)
+    and mirrored into the live window file, which keeps only the newest
+    :data:`LEDGER_WINDOW_SIZE` entries for compatibility. Nothing is
+    ever dropped from the archive; entries rotating out of the window
+    are counted in the ledger meta (see :func:`ledger_status`).
+    """
+    try:
+        stamped = dict(entry)
+        stamped.setdefault("ts", datetime.now(timezone.utc).isoformat())
+        archived = False
+        try:
+            archived = _ensure_archive()
+        except Exception:  # noqa: BLE001 - fall back to window-only below
+            archived = False
+        if archived:
+            LEDGER_PATH.parent.mkdir(parents=True, exist_ok=True)
+            with open(_archive_path(), "a", encoding="utf-8") as fh:
+                fh.write(json.dumps(stamped) + "\n")
+        window = _read_window_file()
+        window.append(stamped)
+        overflow = len(window) - LEDGER_WINDOW_SIZE
+        if overflow > 0:
+            window = window[-LEDGER_WINDOW_SIZE:]
+            if archived:
+                _note_overflow(overflow)
+        LEDGER_PATH.write_text(json.dumps(window, indent=1))
+    except Exception:  # noqa: BLE001
+        _log.debug("ledger write failed", exc_info=True)
+
+
+def read_ledger(limit: int | None = None) -> list[dict]:
+    """Ledger entries, oldest first.
+
+    ``limit=None`` (the default) returns the FULL history from the
+    archive; ``limit=N`` returns only the newest ``N`` entries. The
+    recent window is a read choice here — never a storage limit.
+    """
+    entries: list[dict] = []
+    try:
+        try:
+            _ensure_archive()
+        except Exception:  # noqa: BLE001 - reads still serve the window
+            pass
+        archived = _read_archive()
+        entries = archived if archived is not None else _read_window_file()
+    except Exception:  # noqa: BLE001
+        entries = _read_window_file()
+    if limit is None:
+        return entries
+    if limit <= 0:
+        return []
+    return entries[-int(limit):]
+
+
+def ledger_status() -> dict:
+    """The ledger's whole truth: totals, archive state, oldest entry."""
+    entries = read_ledger()
+    window = _read_window_file()
+    meta = _read_meta()
+    total = len(entries)
+    active = len(window)
+    archived = max(0, total - active)
+    oldest = entries[0] if entries else None
+    newest = entries[-1] if entries else None
+    return {
+        "ledger_path": str(LEDGER_PATH),
+        "archive_path": str(_archive_path()),
+        "total_entries": total,
+        "active_entries": active,
+        "archived_entries": archived,
+        "window_size": LEDGER_WINDOW_SIZE,
+        "oldest_entry": oldest,
+        "oldest_at": oldest.get("ts") if oldest else None,
+        "newest_at": newest.get("ts") if newest else None,
+        "rotated_out_total": int(meta.get("rotated_out_total") or archived),
+        "first_rotated_out_at": meta.get("first_rotated_out_at"),
+        "migrated_from_legacy": bool(meta.get("migrated_from_legacy")),
+        "migrated_entries": int(meta.get("migrated_entries") or 0),
+    }
 
 
 # ---------------------------------------------------------------------------

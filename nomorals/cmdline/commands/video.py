@@ -55,14 +55,21 @@ def _cmd_capability(args: argparse.Namespace, context) -> int:
 
 
 def _cmd_list(args: argparse.Namespace, context) -> int:
-    from ...media.motion_studio._core import read_ledger
-    ledger = read_ledger()
+    from ...media.motion_studio._core import ledger_status, read_ledger
     if args.json:
-        print(json.dumps(ledger, indent=2))
+        print(json.dumps(read_ledger(), indent=2))
         return 0
+    ledger = read_ledger(limit=20)
     if not ledger:
         return _ok("no studio renders yet — try `nm video motion slideshow --help`")
-    for e in ledger[-20:]:
+    st = ledger_status()
+    header = f"🎬 studio renders: {st['total_entries']} total"
+    if st["archived_entries"]:
+        header += (f" ({st['archived_entries']} in the archive beyond the "
+                   f"live window)")
+    header += f" — showing the latest {len(ledger)}"
+    print(header)
+    for e in ledger:
         print(f"{e.get('kind', '?'):22} {e.get('path', '?')}")
     return 0
 
