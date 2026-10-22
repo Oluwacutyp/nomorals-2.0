@@ -546,6 +546,16 @@ class CodingResult:
     # instructions, acceptance, depends_on} with status one of
     # "planned" / "done" / "failed" / "skipped".  Empty when no plan
     # ran (defensive default).
+    # Pass #68: each step dict also carries "verify" — the step's
+    # ISOLATED verification record {ran, ok, tests, failed, checks,
+    # executed_total, note}: the pass-#62 selection scoped to that
+    # step's changed files, run after the step's edits settle.
+    # ran=False / ok=None is the honest unverified-at-this-step
+    # state (no covering tests, or no check ran); "failed" keeps
+    # every failing test id ever attributed to the step, across
+    # repairs, while "ok"/"tests" describe the LATEST check.  The
+    # record is attribution + early signal only — the round's union
+    # verify remains the sole authority for the run's verdict.
     steps: list[dict[str, Any]] = field(default_factory=list)
     # Pass #60 (W4): how many times the run re-planned its remaining
     # steps after a step failed repeatedly (0 or 1 — never more).
@@ -603,6 +613,14 @@ class CodingResult:
             "usage": self.usage,
             "scope_denials": self.scope_denials,
         }
+
+
+def _blank_step_verify(note: str) -> dict[str, Any]:
+    """Pass #68: a step's verify record when no isolated check has
+    run for it — ran=False / ok=None is the honest
+    unverified-at-this-step state, never a pass and never a fail."""
+    return {"ran": False, "ok": None, "tests": [], "failed": [],
+            "checks": 0, "executed_total": 0, "note": note}
 
 
 # Pass #60 (W4): a plan is a list of STEPS, not a bare file list.  A step
@@ -1550,6 +1568,17 @@ class CodingAgent:
         distinct verdict lands on ``CodingResult.final_gate`` — a gate
         failure never rewrites the run's own verdict.
 
+        Per-step isolated verification (pass #68): before the round
+        verify, each step that drafted this round is checked on its
+        OWN scoped selection (the same #62 machinery over just that
+        step's changed files) and the outcome lands on the step's
+        record in ``CodingResult.steps`` as ``verify`` — a step with
+        no covering tests records unverified-at-this-step, a failing
+        step names its failing tests and draws repair through the
+        shared pool like any other failure.  The checks attribute;
+        they never gate — the round's union verify above stays the
+        only verdict that can turn the run green.
+
         Edit calls (pass #64, W6) are fed a CONTEXT PACK, not the
         whole file: the target's relevant region (step-steered), the
         definitions it imports, and its covering tests, under a char
@@ -1665,6 +1694,9 @@ class CodingAgent:
                         "instructions": s.get("instructions", ""),
                         "acceptance": s.get("acceptance", ""),
                         "depends_on": list(s.get("depends_on") or []),
+                        "verify": _blank_step_verify(
+                            "plan awaiting approval — no isolated "
+                            "check has run"),
                     } for s in plan],
                 )
         self._last_scope = [str(s.get("path", "")) if isinstance(s, dict)
@@ -1700,7 +1732,7 @@ class CodingAgent:
                     continue
                 rec: dict[str, Any] = {
                     "spec": spec, "status": "planned", "reason": "",
-                    "fail_streak": 0}
+                    "fail_streak": 0, "verify": None}
                 step_state[rel] = rec
                 by_id[spec["id"]] = rec
                 step_history.append(rec)
@@ -1800,8 +1832,127 @@ class CodingAgent:
                     "instructions": spec.get("instructions", ""),
                     "acceptance": spec.get("acceptance", ""),
                     "depends_on": list(spec.get("depends_on") or []),
+                    # Pass #68: the step's isolated-verify record,
+                    # or the honest blank when no check ever ran
+                    # (never attempted, settled before verify, or a
+                    # non-runner run where per-step selection does
+                    # not apply).
+                    "verify": rec.get("verify") or _blank_step_verify(
+                        "no isolated check ran for this step"
+                        if verify_mode == "runner" else
+                        "isolated check not applicable — the run "
+                        f"verified in '{verify_mode}' mode"),
                 })
             return out
+
+        def _step_verify(rel: str) -> None:
+            """Pass #68: run ONE step's isolated verification and
+            record it on the step's record.
+
+            The selection is pass #62's own machinery — the runner's
+            stem ∪ import-graph selection, scoped via
+            ``changed_files`` to this step's changed files (the
+            step's claimed files that actually changed) — executed
+            through the same governed surfaces as the round verify:
+            the foreground runner, or the background machinery
+            (changed-only mode) when the run enabled it (#66), with
+            the timeout derived from the run budget exactly like
+            the round verify's (no new clamps).  No widened attempt:
+            widening would destroy the scoping that makes the
+            result attributable.
+
+            Outcomes: no covering tests → ran=False / ok=None
+            (unverified at this step, #58 honesty — the step is NOT
+            failed for it); green → ok=True; failing → ok=False,
+            the failing test ids join the step's ``failed`` trail
+            (kept across repairs), and the failure is fed into the
+            step's error slot — unless a more specific draft/review
+            error already sits there — so the existing repair
+            machinery (per-file minimum + shared pool) repairs THIS
+            step and the step re-checks next round.  The record's
+            ``checks`` / ``executed_total`` make the re-run cost of
+            per-step attribution visible on the result."""
+            rec = step_state.get(rel)
+            if rec is None:
+                return
+            spec = rec["spec"]
+            prev = rec.get("verify") or {}
+            checks = int(prev.get("checks") or 0) + 1
+            executed_total = int(prev.get("executed_total") or 0)
+            failed_trail = list(prev.get("failed") or [])
+            step_files = [f for f in (spec.get("files") or [rel])
+                          if f in changed]
+            if not step_files:
+                rec["verify"] = {
+                    "ran": False, "ok": None, "tests": [],
+                    "failed": failed_trail, "checks": checks,
+                    "executed_total": executed_total,
+                    "note": ("step changed no files — nothing to "
+                             "verify in isolation"),
+                }
+                return
+            if background_tests:
+                from .bg_tests import background_run_tests
+
+                bg = background_run_tests(
+                    str(workdir), changed_only=True,
+                    changed_files=list(step_files),
+                    cap_seconds=(test_cap_seconds
+                                 if test_cap_seconds is not None
+                                 else max(timeout * 5.0, 60.0)))
+                tres = bg if isinstance(bg, dict) else bg.wait()
+            else:
+                tres = _pytest_mod.run_tests(
+                    repo=str(workdir),
+                    timeout=max(timeout * 5.0, 60.0),
+                    changed_files=list(step_files))
+            executed_total += int(tres.get("ran") or 0)
+            selected = sorted(tres.get("selection_reasons") or {}) \
+                or [str(t) for t in (tres.get("selected") or [])]
+            if _tests_nothing_ran(tres):
+                rec["verify"] = {
+                    "ran": False, "ok": None, "tests": selected,
+                    "failed": failed_trail, "checks": checks,
+                    "executed_total": executed_total,
+                    "note": ("no tests cover this step's files — "
+                             "unverified at this step ("
+                             + str(tres.get("note")
+                                   or "selection matched no tests")
+                             + ")"),
+                }
+                return
+            failed_names = [str(f.get("test_id"))
+                            for f in (tres.get("failed") or [])
+                            if isinstance(f, dict)]
+            if tres.get("ok") and not failed_names \
+                    and not tres.get("errors"):
+                rec["verify"] = {
+                    "ran": True, "ok": True, "tests": selected,
+                    "failed": failed_trail, "checks": checks,
+                    "executed_total": executed_total, "note": "",
+                }
+                return
+            for name in failed_names:
+                if name not in failed_trail:
+                    failed_trail.append(name)
+            names = ", ".join(failed_names) or (
+                f"{int(tres.get('errors') or 0)} collection/run "
+                "error(s), no single test id reported")
+            rec["verify"] = {
+                "ran": True, "ok": False, "tests": selected,
+                "failed": failed_trail, "checks": checks,
+                "executed_total": executed_total,
+                "note": f"covering tests failed: {names}",
+            }
+            if not file_errors.get(rel):
+                # Names LAST: _finalize_steps keeps the reason's
+                # tail, and the trail must survive into it.
+                file_errors[rel] = (
+                    "isolated step verification failed for step "
+                    f"{spec['id']} ({rel}):\n"
+                    + _pytest_mod.format_test_result(tres)
+                    + "\nfailing tests attributed to this step: "
+                    + names)
 
         # Phase D: explore phase reads all planned files in one parallel
         # call_many block instead of N sequential reads.
@@ -2105,6 +2256,23 @@ class CodingAgent:
                 bg_lint_res: Any = None
                 if use_runner:
                     self._require_scope("run_tests")
+                    # Pass #68: per-step isolated checks — every step
+                    # that drafted this round gets the #62 selection
+                    # scoped to its own changed files, recorded on
+                    # its step record (see _step_verify).  These are
+                    # early signal + attribution ONLY: the round
+                    # verify below still runs over the accumulated
+                    # union and remains the sole authority for the
+                    # round's green.  In background mode the lint
+                    # scope is probed first (the same discipline the
+                    # background branch applies to its own run) so a
+                    # denied lint settles the run before any check
+                    # spends work.
+                    if background_tests:
+                        self._require_scope("lint")
+                    for _spec in plan:
+                        if _spec["path"] in prev_attempted:
+                            _step_verify(_spec["path"])
                     if background_tests:
                         # Phase D: the suite runs in the background while the
                         # agent does the lint gate concurrently (prep work
@@ -2346,7 +2514,12 @@ class CodingAgent:
                     )
                 last_error = verify_err
                 for rel in touched:
-                    if not file_errors[rel]:
+                    # .get: a multi-file patch can touch files no
+                    # plan step claims — they are in `touched` but
+                    # were never given a file_errors slot (pass #68
+                    # survey: the bare [] read crashed the run with
+                    # KeyError instead of settling it failed).
+                    if not file_errors.get(rel):
                         file_errors[rel] = verify_err[-2000:]
 
         except _SpendCapExceeded as exc:

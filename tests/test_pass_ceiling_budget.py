@@ -134,7 +134,14 @@ class VerifyTimeoutTests(unittest.TestCase):
 
     def _verify_timeouts(self, timeout: float) -> list[float]:
         """Run the loop once with a spied run_tests; return the
-        timeout of every verify call the loop made."""
+        timeout of every verify call the loop made.
+
+        Pass #68 fixture note: the loop now makes TWO verify calls
+        in this single-step green run — the step's isolated check
+        and the round verify.  Both derive from the run budget by
+        the same rule (that derivation is what this class pins), so
+        the assertions below pin every observed timeout to the
+        derived value instead of the old single-call list."""
         root = self._repo()
         # pass #67 fixture note: the leading "{}" is the run-start
         # brief's slot — the brief now fires for every task (it used
@@ -165,12 +172,18 @@ class VerifyTimeoutTests(unittest.TestCase):
     def test_b_timeout_60_and_120_match_pre_fix_values(self):
         # Pre-fix: min(max(60*5, 60), 600) == 300 and
         # min(max(120*5, 60), 600) == 600 — defaults unmoved.
-        self.assertEqual(self._verify_timeouts(60.0), [300.0])
-        self.assertEqual(self._verify_timeouts(120.0), [600.0])
+        # (Pass #68: [derived] * len(seen) — the per-step check is
+        # a second call, held to the same derivation; see the
+        # _verify_timeouts docstring.)
+        seen60 = self._verify_timeouts(60.0)
+        self.assertEqual(seen60, [300.0] * len(seen60))
+        seen120 = self._verify_timeouts(120.0)
+        self.assertEqual(seen120, [600.0] * len(seen120))
 
     def test_b_verify_floor_60s_still_holds(self):
         # max(10*5, 60) == 60 before and after the fix.
-        self.assertEqual(self._verify_timeouts(10.0), [60.0])
+        seen = self._verify_timeouts(10.0)
+        self.assertEqual(seen, [60.0] * len(seen))
 
 
 class AcceptCpuTests(unittest.TestCase):
