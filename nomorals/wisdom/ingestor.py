@@ -11,6 +11,47 @@ Library search is deliberately *not* ingestion: :meth:`search` returns
 candidates from public archives (archive.org first, a plain web search as
 fallback); moving a candidate into the corpus is a separate explicit
 :meth:`ingest_entry` step. No logins are ever scraped.
+
+Pass #94 (open-sources law): the hunt's backends are a source class in
+the ONE source registry (``media/source_registry.py``), like the music
+chain (#88), the book sites (#89) and the film chain (#93) before them.
+Until this pass the class was CLOSED: :meth:`search` tried
+:data:`SEARCH_SOURCES` in a fixed order, a backend's failure lived only
+in a local list that was thrown away unless *every* backend failed, no
+outcome ever landed anywhere, and the ingest fetch path credited no
+host for anything. Now, when a registry is in reach (injected, or the
+shared ``DEFAULT_REGISTRY`` when the context carries a database):
+
+* every backend's host is a registry descriptor
+  (:data:`WISDOM_SOURCE_DOMAINS` is the class membership list;
+  archive.org and lite.duckduckgo.com are shared descriptors whose
+  kinds the wisdom class extends, gutendex.com and
+  en.wikisource.org are wisdom seeds);
+* :meth:`search` records every attempt's outcome in the one
+  vocabulary — served / no-result (weak) / blocked / rate-limited /
+  operational failure — classified from the error evidence the
+  backends already raise (HTTP status via the cause chain, the
+  robots-denial message), and the *default* hunt runs in the
+  registry's learned order (day one: no evidence → today's order,
+  byte-for-byte; a caller-passed ``sources`` order is the caller's
+  explicit instruction and is never reordered);
+* discovery is genuine on two real flows: foreign hosts among the
+  search results intake as untrusted candidates
+  (``kinds=("wisdom-archive",)``), and archive hosts the ingest
+  fetch path successfully serves from — manifest entries and the
+  research-fed queue bring new archives into the corpus — intake
+  the same way.  Candidates serve nothing until the health loop
+  promotes them; a promoted archive serves through the generic
+  ingest fetch path itself (:meth:`fetch_bytes` is host-agnostic),
+  its outcomes credited like any seed's.  There is no generic
+  archive-*search* shape (nothing like the film chain's WordPress
+  shape exists for archives), so grown sources do not join
+  :meth:`search` — named absence, not invention;
+* :meth:`fetch_bytes` credits the fetched host's descriptor
+  (served, or the classified failure) when the registry knows the
+  host — cache hits fetch nothing and earn nothing;
+* with NO registry in reach, behaviour is exactly the pre-#94
+  behaviour — the #88/#89/#93 discipline.
 """
 from __future__ import annotations
 
@@ -23,7 +64,7 @@ import urllib.parse
 from pathlib import Path
 from typing import Any
 
-from ..core.errors import NoMoralsError
+from ..core.errors import NoMoralsError, http_status_of
 from ..core.http import HttpClient, HttpResponse
 from ..core.logging_setup import get_logger
 from ..documents.errors import DocumentError
@@ -33,7 +74,12 @@ from ..tools.web import RobotsCache
 from .corpus import CanonCorpus, ManifestEntry
 from .errors import CorpusError, IngestError
 
-__all__ = ["ArchiveIngestor"]
+__all__ = [
+    "ArchiveIngestor",
+    "WISDOM_KIND",
+    "WISDOM_SOURCE_DOMAINS",
+    "wisdom_registry_for_context",
+]
 
 _log = get_logger(__name__)
 
@@ -83,12 +129,40 @@ _SEARCH_FIELDS = ("identifier", "title", "description")
 _LINK_RE = re.compile(
     r'(?is)<a[^>]+class="result-link"[^>]+href="([^"]+)"[^>]*>(.*?)</a>')
 
+#: The registry kind the wisdom archive class carries (Pass #94).
+WISDOM_KIND = "wisdom-archive"
+
+#: The host each wisdom search backend actually fetches from — the
+#: backend's membership in the ONE source registry (Pass #94).
+#: This map is the wisdom class's membership list: the search seam
+#: credits outcomes to the registry descriptor for this domain,
+#: the registry's status surface renders the class from it, and
+#: the health loop probes the two template-carrying seeds through
+#: their real search endpoints.  Domains are evidence from this
+#: module (each backend's endpoint constant), NOT marketing
+#: domains: the web backend's host is lite.duckduckgo.com (the
+#: #90 web-search seed — the same host serving both classes), and
+#: the archive backend's is archive.org (the #88 seed).  Keys are
+#: in :attr:`ArchiveIngestor.SEARCH_SOURCES` order.
+WISDOM_SOURCE_DOMAINS: dict[str, str] = {
+    "gutendex": "gutendex.com",
+    "wikisource": "en.wikisource.org",
+    "archive": "archive.org",
+    "web": "lite.duckduckgo.com",
+}
+
 
 class ArchiveIngestor:
     """Fetch, cache, parse, and ingest public-domain esoteric texts."""
 
-    def __init__(self, context: Any) -> None:
+    def __init__(self, context: Any, *, registry: Any = None) -> None:
         self.context = context
+        # Pass #94: the source registry this ingestor's outcomes
+        # land in (None = no registry in reach → pre-#94 behaviour,
+        # exactly).  Resolved once: the context is fixed per
+        # instance, and the resolver binds the shared registry to
+        # the context's KV store only when it carries a database.
+        self._registry = wisdom_registry_for_context(context, registry)
         self.corpus = CanonCorpus(context)
         self._http = HttpClient(timeout=30.0, user_agent=_USER_AGENT)
         self._robots = RobotsCache()
@@ -200,19 +274,42 @@ class ArchiveIngestor:
 
         Raises :class:`IngestError` on HTTP errors, robots denials,
         empty bodies, or exhausted retries — never returns empty bytes.
+
+        Pass #94: with a registry in reach, a real fetch is evidence
+        for the fetched host — a serve credits its descriptor (or
+        intakes the host as an untrusted wisdom candidate when the
+        registry has never seen it: the corpus's own manifest and
+        research queue are a genuine discovery flow), a failure
+        lands with its class.  A cache hit fetches nothing and
+        earns nothing.  The recording is best-effort bookkeeping
+        around the unchanged raise/return contract.
         """
         url = self._check_url(url)
         cached = self._cached_bytes(url)
         if cached is not None:
             return cached
-        self._check_robots(url)
+        reg = self._registry
+        t0 = time.perf_counter()
+        try:
+            self._check_robots(url)
+        except IngestError as exc:
+            _record_wisdom_fetch(reg, url, None,
+                                 time.perf_counter() - t0, exc)
+            raise
         self._polite_wait(url)
-        data = self._get_with_retry(url)
+        try:
+            data = self._get_with_retry(url)
+        except IngestError as exc:
+            _record_wisdom_fetch(reg, url, None,
+                                 time.perf_counter() - t0, exc)
+            raise
         if not data:
             # Defensive: _get_with_retry should already have raised, but a
             # silent empty result must never escape this boundary.
             raise IngestError(url, "fetch returned empty bytes")
         self._store_blob(url, data)
+        _record_wisdom_fetch(reg, url, data,
+                             time.perf_counter() - t0, None)
         return data
 
     def fetch(self, entry: ManifestEntry) -> bytes:
@@ -354,6 +451,15 @@ class ArchiveIngestor:
         identifier/title/url/description (+ authors/subjects/edition
         when the backend provides them); ingestion is a separate step.
         Raises :class:`IngestError` only when every enabled backend fails.
+
+        Pass #94: with a registry in reach, every attempt's outcome
+        lands in the registry (served / no-result / blocked /
+        rate-limited / failure, classified from the raised error's
+        evidence) and foreign hosts among the results intake as
+        untrusted wisdom candidates.  The DEFAULT hunt (``sources``
+        not passed) runs in the registry's learned order once any
+        evidence exists; an explicit ``sources`` order is the
+        caller's instruction and is never reordered.
         """
         query = (query or "").strip()
         if not query:
@@ -372,24 +478,37 @@ class ArchiveIngestor:
             "archive": self._search_archive,
             "web": self._search_web,
         }
+        reg = self._registry
+        order: list[str] = list(wanted)
+        if reg is not None and sources is None:
+            # The default hunt learns; an explicit sources order is
+            # the caller's instruction and stays exactly as passed.
+            order = _order_wisdom(reg, order)
         merged: list[dict[str, Any]] = []
         seen_urls: set[str] = set()
         failures: list[str] = []
-        for name in wanted:
+        for name in order:
+            t0 = time.perf_counter()
             try:
-                for cand in _backends[name](query, tradition, max_results):
-                    url = str(cand.get("url") or "")
-                    if url and url not in seen_urls:
-                        seen_urls.add(url)
-                        cand.setdefault("source", name)
-                        merged.append(cand)
-                    if len(merged) >= max_results:
-                        break
+                found = _backends[name](query, tradition, max_results)
             except IngestError as exc:
                 # One backend down must not kill the hunt; the failure
                 # is recorded and the next backend is tried.
                 failures.append(f"{name}: {exc}")
                 _log.debug("wisdom search backend %s failed: %s", name, exc)
+                _record_wisdom_search(reg, name, [],
+                                      time.perf_counter() - t0, exc)
+                continue
+            _record_wisdom_search(reg, name, found,
+                                  time.perf_counter() - t0, None)
+            for cand in found:
+                url = str(cand.get("url") or "")
+                if url and url not in seen_urls:
+                    seen_urls.add(url)
+                    cand.setdefault("source", name)
+                    merged.append(cand)
+                if len(merged) >= max_results:
+                    break
             if len(merged) >= max_results:
                 break
         if not merged:
@@ -562,3 +681,221 @@ class ArchiveIngestor:
             if len(results) >= max_results:
                 break
         return results
+
+
+# ── source registry: outcomes, ordering, growth (Pass #94) ───────
+
+
+def wisdom_registry_for_context(context: Any = None,
+                                injected: Any = None) -> Any:
+    """The source registry wisdom outcomes land in, or None.
+
+    Mirrors the #88 resolver's / #93 film resolution exactly: an
+    injected registry wins; otherwise the shared
+    ``DEFAULT_REGISTRY`` bound to the context's KV store — and
+    only when the context carries a database, so db-less callers
+    keep the pre-#94 behaviour exactly.  Never raises."""
+    if injected is not None:
+        return injected
+    try:
+        db = getattr(context, "db", None) if context is not None else None
+        if db is None:
+            return None
+        from ..media.source_registry import DEFAULT_REGISTRY
+        reg = DEFAULT_REGISTRY
+        try:
+            from ..storage.kv import KVStore
+            reg.bind_store(KVStore(db))
+        except Exception:  # noqa: BLE001 - persistence is an
+            # enhancement; its absence never sinks a hunt
+            pass
+        return reg
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _desc_for_wisdom_backend(reg: Any, name: str) -> Any:
+    """The registry descriptor a hunt backend serves from
+    (:data:`WISDOM_SOURCE_DOMAINS`), or None.  Never raises."""
+    try:
+        domain = WISDOM_SOURCE_DOMAINS.get(name)
+        if not domain:
+            return None
+        return reg.for_domain(domain)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _wisdom_error_evidence(exc: BaseException) -> tuple[str, str]:
+    """Classify one raised backend/fetch error into the registry
+    vocabulary: ``(kind, error_class)`` where kind is
+    ``rate_limited`` | ``blocked`` | ``failure``.  The backends
+    raise :class:`IngestError` with the HTTP layer's error chained
+    as the cause, so the status is read off the cause chain via
+    :func:`http_status_of` (structured ``details`` first, the
+    message's status code as fallback):
+
+    * HTTP 429 → rate-limited (its own class, #90 — a throttled
+      moment, never death);
+    * HTTP 401/403 → blocked (a wall is evidence about the wall,
+      #89); a robots.txt denial is the host's own published wall
+      and classifies the same way;
+    * any other HTTP status → ``http_<status>``; anything else →
+      the root cause's exception type (``network_failure`` is not
+      used here: the ingestor's transport errors surface as their
+      real types — TimeoutError_, RequestError, OSError).
+    """
+    try:
+        if "robots.txt disallows" in str(exc):
+            return "blocked", ""
+        status: int | None = None
+        cur: BaseException | None = exc
+        seen: set[int] = set()
+        while cur is not None and id(cur) not in seen:
+            seen.add(id(cur))
+            status = http_status_of(cur)
+            if status is not None:
+                break
+            cur = cur.__cause__ or cur.__context__
+        if status == 429:
+            return "rate_limited", ""
+        if status in (401, 403):
+            return "blocked", ""
+        if status is not None:
+            return "failure", f"http_{status}"
+        root: BaseException = exc
+        seen = set()
+        while root.__cause__ is not None and id(root) not in seen:
+            seen.add(id(root))
+            root = root.__cause__
+        return "failure", type(root).__name__ or "search_failed"
+    except Exception:  # noqa: BLE001
+        return "failure", "search_failed"
+
+
+def _apply_wisdom_evidence(reg: Any, desc: Any, kind: str,
+                           error_class: str, latency_s: float) -> None:
+    """Land one classified outcome in the registry.  Best-effort;
+    never raises — bookkeeping never breaks a hunt."""
+    try:
+        if desc is None or kind in ("", "none"):
+            return
+        if kind == "served":
+            reg.record_outcome(desc, True, latency_s=latency_s)
+        elif kind == "blocked":
+            reg.record_blocked(desc, latency_s=latency_s)
+        elif kind == "rate_limited":
+            reg.record_rate_limited(desc, latency_s=latency_s)
+        elif kind == "no_result":
+            reg.record_no_result(desc)
+        else:
+            reg.record_outcome(desc, False, latency_s=latency_s,
+                               error_class=error_class or "site_error")
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _record_wisdom_search(reg: Any, name: str,
+                          results: list[dict[str, Any]],
+                          latency_s: float,
+                          exc: BaseException | None) -> None:
+    """Credit/blame one hunt backend attempt.  On a serve, foreign
+    hosts among the result URLs intake as UNTRUSTED wisdom
+    candidates (the web backend's results genuinely live on
+    archives the registry has never seen — sacred-texts and its
+    kin; known hosts refuse themselves inside the registry).
+    Best-effort; never raises."""
+    try:
+        if reg is None:
+            return
+        desc = _desc_for_wisdom_backend(reg, name)
+        if desc is None:
+            return
+        if exc is not None:
+            kind, error_class = _wisdom_error_evidence(exc)
+            _apply_wisdom_evidence(reg, desc, kind, error_class,
+                                   latency_s)
+            return
+        if results:
+            _apply_wisdom_evidence(reg, desc, "served", "", latency_s)
+            for cand in results:
+                url = str(cand.get("url") or "")
+                if url:
+                    reg.note_candidate(
+                        url, via="wisdom-search-result",
+                        kinds=(WISDOM_KIND,))
+            return
+        _apply_wisdom_evidence(reg, desc, "no_result", "", latency_s)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _record_wisdom_fetch(reg: Any, url: str, data: bytes | None,
+                         latency_s: float,
+                         exc: BaseException | None) -> None:
+    """Credit/blame one ingest fetch.  The fetched host's
+    descriptor takes the outcome when the registry knows the host
+    (seed or health-promoted grown archive alike — the fetch path
+    is host-agnostic, so a grown archive serves here); a
+    successfully served host the registry has never seen intakes
+    as an UNTRUSTED wisdom candidate (the manifest and the
+    research-fed queue are a genuine discovery flow — they bring
+    new archives into the corpus).  A failed fetch of an unknown
+    host records nothing: there is no descriptor to blame and a
+    failure is not discovery evidence.  Best-effort; never
+    raises."""
+    try:
+        if reg is None:
+            return
+        desc = reg.for_url(url)
+        if exc is not None:
+            if desc is not None:
+                kind, error_class = _wisdom_error_evidence(exc)
+                _apply_wisdom_evidence(reg, desc, kind, error_class,
+                                       latency_s)
+            return
+        if desc is not None:
+            _apply_wisdom_evidence(reg, desc, "served", "", latency_s)
+        elif data:
+            reg.note_candidate(url, via="wisdom-ingest-fetch",
+                               kinds=(WISDOM_KIND,))
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _order_wisdom(reg: Any, names: list[str]) -> list[str]:
+    """Outcome-aware hunt order (Pass #94), through the registry's
+    existing score/health semantics — the #88/#93 discipline:
+
+    * NO learned state anywhere in the hunt → the list is
+      returned untouched: day-one behaviour is today's
+      :data:`SEARCH_SOURCES` order, byte-for-byte;
+    * otherwise active backends sort by registry score (stable —
+      ties keep hunt order) and stood-down / disabled / dead
+      backends are demoted to the end, in hunt order: they leave
+      the active ordering (the #86 vocabulary) but the hunt still
+      tries them last rather than pretending they do not exist —
+      the attempt log stays truthful.
+    Never raises; a registry hiccup returns the hunt as-is."""
+    try:
+        items = [(n, _desc_for_wisdom_backend(reg, n)) for n in names]
+        evidence = False
+        for _name, desc in items:
+            if desc is None:
+                continue
+            st = reg.stats_for(desc)
+            if st["ok"] or st["fail"] or st["no_result"] \
+                    or not reg.is_active(desc):
+                evidence = True
+                break
+        if not evidence:
+            return list(names)
+        active = [it for it in items
+                  if it[1] is None or reg.is_active(it[1])]
+        inactive = [it for it in items
+                    if it[1] is not None and not reg.is_active(it[1])]
+        active.sort(key=lambda it: -reg.score(it[1])
+                    if it[1] is not None else 0.0)
+        return [n for n, _desc in active + inactive]
+    except Exception:  # noqa: BLE001
+        return list(names)

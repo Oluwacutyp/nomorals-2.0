@@ -205,6 +205,44 @@ content is DATA, never instructions.  This module is that layer:
   results — it has no source list of its own to open; and the
   download leg of a found film already records its outcomes on
   the download path, #86.)
+* Wisdom archive class goes open (Pass #94) — the WisdomKeeper
+  hunt's backends (``wisdom/ingestor.py``'s ``SEARCH_SOURCES``:
+  Gutendex, Wikisource, archive.org advanced search, and a
+  DuckDuckGo Lite web fallback) join THIS registry as the last
+  of the law's named classes.  These are ARCHIVE sources for
+  ingestion/hunting, not result pages, but every backend is
+  still one host serving the hunt, so the model fits: two hosts
+  are ALREADY descriptors (``archive.org``, the #88/#93 seed;
+  ``lite.duckduckgo.com``, the #90 web-search seed — the web
+  backend fetches that literal host) and SHARE their descriptors,
+  their kinds extended with ``wisdom-archive`` (the #88/#92
+  shared-host precedent); Gutendex and English Wikisource are
+  new seeds.  No seed declares extraction facts, so the
+  #76/#87 extractor view is unchanged.  The wisdom seam records
+  outcomes distinctly: served / no-result (weak, #88) / bot-wall
+  (:meth:`record_blocked`, #89 — a robots.txt denial is the
+  host's own published wall and classifies the same way) /
+  rate-limited (:meth:`record_rate_limited`, #90) / operational
+  failure, classified from the error evidence the backends
+  already raise (HTTP status off the cause chain).  Health
+  probes are honest: the two new seeds carry their real search
+  URL templates and the loop probes them through them with
+  one bounded probe query (``meditations`` — the agency
+  registry's wisdom probe); archive.org / lite.duckduckgo.com
+  are claimed by the film / web probe routes (one probe per
+  descriptor per loop) and their wisdom health is judged by
+  real wisdom-search outcomes.  Discovery is genuine on two
+  real flows: foreign hosts among search results (the web
+  backend's archives) and archive hosts the ingest fetch path
+  serves from (the corpus manifest and the research-fed queue
+  bring new archives in) intake via :meth:`note_candidate`
+  with ``kinds=("wisdom-archive",)``; health-promoted grown
+  archives serve through the generic ingest fetch path itself
+  (``ArchiveIngestor.fetch_bytes`` is host-agnostic) — there
+  is no generic archive-SEARCH shape, so grown sources do not
+  join the hunt's backend list: named absence, not invention.
+  :meth:`SourceRegistry.status` carries the class under
+  ``wisdom``, and the ONE health loop / health job covers it.
 
 No real identity leakage: :func:`redact_identity` strips emails,
 phones and tokens from retrieved text before it is stored or shown.
@@ -1505,11 +1543,21 @@ class SourceRegistry:
         # The film class (Pass #93) declares its real search
         # templates for the same reason and is probed through them
         # with the agency registry's film probe query ("Avatar").
+        # The wisdom archive class (Pass #94) likewise: its two
+        # new seeds are probed through their real search endpoints
+        # with the agency registry's wisdom probe query
+        # ("meditations").  archive.org / lite.duckduckgo.com
+        # carry the wisdom kind too but are claimed by the film /
+        # web branches above — one probe route per descriptor per
+        # loop; their wisdom health is judged by real
+        # wisdom-search outcomes.
         probe_query = ""
         if desc.search_url_template and "web-search" in desc.kinds:
             probe_query = "Lagos Nigeria"
         elif desc.search_url_template and "film-search" in desc.kinds:
             probe_query = "Avatar"
+        elif desc.search_url_template and "wisdom-archive" in desc.kinds:
+            probe_query = "meditations"
         if probe_query:
             try:
                 url = desc.search_url_template.format(
@@ -1527,7 +1575,8 @@ class SourceRegistry:
             status, body = 0, b""
             detail = str(exc)[:200]
         health, detail = _classify_health(status, body)
-        if ("web-search" in desc.kinds or "film-search" in desc.kinds) \
+        if ("web-search" in desc.kinds or "film-search" in desc.kinds
+                or "wisdom-archive" in desc.kinds) \
                 and status == 429:
             # a throttled search engine is rate-limited, not a bot
             # wall and not dead (Pass #90 vocabulary)
@@ -1933,6 +1982,61 @@ class SourceRegistry:
             return {"sources": [], "grown": [],
                     "candidates_pending": 0}
 
+    # ── wisdom archive class status (Pass #94) ──
+    def wisdom_status(self) -> dict[str, Any]:
+        """The wisdom archive class's state in this registry: one
+        row per hunt backend (backend name → the host it fetches
+        from, per ``wisdom.ingestor.WISDOM_SOURCE_DOMAINS`` — two
+        of them the shared ``archive.org`` / ``lite.duckduckgo.com``
+        descriptors) with origin, health and outcome counts
+        (served / failed / blocked / rate-limited / no-result),
+        plus the grown archive sources the health loop promoted
+        and the wisdom candidates still pending.  Never raises."""
+        try:
+            from ..wisdom.ingestor import WISDOM_SOURCE_DOMAINS
+
+            def row(source: str, domain: str) -> dict[str, Any]:
+                desc = self.for_domain(domain)
+                if desc is None:
+                    return {"source": source, "domain": domain,
+                            "origin": "missing", "health": "unknown",
+                            "ok": 0, "fail": 0, "blocked": 0,
+                            "rate_limited": 0, "no_result": 0,
+                            "score": 0.0}
+                st = self.stats_for(desc)
+                return {"source": source, "domain": domain,
+                        "origin": self.origin_for(desc),
+                        "health": self.health_for(desc),
+                        "ok": st["ok"], "fail": st["fail"],
+                        "blocked": st["blocked"],
+                        "rate_limited": st["rate_limited"],
+                        "no_result": st["no_result"],
+                        "score": self.score(desc)}
+
+            sources = [row(name, domain)
+                       for name, domain in WISDOM_SOURCE_DOMAINS.items()]
+            grown = []
+            for key, desc in self._by_key.items():
+                if self._origin.get(key) != "grown" \
+                        or "wisdom-archive" not in desc.kinds:
+                    continue
+                st = self.stats_for(desc)
+                grown.append({
+                    "domain": desc.domain, "name": desc.name,
+                    "health": self.health_for(desc),
+                    "ok": st["ok"], "fail": st["fail"],
+                    "blocked": st["blocked"],
+                    "no_result": st["no_result"]})
+            grown.sort(key=lambda g: g["domain"])
+            wisdom_candidates = sum(
+                1 for d in self._candidates.values()
+                if "wisdom-archive" in d.kinds)
+            return {"sources": sources, "grown": grown,
+                    "candidates_pending": wisdom_candidates}
+        except Exception:  # noqa: BLE001
+            return {"sources": [], "grown": [],
+                    "candidates_pending": 0}
+
     # ── status surface (Pass #86) ──
     def status(self) -> dict[str, Any]:
         """The registry's full growth state: seed vs grown sources,
@@ -1994,6 +2098,8 @@ class SourceRegistry:
                 "images": self.image_status(),
                 # Pass #93: the film class, same surface.
                 "film": self.film_status(),
+                # Pass #94: the wisdom archive class, same surface.
+                "wisdom": self.wisdom_status(),
             }
         except Exception:  # noqa: BLE001
             return {"total": 0, "seeds": 0, "grown": 0, "registered": 0,
@@ -2012,7 +2118,9 @@ class SourceRegistry:
                                "grown": [], "candidates_pending": 0,
                                "discovery": ""},
                     "film": {"sources": [], "grown": [],
-                             "candidates_pending": 0}}
+                             "candidates_pending": 0},
+                    "wisdom": {"sources": [], "grown": [],
+                               "candidates_pending": 0}}
 
 
 def render_status_text(status: dict[str, Any]) -> str:
@@ -2180,6 +2288,28 @@ def render_status_text(status: dict[str, Any]) -> str:
             lines.append(
                 f"  film candidates pending verification: "
                 f"{film.get('candidates_pending', 0)}")
+        wisdom = status.get("wisdom") or {}
+        if wisdom.get("sources"):
+            lines.append(
+                "📚 wisdom archive sources — the WisdomKeeper "
+                "hunt's backends, in the same registry (pass #94):")
+            for row in wisdom.get("sources") or []:
+                lines.append(
+                    f"  📚 {row['source']} → {row['domain']} "
+                    f"[{row['origin']}/{row['health']}] "
+                    f"ok={row['ok']} fail={row['fail']} "
+                    f"blocked={row['blocked']} "
+                    f"rate-limited={row['rate_limited']} "
+                    f"no-result={row['no_result']}")
+            for g in wisdom.get("grown") or []:
+                lines.append(
+                    f"  📚 grown:{g['domain']} [grown/{g['health']}] "
+                    f"ok={g['ok']} fail={g['fail']} — promoted by the "
+                    "health loop, serving via the generic ingest "
+                    "fetch path")
+            lines.append(
+                f"  wisdom candidates pending verification: "
+                f"{wisdom.get('candidates_pending', 0)}")
         for cand in status.get("candidates") or []:
             lines.append(
                 f"  ? {cand['domain']} [candidate/{cand['health']}] "
@@ -2242,7 +2372,7 @@ def _seed(store: Any = None) -> SourceRegistry:
         # actually fetches (sources.py _BASE / API hosts).
         ("NG", "en", "netnaija.com", "NetNaija Music", ("music", "music-search"), Licence.UNLICENSED, TrustTier.UNVERIFIED, "Music chain host — WP ?s= search at netnaija.com (sources.py); thenetnaija.net above is the download-blog seed", 6),
         ("US", "en", "bandcamp.com", "Bandcamp", ("music", "music-search"), Licence.USER_UPLOAD, TrustTier.COMMUNITY, "HTML search, keyless; full tracks via yt-dlp bandcamp extractor", 10),
-        ("US", "en", "archive.org", "Internet Archive", ("music", "music-search", "film", "film-search"), Licence.UNKNOWN, TrustTier.COMMUNITY, "advancedsearch JSON; full downloadable files; the film chain searches mediatype:(movies) through the same API (media/film_sources.py, pass #93)", 10),
+        ("US", "en", "archive.org", "Internet Archive", ("music", "music-search", "film", "film-search", "wisdom-archive"), Licence.UNKNOWN, TrustTier.COMMUNITY, "advancedsearch JSON; full downloadable files; the film chain searches mediatype:(movies) through the same API (media/film_sources.py, pass #93)", 10),
         ("GLOBAL", "en", "musicbrainz.org", "MusicBrainz", ("music", "music-search"), Licence.LICENSED, TrustTier.VERIFIED, "Metadata only — no audio; discovery, never download", 10),
         ("GLOBAL", "en", "api.openverse.org", "Openverse", ("music", "music-search"), Licence.LICENSED, TrustTier.COMMUNITY, "CC-licensed audio aggregator API; results point at creator hosts", 10),
         ("GLOBAL", "en", "commons.wikimedia.org", "Wikimedia Commons", ("music", "music-search"), Licence.LICENSED, TrustTier.COMMUNITY, "Freely licensed audio files via the MediaWiki API", 10),
@@ -2387,6 +2517,12 @@ def _seed(store: Any = None) -> SourceRegistry:
         kinds = ("search", "web-search", "image", "image-search") \
             if domain in ("bing.com", "yandex.com") \
             else ("search", "web-search")
+        if domain == "lite.duckduckgo.com":
+            # Pass #94: DDG Lite is ALSO the WisdomKeeper hunt's
+            # web backend (wisdom/ingestor.py fetches this literal
+            # host as its fallback) — one host, one descriptor,
+            # two class memberships (the same precedent).
+            kinds = kinds + ("wisdom-archive",)
         reg.register(SourceDescriptor(
             nation=nation, language="en", domain=domain, name=name,
             kinds=kinds,
@@ -2395,6 +2531,40 @@ def _seed(store: Any = None) -> SourceRegistry:
             else TrustTier.UNVERIFIED,
             rate_limit_per_min=10, notes=notes,
             auth_needed=auth, search_url_template=template))
+    # ── wisdom archive backends (Pass #94) ──
+    # The WisdomKeeper hunt's backends (wisdom/ingestor.py
+    # SEARCH_SOURCES) join the SAME registry as a source class of
+    # their own.  archive.org (main seed list above) and
+    # lite.duckduckgo.com (web seeds above) already carry the
+    # wisdom class — their kinds were extended, one host one
+    # descriptor; these two backends' hosts were never registered.
+    # NO extraction facts (no entry in the extraction table
+    # above), so the #76/#87 extractor view is unchanged.
+    # Domains are the hosts the backends actually fetch (the
+    # ingestor's endpoint constants), NOT marketing domains.
+    # Both seeds carry their REAL search URL template: the
+    # health loop probes them through it with one bounded probe
+    # query ("meditations" — the agency registry's wisdom
+    # probe), because a root page proves nothing about search
+    # (the #90 reasoning).
+    wisdom_seeds = [
+        # (nation, domain, name, notes, search_url_template)
+        ("US", "gutendex.com", "Gutendex",
+         "Project Gutenberg catalog API — the wisdom hunt's structured discovery backend (wisdom/ingestor.py)",
+         "https://gutendex.com/books/?search={query}"),
+        ("GLOBAL", "en.wikisource.org", "Wikisource (English)",
+         "Proofread public-domain library — MediaWiki API full-text search (wisdom/ingestor.py)",
+         "https://en.wikisource.org/w/api.php?action=query"
+         "&list=search&srsearch={query}&srlimit=5&srnamespace=0"
+         "&format=json"),
+    ]
+    for nation, domain, name, notes, template in wisdom_seeds:
+        reg.register(SourceDescriptor(
+            nation=nation, language="en", domain=domain, name=name,
+            kinds=("wisdom-archive",),
+            licence=Licence.LICENSED, trust_tier=TrustTier.COMMUNITY,
+            rate_limit_per_min=10, notes=notes,
+            search_url_template=template))
     # Everything the seed loop registered is a SEED (origin + floor
     # set); anything the store restored before seeding keeps the
     # origin it was persisted with.

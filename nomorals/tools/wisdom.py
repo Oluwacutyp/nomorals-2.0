@@ -194,3 +194,37 @@ def register(registry: Any) -> None:
         mod = importlib.import_module("nomorals.wisdom.autonomy")
         organ = mod.WisdomOrgan(context)
         return {"ok": True, **organ.tick()}
+
+    @registry.register(
+        "wisdom_sources",
+        description=(
+            "Wisdom archive source registry — the WisdomKeeper hunt's "
+            "backends (Gutendex, Wikisource, archive.org, DuckDuckGo "
+            "Lite) in the ONE source registry (pass #94, same registry "
+            "as download_sources): action=status (per-backend "
+            "origin/health, served / failed / blocked / rate-limited / "
+            "no-result counts, grown archive sources, wisdom "
+            "candidates pending) | health (run the shared source "
+            "health loop: the archive backends are verified — the "
+            "new seeds through their real search endpoints — and "
+            "discovered archive candidates are promoted or shed)."
+        ),
+        capability="network",
+        parameters={
+            "action": "str — status|health (default status)",
+        },
+    )
+    def wisdom_sources(*, action: str = "status") -> dict[str, Any]:
+        import importlib
+        ing_mod = importlib.import_module("nomorals.wisdom.ingestor")
+        reg = ing_mod.wisdom_registry_for_context(context)
+        if reg is None:
+            from ..media.source_registry import DEFAULT_REGISTRY
+
+            reg = DEFAULT_REGISTRY
+        act = (action or "status").strip().lower()
+        if act == "health":
+            return reg.verify_health()
+        if act == "status":
+            return reg.wisdom_status()
+        return {"error": f"unknown action {act!r} — status|health"}

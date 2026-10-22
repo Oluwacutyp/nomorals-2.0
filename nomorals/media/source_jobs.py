@@ -33,7 +33,15 @@ Job:
   re-verifies the film sources — through their real search
   endpoints (one bounded probe query each) — and can promote
   the candidates the film path discovers — still no second
-  job, no second binding.  Marked
+  job, no second binding.  Since Pass #94 the wisdom archive
+  class (the WisdomKeeper hunt's backends — Gutendex,
+  Wikisource, archive.org, DuckDuckGo Lite) lives in the same
+  registry too, so this one job also re-verifies the archive
+  backends — the two new seeds through their real search
+  endpoints (one bounded probe query each) — and can promote
+  the archive candidates the wisdom hunt and the ingest fetch
+  path discover — still no second job, no second binding.
+  Marked
   ``routine`` deliberately: the loop is self-reporting bookkeeping —
   its results land in the registry's status surface (``/download
   status``), not in owner alerts — but a FAILED run still records as
