@@ -87,13 +87,18 @@ class RuntimeBuildMixin:
         except Exception as exc:  # noqa: BLE001
             return f"coding bot crashed: {exc}"
         elapsed = time.time() - started
+        # Pass #65 (W7): the run's metered token total rides the
+        # outcome line — additive, absent on unmetered result shapes.
+        usage = getattr(result, "usage", None) or {}
+        tokens_bit = (f", {int(usage.get('total_tokens') or 0)} tokens"
+                      if usage else "")
         if result.ok:
             files = ", ".join(getattr(result, "files", []) or []) or "output"
             output = str(getattr(result, "output", ""))[:600]
-            text = (f"✅ code done in {result.iterations} iteration(s), {elapsed:.0f}s — {files}\n"
+            text = (f"✅ code done in {result.iterations} iteration(s), {elapsed:.0f}s{tokens_bit} — {files}\n"
                     f"run output:\n{output}")
         else:
-            text = (f"❌ coding bot gave up after {result.iterations} iteration(s), {elapsed:.0f}s\n"
+            text = (f"❌ coding bot gave up after {result.iterations} iteration(s), {elapsed:.0f}s{tokens_bit}\n"
                     f"{str(getattr(result, 'error', ''))[:600]}\n"
                     f"it's in the workspace if you want to take over.")
         return self._send_long_checked(chat.platform, chat, text)

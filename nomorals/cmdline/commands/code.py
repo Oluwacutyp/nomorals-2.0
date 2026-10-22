@@ -36,6 +36,21 @@ def _cmd_code(args: argparse.Namespace, context: Any) -> int:
     return _cmd_code_run(args, context, task)
 
 
+def _tokens_suffix(result: Any) -> str:
+    """Pass #65 (W7): the run's metered token total as a stats-line
+    suffix — additive, and empty when the result carries no usage
+    (older result shapes, non-run results)."""
+    usage = getattr(result, "usage", None) or {}
+    if not usage:
+        return ""
+    suffix = f"  tokens: {int(usage.get('total_tokens') or 0)}"
+    if usage.get("usage_unreported"):
+        suffix += f" (+{int(usage['usage_unreported'])} unreported)"
+    if usage.get("capped"):
+        suffix += " [spend cap hit]"
+    return suffix
+
+
 def _cmd_code_approve(args: argparse.Namespace, context: Any,
                       plan_id: str) -> int:
     """Approve a paused plan-mode plan and execute it within its scope."""
@@ -50,7 +65,8 @@ def _cmd_code_approve(args: argparse.Namespace, context: Any,
     if result.ok:
         print(f"plan {plan_id} approved and executed — OK")
         print(f"files: {', '.join(result.files) or '(none)'}  "
-              f"iterations: {result.iterations}  seconds: {result.seconds:.1f}")
+              f"iterations: {result.iterations}  seconds: {result.seconds:.1f}"
+              f"{_tokens_suffix(result)}")
     else:
         print(f"FAILED: {result.error}")
     return 0 if result.ok else 1
@@ -84,7 +100,7 @@ def _cmd_code_run(args: argparse.Namespace, context: Any, task: str) -> int:
         return 0 if result.ok else 1
     print(f"task: {task}")
     print(f"file: {args.file}  iterations: {result.iterations}  "
-          f"seconds: {result.seconds:.1f}")
+          f"seconds: {result.seconds:.1f}{_tokens_suffix(result)}")
     if result.ok:
         print("OK — acceptance command passed")
     else:

@@ -189,6 +189,40 @@ class _Budget:
                 or time.monotonic() - self.started > self.max_seconds)
 
 
+def _blank_usage() -> dict[str, int]:
+    """The usage counters shape (pass #65): tokens as the provider
+    reported them, ``calls`` = model calls made, ``usage_unreported``
+    = calls whose response carried no usable usage (counted, never
+    estimated)."""
+    return {"prompt_tokens": 0, "completion_tokens": 0,
+            "total_tokens": 0, "calls": 0, "usage_unreported": 0}
+
+
+def _response_usage(response: Any) -> tuple[int, int, int] | None:
+    """(prompt, completion, total) from a model response, or None
+    when the response carries no usage at all.  A usage object whose
+    fields are all zero is reported as (0, 0, 0) — callers treat that
+    as unreported too (an all-zero usage is a provider that did not
+    report, not a free call).  Never raises."""
+    try:
+        usage = getattr(response, "usage", None)
+        if usage is None:
+            return None
+        if isinstance(usage, dict):
+            prompt = int(usage.get("prompt_tokens") or 0)
+            completion = int(usage.get("completion_tokens") or 0)
+            total = int(usage.get("total_tokens") or 0)
+        else:
+            prompt = int(getattr(usage, "prompt_tokens", 0) or 0)
+            completion = int(getattr(usage, "completion_tokens", 0) or 0)
+            total = int(getattr(usage, "total_tokens", 0) or 0)
+        if total <= 0 and (prompt or completion):
+            total = prompt + completion
+        return prompt, completion, total
+    except Exception:  # noqa: BLE001 — metering must never break a call
+        return None
+
+
 # ── the engine ───────────────────────────────────────────────────────────────
 
 
@@ -208,6 +242,26 @@ class ReasoningEngine:
         self.tools = tools
         self.system_note = system_note
         self.budget = _Budget(max_llm_calls, max_seconds)
+        # Pass #65: token usage of every call this engine makes,
+        # accumulated from the responses themselves (see _llm) so
+        # callers like review_text can surface what a review cost
+        # without changing any return contract.
+        self.usage_totals: dict[str, int] = _blank_usage()
+
+    def _record_usage(self, response: Any) -> None:
+        """Fold one response's usage into ``usage_totals``.  A
+        response with no usable usage counts as one unreported call
+        — the tokens stay honestly unknown, never estimated."""
+        totals = self.usage_totals
+        totals["calls"] += 1
+        extracted = _response_usage(response)
+        if extracted is None or extracted == (0, 0, 0):
+            totals["usage_unreported"] += 1
+            return
+        prompt, completion, total = extracted
+        totals["prompt_tokens"] += prompt
+        totals["completion_tokens"] += completion
+        totals["total_tokens"] += total
 
     # ── llm ──────────────────────────────────────────────────────────────────
 
@@ -224,6 +278,9 @@ class ReasoningEngine:
             [Message.system(system), Message.user(prompt)],
             SamplingParams(temperature=temperature, max_tokens=1400),
         task_kind="reasoning")
+        # Record BEFORE the ok check: a failed response still cost
+        # whatever its usage says it cost.
+        self._record_usage(response)
         if not response.ok:
             raise ToolError(f"reasoning: {getattr(response, 'error', 'model error')}")
         text = (response.text or "").strip()
@@ -821,6 +878,16 @@ def _knowledge_block(context: Any, query: str) -> str:
         return ""
 
 
+def _attach_usage(status: dict[str, Any], engine: ReasoningEngine) -> None:
+    """Pass #65: copy the engine's usage counters into a caller's
+    status dict — only when the engine actually reached a model (a
+    budget-exhausted review made no call; its absence from the dict
+    is the honest signal, and metering callers count it unreported).
+    """
+    if engine.usage_totals.get("calls"):
+        status["usage"] = dict(engine.usage_totals)
+
+
 def review_text(context: Any, text: str, *, focus: str = "",
                 max_calls: int | None = None,
                 status: dict[str, Any] | None = None) -> list[str]:
@@ -836,6 +903,12 @@ def review_text(context: Any, text: str, *, focus: str = "",
     empty or unparseable verdict) means the [] return is NO VERDICT, not
     a clean pass.  Callers that ignore ``status`` keep the lossy
     contract above.
+
+    Pass #65: the same ``status`` dict also gains ``"usage"`` (the
+    engine's accumulated token counters) whenever the review actually
+    reached a model — an additive key on the #63 channel, so a caller
+    metering spend (the coding loop) can charge the review's cost
+    without any signature or return-shape change.
     """
     calls, seconds = _hook_budget(context)
     if max_calls is not None:
@@ -860,9 +933,11 @@ def review_text(context: Any, text: str, *, focus: str = "",
             if status is not None:
                 status.update(available=False,
                               error="reviewer returned no parseable verdict")
+                _attach_usage(status, engine)
             return []
         if status is not None:
             status.update(available=True, error="")
+            _attach_usage(status, engine)
         if data.get("passed") is True and not data.get("flaws"):
             return []
         return [str(f).strip()[:200] for f in (data.get("flaws") or [])
@@ -872,15 +947,21 @@ def review_text(context: Any, text: str, *, focus: str = "",
         if status is not None:
             status.update(available=False,
                           error=f"{type(exc).__name__}: {exc}"[:200])
+            _attach_usage(status, engine)
         return []
 
 
 def revise_text(context: Any, text: str, flaws: list[str], *,
-                focus: str = "", max_calls: int | None = None) -> str:
+                focus: str = "", max_calls: int | None = None,
+                status: dict[str, Any] | None = None) -> str:
     """One revision pass that addresses the listed flaws.
 
     Returns the revised artifact, or the original text unchanged when
     the revision is unusable.  Never raises.
+
+    Pass #65: pass a ``status`` dict to receive ``status["usage"]``
+    (the revision call's token counters) — the same additive channel
+    as :func:`review_text`; existing callers are unaffected.
     """
     if not flaws:
         return text
@@ -901,11 +982,15 @@ def revise_text(context: Any, text: str, flaws: list[str], *,
         "format as it was given — nothing before or after it.")
     try:
         revised = engine._llm(prompt).strip()
+        if status is not None:
+            _attach_usage(status, engine)
         if revised and len(revised) >= 20:
             return revised
         return text
     except Exception:  # noqa: BLE001
         _log.debug("reasoning revision failed", exc_info=True)
+        if status is not None:
+            _attach_usage(status, engine)
         return text
 
 

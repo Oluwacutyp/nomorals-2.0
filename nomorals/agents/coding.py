@@ -454,6 +454,54 @@ def _format_lint_result(lint_res: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+# ── pass #65 (W7): token metering + the optional spend cap ──────────
+#
+# Every model call a run makes funnels through CodingAgent.chat /
+# _phase_chat, and its diff reviews through _call_reviewer — the three
+# points where usage is recorded.  Metering is ALWAYS ON (a run with
+# no cap is metered exactly like a capped one); the cap is the only
+# part that can stop a run, and it stops BEFORE the next model call
+# is issued, never mid-call and never by rewriting a verdict.
+
+
+class _SpendCapExceeded(Exception):
+    """The run's metered token total crossed its spend cap.  Raised
+    by the chat funnel / reviewer seam BEFORE the next model call is
+    issued; run() settles it (green stands when one was earned and no
+    edit has landed since; otherwise an honest cap failure)."""
+
+
+def _blank_usage() -> dict[str, int]:
+    """The usage counters shape: tokens as the provider reported
+    them, ``calls`` = model calls made, ``usage_unreported`` = calls
+    whose response carried no usable usage (counted, never
+    estimated)."""
+    return {"prompt_tokens": 0, "completion_tokens": 0,
+            "total_tokens": 0, "calls": 0, "usage_unreported": 0}
+
+
+def _response_usage(response: Any) -> tuple[int, int, int] | None:
+    """(prompt, completion, total) from a model response, or None
+    when the response carries no usage at all.  Never raises."""
+    try:
+        usage = getattr(response, "usage", None)
+        if usage is None:
+            return None
+        if isinstance(usage, dict):
+            prompt = int(usage.get("prompt_tokens") or 0)
+            completion = int(usage.get("completion_tokens") or 0)
+            total = int(usage.get("total_tokens") or 0)
+        else:
+            prompt = int(getattr(usage, "prompt_tokens", 0) or 0)
+            completion = int(getattr(usage, "completion_tokens", 0) or 0)
+            total = int(getattr(usage, "total_tokens", 0) or 0)
+        if total <= 0 and (prompt or completion):
+            total = prompt + completion
+        return prompt, completion, total
+    except Exception:  # noqa: BLE001 — metering must never break a call
+        return None
+
+
 @dataclass
 class CodingResult:
     ok: bool
@@ -509,6 +557,16 @@ class CodingResult:
     # fallbacks are visible here, never silent.  Empty when no edit
     # call ran (plan pause, new-file-only runs).
     context_packs: list[dict[str, Any]] = field(default_factory=list)
+    # Pass #65 (W7): the run's metered token usage — ALWAYS recorded
+    # (metering is not the cap): {prompt_tokens, completion_tokens,
+    # total_tokens, calls, usage_unreported, by_phase: {phase: same
+    # counters}} with phases plan/edit/chat/review/revise.  Plus
+    # "cap" (the max_tokens the caller set) and "capped": True when
+    # the cap stopped the run.  usage_unreported counts calls whose
+    # response carried no usable usage — their tokens are honestly
+    # unknown (0 in the totals), never estimated.  Empty when the
+    # result did not come from a run (defensive default).
+    usage: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -527,6 +585,7 @@ class CodingResult:
             "replans": self.replans,
             "final_gate": self.final_gate,
             "context_packs": self.context_packs,
+            "usage": self.usage,
         }
 
 
@@ -694,6 +753,9 @@ class CodingAgent:
         # run() right after each _review_flaws call (notes/availability
         # for the result) — the loop is single-threaded per run.
         self._last_review: DiffReview | None = None
+        # Pass #65 (W7): the active run's token meter (see _meter_begin)
+        # — None outside run(), when nothing is metered or capped.
+        self._meter: dict[str, Any] | None = None
         # Spec-first (#4 extension): generation prompts carry the
         # backend-included block by default; set False to opt out.
         self._backend_included: bool = True
@@ -1043,6 +1105,101 @@ class CodingAgent:
             )
         return texts
 
+    # ── pass #65 (W7): the run's token meter ────────────────────────
+
+    def _meter_begin(self, cap: int | None) -> None:
+        """Start a fresh meter for a run.  ``cap`` is the caller's
+        optional spend cap (None = metering only, never blocks)."""
+        self._meter = {"totals": _blank_usage(), "by_phase": {},
+                       "cap": cap, "capped": False}
+
+    def _meter_fold(self, phase: str, prompt: int, completion: int,
+                    total: int, *, reported: bool) -> None:
+        meter = self._meter
+        if meter is None:
+            return
+        for bucket in (meter["totals"],
+                       meter["by_phase"].setdefault(phase,
+                                                    _blank_usage())):
+            bucket["calls"] += 1
+            if reported:
+                bucket["prompt_tokens"] += prompt
+                bucket["completion_tokens"] += completion
+                bucket["total_tokens"] += total
+            else:
+                bucket["usage_unreported"] += 1
+
+    def _meter_response(self, response: Any, phase: str) -> None:
+        """Record one funneled model response's usage.  A response
+        with no usable usage (or all-zero usage — a provider that did
+        not report) counts as one unreported call: its tokens stay
+        honestly unknown in the totals, never estimated."""
+        if self._meter is None:
+            return
+        extracted = _response_usage(response)
+        if extracted is None or extracted == (0, 0, 0):
+            self._meter_fold(phase, 0, 0, 0, reported=False)
+        else:
+            self._meter_fold(phase, *extracted, reported=True)
+
+    def _meter_external(self, usage: Any, phase: str) -> None:
+        """Record a model call made OUTSIDE the funnel whose usage
+        arrived as a counters dict (the reasoning review/revise calls,
+        via their status channel).  A missing/empty dict means the
+        call's cost was not reported — count it unreported."""
+        if self._meter is None:
+            return
+        if isinstance(usage, dict) and usage.get("calls"):
+            for bucket in (self._meter["totals"],
+                           self._meter["by_phase"].setdefault(
+                               phase, _blank_usage())):
+                bucket["calls"] += int(usage.get("calls") or 0)
+                bucket["prompt_tokens"] += int(
+                    usage.get("prompt_tokens") or 0)
+                bucket["completion_tokens"] += int(
+                    usage.get("completion_tokens") or 0)
+                bucket["total_tokens"] += int(
+                    usage.get("total_tokens") or 0)
+                bucket["usage_unreported"] += int(
+                    usage.get("usage_unreported") or 0)
+        else:
+            self._meter_fold(phase, 0, 0, 0, reported=False)
+
+    def _check_spend_cap(self) -> None:
+        """Raise _SpendCapExceeded when the metered total has
+        crossed the run's cap — called BEFORE issuing a model call,
+        so a capped run never pays for the call that would cross it
+        further.  No cap (or no active run) never raises."""
+        meter = self._meter
+        if meter is None:
+            return
+        cap = meter.get("cap")
+        if cap is None:
+            return
+        spent = meter["totals"]["total_tokens"]
+        if spent >= cap:
+            meter["capped"] = True
+            raise _SpendCapExceeded(
+                f"spend cap reached: {spent} tokens spent "
+                f"(cap {cap}) — run stopped before the next model call")
+
+    def _usage_snapshot(self) -> dict[str, Any]:
+        """The result-shaped usage dict for the active meter ({} when
+        no run metered).  by_phase is copied so later calls cannot
+        mutate a settled result."""
+        meter = self._meter
+        if meter is None:
+            return {}
+        out: dict[str, Any] = dict(meter["totals"])
+        out["by_phase"] = {phase: dict(counters)
+                           for phase, counters
+                           in meter["by_phase"].items()}
+        if meter.get("cap") is not None:
+            out["cap"] = meter["cap"]
+        if meter.get("capped"):
+            out["capped"] = True
+        return out
+
     def chat(self, prompt: str) -> Any:
         """Simple chat interface for tools like EditLoop and CodeExecutor."""
         from ..llm.base import Message
@@ -1050,7 +1207,11 @@ class CodingAgent:
         # (Fixed 2026-10-09: this used to pass raw dicts, but providers
         # read ``message.role`` / ``message.content`` as attributes — every
         # call fell into the router's error path.  Real Messages now.)
-        return self._brain().chat([Message.user(prompt)], task_kind="chat")
+        self._check_spend_cap()
+        response = self._brain().chat([Message.user(prompt)],
+                                      task_kind="chat")
+        self._meter_response(response, "chat")
+        return response
 
     def _brain(self) -> Any:
         """Lazy Brain over this agent's router.  Never raises."""
@@ -1105,15 +1266,20 @@ class CodingAgent:
         When routing is off (or the routed pick fails), this is exactly
         ``self.router.chat(...)`` — the existing behavior, untouched.
         """
+        self._check_spend_cap()
         target = self._select_model(phase)
         if target is self.router:
             # Unrouted: the brain owns the chain — task-kind threading,
             # timeouts, the failure taxonomy, context fitting.
-            return self._brain().chat(messages, params, task_kind="coding", **kw)
+            resp = self._brain().chat(messages, params,
+                                      task_kind="coding", **kw)
+            self._meter_response(resp, phase)
+            return resp
         tier = "hard" if phase == "plan" else "medium"
         try:
             resp = target.chat(messages, params, **kw)
             if resp is not None and getattr(resp, "ok", False):
+                self._meter_response(resp, phase)
                 try:
                     from ..llm.router import log_llm_call
                     log_llm_call(
@@ -1131,10 +1297,63 @@ class CodingAgent:
             _log.warning("coding %s phase: provider %s raised (%s); "
                          "chain fallback",
                          phase, getattr(target, "name", "?"), exc)
-        return self._brain().chat(messages, params, task_kind="coding", **kw)
+        resp = self._brain().chat(messages, params, task_kind="coding",
+                                  **kw)
+        self._meter_response(resp, phase)
+        return resp
 
     # ── public ──────────────────────────────────────────────────────────────
     def run(
+        self,
+        task: str,
+        *,
+        filename: str = "main.py",
+        accept: str = "",
+        max_iterations: int = 5,
+        timeout: float = 60.0,
+        seed_code: str = "",
+        background_tests: bool = False,
+        test_cap_seconds: float = 900.0,
+        plan_mode: Any = "auto",
+        full_suite_gate: bool = False,
+        max_tokens: int | None = None,
+        _plan: list[dict[str, Any]] | None = None,
+    ) -> CodingResult:
+        """Run the surgical multi-file edit loop (audit Phase B).
+
+        Pass #65 (W7): every run is METERED — the token usage of
+        every model call the run makes (plan / draft / review /
+        revise) lands on ``CodingResult.usage`` with per-phase
+        attribution; calls whose provider reported no usage count as
+        ``usage_unreported``, never as invented numbers.  Metering
+        never blocks by itself.  ``max_tokens`` (default None = no
+        cap) optionally bounds the spend: once the metered total
+        crosses it, the loop stops BEFORE issuing the next model
+        call and settles honestly — a verify-green that already
+        stands (with no edit landed since) keeps its verdict with
+        the cap noted; anything else fails naming the cap and the
+        tokens spent, per-step status preserved.  The full loop
+        contract is documented on :meth:`_run_impl`.
+        """
+        if max_tokens is not None:
+            max_tokens = int(max_tokens)
+            if max_tokens < 0:
+                raise ValueError("max_tokens must be >= 0 or None")
+        self._meter_begin(max_tokens)
+        try:
+            result = self._run_impl(
+                task, filename=filename, accept=accept,
+                max_iterations=max_iterations, timeout=timeout,
+                seed_code=seed_code, background_tests=background_tests,
+                test_cap_seconds=test_cap_seconds, plan_mode=plan_mode,
+                full_suite_gate=full_suite_gate, _plan=_plan)
+        finally:
+            snapshot = self._usage_snapshot()
+            self._meter = None
+        result.usage = snapshot
+        return result
+
+    def _run_impl(
         self,
         task: str,
         *,
@@ -1260,8 +1479,22 @@ class CodingAgent:
         editor = EditLoop(agent=None, project_root=str(workdir))
 
         # ── plan step: which files change and why ──
-        plan = _plan if _plan is not None else self._plan_files(
-            draft_task, filename, workdir)
+        # Pass #65: the planner call is metered like every other call;
+        # a cap crossed before it (only possible at cap 0) settles the
+        # run before any step exists.
+        try:
+            plan = _plan if _plan is not None else self._plan_files(
+                draft_task, filename, workdir)
+        except _SpendCapExceeded as exc:
+            return CodingResult(
+                ok=False,
+                iterations=0,
+                error=str(exc),
+                seconds=time.perf_counter() - started,
+                steps=[],
+                replans=0,
+                context_packs=[],
+            )
         # Pass #60 (W4): normalize whatever plan arrived (planner output,
         # the fallback, or an approved plan replayed by execute_plan)
         # into STEP specs — ids, instructions, dependencies, acceptance.
@@ -1383,6 +1616,14 @@ class CodingAgent:
                     if spent.get(rel, 0) == 0:
                         status = "skipped"
                         dead = _dep_dead(spec)
+                        if dead and dead in cap_stop["steps"]:
+                            # The dependency itself was only skipped
+                            # because the cap stopped the run — the
+                            # cap is this step's root cause too, not
+                            # the dependency.  (A dependency that
+                            # failed on its own merits keeps the
+                            # dependency reason below.)
+                            dead = ""
                         if dead:
                             reason = (f"dependency {dead} "
                                       f"({by_id[dead]['spec']['path']}) "
@@ -1390,6 +1631,11 @@ class CodingAgent:
                         elif green:
                             reason = ("not attempted — verification "
                                       "passed without it")
+                        elif cap_stop["hit"]:
+                            reason = ("not attempted — spend cap "
+                                      "reached "
+                                      f"({cap_stop['message']})")
+                            cap_stop["steps"].add(spec["id"])
                         else:
                             reason = ("run ended before this step "
                                       "was attempted")
@@ -1453,448 +1699,530 @@ class CodingAgent:
         review_notes: list[str] = []
         gate_available = True
         gate_depth = ""
+        # Pass #65 (W7): cap-stop bookkeeping.  cap_stop is read by
+        # _finalize_steps (defined above; closures resolve at call
+        # time) so unattempted steps name the cap as their reason.
+        # green_state snapshots the latest round that completed
+        # verify-green + lint, taken BEFORE the Phase C gate review;
+        # dirty_since_green tracks whether any edit has landed since
+        # — together they decide whether a cap stop may keep the
+        # earned verdict (see the loop's _SpendCapExceeded settle).
+        cap_stop: dict[str, Any] = {"hit": False, "message": "",
+                                    "steps": set()}
+        green_state: dict[str, Any] | None = None
+        dirty_since_green = False
 
-        for attempt in range(1, rounds + 1):
-            self._last_iterations = attempt  # item #17: checkpoint state
-            if attempt > 1:
-                # Pass #60 (W4): fail streaks from last round's attempts
-                # — a step attempted and still carrying an error grows
-                # its streak; a clean attempt resets it.
-                for rel in prev_attempted:
-                    rec = step_state.get(rel)
-                    if rec is not None:
-                        rec["fail_streak"] = (
-                            rec["fail_streak"] + 1
-                            if file_errors.get(rel) else 0)
-                # Pass #60 (W4): a step failing round after round means
-                # the PLAN is wrong, not just the code — re-plan the
-                # remaining steps ONCE instead of grinding the dead plan
-                # to exhaustion.  Never inside an approved plan's scope
-                # (execute_plan): that scope is the owner's, not the
-                # agent's to redraw.
-                if (not replan_tried and self._plan_scope is None
-                        and attempt < rounds):
-                    failing = [rec for rec in step_history
-                               if rec["status"] == "planned"
-                               and rec["fail_streak"] >= 2]
-                    if failing:
-                        replan_tried = True
-                        worst = max(failing,
-                                    key=lambda r: r["fail_streak"])
-                        wspec = worst["spec"]
-                        replan_task = (
-                            draft_task
-                            + "\n\nRE-PLAN: the previous step plan is "
-                            "failing — step "
-                            f"{wspec['id']} ({wspec['path']}) has failed "
-                            f"{worst['fail_streak']} rounds in a row. "
-                            "Latest error:\n"
-                            + str(file_errors.get(wspec["path"])
-                                  or last_error)[-800:]
-                            + "\nFiles already changed on disk: "
-                            + (", ".join(changed) or "none")
-                            + "\nProduce a REVISED step plan for the "
-                            "REMAINING work: keep steps whose files are "
-                            "already changed and working; replace or "
-                            "split the failing approach instead of "
-                            "repeating it.")
-                        new_specs = self._plan_steps_model(
-                            replan_task, filename, workdir,
-                            used_ids=set(by_id))
-                        if new_specs:
-                            new_paths = {s["path"] for s in new_specs}
-                            for rec in step_history:
-                                if (rec["status"] == "planned"
-                                        and rec["spec"]["path"]
-                                        not in new_paths
-                                        and rec["spec"]["path"]
-                                        not in changed):
-                                    rec["status"] = "skipped"
-                                    rec["reason"] = ("superseded by "
-                                                      "re-plan")
-                            for spec in new_specs:
-                                rel = spec["path"]
-                                rec = step_state.get(rel)
-                                if rec is None:
-                                    _register_steps([spec])
-                                else:
-                                    by_id.pop(rec["spec"]["id"], None)
-                                    rec["spec"] = spec
-                                    rec["fail_streak"] = 0
-                                    by_id[spec["id"]] = rec
-                                file_errors.setdefault(rel, "")
-                                if rel not in texts:
-                                    texts.update(
-                                        self._explore_reads([spec]))
-                            plan = new_specs
-                            self._last_scope = [s["path"] for s in plan]
-                            replans = 1
-                            _log.info(
-                                "coding agent re-planned after step %s "
-                                "failed %d rounds", wspec["id"],
-                                worst["fail_streak"])
-            if not any(step_state[spec["path"]]["status"] == "planned"
-                       and _can_draft(spec["path"]) and not _dep_dead(spec)
-                       for spec in plan):
-                break  # every step spent, done, or dependency-blocked
-            spent_before = dict(spent)
-            diffs: dict[str, str] = {}
-            touched: list[str] = []
-            for spec in plan:
-                rel = spec["path"]
-                rec = step_state[rel]
-                if rec["status"] != "planned":
-                    continue
-                dead = _dep_dead(spec)
-                if dead:
-                    rec["status"] = "skipped"
-                    rec["reason"] = (
-                        f"dependency {dead} "
-                        f"({by_id[dead]['spec']['path']}) did not complete")
-                    continue
-                if not _can_draft(rel):
-                    continue
-                path = self._resolve(rel)
-                before = path.read_text(encoding="utf-8") if path.is_file() else ""
-                is_new = texts[rel] is None or spec.get("new_file")
-                if is_new:
-                    # New files may still be drafted whole.
-                    seeded = bool(seed_code) and rel == filename and attempt == 1
-                    code = self._draft(
-                        _step_task(draft_task, spec), rel,
-                        (seed_code if seeded else texts[rel] or ""),
-                        file_errors[rel] or last_error, attempt, seeded=seeded)
-                    if not code:
-                        rec["status"] = "failed"
-                        rec["reason"] = ("model returned no code for "
-                                         "this step")
-                        rb_note = self._rollback_after_failure(changed)
-                        return CodingResult(
-                            ok=False,
-                            iterations=attempt - 1,
-                            error=("model returned no code block (check the "
-                                   "active provider in /status)") + rb_note,
-                            seconds=time.perf_counter() - started,
-                            steps=_finalize_steps(False),
-                            replans=replans,
-                            context_packs=context_packs,
-                        )
-                    if attempt == 1:
-                        code = self._reason_review_code(draft_task, code)
-                    path.write_text(code, encoding="utf-8")
-                    texts[rel] = code
-                else:
-                    change = self._draft_change(
-                        _step_task(draft_task, spec), rel, texts[rel] or "",
-                        file_errors[rel] or last_error, attempt, workdir,
-                        step=spec)
-                    # Pass #64: record the pack that fed this edit call
-                    # on the run (trimming/fallbacks stay visible).
-                    pack = self._last_context_pack
-                    self._last_context_pack = None
-                    if pack is not None:
-                        context_packs.append(pack.metadata())
-                    if change is None:
-                        file_errors[rel] = "model returned no usable edits"
-                        _spend(rel)
+        try:
+            for attempt in range(1, rounds + 1):
+                self._last_iterations = attempt  # item #17: checkpoint state
+                if attempt > 1:
+                    # Pass #60 (W4): fail streaks from last round's attempts
+                    # — a step attempted and still carrying an error grows
+                    # its streak; a clean attempt resets it.
+                    for rel in prev_attempted:
+                        rec = step_state.get(rel)
+                        if rec is not None:
+                            rec["fail_streak"] = (
+                                rec["fail_streak"] + 1
+                                if file_errors.get(rel) else 0)
+                    # Pass #60 (W4): a step failing round after round means
+                    # the PLAN is wrong, not just the code — re-plan the
+                    # remaining steps ONCE instead of grinding the dead plan
+                    # to exhaustion.  Never inside an approved plan's scope
+                    # (execute_plan): that scope is the owner's, not the
+                    # agent's to redraw.
+                    if (not replan_tried and self._plan_scope is None
+                            and attempt < rounds):
+                        failing = [rec for rec in step_history
+                                   if rec["status"] == "planned"
+                                   and rec["fail_streak"] >= 2]
+                        if failing:
+                            replan_tried = True
+                            worst = max(failing,
+                                        key=lambda r: r["fail_streak"])
+                            wspec = worst["spec"]
+                            replan_task = (
+                                draft_task
+                                + "\n\nRE-PLAN: the previous step plan is "
+                                "failing — step "
+                                f"{wspec['id']} ({wspec['path']}) has failed "
+                                f"{worst['fail_streak']} rounds in a row. "
+                                "Latest error:\n"
+                                + str(file_errors.get(wspec["path"])
+                                      or last_error)[-800:]
+                                + "\nFiles already changed on disk: "
+                                + (", ".join(changed) or "none")
+                                + "\nProduce a REVISED step plan for the "
+                                "REMAINING work: keep steps whose files are "
+                                "already changed and working; replace or "
+                                "split the failing approach instead of "
+                                "repeating it.")
+                            new_specs = self._plan_steps_model(
+                                replan_task, filename, workdir,
+                                used_ids=set(by_id))
+                            if new_specs:
+                                new_paths = {s["path"] for s in new_specs}
+                                for rec in step_history:
+                                    if (rec["status"] == "planned"
+                                            and rec["spec"]["path"]
+                                            not in new_paths
+                                            and rec["spec"]["path"]
+                                            not in changed):
+                                        rec["status"] = "skipped"
+                                        rec["reason"] = ("superseded by "
+                                                          "re-plan")
+                                for spec in new_specs:
+                                    rel = spec["path"]
+                                    rec = step_state.get(rel)
+                                    if rec is None:
+                                        _register_steps([spec])
+                                    else:
+                                        by_id.pop(rec["spec"]["id"], None)
+                                        rec["spec"] = spec
+                                        rec["fail_streak"] = 0
+                                        by_id[spec["id"]] = rec
+                                    file_errors.setdefault(rel, "")
+                                    if rel not in texts:
+                                        texts.update(
+                                            self._explore_reads([spec]))
+                                plan = new_specs
+                                self._last_scope = [s["path"] for s in plan]
+                                replans = 1
+                                _log.info(
+                                    "coding agent re-planned after step %s "
+                                    "failed %d rounds", wspec["id"],
+                                    worst["fail_streak"])
+                if not any(step_state[spec["path"]]["status"] == "planned"
+                           and _can_draft(spec["path"]) and not _dep_dead(spec)
+                           for spec in plan):
+                    break  # every step spent, done, or dependency-blocked
+                spent_before = dict(spent)
+                diffs: dict[str, str] = {}
+                touched: list[str] = []
+                for spec in plan:
+                    rel = spec["path"]
+                    rec = step_state[rel]
+                    if rec["status"] != "planned":
                         continue
-                    kind, payload = change
-                    if kind == "patch":
-                        # Unified-diff protocol: the model shipped a whole
-                        # diff (possibly multi-file); apply it directly.
-                        patch_ok, patch_err = self._apply_model_patch(
-                            payload, workdir, texts, diffs, touched, changed)
-                        _spend(rel)
-                        if not patch_ok:
-                            file_errors[rel] = patch_err
+                    dead = _dep_dead(spec)
+                    if dead:
+                        rec["status"] = "skipped"
+                        rec["reason"] = (
+                            f"dependency {dead} "
+                            f"({by_id[dead]['spec']['path']}) did not complete")
+                        continue
+                    if not _can_draft(rel):
+                        continue
+                    path = self._resolve(rel)
+                    before = path.read_text(encoding="utf-8") if path.is_file() else ""
+                    is_new = texts[rel] is None or spec.get("new_file")
+                    if is_new:
+                        # New files may still be drafted whole.
+                        seeded = bool(seed_code) and rel == filename and attempt == 1
+                        code = self._draft(
+                            _step_task(draft_task, spec), rel,
+                            (seed_code if seeded else texts[rel] or ""),
+                            file_errors[rel] or last_error, attempt, seeded=seeded)
+                        if not code:
+                            rec["status"] = "failed"
+                            rec["reason"] = ("model returned no code for "
+                                             "this step")
+                            rb_note = self._rollback_after_failure(changed)
+                            return CodingResult(
+                                ok=False,
+                                iterations=attempt - 1,
+                                error=("model returned no code block (check the "
+                                       "active provider in /status)") + rb_note,
+                                seconds=time.perf_counter() - started,
+                                steps=_finalize_steps(False),
+                                replans=replans,
+                                context_packs=context_packs,
+                            )
+                        if attempt == 1:
+                            code = self._reason_review_code(draft_task, code)
+                        path.write_text(code, encoding="utf-8")
+                        texts[rel] = code
+                    else:
+                        change = self._draft_change(
+                            _step_task(draft_task, spec), rel, texts[rel] or "",
+                            file_errors[rel] or last_error, attempt, workdir,
+                            step=spec)
+                        # Pass #64: record the pack that fed this edit call
+                        # on the run (trimming/fallbacks stay visible).
+                        pack = self._last_context_pack
+                        self._last_context_pack = None
+                        if pack is not None:
+                            context_packs.append(pack.metadata())
+                        if change is None:
+                            file_errors[rel] = "model returned no usable edits"
+                            _spend(rel)
+                            continue
+                        kind, payload = change
+                        if kind == "patch":
+                            # Unified-diff protocol: the model shipped a whole
+                            # diff (possibly multi-file); apply it directly.
+                            patch_ok, patch_err = self._apply_model_patch(
+                                payload, workdir, texts, diffs, touched, changed)
+                            _spend(rel)
+                            if not patch_ok:
+                                file_errors[rel] = patch_err
+                                continue
+                            file_errors[rel] = ""
+                            if green_state is not None:
+                                dirty_since_green = True
+                            # Phase B: the harsh reviewer runs over patch diffs
+                            # too, not just surgical-edit diffs.  Pass #63: it
+                            # runs ALWAYS; an unavailable reviewer is noted on
+                            # the result, never mistaken for a clean review.
+                            if diffs.get(rel):
+                                flaws = self._review_flaws(
+                                    draft_task, diffs[rel])
+                                last = self._last_review
+                                if last is not None and not last.available:
+                                    note = (f"per-diff review unavailable "
+                                            f"for {rel}: {last.error}")
+                                    review_notes.append(note)
+                                    _log.warning("coding agent: %s", note)
+                                if flaws:
+                                    file_errors[rel] = (
+                                        "reviewer found flaws in the applied "
+                                        "diff: " + "; ".join(flaws))
+                            continue
+                        edits = payload
+                        if not edits:
+                            continue  # model judges no change needed
+                        apply_errors: list[str] = []
+                        for edit in edits:
+                            try:
+                                editor.surgical_replace(
+                                    rel, edit["old_text"], edit["new_text"])
+                            except (ValueError, FileNotFoundError) as exc:
+                                apply_errors.append(str(exc))
+                        texts[rel] = (path.read_text(encoding="utf-8")
+                                      if path.is_file() else "")
+                        if apply_errors:
+                            file_errors[rel] = ("edit application failed: "
+                                               + "; ".join(apply_errors))
+                            _spend(rel)
                             continue
                         file_errors[rel] = ""
-                        # Phase B: the harsh reviewer runs over patch diffs
-                        # too, not just surgical-edit diffs.  Pass #63: it
-                        # runs ALWAYS; an unavailable reviewer is noted on
-                        # the result, never mistaken for a clean review.
-                        if diffs.get(rel):
-                            flaws = self._review_flaws(
-                                draft_task, diffs[rel])
-                            last = self._last_review
-                            if last is not None and not last.available:
-                                note = (f"per-diff review unavailable "
-                                        f"for {rel}: {last.error}")
-                                review_notes.append(note)
-                                _log.warning("coding agent: %s", note)
-                            if flaws:
-                                file_errors[rel] = (
-                                    "reviewer found flaws in the applied "
-                                    "diff: " + "; ".join(flaws))
+                    _spend(rel)
+                    after = path.read_text(encoding="utf-8") if path.is_file() else ""
+                    diff_text = _unified_diff(before, after, rel)
+                    if not diff_text.strip():
                         continue
-                    edits = payload
-                    if not edits:
-                        continue  # model judges no change needed
-                    apply_errors: list[str] = []
-                    for edit in edits:
-                        try:
-                            editor.surgical_replace(
-                                rel, edit["old_text"], edit["new_text"])
-                        except (ValueError, FileNotFoundError) as exc:
-                            apply_errors.append(str(exc))
-                    texts[rel] = (path.read_text(encoding="utf-8")
-                                  if path.is_file() else "")
-                    if apply_errors:
-                        file_errors[rel] = ("edit application failed: "
-                                           + "; ".join(apply_errors))
-                        _spend(rel)
-                        continue
-                    file_errors[rel] = ""
-                _spend(rel)
-                after = path.read_text(encoding="utf-8") if path.is_file() else ""
-                diff_text = _unified_diff(before, after, rel)
-                if not diff_text.strip():
-                    continue
-                diffs[rel] = diff_text
-                touched.append(rel)
-                if rel not in changed:
-                    changed.append(rel)
-                # Phase B: the harsh reviewer runs over EVERY applied diff,
-                # not just attempt-1 new-file drafts. Flaws become next
-                # round's fix prompt for that file.  Pass #63: an
-                # unavailable reviewer is noted, never a silent clean pass.
-                flaws = self._review_flaws(draft_task, diff_text)
-                last = self._last_review
-                if last is not None and not last.available:
-                    note = (f"per-diff review unavailable for {rel}: "
-                            f"{last.error}")
-                    review_notes.append(note)
-                    _log.warning("coding agent: %s", note)
-                if flaws:
-                    file_errors[rel] = (
-                        "reviewer found flaws in the applied diff: "
-                        + "; ".join(flaws))
+                    if green_state is not None:
+                        dirty_since_green = True
+                    diffs[rel] = diff_text
+                    touched.append(rel)
+                    if rel not in changed:
+                        changed.append(rel)
+                    # Phase B: the harsh reviewer runs over EVERY applied diff,
+                    # not just attempt-1 new-file drafts. Flaws become next
+                    # round's fix prompt for that file.  Pass #63: an
+                    # unavailable reviewer is noted, never a silent clean pass.
+                    flaws = self._review_flaws(draft_task, diff_text)
+                    last = self._last_review
+                    if last is not None and not last.available:
+                        note = (f"per-diff review unavailable for {rel}: "
+                                f"{last.error}")
+                        review_notes.append(note)
+                        _log.warning("coding agent: %s", note)
+                    if flaws:
+                        file_errors[rel] = (
+                            "reviewer found flaws in the applied diff: "
+                            + "; ".join(flaws))
 
-            # Pass #60: which steps actually drafted this round — the
-            # next round's fail-streak update reads this.  Recorded
-            # BEFORE verify so the lint/review continue paths below
-            # cannot skip it.
-            prev_attempted = {rel for rel, n in spent.items()
-                              if n > spent_before.get(rel, 0)}
+                # Pass #60: which steps actually drafted this round — the
+                # next round's fail-streak update reads this.  Recorded
+                # BEFORE verify so the lint/review continue paths below
+                # cannot skip it.
+                prev_attempted = {rel for rel, n in spent.items()
+                                  if n > spent_before.get(rel, 0)}
 
-            # ── verify ──
-            bg_lint_res: Any = None
-            if use_runner:
-                if background_tests:
-                    # Phase D: the suite runs in the background while the
-                    # agent does the lint gate concurrently (prep work
-                    # instead of blocking); poll surfaces live progress.
-                    from .bg_tests import background_run_tests
+                # ── verify ──
+                bg_lint_res: Any = None
+                if use_runner:
+                    if background_tests:
+                        # Phase D: the suite runs in the background while the
+                        # agent does the lint gate concurrently (prep work
+                        # instead of blocking); poll surfaces live progress.
+                        from .bg_tests import background_run_tests
 
-                    bg = background_run_tests(
-                        str(workdir), cap_seconds=test_cap_seconds)
-                    if isinstance(bg, dict):
-                        tres = bg  # honest skip: nothing matched
+                        bg = background_run_tests(
+                            str(workdir), cap_seconds=test_cap_seconds)
+                        if isinstance(bg, dict):
+                            tres = bg  # honest skip: nothing matched
+                        else:
+                            bg_lint_res = _lint_mod.lint(
+                                changed or [filename], repo=str(workdir))
+                            tres = bg.wait(on_progress=_bg_progress)
                     else:
-                        bg_lint_res = _lint_mod.lint(
-                            changed or [filename], repo=str(workdir))
-                        tres = bg.wait(on_progress=_bg_progress)
-                else:
-                    # Pass #62: selection follows the work — the runner
-                    # gets the run's accumulated changed files (this
-                    # round's touches included) instead of re-deriving
-                    # the set from git, so selection also works in
-                    # non-git workdirs; its import-graph ∪ stem picks
-                    # cover those files.  The background path above
-                    # keeps targeting the whole tests directory by
-                    # design and needs no scoping.
-                    tres = _pytest_mod.run_tests(
-                        repo=str(workdir),
-                        timeout=max(timeout * 5.0, 60.0),
-                        changed_files=list(changed) or None,
-                        full_suite_gate=full_suite_gate)
-                # Pass #58: ZERO executed tests is never green.  The
-                # runner reports an honest skip (ok=True, passed=0) when
-                # its stem-heuristic selection matches nothing — the
-                # loop used to certify that as a pass.  An explicit
-                # accept command can't occur here (use_runner is False
-                # whenever one was given, so the accept branch below is
-                # already the (a) fallback for those runs).  Otherwise
-                # make ONE widened attempt: the repo's test directories
-                # wholesale instead of the targeted selection.  The
-                # background path needs no widening — it already targets
-                # the whole tests directory (or ".").  Still nothing →
-                # the round fails honestly as UNVERIFIED below.
-                if _tests_nothing_ran(tres) and not background_tests:
-                    wide_paths = [d for d in ("tests", "test")
-                                  if (workdir / d).is_dir()] or ["."]
-                    wide = _pytest_mod.run_tests(
-                        paths=wide_paths, repo=str(workdir),
-                        timeout=max(timeout * 5.0, 60.0))
-                    if not _tests_nothing_ran(wide):
-                        tres = wide
-                if _tests_nothing_ran(tres):
-                    green = False
-                    verification = "unverified"
-                    verify_err = (
-                        "UNVERIFIED — no tests ran for this change: "
-                        + str(tres.get("note")
-                              or "the runner matched no tests")
-                        + ". Zero executed tests cannot certify a "
-                        "change; this round is NOT green. Add tests "
-                        "covering the changed files or pass an explicit "
-                        "accept command.")
-                    verify_out = (verify_err + "\n"
-                                  + _pytest_mod.format_test_result(tres))
-                else:
-                    green = (tres["ok"] and not tres["failed"]
-                             and not tres["errors"])
-                    verification = "tests"
-                    # Pass #62: keep the gate's distinct verdict for
-                    # the result (format_test_result already renders
-                    # its line into verify_out).  It never touches
-                    # `green` — the selection verdict stands alone.
-                    if isinstance(tres.get("final_gate"), dict) \
-                            and tres["final_gate"]:
-                        final_gate = tres["final_gate"]
-                    verify_out = _pytest_mod.format_test_result(tres)
-                    verify_err = "" if green else verify_out
-            else:
-                raw = self._run(accept, workdir, timeout)
-                out_text = (raw.get("stdout") or "").strip()
-                # Real acceptance: exit 0 AND (meaningful stdout OR a
-                # substantive artifact).  An empty main.py that exits 0
-                # with no output is FAILURE, not green — never report
-                # "0 tests, empty file" as success.
-                ran_something = bool(out_text)
-                made_artifact = self._substantive_artifact(
-                    changed or [filename], workdir)
-                green = (raw["exit_code"] == 0 and not raw["timed_out"]
-                         and (ran_something or made_artifact))
-                verify_out = (raw.get("stdout") or "")[-4000:]
-                verify_err = ((raw.get("stderr") or raw.get("stdout")
-                               or "non-zero exit"))[-4000:]
-                if not green:
-                    if raw["exit_code"] == 0 and not raw["timed_out"]:
+                        # Pass #62: selection follows the work — the runner
+                        # gets the run's accumulated changed files (this
+                        # round's touches included) instead of re-deriving
+                        # the set from git, so selection also works in
+                        # non-git workdirs; its import-graph ∪ stem picks
+                        # cover those files.  The background path above
+                        # keeps targeting the whole tests directory by
+                        # design and needs no scoping.
+                        tres = _pytest_mod.run_tests(
+                            repo=str(workdir),
+                            timeout=max(timeout * 5.0, 60.0),
+                            changed_files=list(changed) or None,
+                            full_suite_gate=full_suite_gate)
+                    # Pass #58: ZERO executed tests is never green.  The
+                    # runner reports an honest skip (ok=True, passed=0) when
+                    # its stem-heuristic selection matches nothing — the
+                    # loop used to certify that as a pass.  An explicit
+                    # accept command can't occur here (use_runner is False
+                    # whenever one was given, so the accept branch below is
+                    # already the (a) fallback for those runs).  Otherwise
+                    # make ONE widened attempt: the repo's test directories
+                    # wholesale instead of the targeted selection.  The
+                    # background path needs no widening — it already targets
+                    # the whole tests directory (or ".").  Still nothing →
+                    # the round fails honestly as UNVERIFIED below.
+                    if _tests_nothing_ran(tres) and not background_tests:
+                        wide_paths = [d for d in ("tests", "test")
+                                      if (workdir / d).is_dir()] or ["."]
+                        wide = _pytest_mod.run_tests(
+                            paths=wide_paths, repo=str(workdir),
+                            timeout=max(timeout * 5.0, 60.0))
+                        if not _tests_nothing_ran(wide):
+                            tres = wide
+                    if _tests_nothing_ran(tres):
+                        green = False
+                        verification = "unverified"
                         verify_err = (
-                            "accept command exited 0 but produced no "
-                            "output and no substantive artifact "
-                            "(empty/trivial files) — not accepted as "
-                            "success")
-                        verify_out = (f"empty success rejected:\n{verify_err}")
+                            "UNVERIFIED — no tests ran for this change: "
+                            + str(tres.get("note")
+                                  or "the runner matched no tests")
+                            + ". Zero executed tests cannot certify a "
+                            "change; this round is NOT green. Add tests "
+                            "covering the changed files or pass an explicit "
+                            "accept command.")
+                        verify_out = (verify_err + "\n"
+                                      + _pytest_mod.format_test_result(tres))
                     else:
-                        verify_out = (f"accept command failed "
-                                      f"(exit {raw.get('exit_code')}):\n{verify_err}")
-                verification = verify_mode
-                if verify_mode == "smoke":
-                    # No tests exist here and nobody gave an accept
-                    # command: the file was EXECUTED, not tested.  Say
-                    # so on the result instead of letting a green read
-                    # as test-verified (pass #58).
-                    verify_out += (
-                        "\n[verification: smoke run only — this workdir "
-                        "has no tests and no accept command was given; "
-                        "the file was executed, not tested]")
-            vresult = {"exit_code": 0 if green else 1, "timed_out": False,
-                       "stdout": verify_out, "stderr": verify_err}
-            for rel in touched:
-                self._journal(task, rel, attempt,
-                              diffs.get(rel, "")[:60000], vresult)
-            all_diffs.update({rel: d for rel, d in diffs.items() if d.strip()})
-            _log.info("coding agent round %d: %s%s", attempt,
-                      "green" if green else "failing",
-                      "" if green else " — fixing")
+                        green = (tres["ok"] and not tres["failed"]
+                                 and not tres["errors"])
+                        verification = "tests"
+                        # Pass #62: keep the gate's distinct verdict for
+                        # the result (format_test_result already renders
+                        # its line into verify_out).  It never touches
+                        # `green` — the selection verdict stands alone.
+                        if isinstance(tres.get("final_gate"), dict) \
+                                and tres["final_gate"]:
+                            final_gate = tres["final_gate"]
+                        verify_out = _pytest_mod.format_test_result(tres)
+                        verify_err = "" if green else verify_out
+                else:
+                    raw = self._run(accept, workdir, timeout)
+                    out_text = (raw.get("stdout") or "").strip()
+                    # Real acceptance: exit 0 AND (meaningful stdout OR a
+                    # substantive artifact).  An empty main.py that exits 0
+                    # with no output is FAILURE, not green — never report
+                    # "0 tests, empty file" as success.
+                    ran_something = bool(out_text)
+                    made_artifact = self._substantive_artifact(
+                        changed or [filename], workdir)
+                    green = (raw["exit_code"] == 0 and not raw["timed_out"]
+                             and (ran_something or made_artifact))
+                    verify_out = (raw.get("stdout") or "")[-4000:]
+                    verify_err = ((raw.get("stderr") or raw.get("stdout")
+                                   or "non-zero exit"))[-4000:]
+                    if not green:
+                        if raw["exit_code"] == 0 and not raw["timed_out"]:
+                            verify_err = (
+                                "accept command exited 0 but produced no "
+                                "output and no substantive artifact "
+                                "(empty/trivial files) — not accepted as "
+                                "success")
+                            verify_out = (f"empty success rejected:\n{verify_err}")
+                        else:
+                            verify_out = (f"accept command failed "
+                                          f"(exit {raw.get('exit_code')}):\n{verify_err}")
+                    verification = verify_mode
+                    if verify_mode == "smoke":
+                        # No tests exist here and nobody gave an accept
+                        # command: the file was EXECUTED, not tested.  Say
+                        # so on the result instead of letting a green read
+                        # as test-verified (pass #58).
+                        verify_out += (
+                            "\n[verification: smoke run only — this workdir "
+                            "has no tests and no accept command was given; "
+                            "the file was executed, not tested]")
+                vresult = {"exit_code": 0 if green else 1, "timed_out": False,
+                           "stdout": verify_out, "stderr": verify_err}
+                for rel in touched:
+                    self._journal(task, rel, attempt,
+                                  diffs.get(rel, "")[:60000], vresult)
+                all_diffs.update({rel: d for rel, d in diffs.items() if d.strip()})
+                _log.info("coding agent round %d: %s%s", attempt,
+                          "green" if green else "failing",
+                          "" if green else " — fixing")
 
-            if green:
-                # ── lint gate: runs AFTER tests go green; lint failures
-                # become fix-iterations exactly like test failures.  In
-                # background mode it already ran concurrently with the
-                # suite — reuse it instead of running it twice. ──
-                lint_res = (bg_lint_res if bg_lint_res is not None
-                            else _lint_mod.lint(changed or [filename],
-                                                repo=str(workdir)))
-                if not lint_res["ruff_installed"]:
-                    _log.info("ruff not installed — lint gate skipped "
-                              "(honest skip, never a silent pass)")
-                elif not lint_res["ok"]:
-                    last_error = _format_lint_result(lint_res)
-                    for rel in changed:
-                        file_errors[rel] = last_error
-                    for rel in touched:
-                        self._journal(task, rel, attempt,
-                                      diffs.get(rel, "")[:60000],
-                                      {"exit_code": 1, "timed_out": False,
-                                       "stdout": "", "stderr": last_error})
-                    continue
-                # ── Phase C: diff-review gate.  The critic reads the FULL
-                # multi-file diff; its objections become one more targeted
-                # fix iteration (max 2 review rounds — never infinite).
-                gate_flaws: list[str] = []
-                if changed:
-                    full_diff = "\n".join(
-                        all_diffs.get(rel, "") for rel in changed
-                        if all_diffs.get(rel))
-                    if full_diff.strip():
-                        gate_flaws = self._review_flaws(
-                            draft_task, full_diff, focus=_DIFF_REVIEW_FOCUS)
-                        # Pass #63: the gate always RUNS on a real diff
-                        # now — record whether it produced a verdict.  An
-                        # unavailable gate ships the green diff WITHOUT a
-                        # clean-review claim (see the result below).
-                        last = self._last_review
-                        if last is not None:
-                            gate_available = last.available
-                            gate_depth = last.depth
-                            if not last.available:
-                                review_notes.append(
-                                    "diff-review gate unavailable: "
-                                    f"{last.error}")
-                if gate_flaws:
-                    review_objections.extend(gate_flaws)
-                    review_rounds += 1
-                    if review_rounds < 2:
-                        objection_block = (
-                            "CODE REVIEW objections — address EACH with a "
-                            "minimal edit:\n- " + "\n- ".join(gate_flaws))
+                if green:
+                    # ── lint gate: runs AFTER tests go green; lint failures
+                    # become fix-iterations exactly like test failures.  In
+                    # background mode it already ran concurrently with the
+                    # suite — reuse it instead of running it twice. ──
+                    lint_res = (bg_lint_res if bg_lint_res is not None
+                                else _lint_mod.lint(changed or [filename],
+                                                    repo=str(workdir)))
+                    if not lint_res["ruff_installed"]:
+                        _log.info("ruff not installed — lint gate skipped "
+                                  "(honest skip, never a silent pass)")
+                    elif not lint_res["ok"]:
+                        last_error = _format_lint_result(lint_res)
                         for rel in changed:
-                            file_errors[rel] = objection_block
-                            self._journal(
-                                task, rel, attempt,
-                                all_diffs.get(rel, "")[:60000],
-                                {"exit_code": 1, "timed_out": False,
-                                 "stdout": "",
-                                 "stderr": (f"code-review round "
-                                            f"{review_rounds} objections:\n"
-                                            f"{objection_block}")})
-                        _log.info("code-review round %d found %d flaw(s); "
-                                  "reworking", review_rounds, len(gate_flaws))
+                            file_errors[rel] = last_error
+                        for rel in touched:
+                            self._journal(task, rel, attempt,
+                                          diffs.get(rel, "")[:60000],
+                                          {"exit_code": 1, "timed_out": False,
+                                           "stdout": "", "stderr": last_error})
                         continue
-                    # critic never approved and the 2-round budget is spent:
-                    # ship the green diff WITH the objections attached —
-                    # never a third rework round, never a hang.
-                    gate_exhausted = True
-                    break
-                # closed loop (wave 66): distill per changed file.
-                for rel in changed:
-                    self._distill_session(task, rel, attempt)
+                    # Pass #65: a verify-green now STANDS — snapshot it
+                    # before the gate review spends anything, so a cap
+                    # stop during the gate (or during a later rework
+                    # round) can settle on the earned verdict whenever no
+                    # edit has landed since the snapshot.
+                    green_state = {
+                        "attempt": attempt,
+                        "files": list(changed or [filename]),
+                        "output": verify_out[-2000:],
+                        "verification": verification,
+                        "final_gate": dict(final_gate),
+                    }
+                    dirty_since_green = False
+                    # ── Phase C: diff-review gate.  The critic reads the FULL
+                    # multi-file diff; its objections become one more targeted
+                    # fix iteration (max 2 review rounds — never infinite).
+                    gate_flaws: list[str] = []
+                    if changed:
+                        full_diff = "\n".join(
+                            all_diffs.get(rel, "") for rel in changed
+                            if all_diffs.get(rel))
+                        if full_diff.strip():
+                            gate_flaws = self._review_flaws(
+                                draft_task, full_diff, focus=_DIFF_REVIEW_FOCUS)
+                            # Pass #63: the gate always RUNS on a real diff
+                            # now — record whether it produced a verdict.  An
+                            # unavailable gate ships the green diff WITHOUT a
+                            # clean-review claim (see the result below).
+                            last = self._last_review
+                            if last is not None:
+                                gate_available = last.available
+                                gate_depth = last.depth
+                                if not last.available:
+                                    review_notes.append(
+                                        "diff-review gate unavailable: "
+                                        f"{last.error}")
+                    if gate_flaws:
+                        review_objections.extend(gate_flaws)
+                        review_rounds += 1
+                        if review_rounds < 2:
+                            objection_block = (
+                                "CODE REVIEW objections — address EACH with a "
+                                "minimal edit:\n- " + "\n- ".join(gate_flaws))
+                            for rel in changed:
+                                file_errors[rel] = objection_block
+                                self._journal(
+                                    task, rel, attempt,
+                                    all_diffs.get(rel, "")[:60000],
+                                    {"exit_code": 1, "timed_out": False,
+                                     "stdout": "",
+                                     "stderr": (f"code-review round "
+                                                f"{review_rounds} objections:\n"
+                                                f"{objection_block}")})
+                            _log.info("code-review round %d found %d flaw(s); "
+                                      "reworking", review_rounds, len(gate_flaws))
+                            continue
+                        # critic never approved and the 2-round budget is spent:
+                        # ship the green diff WITH the objections attached —
+                        # never a third rework round, never a hang.
+                        gate_exhausted = True
+                        break
+                    # closed loop (wave 66): distill per changed file.
+                    for rel in changed:
+                        self._distill_session(task, rel, attempt)
+                    return CodingResult(
+                        ok=True,
+                        iterations=attempt,
+                        files=changed or [filename],
+                        output=verify_out[-2000:],
+                        seconds=time.perf_counter() - started,
+                        review={"passed": not gate_flaws and gate_available,
+                                "rounds": review_rounds,
+                                "objections": review_objections,
+                                "available": gate_available,
+                                "depth": gate_depth,
+                                "notes": review_notes},
+                        verification=verification,
+                        steps=_finalize_steps(True),
+                        replans=replans,
+                        final_gate=final_gate,
+                        context_packs=context_packs,
+                    )
+                last_error = verify_err
+                for rel in touched:
+                    if not file_errors[rel]:
+                        file_errors[rel] = verify_err[-2000:]
+
+        except _SpendCapExceeded as exc:
+            # Pass #65 (W7): the cap stopped the run BEFORE the next
+            # model call.  Settle honestly: when a verify-green stands
+            # and no edit has landed since it was earned, the verdict
+            # is intact — finish green with the cap noted and the gate
+            # reported as not completed.  Otherwise fail naming the
+            # cap and the spend, roll the unverified changes back
+            # (the failed-run rule), and let _finalize_steps mark
+            # every unattempted step skipped-with-cap-reason.
+            cap_stop["hit"] = True
+            cap_stop["message"] = str(exc)
+            if green_state is not None and not dirty_since_green:
+                review_notes.append(
+                    "spend cap reached after a green verify — the "
+                    "diff-review gate did not complete; the verified "
+                    "verdict stands")
                 return CodingResult(
                     ok=True,
-                    iterations=attempt,
-                    files=changed or [filename],
-                    output=verify_out[-2000:],
+                    iterations=green_state["attempt"],
+                    files=green_state["files"],
+                    output=green_state["output"],
                     seconds=time.perf_counter() - started,
-                    review={"passed": not gate_flaws and gate_available,
+                    review={"passed": False,
                             "rounds": review_rounds,
                             "objections": review_objections,
-                            "available": gate_available,
+                            "available": False,
                             "depth": gate_depth,
                             "notes": review_notes},
-                    verification=verification,
+                    verification=green_state["verification"],
                     steps=_finalize_steps(True),
                     replans=replans,
-                    final_gate=final_gate,
+                    final_gate=green_state["final_gate"],
                     context_packs=context_packs,
                 )
-            last_error = verify_err
-            for rel in touched:
-                if not file_errors[rel]:
-                    file_errors[rel] = verify_err[-2000:]
-
+            error = str(exc) + self._rollback_after_failure(changed)
+            return CodingResult(
+                ok=False,
+                iterations=attempt,
+                error=error,
+                seconds=time.perf_counter() - started,
+                review={"passed": False,
+                        "rounds": review_rounds,
+                        "objections": review_objections,
+                        "available": gate_available,
+                        "depth": gate_depth,
+                        "notes": review_notes},
+                verification=verification,
+                steps=_finalize_steps(False),
+                replans=replans,
+                final_gate=final_gate,
+                context_packs=context_packs,
+            )
         if gate_exhausted:
             # Green diff, but the critic never approved within its 2-round
             # budget: ship it WITH the objections attached.
@@ -1936,16 +2264,25 @@ class CodingAgent:
             full_diff = "\n".join(all_diffs.get(rel, "") for rel in changed
                                   if all_diffs.get(rel))
             if full_diff.strip():
-                exhausted_objections = self._review_flaws(
-                    draft_task, full_diff, focus=_DIFF_REVIEW_FOCUS)
-                last = self._last_review
-                if last is not None:
-                    exhausted_available = last.available
-                    exhausted_depth = last.depth
-                    if not last.available:
-                        review_notes.append(
-                            "final review unavailable: "
-                            f"{last.error}")
+                # Pass #65: a cap stop here changes nothing about the
+                # verdict (the run already failed) — the final review
+                # is simply reported as not run, never as clean.
+                try:
+                    exhausted_objections = self._review_flaws(
+                        draft_task, full_diff, focus=_DIFF_REVIEW_FOCUS)
+                except _SpendCapExceeded:
+                    exhausted_available = False
+                    review_notes.append(
+                        "final review skipped: spend cap reached")
+                else:
+                    last = self._last_review
+                    if last is not None:
+                        exhausted_available = last.available
+                        exhausted_depth = last.depth
+                        if not last.available:
+                            review_notes.append(
+                                "final review unavailable: "
+                                f"{last.error}")
         return CodingResult(
             ok=False,
             iterations=rounds,
@@ -2431,7 +2768,16 @@ class CodingAgent:
         written against the pre-#63 signature (test fixtures patch
         review_text with (context, text, *, focus, max_calls)) rejects
         the extra kwarg — retry without it and take its verdict at face
-        value, exactly as the loop did before this pass."""
+        value, exactly as the loop did before this pass.
+
+        Pass #65: the spend cap is checked BEFORE the call (raising
+        _SpendCapExceeded out of the reviewer seam — run() settles
+        it), and the call's usage is metered from the status channel's
+        additive "usage" key; a real review that reported no usage
+        counts as one unreported call."""
+        # Outside the try below on purpose: the cap raise must reach
+        # run(), never be swallowed as "reviewer unavailable".
+        self._check_spend_cap()
         from .reasoning import review_text
 
         status: dict[str, Any] = {}
@@ -2451,8 +2797,11 @@ class CodingAgent:
             return [], False, f"reviewer failed: {exc}"[:200]
         if not status:
             # The call returned without reporting status (a stand-in
-            # reviewer): its verdict stands at face value.
+            # reviewer): its verdict stands at face value.  Nothing is
+            # metered — the stand-in's machinery is not a model call
+            # this loop can account for.
             return list(flaws or []), True, ""
+        self._meter_external(status.get("usage"), "review")
         return (list(flaws or []), bool(status.get("available")),
                 str(status.get("error") or ""))
 
@@ -2744,10 +3093,29 @@ class CodingAgent:
         if not flaws:
             return code
         _log.info("coding draft review found %d flaw(s); revising", len(flaws))
-        revised = revise_text(
-            self.context, code, flaws,
-            focus="the SAME format: exactly one fenced ```python block "
-                  "containing the whole file")
+        # Pass #65: the revision is a model call like any other —
+        # cap-checked before it is issued, metered after it returns
+        # (revise_text reports its usage on the status channel).  A
+        # pre-#65 revise double rejects the status kwarg — retry
+        # without it, unmetered, exactly the #63 compatibility seam.
+        self._check_spend_cap()
+        revise_status: dict[str, Any] = {}
+        try:
+            revised = revise_text(
+                self.context, code, flaws,
+                focus="the SAME format: exactly one fenced ```python block "
+                      "containing the whole file",
+                status=revise_status)
+        except TypeError as exc:
+            if "unexpected keyword argument 'status'" not in str(exc):
+                raise
+            revised = revise_text(
+                self.context, code, flaws,
+                focus="the SAME format: exactly one fenced ```python "
+                      "block containing the whole file")
+            revise_status = {}
+        if revise_status:
+            self._meter_external(revise_status.get("usage"), "revise")
         if revised == code:
             return code
         block = extract_code_block(revised)

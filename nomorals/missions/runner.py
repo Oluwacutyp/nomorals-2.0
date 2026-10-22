@@ -2721,7 +2721,8 @@ def _serialize_plan(plan: Any, *, plan_error: str = "") -> list[dict[str, Any]]:
             policy = {k: payload[k] for k in (
                 "optional", "on_failure", "retries", "retry_backoff_s",
                 "retry_on", "timeout_s", "schedule_timeout_s",
-                "needs_approval", "compensate", "accept") if k in payload}
+                "needs_approval", "compensate", "accept",
+                "max_tokens") if k in payload}
             if policy:
                 entry["policy"] = policy
         entries.append(entry)

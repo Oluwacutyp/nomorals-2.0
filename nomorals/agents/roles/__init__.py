@@ -269,7 +269,9 @@ class ResearchAgent(RoleAgent):
 #: steps are long-running autonomous units of work, not chat turns, so
 #: they deliberately get the generous end of the existing callers'
 #: ranges (chat /code: 5×120s, projects: 3×60s). A step's payload may
-#: override either via "max_iterations" / "timeout".
+#: override either via "max_iterations" / "timeout". Token spend has
+#: NO mission default (pass #65): a payload "max_tokens" opts the
+#: step into the loop's spend cap; absent, the step runs uncapped.
 _MISSION_CODING_MAX_ITERATIONS = 5
 _MISSION_CODING_TIMEOUT_S = 300.0
 
@@ -345,6 +347,20 @@ class MissionCodingAgent(RoleAgent):
             return {"goal": goal,
                     "error": "coding step carries a non-numeric "
                              "max_iterations/timeout budget"}
+        # Pass #65 (W7): a step may bound its own token spend with a
+        # payload "max_tokens" — forwarded to the loop's optional cap.
+        # There is deliberately NO mission default: absent means the
+        # step runs uncapped (metered, like every run).
+        raw_cap = merged.get("max_tokens")
+        if raw_cap is None:
+            max_tokens = None
+        else:
+            try:
+                max_tokens = int(raw_cap)
+            except (TypeError, ValueError):
+                return {"goal": goal,
+                        "error": "coding step carries a non-numeric "
+                                 "max_tokens budget"}
         from ..coding import CodingAgent as _LoopCodingAgent
 
         try:
@@ -356,6 +372,7 @@ class MissionCodingAgent(RoleAgent):
                 max_iterations=max_iterations,
                 timeout=timeout,
                 plan_mode=False,
+                max_tokens=max_tokens,
             )
         except Exception as exc:  # noqa: BLE001 - a step failure is a result
             return {"goal": goal, "engine": "coding_agent",
@@ -389,6 +406,9 @@ class MissionCodingAgent(RoleAgent):
             "review": dict(result.review or {}),
             "output": str(result.output or "")[-2000:],
             "seconds": round(float(result.seconds or 0.0), 2),
+            # Pass #65 (W7): the run's metered token usage rides the
+            # settlement as evidence, like the review verdict does.
+            "usage": dict(getattr(result, "usage", None) or {}),
         }
         if result.ok:
             return out

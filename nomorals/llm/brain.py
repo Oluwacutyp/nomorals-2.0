@@ -31,7 +31,7 @@ import time
 from typing import Any, Sequence
 
 from ..core.logging_setup import get_logger
-from .base import LLMResponse, Message, SamplingParams
+from .base import LLMResponse, Message, SamplingParams, Usage
 from .context_fit import DEFAULT_CONTEXT_TOKENS, fit_messages, fit_prompt
 from .failures import FailureClass, classify_failure
 from .prompts import render_prompt, system_prompt_for
@@ -409,6 +409,35 @@ class Brain:
         # responses included) — returned raw here.
         return resp
 
+    @staticmethod
+    def _coerce_usage(raw: Any) -> Usage:
+        """Carry a duck-typed response's usage into the coerced
+        LLMResponse (pass #65: coercion used to DROP usage, so any
+        non-LLMResponse provider response reached callers metered as
+        zero).  Only what the response actually carried is copied —
+        absent usage stays the all-zero default, which metering
+        callers read as "unreported", never as a real zero-cost call.
+        """
+        if isinstance(raw, Usage):
+            return raw
+        if raw is None:
+            return Usage()
+        try:
+            if isinstance(raw, dict):
+                get = raw.get
+            else:
+                def get(key: str, _raw: Any = raw) -> Any:
+                    return getattr(_raw, key, 0)
+            return Usage(
+                prompt_tokens=int(get("prompt_tokens") or 0),
+                completion_tokens=int(get("completion_tokens") or 0),
+                total_tokens=int(get("total_tokens") or 0),
+                cached_tokens=int(get("cached_tokens") or 0),
+                reasoning_tokens=int(get("reasoning_tokens") or 0),
+            )
+        except Exception:  # noqa: BLE001 — usage never breaks coercion
+            return Usage()
+
     def _coerce_response(self, op: str, resp: Any) -> LLMResponse:
         """Coerce a duck-typed router response into an LLMResponse.
 
@@ -431,6 +460,7 @@ class Brain:
                 model=str(getattr(resp, "model", "") or ""),
                 provider=str(getattr(resp, "provider", "") or ""),
                 fallback_note=str(getattr(resp, "fallback_note", "") or ""),
+                usage=self._coerce_usage(getattr(resp, "usage", None)),
             )
         except Exception:  # noqa: BLE001 — coercion never breaks the call
             return LLMResponse(text="", error=f"brain.{op} returned no response")
