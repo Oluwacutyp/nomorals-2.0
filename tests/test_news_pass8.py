@@ -6,10 +6,11 @@ owner's own chat, and an owner-channel push triggerable by any
 non-owner (/news is a PUBLIC command). The command reply IS the
 delivery — no notifier belongs on this path.
 
-Bug 2: `/news run` never marked the pulse seen-store, so the next
-briefing slot repeated the just-delivered stories as "fresh news"
-(recent(15) pulls items the run inserted; _filter_unseen only knows
-slot-marked keys).
+Bug 2: `/news run` never marked what it delivered, so the next
+briefing slot repeated the just-delivered stories as "fresh news".
+(Pass #8 fixed it via the pulse seen-store; Formatting F6 retired
+that marker — the news delivery ledger is now the one sync point,
+and the Bug 2 tests below pin the ledger contract.)
 
 Bug 3: dead feeds are retried forever in the run path — SourceHealth's
 circuit breaker exists but NewsAgent.run() never consults it. Now the
@@ -22,6 +23,7 @@ from __future__ import annotations
 import os
 import shutil
 import tempfile
+import time
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -115,38 +117,55 @@ class NoNotifierPushTests(unittest.TestCase):
                           "(duplicate for the owner, leak for non-owners)")
 
 
-# ── Bug 2: /news run marks the seen-store ──
+# ── Bug 2: /news run deliveries must not repeat in briefing slots ──
+#
+# Pass #8 pinned this via the pulse seen-store (the command marked
+# what it delivered into pulse_seen.json).  F6 retired that marker:
+# the sync point is now the news delivery ledger itself — run()
+# digests through brief(), which records delivery there, and the
+# slots read the same ledger.  The contract below is unchanged; the
+# mechanism it pins is the ledger.
 
 class SeenMarkingTests(unittest.TestCase):
-    def test_news_run_marks_delivered_seen(self):
+    def test_news_run_marks_delivered_in_ledger(self):
+        from nomorals.core.ids import new_id
         rows = [
             {"url": "https://example.test/s1", "title": "Story one"},
             {"url": "https://example.test/s2", "title": "Story two"},
         ]
+        mixin, ctx, tmp = _ctx_with_mixin(self)
+        agent = NewsAgent(ctx)  # ensures delivery columns
+        for row in rows:
+            ctx.db.execute(
+                "INSERT INTO news_items (id, source, title, url, summary, "
+                "published, created_at, delivery_state) "
+                "VALUES (?,?,?,?,?,?,?,?)",
+                (new_id(), "testfeed", row["title"], row["url"], "", 0,
+                 time.time(), "undelivered"))
 
         class FakeAgent:
+            """Stands in for NewsAgent; its run() records delivery in
+            the ledger exactly like the real run()→brief() does."""
+
             def __init__(self, context, notifier=None):
-                pass
+                self._ctx = context
 
             def run(self, cap=None):
+                NewsAgent(self._ctx).mark_delivered(
+                    [r["url"] for r in rows], channel="digest")
                 return {"ok": True, "items": 2, "fresh": 2, "errors": [],
                         "digest": "d", "sources_tried": 1,
-                        "sources_ok": ["x"], "per_source": {}}
+                        "sources_ok": ["x"], "per_source": {},
+                        "delivered_urls": [r["url"] for r in rows]}
 
-            def recent(self, limit=15):
-                return rows[:limit]
-
-        mixin, ctx, tmp = _ctx_with_mixin(self)
         with patch("nomorals.agents.news.NewsAgent", FakeAgent):
             mixin._control_news("run")
-        seen = mp._read_seen(ctx)
-        keys = set()
-        for day in seen.values():
-            keys.update(str(k) for k in day)
-        for row in rows:
-            self.assertIn(row["url"], keys,
-                          f"{row['url']} delivered by /news run but not "
-                          f"marked seen → next briefing slot repeats it")
+        # the next briefing slot's fresh set excludes both stories…
+        with patch.object(NewsAgent, "poll", lambda self: {"ok": True}):
+            fresh = mp._fresh_news_items(ctx)
+        self.assertEqual(fresh, [])
+        # …and no seen-marker file was created or consulted
+        self.assertFalse(os.path.exists(os.path.join(tmp, "pulse_seen.json")))
 
 
 # ── Bug 3: dead feeds stood down in the run path ──

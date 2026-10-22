@@ -172,50 +172,57 @@ class FourSlotsTests(unittest.TestCase):
     def test_midnight_dedupes_across_day_boundary(self):
         """Midnight (00:00, a NEW day) must not repeat evening's stories.
 
-        The seen-store used to prune to today only, so at midnight the
-        previous evening's deliveries were forgotten and repeated.
+        F6: dedupe is the news delivery ledger, which is not day-scoped
+        at all — a story marked delivered by the evening slot (even
+        "yesterday") simply isn't in the undelivered set anymore.
+        (The retired seen-store pruned to today+yesterday and needed
+        this test's boundary dance; the ledger makes it structural.)
         """
+        from nomorals.agents.news import NewsAgent
+        from nomorals.core.ids import new_id
         ctx, tmp = make_ctx(self)
         ctx.settings = SimpleNamespace(workspace_dir=tmp,
                                         partner=make_partner(), pulse=None)
-        import json
-        from nomorals.core.tz import safe_zoneinfo
-        tz = safe_zoneinfo(mp.PULSE_TIMEZONE)
-        today = datetime.now(tz).strftime("%Y-%m-%d")
-        yesterday = (datetime.now(tz) - timedelta(days=1)).strftime("%Y-%m-%d")
-        p = mp._seen_path(ctx)
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(json.dumps({yesterday: {"https://x/evening-story": "evening"},
-                                 today: {}}), encoding="utf-8")
-        items = [{"url": "https://x/evening-story", "title": "Evening story"},
-                 {"url": "https://x/fresh", "title": "Fresh story"}]
-        fresh = mp._filter_unseen(ctx, items, lambda it: it["url"])
-        self.assertEqual([f["url"] for f in fresh], ["https://x/fresh"])
+        agent = NewsAgent(ctx)  # ensures delivery columns
+        for url, title in (("https://x/evening-story", "Evening story"),
+                           ("https://x/fresh", "Fresh story")):
+            ctx.db.execute(
+                "INSERT INTO news_items (id, source, title, url, summary, "
+                "published, created_at, delivery_state) "
+                "VALUES (?,?,?,?,?,?,?,?)",
+                (new_id(), "src", title, url, "", 0, time.time(),
+                 "undelivered"))
+        agent.mark_delivered(["https://x/evening-story"],
+                             channel="pulse-evening")
+        with patch.object(NewsAgent, "poll", lambda self: {"ok": True}):
+            text, items = mp._compose_midnight(ctx)
+        self.assertEqual([i["url"] for i in items], ["https://x/fresh"])
+        self.assertIn("Fresh story", text)
+        self.assertNotIn("Evening story", text)
 
     def test_second_briefing_excludes_first_stories(self):
         """Afternoon #2 must not repeat afternoon #1's headlines."""
+        from nomorals.agents.news import NewsAgent
+        from nomorals.core.ids import new_id
         ctx, tmp = make_ctx(self)
         ctx.settings = SimpleNamespace(workspace_dir=tmp,
                                         partner=make_partner(), pulse=None)
-        items = [{"url": f"https://x/s{i}", "title": f"Story {i}"}
-                 for i in range(4)]
-
-        class FakeAgent:
-            def __init__(self, context):
-                pass
-
-            def run(self):
-                return {"ok": True}
-
-            def recent(self, limit=15):
-                return list(items)
-
-        with patch("nomorals.agents.news.NewsAgent", FakeAgent):
-            text1, keys1 = mp._compose_afternoon(ctx)
-            for i in range(4):
-                self.assertIn(f"Story {i}", text1)
-            mp._mark_seen(ctx, keys1, "afternoon")
-            text2, _keys2 = mp._compose_afternoon(ctx)
+        gw = FakeGateway()
+        ctx.gateway = gw
+        agent = NewsAgent(ctx)  # ensures delivery columns
+        for i in range(4):
+            ctx.db.execute(
+                "INSERT INTO news_items (id, source, title, url, summary, "
+                "published, created_at, delivery_state) "
+                "VALUES (?,?,?,?,?,?,?,?)",
+                (new_id(), "src", f"Story {i}", f"https://x/s{i}", "", 0,
+                 time.time(), "undelivered"))
+        with patch.object(NewsAgent, "poll", lambda self: {"ok": True}), \
+             patch.object(mp, "_afternoon_markets", return_value=("", [])):
+            r1 = mp.run_slot(ctx, "afternoon")
+            text2, items2 = mp._compose_afternoon(ctx)
+        self.assertEqual(r1["stories_delivered"], 4)
+        self.assertEqual(items2, [])
         for i in range(4):
             self.assertNotIn(f"Story {i}", text2,
                               "second briefing repeated a delivered story")
@@ -230,15 +237,19 @@ class ComposerNoDropTests(unittest.TestCase):
 
     def test_composer_drops_no_sections(self):
         from nomorals.agents import morning_briefing as mb
+        from nomorals.agents.news import NewsAgent
         from nomorals.core.ids import new_id
         ctx, _ = make_ctx(self)
+        NewsAgent(ctx)  # ensures the delivery columns (F6 seed realism:
+        # every row poll() stores carries delivery_state='undelivered')
         for i in range(200):
             long_title = f"headline number {i} " + "word " * 80
             ctx.db.execute(
                 "INSERT INTO news_items (id, source, title, url, summary, "
-                "published, created_at) VALUES (?,?,?,?,?,?,?)",
+                "published, created_at, delivery_state) "
+                "VALUES (?,?,?,?,?,?,?,?)",
                 (new_id(), f"src-{i % 5}", long_title, f"https://x/{i}",
-                 "summary " * 40, 0, time.time()))
+                 "summary " * 40, 0, time.time(), "undelivered"))
         b = mb.BriefingComposer().compose(ctx, "2026-10-01")
         # no sections silently dropped, no false "full digest" promise
         self.assertEqual(b.truncated_note, "")
@@ -285,8 +296,8 @@ class PulseCommandTests(unittest.TestCase):
         mixin.gateway = gw
         # quiet news: no fresh items, so the briefing is the quiet text —
         # the point is the run path works and reports delivery honestly.
-        with patch("nomorals.agents.morning_pulse._fresh_news",
-                   return_value=("", [])):
+        with patch("nomorals.agents.morning_pulse._fresh_news_items",
+                   return_value=[]):
             out = mixin._control_pulse("run midnight")
         self.assertIn("midnight", out.lower())
         self.assertIn("deliver", out.lower())

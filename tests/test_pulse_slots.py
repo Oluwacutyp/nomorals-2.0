@@ -56,18 +56,38 @@ def test_slot_prefs_override():
     assert mp.slot_time(ctx, "morning") == "23:00"
 
 
-def test_seen_store_no_repeats():
-    ctx = FakeContext()
-    items = [{"url": "http://a", "title": "A"},
-             {"url": "http://b", "title": "B"}]
-    # nothing seen yet
-    fresh = mp._filter_unseen(ctx, items, lambda it: it["url"])
-    assert len(fresh) == 2
-    # mark one seen
-    mp._mark_seen(ctx, ["http://a"], "morning")
-    fresh = mp._filter_unseen(ctx, items, lambda it: it["url"])
-    assert len(fresh) == 1
-    assert fresh[0]["url"] == "http://b"
+def test_ledger_no_repeats_across_slots():
+    """F6: cross-slot dedupe is the news delivery ledger — a story a
+    slot confirmed delivered leaves the undelivered set for every
+    later slot.  (The retired per-day seen-store this test used to
+    pin was folded into the ledger at cutover.)"""
+    import time
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    from nomorals.agents.news import NewsAgent
+    from nomorals.core.ids import new_id
+    from nomorals.storage.db import Database
+
+    ws = tempfile.mkdtemp()
+    db = Database(os.path.join(ws, "t.db"))
+    db.migrate()
+    ctx = SimpleNamespace(
+        db=db, settings=SimpleNamespace(workspace_dir=ws, pulse=None),
+        extras={})
+    agent = NewsAgent(ctx)  # ensures delivery columns
+    for url, title in (("http://a", "A"), ("http://b", "B")):
+        db.execute(
+            "INSERT INTO news_items (id, source, title, url, summary, "
+            "published, created_at, delivery_state) VALUES (?,?,?,?,?,?,?,?)",
+            (new_id(), "src", title, url, "", 0, time.time(), "undelivered"))
+    with patch.object(NewsAgent, "poll", lambda self: {"ok": True}):
+        fresh = mp._fresh_news_items(ctx)
+        assert [i["url"] for i in fresh] == ["http://a", "http://b"] or \
+            {i["url"] for i in fresh} == {"http://a", "http://b"}
+        agent.mark_delivered(["http://a"], channel="pulse-morning")
+        fresh = mp._fresh_news_items(ctx)
+    assert [i["url"] for i in fresh] == ["http://b"]
 
 
 def test_unknown_slot_rejected():

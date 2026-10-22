@@ -31,6 +31,20 @@ def make_ctx(test=None, **settings_kw):
     return SimpleNamespace(db=db, settings=settings), tmp
 
 
+def seed_news(ctx, rows, summary="sum"):
+    """Insert news rows the way poll() stores them.  F6: the briefing
+    composer sources the news delivery ledger's undelivered set, so
+    test rows carry delivery_state='undelivered' like real rows."""
+    from nomorals.agents.news import NewsAgent
+    from nomorals.core.ids import new_id
+    NewsAgent(ctx)  # ensures the delivery columns exist
+    for src, title, url in rows:
+        ctx.db.execute(
+            "INSERT INTO news_items (id, source, title, url, summary, "
+            "published, created_at, delivery_state) VALUES (?,?,?,?,?,?,?,?)",
+            (new_id(), src, title, url, summary, 0, time.time(), "undelivered"))
+
+
 class ComposeTests(unittest.TestCase):
     def setUp(self):
         self.ctx, self.tmp = make_ctx(self)
@@ -61,15 +75,10 @@ class ComposeTests(unittest.TestCase):
         self.assertEqual(store.held_alerts(), [])
 
     def test_news_filtered_by_topics(self):
-        from nomorals.core.ids import new_id
-        for i, (title, src) in enumerate([
-                ("AI breakthrough in Lagos", "BBC"),
-                ("football results", "BBC"),
-                ("BTC hits new high", "Verge")]):
-            self.ctx.db.execute(
-                "INSERT INTO news_items (id, source, title, url, summary, "
-                "published, created_at) VALUES (?,?,?,?,?,?,?)",
-                (new_id(), src, title, f"https://x/{i}", "sum", 0, time.time()))
+        seed_news(self.ctx, [
+            ("BBC", "AI breakthrough in Lagos", "https://x/0"),
+            ("BBC", "football results", "https://x/1"),
+            ("Verge", "BTC hits new high", "https://x/2")])
         prefs = mb._prefs(self.ctx)
         prefs["topics"] = ["AI", "BTC"]
         mb._save_prefs(self.ctx, prefs)
@@ -81,13 +90,8 @@ class ComposeTests(unittest.TestCase):
         self.assertNotIn("football", titles)
 
     def test_anti_monopoly_max_3_per_source(self):
-        from nomorals.core.ids import new_id
-        for i in range(6):
-            self.ctx.db.execute(
-                "INSERT INTO news_items (id, source, title, url, summary, "
-                "published, created_at) VALUES (?,?,?,?,?,?,?)",
-                (new_id(), "BBC", f"story {i}", f"https://x/{i}", "sum",
-                 0, time.time()))
+        seed_news(self.ctx, [("BBC", f"story {i}", f"https://x/{i}")
+                             for i in range(6)])
         b = mb.BriefingComposer().compose(self.ctx, "2026-10-01")
         sec = next(s for s in b.sections if s.name == "news")
         self.assertLessEqual(len(sec.items), 3)
@@ -101,14 +105,17 @@ class LengthCapTests(unittest.TestCase):
         # The old 600-word cap dropped whole sections to fit and pointed
         # at a "full digest" that was the same capped briefing. Long
         # briefings now paginate at delivery instead of cutting content.
+        from nomorals.agents.news import NewsAgent
         from nomorals.core.ids import new_id
+        NewsAgent(self.ctx)  # ensures delivery columns (see seed_news)
         for i in range(200):
             long_title = f"headline number {i} " + "word " * 80
             self.ctx.db.execute(
                 "INSERT INTO news_items (id, source, title, url, summary, "
-                "published, created_at) VALUES (?,?,?,?,?,?,?)",
+                "published, created_at, delivery_state) "
+                "VALUES (?,?,?,?,?,?,?,?)",
                 (new_id(), f"src-{i % 5}", long_title, f"https://x/{i}",
-                 "summary " * 40, 0, time.time()))
+                 "summary " * 40, 0, time.time(), "undelivered"))
         b = mb.BriefingComposer().compose(self.ctx, "2026-10-01")
         self.assertEqual(b.truncated_note, "")
         self.assertTrue(any(s.name == "news" for s in b.sections))
@@ -180,13 +187,8 @@ class RunDeliverTests(unittest.TestCase):
 class FollowupTests(unittest.TestCase):
     def setUp(self):
         self.ctx, self.tmp = make_ctx(self)
-        from nomorals.core.ids import new_id
-        for i in range(4):
-            self.ctx.db.execute(
-                "INSERT INTO news_items (id, source, title, url, summary, "
-                "published, created_at) VALUES (?,?,?,?,?,?,?)",
-                (new_id(), "BBC", f"story {i}", f"https://x/{i}", "sum",
-                 0, time.time()))
+        seed_news(self.ctx, [("BBC", f"story {i}", f"https://x/{i}")
+                             for i in range(4)])
         # keep this fixture news-only: the ambient weather/USA providers
         # are live-network and would shift item numbering.
         from nomorals.agents import weather as _wx
@@ -217,13 +219,8 @@ class FollowupTests(unittest.TestCase):
 class EngagementTests(unittest.TestCase):
     def setUp(self):
         self.ctx, self.tmp = make_ctx(self)
-        from nomorals.core.ids import new_id
-        for i in range(3):
-            self.ctx.db.execute(
-                "INSERT INTO news_items (id, source, title, url, summary, "
-                "published, created_at) VALUES (?,?,?,?,?,?,?)",
-                (new_id(), "BBC", f"story {i}", f"https://x/{i}", "sum",
-                 0, time.time()))
+        seed_news(self.ctx, [("BBC", f"story {i}", f"https://x/{i}")
+                             for i in range(3)])
 
     def test_sustained_low_engagement_demotes(self):
         store = mb._engagement_store(self.ctx)

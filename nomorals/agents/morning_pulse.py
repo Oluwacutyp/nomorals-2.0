@@ -303,14 +303,24 @@ def _emit_bus(data: dict[str, Any]) -> None:
 # ── the pipeline ─────────────────────────────────────────────────────────
 
 def _fetch_news(context: Any) -> list[dict[str, Any]]:
-    """News radar stage.  Returns the items (may be empty); raises only
-    on unexpected breakage — the stage runner converts that to a
-    graceful degradation."""
+    """News radar stage.  Returns the FULL undelivered set (may be
+    empty); raises only on unexpected breakage — the stage runner
+    converts that to a graceful degradation.
+
+    F6: the radar used to re-read ``agent.recent(limit=12)`` — a pure
+    recency window that discarded everything older than the 12 newest
+    rows.  Now the pulse polls the feeds and reads the news delivery
+    ledger's undelivered set: every story no surface has delivered
+    yet, uncapped.  ``poll()`` (not ``run()``) is the fetch call —
+    ``run()`` digests via ``brief()``, which would mark the whole set
+    delivered before this pulse has delivered anything.
+    """
     from .news import NewsAgent
 
     agent = NewsAgent(context)
-    report = agent.run()
-    items = agent.recent(limit=12) if report.get("ok") else []
+    _migrate_seen_store(context, agent)
+    report = agent.poll()
+    items = agent.undelivered() if report.get("ok") else []
     _log.info("morning-pulse: news radar got %d items", len(items))
     return items
 
@@ -392,28 +402,25 @@ def run_pulse(context: Any) -> dict[str, Any]:
     audio_ok = _deliver_audio(context, audio_path) if audio_path else False
     stages.append("deliver")
 
-    # Mark the radar stories seen so later slots don't repeat them:
-    # afternoon/evening/midnight cover what's new SINCE the morning.
-    if text_ok and news_items:
-        _mark_seen(context,
-                    [str(it.get("url") or it.get("title", ""))
-                     for it in news_items if it.get("url") or it.get("title")],
-                    "morning")
-        # …and record the same delivery in the news store's own state
-        # machine (pass #85), so a later brief() doesn't re-digest
-        # what this pulse already delivered.  Best-effort: the pulse
-        # seen-store above stays authoritative for slot repetition.
-        try:
-            from .news import NewsAgent as _NewsAgent
-
-            _NewsAgent(context).mark_delivered(
-                [str(it.get("url") or "") for it in news_items],
-                channel="pulse")
-        except Exception:  # noqa: BLE001
-            pass
+    # ── 6. the full story list ───────────────────────────────────────
+    # Every undelivered story, as its own delivery, in confirmed
+    # segments (F6): a story is marked delivered in the news ledger
+    # only when its segment actually reached the owner, so a failed
+    # segment's stories stay undelivered and resume next pulse —
+    # nothing is silently dropped and nothing repeats.
+    story_keys = _deliver_stories(context, "morning", news_items)
+    if news_items:
+        stages.append("stories")
+        _ledger(context, "stage",
+                f"news stories: {len(story_keys)}/{len(news_items)} "
+                f"delivered",
+                ok=bool(story_keys),
+                metadata={"stage": "stories",
+                          "delivered": len(story_keys),
+                          "pending": len(news_items) - len(story_keys)})
 
     elapsed = round(time.time() - started, 1)
-    delivered = text_ok or audio_ok
+    delivered = text_ok or audio_ok or bool(story_keys)
     _log.info("morning-pulse done in %ss: stages=%s text=%s audio=%s",
               elapsed, stages, text_ok, audio_ok)
     _ledger(context, "run",
@@ -433,7 +440,9 @@ def run_pulse(context: Any) -> dict[str, Any]:
     })
     result = {"ok": True, "stages": stages, "text": briefing_text,
                 "audio_path": audio_path, "delivered_text": text_ok,
-                "delivered_audio": audio_ok, "elapsed_s": elapsed}
+                "delivered_audio": audio_ok, "elapsed_s": elapsed,
+                "stories_delivered": len(story_keys),
+                "stories_pending": len(news_items) - len(story_keys)}
     _write_marker(context, result)
     return result
 
@@ -800,7 +809,8 @@ def register(registry: Any) -> None:
 # Multi-slot briefings: morning / afternoon / evening
 # Extends the morning pulse with two shorter briefings.  Each slot has
 # its own schedule, enable switch, last-run marker, and content builder.
-# A per-day seen-store keeps slots from repeating each other's items.
+# The news delivery ledger (delivery_state) keeps slots from repeating
+# each other's stories — one newness truth for every slot (F6).
 # ═══════════════════════════════════════════════════════════════════════
 
 #: Slot definitions.  ``voice`` controls whether the slot synthesizes
@@ -959,9 +969,18 @@ def _write_slot_marker(context: Any, slot: str,
                    exc_info=True)
 
 
-# ── seen-store: no repeats across slots ─────────────────────────────
+# ── the delivery ledger is the one newness truth (F6) ──────────────
+#
+# Until F6 the pulses kept a parallel per-day seen-marker
+# (``pulse_seen.json``) next to the news store's ``delivery_state``
+# ledger, and the two drifted: a story could be "seen" to one and
+# undelivered to the other.  The marker is retired — every slot now
+# draws from ``NewsAgent.undelivered()`` and records delivery through
+# ``NewsAgent.mark_delivered()``, so "delivered" has exactly one
+# meaning across the pulses, the /news digest, and brief().
 
 def _seen_path(context: Any) -> Path | None:
+    """Where the RETIRED pulse seen-marker lived (migration input)."""
     try:
         ws = getattr(getattr(context, "settings", None), "workspace_dir", "")
         return Path(ws) / "pulse_seen.json" if ws else None
@@ -969,89 +988,195 @@ def _seen_path(context: Any) -> Path | None:
         return None
 
 
-def _read_seen(context: Any) -> dict[str, Any]:
-    """{day: {item_key: slot}} — item keys already delivered.
+def _migrate_seen_store(context: Any, agent: Any = None) -> int:
+    """One-time cutover: fold the retired seen-marker into the ledger.
 
-    Keeps today AND yesterday: the midnight slot fires at 00:00, the
-    first minutes of a new day, and must still dedupe against the
-    evening briefing's stories. Pruning to today only made midnight
-    repeat the evening wrap.
+    Every key the marker recorded as delivered is marked delivered in
+    the news store (URL/id keys directly; title keys — stories stored
+    without a URL — matched by title and marked by id), so the first
+    ledger-sourced pulse doesn't re-flood the owner with stories
+    earlier slots already showed.  The marker file is then renamed
+    aside (``.retired``) and never consulted again.  Idempotent and
+    never raises; returns how many rows the migration marked.
     """
     try:
-        from datetime import datetime, timedelta
-        from ..core.tz import safe_zoneinfo
         p = _seen_path(context)
-        if p is None or not p.is_file():
-            return {}
+        if p is None:
+            return 0
+        if p.with_name(p.name + ".retired").is_file():
+            return 0  # cutover already done — the marker stays retired
+        if not p.is_file():
+            return 0
         data = json.loads(p.read_text(encoding="utf-8"))
-        if not isinstance(data, dict):
-            return {}
-        tz = safe_zoneinfo(PULSE_TIMEZONE)
-        now = datetime.now(tz)
-        today = now.strftime("%Y-%m-%d")
-        yesterday = (now - timedelta(days=1)).strftime("%Y-%m-%d")
-        # prune to today + yesterday only
-        return {d: data.get(d, {}) for d in (today, yesterday)
-                if isinstance(data.get(d), dict)}
+        keys: set[str] = set()
+        if isinstance(data, dict):
+            for day in data.values():
+                if isinstance(day, dict):
+                    keys.update(str(k) for k in day)
+        marked = 0
+        if keys:
+            from .news import NewsAgent
+
+            agent = agent or NewsAgent(context)
+            marked += agent.mark_delivered(sorted(keys),
+                                           channel="pulse-migration")
+            by_title = [str(r.get("id")) for r in agent.undelivered()
+                        if str(r.get("title", "")) in keys]
+            if by_title:
+                marked += agent.mark_delivered(
+                    by_title, channel="pulse-migration")
+        try:
+            p.replace(p.with_name(p.name + ".retired"))
+        except Exception:  # noqa: BLE001 - already migrated / read-only fs
+            pass
+        if marked:
+            _log.info("pulse: seen-store cutover marked %d stor%s "
+                      "delivered in the news ledger",
+                      marked, "y" if marked == 1 else "ies")
+        return marked
     except Exception:  # noqa: BLE001
-        return {}
+        _log.debug("pulse: seen-store migration failed", exc_info=True)
+        return 0
 
 
-def _mark_seen(context: Any, keys: list[str], slot: str) -> None:
+# ── the full story list: rendering + confirmed-segment delivery ────
+
+#: Chars of story text per delivery segment.  Sized so banner + title
+#: + the gateway's "(i/n)" label stay under the 4096-char Bot API cap:
+#: one segment is ONE gateway chunk on Telegram, so the segment's
+#: publish result is a truthful per-chunk delivery confirmation.
+STORY_SEGMENT_CHARS = 2800
+
+#: Segments delivered inline before the remainder overflows into ONE
+#: large publish of everything left (the gateway chunks it, and past
+#: ~10 chunks the bot adapter routes it to a single document — the
+#: existing overflow route for extreme news days).
+STORY_MAX_INLINE_SEGMENTS = 10
+
+#: Title every story-list segment carries (the "(i/n)" continuation
+#: label is appended per segment when there is more than one).
+STORY_LIST_TITLE = "🗞 All new stories"
+
+
+def _story_key(item: dict[str, Any]) -> str:
+    """The ledger key for a story row (mark_delivered matches URL/id)."""
+    return str(item.get("url") or item.get("id") or "")
+
+
+def _story_block(item: dict[str, Any]) -> str:
+    """One story as the owner reads it: headline + publisher + link,
+    with the summary in an expandable blockquote (tap-to-expand on
+    Telegram; other transports render it as a plain quote)."""
+    import html as _html
+
+    from .news import _short_summary, publisher_of
+
+    title = str(item.get("title", "")).strip() or "(untitled)"
+    source = publisher_of(item)
+    url = str(item.get("url", "") or "").strip()
+    lines = [f"• **{title}**" + (f" — {source}" if source else "")]
+    if url:
+        lines.append(url)
+    summary = _short_summary(str(item.get("summary", "") or ""), 400)
+    if summary:
+        # producer-authored HTML passes the F1 converter verbatim, so
+        # the summary content is escaped HERE.
+        lines.append(
+            f"<blockquote expandable>{_html.escape(summary)}</blockquote>")
+    return "\n".join(lines)
+
+
+def _pack_story_segments(
+        items: list[dict[str, Any]],
+        budget: int = STORY_SEGMENT_CHARS,
+        max_inline: int = STORY_MAX_INLINE_SEGMENTS,
+) -> list[tuple[str, list[str]]]:
+    """Group story blocks into publish-sized segments, in order.
+
+    Returns ``[(text, keys)]`` — the keys are exactly the stories in
+    that segment's text, so a confirmed segment marks exactly its own
+    stories.  A single block larger than the budget still goes out
+    (as its own segment) — packing never drops a story.  Past
+    ``max_inline`` segments the remainder merges into one overflow
+    segment (see STORY_MAX_INLINE_SEGMENTS).
+    """
+    segments: list[tuple[str, list[str]]] = []
+    cur: list[str] = []
+    cur_keys: list[str] = []
+    cur_len = 0
+    for it in items:
+        block = _story_block(it)
+        add = len(block) + (1 if cur else 0)
+        if cur and cur_len + add > budget:
+            segments.append(("\n".join(cur), cur_keys))
+            cur, cur_keys, cur_len = [], [], 0
+            add = len(block)
+        cur.append(block)
+        cur_keys.append(_story_key(it))
+        cur_len += add
+    if cur:
+        segments.append(("\n".join(cur), cur_keys))
+    if len(segments) > max_inline:
+        head = segments[:max_inline - 1]
+        tail = segments[max_inline - 1:]
+        head.append(("\n".join(t for t, _ in tail),
+                     [k for _, ks in tail for k in ks]))
+        segments = head
+    return segments
+
+
+def _mark_stories_delivered(context: Any, keys: list[str],
+                            channel: str) -> None:
+    """Record confirmed story deliveries in the news ledger."""
     if not keys:
         return
     try:
-        from datetime import datetime, timedelta
-        from ..core.tz import safe_zoneinfo
-        p = _seen_path(context)
-        if p is None:
-            return
-        tz = safe_zoneinfo(PULSE_TIMEZONE)
-        now = datetime.now(tz)
-        today = now.strftime("%Y-%m-%d")
-        yesterday = (now - timedelta(days=1)).strftime("%Y-%m-%d")
-        data: dict[str, Any] = {}
-        if p.is_file():
-            try:
-                data = json.loads(p.read_text(encoding="utf-8"))
-                if not isinstance(data, dict):
-                    data = {}
-            except Exception:  # noqa: BLE001
-                pass
-        day = data.get(today, {})
-        if not isinstance(day, dict):
-            day = {}
-        for k in keys:
-            day[str(k)] = slot
-        # keep today + yesterday (midnight dedupes against the evening);
-        # drop anything older
-        kept: dict[str, Any] = {today: day}
-        if isinstance(data.get(yesterday), dict):
-            kept[yesterday] = data[yesterday]
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(json.dumps(kept), encoding="utf-8")
+        from .news import NewsAgent
+
+        NewsAgent(context).mark_delivered(keys, channel=channel)
     except Exception:  # noqa: BLE001
-        _log.debug("pulse: seen-store write failed", exc_info=True)
+        _log.debug("pulse: ledger mark failed", exc_info=True)
 
 
-def _filter_unseen(context: Any, items: list[dict[str, Any]],
-                   key_fn: Any) -> list[dict[str, Any]]:
-    """Drop items whose key was already delivered today by any slot."""
-    seen = _read_seen(context)
-    day_keys: set[str] = set()
-    for day in seen.values():
-        if isinstance(day, dict):
-            day_keys.update(str(k) for k in day)
-    out = []
-    for it in items:
+def _deliver_stories(context: Any, slot: str,
+                     items: list[dict[str, Any]]) -> list[str]:
+    """Deliver the full story list; mark only confirmed segments.
+
+    Each segment is its own Notifier publish.  A segment whose publish
+    doesn't confirm delivery stops the run: its stories — and every
+    later segment's — stay undelivered in the ledger and resume at
+    the next pulse, in order, with nothing repeated before them.
+    Returns the ledger keys marked delivered.  Never raises.
+    """
+    if not items:
+        return []
+    try:
+        from .notifier import Notifier
+
+        notifier = Notifier(context)
+    except Exception:  # noqa: BLE001
+        return []
+    segments = _pack_story_segments(items)
+    total = len(segments)
+    marked: list[str] = []
+    for i, (text, keys) in enumerate(segments, 1):
+        label = f" ({i}/{total})" if total > 1 else ""
         try:
-            k = str(key_fn(it))
-        except Exception:  # noqa: BLE001
-            k = ""
-        if k and k in day_keys:
-            continue
-        out.append(it)
-    return out
+            res = notifier.publish("pulse", STORY_LIST_TITLE + label,
+                                   text, force=True)
+        except Exception as exc:  # noqa: BLE001
+            _log.warning("pulse/%s: story segment %d/%d failed: %s",
+                         slot, i, total, exc)
+            break
+        if not res.get("delivered"):
+            _log.warning("pulse/%s: story segment %d/%d not delivered "
+                         "— %d stor%s stay undelivered for next pulse",
+                         slot, i, total, len(keys),
+                         "y" if len(keys) == 1 else "ies")
+            break
+        _mark_stories_delivered(context, keys, channel=f"pulse-{slot}")
+        marked.extend(keys)
+    return marked
 
 
 # ── afternoon content: markets + fresh news + today's remainder ─────
@@ -1086,33 +1211,37 @@ def _afternoon_markets(context: Any) -> tuple[str, list[str]]:
     return "\n".join(lines), keys
 
 
-def _fresh_news(context: Any, limit: int | None = None) -> tuple[str, list[str]]:
-    """News not yet delivered.  Never raises.
+def _fresh_news_items(context: Any) -> list[dict[str, Any]]:
+    """The full undelivered set for a later slot.  Never raises.
 
-    Returns ALL unseen items (``limit=None``): capping the fresh list
-    silently dropped stories the owner never saw. Delivery paginates,
-    so a long fresh list is fine.
+    F6: this used to read ``agent.recent(limit=15)`` — a recency
+    window — and filter it against the pulse seen-marker, so any
+    story that scrolled past position 15 between slots was silently
+    never delivered by any pulse.  Now a slot's "fresh" IS the news
+    ledger's undelivered set (polled fresh first): every story since
+    the last confirmed delivery, with no window and no second ledger.
     """
     try:
         from .news import NewsAgent
+
         agent = NewsAgent(context)
-        report = agent.run()
-        items = agent.recent(limit=15) if report.get("ok") else []
-        fresh = _filter_unseen(
-            context, items,
-            lambda it: it.get("url") or it.get("title", ""))
-        if limit is not None:
-            fresh = fresh[:limit]
-        lines = []
-        keys = []
-        for it in fresh:
-            title = str(it.get("title", "")).strip()
-            if title:
-                lines.append(f"• {title}")
-                keys.append(str(it.get("url") or title))
-        return "\n".join(lines), keys
+        _migrate_seen_store(context, agent)
+        report = agent.poll()
+        return agent.undelivered() if report.get("ok") else []
     except Exception:  # noqa: BLE001
-        return "", []
+        return []
+
+
+def _fresh_headlines(items: list[dict[str, Any]]) -> str:
+    """Compact headline bullets for a slot's head text — the scannable
+    summary; the full blocks (source, link, summary) ride the story
+    segments delivered right after it."""
+    lines = []
+    for it in items:
+        title = str(it.get("title", "")).strip()
+        if title:
+            lines.append(f"• {title}")
+    return "\n".join(lines)
 
 
 def _today_remainder(context: Any) -> str:
@@ -1144,16 +1273,20 @@ def _today_remainder(context: Any) -> str:
         return ""
 
 
-def _compose_afternoon(context: Any) -> tuple[str, list[str]]:
-    """Afternoon briefing text + delivered item keys."""
-    keys: list[str] = []
+def _compose_afternoon(context: Any) -> tuple[str, list[dict[str, Any]]]:
+    """Afternoon briefing head text + the full undelivered story set.
+
+    The head text carries the headline bullets (the scannable
+    summary); every story's full block is delivered by the story
+    segments and marked from their confirmations — the returned
+    items are NOT marked by composing them here.
+    """
     parts = ["☀️ *Afternoon briefing* — what's moved since this morning.\n"]
-    markets, mkeys = _afternoon_markets(context)
-    keys.extend(mkeys)
+    markets, _mkeys = _afternoon_markets(context)
     if markets:
         parts.append("*Markets*\n" + markets + "\n")
-    news, nkeys = _fresh_news(context)
-    keys.extend(nkeys)
+    items = _fresh_news_items(context)
+    news = _fresh_headlines(items)
     if news:
         parts.append("*Fresh headlines*\n" + news + "\n")
     rest = _today_remainder(context)
@@ -1161,7 +1294,7 @@ def _compose_afternoon(context: Any) -> tuple[str, list[str]]:
         parts.append("*Still ahead today*\n" + rest + "\n")
     if len(parts) == 1:
         parts.append("Quiet afternoon — nothing new since the morning pulse.")
-    return "\n".join(parts).strip(), keys
+    return "\n".join(parts).strip(), items
 
 
 # ── evening content: day wrap + tomorrow + pending ───────────────────
@@ -1237,12 +1370,22 @@ def _pending_items(context: Any) -> str:
     return "\n".join(lines)
 
 
-def _compose_evening(context: Any) -> tuple[str, list[str]]:
-    """Evening wrap text + delivered item keys."""
+def _compose_evening(context: Any) -> tuple[str, list[dict[str, Any]]]:
+    """Evening wrap head text + the full undelivered story set.
+
+    F6: the wrap gains the day's still-undelivered stories (headline
+    bullets here; full blocks in the story segments) — the evening
+    slot now sources from the same ledger as every other slot
+    instead of leaving late-day stories for midnight to find.
+    """
     parts = ["🌆 *Evening wrap* — closing out the day.\n"]
     wrap = _day_wrap(context)
     if wrap:
         parts.append("*Today*\n" + wrap + "\n")
+    items = _fresh_news_items(context)
+    news = _fresh_headlines(items)
+    if news:
+        parts.append("*New since this afternoon*\n" + news + "\n")
     tom = _tomorrow_preview(context)
     if tom:
         parts.append("*Tomorrow*\n" + tom + "\n")
@@ -1251,22 +1394,23 @@ def _compose_evening(context: Any) -> tuple[str, list[str]]:
         parts.append("*Still open*\n" + pend + "\n")
     if len(parts) == 1:
         parts.append("Quiet day — nothing major to report.")
-    return "\n".join(parts).strip(), []
+    return "\n".join(parts).strip(), items
 
 
 # ── midnight content: overnight fresh news + still open ─────────────────
 
-def _compose_midnight(context: Any) -> tuple[str, list[str]]:
-    """Midnight briefing text + delivered item keys.
+def _compose_midnight(context: Any) -> tuple[str, list[dict[str, Any]]]:
+    """Midnight briefing head text + the full undelivered story set.
 
-    Only what's new SINCE the evening wrap (the seen-store filters
-    anything an earlier slot already delivered, including across the
-    midnight day boundary). Plus anything still open overnight.
+    Only what's new SINCE the evening wrap — by construction: the
+    ledger's undelivered set excludes everything an earlier slot
+    confirmed delivered, including across the midnight day boundary
+    (the retired seen-store's today+yesterday pruning dance is gone).
+    Plus anything still open overnight.
     """
-    keys: list[str] = []
     parts = ["🌃 *Midnight briefing* — overnight, since the evening wrap.\n"]
-    news, nkeys = _fresh_news(context)
-    keys.extend(nkeys)
+    items = _fresh_news_items(context)
+    news = _fresh_headlines(items)
     if news:
         parts.append("*Fresh headlines*\n" + news + "\n")
     pend = _pending_items(context)
@@ -1274,7 +1418,7 @@ def _compose_midnight(context: Any) -> tuple[str, list[str]]:
         parts.append("*Still open*\n" + pend + "\n")
     if len(parts) == 1:
         parts.append("Quiet night — nothing new since the evening wrap.")
-    return "\n".join(parts).strip(), keys
+    return "\n".join(parts).strip(), items
 
 
 # ── generalized slot runner ──────────────────────────────────────────
@@ -1320,11 +1464,11 @@ def run_slot(context: Any, slot: str = "morning") -> dict[str, Any]:
     started = time.time()
     stages: list[str] = []
     if slot == "afternoon":
-        text, keys = _compose_afternoon(context)
+        text, story_items = _compose_afternoon(context)
     elif slot == "midnight":
-        text, keys = _compose_midnight(context)
+        text, story_items = _compose_midnight(context)
     else:
-        text, keys = _compose_evening(context)
+        text, story_items = _compose_evening(context)
     stages.append("compose")
 
     # voice only when explicitly enabled for the slot
@@ -1344,24 +1488,20 @@ def run_slot(context: Any, slot: str = "morning") -> dict[str, Any]:
     audio_ok = _deliver_audio(context, audio_path) if audio_path else False
     stages.append("deliver")
 
-    if text_ok and keys:
-        _mark_seen(context, keys, slot)
-        # Record news deliveries in the news store too (pass #85):
-        # keys are section item keys — news keys are story URLs, and
-        # mark_delivered only transitions rows whose URL/id matches,
-        # so market/other keys pass through harmlessly.
-        try:
-            from .news import NewsAgent as _NewsAgent
-
-            _NewsAgent(context).mark_delivered(keys, channel="pulse")
-        except Exception:  # noqa: BLE001
-            pass
+    # The full story list, in confirmed segments (F6): marking rides
+    # each segment's own delivery confirmation — never the head
+    # text's — so a story is recorded delivered only when the owner
+    # actually received it, and a failed segment resumes next slot.
+    story_keys = _deliver_stories(context, slot, story_items)
+    if story_items:
+        stages.append("stories")
 
     elapsed = round(time.time() - started, 1)
-    delivered = text_ok or audio_ok
+    delivered = text_ok or audio_ok or bool(story_keys)
     _ledger(context, "run",
             f"{slot} briefing: stages={','.join(stages)} "
-            f"text={'delivered' if text_ok else 'FAILED'}",
+            f"text={'delivered' if text_ok else 'FAILED'} "
+            f"stories={len(story_keys)}/{len(story_items)}",
             cost_seconds=elapsed, ok=delivered)
     _emit_bus({"slot": slot, "stages": stages,
                "delivered_text": text_ok,
@@ -1369,7 +1509,9 @@ def run_slot(context: Any, slot: str = "morning") -> dict[str, Any]:
                "elapsed_s": elapsed, "ok": delivered})
     result = {"ok": True, "slot": slot, "stages": stages, "text": text,
               "audio_path": audio_path, "delivered_text": text_ok,
-              "delivered_audio": audio_ok, "elapsed_s": elapsed}
+              "delivered_audio": audio_ok, "elapsed_s": elapsed,
+              "stories_delivered": len(story_keys),
+              "stories_pending": len(story_items) - len(story_keys)}
     _write_slot_marker(context, slot, result)
     _log.info("pulse/%s done in %ss: text=%s audio=%s", slot, elapsed,
               text_ok, audio_ok)

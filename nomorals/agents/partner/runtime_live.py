@@ -133,19 +133,12 @@ class RuntimeLiveMixin:
             if not report["ok"]:
                 errs = "; ".join(report["errors"][:3])
                 return f"news run got nothing readable ({report['items']} items)" + (f" — {errs}" if errs else "")
-            # Mark what this run delivered in the pulse seen-store, so the
-            # next briefing slot doesn't repeat it as "fresh news"
-            # (its _filter_unseen only knows slot-marked keys).
-            try:
-                from ..morning_pulse import _mark_seen
-                urls = report.get("delivered_urls")
-                if urls is None:
-                    delivered = agent.recent(report["items"])
-                    urls = [str(r.get("url") or r.get("title", ""))
-                            for r in delivered]
-                _mark_seen(self.context, [str(u) for u in urls], "news")
-            except Exception:  # noqa: BLE001 - seen-marking is best-effort
-                pass
+            # No seen-marking here (F6): agent.run() digests through
+            # brief(), which already records these stories as
+            # delivered in the news ledger — and the briefing slots
+            # read that same ledger, so this run's stories can't
+            # repeat as "fresh news" in the next slot.  (The retired
+            # pulse seen-marker used to need a manual sync here.)
             tried = report.get("sources_tried", 0)
             ok_srcs = report.get("sources_ok") or []
             src_line = (f"sources: {len(ok_srcs)}/{tried} feeds answered "

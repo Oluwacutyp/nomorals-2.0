@@ -34,7 +34,11 @@ from ..core.logging_setup import get_logger
 
 _log = get_logger(__name__)
 
-#: hard cap on briefing length (spec: ~600 words / 40 lines)
+#: summary sizing budget (~600 words / 40 lines): converted to the
+#: per-section line budgets by adaptive_section_budget.  NOT a cap on
+#: what a briefing may carry — the complete story list rides the
+#: pulse's own uncapped story segments (F6); this sizes the summary
+#: sections only.
 MAX_WORDS = 600
 #: anti-monopoly: max items from a single source per section
 MAX_PER_SOURCE = 3
@@ -602,7 +606,14 @@ class RepoProvider(_Provider):
 
 class NewsProvider(_Provider):
     """Top news FILTERED by the owner's explicit topics (settings list).
-    Consumes NewsAgent's stored digest — never replaces its behavior."""
+
+    Highlights are picked from the news delivery ledger's UNDELIVERED
+    set (F6) — never from a recency window — so a briefing never
+    re-shows a story another surface already delivered.  This section
+    is the summary; the COMPLETE undelivered list is delivered by the
+    pulse's own story segments, so the per-source pick and the
+    section budget below size the highlights only — they no longer
+    decide which stories the owner ever sees."""
     name = "news"
     title = "Worth knowing"
     priority = 50
@@ -612,7 +623,7 @@ class NewsProvider(_Provider):
         try:
             from .news import NewsAgent, publisher_of
             agent = NewsAgent(ctx)
-            items = agent.recent(limit=40)
+            items = agent.undelivered()
         except Exception:  # noqa: BLE001
             return None
         if topics:
@@ -979,7 +990,7 @@ class DisruptionProvider(_Provider):
 
 class BriefingComposer:
     """Runs section providers, drops empties, orders by priority
-    (engagement-adjusted), truncates to the word cap."""
+    (engagement-adjusted), sizes sections to the summary budget."""
 
     def __init__(self) -> None:
         self.providers: list[_Provider] = [
