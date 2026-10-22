@@ -1157,7 +1157,7 @@ class RuntimeMetaMixin:
         # state toggles / autonomous loops
         "proactive", "model", "features", "arena",
         # money
-        "money", "shop", "bet", "spend",
+        "money", "shop", "bet", "desk", "spend",
         # slow (attack suites, benchmarks, media generation)
         "redteam", "benchmark", "vnote", "audio", "video", "music",
         # no recursion

@@ -42,6 +42,7 @@ CLI_ALIASES: dict[str, list[str]] = {
     "arena": ["ar"],
     "autonomy": ["auto"],
     "bet": ["bt"],
+    "desk": [],
     "book": ["bk"],
     "books": ["library", "lib"],
     "build": ["bld"],
@@ -1832,6 +1833,32 @@ def _parser() -> argparse.ArgumentParser:
     b_rc.add_argument("--away", required=True)
     b_rc.add_argument("--score", required=True, help="HG-AG, e.g. 2-1")
     b_rc.add_argument("--league", default="GEN")
+
+    desk_p = sub.add_parser("desk", aliases=CLI_ALIASES["desk"],
+        help="betting desk: crash pattern lab, verdicts library, timed signal calls (analysis only)",
+        description=("nm desk status\\n"
+                     "nm desk study\\n"
+                     "nm desk signals [--no-deliver]\\n"
+                     "nm desk library\\n"
+                     "nm desk collect\\n"
+                     "nm desk import --provider P --game G --path FILE\\n"
+                     "nm desk sources\\n"
+                     "nm desk provision"),
+    )
+    desk_sub = desk_p.add_subparsers(dest="desk_action", required=True)
+    desk_sub.add_parser("status", help="rounds, verdicts, calibration, keys")
+    desk_sub.add_parser("study", help="one full desk cycle")
+    d_sig = desk_sub.add_parser("signals", help="evaluate + publish calls")
+    d_sig.add_argument("--no-deliver", action="store_true",
+                       help="log calls without pushing them")
+    desk_sub.add_parser("library", help="per-game study records")
+    desk_sub.add_parser("collect", help="fetch providers + import inbox")
+    d_imp = desk_sub.add_parser("import", help="import a round history file")
+    d_imp.add_argument("--provider", required=True)
+    d_imp.add_argument("--game", required=True)
+    d_imp.add_argument("--path", required=True)
+    desk_sub.add_parser("sources", help="betting sources on the registry")
+    desk_sub.add_parser("provision", help="register desk APIs for self-provisioning")
 
     wx = sub.add_parser("weather", aliases=CLI_ALIASES["weather"],
         help="live weather + USA situations + timezone utilities (keyless)",

@@ -458,6 +458,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "clonevoice": (1, 1),  # /clonevoice <name> — attach a voice note, clone it
     "voices": (0, 0),      # /voices — list every voice, cloned vs built-in
     "bet": (0, None),        # /bet analyze <home> vs <away> [odds…] | bankroll | backtest
+    "desk": (0, None),       # /desk status|study|signals|library|collect|sources|provision — the betting desk (crash lab + signal calls)
     "finance": (0, None),    # /finance quote|analyze|signal|idea|backtest|strategies|compare|watch|doctor
     "weather": (0, None),    # /weather [place] — live conditions + forecast + alerts
     "tz": (0, None),         # /tz [time] — timezone conversion, labeled in owner tz
@@ -2113,7 +2114,11 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
     "bet": {"what": "the sports bet analyst: ensemble ML (Elo + Poisson + form + market, logistic meta-learner) gives 1X2 probabilities, expected value vs bookmaker odds, and Kelly stakes. Analysis only — it never places bets.",
             "usage": "/bet analyze <home> vs <away> [home_odds draw_odds away_odds] [--league L] | /bet bankroll [set <amount>] | /bet backtest [n] [--seed S] | /bet record <home> <away> <hg-ag>",
             "example": "/bet analyze Arsenal vs Chelsea 2.10 3.40 3.60",
-            "related": "/api"},
+            "related": "/desk"},
+    "desk": {"what": "the betting desk: a standing study organ over crash games (Aviator, Stake Crash, bustabit and the likes). It collects timestamped rounds, runs a pattern lab (time-of-day, inter-round timing, autocorrelation, streaks — the time hypothesis, tested), keeps a per-game library of verdicts with evidence, and issues signal calls with at least 2 minutes of lead only off lab-confirmed time structure. Analysis only — it never places bets and never opens book accounts.",
+            "usage": "/desk status | /desk study | /desk signals | /desk library | /desk collect | /desk sources | /desk provision",
+            "example": "/desk status",
+            "related": "/bet"},
     "finance": {"what": "the finance brain: Devon's native TA stack (regime detection, strategy committee, signal fusion, event backtester, risk manager — ported from the Sentinel.py engine) over free keyless market data (Binance/Stooq/Frankfurter). Quotes, regime analysis, signals, full trade plans with stops/targets, per-strategy backtests, and price alerts. Research only — never financial advice.",
             "usage": "/finance quote <sym> [market] | /finance analyze <sym> [market] [tf] | /finance signal <sym> [market] | /finance idea <sym> [market] [--profile P] | /finance backtest <sym> [market] [--profile P] [--strategy NAME] | /finance strategies | /finance compare <s1,s2> [market] | /finance watch <sym> <above|below> <price> [market] | /finance doctor",
             "example": "/finance idea BTC crypto --profile conservative",
@@ -2420,7 +2425,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
     ("tools & automation", ["schedule", "db", "artifact", "api", "connectors", "provision", "notion",
                             "gcal", "trello", "proxy", "workspace", "record",
                             "macro", "file", "publish", "notify", "proactive", "mission",
-                            "bet", "finance", "weather", "tz", "email", "gmail", "mail", "inbox", "routine", "home", "store", "track", "untrack", "trip", "travelclient", "contract", "legal", "research", "contracts", "regwatch", "uprofile", "vnote", "match", "cgroup", "challenge", "room", "scamcheck", "passport", "truecost", "value", "valuepick", "watch", "send", "leads", "guardrails", "competitor", "cost", "panel",
+                            "bet", "desk", "finance", "weather", "tz", "email", "gmail", "mail", "inbox", "routine", "home", "store", "track", "untrack", "trip", "travelclient", "contract", "legal", "research", "contracts", "regwatch", "uprofile", "vnote", "match", "cgroup", "challenge", "room", "scamcheck", "passport", "truecost", "value", "valuepick", "watch", "send", "leads", "guardrails", "competitor", "cost", "panel",
                            "exness", "stripe", "content",
                            "tempmail", "checkmail", "vnumber", "checksms",
                            "browser", "paper", "backup"]),
@@ -2676,7 +2681,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
     ("tools & automation",
      ["schedule", "db", "artifact", "api", "proxy", "workspace", "record", "macro", "file",
       "publish", "notify", "proactive", "mission", "features", "decode", "cookies", "cookielab", "cipher",
-      "monitor", "investigate", "bet", "finance", "weather", "tz", "email", "gmail", "mail", "inbox", "routine", "home", "store", "track", "untrack", "trip", "travelclient", "contract", "legal", "contracts", "regwatch", "uprofile", "vnote", "match", "cgroup", "challenge", "room", "scamcheck", "passport", "truecost", "value", "valuepick", "watch", "send", "leads", "panel",
+      "monitor", "investigate", "bet", "desk", "finance", "weather", "tz", "email", "gmail", "mail", "inbox", "routine", "home", "store", "track", "untrack", "trip", "travelclient", "contract", "legal", "contracts", "regwatch", "uprofile", "vnote", "match", "cgroup", "challenge", "room", "scamcheck", "passport", "truecost", "value", "valuepick", "watch", "send", "leads", "panel",
       "connectors", "provision", "notion", "gcal", "trello", "exness", "stripe",
       "guardrails", "content",
       "tempmail", "checkmail", "vnumber", "checksms", "browser", "paper", "backup"]),
@@ -2858,6 +2863,7 @@ LIST_ONELINERS: dict[str, str] = {
     "tts": "speak text, send as a voice note",
     "speak": "neural voice note of your text",
     "bet": "sports bet analyst: ensemble ML odds analysis + Kelly stakes",
+    "desk": "betting desk: crash pattern lab, verdicts library, timed signal calls",
     "weather": "live weather, alerts, USA situations overview",
     "tz": "timezone conversion + your labeled local time",
     "stt": "transcribe an audio file",

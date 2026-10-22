@@ -2558,6 +2558,97 @@ class RuntimeGamesMixin:
 
         return f"unknown /bet verb {verb!r}\n{_usage()}"
 
+    # ── betting desk: /desk (crash lab + timed signal calls) ────────────
+    def _control_desk(self, tail: str, chat_key: str) -> str:
+        """/desk — the betting desk (analysis only, never places bets).
+
+        /desk status     — rounds, verdicts, signal calibration, keys
+        /desk study      — one full cycle: collect, import, lab, sports
+        /desk signals    — evaluate + publish callable timed calls
+        /desk library    — per-game study records with evidence
+        /desk collect    — fetch providers + import the inbox only
+        /desk sources    — the desk's sources on the shared registry
+        /desk provision  — the desk's API services in self-provisioning
+        """
+        from ..betdesk import (BettingDesk, render_library, render_status)
+
+        desk = BettingDesk(getattr(self, "context", None))
+        parts = (tail or "").strip().split(None, 1)
+        verb = parts[0].lower() if parts else ""
+
+        def _usage() -> str:
+            return ("/desk status — rounds, verdicts, signal calibration, "
+                    "source + key state\n"
+                    "/desk study — run one full desk cycle now\n"
+                    "/desk signals — publish callable signal calls "
+                    "(>= 2m lead, lab-confirmed time structure only)\n"
+                    "/desk library — per-game verdicts with evidence\n"
+                    "/desk collect — fetch providers + import inbox\n"
+                    "/desk sources — betting sources on the registry\n"
+                    "/desk provision — the desk's self-provisioned APIs\n"
+                    "analysis only — the desk never places bets")
+
+        if verb in ("", "help"):
+            return _usage()
+        if verb == "status":
+            return render_status(desk.status())
+        if verb == "library":
+            return render_library(desk.library())
+        if verb == "collect":
+            from ..betdesk.collectors import collect_all
+            rep = collect_all(desk.store, registry=desk.registry)
+            rep["imports"] = desk.import_inbox()
+            lines = [f"collect: +{rep.get('added', 0)} rounds"]
+            for p in rep.get("providers", []):
+                lines.append(f"  {p['provider']}/{p['game']}: "
+                             f"{p.get('detail', '')}")
+            for imp in rep["imports"]:
+                lines.append(f"  import {imp.get('file', '')}: "
+                             f"{imp.get('detail', imp.get('added', ''))}")
+            return "\n".join(lines)
+        if verb == "study":
+            rep = desk.study(deliver_signals=False)
+            lines = ["desk study cycle:"]
+            for key, v in (rep.get("verdicts") or {}).items():
+                lines.append(f"  {key}: {v.get('verdict')} "
+                             f"({v.get('n_rounds', 0)} rounds)")
+            sports = rep.get("sports") or {}
+            lines.append(f"  sports scan: "
+                         f"{'ok' if sports.get('ok') else sports.get('detail', 'failed')}")
+            return "\n".join(lines)
+        if verb == "signals":
+            desk.analyze_all()
+            rep = desk.run_signals(deliver=True)
+            if rep["published"]:
+                lines = [f"published {len(rep['published'])} signal "
+                         f"call(s):"]
+                for pub in rep["published"]:
+                    c = pub["call"]
+                    lines.append(
+                        f"  {c['provider']}/{c['game']} target "
+                        f"{c['target']:.2f}x, lead "
+                        f"{(c['window_start'] - c['published_at']) / 60:.0f}m"
+                        f" — {pub.get('detail', '')}")
+                return "\n".join(lines)
+            return ("no callable signals right now:\n" +
+                    "\n".join(f"  {r}" for r in rep["no_call_reasons"]))
+        if verb == "sources":
+            from ..betdesk.sources import betting_status
+            st = betting_status(desk.registry)
+            if not st["sources"]:
+                return "no betting sources registered yet"
+            return "\n".join(
+                f"{s['domain']} — {s['health']} ({s['origin']})"
+                for s in st["sources"])
+        if verb == "provision":
+            from ..betdesk.sources import ensure_provisioning
+            ids = ensure_provisioning()
+            return ("desk API services registered with self-provisioning: "
+                    + ", ".join(ids) +
+                    "\nprovision a key with: provision <service> "
+                    "(owner's own account; key lands in the vault)")
+        return f"unknown /desk verb {verb!r}\n{_usage()}"
+
     def _control_predict(self, tail: str, chat_key: str, *,
                          message: Any = None) -> str:
         """The prediction pit — unlocked by beating challenges.

@@ -15,6 +15,7 @@ from .commands.autonomy import _cmd_autonomy
 from .commands.backup import _cmd_backup
 from .commands.benchmark import _cmd_benchmark
 from .commands.bet import _cmd_bet
+from .commands.desk import _cmd_desk
 from .commands.book import _cmd_book
 from .commands.account import _cmd_account
 from .commands.books import _cmd_books
@@ -374,6 +375,7 @@ _COMMANDS: dict[str, _CommandSpec] = {
     "captcha": _CommandSpec(_cmd_captcha),
     "account": _CommandSpec(_cmd_account),
     "bet": _CommandSpec(_cmd_bet),
+    "desk": _CommandSpec(_cmd_desk),
     "build": _CommandSpec(_cmd_build),
     "weather": _CommandSpec(_cmd_weather),
     "vision": _CommandSpec(_cmd_vision),

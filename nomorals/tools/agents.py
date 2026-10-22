@@ -33,6 +33,7 @@ _log = logging.getLogger(__name__)
 # register() below.
 AGENT_TOOL_MODULES = (
     "benchmark",
+    "betdesk",
     "bisect",
     "cipher",
     "cognition",

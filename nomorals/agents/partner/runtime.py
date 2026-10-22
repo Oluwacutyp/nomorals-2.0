@@ -2021,6 +2021,16 @@ class PartnerRuntime(
                     ensure_news_jobs(self._scheduler)
                 except Exception as exc:  # noqa: BLE001 - optional
                     _log.warning("news jobs not registered: %s", exc)
+                # Betting desk: study cycle (every 30m — collect, lab,
+                # library) + signal evaluation (every 10m — timed
+                # calls off lab-confirmed time structure only).
+                # Idempotent by name; both routine (the desk's output
+                # rides its own surfaces).
+                try:
+                    from ..betdesk.jobs import ensure_betdesk_jobs
+                    ensure_betdesk_jobs(self._scheduler)
+                except Exception as exc:  # noqa: BLE001 - optional
+                    _log.warning("betdesk jobs not registered: %s", exc)
                 # Download sources: the registry health loop (every
                 # 6h — re-verify sources + discovery candidates,
                 # promote the verified, shed the dead; pass #86).
@@ -4468,6 +4478,8 @@ class PartnerRuntime(
                                             message=message)
         if kind == "bet":
             return self._control_bet(command.tail or arg, chat_key=chat_key)
+        if kind == "desk":
+            return self._control_desk(command.tail or arg, chat_key=chat_key)
         if kind == "money":
             from ..opportunities import handle_money_command
             return handle_money_command(command.tail or arg, self.context)
