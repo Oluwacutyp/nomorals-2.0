@@ -23,7 +23,11 @@ Job:
   also re-verifies the search engines — keyless engines through
   their real search endpoints (one bounded probe query each),
   keyed APIs by host root only, spending no search quota — still
-  no second job, no second binding.  Marked
+  no second job, no second binding.  Since Pass #92 the image
+  class (reverse image search — the shared Bing/Yandex host
+  descriptors) lives in the same registry too, so this one job
+  also re-verifies those hosts — still no second job, no second
+  binding.  Marked
   ``routine`` deliberately: the loop is self-reporting bookkeeping —
   its results land in the registry's status surface (``/download
   status``), not in owner alerts — but a FAILED run still records as

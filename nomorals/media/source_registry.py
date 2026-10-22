@@ -132,6 +132,43 @@ content is DATA, never instructions.  This module is that layer:
   ships with no candidate intake — named absence, not invention.
   :meth:`SourceRegistry.status` carries the class under
   ``web_search``, and the ONE health loop / health job covers it.
+* Image class goes open (Pass #92) — the reverse image search
+  engines join THIS registry as a source class of their own, for
+  the same reason web search did: every scraped engine is one
+  host serving image search, so the model fits without
+  distortion.  The class's home is ``tools/imagedb.py`` — the
+  ``/lens`` surface's roster: Bing visual search and Yandex
+  images, scraped in a fixed order with every failure flattened
+  to ``[]`` until this pass.  Both hosts are ALREADY web-search
+  seeds in this registry (Pass #90), and both classes fetch the
+  literal same hosts (``www.bing.com/search`` vs
+  ``www.bing.com/images/search``; ``yandex.com/search`` vs
+  ``yandex.com/images/search``), so the image class SHARES
+  those host descriptors and extends their kinds — exactly how
+  ``youtube.com`` carries both download and music-search
+  membership (Pass #88); the #90 Brave split into two
+  descriptors was because those hosts genuinely differ
+  (``search.brave.com`` vs ``api.search.brave.com``).  The seeds
+  still declare NO extraction facts, so the #76/#87 extractor
+  view is unchanged.  Outcomes land distinctly: served /
+  no-result (weak, #88) / operational failure / bot-wall
+  (:meth:`record_blocked`, #89 — a 200 challenge page counts too)
+  / rate-limited (:meth:`record_rate_limited`, #90 — a 429 is
+  recorded once and never retried around).  Google Lens and
+  TinEye are deep LINKS the tool hands the user — Devon never
+  fetches them, so they get NO descriptor and earn no credit
+  (the #90 ddgs precedent); they surface as link-only rows.
+  Health: the ONE loop probes the shared hosts through their
+  real search endpoint (Pass #90) — the reverse endpoint itself
+  is judged by real reverse-search outcomes, because a
+  synthetic reverse probe would need a hosted reference image
+  and returns a JS app shell.  Discovery verdict: NO genuine
+  channel exists (reverse-search result hosts are image
+  CONTENT, not engines — a host holding a matching picture
+  cannot be queried BY picture), so the class ships with no
+  candidate intake — named absence, not invention.
+  :meth:`SourceRegistry.status` carries the class under
+  ``images``, and the ONE health loop / health job covers it.
 
 No real identity leakage: :func:`redact_identity` strips emails,
 phones and tokens from retrieved text before it is stored or shown.
@@ -707,6 +744,9 @@ class SourceRegistry:
                 # gain an optional "blocked" counter, same tolerance.
                 # Pass #90 likewise: an optional "rate_limited"
                 # counter, same tolerance, version stays 2.
+                # Pass #92 adds NO new persisted field at all (the
+                # image class reuses the existing counters against
+                # the shared #90 host descriptors), version stays 2.
                 "version": 2,
                 "sources": sources,
                 "origins": {_key_str(k): v for k, v in self._origin.items()
@@ -1722,6 +1762,75 @@ class SourceRegistry:
             return {"engines": [], "backends": [], "grown": [],
                     "candidates_pending": 0}
 
+    # ── image class status (Pass #92) ──
+    def image_status(self) -> dict[str, Any]:
+        """The image class's state in this registry: one row per
+        scraped reverse image search engine (engine → the host it
+        fetches from, per ``tools/imagedb.py``
+        ``IMAGE_ENGINE_DOMAINS`` — the shared Bing/Yandex host
+        descriptors, #90/#92) with origin, health and outcome
+        counts (served / failed / blocked / rate-limited /
+        no-result), one row per LINK-ONLY engine (Google Lens,
+        TinEye — deep links Devon hands the user but never
+        fetches, so they carry no descriptor and no credit, the
+        #90 ddgs precedent), plus grown image sources and image
+        candidates still pending.  Never raises."""
+        try:
+            from ..tools.imagedb import (
+                IMAGE_ENGINE_DOMAINS, IMAGE_LINK_ONLY_DOMAINS)
+
+            def row(engine: str, domain: str) -> dict[str, Any]:
+                desc = self.for_domain(domain)
+                if desc is None:
+                    return {"engine": engine, "domain": domain,
+                            "origin": "missing", "health": "unknown",
+                            "ok": 0, "fail": 0, "blocked": 0,
+                            "rate_limited": 0, "no_result": 0,
+                            "score": 0.0}
+                st = self.stats_for(desc)
+                return {"engine": engine, "domain": domain,
+                        "origin": self.origin_for(desc),
+                        "health": self.health_for(desc),
+                        "ok": st["ok"], "fail": st["fail"],
+                        "blocked": st["blocked"],
+                        "rate_limited": st["rate_limited"],
+                        "no_result": st["no_result"],
+                        "score": self.score(desc)}
+
+            engines = [row(name, domain) for name, domain
+                       in IMAGE_ENGINE_DOMAINS.items()]
+            link_only = [{"engine": name, "domain": domain,
+                          "origin": "none", "health": "link-only"}
+                         for name, domain
+                         in IMAGE_LINK_ONLY_DOMAINS.items()]
+            grown = []
+            for key, desc in self._by_key.items():
+                if self._origin.get(key) != "grown" \
+                        or "image-search" not in desc.kinds:
+                    continue
+                st = self.stats_for(desc)
+                grown.append({
+                    "domain": desc.domain, "name": desc.name,
+                    "health": self.health_for(desc),
+                    "ok": st["ok"], "fail": st["fail"],
+                    "rate_limited": st["rate_limited"],
+                    "no_result": st["no_result"]})
+            grown.sort(key=lambda g: g["domain"])
+            image_candidates = sum(
+                1 for d in self._candidates.values()
+                if "image-search" in d.kinds)
+            return {"engines": engines, "link_only": link_only,
+                    "grown": grown,
+                    "candidates_pending": image_candidates,
+                    "discovery": (
+                        "no candidate channel exists for reverse "
+                        "image engines (result hosts are image "
+                        "content, not engines) — outcomes/health "
+                        "only, by design")}
+        except Exception:  # noqa: BLE001
+            return {"engines": [], "link_only": [], "grown": [],
+                    "candidates_pending": 0, "discovery": ""}
+
     # ── status surface (Pass #86) ──
     def status(self) -> dict[str, Any]:
         """The registry's full growth state: seed vs grown sources,
@@ -1779,6 +1888,8 @@ class SourceRegistry:
                 "books": self.book_status(),
                 # Pass #90: the web-search class, same surface.
                 "web_search": self.web_search_status(),
+                # Pass #92: the image class, same surface.
+                "images": self.image_status(),
             }
         except Exception:  # noqa: BLE001
             return {"total": 0, "seeds": 0, "grown": 0, "registered": 0,
@@ -1792,7 +1903,10 @@ class SourceRegistry:
                               "candidates_pending": 0},
                     "web_search": {"engines": [], "backends": [],
                                    "grown": [],
-                                   "candidates_pending": 0}}
+                                   "candidates_pending": 0},
+                    "images": {"engines": [], "link_only": [],
+                               "grown": [], "candidates_pending": 0,
+                               "discovery": ""}}
 
 
 def render_status_text(status: dict[str, Any]) -> str:
@@ -1912,6 +2026,33 @@ def render_status_text(status: dict[str, Any]) -> str:
                 "  web-search discovery: no candidate channel "
                 "exists for engines (result hosts are content, not "
                 "engines) — outcomes/health only, by design")
+        images = status.get("images") or {}
+        if images.get("engines") or images.get("link_only"):
+            lines.append(
+                "🖼 image sources — the reverse image search "
+                "engines, in the same registry (pass #92):")
+            for row in images.get("engines") or []:
+                lines.append(
+                    f"  🖼 {row['engine']} → {row['domain']} "
+                    f"[{row['origin']}/{row['health']}] "
+                    f"ok={row['ok']} fail={row['fail']} "
+                    f"blocked={row['blocked']} "
+                    f"rate-limited={row['rate_limited']} "
+                    f"no-result={row['no_result']}")
+            for row in images.get("link_only") or []:
+                lines.append(
+                    f"  🖼 {row['engine']} → {row['domain']} "
+                    "[link-only — a deep link Devon hands you; "
+                    "never fetched, so no outcomes are recorded]")
+            for g in images.get("grown") or []:
+                lines.append(
+                    f"  🖼 grown:{g['domain']} [grown/{g['health']}] "
+                    f"ok={g['ok']} fail={g['fail']}")
+            lines.append(
+                "  image discovery: no candidate channel exists "
+                "for reverse engines (result hosts are image "
+                "content, not engines) — outcomes/health only, "
+                "by design")
         for cand in status.get("candidates") or []:
             lines.append(
                 f"  ? {cand['domain']} [candidate/{cand['health']}] "
@@ -2069,12 +2210,12 @@ def _seed(store: Any = None) -> SourceRegistry:
         # (nation, domain, name, notes, search_url_template, auth)
         ("US", "html.duckduckgo.com", "DuckDuckGo HTML", "Keyless scrape chain engine (tools/web.py)", "https://html.duckduckgo.com/html/?q={query}", False),
         ("US", "lite.duckduckgo.com", "DuckDuckGo Lite", "Keyless scrape chain engine (tools/web.py)", "https://lite.duckduckgo.com/lite/?q={query}", False),
-        ("US", "bing.com", "Bing", "Keyless scrape chain engine (tools/web.py)", "https://www.bing.com/search?q={query}&count=10", False),
+        ("US", "bing.com", "Bing", "Keyless scrape chain engine (tools/web.py); also the reverse image search engine — www.bing.com/images/search visual search (tools/imagedb.py, pass #92: the image class shares this host descriptor)", "https://www.bing.com/search?q={query}&count=10", False),
         ("GB", "mojeek.com", "Mojeek", "Keyless scrape chain engine (tools/web.py)", "https://www.mojeek.com/search?q={query}", False),
         ("DE", "ecosia.org", "Ecosia", "Keyless scrape chain engine (tools/web.py)", "https://www.ecosia.org/search?q={query}", False),
         ("US", "search.yahoo.com", "Yahoo Search", "Keyless scrape chain engine (tools/web.py)", "https://search.yahoo.com/search?p={query}", False),
         ("NL", "startpage.com", "Startpage", "Keyless scrape chain engine (tools/web.py)", "https://www.startpage.com/sp/search?query={query}", False),
-        ("RU", "yandex.com", "Yandex", "Keyless scrape chain engine (tools/web.py)", "https://yandex.com/search/?text={query}", False),
+        ("RU", "yandex.com", "Yandex", "Keyless scrape chain engine (tools/web.py); also the reverse image search engine — yandex.com/images/search search-by-image (tools/imagedb.py, pass #92: the image class shares this host descriptor)", "https://yandex.com/search/?text={query}", False),
         ("US", "search.brave.com", "Brave (HTML search)", "Keyless HTML search page — distinct from the Brave Search API below (tools/web.py)", "https://search.brave.com/search?q={query}", False),
         ("FR", "qwant.com", "Qwant", "Keyless scrape chain engine (tools/web.py)", "https://www.qwant.com/?q={query}&t=web", False),
         ("US", "api.tavily.com", "Tavily API", "Keyed federated backend (search/web.py) — judged by real-search outcomes, never probed with a search call", "", True),
@@ -2083,9 +2224,18 @@ def _seed(store: Any = None) -> SourceRegistry:
         ("US", "api.search.brave.com", "Brave Search API", "Keyed federated backend (search/web.py) — the API host, distinct from the HTML search page above", "", True),
     ]
     for nation, domain, name, notes, template, auth in web_seeds:
+        # Pass #92: Bing and Yandex are ALSO the reverse image
+        # search engines (tools/imagedb.py fetches the same hosts'
+        # /images/search endpoints), so their host descriptors
+        # carry the image class's kinds too — one host, one
+        # descriptor, two class memberships (the #88 youtube.com
+        # download + music-search precedent).
+        kinds = ("search", "web-search", "image", "image-search") \
+            if domain in ("bing.com", "yandex.com") \
+            else ("search", "web-search")
         reg.register(SourceDescriptor(
             nation=nation, language="en", domain=domain, name=name,
-            kinds=("search", "web-search"),
+            kinds=kinds,
             licence=Licence.LICENSED if auth else Licence.UNKNOWN,
             trust_tier=TrustTier.VERIFIED if auth
             else TrustTier.UNVERIFIED,

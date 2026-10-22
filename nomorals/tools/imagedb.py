@@ -22,6 +22,36 @@
 
 URLs are downloaded to the media dir first (size-capped), so both tools
 accept either a local path or a public URL.
+
+Pass #92 (owner's open-sources law — images named explicitly): the
+reverse-search roster above is an image SOURCE class, and it now
+lives in the ONE source registry (``media/source_registry.py``) the
+#86–#90 passes built — as its own class, for the same reason web
+search joined in #90: every scraped engine is one host serving
+image search.  The two scraped hosts (``bing.com``,
+``yandex.com``) are already registry descriptors (web-search
+seeds, #90) and both classes fetch the literal same hosts
+(``www.bing.com/search`` vs ``www.bing.com/images/search``;
+``yandex.com/search`` vs ``yandex.com/images/search``), so this
+class SHARES those host descriptors and extends their kinds —
+one host, one descriptor, two class memberships (the #88
+``youtube.com`` download + music-search precedent).  Every scrape
+attempt now records its outcome against the engine's descriptor —
+served / no-result (weak evidence, #88) / failure with an error
+class / bot-wall (:meth:`record_blocked`, #89 — a 200 challenge
+page counts too) / rate-limited (:meth:`record_rate_limited`,
+#90 — a 429 is recorded once and never retried around) — the
+chain order is outcome-aware with a day-one pin (zero learned
+state → ``("bing", "yandex")`` byte-for-byte), and the ONE
+registry health loop / health job covers the class.  Google Lens
+and TinEye are deep LINKS this tool hands the user; Devon never
+fetches them, so they get NO descriptor and earn no credit (the
+#90 ddgs precedent) — they surface as link-only rows in the
+class status (``image_sources`` tool / ``download_sources``
+status).  Discovery verdict — named absence: reverse-search
+RESULT hosts are image content, not engines (a host holding a
+matching picture cannot be queried BY picture), so no candidate
+intake exists on this path.
 """
 
 from __future__ import annotations
@@ -35,13 +65,17 @@ import urllib.parse
 from pathlib import Path
 from typing import Any
 
+from ..core.errors import http_status_of
 from ..core.logging_setup import get_logger
 from ..core.http import HttpClient
 
 _log = get_logger(__name__)
 
 __all__ = ["register", "sniff_format", "image_dimensions", "dhash", "hamming",
-           "image_exif", "image_colors", "find_dupes", "image_stats"]
+           "image_exif", "image_colors", "find_dupes", "image_stats",
+           "REVERSE_IMAGE_ENGINES", "IMAGE_ENGINE_DOMAINS",
+           "IMAGE_LINK_ONLY_DOMAINS", "image_registry_for_context",
+           "ordered_image_engines"]
 
 
 def _pil_image():
@@ -498,7 +532,173 @@ def image_stats(context: Any) -> dict[str, Any]:
     }
 
 
-def _reverse_impl(context: Any, ref: str) -> dict[str, Any]:
+# ── image source class: registry plumbing (Pass #92) ─────────────────
+
+#: The reverse image search engines Devon actually SCRAPES, in
+#: day-one order.  This tuple is the class roster: the chain runs
+#: every engine isolated (one failure never kills the other), and
+#: Pass #92 makes the order outcome-aware through the registry
+#: (see :func:`ordered_image_engines`) with this order as the
+#: zero-evidence pin.
+REVERSE_IMAGE_ENGINES: tuple[str, ...] = ("bing", "yandex")
+
+#: The host each scraped engine actually fetches from — the
+#: engine's source in the ONE source registry (Pass #92).  This
+#: map is the image class's membership list: the scrape path
+#: credits outcomes to the registry descriptor for this domain,
+#: the registry's status surface renders the class from it, and
+#: the health loop verifies these hosts.  Domains are evidence
+#: from the scrape URL construction below (``www.bing.com`` /
+#: ``yandex.com``, www-canonicalised by the registry exactly as
+#: in ``tools/web.py``), NOT the engines' marketing domains —
+#: and they are the SAME hosts the web-search class fetches its
+#: search pages from (#90), which is why the descriptors are
+#: shared rather than duplicated.
+IMAGE_ENGINE_DOMAINS: dict[str, str] = {
+    "bing": "bing.com",
+    "yandex": "yandex.com",
+}
+
+#: Engines that appear in the product only as deep LINKS handed
+#: to the user (see ``_reverse_impl``'s ``lookup_links``).  Devon
+#: never fetches them, so no outcome can ever be recorded for
+#: them honestly: they get NO registry descriptor and earn no
+#: credit (the #90 ddgs precedent) and surface in the class
+#: status as link-only rows.
+IMAGE_LINK_ONLY_DOMAINS: dict[str, str] = {
+    "google_lens": "lens.google.com",
+    "tineye": "tineye.com",
+}
+
+
+def image_registry_for_context(context: Any = None,
+                               injected: Any = None) -> Any:
+    """The source registry image-search outcomes land in, or None.
+
+    Mirrors ``tools/web.py``'s #90 resolution exactly: an injected
+    registry wins; otherwise the shared ``DEFAULT_REGISTRY`` bound
+    to the context's KV store — and only when the context carries
+    a database, so db-less callers (pure/offline contexts, the
+    fake-client test harnesses) keep the pre-#92 behaviour
+    exactly.  Never raises."""
+    if injected is not None:
+        return injected
+    try:
+        db = getattr(context, "db", None) if context is not None else None
+        if db is None:
+            return None
+        from ..media.source_registry import DEFAULT_REGISTRY
+        reg = DEFAULT_REGISTRY
+        try:
+            from ..storage.kv import KVStore
+            reg.bind_store(KVStore(db))
+        except Exception:  # noqa: BLE001 - persistence is an
+            # enhancement; its absence never sinks a search
+            pass
+        return reg
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _image_engine_desc(reg: Any, engine: str) -> Any:
+    """The registry descriptor for one scraped engine, or None.
+    Never raises."""
+    try:
+        domain = IMAGE_ENGINE_DOMAINS.get(engine)
+        if not domain or reg is None:
+            return None
+        return reg.for_domain(domain)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def ordered_image_engines(reg: Any,
+                          engines: tuple[str, ...] | None = None) -> list[str]:
+    """Outcome-aware engine order (Pass #92), through the
+    registry's score/health semantics, mirroring the #88 resolver
+    / #89 adapter / #90 chain ordering:
+
+    * NO learned state anywhere in the roster → the list is
+      returned untouched: day-one behaviour is
+      :data:`REVERSE_IMAGE_ENGINES`, byte-for-byte;
+    * otherwise active engines sort by registry score (stable —
+      ties keep roster order) and stood-down / disabled / dead
+      engines are demoted to the end, in roster order: they leave
+      the active ordering but are still tried last rather than
+      pretending they do not exist.
+    Never raises; a registry hiccup returns the roster as-is."""
+    pool = list(engines) if engines is not None \
+        else list(REVERSE_IMAGE_ENGINES)
+    try:
+        if reg is None:
+            return pool
+        items: list[tuple[str, Any]] = []
+        evidence = False
+        for engine in pool:
+            desc = _image_engine_desc(reg, engine)
+            items.append((engine, desc))
+            if desc is None:
+                continue
+            st = reg.stats_for(desc)
+            if st["ok"] or st["fail"] or st["no_result"] \
+                    or st.get("blocked") or st.get("rate_limited") \
+                    or not reg.is_active(desc):
+                evidence = True
+        if not evidence:
+            return pool
+        active = [it for it in items
+                  if it[1] is None or reg.is_active(it[1])]
+        inactive = [it for it in items
+                    if it[1] is not None and not reg.is_active(it[1])]
+        active.sort(key=lambda it: -reg.score(it[1])
+                    if it[1] is not None else 0.0)
+        return [e for e, _d in active] + [e for e, _d in inactive]
+    except Exception:  # noqa: BLE001
+        return pool
+
+
+def _record_image_outcome(reg: Any, engine: str, kind: str,
+                            latency_s: float = 0.0,
+                            error_class: str = "") -> None:
+    """Record one scrape attempt's outcome against its engine's
+    registry source.  ``kind``: served | no_result | failure |
+    blocked | rate_limited.  Best-effort; never raises —
+    bookkeeping must never break a search."""
+    try:
+        if reg is None:
+            return
+        desc = _image_engine_desc(reg, engine)
+        if desc is None:
+            return
+        if kind == "served":
+            reg.record_outcome(desc, True, latency_s=latency_s)
+        elif kind == "no_result":
+            reg.record_no_result(desc)
+        elif kind == "blocked":
+            reg.record_blocked(desc, latency_s=latency_s)
+        elif kind == "rate_limited":
+            # recorded once — a 429 is a hard stop for this engine,
+            # never a cue to retry, rotate or re-query around it
+            reg.record_rate_limited(desc, latency_s=latency_s)
+        else:
+            reg.record_outcome(desc, False, latency_s=latency_s,
+                               error_class=error_class or "site_error")
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _image_error_class(exc: BaseException) -> str:
+    """The error class a scrape transport exception earns: a
+    timeout is its own class; anything else is a network failure
+    (mirrors ``tools/web.py``'s chain vocabulary)."""
+    msg = f"{type(exc).__name__}: {exc}".lower()
+    if "timed out" in msg or "timeout" in msg:
+        return "timeout"
+    return "network_failure"
+
+
+def _reverse_impl(context: Any, ref: str,
+                  registry: Any = None) -> dict[str, Any]:
     tools = getattr(getattr(context, "settings", None), "tools", None)
     client = HttpClient(timeout=getattr(tools, "http_timeout", 30.0),
                         user_agent=getattr(tools, "user_agent", "NoMoralsCore/0.1"),
@@ -515,7 +715,13 @@ def _reverse_impl(context: Any, ref: str) -> dict[str, Any]:
             "yandex": f"https://yandex.com/images/?rpt=imageview&url={enc}",
             "tineye": f"https://tineye.com/search?url={enc}",
         }
-        matches = _scrape_engines(client, public)
+        # Pass #92: the scrape attempts record their outcomes in
+        # the ONE source registry and run in its learned order
+        # (day-one pin: no evidence → ("bing", "yandex") exactly,
+        # and the payload below is unchanged either way).
+        reg = registry if registry is not None \
+            else image_registry_for_context(context)
+        matches = _scrape_engines(client, public, registry=reg)
         out["unverified_matches"] = [u for urls in matches.values() for u in urls]
         out["unverified_by_engine"] = matches
     else:
@@ -549,16 +755,20 @@ def _dedupe_urls(raw: list[bytes], cap: int = 8) -> list[str]:
     return out
 
 
+def _bing_reverse_url(image_url: str) -> str:
+    return ("https://www.bing.com/images/search?view=detailv2&iss=sbi&qimgurl="
+            + urllib.parse.quote(image_url, safe=""))
+
+
+def _parse_bing_body(body: bytes) -> list[str]:
+    """Related-image media URLs from a Bing visual-search page body."""
+    return _dedupe_urls(_MEDIA_URL.findall(body or b""))
+
+
 def _scrape_bing(client: HttpClient, image_url: str) -> list[str]:
     """Best-effort: related-image media URLs from Bing's visual search page."""
-    try:
-        page = client.get(
-            "https://www.bing.com/images/search?view=detailv2&iss=sbi&qimgurl="
-            + urllib.parse.quote(image_url, safe="")
-        )
-    except Exception:  # noqa: BLE001 - scraping is optional garnish
-        return []
-    return _dedupe_urls(_MEDIA_URL.findall(page.body or b""))
+    urls, _kind, _err = _scrape_one("bing", client, image_url)
+    return urls
 
 
 _YANDEX_ORIGINAL = re.compile(rb'"originalImage"\s*:\s*\{\s*"url"\s*:\s*"([^"]{10,300})"', re.IGNORECASE)
@@ -567,18 +777,16 @@ _YANDEX_IMG_SRC = re.compile(
     re.IGNORECASE)
 
 
-def _scrape_yandex(client: HttpClient, image_url: str) -> list[str]:
-    """Best-effort: similar-image URLs from Yandex's image-search-by-image
-    page. Yandex embeds the matched image JSON as "originalImage":{"url":...}
+def _yandex_reverse_url(image_url: str) -> str:
+    return ("https://yandex.com/images/search?rpt=imageview&url="
+            + urllib.parse.quote(image_url, safe=""))
+
+
+def _parse_yandex_body(body: bytes) -> list[str]:
+    """Similar-image URLs from a Yandex search-by-image page body.
+    Yandex embeds the matched image JSON as "originalImage":{"url":...}
     and similar hits as <img> tags — we fish out both."""
-    try:
-        page = client.get(
-            "https://yandex.com/images/search?rpt=imageview&url="
-            + urllib.parse.quote(image_url, safe="")
-        )
-    except Exception:  # noqa: BLE001 - scraping is optional garnish
-        return []
-    body = page.body or b""
+    body = body or b""
     hits = _YANDEX_ORIGINAL.findall(body) + _YANDEX_IMG_SRC.findall(body)
     cleaned: list[bytes] = []
     for hit in hits:
@@ -588,16 +796,121 @@ def _scrape_yandex(client: HttpClient, image_url: str) -> list[str]:
     return _dedupe_urls(cleaned)
 
 
-def _scrape_engines(client: HttpClient, image_url: str) -> dict[str, list[str]]:
+def _scrape_yandex(client: HttpClient, image_url: str) -> list[str]:
+    """Best-effort: similar-image URLs from Yandex's image-search-by-image
+    page."""
+    urls, _kind, _err = _scrape_one("yandex", client, image_url)
+    return urls
+
+
+#: engine → (reverse-search URL builder, page body parser)
+_ENGINE_SCRAPERS = {
+    "bing": (_bing_reverse_url, _parse_bing_body),
+    "yandex": (_yandex_reverse_url, _parse_yandex_body),
+}
+
+
+def _bot_signalled(body: bytes) -> bool:
+    """True when a 200 page is a bot-wall/challenge, not results —
+    the registry's one bot-signal vocabulary
+    (``media/source_registry._BOT_SIGNALS``, mirrored in #89's
+    health classification: a wall is ``bot-blocked``, never
+    ``dead`` and never a plain no-result)."""
+    try:
+        from ..media.source_registry import _BOT_SIGNALS
+
+        signals = _BOT_SIGNALS
+    except Exception:  # noqa: BLE001 - vocabulary fallback
+        signals = ("captcha", "cloudflare", "just a moment",
+                   "verify you are human", "are you a robot",
+                   "access denied", "attention required")
+    text = (body or b"")[:4000].decode("utf-8", errors="replace").lower()
+    return any(sig in text for sig in signals)
+
+
+def _status_outcome(status: int) -> tuple[str, str]:
+    """(kind, error_class) for an HTTP status on the scrape path:
+    429 is its own class (#90), 403 is a bot wall (#89), anything
+    else non-2xx is an operational failure with its status as the
+    error class."""
+    if status == 429:
+        return "rate_limited", ""
+    if status == 403:
+        return "blocked", ""
+    return "failure", f"http_{status}"
+
+
+def _scrape_one(engine: str, client: HttpClient,
+                image_url: str) -> tuple[list[str], str, str]:
+    """One engine's scrape attempt, classified (Pass #92).
+
+    Returns ``(urls, kind, error_class)`` where ``kind`` is the
+    registry vocabulary: ``served`` (results landed) |
+    ``no_result`` (the engine answered with an empty page — weak
+    evidence) | ``failure`` (transport/HTTP/parser failure, with
+    ``error_class``) | ``blocked`` (HTTP 403, or a 200 page
+    carrying a bot-wall challenge) | ``rate_limited`` (HTTP 429 —
+    recorded once by the caller, never retried around).
+
+    The real ``HttpClient`` RAISES on HTTP status, so the status
+    is read from the exception (``http_status_of``) as well as
+    from duck-typed responses that carry one.  Never raises:
+    scraping is optional garnish, exactly as before."""
+    url_for, parse = _ENGINE_SCRAPERS[engine]
+    try:
+        page = client.get(url_for(image_url))
+    except Exception as exc:  # noqa: BLE001 - per-engine isolation
+        status = http_status_of(exc)
+        if status is not None:
+            kind, error_class = _status_outcome(status)
+            return [], kind, error_class
+        return [], "failure", _image_error_class(exc)
+    status = getattr(page, "status", None)
+    if status is not None and not 200 <= int(status) < 300:
+        kind, error_class = _status_outcome(int(status))
+        return [], kind, error_class
+    body = getattr(page, "body", b"")
+    if body is None:
+        # a response with no body at all is malformed, not an
+        # empty result page (the #90 chain's parser-failure class)
+        return [], "failure", "malformed_response"
+    try:
+        urls = parse(body)
+    except Exception:  # noqa: BLE001 - a markup surprise is a
+        # malformed response, its own class (#90 precedent)
+        return [], "failure", "malformed_response"
+    if urls:
+        return urls, "served", ""
+    if body and _bot_signalled(body if isinstance(body, bytes)
+                               else str(body).encode("utf-8", "replace")):
+        return [], "blocked", ""
+    return [], "no_result", ""
+
+
+def _scrape_engines(client: HttpClient, image_url: str, *,
+                    registry: Any = None) -> dict[str, list[str]]:
     """Run each reverse-search scraper isolated: one engine failing
-    (network, block, markup change) never kills the others."""
+    (network, block, markup change) never kills the others.
+
+    Pass #92: when *registry* is given, every attempt records its
+    outcome against the engine's registry source (served /
+    no-result / failure with error class / blocked on a bot wall /
+    rate-limited on a 429 — recorded once, never retried), and the
+    iteration order is the registry's learned order over the
+    roster (day-one pin: no learned state →
+    :data:`REVERSE_IMAGE_ENGINES` byte-for-byte).  With no
+    registry this is the pre-#92 function, exactly."""
     results: dict[str, list[str]] = {}
-    for name, scraper in (("bing", _scrape_bing), ("yandex", _scrape_yandex)):
+    for name in ordered_image_engines(registry):
+        t0 = time.time()
         try:
-            results[name] = scraper(client, image_url) or []
+            urls, kind, error_class = _scrape_one(name, client, image_url)
         except Exception:  # noqa: BLE001 - per-engine isolation
             _log.debug("reverse image scrape failed for %s", name, exc_info=True)
-            results[name] = []
+            urls, kind, error_class = [], "failure", "network_failure"
+        _record_image_outcome(registry, name, kind,
+                              time.time() - t0, error_class=error_class)
+        results[name] = urls or []
     return results
 
 
@@ -658,3 +971,33 @@ def register(registry: Any) -> None:
     )
     def image_stats_tool() -> dict[str, Any]:
         return image_stats(context)
+
+    @registry.register(
+        "image_sources",
+        description=(
+            "Image source registry — the reverse image search "
+            "engines (Bing visual search, Yandex search-by-image) "
+            "in the ONE source registry (pass #92, same registry "
+            "as download_sources): action=status (per-engine "
+            "origin/health, served / failed / blocked / "
+            "rate-limited / no-result counts, plus the link-only "
+            "engines Google Lens / TinEye — deep links never "
+            "fetched, so no outcomes recorded for them) | health "
+            "(run the shared source health loop: the shared hosts "
+            "are probed through their real search endpoint; the "
+            "reverse endpoints are judged by real-search outcomes)."
+        ),
+        capability="net.out",
+    )
+    def image_sources(*, action: str = "status") -> dict[str, Any]:
+        reg = image_registry_for_context(context)
+        if reg is None:
+            from ..media.source_registry import DEFAULT_REGISTRY
+
+            reg = DEFAULT_REGISTRY
+        act = (action or "status").strip().lower()
+        if act == "health":
+            return reg.verify_health()
+        if act == "status":
+            return reg.image_status()
+        return {"error": f"unknown action {act!r} — status|health"}
