@@ -2757,6 +2757,137 @@ class RuntimeGamesMixin:
                     + f"\n\nfull report: {res['report_path']}")
         return f"unknown /apk verb {verb!r}\n{_usage()}"
 
+    # ── pump desk: /pump (pump.fun intelligence, signals only) ────────
+    def _control_pump(self, tail: str, chat_key: str) -> str:
+        """/pump — the pump.fun intelligence desk (signals only).
+
+        /pump status     — launches, dossiers, call calibration, feeds
+        /pump watch      — one intake + evaluation cycle now
+        /pump study      — grade due calls, recompute dev profiles
+        /pump dossier <mint> — the full evidence record for a token
+        /pump calls      — the call ledger (graded in the open)
+        /pump sources    — the desk's feeds on the shared registry
+        /pump watch dev|smart <wallet> — track a wallet
+        /pump unwatch <wallet> — stop tracking a wallet
+        /pump provision [service] — keyed RPC tier state / drive
+        """
+        from ..pumpdesk import (PumpDesk, render_calls, render_dossier,
+                                render_status)
+
+        desk = PumpDesk(getattr(self, "context", None))
+        parts = (tail or "").strip().split(None, 2)
+        verb = parts[0].lower() if parts else ""
+
+        def _usage() -> str:
+            return ("/pump status — launches, dossiers, call "
+                    "calibration vs the graduation base rate, feeds\n"
+                    "/pump watch — run one intake + evaluation cycle "
+                    "now (publishes calls)\n"
+                    "/pump study — grade due calls, recompute dev "
+                    "profiles\n"
+                    "/pump dossier <mint> — curve state in SOL, dev "
+                    "rug history, block-0 absorption, gate verdict\n"
+                    "/pump calls — the call ledger\n"
+                    "/pump sources — memecoin feeds on the registry\n"
+                    "/pump watch dev|smart <wallet> — track a wallet\n"
+                    "/pump unwatch <wallet>\n"
+                    "/pump provision [helius] — keyed RPC tier state, "
+                    "or drive provisioning\n"
+                    "signals only — the desk never trades")
+
+        if verb in ("", "help"):
+            return _usage()
+        if verb == "status":
+            return render_status(desk.status())
+        if verb == "watch" and len(parts) >= 2 and \
+                parts[1].lower() in ("dev", "smart"):
+            if len(parts) < 3 or not parts[2].strip():
+                return f"usage: /pump watch {parts[1].lower()} <wallet>"
+            wallet = parts[2].strip().split()[0]
+            if parts[1].lower() == "dev":
+                desk.store.watch_dev(wallet, note="via /pump")
+            else:
+                desk.store.watch_smart(wallet, note="via /pump")
+            return f"watching {parts[1].lower()} wallet {wallet}"
+        if verb == "watch":
+            rep = desk.watch_cycle(deliver=True)
+            lines = ["pump watch cycle:"]
+            for pub in rep.get("calls", []):
+                c = pub["call"]
+                lines.append(
+                    f"  CALL {c['symbol'] or c['mint'][:8]}: entry "
+                    f"{c['entry_mc_sol']:.1f} SOL mcap → target "
+                    f"{c['target_mc_sol']:.1f} — {pub.get('detail', '')}")
+            for r in rep.get("no_call_reasons", [])[:8]:
+                lines.append(f"  no call: {r}")
+            fe = rep.get("frontend") or {}
+            if fe.get("error"):
+                lines.append(f"  frontend poll failed: {fe['error']}")
+            else:
+                lines.append(f"  frontend: {fe.get('promoted', 0)} "
+                             f"candidates of {fe.get('rows', 0)} rows")
+            return "\n".join(lines)
+        if verb == "unwatch":
+            if len(parts) < 2:
+                return "usage: /pump unwatch <wallet>"
+            wallet = parts[1].strip()
+            gone = desk.store.unwatch(wallet)
+            return (f"stopped watching {wallet}" if gone
+                    else f"{wallet} was not on a watchlist")
+        if verb == "study":
+            rep = desk.study_cycle()
+            sc = rep.get("scoring") or {}
+            return (f"pump study: {sc.get('scored_now', 0)} calls "
+                    f"graded ({sc.get('wins_now', 0)} wins); "
+                    f"{rep.get('dev_profiles', 0)} dev profiles; "
+                    f"{rep.get('serial_ruggers', 0)} serial ruggers "
+                    f"auto-watched")
+        if verb == "dossier":
+            if len(parts) < 2:
+                return "usage: /pump dossier <mint>"
+            mint = parts[1].strip()
+            d = desk.refresh_dossier(mint)
+            from ..pumpdesk.score import evaluate
+            v = evaluate(d, smart_wallets=desk.store.watched_smart())
+            return (render_dossier(d)
+                    + f"\nverdict: {v.verdict} (composite "
+                      f"{v.composite:.2f}, rug {v.rug_risk:.2f}, "
+                      f"manipulation {v.manipulation:.2f}, momentum "
+                      f"{v.momentum:.2f})\n  {v.evidence}")
+        if verb == "calls":
+            calls = [c.to_dict() for c in desk.calls.log.calls()]
+            return render_calls(calls)
+        if verb == "sources":
+            from ..pumpdesk.sources import pump_status
+            st = pump_status(desk.registry)
+            if not st["sources"]:
+                return "no memecoin sources registered yet"
+            return "\n".join(
+                f"{s['domain']} — {s['health']} ({s['origin']})"
+                for s in st["sources"])
+        if verb == "provision":
+            from ..pumpdesk.sources import ensure_provisioning
+            ids = ensure_provisioning()
+            arg = parts[1].strip() if len(parts) > 1 else ""
+            if arg:
+                from ...accounts.provisioning import get_provision_service
+                svc = get_provision_service(arg)
+                if svc is None or svc.id not in ids:
+                    return (f"{arg!r} is not a pump desk service — "
+                            f"the desk provisions: {', '.join(ids)}")
+                return self._run_provision_drive(svc.id,
+                                                 chat_key=chat_key)
+            import os
+            present = bool(os.environ.get("HELIUS_API_KEY", "").strip())
+            return ("pump desk keyed services in self-provisioning: "
+                    + ", ".join(ids)
+                    + f"\n  helius (HELIUS_API_KEY): "
+                      f"{'present' if present else 'MISSING'}"
+                    + "\ndrive it with /pump provision helius (owner's "
+                      "own account; the key is validated live, then "
+                      "vaulted)")
+        return f"unknown /pump verb {verb!r}\n{_usage()}"
+
     def _control_predict(self, tail: str, chat_key: str, *,
                          message: Any = None) -> str:
         """The prediction pit — unlocked by beating challenges.

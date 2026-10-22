@@ -59,6 +59,7 @@ AGENT_TOOL_MODULES = (
     "opportunity_hunt",
     "planner",
     "projects",
+    "pumpdesk",
     "reasoning",
     "reflection",
     "research.pipeline",

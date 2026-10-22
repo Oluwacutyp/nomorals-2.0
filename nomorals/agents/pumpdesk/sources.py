@@ -1,0 +1,199 @@
+"""Desk sources: pump.fun intelligence joins the shared registry.
+
+One existing organ, extended — never paralleled (the betdesk
+sources pattern):
+
+* ``media/source_registry.SourceRegistry`` gains the desk's seed
+  sources under kind ``memecoin``: PumpPortal's data socket, the
+  public Solana RPC (the always-free floor), the pump.fun frontend
+  API (backfill), DexScreener (outcome grading), Birdeye (keyed).
+  Seeds are the floor — the ONE health loop (stand-down 3, disable
+  10) grades them from real outcomes the firehose records, and the
+  firehose fails over in that order.  Open-sources law: the desk
+  grows into good feeds and sheds dead ones through the registry,
+  not through a hard-coded list.
+* ``accounts/provisioning`` gains the desk's one keyed tier worth
+  having on day one — Helius (RPC + websockets without public
+  rate limits) — as a service with a LIVE validator.  Provisioning
+  is the owner's hand (his account, his key, vaulted); the desk
+  runs keyless until he says otherwise.
+"""
+
+from __future__ import annotations
+
+import os
+from typing import Any
+
+__all__ = [
+    "MEMCOIN_SEEDS", "ensure_pump_sources", "pump_status",
+    "pump_registry_for_context", "ensure_provisioning",
+    "HELIUS_SERVICE", "rpc_endpoint_from_env",
+]
+
+#: (nation, domain, name, auth_needed, notes)
+MEMCOIN_SEEDS: tuple = (
+    ("GLOBAL", "pumpportal.fun", "PumpPortal data API", False,
+     "Free websocket subs for new-token + migration events; trade "
+     "streams are keyed/metered since May 2026. The firehose's "
+     "primary intake."),
+    ("GLOBAL", "api.mainnet-beta.solana.com", "Solana public RPC",
+     False,
+     "The always-free floor: logsSubscribe on the pump program + "
+     "account reads. Rate-limited; every keyed RPC tier replaces "
+     "it through the same interface."),
+    ("GLOBAL", "frontend-api-v3.pump.fun", "pump.fun frontend API",
+     False,
+     "Unofficial REST the pump.fun site itself reads: coin lists "
+     "for backfill/candidate discovery. Schema drifts; the health "
+     "loop is the containment."),
+    ("GLOBAL", "api.dexscreener.com", "DexScreener API", False,
+     "Free pair/token surface — the outcome grader for calls "
+     "(post-graduation prices). No key, generous rate limits."),
+    ("GLOBAL", "public-api.birdeye.so", "Birdeye API", True,
+     "Keyed token analytics (holders, trades). Optional tier; the "
+     "desk provisions it only on the owner's word."),
+)
+
+_SEED_EXTRAS: dict[str, dict[str, Any]] = {
+    "public-api.birdeye.so": {"kinds": ("memecoin", "api")},
+    "api.mainnet-beta.solana.com": {"kinds": ("memecoin", "api")},
+}
+
+
+def _seed_descriptor(nation: str, domain: str, name: str, auth: bool,
+                     notes: str) -> Any:
+    from ...media.source_registry import (
+        Licence, SourceDescriptor, TrustTier)
+    extras = _SEED_EXTRAS.get(domain, {})
+    return SourceDescriptor(
+        nation=nation, language="en", domain=domain, name=name,
+        kinds=tuple(extras.get("kinds", ("memecoin",))),
+        licence=Licence.UNKNOWN,
+        trust_tier=TrustTier.UNVERIFIED, auth_needed=auth,
+        notes=notes)
+
+
+def ensure_pump_sources(registry: Any) -> list[dict[str, Any]]:
+    """Register the memecoin seed sources (idempotent; a persisted
+    older shape is updated in place — the betdesk Pass-8 rule)."""
+    out: list[dict[str, Any]] = []
+    for nation, domain, name, auth, notes in MEMCOIN_SEEDS:
+        desc = _seed_descriptor(nation, domain, name, auth, notes)
+        existing = registry.for_domain(domain)
+        if existing is not None:
+            if (tuple(existing.kinds) == tuple(desc.kinds)
+                    and existing.auth_needed == desc.auth_needed):
+                out.append({"domain": domain, "already_registered": True})
+                continue
+            registry._by_key[desc.key] = desc
+            try:
+                registry._persist()
+            except Exception:  # noqa: BLE001
+                pass
+            out.append({"domain": domain, "updated": True})
+            continue
+        added = registry.register(desc)
+        if added:
+            try:
+                registry._persist()
+            except Exception:  # noqa: BLE001
+                pass
+        out.append({"domain": domain, "registered": bool(added)})
+    return out
+
+
+def pump_registry_for_context(context: Any = None,
+                              injected: Any = None) -> Any:
+    """The registry the desk's outcomes land in: injected wins;
+    else the shared DEFAULT_REGISTRY bound to the context KV store
+    (the #94/#Pass-8 resolver shape).  Never raises."""
+    if injected is not None:
+        return injected
+    from ...media.source_registry import DEFAULT_REGISTRY
+    reg = DEFAULT_REGISTRY
+    try:
+        db = getattr(context, "db", None) if context is not None else None
+        if db is not None:
+            from ...storage.kv import KVStore
+            reg.bind_store(KVStore(db))
+    except Exception:  # noqa: BLE001 - persistence is an enhancement
+        pass
+    return reg
+
+
+def pump_status(registry: Any) -> dict[str, Any]:
+    """Registry view of the memecoin class: sources + health."""
+    rows = []
+    for desc in registry.by_kind("memecoin"):
+        rows.append({
+            "domain": desc.domain, "name": desc.name,
+            "health": registry.health_for(desc),
+            "origin": registry.origin_for(desc),
+            "active": registry.is_active(desc),
+            "stats": registry.stats_for(desc),
+        })
+    return {"sources": rows, "count": len(rows)}
+
+
+# ── RPC endpoint selection ────────────────────────────────────────────
+
+def rpc_endpoint_from_env() -> tuple[str, str]:
+    """(endpoint, source) — a provisioned Helius key upgrades the
+    public RPC; absent one, the public floor serves.  Read per call
+    so a freshly provisioned key takes effect with no restart (the
+    provisioning bridge writes the env)."""
+    key = os.environ.get("HELIUS_API_KEY", "").strip()
+    if key:
+        return (f"https://mainnet.helius-rpc.com/?api-key={key}",
+                "helius (provisioned)")
+    return ("https://api.mainnet-beta.solana.com", "solana public RPC")
+
+
+# ── self-provisioning: the keyed RPC tier ─────────────────────────────
+
+HELIUS_SERVICE = "helius"
+
+
+def _validate_helius(token: str, http_get: Any) -> Any:
+    """Helius' REST surface answers a balances read 200 for a live
+    key, 401 for a dead one — validated live before anything is
+    vaulted (the provisioning HttpGet contract is GET-only)."""
+    from ...accounts.provisioning import ValidationResult
+    probe = ("https://api.helius.xyz/v0/addresses/"
+             "So11111111111111111111111111111111111111112/balances"
+             f"?api-key={token}")
+    try:
+        status, _payload = http_get(probe, {})
+    except Exception as exc:  # noqa: BLE001 - transport is inconclusive
+        return ValidationResult("inconclusive",
+                                f"validation request failed: {exc}")
+    if status == 200:
+        return ValidationResult("ok", "helius key accepted (balances read)")
+    if status in (401, 403):
+        return ValidationResult("rejected",
+                                f"helius answered HTTP {status}")
+    return ValidationResult("inconclusive",
+                            f"helius answered HTTP {status}")
+
+
+def ensure_provisioning() -> list[str]:
+    """Register Helius with the real self-provisioning registry
+    (idempotent).  The owner provisions it like any other service:
+    his own account, live validation, vault, env bridge
+    (``HELIUS_API_KEY`` is read per call by the desk)."""
+    from ...accounts.provisioning import (
+        ProvisionService, _VALIDATORS, register_provision_service)
+    _VALIDATORS.setdefault("helius_key", _validate_helius)
+    register_provision_service(ProvisionService(
+        id=HELIUS_SERVICE,
+        display="Helius",
+        aliases=("helius-rpc",),
+        vault_service="helius",
+        env_keys=("HELIUS_API_KEY",),
+        login_url="https://dashboard.helius.dev/login",
+        token_url="https://dashboard.helius.dev/api-keys",
+        signup_url="https://dashboard.helius.dev/signup",
+        validator="helius_key",
+        flow="",
+    ))
+    return [HELIUS_SERVICE]

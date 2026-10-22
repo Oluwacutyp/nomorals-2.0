@@ -44,6 +44,7 @@ CLI_ALIASES: dict[str, list[str]] = {
     "bet": ["bt"],
     "apk": [],
     "desk": [],
+    "pump": [],
     "book": ["bk"],
     "books": ["library", "lib"],
     "build": ["bld"],
@@ -1889,6 +1890,28 @@ def _parser() -> argparse.ArgumentParser:
     d_imp.add_argument("--path", required=True)
     desk_sub.add_parser("sources", help="betting sources on the registry")
     desk_sub.add_parser("provision", help="desk API key state (drive from chat: /desk provision <service>)")
+
+    pump_p = sub.add_parser("pump", aliases=CLI_ALIASES["pump"],
+        help="pump.fun intelligence desk: dossiers, de-rug gate, graded signal calls (signals only — never trades)",
+        description=("nm pump status\\n"
+                     "nm pump watch [--no-deliver]\\n"
+                     "nm pump study\\n"
+                     "nm pump dossier <mint>\\n"
+                     "nm pump calls\\n"
+                     "nm pump sources\\n"
+                     "nm pump provision"),
+    )
+    pump_sub = pump_p.add_subparsers(dest="pump_action", required=True)
+    pump_sub.add_parser("status", help="launches, dossiers, call calibration, feed health")
+    p_watch = pump_sub.add_parser("watch", help="one intake + evaluation cycle; publish calls")
+    p_watch.add_argument("--no-deliver", action="store_true",
+                         help="log calls without pushing them")
+    pump_sub.add_parser("study", help="grade due calls, recompute dev profiles")
+    p_doss = pump_sub.add_parser("dossier", help="full evidence record for one token")
+    p_doss.add_argument("mint")
+    pump_sub.add_parser("calls", help="the call ledger")
+    pump_sub.add_parser("sources", help="memecoin sources on the registry")
+    pump_sub.add_parser("provision", help="keyed RPC tier state (drive from chat: /pump provision helius)")
 
     wx = sub.add_parser("weather", aliases=CLI_ALIASES["weather"],
         help="live weather + USA situations + timezone utilities (keyless)",

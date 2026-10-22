@@ -2054,6 +2054,22 @@ class PartnerRuntime(
                 except Exception as exc:  # noqa: BLE001 - optional
                     _log.warning("opportunity hunt job not registered: "
                                  "%s", exc)
+                # Pump desk: watch cycle (every 5m — intake, dossiers,
+                # gate, calls) + study cycle (every 30m — grade calls,
+                # dev profiles).  Idempotent by name; both routine
+                # (calls ride their own surface).  The standing
+                # firehose consumer starts best-effort alongside.
+                try:
+                    from ..pumpdesk.jobs import ensure_pumpdesk_jobs
+                    ensure_pumpdesk_jobs(self._scheduler)
+                except Exception as exc:  # noqa: BLE001 - optional
+                    _log.warning("pumpdesk jobs not registered: %s", exc)
+                try:
+                    from ..pumpdesk import PumpDesk
+                    PumpDesk(getattr(self, "context", None)) \
+                        .ensure_stream()
+                except Exception as exc:  # noqa: BLE001 - optional
+                    _log.warning("pumpdesk stream not started: %s", exc)
                 # Motivation class: randomized Lagos-anchored one-shots
                 # (self-rescheduling inside the 05:00–06:00 WAT morning
                 # window + the evening window) drawing on the Teachings
@@ -4518,6 +4534,8 @@ class PartnerRuntime(
             return self._control_desk(command.tail or arg, chat_key=chat_key)
         if kind == "apk":
             return self._control_apk(command.tail or arg, chat_key=chat_key)
+        if kind == "pump":
+            return self._control_pump(command.tail or arg, chat_key=chat_key)
         if kind == "money":
             from ..opportunities import handle_money_command
             return handle_money_command(command.tail or arg, self.context)
