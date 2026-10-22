@@ -2042,6 +2042,19 @@ class PartnerRuntime(
                     ensure_betdesk_jobs(self._scheduler)
                 except Exception as exc:  # noqa: BLE001 - optional
                     _log.warning("betdesk jobs not registered: %s", exc)
+                # Motivation class: randomized Lagos-anchored one-shots
+                # (self-rescheduling inside the 05:00–06:00 WAT morning
+                # window + the evening window) drawing on the Teachings
+                # ledger; catch-up covers an overnight-off host.
+                try:
+                    from ..motivation import (
+                        check_motivation_catchup,
+                        ensure_motivation_jobs,
+                    )
+                    ensure_motivation_jobs(self.context)
+                    check_motivation_catchup(self.context)
+                except Exception as exc:  # noqa: BLE001 - optional
+                    _log.warning("motivation jobs not registered: %s", exc)
                 # Download sources: the registry health loop (every
                 # 6h — re-verify sources + discovery candidates,
                 # promote the verified, shed the dead; pass #86).

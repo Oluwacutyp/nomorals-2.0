@@ -50,6 +50,7 @@ AGENT_TOOL_MODULES = (
     "monitor",
     "morning_briefing",
     "morning_pulse",
+    "motivation",
     "news",
     "os.verifiers",
     "osint_graph",
