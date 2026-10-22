@@ -132,6 +132,27 @@ HEAVY_WEIGHT_THRESHOLD = 1.0
 MISSED_GRACE_SECONDS = 300.0
 
 
+#: Words the schedule surfaces (chat ``/schedule``, ``nm schedule``)
+#: accept for the ``routine`` option and the ``routine`` edit verb.
+ROUTINE_ON_WORDS = frozenset({"on", "true", "yes", "1"})
+ROUTINE_OFF_WORDS = frozenset({"off", "false", "no", "0"})
+
+
+def parse_routine_word(value: Any) -> bool | None:
+    """Parse a routine on/off word: True, False, or None for garbage.
+
+    One parser for every surface so the chat command, the CLI mirror,
+    and any future surface accept exactly the same words — and reject
+    exactly the same garbage (never a silent coercion).
+    """
+    word = str(value or "").strip().lower()
+    if word in ROUTINE_ON_WORDS:
+        return True
+    if word in ROUTINE_OFF_WORDS:
+        return False
+    return None
+
+
 def _legacy_routine_from_name(name: Any) -> bool:
     """The PRE-#71 routine classification: a name-substring rule.
 
@@ -1013,6 +1034,25 @@ class Scheduler:
             self.db.execute(
                 "UPDATE schedule_jobs SET enabled = ?, updated_at = ? WHERE id = ?",
                 (1 if enabled else 0, time.time(), row["id"]),
+            )
+        return self._format_job(self._find(ref))
+
+    def set_routine(self, ref: str, routine: bool) -> dict[str, Any]:
+        """Set or clear a job's first-class ``routine`` flag (Pass #84).
+
+        Mirrors :meth:`set_enabled`: the stored row is the whole story,
+        so the toggle takes effect on the NEXT run's alerting — the
+        runner reads the flag from the row it is executing, never from
+        a cache — with no restart semantics.
+        """
+        row = self._find(ref)
+        if not row:
+            raise LookupError(f"no job {ref!r}")
+        with self.db.transaction():
+            self.db.execute(
+                "UPDATE schedule_jobs SET routine = ?, updated_at = ? "
+                "WHERE id = ?",
+                (1 if routine else 0, time.time(), row["id"]),
             )
         return self._format_job(self._find(ref))
 

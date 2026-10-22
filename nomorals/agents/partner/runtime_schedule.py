@@ -57,6 +57,8 @@ class RuntimeScheduleMixin:
                     extras.append(f"retrying({job['retry_count']})")
                 if job.get("heavy"):
                     extras.append("heavy")
+                if job.get("routine"):
+                    extras.append("routine")
                 if str(job.get("missed_fire_policy") or "fire_now") != "fire_now":
                     extras.append(f"missed:{job['missed_fire_policy']}")
                 if str(job.get("overlap_policy") or "concurrent") != "concurrent":
@@ -86,6 +88,24 @@ class RuntimeScheduleMixin:
             except (LookupError, AmbiguousRef) as exc:
                 return str(exc)
             return f"{job['name']} {'enabled' if job['enabled'] else 'disabled'} (next {job.get('next_run_iso') or '—'})."
+        if verb == "routine":
+            # /schedule routine <name or id> <on|off> — toggle the #71
+            # quiet-on-success flag on an existing job (Pass #84). The
+            # value is the LAST word; everything before it is the ref
+            # (job names may contain spaces).
+            from ..scheduler import parse_routine_word
+            args = parts[1:]
+            value = parse_routine_word(args[-1]) if args else None
+            if len(args) < 2 or value is None:
+                return "usage: /schedule routine <name or id> <on|off>"
+            ref = " ".join(args[:-1])
+            try:
+                job = scheduler.set_routine(ref, value)
+            except (LookupError, AmbiguousRef) as exc:
+                return str(exc)
+            return (f"{job['name']} routine "
+                    f"{'on' if job['routine'] else 'off'} "
+                    f"(next {job.get('next_run_iso') or '—'}).")
         if verb == "run":
             ref = " ".join(parts[1:])
             if not ref:
@@ -96,11 +116,13 @@ class RuntimeScheduleMixin:
                 return str(exc)
             return f"ran {outcome['name']}: {outcome['result'][:400]}"
         return ("usage: /schedule add <name> <when> <message|tool|command> <...> [options] | list | "
-                "health | runs <name> | rm <name> | enable|disable <name> | run <name>\n"
+                "health | runs <name> | rm <name> | enable|disable <name> | run <name> | "
+                "routine <name> <on|off>\n"
                 "  when: 'at 2026-12-25 09:00' | 'every 30m' | '22:00' | 'daily 22:00 America/New_York'\n"
                 "        | 'cron 0 22 * * *' (minute hour day month weekday)\n"
                 "  action: message goodnight | tool web_research {\"query\":\"ai news\"} | command python3 -V\n"
-                "  options: tz <IANA> | after <job> | retry <n> [delay <secs>]")
+                "  options: tz <IANA> | after <job> | retry <n> [delay <secs>] | routine [on|off] "
+                "(quiet on success; failures still surface)")
 
     def _schedule_health(self, scheduler: Any) -> str:
         """Owner-visible scheduler health: ``/schedule health``.
@@ -178,9 +200,11 @@ class RuntimeScheduleMixin:
         # ── trailing options: tz <IANA> | after <job> | depends <id1,id2> |
         #   dependspolicy <all|any|latest> | retry <n> | delay <s> |
         #   backoff <constant|linear|exponential> | missed <fire|skip|next> |
-        #   overlap <skip|queue|concurrent> | timeout <s> | heavy
+        #   overlap <skip|queue|concurrent> | timeout <s> | heavy |
+        #   routine [on|off]
         # stripped from the end of the payload so free-form message text
         # isn't polluted.
+        from ..scheduler import parse_routine_word
         timezone, depends_on = "", ""
         depends_policy = "all_ok"
         max_retries, retry_delay = 0, 60.0
@@ -189,15 +213,30 @@ class RuntimeScheduleMixin:
         overlap_policy = "concurrent"
         run_timeout_s = 0.0
         heavy = False
+        routine = False
         while payload_parts:
             if payload_parts[-1].lower() == "heavy":
                 heavy = True
+                payload_parts = payload_parts[:-1]
+                continue
+            if payload_parts[-1].lower() == "routine":
+                # bare flag, the `heavy` idiom: quiet on success
+                routine = True
                 payload_parts = payload_parts[:-1]
                 continue
             if len(payload_parts) < 2:
                 break
             key = payload_parts[-2].lower()
             val = payload_parts[-1]
+            if key == "routine":
+                parsed_routine = parse_routine_word(val)
+                if parsed_routine is None:
+                    return (f"routine must be on or off, got {val!r} — "
+                            "e.g. '... routine on' (a bare 'routine' "
+                            "also works); nothing was scheduled")
+                routine = parsed_routine
+                payload_parts = payload_parts[:-2]
+                continue
             if key == "tz":
                 timezone = val
                 payload_parts = payload_parts[:-2]
@@ -278,7 +317,8 @@ class RuntimeScheduleMixin:
                                 backoff=backoff,
                                 missed_fire_policy=missed_fire_policy,
                                 overlap_policy=overlap_policy,
-                                run_timeout_s=run_timeout_s, heavy=heavy)
+                                run_timeout_s=run_timeout_s, heavy=heavy,
+                                routine=routine)
         except (ValueError, RuntimeError) as exc:
             return f"scheduling failed: {exc}"
         when = time.strftime("%m-%d %H:%M", time.localtime(job["next_run"]))
@@ -298,6 +338,8 @@ class RuntimeScheduleMixin:
             extras.append(f"timeout={run_timeout_s:g}s")
         if heavy:
             extras.append("heavy")
+        if routine:
+            extras.append("routine")
         extra_s = (" [" + ", ".join(extras) + "]") if extras else ""
         return f"⏰ scheduled {job['name']} — {job['kind']} ({spec}) — next {when}{extra_s}"
 

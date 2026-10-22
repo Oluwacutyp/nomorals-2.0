@@ -379,6 +379,7 @@ class PartnerRuntime(
                             "name": job.get("name") or job.get("id"),
                             "spec": job.get("spec") or job.get("schedule") or "",
                             "enabled": job.get("enabled", True),
+                            "routine": bool(job.get("routine")),
                             "next_run": job.get("next_run"),
                         }
                     )

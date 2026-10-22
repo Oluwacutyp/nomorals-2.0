@@ -12,6 +12,7 @@ the chat command writes to): at / every / daily, with
     nm schedule add <name> <when> command <shell-command...>
     nm schedule rm <name-or-id>
     nm schedule enable|disable <name-or-id>
+    nm schedule routine <name-or-id> <on|off>
     nm schedule run <name-or-id>
 
 ``when``: 'at 2026-12-25 09:00' | 'every 30m' | 'daily 02:00' | '22:00' | '30m'
@@ -46,8 +47,10 @@ def _usage() -> int:
           "                              [dependspolicy <all|any|latest>] [retry <n>] [delay <s>]\n"
           "                              [backoff <constant|linear|exponential>] [missed <fire|skip|next>]\n"
           "                              [overlap <skip|queue|concurrent>] [timeout <s>] [heavy]\n"
+          "                              [routine [on|off]]  (quiet on success; failures still surface)\n"
           "       nm schedule rm <name-or-id>\n"
           "       nm schedule enable|disable <name-or-id>\n"
+          "       nm schedule routine <name-or-id> <on|off>\n"
           "       nm schedule run <name-or-id>\n"
           "when: 'at 2026-12-25 09:00' | 'every 30m' | 'daily 02:00' | "
           "'22:00' | '30m' | 'daily 22:00 America/New_York' | 'cron 0 22 * * *'",
@@ -74,6 +77,8 @@ def _cmd_schedule(args: Any, context: Any) -> int:
             return _schedule_remove(context, words[1:])
         if verb in ("enable", "disable"):
             return _schedule_enable(context, words[1:], enabled=(verb == "enable"))
+        if verb == "routine":
+            return _schedule_routine(context, words[1:])
         if verb == "run":
             return _schedule_run(context, words[1:])
     except Exception as exc:  # noqa: BLE001 - fail fast with the real error
@@ -100,7 +105,9 @@ def _schedule_list(args: Any, context: Any) -> int:
     for job in jobs[:15]:
         state = "on " if job["enabled"] else "off"
         nxt = job.get("next_run_iso") or ("past" if job["kind"] == "at" else "—")
-        print(f"  [{state}] {job['name']} — {job['kind']} {job['spec']} (next: {nxt})")
+        marker = " [routine]" if job.get("routine") else ""
+        print(f"  [{state}] {job['name']} — {job['kind']} {job['spec']} "
+              f"(next: {nxt}){marker}")
         if job.get("last_result"):
             print(f"        last: {job['last_result'][:80]}")
     return 0
@@ -177,7 +184,9 @@ def _schedule_add(context: Any, parts: list[str]) -> int:
     # trailing options: tz <IANA> | after <job> | depends <id1,id2> |
     #   dependspolicy <all|any|latest> | retry <n> | delay <s> |
     #   backoff <constant|linear|exponential> | missed <fire|skip|next> |
-    #   overlap <skip|queue|concurrent> | timeout <s> | heavy
+    #   overlap <skip|queue|concurrent> | timeout <s> | heavy |
+    #   routine [on|off]
+    from ...agents.scheduler import parse_routine_word
     timezone, depends_on = "", ""
     depends_policy = "all_ok"
     max_retries, retry_delay = 0, 60.0
@@ -186,6 +195,7 @@ def _schedule_add(context: Any, parts: list[str]) -> int:
     overlap_policy = "concurrent"
     run_timeout_s = 0.0
     heavy = False
+    routine = False
     while payload_parts:
         # single-word flag
         if payload_parts[-1].lower() == "heavy" and len(payload_parts) >= 1:
@@ -194,10 +204,25 @@ def _schedule_add(context: Any, parts: list[str]) -> int:
             heavy = True
             payload_parts = payload_parts[:-1]
             continue
+        if payload_parts[-1].lower() == "routine":
+            # bare flag, the `heavy` idiom: quiet on success
+            routine = True
+            payload_parts = payload_parts[:-1]
+            continue
         if len(payload_parts) < 2:
             break
         key = payload_parts[-2].lower()
         val = payload_parts[-1]
+        if key == "routine":
+            parsed_routine = parse_routine_word(val)
+            if parsed_routine is None:
+                print(f"routine must be on or off, got {val!r} — "
+                      "e.g. 'routine on' (a bare 'routine' also works); "
+                      "nothing was scheduled", file=sys.stderr)
+                return 2
+            routine = parsed_routine
+            payload_parts = payload_parts[:-2]
+            continue
         if key == "tz":
             timezone = val
             payload_parts = payload_parts[:-2]
@@ -283,12 +308,15 @@ def _schedule_add(context: Any, parts: list[str]) -> int:
                         backoff=backoff,
                         missed_fire_policy=missed_fire_policy,
                         overlap_policy=overlap_policy,
-                        run_timeout_s=run_timeout_s, heavy=heavy)
+                        run_timeout_s=run_timeout_s, heavy=heavy,
+                        routine=routine)
     except (ValueError, RuntimeError) as exc:
         print(f"scheduling failed: {exc}", file=sys.stderr)
         return 1
     when = time.strftime("%m-%d %H:%M", time.localtime(job["next_run"]))
-    print(f"scheduled {job['name']} — {job['kind']} ({spec}) — next {when}")
+    marker = " [routine]" if routine else ""
+    print(f"scheduled {job['name']} — {job['kind']} ({spec}) — "
+          f"next {when}{marker}")
     return 0
 
 
@@ -357,6 +385,29 @@ def _schedule_enable(context: Any, rest: list[str], enabled: bool) -> int:
         print(str(exc), file=sys.stderr)
         return 1
     print(f"{job['name']} {'enabled' if job['enabled'] else 'disabled'} "
+          f"(next {job.get('next_run_iso') or '—'}).")
+    return 0
+
+
+def _schedule_routine(context: Any, rest: list[str]) -> int:
+    """``nm schedule routine <name-or-id> <on|off>`` — toggle the #71
+    quiet-on-success flag on an existing job (Pass #84)."""
+    from ...agents.scheduler import parse_routine_word
+    from ...core.errors import AmbiguousRef
+
+    value = parse_routine_word(rest[-1]) if rest else None
+    if len(rest) < 2 or value is None:
+        print("usage: nm schedule routine <name-or-id> <on|off>",
+              file=sys.stderr)
+        return 2
+    ref = " ".join(rest[:-1])
+    sched = _scheduler(context)
+    try:
+        job = sched.set_routine(ref, value)
+    except (LookupError, AmbiguousRef) as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    print(f"{job['name']} routine {'on' if job['routine'] else 'off'} "
           f"(next {job.get('next_run_iso') or '—'}).")
     return 0
 
