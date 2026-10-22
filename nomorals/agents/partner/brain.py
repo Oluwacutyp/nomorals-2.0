@@ -995,10 +995,15 @@ class PartnerBrain:
         return lines[-5:]
 
     def _reasoning_digest(self, text: str) -> str:
-        """A private reasoning pass before she answers a complex question.
+        """A private reasoning pass before she answers.
 
         Mode comes from ``settings.partner.reasoning``: off | auto | always.
-        In auto mode only messages that look genuinely complex trigger it.
+        Pass #67: the pass runs on EVERY owner turn the mode permits —
+        the old auto-mode gate (the message had to "look complex" by
+        length/keyword shape) silently skipped the review for short
+        messages over consequential asks.  Depth is tiered by the
+        owner's mode instead: auto gets a focused budget, always the
+        full one; off remains the owner's veto.
         The digest is folded into her context so her reply is *informed by*
         the reasoning — in her own voice, never a raw chain-of-thought dump.
         A failed pass is invisible: reasoning must never break the chat.
@@ -1006,12 +1011,13 @@ class PartnerBrain:
         mode = (self.settings.partner.reasoning or "auto").lower()
         if mode == "off":
             return ""
-        from ..reasoning import ReasoningEngine, looks_complex
-        if mode != "always" and not looks_complex(text):
-            return ""
+        from ..reasoning import ReasoningEngine
+        if mode == "always":
+            budget = {"max_llm_calls": 6, "max_seconds": 45.0}
+        else:  # auto — every turn, at the focused tier
+            budget = {"max_llm_calls": 3, "max_seconds": 30.0}
         try:
-            engine = ReasoningEngine(self.context, max_llm_calls=6,
-                                     max_seconds=45.0)
+            engine = ReasoningEngine(self.context, **budget)
             result = engine.reason(text, strategy="auto")
             if not result.answer or result.stopped != "complete":
                 return ""

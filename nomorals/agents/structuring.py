@@ -223,8 +223,10 @@ class PromptArchitect:
         if router is None:
             return None
         try:
-            from .reasoning import reasoning_enabled
-            if not reasoning_enabled(self.context, complex_ok=True):
+            from .reasoning import reasoning_permitted
+            # pass #67: a pure owner-mode check — the old form passed
+            # complex_ok=True, a constant wearing a judgment's clothes.
+            if not reasoning_permitted(self.context):
                 return None
         except Exception:  # noqa: BLE001
             return None

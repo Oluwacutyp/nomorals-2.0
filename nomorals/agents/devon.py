@@ -406,15 +406,18 @@ class DevonAgent:
         """The reasoning pre-flight for his tool sequences: a harsh
         reviewer reads the plan; if it finds real flaws the plan is
         revised and re-parsed once. A revision that doesn't yield valid
-        known tools keeps the original plan. Gated by NM_REASONING_MODE;
-        power mode reviews every plan with a relaxed budget."""
+        known tools keeps the original plan. Gated only by the owner's
+        reasoning mode (NM_REASONING_MODE); power mode reviews with a
+        relaxed budget.  Pass #67: EVERY non-empty plan is reviewed —
+        the old gate (prompt "looks complex" or >= 3 steps) silently
+        skipped the pre-flight for exactly the plans that look
+        innocuous, e.g. a one-step delete from a three-word prompt."""
         if not steps:
             return steps
-        from .reasoning import (looks_complex, reasoning_enabled,
-                                revise_text, review_text)
+        from .reasoning import (reasoning_permitted, revise_text,
+                                review_text)
 
-        complex_ok = looks_complex(task) or len(steps) >= 3
-        if not reasoning_enabled(self.context, complex_ok=complex_ok):
+        if not reasoning_permitted(self.context):
             return steps
         rendered = (f"Task: {task}\nPlanned tool calls:\n" +
                     "\n".join(f"- {s['tool']} {json.dumps(s['args'], default=str)}"
@@ -1430,12 +1433,14 @@ class DevonAgent:
         structured = goal
         brief_meta: dict[str, Any] = {}
         try:
-            from .brief import BriefAgent, should_brief
+            from .brief import BriefAgent
 
-            if should_brief(goal):
-                brief = BriefAgent(context).refine(goal, kind="mission")
-                structured = brief.as_goal()
-                brief_meta["brief"] = brief.to_dict()
+            # pass #67: EVERY goal is structured + persisted — a short
+            # goal is not a small mission, and the raw prose used to
+            # run unspec'd whenever should_brief's length guess said so.
+            brief = BriefAgent(context).refine(goal, kind="mission")
+            structured = brief.as_goal()
+            brief_meta["brief"] = brief.to_dict()
         except Exception as exc:  # noqa: BLE001 — structuring is best-effort
             _log.debug("brief agent failed: %s", exc)
 

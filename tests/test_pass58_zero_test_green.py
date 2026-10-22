@@ -156,7 +156,12 @@ class ZeroTestGreenLoopTests(unittest.TestCase):
     attempt or an explicit accept command really verifies the change."""
 
     def _agent(self, fx, responses):
-        router = ScriptedRouter(responses)
+        # pass #67 fixture note: the run-start brief now fires for
+        # EVERY task (it used to be length-gated off for these short
+        # ones), so each script gains a leading "{}" — a model reply
+        # with no objective, which sends the brief to its heuristic
+        # floor and leaves the task text (and this script) unchanged.
+        router = ScriptedRouter(["{}"] + list(responses))
         return CodingAgent(StubContext(router), root=str(fx.root))
 
     def _repo_with_uncollectable_tests(self):
@@ -252,6 +257,7 @@ class SmokeDisclosureTests(unittest.TestCase):
         root = Path(tempfile.mkdtemp(prefix="pass58_smoke_"))
         self.addCleanup(lambda: shutil.rmtree(root, ignore_errors=True))
         router = ScriptedRouter([
+            "{}",  # pass #67: the run-start brief's slot (see above)
             _json_block({"files": [
                 {"path": "main.py", "why": "new", "new_file": True}]}),
             "```python\nprint('hello from main')\n```\n",

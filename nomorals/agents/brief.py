@@ -14,7 +14,10 @@ supposed to mean.
 Design rules:
   * ONE bounded model call per refine (temperature 0.2, strict JSON);
   * a deterministic heuristic fallback keeps it working model-less;
-  * short requests skip it entirely (no model call to rephrase one line);
+  * EVERY request is structured when a brain is available — a short
+    ask can sit on top of substantial work, so request length never
+    decides whether the spec gets written (pass #67: the old
+    length/clause gate silently skipped exactly those asks);
   * it NEVER refuses — structuring is a capability, not a gate.
 """
 
@@ -36,8 +39,15 @@ _MIN_BRIEF_CHARS = 80
 
 
 def should_brief(request: str) -> bool:
-    """Is this request worth structuring?  One-line asks are not —
-    structuring them would spend a model call to say the same thing."""
+    """Would the pre-#67 gate have structured this request?
+
+    Diagnostic only: since pass #67 it gates NOTHING and has no
+    callers — ``BriefAgent.refine`` and every caller run the
+    structuring on every request, because a request's length says
+    nothing about the size of the work underneath it.  Retained
+    (nothing is deleted) so tooling can still measure how often the
+    old gate would have suppressed the brief.
+    """
     text = (request or "").strip()
     if not text:
         return False
@@ -59,9 +69,14 @@ class MissionBrief:
     persona: str = ""
     tool_hints: list[str] = field(default_factory=list)
     by: str = "heuristic"  # "model" | "heuristic"
+    #: Pass #67: the model call's usage counters (#65 shape) when the
+    #: model path produced this brief — None on the heuristic floor,
+    #: where no call was made.  Lets callers meter the brief honestly
+    #: instead of the spend vanishing at the run's edge.
+    usage: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        d: dict[str, Any] = {
             "objective": self.objective,
             "constraints": self.constraints,
             "success_criteria": self.success_criteria,
@@ -70,6 +85,9 @@ class MissionBrief:
             "tool_hints": self.tool_hints,
             "by": self.by,
         }
+        if self.usage:
+            d["usage"] = dict(self.usage)
+        return d
 
     def as_goal(self) -> str:
         """The structured spec rendered back into ONE goal string for the
@@ -96,6 +114,8 @@ class MissionBrief:
             persona=str(d.get("persona") or ""),
             tool_hints=[str(t) for t in (d.get("tool_hints") or [])],
             by=str(d.get("by") or "heuristic"),
+            usage=(dict(d["usage"]) if isinstance(d.get("usage"), dict)
+                   else None),
         )
 
 
@@ -117,10 +137,13 @@ class BriefAgent:
         """
         request = (request or "").strip()
         brief = self._heuristic_brief(request, kind)
-        if not should_brief(request):
-            brief.objective = request
-            brief.by = "skip"
+        if not request:
             return brief
+        # Pass #67: no shape gate.  The model brief is attempted for
+        # EVERY request when a brain is available; when it cannot run
+        # (no router, dead model) the heuristic floor ships labelled
+        # by="heuristic" — the old by="skip" state, where a short
+        # request silently got NO spec at all, is gone.
         model_brief = self._model_brief(request, kind)
         if model_brief is not None:
             merged = self._merge(model_brief, brief)
@@ -163,7 +186,7 @@ class BriefAgent:
 
             # chat_json runs the repair loop natively: malformed drafts get
             # a repair nudge instead of silently dropping to None.
-            data, _resp = brain_for(self.context).chat_json(
+            data, resp = brain_for(self.context).chat_json(
                 [Message.system(system), Message.user(user)],
                 task_kind="plan",
                 params=SamplingParams(temperature=0.2, max_tokens=700),
@@ -173,7 +196,7 @@ class BriefAgent:
             return None
         if not isinstance(data, dict) or not str(data.get("objective") or "").strip():
             return None
-        return MissionBrief(
+        brief = MissionBrief(
             objective=str(data.get("objective")).strip()[:400],
             constraints=[str(c).strip() for c in
                          (data.get("constraints") or [])
@@ -188,6 +211,8 @@ class BriefAgent:
                         (data.get("tool_hints") or [])
                         if str(t).strip()][:8],
         )
+        brief.usage = _usage_counters(resp)
+        return brief
 
     @staticmethod
     def _extract_json(text: str) -> dict[str, Any] | None:
@@ -253,4 +278,38 @@ class BriefAgent:
             steps=model_brief.steps or floor.steps,
             persona=model_brief.persona or floor.persona,
             tool_hints=model_brief.tool_hints,
+            usage=model_brief.usage,
         )
+
+
+def _usage_counters(response: Any) -> dict[str, int]:
+    """Pass #65-shaped counters for ONE settled model response.
+
+    ``calls`` is 1 (the brief's chat_json call); a response carrying
+    no usable usage counts as one UNREPORTED call — the tokens stay
+    honestly unknown, never estimated.  Never raises: metering must
+    not break structuring.
+    """
+    counters = {"calls": 1, "prompt_tokens": 0, "completion_tokens": 0,
+                "total_tokens": 0, "usage_unreported": 1}
+    try:
+        usage = getattr(response, "usage", None)
+        if usage is None:
+            return counters
+        if isinstance(usage, dict):
+            prompt = int(usage.get("prompt_tokens") or 0)
+            completion = int(usage.get("completion_tokens") or 0)
+            total = int(usage.get("total_tokens") or 0)
+        else:
+            prompt = int(getattr(usage, "prompt_tokens", 0) or 0)
+            completion = int(getattr(usage, "completion_tokens", 0) or 0)
+            total = int(getattr(usage, "total_tokens", 0) or 0)
+    except Exception:  # noqa: BLE001
+        return counters
+    if total <= 0 and (prompt or completion):
+        total = prompt + completion
+    if prompt or completion or total:
+        counters.update(prompt_tokens=prompt,
+                        completion_tokens=completion,
+                        total_tokens=total, usage_unreported=0)
+    return counters

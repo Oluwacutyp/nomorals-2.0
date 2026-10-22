@@ -299,6 +299,9 @@ class ShortTaskGateTests(unittest.TestCase):
         self.addCleanup(self.fx.cleanup)
         self.fx.write("calc.py", "def add(a, b):\n    return a - b\n")
         router = ScriptedRouter([
+            "{}",  # pass #67: the run-start brief's slot — "{}" has no
+            # objective, so the brief takes its heuristic floor and the
+            # task text (and this script) flow exactly as before.
             _json_block({"files": [
                 {"path": "calc.py", "why": "fix add", "new_file": False}]}),
             _json_block({"edits": [
@@ -347,6 +350,7 @@ class RunLevelUnavailableTests(unittest.TestCase):
         self.addCleanup(self.fx.cleanup)
         self.fx.write("v.py", "V = 1\n")
         router = ScriptedRouter([
+            "{}",  # pass #67: the run-start brief's slot (see above)
             _json_block({"files": [
                 {"path": "v.py", "why": "bump", "new_file": False}]}),
             _json_block({"edits": [

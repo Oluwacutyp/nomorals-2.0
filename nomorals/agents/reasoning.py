@@ -46,8 +46,8 @@ from ..storage.kv import KVStore
 _log = get_logger(__name__)
 
 __all__ = ["ReasoningAgent", "ReasoningEngine", "ReasoningResult",
-           "ReasoningStep", "looks_complex", "reasoning_eval", "register",
-           "trace_text"]
+           "ReasoningStep", "looks_complex", "reasoning_eval",
+           "reasoning_permitted", "register", "trace_text"]
 
 _COMPLEX_RE = re.compile(
     r"\b(why|how (do|should|can|would)|explain|prove|design|architect|"
@@ -858,6 +858,29 @@ def reasoning_enabled(context: Any, *, complex_ok: bool = False) -> bool:
     return bool(complex_ok)
 
 
+def reasoning_permitted(context: Any) -> bool:
+    """May reasoning surfaces run at all right now — the OWNER's mode
+    check, and nothing else.
+
+    False only when the reasoning mode is ``off``.  In ``auto`` and
+    ``always`` (and under power mode) the answer is True: whether a
+    given surface fires is decided by that surface's own structural
+    trigger — a failed step, a scored candidate, a plan on the
+    table — never by a guess about the request's shape.  Pass #67:
+    this is the honest form of the old
+    ``reasoning_enabled(context, complex_ok=True)`` constant, which
+    wore a judgment's clothes while only ever checking the mode.
+    Mode resolution mirrors ``reasoning_enabled`` exactly; a settings
+    read failure degrades to auto (permitted), never to a veto.
+    """
+    try:
+        mode = str(getattr(context.settings, "reasoning_mode", "auto")
+                   or "auto").strip().lower()
+    except Exception:  # noqa: BLE001 — bad config must never kill agents
+        mode = "auto"
+    return mode != "off"
+
+
 def _hook_budget(context: Any) -> tuple[int, float]:
     """(max_calls, max_seconds) — relaxed in power mode."""
     try:
@@ -1210,7 +1233,7 @@ class ReasoningAgent:
         # one bounded model advisory — a bonus, never a gate
         advice = ""
         try:
-            if reasoning_enabled(self.context, complex_ok=True):
+            if reasoning_permitted(self.context):
                 advice = self.advise(
                     f"About to run: {action[:400]}"
                     + (f" Context: {details[:300]}" if details else ""),
@@ -1267,7 +1290,7 @@ class ReasoningAgent:
         if not decision:
             return ""
         try:
-            if not reasoning_enabled(self.context, complex_ok=True):
+            if not reasoning_permitted(self.context):
                 return ""
             prompt = (f"Deciding right now: {decision[:1200]}\n")
             if focus:
@@ -1298,7 +1321,7 @@ class ReasoningAgent:
         if not task or not catalog:
             return []
         try:
-            if not reasoning_enabled(self.context, complex_ok=True):
+            if not reasoning_permitted(self.context):
                 return []
         except Exception:  # noqa: BLE001
             return []
@@ -1478,7 +1501,7 @@ class ReasoningAgent:
         pivot = ""
         rationale = ""
         try:
-            if reasoning_enabled(self.context, complex_ok=True):
+            if reasoning_permitted(self.context):
                 prompt = (
                     f"The current approach just failed again: "
                     f"{outcome[:900]}\n")
@@ -1558,7 +1581,7 @@ class ReasoningAgent:
                            "treat as unverified until checked")
         attack = ""
         try:
-            if reasoning_enabled(self.context, complex_ok=True):
+            if reasoning_permitted(self.context):
                 prompt = (
                     "You are challenging your own previous conclusion. "
                     "Try hard to FALSIFY it: what observation would prove "

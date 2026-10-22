@@ -423,14 +423,16 @@ class RuntimeScheduleMixin:
             # god-tier spec (objective, steps, done-means), not the raw line.
             queued, brief_note = text, ""
             try:
-                from ..brief import BriefAgent, should_brief
-                if should_brief(text):
-                    brief = BriefAgent(self.context).refine(text, kind="task")
-                    if brief.by == "model" and brief.objective:
-                        queued = brief.as_goal()
-                        brief_note = f" (structured: {len(brief.steps)} steps)"
-                    elif brief.by == "heuristic":
-                        brief_note = " (structured heuristically)"
+                from ..brief import BriefAgent
+                # pass #67: EVERY queued instruction is structured —
+                # the old should_brief length gate let short asks into
+                # the queue as raw prose while long ones got the spec.
+                brief = BriefAgent(self.context).refine(text, kind="task")
+                if brief.by == "model" and brief.objective:
+                    queued = brief.as_goal()
+                    brief_note = f" (structured: {len(brief.steps)} steps)"
+                elif brief.by == "heuristic":
+                    brief_note = " (structured heuristically)"
             except Exception:  # noqa: BLE001 - structuring must never block the queue
                 pass
             result = agent.add(queued)

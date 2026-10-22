@@ -490,9 +490,14 @@ class ResearchAgent:
         must never block a research cycle.
         """
         try:
-            from .reasoning import ReasoningAgent, reasoning_enabled
+            from .reasoning import ReasoningAgent, reasoning_permitted
 
-            if not reasoning_enabled(self.context):
+            # pass #67: the caller already tiered by structure — this
+            # pass only fires for an item that scored worth notifying —
+            # so the owner's mode is the only gate.  The bare
+            # reasoning_enabled() call made the critique dead code in
+            # auto mode (complex_ok defaults False).
+            if not reasoning_permitted(self.context):
                 return ""
             agent = ReasoningAgent(self.context)
             verdict = agent.advise(

@@ -129,6 +129,10 @@ class RollbackTests(unittest.TestCase):
 
     def _failing_agent(self):
         router = ScriptedRouter([
+            "{}",  # pass #67: the run-start brief's slot — the brief
+            # now fires for every task (it used to be length-gated off
+            # for "bump X"); "{}" has no objective, so the brief takes
+            # its heuristic floor and the script flows as before.
             _plan_response("a.py"),
             _json_block({"edits": [
                 {"old_text": "X = 1", "new_text": "X = 2"}]}),
@@ -380,7 +384,7 @@ class PatchProtocolTests(unittest.TestCase):
         fx.commit_all()
         diff = ("```diff\n--- a/a.py\n+++ b/a.py\n"
                 "@@ -1 +1 @@\n-X = 1\n+X = 2\n```\n")
-        router = ScriptedRouter([_plan_response("a.py"), diff])
+        router = ScriptedRouter(["{}", _plan_response("a.py"), diff])
         agent = CodingAgent(StubContext(router), root=str(fx.root))
         result = agent.run("bump X", accept=FAIL_ACCEPT, max_iterations=1)
         self.assertFalse(result.ok)

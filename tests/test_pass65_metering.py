@@ -168,6 +168,18 @@ _CALC_STEPS = [
 
 
 def _calc_handler(system, user):
+    # pass #67: the run-start brief now fires for every task (it used
+    # to be length-gated off for "Build a tiny calculator"), so the
+    # fake model answers the brief prompt like a real one would —
+    # one JSON brief, objective unchanged — and each usage script
+    # below carries the brief's call as its first entry.
+    if "structure raw owner requests" in system:
+        return json.dumps({
+            "objective": "Build a tiny calculator",
+            "constraints": [],
+            "success_criteria": ["test_calc passes"],
+            "steps": ["implement calc.py", "write report.py"],
+            "persona": "", "tool_hints": []})
     if "build planner" in system:
         return _steps_json(_CALC_STEPS)
     if "Write complete, runnable Python" in system:
@@ -224,9 +236,10 @@ class MeteringTotalsTests(unittest.TestCase):
     def test_a_usage_totals_sum_every_funneled_call(self):
         fx = _calc_repo(FixtureRepo())
         self.addCleanup(fx.cleanup)
-        # router calls, in order: planner, draft calc, draft report
+        # router calls, in order: brief, planner, draft calc, draft
+        # report (the brief leads since pass #67 — see _calc_handler)
         router = UsageRouter(_calc_handler, usage_script=[
-            (100, 50), (200, 100), (300, 150)])
+            (10, 5), (100, 50), (200, 100), (300, 150)])
         reviewer = MeteringReviewer(per_call=(10, 5))
         agent = CodingAgent(StubContext(router), root=str(fx.root))
         with mock.patch("nomorals.agents.reasoning.review_text",
@@ -236,18 +249,21 @@ class MeteringTotalsTests(unittest.TestCase):
                                plan_mode="never")
         self.assertTrue(result.ok, result.error)
         usage = result.usage
+        # brief: 15 over 1 call (pass #67 — folded via _meter_external)
         # funnel: 150 + 300 + 450 = 900 over 3 calls
         # reviews: draft-review + per-diff review per file (2x2), and
         # the Phase C gate at DEEP tier (new top-level defs are a
         # public-api-change risk in the #63 table): per-file x2 +
         # combined x1 = 3 -> 7 review calls x 15 tokens = 105
         self.assertEqual(len(reviewer.calls), 7)
-        self.assertEqual(usage["calls"], 10)
-        self.assertEqual(usage["prompt_tokens"], 600 + 70)
-        self.assertEqual(usage["completion_tokens"], 300 + 35)
-        self.assertEqual(usage["total_tokens"], 1005)
+        self.assertEqual(usage["calls"], 11)
+        self.assertEqual(usage["prompt_tokens"], 610 + 70)
+        self.assertEqual(usage["completion_tokens"], 305 + 35)
+        self.assertEqual(usage["total_tokens"], 1020)
         self.assertEqual(usage["usage_unreported"], 0)
         by_phase = usage["by_phase"]
+        self.assertEqual(by_phase["brief"]["total_tokens"], 15)
+        self.assertEqual(by_phase["brief"]["calls"], 1)
         self.assertEqual(by_phase["plan"]["total_tokens"], 150)
         self.assertEqual(by_phase["plan"]["calls"], 1)
         self.assertEqual(by_phase["edit"]["total_tokens"], 750)
@@ -277,8 +293,12 @@ class MeteringTotalsTests(unittest.TestCase):
         self.assertEqual(usage["total_tokens"], 0)
         self.assertEqual(usage["prompt_tokens"], 0)
         self.assertEqual(usage["completion_tokens"], 0)
-        self.assertEqual(usage["calls"], 10)
-        self.assertEqual(usage["usage_unreported"], 10)
+        # 11 calls: the pass-#67 brief + 3 funnel + 7 reviews, every
+        # one of them unreported rather than estimated
+        self.assertEqual(usage["calls"], 11)
+        self.assertEqual(usage["usage_unreported"], 11)
+        self.assertEqual(usage["by_phase"]["brief"]["usage_unreported"],
+                         1)
         self.assertEqual(usage["by_phase"]["review"]["usage_unreported"],
                          7)
 
@@ -313,11 +333,12 @@ class SpendCapTests(unittest.TestCase):
     def test_d_cap_stops_before_next_model_call(self):
         fx = _calc_repo(FixtureRepo())
         self.addCleanup(fx.cleanup)
-        # planner spends 150, first draft spends 300 -> total 450;
-        # the cap (200) is crossed by the draft, so the NEXT model
-        # call (the attempt-1 draft review) must never be issued.
+        # the brief spends 15 (pass #67), the planner 150, the first
+        # draft 300 -> total 465; the cap (200) is crossed by the
+        # draft, so the NEXT model call (the attempt-1 draft review)
+        # must never be issued.
         router = UsageRouter(_calc_handler, usage_script=[
-            (100, 50), (200, 100), (300, 150)])
+            (10, 5), (100, 50), (200, 100), (300, 150)])
         reviewer = MeteringReviewer(per_call=(10, 5))
         agent = CodingAgent(StubContext(router), root=str(fx.root))
         with mock.patch("nomorals.agents.reasoning.review_text",
@@ -326,15 +347,15 @@ class SpendCapTests(unittest.TestCase):
                                max_iterations=5, timeout=30,
                                plan_mode="never", max_tokens=200)
         self.assertFalse(result.ok)
-        # stopped BEFORE the next call: planner + one draft, and the
-        # reviewer was never reached at all
-        self.assertEqual(len(router.calls), 2)
+        # stopped BEFORE the next call: brief + planner + one draft,
+        # and the reviewer was never reached at all
+        self.assertEqual(len(router.calls), 3)
         self.assertEqual(len(reviewer.calls), 0)
         # the error names the cap and the spend; usage still reported
         self.assertIn("spend cap", result.error)
-        self.assertIn("450", result.error)
+        self.assertIn("465", result.error)
         self.assertIn("200", result.error)
-        self.assertEqual(result.usage["total_tokens"], 450)
+        self.assertEqual(result.usage["total_tokens"], 465)
         self.assertEqual(result.usage["cap"], 200)
         self.assertTrue(result.usage["capped"])
         # per-step status preserved: nothing landed, every step is
@@ -348,22 +369,23 @@ class SpendCapTests(unittest.TestCase):
     def test_e_cap_crossed_after_green_verify_verdict_stands(self):
         fx = _calc_repo(FixtureRepo())
         self.addCleanup(fx.cleanup)
-        # funnel: 150 + 300 + 300 = 750; four pre-gate reviews x 15
-        # bring the running total to 810 when the Phase C gate review
-        # is due.  Cap 800 is crossed only there — after the verify
-        # round already went green and no edit has landed since.
+        # the brief spends 15 first (pass #67); funnel: 150 + 300 +
+        # 300 = 750; four pre-gate reviews x 15 bring the running
+        # total to 825 when the Phase C gate review is due.  Cap 815
+        # is crossed only there — after the verify round already went
+        # green and no edit has landed since.
         router = UsageRouter(_calc_handler, usage_script=[
-            (100, 50), (200, 100), (200, 100)])
+            (10, 5), (100, 50), (200, 100), (200, 100)])
         reviewer = MeteringReviewer(per_call=(10, 5))
         agent = CodingAgent(StubContext(router), root=str(fx.root))
         with mock.patch("nomorals.agents.reasoning.review_text",
                         reviewer):
             result = agent.run("Build a tiny calculator",
                                max_iterations=5, timeout=30,
-                               plan_mode="never", max_tokens=800)
+                               plan_mode="never", max_tokens=815)
         self.assertTrue(result.ok, result.error)
         self.assertEqual(result.verification, "tests")
-        self.assertEqual(len(router.calls), 3)
+        self.assertEqual(len(router.calls), 4)
         self.assertEqual(len(reviewer.calls), 4)  # gate never issued
         by_path = {s["path"]: s for s in result.steps}
         self.assertEqual(by_path["calc.py"]["status"], "done")
@@ -371,7 +393,7 @@ class SpendCapTests(unittest.TestCase):
         # the cap is noted, and the gate honestly reports it never
         # completed — the green verdict itself is untouched
         self.assertTrue(result.usage["capped"])
-        self.assertEqual(result.usage["total_tokens"], 810)
+        self.assertEqual(result.usage["total_tokens"], 825)
         self.assertFalse(result.review["available"])
         self.assertIn("spend cap",
                       " ".join(result.review.get("notes", [])))

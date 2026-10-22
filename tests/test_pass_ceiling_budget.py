@@ -136,8 +136,14 @@ class VerifyTimeoutTests(unittest.TestCase):
         """Run the loop once with a spied run_tests; return the
         timeout of every verify call the loop made."""
         root = self._repo()
-        agent = CodingAgent(StubContext(ScriptedRouter([_PLAN, _EDIT])),
-                            root=str(root))
+        # pass #67 fixture note: the leading "{}" is the run-start
+        # brief's slot — the brief now fires for every task (it used
+        # to be length-gated off for this short one); "{}" carries no
+        # objective, so the brief takes its heuristic floor and the
+        # task text (and this script) flow exactly as before.
+        agent = CodingAgent(
+            StubContext(ScriptedRouter(["{}", _PLAN, _EDIT])),
+            root=str(root))
         seen: list[float] = []
 
         def spy(*args, **kwargs):

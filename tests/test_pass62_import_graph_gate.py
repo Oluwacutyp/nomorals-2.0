@@ -446,8 +446,14 @@ class FinalGateLoopTests(unittest.TestCase):
         return root
 
     def _agent(self, root, responses):
-        return CodingAgent(StubContext(ScriptedRouter(responses)),
-                           root=str(root))
+        # pass #67 fixture note: the run-start brief now fires for
+        # EVERY task (it used to be length-gated off for these short
+        # ones), so each script gains a leading "{}" — a model reply
+        # with no objective, which sends the brief to its heuristic
+        # floor and leaves the task text (and this script) unchanged.
+        return CodingAgent(
+            StubContext(ScriptedRouter(["{}"] + list(responses))),
+            root=str(root))
 
     def test_loop_selection_follows_changed_files_via_graph(self):
         root = self._repo()

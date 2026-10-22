@@ -1566,17 +1566,20 @@ class CodingAgent:
         explicit_accept = bool(accept)
         use_runner = not accept
         accept = accept or f'python3 "{filename}"'
-        # wave 68: a long/multi-clause build ask is structured into a
-        # spec first — unchanged from Phase A.
+        # wave 68: a build ask is structured into a spec first.
+        # Pass #67: EVERY ask — the old gate (should_brief over the
+        # core request's length/clause shape) silently skipped the
+        # brief for short asks over substantial work.  The brief's
+        # model call is real spend, so it is folded into the run
+        # meter under its own phase (pass #65's channel).
         draft_task = task
         try:
-            from .brief import BriefAgent, should_brief
+            from .brief import BriefAgent
 
-            # gate on the CORE request (see core_request above)
-            if should_brief(core_request(task)):
-                brief = BriefAgent(self.context).refine(task, kind="code")
-                if brief.by == "model":
-                    draft_task = brief.as_goal()
+            brief = BriefAgent(self.context).refine(task, kind="code")
+            if brief.by == "model":
+                self._meter_external(brief.usage, "brief")
+                draft_task = brief.as_goal()
         except Exception:  # noqa: BLE001 — structuring is best-effort
             pass
 

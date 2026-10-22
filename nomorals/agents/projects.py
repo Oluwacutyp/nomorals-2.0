@@ -728,9 +728,14 @@ class ProjectManager:
         model never blocks a project.
         """
         try:
-            from .reasoning import ReasoningAgent, reasoning_enabled
+            from .reasoning import ReasoningAgent, reasoning_permitted
 
-            if not reasoning_enabled(self.context):
+            # pass #67: the trigger is structural — a step FAILED with
+            # attempts remaining — so the owner's mode may veto the
+            # consult but may not judge it away: the bare
+            # reasoning_enabled() call here made the consult dead code
+            # in auto mode (complex_ok defaults False).
+            if not reasoning_permitted(self.context):
                 return {}
             agent = ReasoningAgent(self.context)
             return agent.course_correct(
