@@ -2012,6 +2012,15 @@ class PartnerRuntime(
                     ensure_finance_jobs(self._scheduler)
                 except Exception as exc:  # noqa: BLE001 - optional
                     _log.warning("finance jobs not registered: %s", exc)
+                # News: the continuous poll (every 30m — fetch, store,
+                # interest-score, push the high tier).  The digests
+                # ride the briefing slots above; this job is what
+                # keeps the store current between them (pass #85).
+                try:
+                    from ..news_jobs import ensure_news_jobs
+                    ensure_news_jobs(self._scheduler)
+                except Exception as exc:  # noqa: BLE001 - optional
+                    _log.warning("news jobs not registered: %s", exc)
                 # Autonomous nervous system (nomorals/autonomy): the organs
                 # work without commands. Idle monitor watches for quiet
                 # periods; presence heartbeat notices/prepares every 30m.

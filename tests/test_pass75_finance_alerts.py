@@ -311,6 +311,7 @@ def _collect_ensure_bindings(ctx, sched):
     from nomorals.agents.morning_briefing import ensure_briefing_job
     from nomorals.agents.morning_pulse import (
         ensure_pulse_job, ensure_pulse_jobs)
+    from nomorals.agents.news_jobs import ensure_news_jobs
     from nomorals.agents.afternoon_pulse import ensure_afternoon_pulse_job
     from nomorals.agents.evening_pulse import ensure_evening_pulse_job
     from nomorals.agents.research_loop import ensure_research_job
@@ -341,6 +342,7 @@ def _collect_ensure_bindings(ctx, sched):
         ("research loop", lambda: ensure_research_job(ctx)),
         ("improvement schedule", lambda: ensure_improvement_schedule(ctx)),
         ("finance jobs", lambda: ensure_finance_jobs(sched)),
+        ("news jobs", lambda: ensure_news_jobs(sched)),
     ]
     errors = {}
     for label, fn in calls:

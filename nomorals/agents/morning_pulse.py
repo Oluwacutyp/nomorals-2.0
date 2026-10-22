@@ -399,6 +399,18 @@ def run_pulse(context: Any) -> dict[str, Any]:
                     [str(it.get("url") or it.get("title", ""))
                      for it in news_items if it.get("url") or it.get("title")],
                     "morning")
+        # …and record the same delivery in the news store's own state
+        # machine (pass #85), so a later brief() doesn't re-digest
+        # what this pulse already delivered.  Best-effort: the pulse
+        # seen-store above stays authoritative for slot repetition.
+        try:
+            from .news import NewsAgent as _NewsAgent
+
+            _NewsAgent(context).mark_delivered(
+                [str(it.get("url") or "") for it in news_items],
+                channel="pulse")
+        except Exception:  # noqa: BLE001
+            pass
 
     elapsed = round(time.time() - started, 1)
     delivered = text_ok or audio_ok
@@ -1334,6 +1346,16 @@ def run_slot(context: Any, slot: str = "morning") -> dict[str, Any]:
 
     if text_ok and keys:
         _mark_seen(context, keys, slot)
+        # Record news deliveries in the news store too (pass #85):
+        # keys are section item keys — news keys are story URLs, and
+        # mark_delivered only transitions rows whose URL/id matches,
+        # so market/other keys pass through harmlessly.
+        try:
+            from .news import NewsAgent as _NewsAgent
+
+            _NewsAgent(context).mark_delivered(keys, channel="pulse")
+        except Exception:  # noqa: BLE001
+            pass
 
     elapsed = round(time.time() - started, 1)
     delivered = text_ok or audio_ok

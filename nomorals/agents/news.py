@@ -17,6 +17,23 @@
   the feed name in ``source`` (provenance), so stored-path consumers
   credit the same publisher the live digest did.
 
+* **Continuous poll + interest tiers (pass #85)** — fetch and delivery
+  are separate acts.  ``poll()`` fetches and stores EVERY fresh story
+  (no cap) as ``undelivered``; the brain then scores each story 0–1
+  against the owner's interest profile (seed beats + pins, persisted
+  in ``news_interest``).  High interest is pushed anytime — through
+  the notifier, held during quiet hours and under a per-day cap;
+  mid interest waits for the digest; low interest is archived
+  (stored, queryable, never delivered).  ``brief()`` composes the
+  digest from ALL undelivered stories — nothing is silently dropped —
+  and marks exactly those delivered.  Every stored row carries an
+  honest ``delivery_state`` (``undelivered`` / ``pushed`` /
+  ``digested`` / ``archived``); rows stored before this pass have a
+  NULL state and count as already delivered (the old run() published
+  what it stored).  With no brain available, scoring degrades
+  honestly: nothing is pushed, scores stay NULL, and ``status()``
+  reports interest ``unavailable`` — scores are never fabricated.
+
 Every feed URL was live-fetched and classified 2026-10-18 (see
 ``docs/source-verification-2026-10-18.md``): 9 dead feeds removed
 (404 / 200-but-HTML), 7 verified-live replacements added. Feeds that
@@ -36,6 +53,7 @@ Oceania — has its own outlets in the default digest (see FEED_REGIONS).
 from __future__ import annotations
 
 import html as _html
+import json
 import re
 import time
 import xml.etree.ElementTree as ET
@@ -431,6 +449,73 @@ def _ensure_attribution_columns(db: Any) -> None:
                 return
 
 
+# ── delivery state + interest profile (pass #85) ──────────────────────
+#
+# ``news_items`` rows gain a delivery state machine.  Before this pass
+# storage WAS the seen-marker: run() stored exactly the capped digest
+# selection, so "stored" and "delivered" were one fact and stories
+# beyond the cap vanished unaudited.  Now poll() stores everything as
+# STATE_UNDELIVERED and delivery is a recorded transition.
+
+STATE_UNDELIVERED = "undelivered"
+STATE_PUSHED = "pushed"
+STATE_DIGESTED = "digested"
+STATE_ARCHIVED = "archived"
+
+_DELIVERY_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("delivery_state", "TEXT"),
+    ("interest", "REAL"),
+    ("delivered_at", "REAL"),
+    ("delivery_channel", "TEXT"),
+)
+
+#: The owner's seed beats — interest-profile DATA, shipped as defaults
+#: and owner-correctable (persisted profile in ``news_interest`` wins
+#: once saved; ``settings.briefing.topics`` also count as stated
+#: interests at scoring time).  His beats weigh more by construction.
+INTEREST_SEED_BEATS: tuple[tuple[str, float], ...] = (
+    ("XAUUSD and gold trading", 1.0),
+    ("AI and model work", 0.9),
+    ("Nigerian tech and Lagos", 0.9),
+    ("Devon herself — the owner's own agent and her systems", 1.0),
+    ("USA money opportunities, including loans", 0.8),
+)
+
+#: Tier thresholds (settings.news.interest_high / interest_low win).
+INTEREST_HIGH_DEFAULT = 0.75
+INTEREST_LOW_DEFAULT = 0.35
+#: Anytime-push budget per day (settings.news.push_cap_per_day wins).
+PUSH_CAP_DEFAULT = 6
+#: Bounds on per-poll work: stories scored / backlog rows tiered.
+_SCORE_BATCH = 20
+_SCORE_MAX_PER_POLL = 80
+_TIER_BACKLOG_MAX = 200
+
+
+def _ensure_delivery_columns(db: Any) -> None:
+    """Lazily add the pass-#85 columns + profile table.
+
+    Same best-effort, idempotent pattern as the attribution columns:
+    a failure here must never stop news — storage falls back to the
+    legacy column list and delivery tracking resumes next construct.
+    """
+    if db is None:
+        return
+    for name, decl in _DELIVERY_COLUMNS:
+        try:
+            db.execute(
+                f"ALTER TABLE news_items ADD COLUMN {name} {decl}")
+        except Exception as exc:  # noqa: BLE001
+            if "duplicate column" not in str(exc).lower():
+                return
+    try:
+        db.execute(
+            "CREATE TABLE IF NOT EXISTS news_interest "
+            "(key TEXT PRIMARY KEY, value TEXT)")
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def publisher_of(item: dict[str, Any]) -> str:
     """The truthful display attribution for a news item or stored row.
 
@@ -455,7 +540,14 @@ class NewsAgent:
         self.settings = getattr(context, "settings", None)
         self.db = getattr(context, "db", None)
         _ensure_attribution_columns(self.db)
+        _ensure_delivery_columns(self.db)
         self.notifier = notifier
+        #: db-less contexts keep the last poll's rows in memory so a
+        #: poll() → brief() pair on one instance still composes.
+        self._pending: list[dict[str, Any]] = []
+        #: last scoring outcome ("ok" / "unavailable" / "error: …") —
+        #: surfaced by status() so degradation is never silent.
+        self._interest_state: str | None = None
         tools = getattr(self.settings, "tools", None)
         self._client = HttpClient(
             timeout=getattr(tools, "http_timeout", 30.0),
@@ -504,13 +596,20 @@ class NewsAgent:
                 out[items[idx]["url"]] = sentence.strip()
         return out
 
-    # ── one digest cycle ─────────────────────────────────────────────────────
-    def run(self, cap: int | None = None) -> dict[str, Any]:
+    # ── poll: fetch + store + score + tier (pass #85) ──────────────────
+    def poll(self) -> dict[str, Any]:
+        """Fetch every feed, store EVERY fresh story as undelivered,
+        score with the brain, and apply the interest tiers.
+
+        The digest is brief()'s separate act; poll() itself only
+        delivers the high-interest tier (the anytime push path).
+        Report keys: the fetch breadth (sources_tried / sources_ok /
+        per_source / stood_down / errors) plus the tier outcome
+        (polled / scored / pushed / archived / held, the interest
+        state, and the discipline flags quiet_hold / push_cap_reached).
+        """
         from ..agency.sourcehealth import SourceHealth, SourceSpec, RSS
 
-        settings_news = getattr(self.settings, "news", None)
-        cap = int(cap or getattr(settings_news, "cap", 12))
-        cap = max(1, min(cap, 40))
         fetched: list[dict[str, str]] = []
         errors: list[str] = []
         per_source: dict[str, int] = {}
@@ -628,69 +727,27 @@ class NewsAgent:
                     continue
             fresh.append(it)
         fresh.sort(key=lambda i: float(i.get("source_ts") or 0), reverse=True)
-        top = fresh[:cap]
-        summaries = self._model_summaries(top)
+        # Store EVERY fresh story — the old fresh[:cap] selection is
+        # gone; the digest cap no longer decides what exists.
+        new_rows = self._store_fresh(fresh)
+        tiers = self._score_and_tier(new_rows)
+        held = 0
         if self.db is not None:
-            # Persist attribution alongside the carrying feed (pass
-            # #83): ``source`` stays the feed (provenance), ``publisher``
-            # / ``publisher_url`` carry the <source> attribution (NULL
-            # when the item has none).  If the columns are somehow
-            # unavailable (the lazy ensure failed), fall back to the
-            # legacy column list so storage keeps working exactly as
-            # it did before attribution existed.
-            stored = False
             try:
-                with self.db.transaction():
-                    for it in top:
-                        self.db.execute(
-                            "INSERT OR IGNORE INTO news_items (id, source, publisher, publisher_url, title, url, summary, published, created_at) "
-                            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                            (new_id(), it["source"],
-                             (it.get("source_name") or "").strip() or None,
-                             (it.get("source_url") or "").strip() or None,
-                             it["title"], it["url"],
-                             it.get("summary", "")[:400], float(it.get("source_ts") or 0), time.time()),
-                        )
-                stored = True
+                row = self.db.query_one(
+                    "SELECT COUNT(*) AS n FROM news_items "
+                    "WHERE delivery_state = ?", (STATE_UNDELIVERED,))
+                held = int((row or {}).get("n") or 0)
             except Exception:  # noqa: BLE001
-                stored = False
-            if not stored:
-                try:
-                    with self.db.transaction():
-                        for it in top:
-                            self.db.execute(
-                                "INSERT OR IGNORE INTO news_items (id, source, title, url, summary, published, created_at) "
-                                "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                                (new_id(), it["source"], it["title"], it["url"],
-                                 it.get("summary", "")[:400], float(it.get("source_ts") or 0), time.time()),
-                            )
-                except Exception:  # noqa: BLE001
-                    pass
-        lines: list[str] = []
-        # Group by PUBLISHER when the item carries attribution, else by
-        # carrying feed (pass #83): a Reuters story reads under
-        # "■ Reuters" whichever feed carried it.  No merge machinery —
-        # the item cap above stays authoritative, so the block count is
-        # bounded by the item count exactly as per-feed blocks were,
-        # and unattributed items still coalesce under their feed.
-        by_source: dict[str, list[dict[str, str]]] = {}
-        for it in top:
-            by_source.setdefault(publisher_of(it), []).append(it)
-        for source, items in by_source.items():
-            lines.append(f"■ {source}")
-            # every selected item is shown — the old [:4]-per-source slice
-            # silently dropped stories that made it into `top`.
-            for it in items:
-                summary = summaries.get(it["url"]) or it.get("summary") or ""
-                lines.append(f"  • {it['title']}" + (
-                    f" — {_short_summary(summary)}" if summary else ""))
-        digest = "\n".join(lines)
-        result = {
-            "ok": bool(top),
-            "items": len(top),
-            "fresh": len(fresh),
+                held = 0
+        else:
+            held = sum(1 for r in self._pending
+                       if r.get("delivery_state") == STATE_UNDELIVERED)
+        return {
+            "ok": bool(sources_ok or new_rows),
+            "polled": len(new_rows),
+            "fresh": len(new_rows),
             "errors": errors,
-            "digest": digest,
             # Visible breadth: the user sees HOW MANY sources were tried
             # and which ones answered — never a silent 1–2. Stood-down
             # feeds are reported, not silently dropped.
@@ -698,11 +755,575 @@ class NewsAgent:
             "sources_ok": sources_ok,
             "per_source": per_source,
             "stood_down": stood_down,
+            **tiers,
+            "held": held,
         }
-        if self.notifier is not None and top:
+
+    def _store_fresh(self, fresh: list[dict[str, str]]) -> list[dict[str, Any]]:
+        """Persist fresh items as UNDELIVERED; return their row dicts.
+
+        Attribution persists alongside the carrying feed (pass #83):
+        ``source`` stays the feed (provenance), ``publisher`` /
+        ``publisher_url`` carry the <source> attribution (NULL when
+        the item has none).  If the pass-#85 columns are somehow
+        unavailable (the lazy ensure failed), fall back to the legacy
+        column list so storage keeps working exactly as it did before
+        delivery state existed.
+        """
+        now = time.time()
+        rows: list[dict[str, Any]] = []
+        for it in fresh:
+            rows.append({
+                "id": new_id(),
+                "source": it["source"],
+                "publisher": (it.get("source_name") or "").strip() or None,
+                "publisher_url":
+                    (it.get("source_url") or "").strip() or None,
+                "source_name": it.get("source_name") or "",
+                "source_url": it.get("source_url") or "",
+                "title": it["title"],
+                "url": it["url"],
+                "summary": (it.get("summary") or "")[:400],
+                "published": float(it.get("source_ts") or 0),
+                "created_at": now,
+                "delivery_state": STATE_UNDELIVERED,
+                "interest": None,
+                "delivered_at": None,
+                "delivery_channel": None,
+            })
+        if self.db is None:
+            self._pending.extend(rows)
+            return rows
+        stored = False
+        try:
+            with self.db.transaction():
+                for r in rows:
+                    self.db.execute(
+                        "INSERT OR IGNORE INTO news_items (id, source, publisher, publisher_url, title, url, summary, published, created_at, delivery_state) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        (r["id"], r["source"], r["publisher"],
+                         r["publisher_url"], r["title"], r["url"],
+                         r["summary"], r["published"], r["created_at"],
+                         STATE_UNDELIVERED),
+                    )
+            stored = True
+        except Exception:  # noqa: BLE001
+            stored = False
+        if not stored:
+            try:
+                with self.db.transaction():
+                    for r in rows:
+                        self.db.execute(
+                            "INSERT OR IGNORE INTO news_items (id, source, publisher, publisher_url, title, url, summary, published, created_at) "
+                            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                            (r["id"], r["source"], r["publisher"],
+                             r["publisher_url"], r["title"], r["url"],
+                             r["summary"], r["published"], r["created_at"]),
+                        )
+            except Exception:  # noqa: BLE001
+                pass
+            # rows written without a state read back NULL = legacy
+            # (already delivered) — keep this instance's copies so the
+            # poll → brief flow on THIS agent still composes them.
+            self._pending.extend(rows)
+        return rows
+
+    # ── interest: profile, scoring, tiers ────────────────────────────────
+
+    def _news_setting(self, name: str, default: Any) -> Any:
+        val = getattr(getattr(self.settings, "news", None), name, None)
+        return default if val is None else val
+
+    def _thresholds(self) -> tuple[float, float]:
+        try:
+            high = float(self._news_setting(
+                "interest_high", INTEREST_HIGH_DEFAULT))
+        except (TypeError, ValueError):
+            high = INTEREST_HIGH_DEFAULT
+        try:
+            low = float(self._news_setting(
+                "interest_low", INTEREST_LOW_DEFAULT))
+        except (TypeError, ValueError):
+            low = INTEREST_LOW_DEFAULT
+        return (max(0.0, min(high, 1.0)), max(0.0, min(low, 1.0)))
+
+    def _push_cap(self) -> int:
+        try:
+            return max(0, int(self._news_setting(
+                "push_cap_per_day", PUSH_CAP_DEFAULT)))
+        except (TypeError, ValueError):
+            return PUSH_CAP_DEFAULT
+
+    def _load_profile(self) -> dict[str, Any]:
+        """The stored profile, or the seeds when none was saved yet."""
+        profile: dict[str, Any] = {
+            "beats": [{"topic": t, "weight": w}
+                      for t, w in INTEREST_SEED_BEATS],
+            "pins": [],
+        }
+        saved: Any = None
+        if self.db is not None:
+            try:
+                row = self.db.query_one(
+                    "SELECT value FROM news_interest WHERE key = ?",
+                    ("profile",))
+                raw = (row or {}).get("value")
+                if raw:
+                    saved = json.loads(raw)
+            except Exception:  # noqa: BLE001 - seeds are the fallback
+                saved = None
+        elif isinstance(getattr(self, "_profile_mem", None), dict):
+            saved = self._profile_mem  # type: ignore[attr-defined]
+        if isinstance(saved, dict):
+            beats = saved.get("beats")
+            if isinstance(beats, list) and beats:
+                profile["beats"] = [
+                    {"topic": str(b.get("topic") or ""),
+                     "weight": float(b.get("weight") or 0.5)}
+                    for b in beats
+                    if isinstance(b, dict) and b.get("topic")]
+            pins = saved.get("pins")
+            if isinstance(pins, list):
+                profile["pins"] = [str(p) for p in pins if str(p).strip()]
+        return profile
+
+    def _save_profile(self, profile: dict[str, Any]) -> None:
+        if self.db is None:
+            self._profile_mem = profile  # type: ignore[attr-defined]
+            return
+        try:
+            self.db.execute(
+                "INSERT OR REPLACE INTO news_interest (key, value) "
+                "VALUES (?, ?)",
+                ("profile", json.dumps(profile)))
+        except Exception:  # noqa: BLE001
+            pass
+
+    def interest_profile(self) -> dict[str, Any]:
+        """The effective interest profile: stored beats + pins, with
+        the owner's already-configured briefing topics folded in as
+        stated interests (settings.briefing.topics — the same list the
+        morning briefing's NewsProvider filters by)."""
+        profile = self._load_profile()
+        beats = [dict(b) for b in profile["beats"]]
+        known = {b["topic"].lower() for b in beats}
+        briefing = getattr(self.settings, "briefing", None)
+        for topic in (getattr(briefing, "topics", None) or []):
+            topic = str(topic).strip()
+            if topic and topic.lower() not in known:
+                beats.append({"topic": topic, "weight": 1.0})
+                known.add(topic.lower())
+        pins = list(profile["pins"])
+        beats_text = "; ".join(
+            f"{b['topic']} (weight {b['weight']:g})" for b in beats)
+        if pins:
+            beats_text += " | pinned: " + ", ".join(pins)
+        return {"beats": beats, "pins": pins, "beats_text": beats_text}
+
+    def pin(self, topic: str) -> dict[str, Any]:
+        """Pin a topic: it renders as always-high interest to the brain."""
+        topic = (topic or "").strip()
+        profile = self._load_profile()
+        if topic and topic.lower() not in {
+                p.lower() for p in profile["pins"]}:
+            profile["pins"].append(topic)
+            self._save_profile(profile)
+        return self.interest_profile()
+
+    def unpin(self, topic: str) -> dict[str, Any]:
+        topic = (topic or "").strip().lower()
+        profile = self._load_profile()
+        profile["pins"] = [p for p in profile["pins"]
+                           if p.lower() != topic]
+        self._save_profile(profile)
+        return self.interest_profile()
+
+    def _brain_available(self) -> bool:
+        # The module's own convention (see _model_summaries): no
+        # router on the context means no live model is answering.
+        return getattr(self.context, "router", None) is not None
+
+    def _score_interest(
+            self, rows: list[dict[str, Any]]) -> tuple[dict[str, float], str]:
+        """Brain-score rows 0–1 against the interest profile.
+
+        Returns ({row_id: score}, state).  State is "unavailable"
+        when no brain is answering (scores stay NULL — never
+        fabricated) and "error: …" when the brain answered garbage;
+        both degrade to digest-only delivery, visibly.
+        """
+        if not rows:
+            return {}, (self._interest_state or "ok")
+        if not self._brain_available():
+            self._interest_state = "unavailable"
+            return {}, "unavailable"
+        from ..llm.base import Message
+
+        profile = self.interest_profile()
+        scores: dict[str, float] = {}
+        try:
+            brain = brain_for(self.context)
+            for start in range(0, len(rows), _SCORE_BATCH):
+                batch = rows[start:start + _SCORE_BATCH]
+                lines = []
+                for i, r in enumerate(batch):
+                    who = publisher_of(r)
+                    lines.append(
+                        f"{i + 1}. {r.get('title', '')} — "
+                        f"{(r.get('summary') or '')[:160]}"
+                        + (f" [{who}]" if who else ""))
+                prompt = (
+                    "Score each news story for INTEREST to one specific "
+                    "reader, 0.0 to 1.0: novelty x consequence x "
+                    "likelihood this reader cares. The reader's beats "
+                    "(higher weight = cares more): "
+                    f"{profile['beats_text']}. Stories on the reader's "
+                    "beats score higher; pinned topics are always high "
+                    "interest. Reply with one line per story, exactly: "
+                    "\"N. <score>\".\n" + "\n".join(lines))
+                response = brain.chat(
+                    [Message(role="user", content=prompt)],
+                    task_kind="summarize")
+                text = (getattr(response, "text", "") or "").strip()
+                for line in text.splitlines():
+                    line = line.strip()
+                    if not line or line[0] not in "0123456789":
+                        continue
+                    num, _, rest = line.partition(".")
+                    try:
+                        idx = int(num.strip()) - 1
+                        val = float(rest.strip().split()[0])
+                    except (ValueError, IndexError):
+                        continue
+                    if 0 <= idx < len(batch):
+                        scores[batch[idx]["id"]] = max(0.0, min(val, 1.0))
+        except Exception as exc:  # noqa: BLE001
+            self._interest_state = f"error: {type(exc).__name__}: {exc}"[:120]
+            return {}, self._interest_state
+        if not scores:
+            self._interest_state = "error: brain returned no usable scores"
+            return {}, self._interest_state
+        self._interest_state = "ok"
+        return scores, "ok"
+
+    def _set_state(self, row: dict[str, Any], state: str,
+                   channel: str | None = None) -> None:
+        row["delivery_state"] = state
+        row["delivered_at"] = time.time()
+        if channel is not None:
+            row["delivery_channel"] = channel
+        if self.db is not None:
+            try:
+                self.db.execute(
+                    "UPDATE news_items SET delivery_state = ?, "
+                    "delivered_at = ?, delivery_channel = ? WHERE id = ?",
+                    (state, row["delivered_at"],
+                     row.get("delivery_channel"), row["id"]))
+            except Exception:  # noqa: BLE001
+                pass
+
+    def _pushes_today(self) -> int:
+        lt = time.localtime()
+        start = time.mktime(
+            (lt.tm_year, lt.tm_mon, lt.tm_mday, 0, 0, 0, 0, 0, -1))
+        if self.db is None:
+            return sum(1 for r in self._pending
+                       if r.get("delivery_state") == STATE_PUSHED
+                       and (r.get("delivered_at") or 0) >= start)
+        try:
+            row = self.db.query_one(
+                "SELECT COUNT(*) AS n FROM news_items "
+                "WHERE delivery_state = ? AND delivered_at >= ?",
+                (STATE_PUSHED, start))
+            return int((row or {}).get("n") or 0)
+        except Exception:  # noqa: BLE001
+            return 0
+
+    def _quiet_now(self) -> bool:
+        """Quiet hours per the codebase's one discipline: the
+        notifier's partner quiet window (quiet_start/quiet_end)."""
+        try:
+            from .notifier import _in_quiet_hours_now
+            return bool(_in_quiet_hours_now(self.context))
+        except Exception:  # noqa: BLE001
+            return False
+
+    def _score_and_tier(self, new_rows: list[dict[str, Any]]) -> dict[str, Any]:
+        """Score the undelivered backlog and apply the tiers.
+
+        Candidates = the fresh rows + stored undelivered rows (a story
+        held by quiet hours or a dead brain is re-tiered by the next
+        poll).  High → anytime push (quiet hours / per-day cap hold
+        it, still undelivered); low → archived; mid → stays for the
+        digest.  Unscored rows are never tiered by a guess.
+        """
+        out: dict[str, Any] = {
+            "scored": 0, "pushed": 0, "archived": 0,
+            "interest": self._interest_state or (
+                "ok" if self._brain_available() else "unavailable"),
+            "quiet_hold": False, "push_cap_reached": False,
+        }
+        candidates: dict[str, dict[str, Any]] = {
+            r["id"]: r for r in new_rows}
+        if self.db is not None:
+            try:
+                rows = self.db.query(
+                    "SELECT * FROM news_items WHERE delivery_state = ? "
+                    "ORDER BY created_at ASC LIMIT ?",
+                    (STATE_UNDELIVERED, _TIER_BACKLOG_MAX))
+                for r in rows or []:
+                    candidates.setdefault(r["id"], dict(r))
+            except Exception:  # noqa: BLE001
+                pass
+        else:
+            for r in self._pending:
+                if r.get("delivery_state") == STATE_UNDELIVERED:
+                    candidates.setdefault(r["id"], r)
+        if not candidates:
+            return out
+        rows = list(candidates.values())
+        unscored = [r for r in rows if r.get("interest") is None]
+        # fresh first: newest stories get the bounded scoring budget
+        unscored.sort(key=lambda r: float(r.get("created_at") or 0),
+                      reverse=True)
+        scores, state = self._score_interest(
+            unscored[:_SCORE_MAX_PER_POLL])
+        out["interest"] = state
+        out["scored"] = len(scores)
+        for rid, val in scores.items():
+            row = candidates[rid]
+            row["interest"] = val
+            if self.db is not None:
+                try:
+                    self.db.execute(
+                        "UPDATE news_items SET interest = ? WHERE id = ?",
+                        (val, rid))
+                except Exception:  # noqa: BLE001
+                    pass
+        high, low = self._thresholds()
+        push_candidates: list[dict[str, Any]] = []
+        for row in rows:
+            score = row.get("interest")
+            if score is None:
+                continue  # unscored: never tiered by a guess
+            if float(score) < low:
+                if row.get("delivery_state") == STATE_UNDELIVERED:
+                    self._set_state(row, STATE_ARCHIVED, channel="interest")
+                    out["archived"] += 1
+            elif float(score) >= high:
+                push_candidates.append(row)
+        if push_candidates:
+            push_candidates.sort(
+                key=lambda r: float(r.get("interest") or 0), reverse=True)
+            if self.notifier is None:
+                out["push_held_no_notifier"] = len(push_candidates)
+            elif self._quiet_now():
+                out["quiet_hold"] = True
+            else:
+                remaining = self._push_cap() - self._pushes_today()
+                if remaining <= 0:
+                    out["push_cap_reached"] = True
+                else:
+                    if len(push_candidates) > remaining:
+                        out["push_cap_reached"] = True
+                    for row in push_candidates[:remaining]:
+                        body = _short_summary(row.get("summary") or "")
+                        body = (body + "\n" if body else "") \
+                            + str(row.get("url") or "")
+                        try:
+                            res = self.notifier.publish(
+                                "news", str(row.get("title") or ""), body)
+                        except Exception:  # noqa: BLE001
+                            res = {}
+                        if isinstance(res, dict) and res.get("delivered"):
+                            self._set_state(row, STATE_PUSHED,
+                                            channel="push")
+                            out["pushed"] += 1
+        return out
+
+    # ── brief: the digest of everything undelivered ──────────────────────
+
+    @staticmethod
+    def _normalize_row(row: Any) -> Any:
+        """Stored row → live-item shape (pass #83): the persisted
+        ``publisher`` / ``publisher_url`` surface as ``source_name`` /
+        ``source_url``.  Legacy rows get "" — the fallback every
+        consumer already applies."""
+        if isinstance(row, dict):
+            if not row.get("source_name"):
+                row["source_name"] = row.get("publisher") or ""
+            if not row.get("source_url"):
+                row["source_url"] = row.get("publisher_url") or ""
+        return row
+
+    def undelivered(self, limit: int | None = None) -> list[dict[str, Any]]:
+        """Stored stories not yet delivered, newest first."""
+        rows: list[dict[str, Any]] = []
+        if self.db is not None:
+            try:
+                queried = self.db.query(
+                    "SELECT * FROM news_items WHERE delivery_state = ? "
+                    "ORDER BY published DESC",
+                    (STATE_UNDELIVERED,)) or []
+                rows = [r for r in queried if isinstance(r, dict)]
+            except Exception:  # noqa: BLE001
+                rows = []
+        seen_ids = {r.get("id") for r in rows}
+        # this instance's in-memory copies (db-less contexts, and the
+        # legacy-column fallback where stored rows carry no state)
+        for r in self._pending:
+            if r.get("delivery_state") == STATE_UNDELIVERED \
+                    and r.get("id") not in seen_ids:
+                rows.append(r)
+        rows = [self._normalize_row(r) for r in rows]
+        rows.sort(key=lambda r: float(r.get("published") or 0),
+                  reverse=True)
+        return rows if limit is None else rows[:limit]
+
+    def _compose_digest(
+            self, rows: list[dict[str, Any]]) -> str:
+        summaries = self._model_summaries(rows)  # type: ignore[arg-type]
+        lines: list[str] = []
+        # Group by PUBLISHER when the item carries attribution, else by
+        # carrying feed (pass #83): a Reuters story reads under
+        # "■ Reuters" whichever feed carried it.
+        by_source: dict[str, list[dict[str, Any]]] = {}
+        for it in rows:
+            by_source.setdefault(publisher_of(it), []).append(it)
+        for source, items in by_source.items():
+            lines.append(f"■ {source}")
+            # every item is shown — no per-source slice; the digest
+            # carries everything undelivered (pass #85).
+            for it in items:
+                summary = summaries.get(it["url"]) or it.get("summary") or ""
+                lines.append(f"  • {it['title']}" + (
+                    f" — {_short_summary(summary)}" if summary else ""))
+        return "\n".join(lines)
+
+    def brief(self, rows: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+        """Compose and deliver the digest of ALL undelivered stories.
+
+        No cap: what poll() stored and no push took, the digest
+        carries.  The briefed rows are marked ``digested`` — when a
+        notifier is attached the digest is published through it; with
+        no notifier the caller's own surface IS the delivery (the
+        /news command reply, the pulse's briefing), the convention
+        those callers already document.
+        """
+        if rows is None:
+            rows = self.undelivered()
+        else:
+            rows = [r for r in rows
+                    if r.get("delivery_state") == STATE_UNDELIVERED]
+        if not rows:
+            return {"ok": False, "items": 0, "digest": "",
+                    "delivered_urls": []}
+        digest = self._compose_digest(rows)
+        if self.notifier is not None:
             # full digest — the gateway chunks it; no [:3500] cut.
-            self.notifier.publish("news", f"news digest — {len(top)} new items", digest)
-        return result
+            self.notifier.publish(
+                "news", f"news digest — {len(rows)} new items", digest)
+        for r in rows:
+            self._set_state(r, STATE_DIGESTED, channel="digest")
+        return {"ok": True, "items": len(rows), "digest": digest,
+                "delivered_urls": [str(r.get("url") or "") for r in rows]}
+
+    def mark_delivered(self, keys: list[str], *,
+                       channel: str = "digest") -> int:
+        """Record delivery of undelivered rows by URL or id.
+
+        The shared state machine's door for the OTHER delivery
+        surfaces (the pulse slots deliver stories inside their own
+        briefings): what they delivered must not be re-digested here.
+        Returns how many rows transitioned.
+        """
+        wanted = {str(k) for k in (keys or []) if str(k).strip()}
+        if not wanted:
+            return 0
+        now = time.time()
+        if self.db is None:
+            n = 0
+            for r in self._pending:
+                if r.get("delivery_state") == STATE_UNDELIVERED and (
+                        str(r.get("url")) in wanted
+                        or str(r.get("id")) in wanted):
+                    r["delivery_state"] = STATE_DIGESTED
+                    r["delivered_at"] = now
+                    r["delivery_channel"] = channel
+                    n += 1
+            return n
+        try:
+            rows = self.db.query(
+                "SELECT id, url FROM news_items WHERE delivery_state = ? "
+                "OR delivery_state IS NULL", (STATE_UNDELIVERED,))
+        except Exception:  # noqa: BLE001
+            return 0
+        n = 0
+        for r in rows or []:
+            if str(r.get("url")) in wanted or str(r.get("id")) in wanted:
+                try:
+                    self.db.execute(
+                        "UPDATE news_items SET delivery_state = ?, "
+                        "delivered_at = ?, delivery_channel = ? "
+                        "WHERE id = ?",
+                        (STATE_DIGESTED, now, channel, r["id"]))
+                    n += 1
+                except Exception:  # noqa: BLE001
+                    pass
+        return n
+
+    def status(self) -> dict[str, Any]:
+        """Delivery-state census + interest health, for /news status."""
+        counts: dict[str, int] = {}
+        if self.db is not None:
+            try:
+                for r in self.db.query(
+                        "SELECT delivery_state, COUNT(*) AS n "
+                        "FROM news_items GROUP BY delivery_state") or []:
+                    key = r.get("delivery_state") or "legacy"
+                    counts[str(key)] = int(r.get("n") or 0)
+            except Exception:  # noqa: BLE001
+                counts = {}
+        else:
+            for r in self._pending:
+                key = str(r.get("delivery_state") or "legacy")
+                counts[key] = counts.get(key, 0) + 1
+        profile = self.interest_profile()
+        interest = self._interest_state or (
+            "ok" if self._brain_available() else "unavailable")
+        return {
+            "stored": sum(counts.values()),
+            "by_state": counts,
+            "undelivered": counts.get(STATE_UNDELIVERED, 0),
+            "archived": counts.get(STATE_ARCHIVED, 0),
+            "pushed_today": self._pushes_today(),
+            "push_cap_per_day": self._push_cap(),
+            "interest": interest,
+            "quiet_now": self._quiet_now(),
+            "beats": [b["topic"] for b in profile["beats"]],
+            "pins": profile["pins"],
+        }
+
+    # ── one digest cycle (compatibility composition) ─────────────────────
+    def run(self, cap: int | None = None) -> dict[str, Any]:
+        """poll() + brief(): fetch, tier, and digest what remains.
+
+        The historical single-call contract for /news, the pulse
+        slots, and the agency adapter.  ``cap`` is accepted for
+        signature compatibility and no longer selects what gets
+        delivered — the digest carries every undelivered story
+        (pass #85); it survives only as the settings default the
+        callers pass through.
+        """
+        report = self.poll()
+        brief = self.brief()
+        report.update({
+            "ok": bool(brief["items"] or report.get("pushed")),
+            "items": brief["items"],
+            "digest": brief["digest"],
+            "delivered_urls": brief["delivered_urls"],
+        })
+        return report
 
     def recent(self, limit: int = 15) -> list[dict[str, Any]]:
         if self.db is None:
@@ -713,17 +1334,62 @@ class NewsAgent:
             )
         except Exception:  # noqa: BLE001
             return []
-        # Normalize stored rows to the live-item shape (pass #83): a
-        # row's persisted ``publisher`` / ``publisher_url`` surface as
-        # ``source_name`` / ``source_url``, so stored-path consumers
-        # see the same attribution fields a freshly parsed item has.
-        # Legacy rows (columns absent or NULL) get "" — the fallback
-        # every consumer already applies.
+        # Normalize stored rows to the live-item shape (pass #83), so
+        # stored-path consumers see the same attribution fields a
+        # freshly parsed item has.
         for row in rows or []:
-            if not isinstance(row, dict):
-                continue
-            if not row.get("source_name"):
-                row["source_name"] = row.get("publisher") or ""
-            if not row.get("source_url"):
-                row["source_url"] = row.get("publisher_url") or ""
+            self._normalize_row(row)
         return rows or []
+
+
+# ── agent tool (pass #85) ─────────────────────────────────────────────
+#
+# Until this pass the news organ had NO registry tool: the only
+# scheduled deliveries were the four pulse slots, and nothing polled
+# between them.  The tool closes over ``registry.context`` (the
+# codebase convention for scheduler-bound tools — the registry never
+# passes a context argument) and is what the "news poll" job binds.
+
+def register(registry: Any) -> None:
+    """Register the ``news`` tool (poll / brief / run / status / recent)."""
+    from ..core.policy import Capability
+
+    context = registry.context
+
+    @registry.register(
+        "news",
+        description=(
+            "News organ: action=poll (fetch all feeds, store every new "
+            "story, brain-score interest, push the high tier anytime) | "
+            "brief (digest of ALL undelivered stories) | run (poll + "
+            "brief) | status (delivery-state census + interest health + "
+            "profile) | recent (latest stored stories)."
+        ),
+        capability=Capability.DB_READ,
+        parameters={
+            "action": "str — poll|brief|run|status|recent",
+        },
+    )
+    def news(*, action: str = "run") -> dict[str, Any]:
+        act = (action or "run").strip().lower()
+        if act == "status":
+            return NewsAgent(context).status()
+        if act == "recent":
+            agent = NewsAgent(context)
+            return {"items": [
+                {"title": r.get("title", ""),
+                 "source": publisher_of(r),
+                 "url": r.get("url", ""),
+                 "delivery_state": r.get("delivery_state")}
+                for r in agent.recent(limit=15)]}
+        from .notifier import Notifier
+
+        agent = NewsAgent(context, notifier=Notifier(context))
+        if act == "poll":
+            return agent.poll()
+        if act == "brief":
+            return agent.brief()
+        if act == "run":
+            return agent.run()
+        return {"error": f"unknown action {act!r} — "
+                         "poll|brief|run|status|recent"}

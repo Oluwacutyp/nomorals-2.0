@@ -75,7 +75,58 @@ class RuntimeLiveMixin:
                 # credit the publisher when the row carries attribution
                 # (pass #83); legacy rows show their feed name as before
                 lines.append(f"  [{publisher_of(row)}] {row['title'][:70]}")
+            # Delivery-state census + interest health (pass #85): the
+            # degraded no-brain state is VISIBLE here, never silent.
+            try:
+                st = agent.status()
+                lines.append(
+                    f"delivery: {st['undelivered']} undelivered, "
+                    f"{st['pushed_today']} pushed today "
+                    f"(cap {st['push_cap_per_day']}/day), "
+                    f"{st['archived']} archived")
+                lines.append(
+                    f"interest: {st['interest']}"
+                    + (" (quiet hours — pushes held)"
+                       if st.get("quiet_now") else ""))
+                lines.append(
+                    "beats: " + ", ".join(st["beats"])
+                    + (f" | pins: {', '.join(st['pins'])}"
+                       if st["pins"] else ""))
+            except Exception:  # noqa: BLE001 - status extras are best-effort
+                pass
             return "\n".join(lines)
+        if verb == "poll":
+            # No notifier on this surface (see the run path's note):
+            # a public command must not push to owner channels.  The
+            # poll still fetches/stores/scores; high-tier stories are
+            # reported held, and the scheduled news-poll job (which
+            # owns a notifier) is what pushes them.
+            report = agent.poll()
+            return (f"news poll — {report['polled']} new stories stored "
+                    f"({report['held']} undelivered, "
+                    f"{report['archived']} archived low-interest); "
+                    f"interest: {report['interest']}; "
+                    f"sources: {len(report.get('sources_ok') or [])}/"
+                    f"{report.get('sources_tried', 0)} feeds answered")
+        if verb == "brief":
+            report = agent.brief()
+            if not report["ok"]:
+                return "nothing undelivered — the digest is empty."
+            return (f"news digest — {report['items']} items\n\n"
+                    f"{report['digest']}")
+        if verb in ("pin", "unpin"):
+            topic = tail.split(None, 1)[1].strip() if len(parts) > 1 else ""
+            if not topic:
+                return f"usage: /news {verb} <topic>"
+            profile = (agent.pin(topic) if verb == "pin"
+                       else agent.unpin(topic))
+            pins = profile["pins"]
+            return (f"interest pins: {', '.join(pins) if pins else '(none)'}")
+        if verb == "interest":
+            profile = agent.interest_profile()
+            return ("interest profile\nbeats: " + profile["beats_text"]
+                    + "\npins: "
+                    + (", ".join(profile["pins"]) or "(none)"))
         if verb == "run" or verb == "briefing":
             cap = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else None
             report = agent.run(cap)
@@ -87,12 +138,12 @@ class RuntimeLiveMixin:
             # (its _filter_unseen only knows slot-marked keys).
             try:
                 from ..morning_pulse import _mark_seen
-                delivered = agent.recent(report["items"])
-                _mark_seen(
-                    self.context,
-                    [str(r.get("url") or r.get("title", ""))
-                     for r in delivered],
-                    "news")
+                urls = report.get("delivered_urls")
+                if urls is None:
+                    delivered = agent.recent(report["items"])
+                    urls = [str(r.get("url") or r.get("title", ""))
+                            for r in delivered]
+                _mark_seen(self.context, [str(u) for u in urls], "news")
             except Exception:  # noqa: BLE001 - seen-marking is best-effort
                 pass
             tried = report.get("sources_tried", 0)
@@ -105,7 +156,8 @@ class RuntimeLiveMixin:
                           f"run: {', '.join(stood)})" if stood else "")
             # FULL digest — no [:3000] cut; the gateway chunks it losslessly.
             return (f"news digest — {report['items']} new items (of {report['fresh']} fresh)\n{src_line}{stood_line}\n\n{report['digest']}")
-        return "usage: /news [run [n]|briefing|status]"
+        return ("usage: /news [run [n]|briefing|poll|brief|status|"
+                "interest|pin <topic>|unpin <topic>]")
 
     # ── pulse / briefings ──────────────────────────────────────────────
     def _control_pulse(self, tail: str) -> str:
