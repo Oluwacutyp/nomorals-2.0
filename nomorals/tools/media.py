@@ -527,6 +527,33 @@ def register(registry: Any) -> None:
         return probe(url)
 
     @registry.register(
+        "download_sources",
+        description=(
+            "Download source registry (the one registry behind every "
+            "download): action=status (seed vs grown sources, health, "
+            "outcome counts, candidates pending/shed) | health (run "
+            "the source health loop: re-verify sources + candidates, "
+            "promote verified candidates, shed dead ones)."
+        ),
+        capability=Capability.NET_OUT,
+    )
+    def download_sources(*, action: str = "status") -> dict[str, Any]:
+        # Closes over ``registry.context`` (the scheduler-bound tool
+        # convention): the registry it reports on is the downloader's
+        # own context-bound instance, so the scheduled health loop and
+        # the status surface always see the same learned state the
+        # download path writes.
+        from ..media.downloader import MediaDownloader
+
+        reg = MediaDownloader(context).source_registry()
+        act = (action or "status").strip().lower()
+        if act == "health":
+            return reg.verify_health()
+        if act == "status":
+            return reg.status()
+        return {"error": f"unknown action {act!r} — status|health"}
+
+    @registry.register(
         "media_capability",
         description="Report which media backends are available in this environment.",
         capability=Capability.FS_READ,

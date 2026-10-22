@@ -2021,6 +2021,16 @@ class PartnerRuntime(
                     ensure_news_jobs(self._scheduler)
                 except Exception as exc:  # noqa: BLE001 - optional
                     _log.warning("news jobs not registered: %s", exc)
+                # Download sources: the registry health loop (every
+                # 6h — re-verify sources + discovery candidates,
+                # promote the verified, shed the dead; pass #86).
+                try:
+                    from ...media.source_jobs import (
+                        ensure_source_health_jobs)
+                    ensure_source_health_jobs(self._scheduler)
+                except Exception as exc:  # noqa: BLE001 - optional
+                    _log.warning("download source health job not "
+                                 "registered: %s", exc)
                 # Autonomous nervous system (nomorals/autonomy): the organs
                 # work without commands. Idle monitor watches for quiet
                 # periods; presence heartbeat notices/prepares every 30m.

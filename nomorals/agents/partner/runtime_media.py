@@ -951,11 +951,15 @@ class RuntimeMediaMixin:
         if not tail:
             return ("usage: /download <url> [audio]\n"
                     "paste any media URL — YouTube, TikTok, Instagram, X, "
-                    "SoundCloud, direct mp3/mp4 links, 1000+ sites via yt-dlp.")
+                    "SoundCloud, direct mp3/mp4 links, 1000+ sites via yt-dlp.\n"
+                    "/download status — the source registry's growth "
+                    "state (seeds, grown sources, health, candidates).")
         words = tail.split()
         if words and words[0].lower() == "cancel":
             return self._cancel_download_job(
                 words[1] if len(words) > 1 else "", chat_key)
+        if words and words[0].lower() == "status":
+            return self._download_sources_status()
         audio_only = any(w.lower() in ("audio", "--audio", "-a") for w in words)
         url = " ".join(w for w in words
                        if w.lower() not in ("audio", "--audio", "-a")).strip()
@@ -975,6 +979,18 @@ class RuntimeMediaMixin:
                 title=url[:80])
         text, _sent = self._download_produce(url, audio_only, None)
         return text
+
+    def _download_sources_status(self) -> str:
+        """/download status — the source registry's growth state
+        (pass #86): seed vs grown sources, health, outcome counts,
+        candidates pending/shed.  Renders the SAME registry the
+        download path credits (the downloader's context-bound
+        instance), so what this shows is what downloads learned."""
+        from ...media.downloader import MediaDownloader
+        from ...media.source_registry import render_status_text
+
+        reg = MediaDownloader(self.context).source_registry()
+        return render_status_text(reg.status())
 
     # ── background downloads (owner decision 2026-10-19) ────────────────
     #

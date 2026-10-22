@@ -494,7 +494,8 @@ class MediaDownloader:
                  extractors: Any | None = None,
                  kit_downloader: Any | None = None,
                  ledger: Any | None = None,
-                 cookie_store: Any | None = None) -> None:
+                 cookie_store: Any | None = None,
+                 source_registry: Any | None = None) -> None:
         self.context = context
         self.profile = profile or detect_profile()
         self._connector_factory = connector_factory
@@ -518,15 +519,80 @@ class MediaDownloader:
         # carries a database — None only where there is no vault
         # to back it, and there the gate only detects, as before.
         self._cookie_store = cookie_store
+        # Source registry (Pass #86): the ONE registry (#76) this
+        # downloader credits outcomes to, intakes discovery candidates
+        # into, and derives its extractor view from.  Defaults to the
+        # shared DEFAULT_REGISTRY; tests may inject their own.
+        self._source_registry_injected = source_registry
+        self._source_registry_cache: Any = None
 
     # ── download-kit accessors (Pass #76) ─────────────────────────────
 
+    def source_registry(self) -> Any:
+        """The ONE source registry (Pass #86), bound to the context's
+        KV store so its learned state (outcomes, health, grown
+        sources, candidates) persists across restarts — the same
+        ``KVStore(db)`` pattern ``core.trust.SourceTrust`` uses.
+        Binding is lazy and best-effort: a context without a database
+        keeps the registry memory-only, exactly as before."""
+        if self._source_registry_cache is not None:
+            return self._source_registry_cache
+        if self._source_registry_injected is not None:
+            self._source_registry_cache = self._source_registry_injected
+            return self._source_registry_cache
+        from .source_registry import DEFAULT_REGISTRY
+        reg = DEFAULT_REGISTRY
+        try:
+            db = getattr(self.context, "db", None) \
+                if self.context is not None else None
+            if db is not None:
+                from ..storage.kv import KVStore
+                reg.bind_store(KVStore(db))
+        except Exception:  # noqa: BLE001 - persistence is an
+            # enhancement; its absence never sinks a download
+            pass
+        self._source_registry_cache = reg
+        return reg
+
     def _extractor_registry(self) -> Any:
-        """The extractor view over the ONE source registry."""
-        if self._extractors is None:
-            from .download_kit import DEFAULT_EXTRACTORS
-            self._extractors = DEFAULT_EXTRACTORS
-        return self._extractors
+        """The extractor view over the ONE source registry.  Derived
+        fresh from the registry (the PlayService pattern) so sources
+        promoted by the health loop are visible without a restart."""
+        if self._extractors is not None:
+            return self._extractors
+        from .download_kit import ExtractorRegistry
+        return ExtractorRegistry(registry=self.source_registry())
+
+    # ── source growth: outcomes + discovery (Pass #86) ────────────────
+
+    def _record_download_outcome(self, report: DownloadReport, *,
+                                 ok: bool, error_class: str = "",
+                                 latency_s: float = 0.0) -> None:
+        """Credit/blame the source that served this attempt, through
+        the registry's own outcome API — a source that keeps failing
+        degrades in the registry's ranking, a source that serves is
+        credited.  Bookkeeping is best-effort: it never turns a real
+        download outcome into a different one."""
+        try:
+            reg = self.source_registry()
+            url = report.resolved_url or report.url
+            desc = reg.for_url(url)
+            if desc is not None:
+                reg.record_outcome(desc, ok, latency_s=latency_s,
+                                   error_class=error_class)
+        except Exception:  # noqa: BLE001 - bookkeeping never breaks downloads
+            pass
+
+    def _intake_candidate(self, url: str, *, via: str) -> None:
+        """Discovery intake: a host encountered on the real path that
+        the registry does not know is noted as an UNTRUSTED candidate
+        (it serves nothing until the health loop verifies it)."""
+        try:
+            reg = self.source_registry()
+            if reg.for_url(url) is None:
+                reg.note_candidate(url, via=via)
+        except Exception:  # noqa: BLE001 - intake never breaks downloads
+            pass
 
     def _descriptor_for(self, url: str) -> Any | None:
         """Best extractor descriptor for *url*; None when the
@@ -575,6 +641,8 @@ class MediaDownloader:
         """Record a landed download in the kit's integrity ledger,
         then finish.  Bookkeeping is best-effort — a ledger failure
         never turns a real download into a reported failure."""
+        self._record_download_outcome(
+            report, ok=True, latency_s=time.perf_counter() - started)
         try:
             if report.ok and report.path:
                 digest = _sha256_of(Path(report.path))
@@ -648,6 +716,15 @@ class MediaDownloader:
                     stage="resolve", url=url,
                     note="short link could not be expanded; continuing "
                          "with the original URL"))
+        # Discovery intake (Pass #86): hosts the registry does not
+        # know — the download URL's own host, and a short link's
+        # redirect target — are noted as untrusted candidates.  A
+        # candidate changes nothing about THIS download (the owner's
+        # explicit request flows through the generic fallbacks as
+        # always); it only enters the registry's growth pipeline.
+        self._intake_candidate(work_url, via="download-url")
+        if report.resolved_url:
+            self._intake_candidate(report.resolved_url, via="redirect")
         # Descriptor truth (Pass #76): the matched source descriptor —
         # a view over the ONE source registry — speaks before any
         # fetch.  A source that declares itself not downloadable
@@ -703,6 +780,14 @@ class MediaDownloader:
                 stage="chain", url=url, error_class="site_error",
                 error=f"orchestrator error: {_err_text(exc, 380)}"))
         self._finish_failure(report)
+        # The chain exhausted: the attempt's failure (with its error
+        # class) is recorded against the source that was asked to
+        # serve it.  The early returns above (disk preflight, a
+        # registry-marked not-downloadable source) deliberately do
+        # NOT record — neither is the source's failure.
+        self._record_download_outcome(
+            report, ok=False, error_class=report.failure.value,
+            latency_s=time.perf_counter() - started)
         return self._finish(report, started)
 
     # ── stage 1: direct ───────────────────────────────────────────────
@@ -1195,6 +1280,13 @@ class MediaDownloader:
                         0, FailureKind.OK, "", note="page opened")
         self._cloudflare_gate(report, session, page_url)
         candidates = self._media_candidates(session)
+        # Discovery intake (Pass #86): media hosts embedded in the
+        # page (alternate CDNs / mirrors the extractor mined) that
+        # the registry does not know become untrusted candidates.
+        for cand in candidates:
+            self._intake_candidate(
+                cand[len("click:"):] if cand.startswith("click:") else cand,
+                via="browser-page")
         report.stages.append(StageLog(
             stage="browser", url=page_url,
             note=f"page opened; {len(candidates)} media candidate(s) "

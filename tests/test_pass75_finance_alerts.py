@@ -321,6 +321,7 @@ def _collect_ensure_bindings(ctx, sched):
     from nomorals.autonomy.presence import ensure_heartbeat_job
     from nomorals.finance.jobs import ensure_finance_jobs
     from nomorals.immune.wiring import ensure_immune_sampler_job
+    from nomorals.media.source_jobs import ensure_source_health_jobs
     from nomorals.memory.cadence import ensure_consolidation_job
     from nomorals.workspace.rooms import ensure_rooms_tick_job
 
@@ -343,6 +344,7 @@ def _collect_ensure_bindings(ctx, sched):
         ("improvement schedule", lambda: ensure_improvement_schedule(ctx)),
         ("finance jobs", lambda: ensure_finance_jobs(sched)),
         ("news jobs", lambda: ensure_news_jobs(sched)),
+        ("download source health", lambda: ensure_source_health_jobs(sched)),
     ]
     errors = {}
     for label, fn in calls:
