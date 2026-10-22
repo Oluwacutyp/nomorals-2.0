@@ -2687,7 +2687,7 @@ def register(registry: Any) -> None:
                         "note": "already scheduled"}
             created = scheduler.add(
                 job_name, f"every {every}m", "tool",
-                {"tool": "proxy_refresh", "limit": "150"})
+                {"tool": "proxy_refresh", "args": {"limit": "150"}})
             return {"scheduled": True, "id": created["id"],
                     "every_minutes": every}
         if existing:

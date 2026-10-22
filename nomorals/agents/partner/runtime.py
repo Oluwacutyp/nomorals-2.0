@@ -2007,21 +2007,8 @@ class PartnerRuntime(
                 # Notifier) + weekly money digest (Sundays 09:00 local).
                 # Idempotent by name; no-ops when no alerts/goals exist.
                 try:
-                    have = [j for j in self._scheduler.list_jobs()
-                            if j.get("name") == "finance alerts"]
-                    if not have:
-                        self._scheduler.add(
-                            "finance alerts", "every 15m", "tool",
-                            {"tool": "finance_alert",
-                             "args": {"action": "check", "deliver": True}},
-                        )
-                    have = [j for j in self._scheduler.list_jobs()
-                            if j.get("name") == "finance digest"]
-                    if not have:
-                        self._scheduler.add(
-                            "finance digest", "cron 0 9 * * SUN", "tool",
-                            {"tool": "finance_digest", "args": {}},
-                        )
+                    from ...finance.jobs import ensure_finance_jobs
+                    ensure_finance_jobs(self._scheduler)
                 except Exception as exc:  # noqa: BLE001 - optional
                     _log.warning("finance jobs not registered: %s", exc)
                 # Autonomous nervous system (nomorals/autonomy): the organs

@@ -8,7 +8,9 @@ import agents L5).
 
 from __future__ import annotations
 
+import functools
 import importlib
+import inspect
 from typing import Any
 
 __all__ = ["register"]
@@ -20,7 +22,77 @@ def _expert_class() -> Any:
     return mod.FinancialExpert
 
 
+def _wants_context(fn: Any) -> bool:
+    """True when ``fn`` declares a required leading ``context`` param.
+
+    The finance tool family (this module's market tools and the whole
+    ``nomorals.finance.tools`` package) is written context-first:
+    ``def finance_alert(context, action=..., ...)``. But registry
+    dispatch (``ToolRegistry._call_inner``) invokes ``spec.fn(**kwargs)``
+    and NEVER supplies a context argument — the registry's documented
+    convention (see ``tools/autonomy.py``) is that a dispatched tool
+    closes over ``registry.context`` instead of receiving it. A
+    context-first function registered raw therefore dies on every call
+    with ``TypeError: ... missing 1 required positional argument:
+    'context'`` — which is exactly how the scheduled "finance alerts"
+    and "finance digest" jobs failed on every run (Pass #75).
+    """
+    try:
+        params = list(inspect.signature(fn).parameters.values())
+    except (TypeError, ValueError):
+        return False
+    positional = [p for p in params if p.kind in (
+        inspect.Parameter.POSITIONAL_ONLY,
+        inspect.Parameter.POSITIONAL_OR_KEYWORD)]
+    return bool(positional and positional[0].name == "context"
+                and positional[0].default is inspect.Parameter.empty)
+
+
+class _ContextBoundRegistry:
+    """Registry view binding the registry's context into context-first
+    tool functions at registration time.
+
+    Wraps each registered function that declares a required leading
+    ``context`` parameter in ``functools.partial(fn, registry.context)``
+    — the registration-time equivalent of the closure-over-context
+    pattern the scheduler bridge tools (``pulse``, ``briefing``, the
+    ``__*_`` tools) are written with. Declared parameter metadata is
+    untouched: the family's ``parameters=`` dicts never listed
+    ``context`` (it is dispatcher-supplied), so a bound function's
+    effective signature now matches its declared schema. Functions
+    without a leading context parameter register unchanged.
+    """
+
+    def __init__(self, inner: Any) -> None:
+        self._inner = inner
+        self.context = getattr(inner, "context", None)
+
+    def _bind(self, fn: Any) -> Any:
+        if fn is not None and _wants_context(fn):
+            return functools.partial(fn, self.context)
+        return fn
+
+    def register(self, name: str, fn: Any = None, **meta: Any) -> Any:
+        if fn is not None:
+            return self._inner.register(name, self._bind(fn), **meta)
+        decorator = self._inner.register(name, **meta)
+
+        def _registering(func: Any) -> Any:
+            return decorator(self._bind(func))
+
+        return _registering
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+
 def register(registry: Any) -> None:
+    # Bind the app context into the context-first finance family (this
+    # module's tools + the nomorals.finance.tools package below) — see
+    # _ContextBoundRegistry. Without this, every registry dispatch of a
+    # finance tool raised TypeError and the scheduled finance jobs
+    # failed on every run.
+    registry = _ContextBoundRegistry(registry)
     @registry.register(
         "finance_price",
         description=(
