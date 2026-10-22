@@ -168,6 +168,19 @@ def detect_challenge_signal(html: str = "", url: str = "", *,
         return ChallengeSignal(kind=kind, vendor=info.vendor,
                                detection="slider-wall", url=url,
                                evidence=f"slider widget: {info.evidence}")
+    # Question captchas next — invisible to both detectors above
+    # and below (no wall marker, no image, no token widget).
+    try:
+        from .question_solver import (
+            QUESTION_KIND, detect_question_challenge)
+        qinfo = detect_question_challenge(html or "")
+    except Exception:  # noqa: BLE001 - detection never blocks
+        qinfo = None
+    if qinfo is not None:
+        return ChallengeSignal(
+            kind=QUESTION_KIND, vendor="question",
+            detection="question-wall", url=url,
+            evidence=f"question captcha: {qinfo['question'][:60]}")
     try:
         from ..tools.captcha import detect as _captcha_detect
         found = _captcha_detect(html or "", url or "")
@@ -396,13 +409,13 @@ class ChallengeSolver:
 
         Sources, in order: an injected ``local_solve`` callable, an
         injected ``slider_solver``, or the kind registry
-        (:mod:`nomorals.browser.kind_solvers`) — importing the slider
-        solver module is what registers slider/geetest there.
+        (:mod:`nomorals.browser.kind_solvers`) — importing the
+        estate aggregator is what registers every kind there.
         """
         if self._local_solve is not None or self._slider_solver is not None:
             return True
         try:
-            from . import slider_solver as _slider  # noqa: F401 - registers
+            from . import captcha_estate as _estate  # noqa: F401 - registers
             from .kind_solvers import kind_solver_for
             return kind_solver_for(signal.kind) is not None
         except Exception:  # noqa: BLE001 - a broken solver is not a wall
@@ -424,7 +437,7 @@ class ChallengeSolver:
             out = self._slider_solver.solve_tab(tab)
             return done(bool(getattr(out, "ok", False)),
                         str(getattr(out, "detail", "") or ""))
-        from . import slider_solver as _slider  # noqa: F401 - registers
+        from . import captcha_estate as _estate  # noqa: F401 - registers
         from .kind_solvers import kind_solver_for
         fn = kind_solver_for(signal.kind)
         if fn is None:

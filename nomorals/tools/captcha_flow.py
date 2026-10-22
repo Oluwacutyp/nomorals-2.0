@@ -340,6 +340,38 @@ class OriginCostCeiling:
         return {"allowed": False, "needs_owner_ping": True, **payload}
 
 
+# ── default OCR stage (the estate registers its tesseract core) ─────────────
+
+_DEFAULT_OCR_FN: Any = None
+
+
+def register_default_ocr_fn(fn: Any) -> None:
+    """Install (or clear, with ``None``) the flow's default OCR fn.
+
+    The browser estate registers its tesseract core here at import
+    (``browser/ocr_solver``), so non-browser flows get a real OCR
+    stage without ``tools`` importing ``browser`` at module load.
+    An instance ``ocr_fn`` still wins over the default.
+    """
+    global _DEFAULT_OCR_FN
+    _DEFAULT_OCR_FN = fn
+
+
+def _default_ocr_fn() -> Any:
+    """The registered default OCR fn, lazily resolving the estate's.
+
+    Returns ``None`` when no OCR core is importable — the stage
+    then records its absence instead of pretending to read.
+    """
+    if _DEFAULT_OCR_FN is not None:
+        return _DEFAULT_OCR_FN
+    try:
+        from ..browser.ocr_solver import flow_ocr_fn
+        return flow_ocr_fn
+    except Exception:  # noqa: BLE001 - no estate, no default
+        return None
+
+
 # ── audio captchas: local ASR first ──────────────────────────────────────────
 
 def _local_asr(audio: Any, language: str = "en") -> str:
@@ -468,7 +500,7 @@ class CaptchaFlow:
         fn = self.slider_fn
         if fn is None:
             try:
-                from ..browser import slider_solver as _ss  # noqa: F401
+                from ..browser import captcha_estate as _estate  # noqa: F401
                 from ..browser.kind_solvers import kind_solver_for
             except Exception:  # noqa: BLE001 - spine import is additive
                 return None
@@ -565,6 +597,16 @@ class CaptchaFlow:
                         kind = "slider"
                 except Exception:  # noqa: BLE001 - detection is additive
                     pass
+                # question captchas are equally invisible to it —
+                # the browser layer's question detection names them.
+                if kind in ("", "unknown"):
+                    try:
+                        from ..browser.question_solver import (
+                            QUESTION_KIND, detect_question_challenge)
+                        if detect_question_challenge(html) is not None:
+                            kind = QUESTION_KIND
+                    except Exception:  # noqa: BLE001 - detection additive
+                        pass
             if kind in ("", "unknown"):
                 self._record(kind, site, "passive", ok=True)
                 return {"ok": True, "stage": "passive",
@@ -584,11 +626,16 @@ class CaptchaFlow:
         if local_out is not None:
             return local_out
 
-        # stage 2 — OCR / image model (image captchas only)
-        if kind == "image_captcha" and self.ocr_fn is not None:
+        # stage 2 — OCR / image model (image captchas only). The
+        # default OCR fn is the estate's tesseract core (registered
+        # at import, lazily resolved): with no tesseract on this
+        # machine the stage runs, reads nothing, and the flow
+        # continues honestly instead of skipping silently.
+        ocr_fn = self.ocr_fn or _default_ocr_fn()
+        if kind == "image_captcha" and ocr_fn is not None:
             tried.append("ocr")
             try:
-                res = self.ocr_fn(ch) or {}
+                res = ocr_fn(ch) or {}
             except Exception as exc:  # noqa: BLE001 - next stage
                 res = {"ok": False, "error": str(exc)}
             text = str(res.get("text") or "").strip()

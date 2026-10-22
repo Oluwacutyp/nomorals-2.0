@@ -1839,6 +1839,14 @@ def register(registry: Any) -> None:
     except Exception:  # noqa: BLE001
         _log.debug("local slider backend registration skipped",
                    exc_info=True)
+    # Pass #79: importing the estate aggregator registers the rest
+    # of the local kind solvers + backends (ocr / audio / click /
+    # question / cloudflare), so every status surface in this
+    # process shows the complete kind map. Additive, like above.
+    try:
+        from ..browser import captcha_estate as _estate  # noqa: F401
+    except Exception:  # noqa: BLE001
+        _log.debug("captcha estate registration skipped", exc_info=True)
     context = registry.context
     settings = getattr(context, "settings", None) if context is not None else None
     tools_settings = getattr(settings, "tools", None) if settings else None

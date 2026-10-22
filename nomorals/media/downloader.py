@@ -493,7 +493,8 @@ class MediaDownloader:
                  connector_factory: Any | None = None,
                  extractors: Any | None = None,
                  kit_downloader: Any | None = None,
-                 ledger: Any | None = None) -> None:
+                 ledger: Any | None = None,
+                 cookie_store: Any | None = None) -> None:
         self.context = context
         self.profile = profile or detect_profile()
         self._connector_factory = connector_factory
@@ -510,6 +511,9 @@ class MediaDownloader:
         self._extractors = extractors        # → download_kit.DEFAULT_EXTRACTORS
         self._kit_downloader = kit_downloader  # → download_kit.ResumeDownloader
         self._ledger = ledger                # → download_kit.IntegrityLedger
+        # Cloudflare gate vault (Pass #79): the kit's duck-typed
+        # cookie store (get/set); None = the gate only detects.
+        self._cookie_store = cookie_store
 
     # ── download-kit accessors (Pass #76) ─────────────────────────────
 
@@ -1066,6 +1070,63 @@ class MediaDownloader:
                 cands.append(f"click:{href}")
         return cands[:self.browser_candidates]
 
+    def _cloudflare_gate(self, report: DownloadReport, session: Any,
+                         page_url: str) -> None:
+        """Pass #79: the download kit's Cloudflare state machine,
+        wired at last (media/cloudflare_gate.py is the decision
+        seam). An opened page that is a CF interstitial feeds the
+        machine; a stored vault clearance is injected into the
+        session's cookie jar and the page re-opened once; an ask or
+        an expiry lands on the report (stage note + hint) so the
+        next rung sees the kit's own words. Never raises — the gate
+        advises the browser stage, it never sinks it.
+        """
+        try:
+            body = str((session.html() or {}).get("html") or "")
+            if not body:
+                return
+            from .cloudflare_gate import CloudflareGate
+            gate = CloudflareGate(self._cookie_store)
+            if not gate.inspect(body):
+                return
+            decision = gate.cookie_decision(page_url)
+            note = f"cloudflare interstitial: {decision['message']}"
+            cleared = False
+            if decision["action"] == "inject":
+                import http.cookiejar as _cj
+                import urllib.parse as _up
+                host = _up.urlparse(page_url).hostname or ""
+                jar = getattr(session, "cookie_jar", None)
+                value = str(decision["cookie"]).split("=", 1)[-1]
+                if jar is not None and host:
+                    jar.set_cookie(_cj.Cookie(
+                        0, "cf_clearance", value, None, False,
+                        host, True, False, "/", True, False, None,
+                        True, None, None, {}, False))
+                    reopened = session.open(page_url)
+                    cleared = bool(reopened.get("ok"))
+                    if cleared:
+                        body2 = str((session.html() or {}).get(
+                            "html") or "")
+                        cleared = not gate.inspect(body2)
+                    gate.resolve(cleared)
+                    note += ("; vault clearance injected, page "
+                             "re-opened — wall cleared"
+                             if cleared else
+                             "; vault clearance injected but the "
+                             "wall is still up (gate state "
+                             f"{gate.state})")
+                else:
+                    note += "; the session has no cookie jar to " \
+                            "inject into"
+            report.stages.append(StageLog(stage="browser",
+                                          url=page_url, note=note))
+            if not cleared:
+                report.hint = ((report.hint + " ") if report.hint
+                               else "") + note
+        except Exception as exc:  # noqa: BLE001 - gate never sinks
+            _log.info("cloudflare gate failed soft: %s", exc)
+
     def _stage_browser(self, report: DownloadReport, url: str,
                        target_dir: Path, audio_only: bool, page_url: str,
                        budget: dict[str, float]) -> bool:
@@ -1107,6 +1168,7 @@ class MediaDownloader:
             return False
         self._log_stage("browser", page_url, "", time.perf_counter() - t0,
                         0, FailureKind.OK, "", note="page opened")
+        self._cloudflare_gate(report, session, page_url)
         candidates = self._media_candidates(session)
         report.stages.append(StageLog(
             stage="browser", url=page_url,

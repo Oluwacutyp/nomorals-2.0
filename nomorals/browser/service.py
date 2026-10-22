@@ -2546,6 +2546,114 @@ class RenderedTab:
             raise BrowserError(
                 f"rendered mouse_drag_path failed: {exc}") from exc
 
+    # -- captcha-estate primitives (Pass #79) ------------------------------
+    # The session side of the per-kind solvers in browser/{ocr,audio,
+    # click,question,cloudflare}_solver.py: a CSS-pixel click, a
+    # session-authenticated subresource fetch, and frame reads. The
+    # frame story, honestly: Playwright reaches every frame on the
+    # page (the automation layer the owner controls), so frames are
+    # READ here — but in-page JS walkers (browser/forms.py) still
+    # skip cross-origin frames, and nothing here pretends otherwise.
+
+    def click_at_px(self, x: float, y: float) -> None:
+        """Click at viewport CSS pixels (the click solver's hand).
+
+        Unlike :meth:`click_at` (normalized 0..1 takeover coords),
+        this takes the raw CSS-pixel point the solvers compute from
+        element boxes. Mouse events land in whatever frame occupies
+        that point — no frame switching needed for clicks.
+        """
+        page = self._require_loaded()
+        try:
+            page.mouse.click(float(x), float(y))
+        except Exception as exc:  # noqa: BLE001 - input errors are opaque
+            raise BrowserError(f"rendered click_at_px failed: {exc}") from exc
+
+    def session_fetch_bytes(self, url: str) -> bytes:
+        """Fetch ``url`` through the browser CONTEXT's request stack.
+
+        Cookies from the live session ride along and there is no
+        CORS gate (this is the context's own request context, not an
+        in-page fetch) — the way an audio-captcha payload or any
+        session-bound subresource is pulled down. Raises
+        :class:`BrowserError` on transport failure or HTTP >= 400.
+        """
+        self._require_loaded()
+        url = (url or "").strip()
+        if not url:
+            raise BrowserError("session_fetch_bytes needs a URL")
+        request = getattr(self._context, "request", None)
+        if request is None:
+            raise BrowserError(
+                "this browser context cannot fetch subresources")
+        try:
+            resp = request.get(url)
+        except Exception as exc:  # noqa: BLE001 - transport errors opaque
+            raise BrowserError(
+                f"session fetch of {url} failed: {exc}") from exc
+        status = int(getattr(resp, "status", 0) or 0)
+        if status >= 400:
+            raise BrowserError(
+                f"session fetch of {url} returned HTTP {status}")
+        try:
+            body = resp.body()
+        except Exception as exc:  # noqa: BLE001
+            raise BrowserError(
+                f"session fetch of {url} produced no body: {exc}") from exc
+        if not body:
+            raise BrowserError(f"session fetch of {url} produced no body")
+        return bytes(body)
+
+    def frames_html(self) -> list[dict[str, str]]:
+        """Every frame's ``{"url", "html"}`` — main frame first.
+
+        Challenge widgets live in iframes (reCAPTCHA, hCaptcha) whose
+        DOM the main frame's ``html()`` never shows. A frame whose
+        content cannot be read is skipped, never faked.
+        """
+        page = self._require_loaded()
+        frames = getattr(page, "frames", None) or []
+        out: list[dict[str, str]] = []
+        for frame in frames:
+            try:
+                html = frame.content()
+            except Exception:  # noqa: BLE001 - unreadable frame skips
+                continue
+            out.append({"url": str(getattr(frame, "url", "") or ""),
+                        "html": str(html or "")})
+        return out
+
+    def frame_evaluate(self, url_substr: str, js: str,
+                       arg: Any = _MISSING) -> Any:
+        """Run ``js`` in the first frame whose URL contains ``url_substr``.
+
+        The per-frame sibling of :meth:`evaluate` — the seam the
+        audio/click solvers use to read a challenge frame's payload
+        URL, set its response input, or press its verify button.
+        Raises :class:`BrowserError` when no frame matches or the
+        driver cannot evaluate there.
+        """
+        page = self._require_loaded()
+        if not (js or "").strip():
+            raise BrowserError("frame_evaluate needs JavaScript source")
+        needle = (url_substr or "").strip()
+        frames = getattr(page, "frames", None) or []
+        for frame in frames:
+            if needle and needle not in str(getattr(frame, "url", "") or ""):
+                continue
+            evaluate = getattr(frame, "evaluate", None)
+            if evaluate is None:
+                raise BrowserError(
+                    "this page driver cannot evaluate in frames")
+            try:
+                if arg is _MISSING:
+                    return evaluate(js)
+                return evaluate(js, arg)
+            except Exception as exc:  # noqa: BLE001 - eval errors opaque
+                raise self._action_error("frame_evaluate", exc) from exc
+        raise BrowserError(
+            f"no frame URL contains {url_substr!r} on this page")
+
     def pdf(self, path: str | os.PathLike[str] | None = None
             ) -> dict[str, Any]:
         """Save the current page as a PDF (receipts, articles, invoices —
@@ -3099,6 +3207,34 @@ class RenderedTabTakeoverAdapter:
         if not callable(fn):
             raise BrowserError("this tab cannot perform mouse drags")
         fn(points)
+
+    # -- captcha-estate protocol (delegate; fail loudly when absent) --
+
+    def click_at_px(self, x: float, y: float) -> None:
+        fn = getattr(self._tab, "click_at_px", None)
+        if not callable(fn):
+            raise BrowserError("this tab cannot click at CSS pixels")
+        fn(x, y)
+
+    def session_fetch_bytes(self, url: str) -> bytes:
+        fn = getattr(self._tab, "session_fetch_bytes", None)
+        if not callable(fn):
+            raise BrowserError(
+                "this tab cannot fetch subresources through its session")
+        return bytes(fn(url))
+
+    def frames_html(self) -> list[dict[str, str]]:
+        fn = getattr(self._tab, "frames_html", None)
+        if not callable(fn):
+            raise BrowserError("this tab cannot read its frames")
+        return list(fn())
+
+    def frame_evaluate(self, url_substr: str, js: str,
+                       arg: Any = None) -> Any:
+        fn = getattr(self._tab, "frame_evaluate", None)
+        if not callable(fn):
+            raise BrowserError("this tab cannot evaluate in frames")
+        return fn(url_substr, js, arg)
 
 
 class BrowserService:

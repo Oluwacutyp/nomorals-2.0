@@ -43,11 +43,26 @@ def _cmd_captcha(args: argparse.Namespace, context: Any) -> int:
         except Exception as exc:  # noqa: BLE001 - status stays honest
             local = {"backend": "local_slider", "available": False,
                      "detail": f"local status unavailable: {exc}"}
+        # The full estate map (Pass #79): every kind → its real
+        # mechanism + availability probed now. Importing the estate
+        # also registers every local backend, so the backends list
+        # tells the whole truth.
+        kind_map: dict[str, Any] = {}
+        try:
+            from ...browser.captcha_estate import estate_status
+            kind_map = estate_status(settings).get("kinds", {})
+            for extra in ("local_ocr", "local_audio", "local_click",
+                          "local_brain", "local_cloudflare"):
+                if extra not in backends:
+                    backends.append(extra)
+        except Exception as exc:  # noqa: BLE001 - status stays honest
+            kind_map = {"error": f"estate status unavailable: {exc}"}
         return _out({
             "backends": backends,
             "service_available": svc.available(),
             "api_key_configured": svc.available(),
             "local_slider": local,
+            "kind_map": kind_map,
             "solver_enabled": _os2.environ.get("NM_CAPTCHA_SOLVER", "1") != "0",
             "rate_limit": _rl(settings).status(),
             "audit_log": _audit_path(settings),
