@@ -208,7 +208,7 @@ class SandboxSimulator:
             out = run_sandboxed(
                 command, cwd=workdir, timeout=timeout, network=network,
                 backend=self.backend, max_output=max_output,
-                limits=SandboxLimits(),
+                limits=SandboxLimits(cpu_seconds=int(timeout)),
             )
         except Exception as exc:  # noqa: BLE001 — report, don't crash
             out = {"exit_code": -1, "stdout": "", "stderr": str(exc),

@@ -346,7 +346,7 @@ def register(registry: Any) -> None:
 
         workdir = safe_path(context, ".")
         limits = SandboxLimits(
-            cpu_seconds=int(min(timeout, 900)),
+            cpu_seconds=int(timeout),
             address_space_mb=2048,
             file_size_mb=256,
         )
@@ -379,7 +379,7 @@ def register(registry: Any) -> None:
                 f"{sys.executable} {snippet.name}",
                 cwd=workdir,
                 timeout=timeout,
-                limits=SandboxLimits(cpu_seconds=int(min(timeout, 900))),
+                limits=SandboxLimits(cpu_seconds=int(timeout)),
             )
         finally:
             snippet.unlink(missing_ok=True)

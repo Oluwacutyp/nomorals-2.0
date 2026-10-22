@@ -388,7 +388,7 @@ def _run_python(code: str, timeout: float = 15.0) -> dict[str, Any]:
         return run_sandboxed(
             f"{_sys.executable} \"{target}\"",
             cwd=str(tmp), timeout=timeout, env=env,
-            limits=SandboxLimits(cpu_seconds=int(min(max(timeout, 5.0), 60.0))),
+            limits=SandboxLimits(cpu_seconds=int(max(timeout, 5.0))),
         )
     finally:
         try:
@@ -740,7 +740,7 @@ def _run_hidden_tests(workdir: Path, timeout_s: float) -> dict[str, Any]:
             f"{sys.executable} -m unittest discover -s tests -t .",
             cwd=str(workdir), timeout=timeout_s, env=env,
             limits=SandboxLimits(
-                cpu_seconds=int(min(max(timeout_s, 5.0), 120.0))),
+                cpu_seconds=int(max(timeout_s, 5.0))),
         )
     except Exception as exc:  # noqa: BLE001 — a launch failure is a failure
         return {"pass": False, "timed_out": False,

@@ -184,7 +184,7 @@ class CodeRunner:
         ``cassette_mode="replay"`` the run is L1-offline and recorded
         traffic is replayed through the egress client.
         """
-        from .tools.shell import run_sandboxed
+        from .tools.shell import SandboxLimits, run_sandboxed
 
         if not (code or "").strip() and not file:
             raise ToolError("run_code needs code or file=")
@@ -232,6 +232,7 @@ class CodeRunner:
         if stdin:
             command = f"{command} <<'NM_STDIN'\n{stdin}\nNM_STDIN"
 
+        limits = SandboxLimits(cpu_seconds=int(timeout))
         result = None
         if egress_token is not None:
             from .core.cassette import GenericCassetteStore
@@ -241,11 +242,13 @@ class CodeRunner:
                         if cassette_dir else None)
             result = run_sandboxed_l2(
                 command, cwd=work, timeout=timeout, stdin="",
+                limits=limits,
                 egress_token=egress_token, cassette=cassette,
                 cassette_mode=cassette_mode)
         else:
             result = run_sandboxed(
-                command, cwd=work, timeout=timeout, network=False, stdin="")
+                command, cwd=work, timeout=timeout, network=False, stdin="",
+                limits=limits)
         stdout = (result.get("stdout") or "")[:MAX_OUTPUT]
         stderr = (result.get("stderr") or "")[:MAX_OUTPUT]
         exit_code = int(result.get("exit_code", -1))
@@ -448,11 +451,12 @@ class CodeRunner:
         """
         import shlex
 
-        from .tools.shell import run_sandboxed
+        from .tools.shell import SandboxLimits, run_sandboxed
 
         result = run_sandboxed(
             shlex.join([str(part) for part in cmd]),
             cwd=cwd, timeout=timeout, network=False,
+            limits=SandboxLimits(cpu_seconds=int(timeout)),
             max_output=2_000_000)
         return {
             "exit_code": result.get("exit_code", -1),
