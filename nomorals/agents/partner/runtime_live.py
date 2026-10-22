@@ -52,7 +52,7 @@ class RuntimeLiveMixin:
     # ── news ─────────────────────────────────────────────────────────────────
     def _control_news(self, tail: str) -> str:
         from ..features import feature_enabled
-        from ..news import NewsAgent
+        from ..news import NewsAgent, publisher_of
 
         if not feature_enabled(self.context, "news"):
             return "news is off. /features news on"
@@ -72,7 +72,9 @@ class RuntimeLiveMixin:
                 return "no news stored yet — /news run to fetch the feeds."
             lines = ["recent news:"]
             for row in rows:
-                lines.append(f"  [{row['source']}] {row['title'][:70]}")
+                # credit the publisher when the row carries attribution
+                # (pass #83); legacy rows show their feed name as before
+                lines.append(f"  [{publisher_of(row)}] {row['title'][:70]}")
             return "\n".join(lines)
         if verb == "run" or verb == "briefing":
             cap = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else None

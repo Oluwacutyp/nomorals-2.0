@@ -610,7 +610,7 @@ class NewsProvider(_Provider):
     def collect(self, ctx: Any, since: float) -> BriefingSection | None:
         topics = briefing_topics(ctx)
         try:
-            from .news import NewsAgent
+            from .news import NewsAgent, publisher_of
             agent = NewsAgent(ctx)
             items = agent.recent(limit=40)
         except Exception:  # noqa: BLE001
@@ -621,10 +621,14 @@ class NewsProvider(_Provider):
                      if any(t in f"{i.get('title', '')} "
                                     f"{i.get('summary', '')}".lower()
                             for t in lowered)]
-        # anti-monopoly: max 3 per source
+        # anti-monopoly: max 3 per source — keyed on the PUBLISHER
+        # (pass #83): the same outlet arriving via two carrying feeds
+        # counts once, and distinct publishers sharing one aggregator
+        # feed no longer share a single slot.  Legacy rows without
+        # attribution key on their feed name, exactly as before.
         by_src: dict[str, list] = {}
         for i in items:
-            by_src.setdefault(i.get("source", "?"), []).append(i)
+            by_src.setdefault(publisher_of(i) or "?", []).append(i)
         picked = []
         for src, src_items in by_src.items():
             for i in src_items[:MAX_PER_SOURCE]:

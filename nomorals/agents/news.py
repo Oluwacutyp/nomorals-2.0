@@ -10,7 +10,12 @@
   user sees the breadth.
 * **Summarizer** — model-sourced when a live model is answering, extractive
   one-liners otherwise. Never invents a headline it didn't read.
-* **Digest** — top N items per source, delivered through the notifier.
+* **Digest** — top N items grouped by PUBLISHER when the item carries
+  one (``<source>`` attribution, pass #80/#83), by carrying feed
+  otherwise, delivered through the notifier.  Stored rows persist the
+  attribution (``news_items.publisher`` / ``publisher_url``) alongside
+  the feed name in ``source`` (provenance), so stored-path consumers
+  credit the same publisher the live digest did.
 
 Every feed URL was live-fetched and classified 2026-10-18 (see
 ``docs/source-verification-2026-10-18.md``): 9 dead feeds removed
@@ -44,7 +49,7 @@ from .search.engine import SearchEngine
 __all__ = ["DEFAULT_FEEDS", "DEFAULT_CATEGORIES", "FEED_CATEGORIES",
            "FEED_REGIONS", "NEWS_GLOBAL_REGIONS", "feeds_for",
            "news_covered_regions", "feed_health_key",
-           "NewsAgent", "parse_feed"]
+           "NewsAgent", "parse_feed", "publisher_of"]
 
 #: Sane keyless defaults when settings.news.feeds is empty.
 #: Categorized so callers can subscribe by interest (``feeds_for``);
@@ -388,6 +393,60 @@ def parse_feed(markup: str) -> list[dict[str, str]]:
     return items
 
 
+# ── stored attribution (pass #83) ─────────────────────────────────────
+#
+# ``news_items.source`` has always held the CARRYING FEED's display name
+# and still does — it is provenance ("carried by the Google News wires
+# feed"), and feed-health records key on it.  What it never held is the
+# PUBLISHER of an aggregator-carried item, which pass #80 taught
+# ``parse_feed`` to read from the item's ``<source>`` element.  These
+# two additive, nullable columns persist that attribution at ingest;
+# rows written before they existed read NULL and every consumer falls
+# back to the legacy feed-name behaviour, byte-identically.
+
+_ATTRIBUTION_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("publisher", "TEXT"),
+    ("publisher_url", "TEXT"),
+)
+
+
+def _ensure_attribution_columns(db: Any) -> None:
+    """Lazily add the attribution columns (pass #71's pattern).
+
+    Best-effort and idempotent: ``ALTER TABLE`` per column, swallowing
+    the duplicate-column error once the column exists.  A failure here
+    must never stop news — an un-migrated table simply stores rows the
+    legacy way and attribution resumes on the next construction.
+    """
+    if db is None:
+        return
+    for name, decl in _ATTRIBUTION_COLUMNS:
+        try:
+            db.execute(
+                f"ALTER TABLE news_items ADD COLUMN {name} {decl}")
+        except Exception as exc:  # noqa: BLE001
+            if "duplicate column" not in str(exc).lower():
+                # table absent (pre-migration db) or a transient lock:
+                # nothing more to do — storage fails open as before.
+                return
+
+
+def publisher_of(item: dict[str, Any]) -> str:
+    """The truthful display attribution for a news item or stored row.
+
+    Publisher when known — a live item's ``source_name`` (from the RSS
+    ``<source>`` element) or a stored row's ``publisher`` column — else
+    the carrying feed's name in ``source``.  Legacy rows (NULL
+    attribution) therefore resolve to exactly the label they always
+    rendered under.
+    """
+    for key in ("publisher", "source_name"):
+        val = str(item.get(key) or "").strip()
+        if val:
+            return val
+    return str(item.get("source") or "").strip()
+
+
 class NewsAgent:
     """Fetches feeds, dedupes, summarizes, and delivers a digest."""
 
@@ -395,6 +454,7 @@ class NewsAgent:
         self.context = context
         self.settings = getattr(context, "settings", None)
         self.db = getattr(context, "db", None)
+        _ensure_attribution_columns(self.db)
         self.notifier = notifier
         tools = getattr(self.settings, "tools", None)
         self._client = HttpClient(
@@ -571,21 +631,51 @@ class NewsAgent:
         top = fresh[:cap]
         summaries = self._model_summaries(top)
         if self.db is not None:
+            # Persist attribution alongside the carrying feed (pass
+            # #83): ``source`` stays the feed (provenance), ``publisher``
+            # / ``publisher_url`` carry the <source> attribution (NULL
+            # when the item has none).  If the columns are somehow
+            # unavailable (the lazy ensure failed), fall back to the
+            # legacy column list so storage keeps working exactly as
+            # it did before attribution existed.
+            stored = False
             try:
                 with self.db.transaction():
                     for it in top:
                         self.db.execute(
-                            "INSERT OR IGNORE INTO news_items (id, source, title, url, summary, published, created_at) "
-                            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                            (new_id(), it["source"], it["title"], it["url"],
+                            "INSERT OR IGNORE INTO news_items (id, source, publisher, publisher_url, title, url, summary, published, created_at) "
+                            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                            (new_id(), it["source"],
+                             (it.get("source_name") or "").strip() or None,
+                             (it.get("source_url") or "").strip() or None,
+                             it["title"], it["url"],
                              it.get("summary", "")[:400], float(it.get("source_ts") or 0), time.time()),
                         )
+                stored = True
             except Exception:  # noqa: BLE001
-                pass
+                stored = False
+            if not stored:
+                try:
+                    with self.db.transaction():
+                        for it in top:
+                            self.db.execute(
+                                "INSERT OR IGNORE INTO news_items (id, source, title, url, summary, published, created_at) "
+                                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                                (new_id(), it["source"], it["title"], it["url"],
+                                 it.get("summary", "")[:400], float(it.get("source_ts") or 0), time.time()),
+                            )
+                except Exception:  # noqa: BLE001
+                    pass
         lines: list[str] = []
+        # Group by PUBLISHER when the item carries attribution, else by
+        # carrying feed (pass #83): a Reuters story reads under
+        # "■ Reuters" whichever feed carried it.  No merge machinery —
+        # the item cap above stays authoritative, so the block count is
+        # bounded by the item count exactly as per-feed blocks were,
+        # and unattributed items still coalesce under their feed.
         by_source: dict[str, list[dict[str, str]]] = {}
         for it in top:
-            by_source.setdefault(it["source"], []).append(it)
+            by_source.setdefault(publisher_of(it), []).append(it)
         for source, items in by_source.items():
             lines.append(f"■ {source}")
             # every selected item is shown — the old [:4]-per-source slice
@@ -618,8 +708,22 @@ class NewsAgent:
         if self.db is None:
             return []
         try:
-            return self.db.query(
+            rows = self.db.query(
                 "SELECT * FROM news_items ORDER BY created_at DESC LIMIT ?", (limit,)
             )
         except Exception:  # noqa: BLE001
             return []
+        # Normalize stored rows to the live-item shape (pass #83): a
+        # row's persisted ``publisher`` / ``publisher_url`` surface as
+        # ``source_name`` / ``source_url``, so stored-path consumers
+        # see the same attribution fields a freshly parsed item has.
+        # Legacy rows (columns absent or NULL) get "" — the fallback
+        # every consumer already applies.
+        for row in rows or []:
+            if not isinstance(row, dict):
+                continue
+            if not row.get("source_name"):
+                row["source_name"] = row.get("publisher") or ""
+            if not row.get("source_url"):
+                row["source_url"] = row.get("publisher_url") or ""
+        return rows or []
