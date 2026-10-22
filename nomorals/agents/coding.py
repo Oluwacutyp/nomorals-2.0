@@ -471,6 +471,14 @@ class _SpendCapExceeded(Exception):
     edit has landed since; otherwise an honest cap failure)."""
 
 
+class _ScopeDenied(Exception):
+    """Pass #66: a governed tool call fell outside the run's scoped
+    registry (the role scope a bridge forwarded into the loop).
+    Raised by the scope gate BEFORE the call executes; _run_impl
+    settles it as an honest failure naming the denial — the call is
+    never re-routed to the full registry (no silent widening)."""
+
+
 def _blank_usage() -> dict[str, int]:
     """The usage counters shape: tokens as the provider reported
     them, ``calls`` = model calls made, ``usage_unreported`` = calls
@@ -567,6 +575,13 @@ class CodingResult:
     # unknown (0 in the totals), never estimated.  Empty when the
     # result did not come from a run (defensive default).
     usage: dict[str, Any] = field(default_factory=dict)
+    # Pass #66: tool calls the run's scoped registry refused, as
+    # {"tool", "reason"} dicts — the role scope a bridge forwarded
+    # into the loop (see CodingAgent's `tools` kwarg).  A refusal
+    # surfaces here and in the run's error; the call is never
+    # silently re-routed to the full registry.  Empty for unscoped
+    # runs and for scoped runs that stayed in scope.
+    scope_denials: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -586,6 +601,7 @@ class CodingResult:
             "final_gate": self.final_gate,
             "context_packs": self.context_packs,
             "usage": self.usage,
+            "scope_denials": self.scope_denials,
         }
 
 
@@ -710,10 +726,24 @@ class CodingAgent:
     """One coding session against the real tools and the active model."""
 
     def __init__(self, context: Any, *, root: str | None = None,
-                 pack_budget_chars: int | None = None) -> None:
+                 pack_budget_chars: int | None = None,
+                 tools: Any = None) -> None:
         self.context = context
         self.db = context.db
         self.router = context.router
+        # Pass #66: an optional SCOPED tool registry (a
+        # RoleEnforcingRegistry / RoleScopedRegistry a bridge was
+        # itself scoped with).  When provided it governs every
+        # governed surface of the loop — explore fs_read, edit
+        # application (edit_file / apply_patch), verify (run_tests),
+        # lint, and the accept command (shell_run): a call outside
+        # the scope is refused with a named scope error on the result
+        # (CodingResult.scope_denials), never silently widened to
+        # the context's full registry.  None (every direct caller:
+        # chat /code, nm code, projects) = unscoped, exactly the
+        # pre-#66 behavior.
+        self._scoped_tools = tools
+        self._scope_denials: list[dict[str, Any]] = []
         # Pass #64 (W6): char budget for one edit call's context pack
         # (tools.context_pack).  None takes the module default.
         if pack_budget_chars is None:
@@ -1056,6 +1086,79 @@ class CodingAgent:
         _log.info("failed mission rolled back %d file(s)", len(changed))
         return ""
 
+    # ── pass #66: the scope gate ─────────────────────────────────────
+
+    def _scope_denial_for(self, tool_name: str,
+                          call_kwargs: dict[str, Any]) -> str | None:
+        """Why the run's scoped registry forbids this tool call, or
+        None when the call is in scope (or the run is unscoped).
+
+        Enforcement mirrors the two scoped-registry flavors the
+        bridges forward, reusing their own rules — never a third
+        implementation: a RoleSpec-bound registry
+        (:class:`RoleEnforcingRegistry`) is checked with
+        :func:`check_spec_call` (the one enforcement rule for every
+        roles-layer path) and the denial is recorded through
+        :func:`record_tool_denial`, exactly as ``RoleAgent._call_tool``
+        does; an allowlist registry (:class:`RoleScopedRegistry`) is
+        probed through its own ``get`` (None = not allowlisted) and
+        the refusal is phrased in its own words.
+        """
+        scoped = self._scoped_tools
+        if scoped is None:
+            return None
+        spec = getattr(scoped, "spec", None)
+        if spec is not None:
+            from .role_specs import check_spec_call, record_tool_denial
+
+            capability = ""
+            inner = getattr(self.context, "tools", None)
+            inner_get = getattr(inner, "get", None)
+            if callable(inner_get):
+                tool_spec = inner_get(tool_name)
+                capability = getattr(tool_spec, "capability", "") or ""
+            denied = check_spec_call(spec, tool_name, call_kwargs,
+                                     capability)
+            if denied is None:
+                return None
+            record_tool_denial(self.context, spec.name, tool_name,
+                               denied.reason, str(denied))
+            return str(denied)
+        get = getattr(scoped, "get", None)
+        if callable(get):
+            if get(tool_name) is not None:
+                return None
+            inner = getattr(self.context, "tools", None)
+            inner_get = getattr(inner, "get", None)
+            tool_spec = inner_get(tool_name) if callable(inner_get) \
+                else None
+            if tool_spec is None:
+                return f"unknown tool {tool_name!r}"
+            role = (getattr(scoped, "_role", None)
+                    or getattr(scoped, "role", None) or "scoped")
+            return (f"role {role!r} may not call {tool_name!r}: "
+                    f"capability "
+                    f"{getattr(tool_spec, 'capability', '?')!r} is not "
+                    f"granted to this role")
+        names = getattr(scoped, "names", None)
+        if callable(names):
+            if tool_name in names():
+                return None
+            return (f"tool {tool_name!r} is not in the run's tool "
+                    f"scope")
+        return None
+
+    def _require_scope(self, tool_name: str, **call_kwargs: Any) -> None:
+        """Gate one governed tool call: record the denial on the run
+        and raise :class:`_ScopeDenied` when it falls outside the
+        run's scoped registry.  A no-op when unscoped — direct
+        callers keep byte-identical behavior."""
+        denial = self._scope_denial_for(tool_name, call_kwargs)
+        if denial is not None:
+            self._scope_denials.append(
+                {"tool": tool_name, "reason": denial})
+            raise _ScopeDenied(denial)
+
     def _explore_reads(
         self, plan: list[dict[str, Any]],
     ) -> dict[str, str | None]:
@@ -1068,10 +1171,15 @@ class CodingAgent:
         when no registry is available (minimal contexts) or when
         ``fs_read`` cannot resolve a path — e.g. the agent root sits
         outside the tool workspace, or the file exceeds ``fs_read``'s
-        byte cap.
+        byte cap.  Pass #66: when the run is scoped, the reads route
+        through the SCOPED registry, and a scope refusal is NOT one of
+        the fallback cases — falling back to a direct read would
+        silently widen the role's surface.  The denial is recorded on
+        the run and the file stays unread; _run_impl settles it.
         """
         rels = [spec["path"] for spec in plan]
-        tools = getattr(self.context, "tools", None)
+        tools = (self._scoped_tools if self._scoped_tools is not None
+                 else getattr(self.context, "tools", None))
         call_many = getattr(tools, "call_many", None)
         if call_many is not None:
             outcomes: Any = None
@@ -1084,6 +1192,8 @@ class CodingAgent:
             except Exception as exc:  # noqa: BLE001 — fall back to direct
                 _log.debug("parallel explore reads failed: %s", exc)
             if outcomes is not None:
+                from ..core.errors import CapabilityDenied, ToolDenied
+
                 texts: dict[str, str | None] = {}
                 for rel, outcome in zip(rels, outcomes):
                     content: str | None = None
@@ -1091,6 +1201,16 @@ class CodingAgent:
                         value = outcome.value or {}
                         content = value.get("content")
                     if content is None:
+                        if (self._scoped_tools is not None
+                                and not getattr(outcome, "ok", False)
+                                and isinstance(
+                                    getattr(outcome, "error", None),
+                                    (CapabilityDenied, ToolDenied))):
+                            self._scope_denials.append({
+                                "tool": "fs_read",
+                                "reason": str(outcome.error)})
+                            texts[rel] = None
+                            continue
                         p = self._resolve(rel)
                         content = (p.read_text(encoding="utf-8")
                                    if p.is_file() else None)
@@ -1313,7 +1433,7 @@ class CodingAgent:
         timeout: float = 60.0,
         seed_code: str = "",
         background_tests: bool = False,
-        test_cap_seconds: float = 900.0,
+        test_cap_seconds: float | None = None,
         plan_mode: Any = "auto",
         full_suite_gate: bool = False,
         max_tokens: int | None = None,
@@ -1334,12 +1454,20 @@ class CodingAgent:
         the cap noted; anything else fails naming the cap and the
         tokens spent, per-step status preserved.  The full loop
         contract is documented on :meth:`_run_impl`.
+
+        Pass #66: ``test_cap_seconds=None`` (the default) derives
+        the background-test cap from the run budget — the same
+        ``max(timeout * 5, 60)`` the foreground verify uses — so the
+        cap can never silently bind below the budget the caller set
+        (the ceiling doctrine); an explicitly passed value is a
+        named caller choice, honored verbatim.
         """
         if max_tokens is not None:
             max_tokens = int(max_tokens)
             if max_tokens < 0:
                 raise ValueError("max_tokens must be >= 0 or None")
         self._meter_begin(max_tokens)
+        self._scope_denials = []
         try:
             result = self._run_impl(
                 task, filename=filename, accept=accept,
@@ -1349,8 +1477,10 @@ class CodingAgent:
                 full_suite_gate=full_suite_gate, _plan=_plan)
         finally:
             snapshot = self._usage_snapshot()
+            denials = list(self._scope_denials)
             self._meter = None
         result.usage = snapshot
+        result.scope_denials = denials
         return result
 
     def _run_impl(
@@ -1363,7 +1493,7 @@ class CodingAgent:
         timeout: float = 60.0,
         seed_code: str = "",
         background_tests: bool = False,
-        test_cap_seconds: float = 900.0,
+        test_cap_seconds: float | None = None,
         plan_mode: Any = "auto",
         full_suite_gate: bool = False,
         _plan: list[dict[str, Any]] | None = None,
@@ -1383,7 +1513,11 @@ class CodingAgent:
         "unverified").  ``seed_code`` pre-loads the default file on round 1.
         ``background_tests`` (Phase D) runs the suite in the background
         while the lint gate runs concurrently, instead of blocking on it;
-        ``test_cap_seconds`` caps the background run (default 15 min).
+        ``test_cap_seconds`` caps the background run — None (pass #66,
+        the default) derives the cap from the run budget as
+        ``max(timeout * 5, 60)``, the foreground verify's own timeout,
+        so the cap cannot silently bind below the caller's budget; an
+        explicit value is honored verbatim.
 
         ``plan_mode`` gates non-trivial work on owner approval:
         ``"auto"`` (default) pauses when the file plan is complex
@@ -1712,6 +1846,27 @@ class CodingAgent:
         green_state: dict[str, Any] | None = None
         dirty_since_green = False
 
+        if self._scope_denials:
+            # Pass #66: the explore reads already hit the run's scope
+            # (fs_read not on the role's allowlist) — drafting blind
+            # behind a refusal would waste the budget and dress a
+            # widening up as work.  Settle now: every step is skipped
+            # with the denial as its reason, and the result names it.
+            denial = self._scope_denials[0]["reason"]
+            for rec in step_history:
+                if rec["status"] == "planned":
+                    rec["status"] = "skipped"
+                    rec["reason"] = denial
+            return CodingResult(
+                ok=False,
+                iterations=0,
+                error=denial,
+                seconds=time.perf_counter() - started,
+                steps=_finalize_steps(False),
+                replans=replans,
+                context_packs=context_packs,
+            )
+
         try:
             for attempt in range(1, rounds + 1):
                 self._last_iterations = attempt  # item #17: checkpoint state
@@ -1840,6 +1995,7 @@ class CodingAgent:
                             )
                         if attempt == 1:
                             code = self._reason_review_code(draft_task, code)
+                        self._require_scope("edit_file", path=rel)
                         path.write_text(code, encoding="utf-8")
                         texts[rel] = code
                     else:
@@ -1861,6 +2017,7 @@ class CodingAgent:
                         if kind == "patch":
                             # Unified-diff protocol: the model shipped a whole
                             # diff (possibly multi-file); apply it directly.
+                            self._require_scope("apply_patch", path=rel)
                             patch_ok, patch_err = self._apply_model_patch(
                                 payload, workdir, texts, diffs, touched, changed)
                             _spend(rel)
@@ -1891,6 +2048,7 @@ class CodingAgent:
                         edits = payload
                         if not edits:
                             continue  # model judges no change needed
+                        self._require_scope("edit_file", path=rel)
                         apply_errors: list[str] = []
                         for edit in edits:
                             try:
@@ -1943,14 +2101,27 @@ class CodingAgent:
                 # ── verify ──
                 bg_lint_res: Any = None
                 if use_runner:
+                    self._require_scope("run_tests")
                     if background_tests:
                         # Phase D: the suite runs in the background while the
                         # agent does the lint gate concurrently (prep work
                         # instead of blocking); poll surfaces live progress.
+                        # Pass #66: the lint gate is concurrent in this
+                        # mode, so it is scope-gated BEFORE the suite
+                        # starts — a denied lint must not leave an
+                        # orphaned background run behind.
+                        self._require_scope("lint")
                         from .bg_tests import background_run_tests
 
+                        # Pass #66: cap derivation (the ceiling doctrine):
+                        # None derives from the run budget exactly like
+                        # the foreground verify below — an explicit
+                        # test_cap_seconds is a named caller choice.
                         bg = background_run_tests(
-                            str(workdir), cap_seconds=test_cap_seconds)
+                            str(workdir),
+                            cap_seconds=(test_cap_seconds
+                                         if test_cap_seconds is not None
+                                         else max(timeout * 5.0, 60.0)))
                         if isinstance(bg, dict):
                             tres = bg  # honest skip: nothing matched
                         else:
@@ -2018,6 +2189,7 @@ class CodingAgent:
                         verify_out = _pytest_mod.format_test_result(tres)
                         verify_err = "" if green else verify_out
                 else:
+                    self._require_scope("shell_run")
                     raw = self._run(accept, workdir, timeout)
                     out_text = (raw.get("stdout") or "").strip()
                     # Real acceptance: exit 0 AND (meaningful stdout OR a
@@ -2068,9 +2240,12 @@ class CodingAgent:
                     # become fix-iterations exactly like test failures.  In
                     # background mode it already ran concurrently with the
                     # suite — reuse it instead of running it twice. ──
-                    lint_res = (bg_lint_res if bg_lint_res is not None
-                                else _lint_mod.lint(changed or [filename],
-                                                    repo=str(workdir)))
+                    if bg_lint_res is not None:
+                        lint_res = bg_lint_res
+                    else:
+                        self._require_scope("lint")
+                        lint_res = _lint_mod.lint(
+                            changed or [filename], repo=str(workdir))
                     if not lint_res["ruff_installed"]:
                         _log.info("ruff not installed — lint gate skipped "
                                   "(honest skip, never a silent pass)")
@@ -2205,6 +2380,33 @@ class CodingAgent:
                     final_gate=green_state["final_gate"],
                     context_packs=context_packs,
                 )
+            error = str(exc) + self._rollback_after_failure(changed)
+            return CodingResult(
+                ok=False,
+                iterations=attempt,
+                error=error,
+                seconds=time.perf_counter() - started,
+                review={"passed": False,
+                        "rounds": review_rounds,
+                        "objections": review_objections,
+                        "available": gate_available,
+                        "depth": gate_depth,
+                        "notes": review_notes},
+                verification=verification,
+                steps=_finalize_steps(False),
+                replans=replans,
+                final_gate=final_gate,
+                context_packs=context_packs,
+            )
+        except _ScopeDenied as exc:
+            # Pass #66: a governed tool call fell outside the run's
+            # scoped registry.  The run cannot do its contracted work
+            # under the scope it was given — settle not-green, name
+            # the denial (it also rides CodingResult.scope_denials),
+            # and roll the unverified changes back like any failed
+            # run.  A scope refusal never keeps a verdict: denials are
+            # deterministic per registry, so a first refusal always
+            # precedes any green the run could have earned.
             error = str(exc) + self._rollback_after_failure(changed)
             return CodingResult(
                 ok=False,

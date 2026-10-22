@@ -258,12 +258,20 @@ class CodingRoleAgent:
         payload = payload or {}
         task_text = (payload.get("task") or payload.get("goal") or "").strip()
         root = payload.get("root")
-        agent = (CodingAgent(self.context, root=root) if root
-                 else CodingAgent(self.context))
+        # Pass #66: the scoped registry this agent was built with
+        # finally reaches the loop it delegates to — before this, the
+        # loop read the context's FULL registry and the allowlist
+        # governed only this class's own (nonexistent) tool calls.
+        agent = (CodingAgent(self.context, root=root, tools=self.tools)
+                 if root else CodingAgent(self.context, tools=self.tools))
         result = agent.run(
             task_text or "(no task text)",
             max_iterations=int(payload.get("max_iterations", 5)),
             timeout=float(payload.get("timeout", 120)),
+            # Pass #66 (W10): an orchestrator-delegated step is a
+            # long-running autonomous surface, like a mission step —
+            # verify in the background, cap derived from the timeout.
+            background_tests=True,
         )
         return SimpleNamespace(
             output={
@@ -272,6 +280,8 @@ class CodingRoleAgent:
                 "summary": result.output[-2000:],
                 "error": result.error,
                 "review": getattr(result, "review", {}),
+                "scope_denials": list(
+                    getattr(result, "scope_denials", None) or []),
             },
             ok=result.ok,
         )

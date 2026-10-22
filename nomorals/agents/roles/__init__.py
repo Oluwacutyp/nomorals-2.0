@@ -363,9 +363,28 @@ class MissionCodingAgent(RoleAgent):
                                  "max_tokens budget"}
         from ..coding import CodingAgent as _LoopCodingAgent
 
+        # Pass #66: forward the role's scope into the loop.  The
+        # carrier is the bound RoleSpec — the attribute the swarm
+        # delegation sets on this agent — and the scoped view is the
+        # same RoleEnforcingRegistry the swarm layer builds over
+        # context.tools, so the loop's governed surfaces (explore
+        # reads, edits, verify, lint, accept) answer to the step's
+        # allowlist instead of the full registry.  Unbound (a plain
+        # mission step): no spec exists to forward — the loop is
+        # constructed exactly as before, with no tools kwarg at all.
+        ctor_kwargs: dict[str, Any] = {}
+        spec = getattr(self, "role_spec", None)
+        inner_tools = (getattr(self.context, "tools", None)
+                       if self.context is not None else None)
+        if spec is not None and inner_tools is not None:
+            from ..role_specs import RoleEnforcingRegistry
+
+            ctor_kwargs["tools"] = RoleEnforcingRegistry(
+                inner_tools, spec, self.context)
+        if root:
+            ctor_kwargs["root"] = str(root)
         try:
-            loop = (_LoopCodingAgent(self.context, root=str(root))
-                    if root else _LoopCodingAgent(self.context))
+            loop = _LoopCodingAgent(self.context, **ctor_kwargs)
             result = loop.run(
                 goal,
                 accept=accept,
@@ -373,6 +392,11 @@ class MissionCodingAgent(RoleAgent):
                 timeout=timeout,
                 plan_mode=False,
                 max_tokens=max_tokens,
+                # Pass #66 (W10): mission steps are the long-running
+                # autonomous surface — verify runs in the background
+                # (lint concurrent, cap derived from this step's
+                # timeout by the loop) instead of blocking on it.
+                background_tests=True,
             )
         except Exception as exc:  # noqa: BLE001 - a step failure is a result
             return {"goal": goal, "engine": "coding_agent",
@@ -409,6 +433,10 @@ class MissionCodingAgent(RoleAgent):
             # Pass #65 (W7): the run's metered token usage rides the
             # settlement as evidence, like the review verdict does.
             "usage": dict(getattr(result, "usage", None) or {}),
+            # Pass #66: scope refusals the loop recorded ride along
+            # too — a step settled by its own allowlist says so here.
+            "scope_denials": list(
+                getattr(result, "scope_denials", None) or []),
         }
         if result.ok:
             return out
