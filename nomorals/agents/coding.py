@@ -502,6 +502,13 @@ class CodingResult:
     # which belong to the change's own selection run.  Empty when the
     # gate never ran.
     final_gate: dict[str, Any] = field(default_factory=dict)
+    # Pass #64 (W6): one metadata dict per edit call — the context
+    # pack that fed it (tools/context_pack.ContextPack.metadata):
+    # mode ("pack" / "whole-file"), budget vs used chars, sections,
+    # everything the budget trimmed, and fallback notes.  Trimming and
+    # fallbacks are visible here, never silent.  Empty when no edit
+    # call ran (plan pause, new-file-only runs).
+    context_packs: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -519,6 +526,7 @@ class CodingResult:
             "steps": self.steps,
             "replans": self.replans,
             "final_gate": self.final_gate,
+            "context_packs": self.context_packs,
         }
 
 
@@ -642,10 +650,25 @@ def _step_task(task: str, spec: dict[str, Any]) -> str:
 class CodingAgent:
     """One coding session against the real tools and the active model."""
 
-    def __init__(self, context: Any, *, root: str | None = None) -> None:
+    def __init__(self, context: Any, *, root: str | None = None,
+                 pack_budget_chars: int | None = None) -> None:
         self.context = context
         self.db = context.db
         self.router = context.router
+        # Pass #64 (W6): char budget for one edit call's context pack
+        # (tools.context_pack).  None takes the module default.
+        if pack_budget_chars is None:
+            from ..tools.context_pack import DEFAULT_PACK_BUDGET_CHARS
+
+            pack_budget_chars = DEFAULT_PACK_BUDGET_CHARS
+        self._pack_budget_chars = int(pack_budget_chars)
+        # Pack memo: (rel, current hash, step id, error hash) -> pack.
+        # Repair rounds against an unchanged file reuse the identical
+        # pack instead of re-parsing the repo every round.
+        self._pack_cache: dict[tuple[str, int, str, int], Any] = {}
+        # The most recent pack built, harvested by run() after each
+        # _draft_change call (same pattern as _last_review, pass #63).
+        self._last_context_pack: Any | None = None
         # Optional explicit project root (used by `nm code --root`). When set,
         # files resolve under it with a containment check instead of the
         # workspace sandbox — so the agent can work on a real repo checkout.
@@ -1173,6 +1196,14 @@ class CodingAgent:
         a green selection run, the full suite runs once and its
         distinct verdict lands on ``CodingResult.final_gate`` — a gate
         failure never rewrites the run's own verdict.
+
+        Edit calls (pass #64, W6) are fed a CONTEXT PACK, not the
+        whole file: the target's relevant region (step-steered), the
+        definitions it imports, and its covering tests, under a char
+        budget with every trim recorded on
+        ``CodingResult.context_packs``.  Small or unparseable files
+        fall back to the whole file, with the reason in the pack's
+        notes — never a silently emptier prompt.
         """
         from ..tools import lint as _lint_mod
         from ..tools import pytest_runner as _pytest_mod
@@ -1399,6 +1430,9 @@ class CodingAgent:
         # Pass #62: captured from the green verify round's runner
         # result when the caller opted into the final gate.
         final_gate: dict[str, Any] = {}
+        # Pass #64 (W6): context-pack metadata, harvested after every
+        # _draft_change call from self._last_context_pack.
+        context_packs: list[dict[str, Any]] = []
         rounds = max(1, max_iterations)
         # Pass #60 (W4): re-plan bookkeeping — steps attempted last round
         # (for fail streaks) and the one-shot re-plan flags.
@@ -1543,6 +1577,7 @@ class CodingAgent:
                             seconds=time.perf_counter() - started,
                             steps=_finalize_steps(False),
                             replans=replans,
+                            context_packs=context_packs,
                         )
                     if attempt == 1:
                         code = self._reason_review_code(draft_task, code)
@@ -1551,7 +1586,14 @@ class CodingAgent:
                 else:
                     change = self._draft_change(
                         _step_task(draft_task, spec), rel, texts[rel] or "",
-                        file_errors[rel] or last_error, attempt, workdir)
+                        file_errors[rel] or last_error, attempt, workdir,
+                        step=spec)
+                    # Pass #64: record the pack that fed this edit call
+                    # on the run (trimming/fallbacks stay visible).
+                    pack = self._last_context_pack
+                    self._last_context_pack = None
+                    if pack is not None:
+                        context_packs.append(pack.metadata())
                     if change is None:
                         file_errors[rel] = "model returned no usable edits"
                         _spend(rel)
@@ -1846,6 +1888,7 @@ class CodingAgent:
                     steps=_finalize_steps(True),
                     replans=replans,
                     final_gate=final_gate,
+                    context_packs=context_packs,
                 )
             last_error = verify_err
             for rel in touched:
@@ -1873,6 +1916,7 @@ class CodingAgent:
                 steps=_finalize_steps(True),
                 replans=replans,
                 final_gate=final_gate,
+                context_packs=context_packs,
             )
         final_steps = _finalize_steps(False)
         stuck = [s["path"] for s in final_steps if s["status"] == "failed"]
@@ -1918,6 +1962,7 @@ class CodingAgent:
             steps=final_steps,
             replans=replans,
             final_gate=final_gate,
+            context_packs=context_packs,
         )
 
     # ── plan mode: approve → execute (item #4) ────────────────────────
@@ -2178,15 +2223,59 @@ class CodingAgent:
             "acceptance": "the run's verification passes for this file",
         }])
 
+    def _context_pack(self, task: str, rel: str, current: str,
+                      last_error: str, workdir: Path,
+                      step: dict[str, Any] | None) -> Any:
+        """Pass #64 (W6): the context pack for one edit call.
+
+        Built by tools.context_pack from the repo's real structure —
+        the step steers it, the last error's identifiers steer repair
+        rounds.  Memoized per (file content, step, error) so repeat
+        rounds against an unchanged file don't re-parse the repo.
+        The pack builder never raises; this wrapper is a second belt:
+        any failure degrades to the whole-file pack with the reason in
+        its notes, so the prompt is never silently emptier than the
+        pre-#64 behavior."""
+        from ..tools.context_pack import build_context_pack, whole_file_pack
+
+        key = (rel, hash(current), str((step or {}).get("id", "")),
+               hash(last_error or ""))
+        cached = self._pack_cache.get(key)
+        if cached is not None:
+            return cached
+        try:
+            pack = build_context_pack(
+                workdir, rel, current, task=task, step=step,
+                last_error=last_error,
+                budget_chars=self._pack_budget_chars)
+        except Exception as exc:  # noqa: BLE001 — never break the loop
+            _log.warning("context pack failed for %s: %s", rel, exc)
+            pack = whole_file_pack(
+                rel, current, self._pack_budget_chars,
+                f"context pack build raised ({type(exc).__name__}: "
+                f"{exc}); whole file sent, as before pass #64")
+        if len(self._pack_cache) > 64:
+            self._pack_cache.clear()
+        self._pack_cache[key] = pack
+        return pack
+
     def _draft_change(self, task: str, rel: str, current: str,
                       last_error: str, attempt: int,
-                      workdir: Path) -> tuple[str, Any] | None:
+                      workdir: Path,
+                      step: dict[str, Any] | None = None
+                      ) -> tuple[str, Any] | None:
         """One model call for an existing file; two answer protocols.
 
         Returns ``("edits", [{old_text, new_text}])`` for the surgical-edit
         protocol, ``("patch", patch_text)`` for a unified diff (the caller
         applies it via :meth:`_apply_model_patch`), or None when the model
         gave nothing usable.
+
+        Pass #64 (W6): the model is shown a CONTEXT PACK (see
+        :meth:`_context_pack`) — the target's relevant region, its
+        import surface, its covering tests — instead of the whole
+        file pasted blind.  When the pack falls back to whole-file
+        mode the prompt below is byte-for-byte the pre-#64 prompt.
         """
         system = (
             "You are a surgical code editor. Fix the file below with minimal "
@@ -2202,8 +2291,33 @@ class CodingAgent:
             'For (a), if no change is needed, return {"edits": []}. '
             "No prose outside the block."
         )
-        user = (f"Task: {task}\n\nFile: {rel}\n\nCurrent content:\n```\n"
-                f"{current}\n```\n\nAttempt {attempt}.")
+        pack = self._context_pack(task, rel, current, last_error,
+                                  workdir, step)
+        self._last_context_pack = pack
+        if pack.mode == "pack":
+            system += (
+                "\nThe file view below is a CONTEXT PACK, not the "
+                "whole file: the relevant region (omitted regions are "
+                "marked, with the definitions they contain named), "
+                "the definitions this file imports from the repo, and "
+                "its covering tests. For protocol (a), copy old_text "
+                "verbatim from the shown region. If the code you must "
+                "change sits in an omitted region, use protocol (b) — "
+                "a unified diff against the real file."
+            )
+            user = (f"Task: {task}\n\nFile: {rel}\n\nContext pack:\n```\n"
+                    f"{pack.text}\n```\n\nAttempt {attempt}.")
+            _log.info(
+                "context pack for %s: %d chars vs %d whole-file "
+                "(trimmed %d item(s), %d note(s))",
+                rel, len(pack.text), len(current), len(pack.trimmed),
+                len(pack.notes))
+        else:
+            user = (f"Task: {task}\n\nFile: {rel}\n\nCurrent content:\n```\n"
+                    f"{current}\n```\n\nAttempt {attempt}.")
+            if pack.notes:
+                _log.info("context pack for %s: whole file — %s",
+                          rel, "; ".join(pack.notes))
         if last_error:
             user += (f"\n\nThe last round FAILED with this exact output:\n```\n"
                      f"{last_error}\n```\nFix it with minimal edits.")
