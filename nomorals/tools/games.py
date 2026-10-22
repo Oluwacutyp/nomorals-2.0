@@ -69,7 +69,11 @@ def register(registry: Any) -> None:
             "start (open a game: game name, players), move (play a turn), "
             "state (current board/transcript), join (enter a live game), "
             "spectate (watch), invent (design a brand-new game from a theme), "
-            "tournament (start a multi-game bracket). Games are public — "
+            "tournament (start a multi-game bracket), trivia_bank (the "
+            "verified Library question bank behind trivia: sub=status "
+            "(stock by source + admission rate) | refill (run one "
+            "refiller tick) | purge (drop one question by its text in "
+            "game=, or the whole bank)). Games are public — "
             "anyone can play."
         ),
         capability="social.play",
@@ -86,10 +90,27 @@ def register(registry: Any) -> None:
         name: str = "",
         rounds: int = 3,
         stake: int = 0,
+        sub: str = "",
     ) -> dict[str, Any]:
         """Run a game action and return the result."""
         action = (action or "").strip().lower()
         eng = _engine(registry)
+
+        if action == "trivia_bank":
+            forge = eng.forge
+            sub_act = (sub or "status").strip().lower()
+            if sub_act == "status":
+                return {"ok": True, "bank": forge.bank_status(),
+                        "note": forge.render_bank_status()}
+            if sub_act == "refill":
+                return {"ok": True, "refill": forge.refill_bank(),
+                        "bank": forge.bank_status(),
+                        "note": forge.render_bank_status()}
+            if sub_act == "purge":
+                return {"ok": True, **forge.purge_bank(game)}
+            return {"ok": False,
+                    "error": f"unknown trivia_bank sub {sub_act!r} — "
+                             "status|refill|purge"}
 
         if action == "list":
             items = []

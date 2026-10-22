@@ -225,7 +225,8 @@ class GameEngine:
         forge = self._forge_obj
         if forge is None:
             from .trivia_forge import TriviaForge
-            forge = TriviaForge(suggest=self._suggest, db=self.db)
+            forge = TriviaForge(suggest=self._suggest, db=self.db,
+                                context=self.context)
             self._forge_obj = forge
         return forge
 

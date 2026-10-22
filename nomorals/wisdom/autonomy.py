@@ -35,6 +35,28 @@ from .. import organs as _bus
 
 _log = get_logger(__name__)
 
+
+def _brain_suggest(context: Any) -> Any:
+    """A ``suggest(prompt) -> str`` callable over the context's brain
+    (the motivation class's seam), or None when no brain answers.
+    Used by the trivia-bank stage: question generation needs a
+    model; maths-only stocking proceeds without one."""
+    try:
+        from ..llm.brain import brain_for
+
+        brain = brain_for(context)
+        if brain is None:
+            return None
+
+        def suggest(prompt: str) -> str:
+            resp = brain.chat([{"role": "user", "content": prompt}])
+            return resp.text if hasattr(resp, "text") else str(resp)
+
+        return suggest
+    except Exception:  # noqa: BLE001 - no brain == maths-only refill
+        return None
+
+
 _STOP = frozenset(
     "the a an and or of to in is are was were be been being on at for with "
     "by from as it its this that these those he she they we you i his her "
@@ -256,7 +278,27 @@ class WisdomOrgan:
             report["links"] = self._cross_link(deadline)
         except Exception as exc:  # noqa: BLE001
             report["errors"].append(f"crosslink: {exc}")
+        try:
+            report["trivia_bank"] = self._refill_trivia_bank()
+        except Exception as exc:  # noqa: BLE001
+            report["errors"].append(f"trivia_bank: {exc}")
         return report
+
+    def _refill_trivia_bank(self) -> dict[str, Any]:
+        """M3 stage: keep the verified trivia bank stocked.
+
+        The trivia refiller (``games.trivia_forge.TriviaBank.tick``)
+        generates questions FROM this organ's digests and the rest
+        of the Library, so its maintenance rides the wisdom tick —
+        the pattern the design names.  Fail-soft like every stage:
+        a bank hiccup never sinks a wisdom tick.  When the bank is
+        at target the tick is a counted no-op.
+        """
+        from ..games.trivia_forge import TriviaForge
+
+        forge = TriviaForge(suggest=_brain_suggest(self.context),
+                            db=self.db, context=self.context)
+        return forge.refill_bank()
 
     def _drain_events(self) -> int:
         n = 0
