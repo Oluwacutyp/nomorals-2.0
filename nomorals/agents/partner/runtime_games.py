@@ -2566,13 +2566,18 @@ class RuntimeGamesMixin:
         /desk study      — one full cycle: collect, import, lab, sports
         /desk signals    — evaluate + publish callable timed calls
         /desk library    — per-game study records with evidence
-        /desk collect    — fetch providers + import the inbox only
+        /desk collect    — fetch providers + import inbox + sports feeds
         /desk sources    — the desk's sources on the shared registry
-        /desk provision  — the desk's API services in self-provisioning
+        /desk provision [service] — key state, or drive provisioning
         """
-        from ..betdesk import (BettingDesk, render_library, render_status)
+        from ..betdesk import (BettingDesk, render_collect,
+                               render_library, render_status)
 
-        desk = BettingDesk(getattr(self, "context", None))
+        try:
+            vault = self._provision_vault()
+        except Exception:  # noqa: BLE001 - a locked vault degrades
+            vault = None  # status to env-only key state, never a crash
+        desk = BettingDesk(getattr(self, "context", None), vault=vault)
         parts = (tail or "").strip().split(None, 1)
         verb = parts[0].lower() if parts else ""
 
@@ -2583,9 +2588,11 @@ class RuntimeGamesMixin:
                     "/desk signals — publish callable signal calls "
                     "(>= 2m lead, lab-confirmed time structure only)\n"
                     "/desk library — per-game verdicts with evidence\n"
-                    "/desk collect — fetch providers + import inbox\n"
+                    "/desk collect — fetch providers + import inbox + "
+                    "sports feeds\n"
                     "/desk sources — betting sources on the registry\n"
-                    "/desk provision — the desk's self-provisioned APIs\n"
+                    "/desk provision [service] — key state, or drive "
+                    "provisioning for odds-api / football-data\n"
                     "analysis only — the desk never places bets")
 
         if verb in ("", "help"):
@@ -2595,23 +2602,19 @@ class RuntimeGamesMixin:
         if verb == "library":
             return render_library(desk.library())
         if verb == "collect":
-            from ..betdesk.collectors import collect_all
-            rep = collect_all(desk.store, registry=desk.registry)
-            rep["imports"] = desk.import_inbox()
-            lines = [f"collect: +{rep.get('added', 0)} rounds"]
-            for p in rep.get("providers", []):
-                lines.append(f"  {p['provider']}/{p['game']}: "
-                             f"{p.get('detail', '')}")
-            for imp in rep["imports"]:
-                lines.append(f"  import {imp.get('file', '')}: "
-                             f"{imp.get('detail', imp.get('added', ''))}")
-            return "\n".join(lines)
+            return render_collect(desk.collect())
         if verb == "study":
             rep = desk.study(deliver_signals=False)
             lines = ["desk study cycle:"]
             for key, v in (rep.get("verdicts") or {}).items():
                 lines.append(f"  {key}: {v.get('verdict')} "
                              f"({v.get('n_rounds', 0)} rounds)")
+            sc = rep.get("sports_collect") or {}
+            if sc.get("error"):
+                lines.append(f"  sports collect: {sc['error']}")
+            else:
+                lines.append(f"  sports collect: {sc.get('landed', 0)} "
+                             f"new fixtures landed")
             sports = rep.get("sports") or {}
             lines.append(f"  sports scan: "
                          f"{'ok' if sports.get('ok') else sports.get('detail', 'failed')}")
@@ -2643,10 +2646,34 @@ class RuntimeGamesMixin:
         if verb == "provision":
             from ..betdesk.sources import ensure_provisioning
             ids = ensure_provisioning()
-            return ("desk API services registered with self-provisioning: "
-                    + ", ".join(ids) +
-                    "\nprovision a key with: provision <service> "
-                    "(owner's own account; key lands in the vault)")
+            arg = parts[1].strip() if len(parts) > 1 else ""
+            if arg:
+                from ...accounts.provisioning import get_provision_service
+                svc = get_provision_service(arg)
+                if svc is None or svc.id not in ids:
+                    return (f"{arg!r} is not a desk API service — the "
+                            f"desk provisions: {', '.join(ids)}")
+                # The real drive, through the same mixin /provision
+                # uses: signup/login on the owner's own account,
+                # page flow, live validation, vault, env bridge.
+                return self._run_provision_drive(svc.id,
+                                                 chat_key=chat_key)
+            lines = ["desk API services in self-provisioning: "
+                     + ", ".join(ids)]
+            for p in desk.status()["provisioning"]:
+                if not p["key_present"]:
+                    state = "MISSING"
+                elif p.get("source") == "vault":
+                    state = ("present — vaulted"
+                             + (f", validated: {p['validation']}"
+                                if p.get("validation") else ""))
+                else:
+                    state = "present"
+                lines.append(f"  {p['service']} ({p['env_key']}): {state}")
+            lines.append("drive one with /desk provision <service> "
+                         "(owner's own account; the key is validated "
+                         "live, then vaulted)")
+            return "\n".join(lines)
         return f"unknown /desk verb {verb!r}\n{_usage()}"
 
     def _control_predict(self, tail: str, chat_key: str, *,

@@ -95,6 +95,17 @@ class RuntimeProvisionMixin:
         brick boot — features then fail honestly (and offer the drive)
         when used. Returns the env keys populated."""
         try:
+            # Pass 8: the betting desk's keyed services register from
+            # the agents layer (betdesk.sources), which boot never
+            # imported — a vaulted desk key would never bridge at
+            # startup.  Ensure them first (idempotent, best-effort).
+            try:
+                from ..betdesk.sources import ensure_provisioning
+
+                ensure_provisioning()
+            except Exception:  # noqa: BLE001 - desk registration is
+                _log.debug("desk provisioning registration skipped",
+                           exc_info=True)
             from ...accounts.provisioning import bridge_vault_credentials
 
             vault = self._provision_vault()

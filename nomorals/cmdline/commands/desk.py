@@ -8,8 +8,8 @@ from typing import Any
 
 def _cmd_desk(args: Any, context: Any) -> int:
     """Route `nm desk` subcommands.  Analysis only — never places bets."""
-    from ...agents.betdesk import (BettingDesk, render_library,
-                                   render_status)
+    from ...agents.betdesk import (BettingDesk, render_collect,
+                                   render_library, render_status)
 
     desk = BettingDesk(context)
     action = args.desk_action
@@ -23,15 +23,7 @@ def _cmd_desk(args: Any, context: Any) -> int:
         return 0
 
     if action == "collect":
-        from ...agents.betdesk.collectors import collect_all
-        rep = collect_all(desk.store, registry=desk.registry)
-        rep["imports"] = desk.import_inbox()
-        print(f"collect: +{rep.get('added', 0)} rounds")
-        for p in rep.get("providers", []):
-            print(f"  {p['provider']}/{p['game']}: {p.get('detail', '')}")
-        for imp in rep["imports"]:
-            print(f"  import {imp.get('file', '')}: "
-                  f"{imp.get('detail', imp.get('added', ''))}")
+        print(render_collect(desk.collect()))
         return 0
 
     if action == "import":
@@ -48,6 +40,12 @@ def _cmd_desk(args: Any, context: Any) -> int:
                   f"({v.get('n_rounds', 0)} rounds)")
             if v.get("evidence"):
                 print(f"  {v['evidence'][:300]}")
+        sc = rep.get("sports_collect") or {}
+        if sc.get("error"):
+            print(f"sports collect: {sc['error']}")
+        else:
+            print(f"sports collect: {sc.get('landed', 0)} new fixtures "
+                  f"landed")
         sports = rep.get("sports") or {}
         print(f"sports scan: "
               f"{'ok' if sports.get('ok') else sports.get('detail')}")
@@ -79,8 +77,21 @@ def _cmd_desk(args: Any, context: Any) -> int:
 
     if action == "provision":
         from ...agents.betdesk.sources import ensure_provisioning
-        print("registered with self-provisioning: "
-              + ", ".join(ensure_provisioning()))
+        ids = ensure_provisioning()
+        print("registered with self-provisioning: " + ", ".join(ids))
+        for p in desk.status()["provisioning"]:
+            if not p["key_present"]:
+                state = "MISSING"
+            elif p.get("source") == "vault":
+                state = ("present — vaulted"
+                         + (f", validated: {p['validation']}"
+                            if p.get("validation") else ""))
+            else:
+                state = "present"
+            print(f"  {p['service']} ({p['env_key']}): {state}")
+        print("drive a provisioning run from chat: "
+              "/desk provision <service> (or /provision <service>) — "
+              "the drive needs the chat browser session")
         return 0
 
     print(f"unknown desk action: {action}", file=sys.stderr)

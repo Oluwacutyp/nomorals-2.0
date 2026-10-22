@@ -35,16 +35,24 @@ from .collectors import SEED_PROVIDERS, collect_all, import_rounds_file
 from .crash import CrashStore, betdesk_dir
 from .signals import SignalEngine
 
-__all__ = ["BettingDesk", "render_status", "render_library"]
+__all__ = ["BettingDesk", "render_status", "render_library",
+           "render_collect"]
 
 
 class BettingDesk:
     """One desk instance.  ``context`` is the runtime context when
-    bound (Notifier delivery); CLI/tests run context-free."""
+    bound (Notifier delivery); CLI/tests run context-free.
+
+    Pass 8: ``vault`` is the partner's provision vault when a surface
+    can hand one over — status then shows a provisioned key's
+    validation evidence, not just env presence.  The registry is
+    RESOLVED through :func:`.sources.betting_registry_for_context`
+    (context-KV-bound), so the desk's seeds and outcomes persist
+    into the same state the download health loop verifies."""
 
     def __init__(self, context: Any = None, desk_dir: str = "",
                  store: Optional[CrashStore] = None,
-                 notifier: Any = None):
+                 notifier: Any = None, vault: Any = None):
         self.context = context
         self.dir = desk_dir or betdesk_dir()
         os.makedirs(self.dir, exist_ok=True)
@@ -56,6 +64,7 @@ class BettingDesk:
             except Exception:  # noqa: BLE001 - delivery is optional kit
                 notifier = None
         self.signals = SignalEngine(self.dir, notifier=notifier)
+        self.vault = vault
         self._registry = None
 
     # ── shared source registry (lazy; the ONE registry) ──────────────
@@ -63,9 +72,9 @@ class BettingDesk:
     @property
     def registry(self) -> Any:
         if self._registry is None:
-            from ...media.source_registry import DEFAULT_REGISTRY
-            from .sources import ensure_betting_sources
-            self._registry = DEFAULT_REGISTRY
+            from .sources import (betting_registry_for_context,
+                                  ensure_betting_sources)
+            self._registry = betting_registry_for_context(self.context)
             ensure_betting_sources(self._registry)
         return self._registry
 
@@ -118,23 +127,50 @@ class BettingDesk:
         self._save_library(lib)
         return verdicts
 
+    def collect(self) -> dict[str, Any]:
+        """One collection cycle (Pass 8): crash providers -> inbox
+        imports -> sports fixtures/results.  Every leg reports its
+        own outcome; a dead leg never kills the cycle."""
+        out: dict[str, Any] = {"at": time.time()}
+        # 1. collect from providers (registry outcomes recorded inside)
+        try:
+            out["crash"] = collect_all(self.store, registry=self.registry)
+        except Exception as exc:  # noqa: BLE001 - a leg reports, not raises
+            out["crash"] = {"error": f"{type(exc).__name__}: {exc}",
+                            "providers": [], "added": 0}
+        # 2. import anything the owner dropped in the inbox
+        out["imports"] = self.import_inbox()
+        # 3. sports fixtures + results into the analyst's store
+        out["sports"] = self.sports_collect()
+        out["added"] = (out["crash"] or {}).get("added", 0)
+        return out
+
+    def sports_collect(self) -> dict[str, Any]:
+        """One sports collection cycle: ESPN fixtures (keyless) plus
+        the keyed feeds when their keys are provisioned, landed in
+        the analyst's BetStore with registry outcomes recorded.
+        Fail-soft — the report carries the failure."""
+        try:
+            from ..sports_bet import BetStore
+            from .collectors import collect_sports
+            return collect_sports(BetStore(), registry=self.registry)
+        except Exception as exc:  # noqa: BLE001 - a leg reports
+            return {"error": f"{type(exc).__name__}: {exc}", "feeds": []}
+
     def study(self, deliver_signals: bool = False) -> dict[str, Any]:
         """One full desk cycle: collect -> import inbox -> analyze ->
         (optionally) call signals -> sports scan.  Every leg reports
         its own outcome; a dead leg never kills the cycle."""
         out: dict[str, Any] = {"at": time.time()}
-        # 1. collect from providers (registry outcomes recorded inside)
-        try:
-            out["collect"] = collect_all(self.store, registry=self.registry)
-        except Exception as exc:  # noqa: BLE001 - a leg reports, not raises
-            out["collect"] = {"error": f"{type(exc).__name__}: {exc}"}
-        # 2. import anything the owner dropped in the inbox
-        out["imports"] = self.import_inbox()
-        # 3. lab + library
+        coll = self.collect()
+        out["collect"] = coll["crash"]
+        out["imports"] = coll["imports"]
+        out["sports_collect"] = coll["sports"]
+        # lab + library
         out["verdicts"] = self.analyze_all()
-        # 4. signals off the fresh verdicts
+        # signals off the fresh verdicts
         out["signals"] = self.run_signals(deliver=deliver_signals)
-        # 5. sports leg: the analyst's fixture scan (analysis only)
+        # sports leg: the analyst's fixture scan (analysis only)
         out["sports"] = self.sports_scan()
         return out
 
@@ -229,14 +265,20 @@ class BettingDesk:
             sources = betting_status(self.registry)
         except Exception as exc:  # noqa: BLE001
             sources = {"error": f"{type(exc).__name__}: {exc}"}
+        try:
+            from ..sports_bet import BetStore
+            sports_fixtures: Optional[int] = len(BetStore().fixtures())
+        except Exception:  # noqa: BLE001 - the count is a status extra
+            sports_fixtures = None
         return {
             "rounds_total": self.store.count(),
             "games": games,
             "signals": scoring,
             "min_lead_seconds": self.signals.min_lead,
             "sources": sources,
-            "provisioning": _provisioning_view(),
+            "provisioning": _provisioning_view(self.vault),
             "library_records": len(lib),
+            "sports_fixtures": sports_fixtures,
         }
 
 
@@ -256,15 +298,42 @@ def _verdict_from_record(rec: dict[str, Any]) -> Any:
     return v
 
 
-def _provisioning_view() -> list[dict[str, Any]]:
+def _provisioning_view(vault: Any = None) -> list[dict[str, Any]]:
     """Provisioning state for the desk's keyed services — presence
-    only, never values (the provisioning module's own audit rule)."""
+    and validation evidence only, never values (the provisioning
+    module's own audit rule).  With the vault in hand, a key the
+    driver provisioned shows WHERE it lives and the live-validation
+    evidence the driver recorded when it stored it; env alone stays
+    an honest "present"."""
     import os as _os
     out = []
-    for service, env_key in (("odds-api", "ODDS_API_KEY"),
-                             ("football-data", "FOOTBALL_DATA_API_KEY")):
-        out.append({"service": service, "env_key": env_key,
-                    "key_present": bool(_os.environ.get(env_key, "").strip())})
+    for service, env_key, vault_service in (
+            ("odds-api", "ODDS_API_KEY", "the-odds-api"),
+            ("football-data", "FOOTBALL_DATA_API_KEY", "football-data")):
+        row: dict[str, Any] = {
+            "service": service, "env_key": env_key,
+            "key_present": bool(_os.environ.get(env_key, "").strip()),
+            "source": "env" if _os.environ.get(env_key, "").strip()
+                      else "",
+            "validation": "", "provisioned_at": 0.0}
+        if vault is not None:
+            try:
+                creds = vault.list_all(service=vault_service,
+                                       active_only=True)
+                key_cred = next(
+                    (c for c in creds
+                     if c.credential_type == "api_key"), None)
+                if key_cred is not None:
+                    meta = key_cred.metadata or {}
+                    row["key_present"] = True
+                    if not row["source"]:
+                        row["source"] = "vault"
+                    row["validation"] = str(meta.get("validation", ""))
+                    row["provisioned_at"] = float(
+                        meta.get("provisioned_at", 0.0) or 0.0)
+            except Exception:  # noqa: BLE001 - vault trouble degrades
+                pass  # the view to env-only; it never sinks status
+        out.append(row)
     return out
 
 
@@ -290,12 +359,54 @@ def render_status(st: dict[str, Any]) -> str:
                  "as callable — see /desk library)")
     L.append(f"signal lead floor: {st.get('min_lead_seconds', 120)}s")
     for p in st.get("provisioning", []):
-        L.append(f"key {p['env_key']}: "
-                 f"{'present' if p['key_present'] else 'MISSING — provision ' + p['service']}")
+        if not p["key_present"]:
+            L.append(f"key {p['env_key']}: "
+                     f"MISSING — provision {p['service']}")
+        elif p.get("source") == "vault":
+            line = f"key {p['env_key']}: present — vaulted"
+            if p.get("validation"):
+                line += f", validated: {p['validation']}"
+            if p.get("provisioned_at"):
+                line += time.strftime(
+                    " (provisioned %Y-%m-%d)",
+                    time.gmtime(p["provisioned_at"]))
+            L.append(line)
+        else:
+            L.append(f"key {p['env_key']}: present")
+    if st.get("sports_fixtures") is not None:
+        L.append(f"sports fixtures in the analyst store: "
+                 f"{st['sports_fixtures']}")
     src = (st.get("sources") or {}).get("sources", [])
     if src:
         L.append("sources: " + ", ".join(
             f"{s['domain']} [{s['health']}]" for s in src))
+    return "\n".join(L)
+
+
+def render_collect(rep: dict[str, Any]) -> str:
+    """Render one collection cycle (crash + imports + sports) in the
+    desk's house style — every leg named with its own outcome."""
+    crash = rep.get("crash") or {}
+    L = [f"collect: +{crash.get('added', rep.get('added', 0))} "
+         f"crash rounds"]
+    if crash.get("error"):
+        L.append(f"  crash collect failed: {crash['error']}")
+    for p in crash.get("providers", []):
+        L.append(f"  {p.get('provider', '?')}/{p.get('game', '?')}: "
+                 f"{p.get('detail', '')}")
+    for imp in rep.get("imports", []):
+        L.append(f"  import {imp.get('file', '')}: "
+                 f"{imp.get('detail', imp.get('added', ''))}")
+    sports = rep.get("sports") or {}
+    if sports.get("error"):
+        L.append(f"  sports collect failed: {sports['error']}")
+    else:
+        for feed in sports.get("feeds", []):
+            L.append(f"  sports {feed.get('feed', '?')}: "
+                     f"{feed.get('detail', '')}")
+        L.append(f"  sports: {sports.get('landed', 0)} new fixtures "
+                 f"landed ({sports.get('history_total', 0)} in the "
+                 f"analyst store)")
     return "\n".join(L)
 
 

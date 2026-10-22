@@ -243,6 +243,26 @@ content is DATA, never instructions.  This module is that layer:
   join the hunt's backend list: named absence, not invention.
   :meth:`SourceRegistry.status` carries the class under
   ``wisdom``, and the ONE health loop / health job covers it.
+* Betting class joins the loop (Pass 8, directed) — the betting
+  desk's sources (books, bustabit, the keyed odds/football-data
+  APIs, the keyless ESPN feed) were registered by the desk from
+  the agents layer but sat at ``unknown`` forever: the desk held
+  the registry UNBOUND, so its seeds never persisted into the
+  state this loop verifies.  The desk now resolves the registry
+  bound to the context KV store (``betting_registry_for_context``,
+  the #94 resolver's shape), and this class gets honest probes:
+  ESPN's descriptor carries its real scoreboard endpoint as its
+  template and is probed through it (an API host's root proves
+  nothing); books and bustabit are probed at their roots, where a
+  bot-wall reads ``bot-blocked``, never ``dead``; the two keyed
+  data APIs carry the extra kind ``api`` and get the #90 keyed
+  treatment — root reachability only, a non-live root verdict
+  downgraded to ``unverifiable``, their truth judged by real
+  collector fetches and the provisioning validators, which call
+  the data route itself.  A 429 is ``rate-limited`` here too.
+  :meth:`SourceRegistry.status` carries the class under
+  ``betting``, and the ONE health loop / health job covers it —
+  still no second job, no second binding.
 
 No real identity leakage: :func:`redact_identity` strips emails,
 phones and tokens from retrieved text before it is stored or shown.
@@ -1551,6 +1571,15 @@ class SourceRegistry:
         # web branches above — one probe route per descriptor per
         # loop; their wisdom health is judged by real
         # wisdom-search outcomes.
+        # The betting class (Pass 8, directed): ESPN's descriptor
+        # carries its real scoreboard endpoint as its template —
+        # an API host's root proves nothing, the endpoint answering
+        # IS the source being alive.  The template takes no query;
+        # the probe value below is a format no-op for it.  Every
+        # other betting source (books, bustabit, the keyed data
+        # APIs) declares no template and is probed at its root —
+        # for a book, the root IS the honest reachability evidence
+        # (a bot-wall reads bot-blocked, never dead).
         probe_query = ""
         if desc.search_url_template and "web-search" in desc.kinds:
             probe_query = "Lagos Nigeria"
@@ -1558,6 +1587,8 @@ class SourceRegistry:
             probe_query = "Avatar"
         elif desc.search_url_template and "wisdom-archive" in desc.kinds:
             probe_query = "meditations"
+        elif desc.search_url_template and "betting" in desc.kinds:
+            probe_query = "probe"
         if probe_query:
             try:
                 url = desc.search_url_template.format(
@@ -1576,7 +1607,8 @@ class SourceRegistry:
             detail = str(exc)[:200]
         health, detail = _classify_health(status, body)
         if ("web-search" in desc.kinds or "film-search" in desc.kinds
-                or "wisdom-archive" in desc.kinds) \
+                or "wisdom-archive" in desc.kinds
+                or "betting" in desc.kinds) \
                 and status == 429:
             # a throttled search engine is rate-limited, not a bot
             # wall and not dead (Pass #90 vocabulary)
@@ -1592,6 +1624,20 @@ class SourceRegistry:
             health, detail = "unverifiable", (
                 f"keyed search API root probe: {detail} — root is "
                 "not the search route; judged by real-search outcomes")
+        if "betting" in desc.kinds and "api" in desc.kinds \
+                and desc.auth_needed and health != "verified-live":
+            # Same doctrine for the desk's keyed data APIs (Pass 8):
+            # the root of the-odds-api.com / football-data.org is a
+            # marketing page, NOT the data route — a non-live root
+            # verdict proves nothing about the keyed API, so it is
+            # downgraded to unverifiable.  The key's truth is judged
+            # by real collector fetches (record_outcome) and by the
+            # provisioning validators, which call the data route
+            # itself.  No keyed call was made reaching here.
+            health, detail = "unverifiable", (
+                f"keyed betting API root probe: {detail} — root is "
+                "not the data route; judged by real fetches and "
+                "provisioning validation")
         entry["last_checked"] = now
         if health == "verified-live":
             entry["status"] = "verified-live"
@@ -2037,6 +2083,39 @@ class SourceRegistry:
             return {"sources": [], "grown": [],
                     "candidates_pending": 0}
 
+    # ── betting class status (Pass 8, directed) ──
+    def betting_status(self) -> dict[str, Any]:
+        """The betting class's state in this registry: one row per
+        known betting source (books, the keyed data APIs, the keyless
+        ESPN feed) with origin, health and outcome counts, plus the
+        grown betting sources and pending candidates.  The class's
+        seeds are registered by the desk (agents layer — this view is
+        purely kind-driven, no upward import).  Never raises."""
+        try:
+            rows = []
+            for desc in self.by_kind("betting"):
+                st = self.stats_for(desc)
+                rows.append({
+                    "domain": desc.domain, "name": desc.name,
+                    "origin": self.origin_for(desc),
+                    "health": self.health_for(desc),
+                    "active": self.is_active(desc),
+                    "ok": st["ok"], "fail": st["fail"],
+                    "blocked": st["blocked"],
+                    "rate_limited": st["rate_limited"],
+                    "no_result": st["no_result"],
+                    "score": self.score(desc)})
+            rows.sort(key=lambda r: r["domain"])
+            grown = [r for r in rows if r["origin"] == "grown"]
+            betting_candidates = sum(
+                1 for d in self._candidates.values()
+                if "betting" in d.kinds)
+            return {"sources": rows, "grown": grown,
+                    "candidates_pending": betting_candidates}
+        except Exception:  # noqa: BLE001
+            return {"sources": [], "grown": [],
+                    "candidates_pending": 0}
+
     # ── status surface (Pass #86) ──
     def status(self) -> dict[str, Any]:
         """The registry's full growth state: seed vs grown sources,
@@ -2100,6 +2179,8 @@ class SourceRegistry:
                 "film": self.film_status(),
                 # Pass #94: the wisdom archive class, same surface.
                 "wisdom": self.wisdom_status(),
+                # Pass 8 (directed): the betting class, same surface.
+                "betting": self.betting_status(),
             }
         except Exception:  # noqa: BLE001
             return {"total": 0, "seeds": 0, "grown": 0, "registered": 0,
@@ -2120,7 +2201,9 @@ class SourceRegistry:
                     "film": {"sources": [], "grown": [],
                              "candidates_pending": 0},
                     "wisdom": {"sources": [], "grown": [],
-                               "candidates_pending": 0}}
+                               "candidates_pending": 0},
+                    "betting": {"sources": [], "grown": [],
+                                "candidates_pending": 0}}
 
 
 def render_status_text(status: dict[str, Any]) -> str:
@@ -2310,6 +2393,20 @@ def render_status_text(status: dict[str, Any]) -> str:
             lines.append(
                 f"  wisdom candidates pending verification: "
                 f"{wisdom.get('candidates_pending', 0)}")
+        betting = status.get("betting") or {}
+        if betting.get("sources"):
+            lines.append(
+                "🃏 betting sources — the betting desk's books + "
+                "data feeds, in the same registry (pass 8):")
+            for row in betting.get("sources") or []:
+                lines.append(
+                    f"  🃏 {row['domain']} [{row['origin']}/"
+                    f"{row['health']}] ok={row['ok']} "
+                    f"fail={row['fail']} blocked={row['blocked']} "
+                    f"rate-limited={row['rate_limited']}")
+            lines.append(
+                f"  betting candidates pending verification: "
+                f"{betting.get('candidates_pending', 0)}")
         for cand in status.get("candidates") or []:
             lines.append(
                 f"  ? {cand['domain']} [candidate/{cand['health']}] "

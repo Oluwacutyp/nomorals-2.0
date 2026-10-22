@@ -40,7 +40,16 @@ Job:
   backends — the two new seeds through their real search
   endpoints (one bounded probe query each) — and can promote
   the archive candidates the wisdom hunt and the ingest fetch
-  path discover — still no second job, no second binding.
+  path discover — still no second job, no second binding.  Since
+  Pass 8 (directed) the betting class (the betting desk's books,
+  bustabit, the keyed odds/football-data APIs, the keyless ESPN
+  feed) lives in the same registry too — the desk resolves the
+  registry bound to the same KV store, so this one job also
+  re-verifies the betting sources: ESPN through its real
+  scoreboard endpoint, books at their roots (a bot-wall reads
+  bot-blocked, never dead), the keyed APIs by root with the
+  non-live verdict downgraded to unverifiable — still no second
+  job, no second binding.
   Marked
   ``routine`` deliberately: the loop is self-reporting bookkeeping —
   its results land in the registry's status surface (``/download

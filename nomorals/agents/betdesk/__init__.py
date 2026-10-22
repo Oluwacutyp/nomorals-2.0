@@ -13,12 +13,14 @@ from __future__ import annotations
 from typing import Any
 
 from .crash import CrashRound, CrashStore, betdesk_dir
-from .desk import BettingDesk, render_library, render_status
+from .desk import BettingDesk, render_collect, render_library, \
+    render_status
 from .jobs import ensure_betdesk_jobs
 
 __all__ = [
     "BettingDesk", "CrashRound", "CrashStore", "betdesk_dir",
-    "ensure_betdesk_jobs", "render_library", "render_status",
+    "ensure_betdesk_jobs", "render_collect", "render_library",
+    "render_status",
     "register",
 ]
 
@@ -39,17 +41,21 @@ def register(registry: Any) -> None:
             "off lab-confirmed time structure only) | status (rounds, "
             "verdicts, signal calibration, sources, keys) | library "
             "(per-game study records with evidence) | collect (fetch "
-            "providers + import inbox only) | provision (register the "
-            "desk's API services with self-provisioning)."
+            "providers + import inbox + land sports fixtures/results) "
+            "| provision (the desk's API services in self-provisioning "
+            "+ key state; the drive itself runs from chat: /desk "
+            "provision <service>)."
         ),
         capability=Capability.DB_READ,
         parameters={
             "action": "str — study|signals|status|library|collect|provision",
             "deliver": "bool — publish signal calls when action=signals",
+            "service": "str — one desk API service for action=provision",
         },
     )
     def betdesk(*, action: str = "status",
-                deliver: bool = False) -> dict[str, Any]:
+                deliver: bool = False,
+                service: str = "") -> dict[str, Any]:
         act = (action or "status").strip().lower()
         desk = BettingDesk(context)
         if act == "status":
@@ -57,10 +63,7 @@ def register(registry: Any) -> None:
         if act == "library":
             return {"library": desk.library()}
         if act == "collect":
-            from .collectors import collect_all
-            rep = collect_all(desk.store, registry=desk.registry)
-            rep["imports"] = desk.import_inbox()
-            return rep
+            return desk.collect()
         if act == "study":
             return desk.study(deliver_signals=bool(deliver))
         if act == "signals":
@@ -68,6 +71,18 @@ def register(registry: Any) -> None:
             return desk.run_signals(deliver=bool(deliver))
         if act == "provision":
             from .sources import ensure_provisioning
-            return {"services": ensure_provisioning()}
+            ids = ensure_provisioning()
+            rows = desk.status()["provisioning"]
+            if service:
+                rows = [r for r in rows
+                        if r["service"] == service.strip().lower()]
+                if not rows:
+                    return {"error": f"{service!r} is not a desk API "
+                                     f"service — the desk provisions: "
+                                     f"{', '.join(ids)}"}
+            return {"services": ids, "keys": rows,
+                    "drive": "run /desk provision <service> in chat "
+                             "(or /provision <service>) — the drive "
+                             "needs the chat browser session"}
         return {"error": f"unknown action {act!r} — "
                          "study|signals|status|library|collect|provision"}

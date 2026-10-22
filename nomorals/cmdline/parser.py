@@ -1852,13 +1852,13 @@ def _parser() -> argparse.ArgumentParser:
     d_sig.add_argument("--no-deliver", action="store_true",
                        help="log calls without pushing them")
     desk_sub.add_parser("library", help="per-game study records")
-    desk_sub.add_parser("collect", help="fetch providers + import inbox")
+    desk_sub.add_parser("collect", help="fetch providers + import inbox + sports feeds")
     d_imp = desk_sub.add_parser("import", help="import a round history file")
     d_imp.add_argument("--provider", required=True)
     d_imp.add_argument("--game", required=True)
     d_imp.add_argument("--path", required=True)
     desk_sub.add_parser("sources", help="betting sources on the registry")
-    desk_sub.add_parser("provision", help="register desk APIs for self-provisioning")
+    desk_sub.add_parser("provision", help="desk API key state (drive from chat: /desk provision <service>)")
 
     wx = sub.add_parser("weather", aliases=CLI_ALIASES["weather"],
         help="live weather + USA situations + timezone utilities (keyless)",
