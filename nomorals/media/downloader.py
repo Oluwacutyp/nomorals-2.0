@@ -14,6 +14,14 @@ four-stage chain that keeps trying instead of erroring out:
    bot check three times is just slower failure.  yt-dlp is handed the
    best cookies file for the URL — the owner's exported file, or
    Devon's own browser-profile cookies when she has logged in there.
+1b. **kit** — the download kit (:mod:`nomorals.media.download_kit`),
+   wired in by Pass #76: when the matched source descriptor (a view
+   over the ONE source registry) says the URL *is* the file, the
+   kit's resumable, validator-verified fetcher takes it.  The kit
+   also guards the chain's edges: a disk preflight before any byte
+   moves, an up-front refusal for sources the registry marks
+   not-downloadable, quality-label → format translation, and an
+   integrity-ledger entry for every landed download.
 2. **proxy** — retry through the proxy lab (:class:`ProxyPoolConnector`
    via :meth:`healthy_proxies`, protocol-aware ordering).  A proxy that
    fails is *demoted* (``record_failure``) and the chain moves to the
@@ -482,7 +490,10 @@ class MediaDownloader:
                  profile: str | None = None,
                  max_proxies: int | None = None,
                  direct_retries: int | None = None,
-                 connector_factory: Any | None = None) -> None:
+                 connector_factory: Any | None = None,
+                 extractors: Any | None = None,
+                 kit_downloader: Any | None = None,
+                 ledger: Any | None = None) -> None:
         self.context = context
         self.profile = profile or detect_profile()
         self._connector_factory = connector_factory
@@ -493,6 +504,63 @@ class MediaDownloader:
             else budget["direct_retries"]
         self.browser_candidates = budget["browser_candidates"]
         self.stage_timeout = budget["stage_timeout_s"]
+        # Download-kit wiring (Pass #76).  All three default to the
+        # kit's real objects, built lazily so constructing a
+        # MediaDownloader stays side-effect free; tests may inject.
+        self._extractors = extractors        # → download_kit.DEFAULT_EXTRACTORS
+        self._kit_downloader = kit_downloader  # → download_kit.ResumeDownloader
+        self._ledger = ledger                # → download_kit.IntegrityLedger
+
+    # ── download-kit accessors (Pass #76) ─────────────────────────────
+
+    def _extractor_registry(self) -> Any:
+        """The extractor view over the ONE source registry."""
+        if self._extractors is None:
+            from .download_kit import DEFAULT_EXTRACTORS
+            self._extractors = DEFAULT_EXTRACTORS
+        return self._extractors
+
+    def _descriptor_for(self, url: str) -> Any | None:
+        """Best extractor descriptor for *url*; None when the
+        registry view itself is unavailable (chain proceeds as
+        before — descriptors advise, they never gate by absence)."""
+        try:
+            return self._extractor_registry().best_for(url)
+        except Exception:  # noqa: BLE001
+            return None
+
+    def _kit(self) -> Any:
+        if self._kit_downloader is None:
+            from .download_kit import ResumeDownloader
+            self._kit_downloader = ResumeDownloader()
+        return self._kit_downloader
+
+    def _integrity_ledger(self) -> Any:
+        if self._ledger is None:
+            from .download_kit import IntegrityLedger
+            self._ledger = IntegrityLedger()
+        return self._ledger
+
+    def _succeed(self, report: DownloadReport,
+                 started: float) -> DownloadReport:
+        """Record a landed download in the kit's integrity ledger,
+        then finish.  Bookkeeping is best-effort — a ledger failure
+        never turns a real download into a reported failure."""
+        try:
+            if report.ok and report.path:
+                digest = _sha256_of(Path(report.path))
+                if digest:
+                    winner = next(
+                        (s.stage for s in reversed(report.stages) if s.ok),
+                        "")
+                    self._integrity_ledger().append(
+                        url=report.url, sha256=digest,
+                        size_bytes=report.size_bytes,
+                        source=winner or report.extractor or "downloader",
+                        dest=report.path)
+        except Exception:  # noqa: BLE001 - bookkeeping never breaks downloads
+            pass
+        return self._finish(report, started)
 
     # ── public API ────────────────────────────────────────────────────
 
@@ -513,6 +581,25 @@ class MediaDownloader:
 
         _log.info("download start url=%s profile=%s audio_only=%s",
                   url, self.profile, audio_only)
+        # Kit preflight (Pass #76): no point expanding links or
+        # fetching a byte when the destination cannot hold anything.
+        # Silent when there is room — the report gains a stage only
+        # when the preflight is what stops the download.
+        try:
+            from .download_kit import disk_preflight
+            pre = disk_preflight(0, target_dir)
+            if not pre.ok:
+                report.stages.append(StageLog(
+                    stage="preflight", url=url,
+                    error_class=FailureKind.SITE_ERROR.value,
+                    error=pre.message))
+                report.failure = FailureKind.SITE_ERROR
+                report.likely_cause = pre.message
+                report.hint = ("free disk space or choose another "
+                               "destination folder")
+                return self._finish(report, started)
+        except Exception:  # noqa: BLE001 - preflight never breaks the chain
+            pass
         # Stage zero: a short link expands to the page it MEANS before
         # any extractor sees it.  Failure to expand is a note in the
         # report — the chain continues with the original URL.
@@ -532,16 +619,54 @@ class MediaDownloader:
                     stage="resolve", url=url,
                     note="short link could not be expanded; continuing "
                          "with the original URL"))
+        # Descriptor truth (Pass #76): the matched source descriptor —
+        # a view over the ONE source registry — speaks before any
+        # fetch.  A source that declares itself not downloadable
+        # (Spotify, Boomplay) is refused here with its own reason
+        # instead of burning every stage to learn the same thing; a
+        # caller's quality LABEL is translated to the descriptor's
+        # yt-dlp format for this source.
+        descriptor = self._descriptor_for(work_url)
+        if descriptor is not None:
+            if format_spec:
+                mapped = ""
+                try:
+                    mapped = descriptor.format_for(format_spec)
+                except Exception:  # noqa: BLE001
+                    mapped = ""
+                if mapped and mapped != format_spec:
+                    _log.info("download format label %r → %r via "
+                              "descriptor %s", format_spec, mapped,
+                              descriptor.name)
+                    format_spec = mapped
+            if not descriptor.downloadable:
+                report.extractor = descriptor.name
+                report.stages.append(StageLog(
+                    stage="extractor", url=work_url,
+                    error_class=FailureKind.SITE_ERROR.value,
+                    error=f"{descriptor.name}: {descriptor.notes}",
+                    note="source registry marks this source "
+                         "not downloadable"))
+                report.failure = FailureKind.SITE_ERROR
+                report.likely_cause = (
+                    f"{descriptor.name} does not serve downloads — "
+                    f"{descriptor.notes}")
+                report.hint = ("find the same title on a downloadable "
+                               "source, or play it in the source's own app")
+                return self._finish(report, started)
         try:
             if self._stage_direct(report, work_url, target_dir, audio_only,
                                   format_spec, timeout, budget):
-                return self._finish(report, started)
+                return self._succeed(report, started)
+            if self._stage_kit(report, work_url, target_dir, audio_only,
+                               budget):
+                return self._succeed(report, started)
             if self._stage_proxy(report, work_url, target_dir, audio_only,
                                  format_spec, timeout, budget):
-                return self._finish(report, started)
+                return self._succeed(report, started)
             if self._stage_browser(report, work_url, target_dir, audio_only,
                                    page_url or work_url, budget):
-                return self._finish(report, started)
+                return self._succeed(report, started)
         except Exception as exc:  # noqa: BLE001 — the chain never raises
             _log.warning("downloader crashed mid-chain on %s: %s",
                          url, exc)
@@ -617,6 +742,71 @@ class MediaDownloader:
             self._fill_success(report, result, size)
             return True
         return False
+
+    # ── stage 1b: download kit (Pass #76) ─────────────────────────────
+
+    def _stage_kit(self, report: DownloadReport, url: str,
+                   target_dir: Path, audio_only: bool,
+                   budget: dict[str, float]) -> bool:
+        """The download kit's resumable fetch, in the chain.
+
+        Engages only when the matched source descriptor says the URL
+        IS the file (extraction rule ``direct`` — a direct media
+        link): yt-dlp has no extractor work to do there, and the
+        kit's :class:`ResumeDownloader` is the stronger fetcher —
+        validator-verified resume across attempts plus a sha256 of
+        what landed.  Every other rule keeps flowing to proxy /
+        browser exactly as before.  A kit failure is a stage log and
+        the chain moves on — never a swallowed success, never the
+        end of the chain."""
+        descriptor = self._descriptor_for(url)
+        if descriptor is None or descriptor.extraction_rule != "direct":
+            return False
+        if time.perf_counter() > budget["deadline"]:
+            return False
+        dest = target_dir / _safe_name(url, audio_only)
+        t0 = time.perf_counter()
+        try:
+            result = self._kit().download(url, dest)
+        except Exception as exc:  # noqa: BLE001 - a stage reports, never raises
+            result = None
+            error = _err_text(exc)
+        else:
+            error = "" if result.ok else (result.error or "kit fetch failed")
+        lat = time.perf_counter() - t0
+        if result is None or not result.ok:
+            kind = classify_failure(error)
+            report.stages.append(StageLog(
+                stage="kit", url=url, latency_s=lat,
+                error_class=kind.value, error=error))
+            self._log_stage("kit", url, "", lat, 0, kind,
+                            _err_text(error, 200))
+            return False
+        landed = self._verify_landed(
+            {"path": result.path, "bytes": result.size_bytes})
+        if landed is None:
+            # Same phantom guard as the direct stage: the kit CLAIMS
+            # bytes — the disk decides.
+            report.stages.append(StageLog(
+                stage="kit", url=url, latency_s=lat,
+                error_class=FailureKind.NO_MEDIA_FOUND.value,
+                error="kit reported success but the file is missing "
+                      f"or empty on disk ({result.path or 'no path'})"))
+            self._log_stage("kit", url, "", lat, 0,
+                            FailureKind.NO_MEDIA_FOUND,
+                            "reported success, nothing on disk")
+            return False
+        _path, size = landed
+        report.stages.append(StageLog(
+            stage="kit", url=url, latency_s=lat, size_bytes=size,
+            ok=True,
+            note=f"download-kit resumable fetch "
+                 f"(resumed={result.resumed} restarted={result.restarted})"))
+        self._log_stage("kit", url, "", lat, size, FailureKind.OK, "")
+        self._fill_success(report, {
+            "path": _path, "bytes": size, "title": "",
+            "extractor": "download-kit"}, size)
+        return True
 
     # ── context-derived helpers ──────────────────────────────────────
 
@@ -1231,6 +1421,19 @@ def kinds_to_failure(kinds: list[str]) -> FailureKind:
         if kind.value in kinds:
             return kind
     return FailureKind.SITE_ERROR
+
+
+def _sha256_of(path: Path) -> str:
+    """Streaming sha256 of a landed file; "" when it cannot be read."""
+    try:
+        import hashlib
+        digest = hashlib.sha256()
+        with open(path, "rb") as fh:
+            for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+    except Exception:  # noqa: BLE001
+        return ""
 
 
 def _safe_name(url: str, audio_only: bool) -> str:

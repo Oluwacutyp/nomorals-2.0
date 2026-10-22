@@ -11,6 +11,9 @@ CHAIN; this module owns the PIECES the chain was missing:
   descriptor; the rest get explicit descriptors (Audiomack, Boomplay
   metadata-only, NetNaija scrape, Spotify no-download, ...).  No
   per-domain ``if`` in the download path — descriptors decide.
+  (Pass #76: descriptors are DERIVED from
+  :mod:`nomorals.media.source_registry` — the one source of truth for
+  sources; this registry is a view over it, not a second list.)
 * :class:`ResumeDownloader` — resume with ETag / Last-Modified
   verification.  INVARIANT: if the validators changed, restart from
   byte 0 — NEVER splice a stale partial onto fresh bytes.
@@ -45,13 +48,14 @@ from pathlib import Path
 from typing import Any, Callable
 
 from ..core.logging_setup import get_logger
-from .source_registry import Licence
+from .source_registry import DEFAULT_REGISTRY, Licence, SourceRegistry
 
 _log = get_logger(__name__)
 
 __all__ = [
     "ExtractorDescriptor",
     "ExtractorRegistry",
+    "descriptors_for_registry",
     "DEFAULT_EXTRACTORS",
     "CloudflareState",
     "CloudflareStateMachine",
@@ -98,77 +102,79 @@ class ExtractorDescriptor:
             return ""
 
 
-def _default_extractors() -> list[ExtractorDescriptor]:
-    q = (("360p", "best[height<=360]"), ("720p", "best[height<=720]"),
-         ("1080p", "best[height<=1080]"), ("audio", "bestaudio/best"))
+#: Quality map shared by the structural fallback descriptors.
+_Q = (("360p", "best[height<=360]"), ("720p", "best[height<=720]"),
+      ("1080p", "best[height<=1080]"), ("audio", "bestaudio/best"))
+
+
+def _structural_fallbacks() -> list[ExtractorDescriptor]:
+    """Descriptors that are NOT sources — URL-shape fallbacks closing
+    every extractor view: a direct media file, then the yt-dlp generic
+    catch-all (LAST in order — every specific descriptor wins)."""
     return [
-        ExtractorDescriptor(
-            name="youtube", url_patterns=(r"youtube\.com", r"youtu\.be"),
-            extraction_rule="ytdlp", quality_map=q,
-            licence=Licence.USER_UPLOAD,
-            notes="yt-dlp youtube extractor; cookies may be needed on bot-check"),
-        ExtractorDescriptor(
-            name="soundcloud", url_patterns=(r"soundcloud\.com",),
-            extraction_rule="ytdlp", quality_map=(("audio", "bestaudio/best"),),
-            licence=Licence.USER_UPLOAD,
-            notes="yt-dlp soundcloud extractor; preview-only tracks refused upstream"),
-        ExtractorDescriptor(
-            name="audiomack", url_patterns=(r"audiomack\.com",),
-            extraction_rule="ytdlp", quality_map=(("audio", "bestaudio/best"),),
-            licence=Licence.USER_UPLOAD,
-            notes="yt-dlp audiomack extractor handles permalinks"),
-        ExtractorDescriptor(
-            name="netnaija", url_patterns=(r"netnaija",),
-            extraction_rule="scrape", quality_map=(("audio", "bestaudio/best"),),
-            licence=Licence.UNLICENSED,
-            notes="WordPress scrape: search → post → multi-hop direct MP3"),
-        ExtractorDescriptor(
-            name="boomplay", url_patterns=(r"boomplay\.com",),
-            extraction_rule="none", licence=Licence.LICENSED,
-            downloadable=False,
-            notes="Streams protected — metadata only, never download"),
-        ExtractorDescriptor(
-            name="spotify", url_patterns=(r"open\.spotify\.com", r"^spotify:"),
-            extraction_rule="none", licence=Licence.LICENSED,
-            downloadable=False,
-            notes="No downloadable stream — device playback only"),
-        ExtractorDescriptor(
-            name="tiktok", url_patterns=(r"tiktok\.com",),
-            extraction_rule="ytdlp", quality_map=q,
-            licence=Licence.USER_UPLOAD,
-            notes="yt-dlp tiktok extractor"),
-        ExtractorDescriptor(
-            name="instagram", url_patterns=(r"instagram\.com",),
-            extraction_rule="ytdlp", quality_map=q,
-            licence=Licence.USER_UPLOAD,
-            notes="yt-dlp instagram extractor; login-walled posts fail honestly"),
-        ExtractorDescriptor(
-            name="x-twitter", url_patterns=(r"(twitter\.com|x\.com)",),
-            extraction_rule="ytdlp", quality_map=q,
-            licence=Licence.USER_UPLOAD,
-            notes="yt-dlp twitter extractor"),
         ExtractorDescriptor(
             name="direct-media", url_patterns=(r"\.(mp3|m4a|ogg|opus|wav|flac|mp4|webm|mkv|mov)(\?|$)",),
             extraction_rule="direct", quality_map=(("audio", "bestaudio/best"),),
             licence=Licence.UNKNOWN,
             notes="Direct media file URL — plain HTTP fetch"),
-        # Generic yt-dlp catch-all: ~1800 sites.  LAST in order — every
-        # specific descriptor above wins over it.
         ExtractorDescriptor(
             name="ytdlp-generic", url_patterns=(r"^https?://",),
-            extraction_rule="ytdlp", quality_map=q,
+            extraction_rule="ytdlp", quality_map=_Q,
             licence=Licence.UNKNOWN,
             notes="yt-dlp generic: routes ~1800 sites dynamically"),
     ]
 
 
-class ExtractorRegistry:
-    """Descriptors in priority order.  :meth:`for_url` returns every
-    matching descriptor, specific first, generic last."""
+def descriptors_for_registry(registry: SourceRegistry) -> list[ExtractorDescriptor]:
+    """Derive extractor descriptors from a source registry (Pass #76).
 
-    def __init__(self, descriptors: list[ExtractorDescriptor] | None = None) -> None:
-        self._descs: list[ExtractorDescriptor] = list(
-            descriptors if descriptors is not None else _default_extractors())
+    The source registry (:mod:`nomorals.media.source_registry`) is
+    the ONE source of truth for download sources: every source that
+    declares extraction facts (rule / patterns / quality map /
+    downloadable) becomes a descriptor here.  Sources without facts
+    (news, discovery, search) get no descriptor and fall through to
+    the structural fallbacks — the same behaviour they had while this
+    list was hand-maintained separately (and drifted)."""
+    out: list[ExtractorDescriptor] = []
+    try:
+        for src in registry.all():
+            if not src.extraction_rule:
+                continue
+            out.append(ExtractorDescriptor(
+                name=(src.name or src.domain).lower().replace(" ", ""),
+                url_patterns=src.url_patterns or (re.escape(src.domain),),
+                auth_needed=src.auth_needed,
+                extraction_rule=src.extraction_rule,
+                quality_map=src.quality_map,
+                licence=src.licence,
+                notes=src.notes,
+                downloadable=src.downloadable))
+    except Exception:  # noqa: BLE001
+        pass
+    return out + _structural_fallbacks()
+
+
+def _default_extractors() -> list[ExtractorDescriptor]:
+    return descriptors_for_registry(DEFAULT_REGISTRY)
+
+
+class ExtractorRegistry:
+    """A VIEW over a :class:`SourceRegistry` (Pass #76 convergence):
+    descriptors in priority order, derived from the registry's
+    extraction facts plus the structural fallbacks.  Pass
+    ``descriptors=`` for an explicit list (tests, one-off callers) or
+    ``registry=`` to view a different registry instance.
+    :meth:`for_url` returns every matching descriptor, specific
+    first, generic last."""
+
+    def __init__(self, descriptors: list[ExtractorDescriptor] | None = None,
+                 *, registry: SourceRegistry | None = None) -> None:
+        if descriptors is not None:
+            self._descs: list[ExtractorDescriptor] = list(descriptors)
+        elif registry is not None:
+            self._descs = descriptors_for_registry(registry)
+        else:
+            self._descs = _default_extractors()
 
     def register(self, desc: ExtractorDescriptor) -> None:
         try:

@@ -113,11 +113,20 @@ class OrderingTests(unittest.TestCase):
         return _raise
 
     def test_browser_runs_last(self):
+        # Pass #76 fixture update: the chain gained the kit stage
+        # between direct and proxy (same patching pattern as its
+        # sibling stages).  The pinned intent is unchanged — strict
+        # stage order, browser LAST.
         order = []
 
         def direct(*a, **k):
             order.append("direct")
             raise RuntimeError("connection reset by peer")
+
+        def kit(report, *a, **k):
+            order.append("kit")
+            report.stages.append(StageLog(stage="kit", note="mocked"))
+            return False
 
         def proxy(report, *a, **k):
             order.append("proxy")
@@ -130,17 +139,26 @@ class OrderingTests(unittest.TestCase):
             return False
 
         with patch("nomorals.tools.media.download", side_effect=direct):
-            with patch.object(self.dl, "_stage_proxy", side_effect=proxy):
-                with patch.object(self.dl, "_stage_browser",
-                                  side_effect=browser):
-                    with patch.object(self.dl, "_proxy_pool",
-                                       return_value=None):
-                        report = self.dl.download("https://x.test/a.mp3")
-        self.assertEqual(order, ["direct", "proxy", "browser"])
+            with patch.object(self.dl, "_stage_kit", side_effect=kit):
+                with patch.object(self.dl, "_stage_proxy", side_effect=proxy):
+                    with patch.object(self.dl, "_stage_browser",
+                                      side_effect=browser):
+                        with patch.object(self.dl, "_proxy_pool",
+                                           return_value=None):
+                            report = self.dl.download("https://x.test/a.mp3")
+        self.assertEqual(order, ["direct", "kit", "proxy", "browser"])
         self.assertFalse(report.ok)
-        self.assertEqual(report.tried(), ["direct", "proxy", "browser"])
+        self.assertEqual(report.tried(),
+                         ["direct", "kit", "proxy", "browser"])
 
     def test_proxy_skipped_when_pool_missing_chain_continues(self):
+        # Pass #76 fixture update: kit stage stubbed like its siblings;
+        # intent unchanged — the chain still reaches the browser when
+        # the proxy pool is missing.
+        def kit(report, *a, **k):
+            report.stages.append(StageLog(stage="kit", note="mocked"))
+            return False
+
         def proxy(report, *a, **k):
             report.stages.append(StageLog(stage="proxy", note="mocked"))
             return False
@@ -152,15 +170,17 @@ class OrderingTests(unittest.TestCase):
         with patch("nomorals.tools.media.download",
                    side_effect=RuntimeError("timeout")):
             with patch.object(self.dl, "_proxy_pool", return_value=None):
-                with patch.object(self.dl, "_stage_proxy",
-                                  side_effect=proxy):
-                    with patch.object(self.dl, "_stage_browser",
-                                      side_effect=browser):
-                        report = self.dl.download("https://x.test/a.mp3")
+                with patch.object(self.dl, "_stage_kit", side_effect=kit):
+                    with patch.object(self.dl, "_stage_proxy",
+                                      side_effect=proxy):
+                        with patch.object(self.dl, "_stage_browser",
+                                          side_effect=browser):
+                            report = self.dl.download("https://x.test/a.mp3")
         proxy_logs = [s for s in report.stages if s.stage == "proxy"]
         self.assertTrue(proxy_logs)
         # browser stage still ran despite proxy being unavailable
-        self.assertEqual(report.tried(), ["direct", "proxy", "browser"])
+        self.assertEqual(report.tried(),
+                         ["direct", "kit", "proxy", "browser"])
 
     def test_success_short_circuits(self):
         audio = os.path.join(self.tmp, "ok.mp3")

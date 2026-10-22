@@ -120,6 +120,17 @@ class SourceDescriptor:
     auth_needed: bool = False     # needs owner-provided auth/cookie
     search_url_template: str = ""  # "...?q={query}" — "" = no search endpoint
     notes: str = ""
+    # ── download-extraction facts (Pass #76 convergence) ──
+    # This registry is the ONE source of truth for download sources:
+    # download_kit's ExtractorRegistry is a derived VIEW over these
+    # fields, so extractor truth can never drift from source truth
+    # again.  An empty rule means the source declares no extraction
+    # facts (news / discovery / search sources); downloads for it fall
+    # back to the generic extractor, exactly as before.
+    extraction_rule: str = ""        # "ytdlp" | "scrape" | "direct" | "none"
+    url_patterns: tuple[str, ...] = ()   # regexes matched against the URL
+    quality_map: tuple[tuple[str, str], ...] = ()  # label → yt-dlp format
+    downloadable: bool = True        # False = metadata only, never fetch
 
     @property
     def key(self) -> tuple[str, str, str]:
@@ -433,12 +444,42 @@ def _seed() -> SourceRegistry:
         ("US", "en", "soundcloud.com", "SoundCloud", ("music",), Licence.USER_UPLOAD, TrustTier.COMMUNITY, "Keyless api-v2 search", 20),
         ("US", "en", "open.spotify.com", "Spotify", ("music", "charts"), Licence.LICENSED, TrustTier.VERIFIED, "Metadata/playback only — never download", 20),
         ("US", "en", "en.wikipedia.org", "Wikipedia", ("news", "reference"), Licence.LICENSED, TrustTier.VERIFIED, "Reference", 20),
+        # ── video/social globals (lived only in download_kit before
+        # Pass #76 — now first-class sources like everything else) ──
+        ("US", "en", "tiktok.com", "TikTok", ("music", "film"), Licence.USER_UPLOAD, TrustTier.COMMUNITY, "Short video; yt-dlp tiktok extractor", 20),
+        ("US", "en", "instagram.com", "Instagram", ("music", "film"), Licence.USER_UPLOAD, TrustTier.COMMUNITY, "Reels/posts; yt-dlp instagram extractor", 20),
+        ("US", "en", "x.com", "X-Twitter", ("music", "film"), Licence.USER_UPLOAD, TrustTier.COMMUNITY, "Video posts; yt-dlp twitter extractor", 20),
     ]
+    # Download-extraction facts live ON the source (Pass #76): the
+    # download kit's extractor registry derives its descriptors from
+    # these, keyed by domain.  NotJustOk / TooXclusive are SCRAPE
+    # sources — verified 2026-10-09 research (media/sources.py): no
+    # yt-dlp extractor exists for them; the kit previously let them
+    # fall through to the yt-dlp generic, which was simply wrong.
+    _Q = (("360p", "best[height<=360]"), ("720p", "best[height<=720]"),
+          ("1080p", "best[height<=1080]"), ("audio", "bestaudio/best"))
+    _AUDIO = (("audio", "bestaudio/best"),)
+    extraction = {
+        "thenetnaija.net": ("scrape", (r"netnaija",), _AUDIO, True),
+        "audiomack.com": ("ytdlp", (r"audiomack\.com",), _AUDIO, True),
+        "boomplay.com": ("none", (r"boomplay\.com",), (), False),
+        "notjustok.com": ("scrape", (r"notjustok\.com",), _AUDIO, True),
+        "tooxclusive.com": ("scrape", (r"tooxclusive\.com",), _AUDIO, True),
+        "youtube.com": ("ytdlp", (r"youtube\.com", r"youtu\.be"), _Q, True),
+        "soundcloud.com": ("ytdlp", (r"soundcloud\.com",), _AUDIO, True),
+        "open.spotify.com": ("none", (r"open\.spotify\.com", r"^spotify:"), (), False),
+        "tiktok.com": ("ytdlp", (r"tiktok\.com",), _Q, True),
+        "instagram.com": ("ytdlp", (r"instagram\.com",), _Q, True),
+        "x.com": ("ytdlp", (r"(twitter\.com|x\.com)",), _Q, True),
+    }
     for nation, lang, domain, name, kinds, lic, tier, notes, rpm in seeds:
+        rule, pats, qmap, can_dl = extraction.get(domain, ("", (), (), True))
         reg.register(SourceDescriptor(
             nation=nation, language=lang, domain=domain, name=name,
             kinds=kinds, licence=lic, trust_tier=tier,
-            rate_limit_per_min=rpm, notes=notes))
+            rate_limit_per_min=rpm, notes=notes,
+            extraction_rule=rule, url_patterns=pats, quality_map=qmap,
+            downloadable=can_dl))
     return reg
 
 

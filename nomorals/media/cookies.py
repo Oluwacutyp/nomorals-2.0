@@ -360,17 +360,85 @@ def _count_valid_youtube_cookies(path: str) -> int:
         return 0
 
 
-def cookies_status() -> dict[str, Any]:
-    """Where Devon looks for cookies + whether one was found. Never raises."""
+def _netscape_stats(path: str) -> dict[str, Any]:
+    """Entry counts for a Netscape cookies file, all domains:
+    ``total`` entries, ``valid`` non-expired entries (session cookies
+    with expiry 0 count as valid), and the sorted ``domains`` holding
+    at least one valid entry.  Never raises; a missing/unreadable
+    file stats as empty."""
+    stats: dict[str, Any] = {"total": 0, "valid": 0, "domains": []}
+    try:
+        now = time.time()
+        domains: set[str] = set()
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                parts = line.split("\t")
+                if len(parts) < 7:
+                    continue
+                stats["total"] += 1
+                try:
+                    expiry = int(parts[4])
+                except (TypeError, ValueError):
+                    continue
+                if expiry == 0 or expiry > now:
+                    stats["valid"] += 1
+                    domain = parts[0].strip().lower().lstrip(".")
+                    if domain:
+                        domains.add(domain)
+        stats["domains"] = sorted(domains)
+    except Exception:  # noqa: BLE001 - stats must never break callers
+        pass
+    return stats
+
+
+def cookies_status(session_dir: str = "") -> dict[str, Any]:
+    """The cookie store's state — the SAME store downloads resolve at
+    fetch time (Pass #76 truth fix).
+
+    Downloads resolve cookies through :func:`cookies_file_for`, which
+    considers TWO files: the user-provided file AND the browser-
+    profile export (Pass 2).  This status used to report only the
+    user file, so it claimed "no cookies" while downloads were in
+    fact running with browser-profile cookies.  It now reports both,
+    plus ``effective`` — the file a download with no host-specific
+    winner would be handed — and ``stale``: a file exists but every
+    candidate holds zero non-expired cookies.
+
+    The original keys keep their exact meaning (``found`` /
+    ``valid_youtube`` describe the user file).  Never raises."""
     try:
         found = find_cookies_file()
+        export = export_browser_cookies(session_dir)
+        user_stats = _netscape_stats(found) if found else None
+        export_stats = _netscape_stats(export) if export else None
+        if found:
+            effective = {"source": "user_file", "path": found}
+        elif export:
+            effective = {"source": "browser_profile", "path": export}
+        else:
+            effective = {"source": "none", "path": None}
+        total_valid = (user_stats["valid"] if user_stats else 0) \
+            + (export_stats["valid"] if export_stats else 0)
         return {
             "found": found,
             "valid_youtube": (_count_valid_youtube_cookies(found)
                               if found else None),
             "checked": [str(p) for p in _candidate_paths()],
             "env_var": COOKIES_ENV,
+            "browser_export": export,
+            "browser_valid": (export_stats["valid"]
+                              if export_stats else None),
+            "browser_domains": (export_stats["domains"]
+                                if export_stats else []),
+            "effective": effective,
+            "stale": bool((found or export) and total_valid == 0),
         }
     except Exception:  # noqa: BLE001
         return {"found": None, "valid_youtube": None, "checked": [],
-                "env_var": COOKIES_ENV}
+                "env_var": COOKIES_ENV, "browser_export": None,
+                "browser_valid": None, "browser_domains": [],
+                "effective": {"source": "none", "path": None},
+                "stale": False}

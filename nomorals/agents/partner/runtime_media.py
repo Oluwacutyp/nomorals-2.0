@@ -2016,6 +2016,22 @@ class RuntimeMediaMixin:
         st = cookies_status()
         found = st.get("found")
         valid = st.get("valid_youtube")
+        # Pass #76: the browser-profile export is part of the store
+        # downloads actually resolve at fetch time — the status must
+        # say so, or it lies by omission (it used to report only the
+        # user file while downloads ran on profile cookies).
+        bvalid = st.get("browser_valid") or 0
+        browser_line = ""
+        if bvalid:
+            domains = ", ".join(st.get("browser_domains") or [])
+            browser_line = (
+                f"🍪 browser profile: {bvalid} valid cookie"
+                f"{'s' if bvalid != 1 else ''}"
+                f"{f' ({domains})' if domains else ''} — downloads use "
+                "these automatically for those sites.")
+        elif st.get("browser_export"):
+            browser_line = ("🍪 browser profile: a cookie export "
+                            "exists, but every cookie in it is expired.")
         lines = []
         if found:
             if valid:
@@ -2033,8 +2049,16 @@ class RuntimeMediaMixin:
                              "— an expired file won't pass the bot check.")
                 lines.append("")
                 lines.append(BOT_COOKIE_HELP)
+            if browser_line:
+                lines.append(browser_line)
+        elif bvalid:
+            lines.append("❌ no YouTube cookies file found — but "
+                         "downloads are not cookieless:")
+            lines.append(browser_line)
         else:
             lines.append("❌ no YouTube cookies file found.")
+            if browser_line:
+                lines.append(browser_line)
             lines.append("")
             lines.append(BOT_COOKIE_HELP)
         if (tail or "").strip().lower() == "check" and not found:

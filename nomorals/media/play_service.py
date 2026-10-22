@@ -46,7 +46,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ..core.logging_setup import get_logger
-from .download_kit import DEFAULT_EXTRACTORS, ExtractorRegistry
+from .download_kit import ExtractorRegistry
 from .picklist import parse_title_artist
 from .source_registry import DEFAULT_REGISTRY, EkitiLexicon, SourceRegistry
 
@@ -227,7 +227,9 @@ class PlayService:
                  unlicensed_mode: str | None = None) -> None:
         self.context = context
         self.registry = registry or DEFAULT_REGISTRY
-        self.extractors = extractors or DEFAULT_EXTRACTORS
+        # Pass #76: the extractor view derives from THIS service's
+        # registry instance — one source of truth, never a second list.
+        self.extractors = extractors or ExtractorRegistry(registry=self.registry)
         self._resolver = resolver
         self._lexicon = EkitiLexicon()
         self._chart_providers = dict(chart_providers or {})
