@@ -901,6 +901,52 @@ class FromYourPastProvider(_Provider):
             source=self.source, items=items, lines=lines)
 
 
+class RealTalkProvider(_Provider):
+    """One real talk per briefing (M2): a short teaching in Devon's
+    voice — trending story, beyond-trending find, or Library passage —
+    built by the ONE shared builder (``agents/realtalk.py``) every
+    pulse slot uses, and marked served in the shared Teachings ledger
+    so no other pulse (and no motivation) ever repeats it.  Mid
+    priority: after News, before FromYourPast.  Never raises — no
+    grounded material that day → no section."""
+    name = "realtalk"
+    title = "🗣️ Real talk"
+    priority = 65  # after News (50) / Rooms (60), before Research (70)
+    source = "teachings"
+
+    def collect(self, ctx: Any, since: float) -> BriefingSection | None:
+        try:
+            return self._collect(ctx)
+        except Exception as exc:  # noqa: BLE001 — talk is optional
+            _log.debug("realtalk provider skipped: %s", exc)
+            return None
+
+    def _collect(self, ctx: Any) -> BriefingSection | None:
+        from .realtalk import compose_realtalk
+
+        item = compose_realtalk(ctx, "morning")
+        if not item:
+            return None
+        body = str(item.get("body") or "").strip()
+        if not body:
+            return None
+        # The prose rides as ONE line: the composer's adaptive budget
+        # clips by line count, and a talk is composed prose sized by
+        # its builder — never a list to be clipped mid-thought.
+        lines = [body]
+        footer = str(item.get("footer") or "").strip()
+        if footer:
+            lines.append(footer)
+        return BriefingSection(
+            name=self.name, title=self.title, priority=self.priority,
+            source=self.source,
+            items=[{"id": str(item.get("id") or ""),
+                    "title": str(item.get("title") or ""),
+                    "body": body[:600],
+                    "talk_kind": str(item.get("talk_kind") or "")}],
+            lines=lines)
+
+
 class GoalsProvider(_Provider):
     """Goal triage: overdue + due-soon goals, then the mission-control
     pick with its next action.  The "what needs attention today" content
@@ -1026,6 +1072,13 @@ class BriefingComposer:
         # constructed defensively — no due cards → provider returns None.
         try:
             self.providers.append(FromYourPastProvider())
+        except Exception:  # noqa: BLE001
+            pass
+        # Real talk (M2): the shared talk builder over the Teachings
+        # ledger — local class, constructed defensively like research;
+        # no grounded material → provider returns None.
+        try:
+            self.providers.append(RealTalkProvider())
         except Exception:  # noqa: BLE001
             pass
         # Readiness (health coaching, build-map #53): lazy import to avoid

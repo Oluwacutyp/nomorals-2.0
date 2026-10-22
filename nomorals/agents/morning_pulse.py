@@ -1273,6 +1273,27 @@ def _today_remainder(context: Any) -> str:
         return ""
 
 
+def _realtalk_block(context: Any, slot: str) -> str:
+    """The slot's real-talk segment (M2), or "" — never raises.
+
+    One shared builder (``agents/realtalk.py``) serves every slot and
+    the morning composer alike, and marks the Teachings ledger as it
+    builds, so a talk served in any pulse is invisible to the others
+    and to the Motivation class.  No grounded material → no segment;
+    the pulse simply carries no talk that slot.
+    """
+    try:
+        from .realtalk import compose_realtalk
+
+        item = compose_realtalk(context, slot)
+        if not item:
+            return ""
+        return "🗣️ *Real talk*\n" + str(item.get("text") or "")
+    except Exception:  # noqa: BLE001
+        _log.debug("pulse/%s: real-talk skipped", slot, exc_info=True)
+        return ""
+
+
 def _compose_afternoon(context: Any) -> tuple[str, list[dict[str, Any]]]:
     """Afternoon briefing head text + the full undelivered story set.
 
@@ -1289,6 +1310,9 @@ def _compose_afternoon(context: Any) -> tuple[str, list[dict[str, Any]]]:
     news = _fresh_headlines(items)
     if news:
         parts.append("*Fresh headlines*\n" + news + "\n")
+    talk = _realtalk_block(context, "afternoon")
+    if talk:
+        parts.append(talk + "\n")
     rest = _today_remainder(context)
     if rest:
         parts.append("*Still ahead today*\n" + rest + "\n")
@@ -1386,6 +1410,9 @@ def _compose_evening(context: Any) -> tuple[str, list[dict[str, Any]]]:
     news = _fresh_headlines(items)
     if news:
         parts.append("*New since this afternoon*\n" + news + "\n")
+    talk = _realtalk_block(context, "evening")
+    if talk:
+        parts.append(talk + "\n")
     tom = _tomorrow_preview(context)
     if tom:
         parts.append("*Tomorrow*\n" + tom + "\n")
@@ -1413,6 +1440,9 @@ def _compose_midnight(context: Any) -> tuple[str, list[dict[str, Any]]]:
     news = _fresh_headlines(items)
     if news:
         parts.append("*Fresh headlines*\n" + news + "\n")
+    talk = _realtalk_block(context, "midnight")
+    if talk:
+        parts.append(talk + "\n")
     pend = _pending_items(context)
     if pend:
         parts.append("*Still open*\n" + pend + "\n")
