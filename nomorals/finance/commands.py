@@ -202,8 +202,9 @@ def control_balances(tail: str, context: Any) -> str:
 
     vault = _vault_from_context(context)
     if vault is None:
-        return ("the credential vault is locked — set NM_VAULT_PASSPHRASE "
-                "so I can read rail balances.")
+        return ("the credential vault is locked — no owner credential "
+                "could open it (owner seal, power key, or "
+                "NM_VAULT_PASSPHRASE), so I can't read rail balances.")
     rails = None
     tail = (tail or "").strip().lower()
     if tail:
@@ -217,14 +218,12 @@ def control_balances(tail: str, context: Any) -> str:
 
 
 def _vault_from_context(context: Any) -> Any | None:
-    import os
+    """The accounts vault via the one unlock path, or None when no
+    owner credential (seal, power key, legacy passphrase) opens it."""
     try:
-        from ..accounts.vault import CredentialVault
-        passphrase = os.environ.get("NM_VAULT_PASSPHRASE", "")
-        if not passphrase:
-            return None
-        return CredentialVault(getattr(context, "db", None),
-                               master_passphrase=passphrase)
+        from ..accounts.vault import open_vault
+        return open_vault(getattr(context, "db", None), context=context,
+                          actor="finance")
     except Exception:
         return None
 
@@ -429,13 +428,12 @@ def _trade_desk(context: Any) -> Any:
     connector = getattr(context, "exness", None)
     if connector is None:
         from ..connectors.exness import ExnessConnector
-        from ..accounts.vault import CredentialVault
-        import os
-        passphrase = os.environ.get("NM_VAULT_PASSPHRASE", "")
-        if not passphrase:
-            raise RuntimeError("vault locked — set NM_VAULT_PASSPHRASE")
-        vault = CredentialVault(getattr(context, "db", None),
-                                master_passphrase=passphrase)
+        from ..accounts.vault import VaultLockedError, open_vault
+        try:
+            vault = open_vault(getattr(context, "db", None),
+                               context=context, actor="finance")
+        except VaultLockedError as exc:
+            raise RuntimeError(str(exc)) from exc
         connector = ExnessConnector(vault=vault)
     return TradingDesk(connector, mode="paper")
 

@@ -31,9 +31,9 @@ Backends:
   paid API backends driving the matching connectors in
   ``nomorals/connectors/``. Explicit opt-in only (never "auto") — every
   call costs real money/credits. Keys live in the credential vault
-  (``nm connectors connect --name <backend>``); the vault unlocks via
-  ``NM_VAULT_PASSPHRASE``.
-- ``off`` / unconfigured: :class:`GenerativeEditError` naming the env var —
+  (``nm connectors connect --name <backend>``); the vault unlocks with
+  any owner credential (seal, power key, or ``NM_VAULT_PASSPHRASE``).
+- ``off`` / unconfigured: :class:`GenerativeEditError` naming the fix —
   never a fake edit.
 
 ``mask`` targets a region: a ``(l, t, r, b)`` box, a path to a mask image,
@@ -848,21 +848,19 @@ def set_connector_factory(factory: Any | None) -> None:
 def _paid_vault(vault: Any | None) -> Any:
     """Resolve the credential vault for a paid image backend.
 
-    An explicit ``vault`` wins (tests, wired callers). Otherwise build one
-    from the default database + ``NM_VAULT_PASSPHRASE`` — the same vault
-    ``nm connectors`` stores keys in. Fails fast with the exact fix.
+    An explicit ``vault`` wins (tests, wired callers). Otherwise open
+    the default database's vault through the one unlock path
+    (:func:`nomorals.accounts.vault.open_vault`) — any owner
+    credential (seal, power key from the settings, legacy passphrase)
+    opens the same vault ``nm connectors`` stores keys in. Fails fast
+    with the unlock error naming every source checked.
     """
     if vault is not None:
         return vault
-    passphrase = os.environ.get("NM_VAULT_PASSPHRASE", "")
-    if not passphrase:
-        raise GenerativeEditError(
-            "paid image backends need the credential vault: set "
-            "NM_VAULT_PASSPHRASE, then connect the backend with "
-            "`nm connectors connect --name <backend>` "
-            "(or /connectors connect <backend> in chat)")
     try:
-        from ..accounts.vault import CredentialVault
+        from types import SimpleNamespace
+
+        from ..accounts.vault import VaultLockedError, open_vault
         from ..core.config import get_settings
         from ..storage.db import open_database
         settings = get_settings()
@@ -873,7 +871,16 @@ def _paid_vault(vault: Any | None) -> Any:
             busy_timeout_ms=getattr(storage, "busy_timeout_ms", 5000),
             synchronous=getattr(storage, "synchronous", "NORMAL"),
         )
-        return CredentialVault(db, master_passphrase=passphrase)
+        try:
+            return open_vault(
+                db, context=SimpleNamespace(settings=settings),
+                actor="media-edit")
+        except VaultLockedError as exc:
+            raise GenerativeEditError(
+                f"paid image backends need the credential vault: {exc} "
+                "Then connect the backend with "
+                "`nm connectors connect --name <backend>` "
+                "(or /connectors connect <backend> in chat)") from exc
     except GenerativeEditError:
         raise
     except Exception as exc:  # noqa: BLE001 - surfaced as a clear message
@@ -1380,8 +1387,8 @@ def get_backend(name: str | None = None,
     else raises a clear error (never a fake edit). The paid backends are
     explicit opt-in only — auto never selects them, because every call
     costs real money/credits. ``vault`` is the credential vault for the
-    paid backends; when omitted it is built lazily from the default
-    database + NM_VAULT_PASSPHRASE.
+    paid backends; when omitted it is opened lazily from the default
+    database via the one unlock path (any owner credential).
     """
     want = (name or os.environ.get("MEDIA_GEN_BACKEND", "auto")).lower()
     if want == "off":

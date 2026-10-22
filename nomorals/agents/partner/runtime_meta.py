@@ -1076,16 +1076,20 @@ class RuntimeMetaMixin:
         creation flows can use it without asking every time. Persisted to DB.
         """
         from ...accounts.creator import AccountCreator
-        from ...accounts.vault import CredentialVault
+        from ...accounts.vault import VaultLockedError, open_vault
 
         parts = (tail or "").strip().split(None, 2)
         verb = parts[0].lower() if parts else "show"
 
-        # Get or create the AccountCreator
-        vault = CredentialVault(
-            self.context.db if hasattr(self.context, "db") else None,
-            os.environ.get("NM_VAULT_PASSPHRASE", ""),
-        )
+        # Get or create the AccountCreator — the vault opens through
+        # the one unlock path (any owner credential), never a raw
+        # passphrase construction.
+        try:
+            vault = open_vault(
+                self.context.db if hasattr(self.context, "db") else None,
+                context=self.context, actor="identity")
+        except VaultLockedError as exc:
+            return f"identity bank unavailable — {exc}"
         creator = AccountCreator(vault, db=getattr(self.context, "db", None))
 
         if verb == "show":

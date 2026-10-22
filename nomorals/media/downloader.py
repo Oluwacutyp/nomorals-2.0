@@ -648,16 +648,14 @@ class MediaDownloader:
 
     def _proxy_pool(self) -> Any | None:
         """The proxy lab connector, or None when unavailable."""
-        passphrase = os.environ.get("NM_VAULT_PASSPHRASE", "")
-        if not passphrase:
-            return None
         factory = self._connector_factory or _CONNECTOR_FACTORY
         if factory is None:
             return None
         try:
-            from ..accounts.vault import CredentialVault
-            vault = CredentialVault(getattr(self.context, "db", None),
-                                    master_passphrase=passphrase)
+            from ..accounts.vault import open_vault
+            vault = open_vault(getattr(self.context, "db", None),
+                               context=getattr(self, "context", None),
+                               actor="downloader-proxy")
             return factory("proxypool", vault)
         except Exception as exc:  # noqa: BLE001 — pool optional
             _log.debug("downloader: proxy pool unavailable: %s", exc)
@@ -700,7 +698,7 @@ class MediaDownloader:
             report.stages.append(StageLog(
                 stage="proxy", url=url,
                 note="proxy pool unavailable "
-                     "(no NM_VAULT_PASSPHRASE or no stored proxies)"))
+                     "(vault locked or no stored proxies)"))
             _log.info("download stage=proxy url=%s skipped: pool "
                       "unavailable", url)
             return False

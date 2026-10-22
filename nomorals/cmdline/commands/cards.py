@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import os
 from typing import Any
 from ..emit import _emit
 
@@ -19,10 +18,8 @@ def _cmd_cards(args: argparse.Namespace, context: Any) -> int:
     db = getattr(context, "db", None)
     vault = None
     try:
-        from ...accounts.vault import CredentialVault
-        vault = CredentialVault(
-            db, os.environ.get("NM_VAULT_PASSPHRASE", "")
-        )
+        from ...accounts.vault import open_vault
+        vault = open_vault(db, context=context, actor="cards-cli")
     except Exception:
         pass
 

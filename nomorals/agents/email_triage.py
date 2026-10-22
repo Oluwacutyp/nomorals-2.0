@@ -670,11 +670,11 @@ EMAIL_DAILY_ACTION = "email_triage.daily"
 def _get_gmail(context: Any) -> Any | None:
     """Build a GmailConnector from the context's vault, or None."""
     try:
-        from ..accounts.vault import CredentialVault
+        from ..accounts.vault import open_vault
         from ..connectors.registry import create_connector
 
-        passphrase = os.environ.get("NM_VAULT_PASSPHRASE", "")
-        vault = CredentialVault(context.db, master_passphrase=passphrase)
+        vault = open_vault(getattr(context, "db", None), context=context,
+                           actor="email-triage")
         gmail = create_connector("gmail", vault)
         st = gmail.status()
         if not getattr(st, "connected", False):

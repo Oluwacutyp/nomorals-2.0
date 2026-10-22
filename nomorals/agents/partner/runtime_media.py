@@ -2072,7 +2072,7 @@ class RuntimeMediaMixin:
         """
         from ...audio.fingerprint import describe_audio, match_local_db
         from ...connectors.registry import create_connector
-        from ...accounts.vault import CredentialVault
+        from ...accounts.vault import VaultLockedError, open_vault
 
         audio_path = self._sham_find_audio(message)
         if not audio_path:
@@ -2090,15 +2090,26 @@ class RuntimeMediaMixin:
                     f"confidence {score})\n"
                     f"/play {artist} {title}")
         heard = describe_audio(audio_path)
-        vault = CredentialVault(
-            getattr(self.context, "db", None),
-            master_passphrase=__import__("os").environ.get(
-                "NM_VAULT_PASSPHRASE", ""))
+        vault = None
+        vault_locked = False
         try:
-            audd = create_connector("audd", vault)
-        except Exception:
-            audd = None
+            vault = open_vault(getattr(self.context, "db", None),
+                               context=self.context, actor="shazam")
+        except VaultLockedError:
+            vault_locked = True
+        audd = None
+        if vault is not None:
+            try:
+                audd = create_connector("audd", vault)
+            except Exception:
+                audd = None
         if audd is None:
+            if vault_locked:
+                return (
+                    "couldn't name that track — the credential vault "
+                    "is locked, so I can't reach the AudD key, and it's "
+                    "not in my local library.\n"
+                    f"👂 but here's what I hear: {heard}")
             return (
                 "couldn't name that track — music recognition isn't set "
                 "up (it's one free AudD API key away), and it's not in "
@@ -3708,10 +3719,9 @@ def _resolve_play_title(context: Any, title: str) -> str:
     # 3. SoundCloud search (keyless, auto client_id)
     try:
         from ...connectors import create_connector
-        from ...accounts.vault import CredentialVault
-        vault = CredentialVault(
-            getattr(context, "db", None),
-            master_passphrase=os.environ.get("NM_VAULT_PASSPHRASE", ""))
+        from ...accounts.vault import open_vault
+        vault = open_vault(getattr(context, "db", None), context=context,
+                           actor="soundcloud-search")
         sc = create_connector("soundcloud", vault)
         tracks = sc.search_tracks(query, limit=3)
         for t in tracks or []:

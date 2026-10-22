@@ -1988,11 +1988,10 @@ class DevonAgent:
             return "\n".join(out)
         if action == "status":
             try:
-                from ..accounts.vault import CredentialVault
-                vault = CredentialVault(
-                    self.context.db,
-                    master_passphrase=os.environ.get(
-                        "NM_VAULT_PASSPHRASE", ""))
+                from ..accounts.vault import open_vault
+                vault = open_vault(getattr(self.context, "db", None),
+                                   context=self.context,
+                                   actor="connector-status")
                 inst = cls(vault)
                 st = inst.status()
                 return (f"{cid} status: "

@@ -69,10 +69,21 @@ def _discover_actions(connector_id: str) -> list[dict[str, Any]]:
 
 
 def _get_connector_instance(connector_id: str, context: Any) -> Any:
-    """Instantiate with vault credentials; connect if needed."""
+    """Instantiate with vault credentials; connect if needed.
+
+    The vault comes from the context when one is attached; otherwise
+    it is opened through the one unlock path
+    (:func:`nomorals.accounts.vault.open_vault` — owner seal, power
+    key, or legacy passphrase).  A locked vault raises
+    ``VaultLockedError`` naming every source checked — the caller
+    surfaces it as an honest error.
+    """
     from ..connectors.registry import create_connector
-    from ..accounts.vault import CredentialVault
-    vault = getattr(context, "vault", None) or CredentialVault()
+    vault = getattr(context, "vault", None)
+    if vault is None:
+        from ..accounts.vault import open_vault
+        vault = open_vault(getattr(context, "db", None), context=context,
+                           actor="services")
     inst = create_connector(connector_id, vault)
     return inst
 

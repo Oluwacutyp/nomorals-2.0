@@ -604,7 +604,7 @@ class ProxyPoolFactoryTests(unittest.TestCase):
             return "POOL"
 
         with self._env(), patch(
-                "nomorals.accounts.vault.CredentialVault",
+                "nomorals.accounts.vault.open_vault",
                 return_value="VAULT"):
             set_connector_factory(fake_factory)
             self.assertEqual(self.dl._proxy_pool(), "POOL")
@@ -628,7 +628,7 @@ class ProxyPoolFactoryTests(unittest.TestCase):
             return "INSTANCE"
 
         with self._env(), patch(
-                "nomorals.accounts.vault.CredentialVault",
+                "nomorals.accounts.vault.open_vault",
                 return_value="VAULT"):
             set_connector_factory(module_factory)
             dl = MediaDownloader(_ctx(self.tmp),

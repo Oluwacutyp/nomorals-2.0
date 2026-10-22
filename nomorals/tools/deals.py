@@ -70,25 +70,24 @@ def _get_hunter() -> Any:
 
 
 def _build_hunter() -> Any:
-    import os
     from ..accounts.manager import AccountManager
-    from ..accounts.vault import CredentialVault
+    from ..accounts.vault import VaultLockedError, open_vault
     from ..integrations.naija_deals import NaijaDealHunter
     from ..storage.db import Database
 
-    passphrase = os.environ.get("NM_VAULT_PASSPHRASE", "")
-    if not passphrase:
-        raise RuntimeError(
-            "Deal hunter needs the credential vault: set "
-            "NM_VAULT_PASSPHRASE, or call init_deal_hunter() with a "
-            "ready NaijaDealHunter.")
     db = getattr(_lazy_context, "db", None) if _lazy_context else None
     if db is None:
         import os as _os
         home = _os.path.expanduser("~/.nomorals")
         _os.makedirs(home, exist_ok=True)
         db = Database(_os.path.join(home, "shopping.db"))
-    vault = CredentialVault(db, master_passphrase=passphrase)
+    try:
+        vault = open_vault(db, context=_lazy_context, actor="deals")
+    except VaultLockedError as exc:
+        raise RuntimeError(
+            f"Deal hunter needs the credential vault.\n{exc}\n"
+            "Or call init_deal_hunter() with a ready NaijaDealHunter."
+        ) from exc
     hunter = NaijaDealHunter(AccountManager(vault), db)
     _log.info("deal hunter lazily initialized")
     return hunter

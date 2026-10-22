@@ -314,10 +314,10 @@ class TrialFlow:
             return (
                 f"couldn't verify whether an account already exists for "
                 f"{platform} — refusing to risk a duplicate signup.\n"
-                "  a vault could not be checked (passphrase unset, vault "
-                "locked, or a vault read failed).\n"
-                "  set NM_VAULT_PASSPHRASE so the personal vault can be "
-                "checked, then retry."
+                "  a vault could not be checked (no owner credential "
+                "could open it, or a vault read failed).\n"
+                "  unlock the personal vault (owner seal, power key, or "
+                "NM_VAULT_PASSPHRASE) so it can be checked, then retry."
             )
         # Owner's own identity wins when set (services tied to them).
         # Otherwise draft a disposable persona — confirmation-gated.
@@ -389,6 +389,25 @@ class TrialFlow:
             persona_id=gen["persona_id"],
         )
 
+    def _personal_vault(self):
+        """Open the PERSONAL (accounts) vault through the one unlock
+        path — any owner credential (seal, power key, or the legacy
+        NM_VAULT_PASSPHRASE) opens it (Pass 4's ruling, via
+        :func:`nomorals.accounts.vault.open_vault`).
+
+        This is the accounts vault only: the trial vault
+        (``self.vault``, :class:`TrialVault`) is a separate store with
+        its own key and is never opened through here.
+
+        Raises:
+            VaultLockedError: no available owner credential could
+                open the vault; the message names every source
+                checked.
+        """
+        from ...accounts.vault import open_vault
+
+        return open_vault(self.db, context=self.context, actor="trial")
+
     def _existing_account(
         self, platform: str,
     ) -> tuple[str, tuple[str, str] | None]:
@@ -401,14 +420,16 @@ class TrialFlow:
         * ``"none"`` — both vaults were checked and neither has one.
         * ``"unknown"`` — a vault could not be checked, so absence is
           UNPROVEN: trial-vault read error, an entry that exists but is
-          unreadable (tampered MAC), personal vault unreachable, or the
-          passphrase unset (personal vault never checked). Callers MUST
-          fail closed on ``"unknown"`` — treating it as "none" would let
-          a second signup run for a service that already has an account.
+          unreadable (tampered MAC), personal vault unreachable, or no
+          owner credential available (personal vault never checked).
+          Callers MUST fail closed on ``"unknown"`` — treating it as
+          "none" would let a second signup run for a service that
+          already has an account.
 
-        The trial vault is always readable without a passphrase, so a
-        trial hit refuses even when the vault is locked. The personal
-        vault is only checked when the passphrase is set.
+        The trial vault is always readable without a credential, so a
+        trial hit refuses even when the personal vault is locked. The
+        personal vault is checked whenever an owner credential (seal,
+        power key, or passphrase) can open it.
         """
         key = (platform or "").strip().lower()
         if not key:
@@ -424,15 +445,11 @@ class TrialFlow:
                 # An entry EXISTS but cannot be verified — fail closed.
                 return ("unknown", None)
             return ("found", ("trial", str(entry.get("login") or "?")))
-        passphrase = os.environ.get("NM_VAULT_PASSPHRASE", "")
-        if not passphrase or self.db is None:
+        if self.db is None:
             # Personal vault never checked — absence unproven.
             return ("unknown", None)
         try:
-            from ...accounts.vault import CredentialVault
-
-            vault = CredentialVault(self.db,
-                                    master_passphrase=passphrase)
+            vault = self._personal_vault()
             for cred in vault.list_all(service=key, active_only=True):
                 return ("found",
                         ("accounts",
@@ -453,11 +470,12 @@ class TrialFlow:
         already been passed by the caller (card + /trial confirm, or
         --yes); a resume re-drive carries the owner's action as the
         go-ahead."""
-        if not os.environ.get("NM_VAULT_PASSPHRASE", ""):
-            return (
-                "vault is locked: set the NM_VAULT_PASSPHRASE environment "
-                "variable so I can store the new credentials, then ask me again."
-            )
+        from ...accounts.vault import VaultLockedError
+
+        try:
+            self._personal_vault()
+        except VaultLockedError as exc:
+            return str(exc)
         # One account per service, enforced in code: refuse to drive a
         # second signup when one already exists in either vault.  The
         # owner redelivers with /trial send or removes it first.
@@ -482,10 +500,10 @@ class TrialFlow:
             return (
                 f"couldn't verify whether an account already exists for "
                 f"{platform} — refusing to risk a duplicate signup.\n"
-                "  a vault could not be checked (passphrase unset, vault "
-                "locked, or a vault read failed).\n"
-                "  set NM_VAULT_PASSPHRASE so the personal vault can be "
-                "checked, then retry."
+                "  a vault could not be checked (no owner credential "
+                "could open it, or a vault read failed).\n"
+                "  unlock the personal vault (owner seal, power key, or "
+                "NM_VAULT_PASSPHRASE) so it can be checked, then retry."
             )
         # One signup at a time per service: the vault checks above only
         # see COMPLETED accounts — a drive still in flight has stored
@@ -551,11 +569,6 @@ class TrialFlow:
         checkpoint_id = (checkpoint_id or "").strip()
         if not checkpoint_id:
             return "usage: /trial resume <checkpoint-id>"
-        if not os.environ.get("NM_VAULT_PASSPHRASE", ""):
-            return (
-                "vault is locked: set the NM_VAULT_PASSPHRASE environment "
-                "variable so I can store the credentials, then ask me again."
-            )
         try:
             from ...accounts.creator import (
                 AccountCheckpoint,
@@ -563,15 +576,15 @@ class TrialFlow:
                 AccountCreator,
                 CreatedAccount,
             )
-            from ...accounts.vault import CredentialVault
+            from ...accounts.vault import VaultLockedError
             from ...core.errors import NotFound
         except Exception as exc:  # noqa: BLE001
             return f"account automation unavailable: {exc}"
 
-        vault = CredentialVault(
-            self.db,
-            master_passphrase=os.environ.get("NM_VAULT_PASSPHRASE", ""),
-        )
+        try:
+            vault = self._personal_vault()
+        except VaultLockedError as exc:
+            return str(exc)
         creator = AccountCreator(vault, db=self.db)
         try:
             cp = creator.checkpoints.get(checkpoint_id)
@@ -719,13 +732,9 @@ class TrialFlow:
                 AccountCreator,
                 AccountExistsError,
             )
-            from ...accounts.vault import CredentialVault
             from ...tools.captcha import creator_solver_adapter
 
-            vault = CredentialVault(
-                self.db,
-                master_passphrase=os.environ.get("NM_VAULT_PASSPHRASE", ""),
-            )
+            vault = self._personal_vault()
             creator = AccountCreator(
                 vault,
                 db=self.db,
@@ -1603,16 +1612,14 @@ class TrialFlow:
         service = (service or "").strip().lower()
         if not service:
             return "", [], "usage: /trial inbox <service>"
-        passphrase = os.environ.get("NM_VAULT_PASSPHRASE", "")
-        if not passphrase:
-            return "", [], (
-                "vault is locked: set the NM_VAULT_PASSPHRASE environment "
-                "variable so I can read the disposable credential.")
         try:
             from ...accounts.creator import AccountCreator
-            from ...accounts.vault import CredentialVault
+            from ...accounts.vault import VaultLockedError
 
-            vault = CredentialVault(self.db, master_passphrase=passphrase)
+            try:
+                vault = self._personal_vault()
+            except VaultLockedError as exc:
+                return "", [], str(exc)
             creator = AccountCreator(vault, db=self.db)
             creds = vault.list_all(service=service, active_only=True)
             targets = [c for c in creds
@@ -1673,16 +1680,14 @@ class TrialFlow:
         return persona, identity
 
     def _identity_bank(self):
-        """Vault-side identity bank (vault when the passphrase is set)."""
+        """Vault-side identity bank (vault when an owner credential
+        opens the personal vault; table backend otherwise)."""
         from ...accounts.identity_bank import IdentityBank
-        from ...accounts.vault import CredentialVault
 
-        passphrase = os.environ.get("NM_VAULT_PASSPHRASE", "")
         vault = None
-        if passphrase and self.db is not None:
+        if self.db is not None:
             try:
-                vault = CredentialVault(self.db,
-                                        master_passphrase=passphrase)
+                vault = self._personal_vault()
             except Exception:  # noqa: BLE001 - fall back to table backend
                 vault = None
         return IdentityBank(db=self.db, vault=vault)

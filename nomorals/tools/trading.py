@@ -12,14 +12,14 @@ Live trading is INERT unless every gate passes:
 4. fewer than 3 consecutive engine errors.
 
 Exchange API keys come ONLY from the credential vault
-(``NM_VAULT_PASSPHRASE`` unlocks it) — never from CLI args, env values, or
+(any owner credential — seal, power key, or ``NM_VAULT_PASSPHRASE`` —
+unlocks it via the one open path) — never from CLI args, env values, or
 configs. Every live action is journaled to the append-only ``trade_journal``.
 """
 
 from __future__ import annotations
 
 import json
-import os
 import time
 from typing import Any
 
@@ -74,13 +74,12 @@ def _trading_settings(context: Any) -> Any:
 
 
 def _vault(context: Any) -> Any:
-    from ..accounts.vault import CredentialVault
-    passphrase = os.environ.get("NM_VAULT_PASSPHRASE", "")
-    if not passphrase:
-        raise bridge.SentinelError(
-            "vault is locked: set the NM_VAULT_PASSPHRASE environment "
-            "variable to unlock exchange credentials")
-    return CredentialVault(context.db, master_passphrase=passphrase)
+    from ..accounts.vault import VaultLockedError, open_vault
+    try:
+        return open_vault(getattr(context, "db", None), context=context,
+                          actor="trading")
+    except VaultLockedError as exc:
+        raise bridge.SentinelError(str(exc)) from exc
 
 
 def _exchange_keys(context: Any, exchange: str) -> tuple[str, str]:
@@ -468,12 +467,12 @@ def kill_switch(context: Any, reason: str = "operator kill") -> dict[str, Any]:
 
 # ── Exness desk (Devon's own trading system) ──────────────────────────
 def _desk_vault(context: Any) -> Any:
-    from ..accounts.vault import CredentialVault
-    passphrase = os.environ.get("NM_VAULT_PASSPHRASE", "")
-    if not passphrase:
-        raise bridge.SentinelError(
-            "vault is locked: set NM_VAULT_PASSPHRASE to use the Exness desk")
-    return CredentialVault(context.db, master_passphrase=passphrase)
+    from ..accounts.vault import VaultLockedError, open_vault
+    try:
+        return open_vault(getattr(context, "db", None), context=context,
+                          actor="trading-desk")
+    except VaultLockedError as exc:
+        raise bridge.SentinelError(str(exc)) from exc
 
 
 def _exness_desk(context: Any, mode: str = "paper") -> Any:

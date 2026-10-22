@@ -252,11 +252,14 @@ def build_adapter(settings: Any, name: str, *, on_new_member: Any = None,
             twilio = None
             if db is not None:
                 try:
-                    from ...accounts.vault import CredentialVault
+                    from types import SimpleNamespace
+
+                    from ...accounts.vault import open_vault
                     from ...connectors import create_connector
 
-                    vault = CredentialVault(
-                        db, master_passphrase=os.environ.get("NM_VAULT_PASSPHRASE", ""))
+                    vault = open_vault(
+                        db, context=SimpleNamespace(settings=settings),
+                        actor="sms")
                     twilio = create_connector("twilio", vault)
                 except Exception as exc:  # noqa: BLE001 - sends fail closed
                     _log.warning("sms: twilio connector unavailable: %s", exc)

@@ -303,17 +303,12 @@ def register(registry: Any) -> None:
         },
     )
     def finance_balances(context: Any, rails: str = "") -> dict[str, Any]:
-        import os
         from .overview import (BalanceCache, collect_balances, render_overview,
                                snapshot_net_worth)
         try:
-            from ..accounts.vault import CredentialVault
-            passphrase = os.environ.get("NM_VAULT_PASSPHRASE", "")
-            if not passphrase:
-                return {"ok": False,
-                        "error": "vault locked: set NM_VAULT_PASSPHRASE"}
-            vault = CredentialVault(getattr(context, "db", None),
-                                    master_passphrase=passphrase)
+            from ..accounts.vault import open_vault
+            vault = open_vault(getattr(context, "db", None),
+                               context=context, actor="finance")
         except Exception as exc:
             return {"ok": False, "error": f"vault unavailable: {exc}"}
         wanted = tuple(r.strip() for r in rails.split(",") if r.strip()) or None
@@ -685,13 +680,10 @@ def register(registry: Any) -> None:
         if connector is None:
             try:
                 from ..connectors.exness import ExnessConnector
-                from ..accounts.vault import CredentialVault
-                import os as _os
-                passphrase = _os.environ.get("NM_VAULT_PASSPHRASE", "")
-                if passphrase:
-                    vault = CredentialVault(getattr(context, "db", None),
-                                            master_passphrase=passphrase)
-                    connector = ExnessConnector(vault=vault)
+                from ..accounts.vault import open_vault
+                vault = open_vault(getattr(context, "db", None),
+                                   context=context, actor="finance")
+                connector = ExnessConnector(vault=vault)
             except Exception as exc:
                 return {"ok": False,
                         "error": f"no Exness connector available: {exc}"}
