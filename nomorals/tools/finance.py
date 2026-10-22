@@ -22,6 +22,22 @@ def _expert_class() -> Any:
     return mod.FinancialExpert
 
 
+def _bind_price_store(context: Any, md: Any) -> None:
+    """Bind the price layer's learned state to the context's KV
+    store (Pass #91) — the same lazy, best-effort discipline the
+    media registry uses: a context without a database keeps the
+    price state memory-only, exactly as before.  Never raises."""
+    try:
+        db = getattr(context, "db", None) if context is not None else None
+        if db is None:
+            return
+        from ..storage.kv import KVStore
+
+        md.bind_price_source_store(KVStore(db))
+    except Exception:  # noqa: BLE001 - persistence is an enhancement
+        pass
+
+
 def _wants_context(fn: Any) -> bool:
     """True when ``fn`` declares a required leading ``context`` param.
 
@@ -112,7 +128,39 @@ def register(registry: Any) -> None:
     def finance_price(context: Any, symbol: str, market: str = "crypto") -> dict[str, Any]:
         import importlib
         md = importlib.import_module("nomorals.integrations.market_data")
+        _bind_price_store(context, md)
         return md.quote(symbol, market=market)
+
+    @registry.register(
+        "price_sources",
+        description=(
+            "Price/market-data source health (pass #91, the open-"
+            "sources law applied to prices): the quote providers "
+            "(Binance/Kraken/Coinbase/CoinGecko, Yahoo/Stooq, "
+            "Frankfurter/open.er-api/ECB, gold-api, plus the keyed "
+            "TwelveData/AlphaVantage/Finnhub upgrades) learn from "
+            "real fetch outcomes — fresh / stale (a stale quote is "
+            "its own evidence class) / failed / blocked / "
+            "rate-limited / no-result counts, learned health and "
+            "chain order. action=status | health (run the price "
+            "health loop: one bounded real quote probe per keyless "
+            "provider; keyed providers are never probed — quota)."
+        ),
+        capability="network",
+        parameters={
+            "action": "str — status|health (default status)",
+        },
+    )
+    def price_sources(context: Any, *, action: str = "status") -> dict[str, Any]:
+        import importlib
+        md = importlib.import_module("nomorals.integrations.market_data")
+        _bind_price_store(context, md)
+        act = (action or "status").strip().lower()
+        if act == "health":
+            return md.verify_price_sources()
+        if act == "status":
+            return md.price_source_status()
+        return {"error": f"unknown action {act!r} — status|health"}
 
     @registry.register(
         "finance_analyze",

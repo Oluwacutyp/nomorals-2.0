@@ -27,6 +27,25 @@ Every source has automatic health tracking: after 3 consecutive failures
 it's skipped for 5 minutes (circuit breaker), routing around dead sources
 without manual intervention. See `source_health()` in `market_data.py`.
 
+Since pass #91 the layer also LEARNS from every real fetch (the owner's
+open-sources law, prices named explicitly): each attempt records its
+outcome — fresh / stale (a provider timestamp older than the provider's
+own cadence is its own evidence class, neither success nor transport
+failure) / served-without-timestamp (freshness honestly unknown, never
+fabricated) / no-data-for-symbol (weak evidence, never a demotion) /
+failure with error class / rate-limited (HTTP 429, recorded once, never
+retried around) / bot-blocked. With evidence, fresh-serving sources are
+preferred and chronically stale/failing sources demote to last in their
+chain (still the fallback of last resort, marked `source_demoted` on
+the quote when one serves). Zero learned state → the chains above,
+byte-for-byte. Learned state persists via the KV store
+(`finance.price_sources.v1`) and is visible via `source_status()` →
+`price_sources` or the `price_sources` tool; a 6-hourly health job
+probes every keyless source with one bounded real quote (keyed sources
+are never probed — judged by real-fetch outcomes only). There is no
+candidate intake for new price APIs: no genuine discovery channel
+exists in code (named absence, pass #91).
+
 ## Keyless sources
 
 | Source | Endpoint | Coverage | Rate limit | Notes |

@@ -23,6 +23,31 @@ Source reliability tiers (infrastructure first):
 Each source has automatic health tracking — after 3 consecutive failures
 a source is skipped for 5 minutes (circuit breaker). See source_health().
 
+Pass #91 (owner's open-sources law — prices were named explicitly):
+the price class is now outcome-aware, with the #86–#90 vocabulary and
+discipline, in mirrored machinery HERE rather than in the media
+source registry.  The registry was judged honestly and does not fit:
+this module is layering-pinned L2 (imports only core/storage peers)
+while ``media`` is L4; a price source's identity is its provider id,
+not a (nation, language, domain) key — ``yahoo`` and ``yahoo_metals``
+share one host with different coverage, and nation/language ordering
+cannot express per-market chains; and this module already owns the
+routing health store (the circuit breaker below), so registry
+membership would have created a second, parallel stats store.
+Instead the existing store learned the full vocabulary — fresh /
+stale / served (no provider timestamp; freshness never fabricated) /
+no-result (weak evidence) / failure with error class / rate-limited
+(429: recorded once, never retried around) / bot-blocked — plus
+stand-down/disable thresholds, outcome-aware chain ordering (day-one
+pin: zero learned state → the hardcoded chains byte-for-byte),
+KV persistence (``finance.price_sources.v1``), a real-fetch health
+loop (:func:`verify_price_sources` — keyless providers probed with
+one bounded liquid-symbol fetch; keyed providers never probed, they
+are judged by real-fetch outcomes), and the extended
+:func:`source_status` surface.  Discovery verdict: no genuine
+discovery channel for new price APIs exists in code, so the class
+ships with NO candidate intake — named absence, not invention.
+
 All OHLC fetchers return a pandas DataFrame with a DatetimeIndex and
 ``open/high/low/close/volume`` float columns — the exact shape Sentinel's
 ``ensure_ohlcv`` expects — so they plug straight into
@@ -58,6 +83,17 @@ __all__ = [
     "source_status",
     "source_health",
     "record_source_result",
+    # Pass #91: the open price-source class
+    "PRICE_PERSIST_KEY",
+    "record_quote_outcome",
+    "price_source_stats",
+    "price_source_health",
+    "price_source_status",
+    "price_score",
+    "ordered_price_chain",
+    "verify_price_sources",
+    "bind_price_source_store",
+    "clear_price_source_state",
 ]
 
 _log = get_logger(__name__)
@@ -150,39 +186,266 @@ KEYED_SOURCES: dict[str, str] = {
 }
 
 
-# ── source health tracking (circuit breaker) ──────────────────────────
+# ── source health tracking (circuit breaker) + learned state (#91) ────
 # After _HEALTH_FAIL_THRESHOLD consecutive failures, a source is skipped
 # for _HEALTH_COOLDOWN_S seconds. This routes around dead sources
 # automatically without manual intervention.
 _HEALTH_FAIL_THRESHOLD = 3
 _HEALTH_COOLDOWN_S = 300.0  # 5 minutes
 
+# Pass #91: the learned-state thresholds, mirroring the media source
+# registry's vocabulary (``media/source_registry.py`` STAND_DOWN_AFTER
+# / DISABLE_AFTER): STAND_DOWN_AFTER consecutive non-fresh outcomes
+# stand a source down (demoted to last in its chains, still the
+# fallback of last resort); DISABLE_AFTER disable it.  A fresh serve
+# resets the streak and re-activates.
+STAND_DOWN_AFTER = 3
+DISABLE_AFTER = 10
+#: Health states that remove a source from the ACTIVE ordering.
+_INACTIVE_PRICE_HEALTH = frozenset({"stood-down", "disabled", "dead"})
+
+#: KV key the price class's learned state persists under (Pass #91).
+#: Version 1 is deliberate: pre-#91 state was memory-only, so there
+#: is nothing to migrate — a bound store with no row is zero learned
+#: state, and wiping the row returns exactly the seed behaviour.
+PRICE_PERSIST_KEY = "finance.price_sources.v1"
+_PRICE_STATE_VERSION = 1
+
 _source_health: dict[str, dict[str, Any]] = {}
 _health_lock = __import__("threading").Lock()
+#: The bound KV store learned price state persists through (the same
+#: KVStore-over-context-db discipline the media registry uses);
+#: None = memory-only, exactly the pre-#91 behaviour.
+_price_store: Any = None
+
+
+def _blank_health() -> dict[str, Any]:
+    return {"fails": 0, "ok": 0, "last_fail": 0.0, "last_ok": 0.0,
+            "cooling_until": 0.0,
+            # Pass #91 learned-state fields
+            "stale": 0, "no_result": 0, "blocked": 0, "rate_limited": 0,
+            "streak": 0, "status": "unknown", "last_error_class": "",
+            "last_seen": 0.0, "last_quote_ts": None, "last_age_s": None}
+
+
+def _health_entry(source: str) -> dict[str, Any]:
+    """The mutable health entry for *source* (created blank).
+    Caller must hold ``_health_lock``."""
+    h = _source_health.get(source)
+    if h is None:
+        h = _blank_health()
+        _source_health[source] = h
+    else:
+        for k, v in _blank_health().items():
+            h.setdefault(k, v)
+    return h
+
+
+def _apply_breaker(h: dict[str, Any], source: str, now: float) -> None:
+    """The pre-#91 circuit breaker, unchanged: _HEALTH_FAIL_THRESHOLD
+    consecutive transport failures cool a source for 5 minutes."""
+    if h["fails"] >= _HEALTH_FAIL_THRESHOLD:
+        h["cooling_until"] = now + _HEALTH_COOLDOWN_S
+        _log.warning("market_data: %s cooling down for %ds "
+                     "(%d consecutive failures)",
+                     source, _HEALTH_COOLDOWN_S, h["fails"])
+
+
+def _apply_streak_status(h: dict[str, Any], kind: str) -> None:
+    """Health-status transitions for one non-fresh outcome, mirroring
+    the registry's: DISABLE_AFTER consecutive → disabled,
+    STAND_DOWN_AFTER → stood-down, otherwise the kind's own status
+    (``stale`` / ``rate-limited`` / ``bot-blocked``); a plain failure
+    only marks an untouched source ``unverifiable``."""
+    streak = int(h.get("streak") or 0)
+    if streak >= DISABLE_AFTER:
+        h["status"] = "disabled"
+    elif streak >= STAND_DOWN_AFTER:
+        h["status"] = "stood-down"
+    elif kind == "stale":
+        h["status"] = "stale"
+    elif kind == "rate_limited":
+        h["status"] = "rate-limited"
+    elif kind == "blocked":
+        h["status"] = "bot-blocked"
+    elif h.get("status") in (None, "", "unknown"):
+        h["status"] = "unverifiable"
+
+
+def record_quote_outcome(source: str, kind: str, *,
+                         error_class: str = "",
+                         quote_ts: float | None = None,
+                         age_s: float | None = None,
+                         now: float = 0.0) -> None:
+    """Record one real price-fetch attempt's outcome (Pass #91).
+
+    ``kind`` is the open-sources vocabulary, price edition:
+
+    * ``fresh`` — a quote/bars landed with a provider timestamp
+      inside the provider's own cadence;
+    * ``stale`` — a quote/bars landed but its timestamp is older
+      than that cadence: its OWN evidence class, neither full
+      success nor transport failure (acting on stale prices is
+      how money gets lost);
+    * ``served`` — a quote landed with NO provider timestamp, so
+      no freshness verdict exists (never fabricated);
+    * ``no_result`` — the provider answered but has no data for
+      this symbol: weak evidence (#88 precedent) — it sinks the
+      score's denominator but NEVER feeds the streak or the
+      breaker, so a crypto-only provider is never punished for
+      missing an FX symbol it was never chained for;
+    * ``failure`` — transport/HTTP failure, with ``error_class``;
+    * ``rate_limited`` — HTTP 429: its own class (#90), health
+      ``rate-limited`` never ``dead``; recorded once — callers
+      never retry or rotate around a 429 within one fetch;
+    * ``blocked`` — a 403/451 bot/geo wall: health ``bot-blocked``,
+      never ``dead`` (a wall is evidence about the wall).
+
+    Auth-config missing is NOT recorded here at all (#90 precedent):
+    a keyed source dark without its key is configuration, not
+    evidence.  Never raises."""
+    try:
+        now = now or time.time()
+        with _health_lock:
+            h = _health_entry(source)
+            h["last_seen"] = now
+            if kind in ("fresh", "served"):
+                h["ok"] += 1
+                h["fails"] = 0
+                h["streak"] = 0
+                h["last_ok"] = now
+                h["cooling_until"] = 0.0
+                h["status"] = "verified-live"
+                h["last_error_class"] = ""
+                if quote_ts is not None:
+                    h["last_quote_ts"] = quote_ts
+                    h["last_age_s"] = age_s
+            elif kind == "no_result":
+                h["no_result"] += 1
+            elif kind == "stale":
+                h["stale"] += 1
+                h["streak"] = int(h.get("streak") or 0) + 1
+                h["last_fail"] = now
+                h["last_error_class"] = "stale_quote"
+                if quote_ts is not None:
+                    h["last_quote_ts"] = quote_ts
+                    h["last_age_s"] = age_s
+                _apply_streak_status(h, kind)
+            elif kind in ("failure", "rate_limited", "blocked"):
+                if kind == "rate_limited":
+                    h["rate_limited"] += 1
+                elif kind == "blocked":
+                    h["blocked"] += 1
+                h["fails"] += 1
+                h["streak"] = int(h.get("streak") or 0) + 1
+                h["last_fail"] = now
+                h["last_error_class"] = str(
+                    error_class or kind)
+                _apply_breaker(h, source, now)
+                _apply_streak_status(h, kind)
+            else:
+                return
+        _persist_price_state()
+    except Exception:  # noqa: BLE001 - bookkeeping never breaks a fetch
+        pass
 
 
 def record_source_result(source: str, ok: bool) -> None:
-    """Record a source attempt. Called automatically by the fetchers."""
-    now = time.time()
+    """Record a source attempt. Called automatically by the fetchers.
+
+    The pre-#91 boolean seam, kept for its existing callers: a plain
+    success is ``served`` (no freshness claim — the caller supplied
+    no timestamp) and a plain failure is ``failure``; both feed the
+    learned state above as well as the circuit breaker."""
+    record_quote_outcome(source, "served" if ok else "failure",
+                         error_class="" if ok else "fetch_failed")
+
+
+def price_source_health(source: str) -> str:
+    """Current learned health for one source ("unknown" until an
+    outcome or the health loop says otherwise)."""
     with _health_lock:
         h = _source_health.get(source)
-        if h is None:
-            h = {"fails": 0, "ok": 0, "last_fail": 0.0,
-                 "last_ok": 0.0, "cooling_until": 0.0}
-            _source_health[source] = h
-        if ok:
-            h["fails"] = 0
-            h["ok"] += 1
-            h["last_ok"] = now
-            h["cooling_until"] = 0.0
-        else:
-            h["fails"] += 1
-            h["last_fail"] = now
-            if h["fails"] >= _HEALTH_FAIL_THRESHOLD:
-                h["cooling_until"] = now + _HEALTH_COOLDOWN_S
-                _log.warning("market_data: %s cooling down for %ds "
-                             "(%d consecutive failures)",
-                             source, _HEALTH_COOLDOWN_S, h["fails"])
+        return str((h or {}).get("status") or "unknown")
+
+
+def price_source_stats(source: str) -> dict[str, Any]:
+    """Recorded outcome statistics for one source (zeros when it has
+    never served an attempt).  Never raises."""
+    with _health_lock:
+        h = _source_health.get(source) or {}
+        ok = int(h.get("ok") or 0)
+        fail = int(h.get("fails") or 0)
+        stale = int(h.get("stale") or 0)
+        no_result = int(h.get("no_result") or 0)
+        total = ok + fail + stale + no_result
+        return {
+            "ok": ok, "fail": fail, "stale": stale,
+            "blocked": int(h.get("blocked") or 0),
+            "rate_limited": int(h.get("rate_limited") or 0),
+            "no_result": no_result,
+            "fresh_rate": round(ok / total, 3) if total else 0.5,
+            "health": str(h.get("status") or "unknown"),
+            "streak": int(h.get("streak") or 0),
+            "last_ok": float(h.get("last_ok") or 0.0),
+            "last_seen": float(h.get("last_seen") or 0.0),
+            "last_error_class": str(h.get("last_error_class") or ""),
+            "last_quote_ts": h.get("last_quote_ts"),
+            "last_age_s": h.get("last_age_s"),
+        }
+
+
+#: Reliability-tier base weights for the learned price score.
+_PRICE_TIER_WEIGHT = {1: 0.90, 2: 0.65, 3: 0.45}
+
+
+def price_score(source: str) -> float:
+    """Learned score 0..1 for one source: tier prior + observed
+    fresh-serve rate.  Zero evidence → the neutral 0.5 rate, so the
+    score only moves a chain once real outcomes exist."""
+    st = price_source_stats(source)
+    base = _PRICE_TIER_WEIGHT.get(SOURCE_TIERS.get(source, 9), 0.45)
+    return round(max(0.0, min(1.0,
+                              0.35 * base + 0.65 * st["fresh_rate"])), 3)
+
+
+def ordered_price_chain(market: str,
+                        chain: list[str] | None = None) -> list[str]:
+    """Outcome-aware order for one market's source chain (Pass #91).
+
+    * Zero learned state anywhere in the chain → the chain is
+      returned untouched: day-one behaviour is the hardcoded
+      ``_DEFAULT_CHAINS`` order (plus keyed upgrades first when
+      their env var is set), byte-for-byte;
+    * otherwise active sources sort by learned score (stable — ties
+      keep chain order) and stood-down / disabled sources demote to
+      the end, in chain order: demoted, never deleted — a demoted
+      source is still the fallback of last resort when it is the
+      only source for a symbol, and its demotion is visible in
+      :func:`price_source_status` and on the served quote itself.
+    Never raises; a hiccup returns the chain as-is."""
+    pool = list(chain) if chain is not None else list(
+        _DEFAULT_CHAINS.get(market, ["binance"]))
+    try:
+        evidence = False
+        for src in pool:
+            st = price_source_stats(src)
+            if st["ok"] or st["fail"] or st["stale"] \
+                    or st["no_result"] or st["blocked"] \
+                    or st["rate_limited"] \
+                    or st["health"] != "unknown":
+                evidence = True
+                break
+        if not evidence:
+            return pool
+        active = [s for s in pool
+                  if price_source_health(s) not in _INACTIVE_PRICE_HEALTH]
+        demoted = [s for s in pool
+                   if price_source_health(s) in _INACTIVE_PRICE_HEALTH]
+        active.sort(key=lambda s: -price_score(s))
+        return active + demoted
+    except Exception:  # noqa: BLE001
+        return pool
 
 
 def _source_healthy(source: str) -> bool:
@@ -211,6 +474,13 @@ def source_health() -> dict[str, dict[str, Any]]:
                     0.0, h.get("cooling_until", 0.0) - now) if cooling else 0.0,
                 "last_ok": h.get("last_ok", 0.0),
                 "last_fail": h.get("last_fail", 0.0),
+                # Pass #91: the learned vocabulary, on the same surface
+                "status": str(h.get("status") or "unknown"),
+                "stale": h.get("stale", 0),
+                "no_result": h.get("no_result", 0),
+                "blocked": h.get("blocked", 0),
+                "rate_limited": h.get("rate_limited", 0),
+                "last_error_class": h.get("last_error_class", ""),
             }
         return out
 
@@ -218,6 +488,216 @@ def source_health() -> dict[str, dict[str, Any]]:
 def _healthy_chain(chain: list[str]) -> list[str]:
     """Filter a source chain to healthy sources (circuit breaker)."""
     return [s for s in chain if _source_healthy(s)]
+
+
+# ── price learned-state persistence (Pass #91) ────────────────────────
+def bind_price_source_store(store: Any) -> bool:
+    """Bind (or re-bind) the KV store price learned state persists
+    through — the same injected-store discipline the media source
+    registry uses.  Idempotent for the same store object; a new
+    store's persisted state loads in (in-memory state, which is
+    fresher, wins per source).  Returns True when the binding
+    changed.  Never raises."""
+    global _price_store
+    try:
+        if store is None or _price_store is store:
+            return False
+        _price_store = store
+        _load_price_state()
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _persist_price_state() -> None:
+    """Write the learned price state to the bound store.  Never
+    raises; a no-op when no store is bound (memory-only)."""
+    if _price_store is None:
+        return
+    try:
+        with _health_lock:
+            payload = {"version": _PRICE_STATE_VERSION,
+                       "sources": {src: dict(h) for src, h
+                                   in _source_health.items()}}
+        raw = json.dumps(payload, ensure_ascii=False)
+        if hasattr(_price_store, "set_raw"):
+            _price_store.set_raw(PRICE_PERSIST_KEY, raw, "json")
+        else:
+            _price_store.set(PRICE_PERSIST_KEY, payload)
+    except Exception:  # noqa: BLE001
+        _log.debug("price source persist failed", exc_info=True)
+
+
+def _load_price_state() -> None:
+    """Restore learned price state from the bound store, as
+    recorded — a stood-down source stays stood-down until a fresh
+    outcome or probe revives it; nothing resurrects as trusted.
+    In-memory rows (fresher) win per source.  Never raises."""
+    if _price_store is None:
+        return
+    try:
+        data = _price_store.get(PRICE_PERSIST_KEY)
+        if isinstance(data, str):
+            data = json.loads(data)
+        if not isinstance(data, dict):
+            return
+        rows = data.get("sources") or {}
+        with _health_lock:
+            for src, raw in rows.items():
+                if not isinstance(raw, dict) or src in _source_health:
+                    continue
+                h = _blank_health()
+                for k in h:
+                    if k in raw:
+                        h[k] = raw[k]
+                _source_health[str(src)] = h
+    except Exception:  # noqa: BLE001
+        _log.debug("price source load failed", exc_info=True)
+
+
+def clear_price_source_state() -> bool:
+    """Drop the persisted learned price state (the seed chains are
+    untouched).  Returns True when a store is bound and the delete
+    was issued.  Never raises."""
+    try:
+        if _price_store is None:
+            return False
+        delete = getattr(_price_store, "delete", None)
+        if callable(delete):
+            delete(PRICE_PERSIST_KEY)
+            return True
+        return False
+    except Exception:  # noqa: BLE001
+        return False
+
+
+# ── staleness + error classification (Pass #91) ───────────────────────
+#: How old a quote's provider timestamp may be before the quote is
+#: STALE, per source — the provider's own cadence plus grace:
+#: continuous feeds (binance ticker, gold-api spot) get minutes;
+#: daily fixings (frankfurter, ECB) get 4 days so a Friday fixing
+#: read on Monday is fresh, while a week-frozen feed is stale;
+#: open.er-api advertises daily updates (2 days); yahoo/stooq daily
+#: closes get the same weekend-tolerant 4 days (this is what
+#: catches a delisted symbol's frozen meta — cf. the delisted
+#: XAUUSD=X note in _METAL_YAHOO).  None = the provider supplies
+#: no timestamp on this path, so freshness stays unknown.
+_QUOTE_STALE_AFTER_S: dict[str, float | None] = {
+    "binance": 300.0, "gold_api": 300.0,
+    "frankfurter": 4 * 86400.0, "ecb": 4 * 86400.0,
+    "open_er_api": 2 * 86400.0,
+    "yahoo": 4 * 86400.0, "yahoo_metals": 4 * 86400.0,
+    "stooq": 4 * 86400.0,
+    "coingecko": None, "kraken": None, "coinbase": None,
+}
+
+_TF_SECONDS = {"1m": 60, "3m": 180, "5m": 300, "15m": 900,
+               "30m": 1800, "1h": 3600, "2h": 7200, "4h": 14400,
+               "6h": 21600, "8h": 28800, "12h": 43200, "1d": 86400,
+               "3d": 259200, "1w": 604800, "1M": 2592000}
+
+
+def _quote_freshness(source: str, quote_ts: float | None,
+                     now: float = 0.0) -> tuple[str, float | None]:
+    """(freshness, age_s) for one quote: ``fresh`` / ``stale`` when
+    the provider supplied a timestamp and a cadence is known;
+    ``unknown`` otherwise — a verdict is never fabricated."""
+    if quote_ts is None:
+        return "unknown", None
+    threshold = _QUOTE_STALE_AFTER_S.get(source)
+    if threshold is None:
+        return "unknown", None
+    age = max(0.0, (now or time.time()) - float(quote_ts))
+    return ("stale" if age > threshold else "fresh"), age
+
+
+def _ohlcv_stale_after_s(timeframe: str) -> float:
+    """How old the newest bar may be before an OHLCV frame is stale:
+    3× the timeframe for intraday (weekend/gap tolerant), a flat
+    multi-day grace for daily-and-above fixings."""
+    tf = _TF_SECONDS.get(timeframe, 3600)
+    if tf >= 86400:
+        return max(5 * 86400.0, 1.5 * tf)
+    return max(900.0, 3.0 * tf)
+
+
+def _frame_last_ts(df: Any) -> float | None:
+    """Epoch-seconds of a frame's newest bar, or None.  Uses the
+    index's nanosecond value (UTC-exact), like sentinel_bridge."""
+    try:
+        idx = df.index
+        if len(idx) == 0:
+            return None
+        last = idx[-1]
+        if hasattr(last, "value"):
+            return float(last.value // 10**9)
+        return float(last)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _classify_fetch_error(exc: BaseException) -> tuple[str, str]:
+    """(kind, error_class) for one failed price fetch (Pass #91).
+
+    ``kind`` is the recording vocabulary: ``config`` means RECORD
+    NOTHING (a keyed source dark without its key is configuration,
+    #90 precedent); ``no_result`` is the provider answering "no
+    data for this symbol" (weak evidence, per-symbol reality);
+    ``rate_limited`` / ``blocked`` are their own classes; anything
+    else is ``failure`` with a transport error class."""
+    msg = str(exc or "").lower()
+    if "api_key" in msg or "apikey" in msg:
+        return "config", ""
+    if "rate limited" in msg or "429" in msg \
+            or "too many requests" in msg:
+        return "rate_limited", "rate_limited"
+    import re as _re
+    m = _re.search(r"http (\d{3})", msg)
+    if m:
+        code = int(m.group(1))
+        if code == 429:
+            return "rate_limited", "rate_limited"
+        if code in (403, 451):
+            return "blocked", "bot_block"
+        return "failure", f"http_{code}"
+    _NO_DATA = ("no klines", "no ohlc", "no candles", "no data for",
+                "no data (", "empty series", "empty", "no rate for",
+                "not in reference rates", "unsupported timeframe",
+                "no futures symbol", "no keyless spot",
+                "no metal history", "unknown asset", "need a pair")
+    if any(p in msg for p in _NO_DATA):
+        return "no_result", ""
+    if "bad response" in msg or "unexpected response" in msg \
+            or "parse failed" in msg:
+        return "failure", "malformed_response"
+    if "timed out" in msg or "timeout" in msg:
+        return "failure", "timeout"
+    if "fetch failed" in msg:
+        return "failure", "network_failure"
+    return "failure", "site_error"
+
+
+def _record_quote_result(source: str, result: dict[str, Any],
+                         now: float = 0.0) -> dict[str, Any]:
+    """Record one served quote's outcome and surface its freshness
+    on the result itself (Pass #91): ``quote_ts`` (the provider's
+    own timestamp, when it supplied one), ``quote_age_s`` and
+    ``freshness`` (fresh | stale | unknown) become part of the
+    quote dict every consumer already receives; ``source_demoted``
+    marks a serve from a demoted source — the fallback of last
+    resort, visible, never silent.  Consumer accept/reject policy
+    is unchanged: a stale quote is returned, recorded, surfaced."""
+    now = now or time.time()
+    ts = result.get("quote_ts")
+    freshness, age = _quote_freshness(source, ts, now)
+    result["quote_ts"] = ts
+    result["quote_age_s"] = round(age, 3) if age is not None else None
+    result["freshness"] = freshness
+    if price_source_health(source) in _INACTIVE_PRICE_HEALTH:
+        result["source_demoted"] = True
+    kind = {"fresh": "fresh", "stale": "stale"}.get(freshness, "served")
+    record_quote_outcome(source, kind, quote_ts=ts, age_s=age, now=now)
+    return result
 
 
 # ── HTTP ──────────────────────────────────────────────────────────────
@@ -565,10 +1045,46 @@ def _goldapi_quote(sym: dict[str, str]) -> dict[str, Any]:
     except (KeyError, TypeError, ValueError) as exc:
         raise MarketDataError(
             f"gold_api: bad response for {base} ({str(d)[:120]})") from exc
-    record_source_result("gold_api", True)
-    return {"symbol": sym["raw"], "price": price,
-            "change_pct_24h": None, "currency": "USD",
-            "source": "gold_api"}
+    # Pass #91: gold-api stamps each spot (``updatedAt``, ISO-8601) —
+    # surface it as quote_ts so staleness is computed, never guessed.
+    # (Recording is centralised in quote()/get_ohlcv since #91: the
+    # adapters used to self-record AND be recorded by their caller,
+    # double-counting every serve.)
+    out: dict[str, Any] = {"symbol": sym["raw"], "price": price,
+                           "change_pct_24h": None, "currency": "USD",
+                           "source": "gold_api"}
+    ts = _parse_iso_ts((d or {}).get("updatedAt"))
+    if ts is not None:
+        out["quote_ts"] = ts
+    return out
+
+
+def _parse_iso_ts(value: Any) -> float | None:
+    """ISO-8601 timestamp → epoch seconds, or None.  Never raises."""
+    try:
+        if not value:
+            return None
+        from datetime import datetime, timezone
+        dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.timestamp()
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _parse_date_ts(value: Any) -> float | None:
+    """A ``YYYY-MM-DD`` fixing date → epoch seconds (UTC midnight),
+    or None.  Never raises."""
+    try:
+        if not value:
+            return None
+        import calendar as _cal
+        import time as _time
+        return float(_cal.timegm(
+            _time.strptime(str(value)[:10], "%Y-%m-%d")))
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def _yahoo_metal_ohlc(sym: dict[str, str], timeframe: str,
@@ -605,7 +1121,6 @@ def _yahoo_metal_ohlc(sym: dict[str, str], timeframe: str,
     rows.sort(key=lambda r: r[0])
     if not rows:
         raise MarketDataError(f"yahoo_metals: empty series for {fsym}")
-    record_source_result("yahoo_metals", True)
     return _frame(rows[-bars:], ["timestamp", "open", "high", "low",
                                  "close", "volume"])
 
@@ -633,9 +1148,17 @@ def _open_er_api_quote(sym: dict[str, str]) -> dict[str, Any]:
     except (KeyError, TypeError, ValueError) as exc:
         raise MarketDataError(
             f"open_er_api: no rate for {base}/{quote_c}") from exc
-    record_source_result("open_er_api", True)
-    return {"symbol": sym["raw"], "price": rate, "change_pct_24h": None,
-            "currency": quote_c, "source": "open_er_api"}
+    out: dict[str, Any] = {"symbol": sym["raw"], "price": rate,
+                           "change_pct_24h": None,
+                           "currency": quote_c, "source": "open_er_api"}
+    # Pass #91: the payload stamps its own last update — surface it.
+    try:
+        updated = float((d or {}).get("time_last_update_unix") or 0)
+        if updated:
+            out["quote_ts"] = updated
+    except (TypeError, ValueError):
+        pass
+    return out
 
 
 def _ecb_direct_quote(sym: dict[str, str]) -> dict[str, Any]:
@@ -657,6 +1180,9 @@ def _ecb_direct_quote(sym: dict[str, str]) -> dict[str, Any]:
         rates = {"EUR": 1.0}
         for c in cubes:
             rates[c.get("currency")] = float(c.get("rate"))
+        # Pass #91: the fixing's own date lives on the time Cube.
+        timed = root.findall(".//e:Cube[@time]", ns)
+        fixing_day = timed[0].get("time") if timed else None
     except Exception as exc:
         raise MarketDataError(f"ecb: XML parse failed: {exc}") from exc
     if base not in rates or quote_c not in rates:
@@ -664,9 +1190,13 @@ def _ecb_direct_quote(sym: dict[str, str]) -> dict[str, Any]:
             f"ecb: pair {base}/{quote_c} not in reference rates")
     # ECB quotes EUR/XXX; cross: base/quote = (EUR/quote) / (EUR/base)
     rate = rates[quote_c] / rates[base]
-    record_source_result("ecb", True)
-    return {"symbol": sym["raw"], "price": rate, "change_pct_24h": None,
-            "currency": quote_c, "source": "ecb"}
+    out: dict[str, Any] = {"symbol": sym["raw"], "price": rate,
+                           "change_pct_24h": None,
+                           "currency": quote_c, "source": "ecb"}
+    ts = _parse_date_ts(fixing_day)
+    if ts is not None:
+        out["quote_ts"] = ts
+    return out
 
 
 # ── optional keyed upgrades (env vars, never required) ────────────────
@@ -845,13 +1375,17 @@ def get_ohlcv(symbol: str, market: str = "crypto",
     market = _detect_market(symbol, (market or "crypto").strip().lower())
     sym = normalize_symbol(symbol, market)
     if source == "auto":
-        chain = _keyed_chain(market) + _DEFAULT_CHAINS.get(market,
-                                                           ["binance"])
-        chain = _healthy_chain(chain)
+        # Pass #91: the learned order (day-one pin: zero evidence →
+        # the chain below byte-for-byte), then the circuit breaker;
+        # when every source is cooling/demoted the learned order is
+        # tried anyway — the demoted are the fallback of last
+        # resort, never silently dropped.
+        full = _keyed_chain(market) + _DEFAULT_CHAINS.get(market,
+                                                          ["binance"])
+        chain = _healthy_chain(ordered_price_chain(market, full))
         if not chain:
             # all sources cooling — try anyway, don't hard-fail
-            chain = _keyed_chain(market) + _DEFAULT_CHAINS.get(
-                market, ["binance"])
+            chain = ordered_price_chain(market, full)
     else:
         chain = [source.strip().lower()]
     errors: list[str] = []
@@ -862,15 +1396,39 @@ def get_ohlcv(symbol: str, market: str = "crypto",
             continue
         try:
             df = fn(sym, market, timeframe, bars)
-            record_source_result(src, True)
+            # Pass #91: bars always carry timestamps, so bar
+            # staleness is computed against the timeframe cadence
+            # and recorded; the frame surfaces it via attrs.
+            last_ts = _frame_last_ts(df)
+            freshness, age = ("unknown", None) if last_ts is None \
+                else (("stale" if (time.time() - last_ts)
+                        > _ohlcv_stale_after_s(timeframe)
+                        else "fresh"),
+                      max(0.0, time.time() - last_ts))
+            record_quote_outcome(
+                src, {"fresh": "fresh", "stale": "stale"}.get(
+                    freshness, "served"),
+                quote_ts=last_ts, age_s=age)
+            try:
+                df.attrs["source"] = src
+                df.attrs["freshness"] = freshness
+                df.attrs["last_bar_ts"] = last_ts
+                if price_source_health(src) in _INACTIVE_PRICE_HEALTH:
+                    df.attrs["source_demoted"] = True
+            except Exception:  # noqa: BLE001 - attrs are surface only
+                pass
             _log.info("market_data: %s %s %s via %s (%d bars)",
                       symbol, market, timeframe, src, len(df))
             return df
         except MarketDataError as exc:
-            record_source_result(src, False)
+            kind, error_class = _classify_fetch_error(exc)
+            if kind != "config":  # config records nothing (#90)
+                record_quote_outcome(src, kind,
+                                     error_class=error_class)
             errors.append(f"{src}: {exc}")
         except Exception as exc:  # noqa: BLE001 - adapter bug, try next
-            record_source_result(src, False)
+            record_quote_outcome(src, "failure",
+                                 error_class="unexpected")
             errors.append(f"{src}: unexpected {exc}")
             _log.warning("market_data adapter %s failed: %s", src, exc)
     raise MarketDataError(
@@ -879,11 +1437,38 @@ def get_ohlcv(symbol: str, market: str = "crypto",
 
 
 # ── quotes (stdlib-only, no pandas) ───────────────────────────────────
+def _live_chain(market: str, chain: list[str]) -> list[str]:
+    """The chain a quote fetch actually walks (Pass #91): the
+    learned order (day-one pin: zero evidence → *chain* untouched),
+    circuit-breaker filtered; when every source is cooling the
+    learned order is walked anyway — demoted/cooling sources are
+    the fallback of last resort, and a serve from one is marked
+    ``source_demoted`` on the result by :func:`_record_quote_result`."""
+    ordered = ordered_price_chain(market, chain)
+    live = _healthy_chain(ordered)
+    return live or ordered
+
+
+def _record_failure(source: str, exc: BaseException) -> None:
+    """Record one failed quote attempt with its classified kind —
+    except ``config``, which records nothing (#90 precedent)."""
+    kind, error_class = _classify_fetch_error(exc)
+    if kind != "config":
+        record_quote_outcome(source, kind, error_class=error_class)
+
+
 def quote(symbol: str, market: str = "crypto") -> dict[str, Any]:
     """Latest price + 24h change for one symbol. Keyless, no pandas.
 
-    Returns ``{"symbol","price","change_pct_24h","currency","source"}``.
-    ``change_pct_24h`` may be None when the source has no change data.
+    Returns ``{"symbol","price","change_pct_24h","currency","source"}``
+    plus, since Pass #91, the freshness surface: ``quote_ts`` (the
+    provider's own timestamp when it supplied one, else None),
+    ``quote_age_s`` and ``freshness`` (fresh | stale | unknown),
+    and ``source_demoted`` when a demoted source served as the
+    fallback of last resort.  ``change_pct_24h`` may be None when
+    the source has no change data.  Every attempt records its
+    outcome (see :func:`record_quote_outcome`); a stale quote is
+    still returned — recorded and surfaced, never silently dropped.
 
     Metal symbols (XAUUSD, XAG, …) are auto-routed to the commodities
     market even when ``market="forex"`` is passed.
@@ -892,30 +1477,38 @@ def quote(symbol: str, market: str = "crypto") -> dict[str, Any]:
     sym = normalize_symbol(symbol, market)
     disp = (symbol or "").strip().upper()
     if market == "crypto":
-        for src in _healthy_chain(["binance", "coingecko"]):
+        for src in _live_chain(market, ["binance", "coingecko"]):
             try:
                 if src == "binance":
                     d = _json(
                         "https://api.binance.com/api/v3/ticker/24hr",
                         {"symbol": sym["binance"]})
+                    if not (d or {}).get("lastPrice"):
+                        raise MarketDataError(
+                            f"binance: bad response ({str(d)[:120]})")
                     bid = float(d["bidPrice"]) if d.get("bidPrice") else None
                     ask = float(d["askPrice"]) if d.get("askPrice") else None
                     hi = float(d["highPrice"]) if d.get("highPrice") else None
                     lo = float(d["lowPrice"]) if d.get("lowPrice") else None
                     spread_bps = ((ask - bid) / float(d["lastPrice"])
                                   * 10000) if bid and ask else None
-                    record_source_result("binance", True)
-                    return {"symbol": disp,
-                            "price": float(d["lastPrice"]),
-                            "change_pct_24h": float(
-                                d.get("priceChangePercent") or 0),
-                            "currency": sym["quote"] or "USDT",
-                            "bid": bid, "ask": ask,
-                            "high": hi, "low": lo,
-                            "spread_bps": spread_bps,
-                            "volume": float(d.get("quoteVolume") or 0)
-                            or None,
-                            "source": "binance"}
+                    result: dict[str, Any] = {
+                        "symbol": disp,
+                        "price": float(d["lastPrice"]),
+                        "change_pct_24h": float(
+                            d.get("priceChangePercent") or 0),
+                        "currency": sym["quote"] or "USDT",
+                        "bid": bid, "ask": ask,
+                        "high": hi, "low": lo,
+                        "spread_bps": spread_bps,
+                        "volume": float(d.get("quoteVolume") or 0)
+                        or None,
+                        "source": "binance"}
+                    # binance stamps the ticker (closeTime, ms) —
+                    # surface it; absent → freshness stays unknown.
+                    if d.get("closeTime"):
+                        result["quote_ts"] = float(d["closeTime"]) / 1000.0
+                    return _record_quote_result("binance", result)
                 coin = _CG_MAP.get(sym["base"], sym["base"].lower())
                 d = _json(
                     "https://api.coingecko.com/api/v3/simple/price",
@@ -923,68 +1516,110 @@ def quote(symbol: str, market: str = "crypto") -> dict[str, Any]:
                      "include_24hr_change": "true"})
                 row = (d or {}).get(coin) or {}
                 if "usd" not in row:
-                    record_source_result("coingecko", False)
-                    continue
-                record_source_result("coingecko", True)
-                return {"symbol": disp, "price": float(row["usd"]),
-                        "change_pct_24h": row.get("usd_24h_change"),
-                        "currency": "USD", "source": "coingecko"}
-            except Exception:  # noqa: BLE001 - try next source
-                record_source_result(src, False)
+                    raise MarketDataError(
+                        f"coingecko: no data for {coin}")
+                # CoinGecko's simple/price carries NO timestamp —
+                # freshness stays honestly unknown (never fabricated).
+                return _record_quote_result("coingecko", {
+                    "symbol": disp, "price": float(row["usd"]),
+                    "change_pct_24h": row.get("usd_24h_change"),
+                    "currency": "USD", "source": "coingecko"})
+            except Exception as exc:  # noqa: BLE001 - try next source
+                _record_failure(src, exc)
                 continue
         raise MarketDataError(f"no crypto quote for {disp}")
     if market == "stocks":
-        ysym = _yahoo_symbol(sym, market)
-        try:
-            d = _json(
-                "https://query1.finance.yahoo.com/v8/finance/chart/"
-                f"{ysym}", {"interval": "1d", "range": "5d"})
-            meta = (d or {}).get("chart", {}).get("result", [{}])[0].get(
-                "meta", {})
-            price = meta.get("regularMarketPrice")
-            if price is not None:
-                return {"symbol": disp, "price": float(price),
-                        "change_pct_24h": None,
-                        "currency": str(meta.get("currency") or "USD"),
-                        "source": "yahoo"}
-        except Exception:  # noqa: BLE001 - fall through to stooq
-            pass
-        raw = _fetch("https://stooq.com/q/l/",
-                     {"s": sym["stooq"], "f": "sd2t2ohlcv",
-                      "h": "", "e": "csv"}).decode("utf-8", "ignore")
-        rows = list(csv.DictReader(io.StringIO(raw)))
-        if rows:
-            r = rows[0]
+        # NOTE (survey, Pass #91): this path recorded NOTHING before
+        # #91 — yahoo's success/failure and stooq's serve were the
+        # only quote outcomes in the layer with no health record.
+        for src in _live_chain(market, ["yahoo", "stooq"]):
             try:
-                return {"symbol": disp, "price": float(r["Close"]),
-                        "change_pct_24h": None, "currency": "USD",
-                        "source": "stooq"}
-            except (KeyError, TypeError, ValueError):  # noqa: E103 - malformed stooq row; MarketDataError raised below
-                pass
+                if src == "yahoo":
+                    ysym = _yahoo_symbol(sym, market)
+                    d = _json(
+                        "https://query1.finance.yahoo.com/v8/finance/"
+                        f"chart/{ysym}",
+                        {"interval": "1d", "range": "5d"})
+                    meta = (d or {}).get("chart", {}).get(
+                        "result", [{}])[0].get("meta", {})
+                    price = meta.get("regularMarketPrice")
+                    if price is None:
+                        raise MarketDataError(
+                            f"yahoo: no data for {ysym}")
+                    result = {"symbol": disp, "price": float(price),
+                              "change_pct_24h": None,
+                              "currency": str(
+                                  meta.get("currency") or "USD"),
+                              "source": "yahoo"}
+                    if meta.get("regularMarketTime"):
+                        result["quote_ts"] = float(
+                            meta["regularMarketTime"])
+                    return _record_quote_result("yahoo", result)
+                raw = _fetch("https://stooq.com/q/l/",
+                             {"s": sym["stooq"], "f": "sd2t2ohlcv",
+                              "h": "", "e": "csv"}).decode(
+                                  "utf-8", "ignore")
+                rows = list(csv.DictReader(io.StringIO(raw)))
+                if not rows:
+                    raise MarketDataError(
+                        f"stooq: no data for {sym['stooq']}")
+                r = rows[0]
+                try:
+                    price = float(r["Close"])
+                except (KeyError, TypeError, ValueError) as exc:
+                    raise MarketDataError(
+                        f"stooq: bad response ({str(r)[:120]})") from exc
+                result = {"symbol": disp, "price": price,
+                          "change_pct_24h": None, "currency": "USD",
+                          "source": "stooq"}
+                ts = _parse_date_ts(r.get("Date"))
+                if ts is not None and r.get("Time"):
+                    try:
+                        hh, mm, ss = (int(p) for p in
+                                      str(r["Time"]).split(":"))
+                        ts += hh * 3600 + mm * 60 + ss
+                    except (TypeError, ValueError):
+                        pass
+                if ts is not None:
+                    result["quote_ts"] = ts
+                return _record_quote_result("stooq", result)
+            except Exception as exc:  # noqa: BLE001 - try next source
+                _record_failure(src, exc)
+                continue
         raise MarketDataError(f"no stock quote for {disp}")
     if market == "forex":
         base, quote_c = sym["base"], sym["quote"]
-        # Chain: frankfurter → open.er-api.com → ECB direct.
-        # Each records health; cooling sources are skipped.
-        forex_chain = _healthy_chain(
-            ["frankfurter", "open_er_api", "ecb"])
+        # Chain: frankfurter → open.er-api.com → ECB direct, in the
+        # learned order; each attempt records its outcome.
         errors = []
-        for src in forex_chain:
+        for src in _live_chain(market,
+                               ["frankfurter", "open_er_api", "ecb"]):
             try:
                 if src == "frankfurter":
                     d = _json(f"https://api.frankfurter.dev/v2/rate/"
                               f"{base.lower()}/{quote_c.lower()}")
-                    rate = float((d or {})["rate"])
-                    record_source_result("frankfurter", True)
-                    return {"symbol": disp, "price": rate,
-                            "change_pct_24h": None,
-                            "currency": quote_c, "source": "frankfurter"}
+                    try:
+                        rate = float((d or {})["rate"])
+                    except (KeyError, TypeError, ValueError) as exc:
+                        raise MarketDataError(
+                            f"frankfurter: bad response "
+                            f"({str(d)[:120]})") from exc
+                    result = {"symbol": disp, "price": rate,
+                              "change_pct_24h": None,
+                              "currency": quote_c,
+                              "source": "frankfurter"}
+                    ts = _parse_date_ts((d or {}).get("date"))
+                    if ts is not None:
+                        result["quote_ts"] = ts
+                    return _record_quote_result("frankfurter", result)
                 elif src == "open_er_api":
-                    return _open_er_api_quote(sym)
+                    return _record_quote_result(
+                        "open_er_api", _open_er_api_quote(sym))
                 elif src == "ecb":
-                    return _ecb_direct_quote(sym)
+                    return _record_quote_result(
+                        "ecb", _ecb_direct_quote(sym))
             except Exception as exc:  # noqa: BLE001 - try next
-                record_source_result(src, False)
+                _record_failure(src, exc)
                 errors.append(f"{src}: {exc}")
                 continue
         # yahoo as last resort for forex (v8 chart)
@@ -997,32 +1632,44 @@ def quote(symbol: str, market: str = "crypto") -> dict[str, Any]:
                 "meta", {})
             price = meta.get("regularMarketPrice")
             if price is not None:
-                record_source_result("yahoo", True)
-                return {"symbol": disp, "price": float(price),
-                        "change_pct_24h": None,
-                        "currency": quote_c or "USD",
-                        "source": "yahoo"}
+                result = {"symbol": disp, "price": float(price),
+                          "change_pct_24h": None,
+                          "currency": quote_c or "USD",
+                          "source": "yahoo"}
+                if meta.get("regularMarketTime"):
+                    result["quote_ts"] = float(meta["regularMarketTime"])
+                return _record_quote_result("yahoo", result)
+            raise MarketDataError(f"yahoo: no data for {ysym}")
         except Exception as exc:  # noqa: BLE001
-            record_source_result("yahoo", False)
+            _record_failure("yahoo", exc)
             errors.append(f"yahoo: {exc}")
         raise MarketDataError(
             f"no forex quote for {base}/{quote_c}: {'; '.join(errors)}")
     if market == "commodities":
         # Chain: gold-api.com (real-time) → frankfurter (daily fixing).
         errors = []
-        for src in _healthy_chain(["gold_api", "frankfurter"]):
+        for src in _live_chain(market, ["gold_api", "frankfurter"]):
             try:
                 if src == "gold_api":
-                    return _goldapi_quote(sym)
+                    return _record_quote_result(
+                        "gold_api", _goldapi_quote(sym))
                 d = _json(f"https://api.frankfurter.dev/v2/rate/"
                           f"{sym['base'].lower()}/usd")
-                rate = float((d or {})["rate"])
-                record_source_result("frankfurter", True)
-                return {"symbol": disp, "price": rate,
-                        "change_pct_24h": None, "currency": "USD",
-                        "source": "frankfurter"}
+                try:
+                    rate = float((d or {})["rate"])
+                except (KeyError, TypeError, ValueError) as exc:
+                    raise MarketDataError(
+                        f"frankfurter: bad response "
+                        f"({str(d)[:120]})") from exc
+                result = {"symbol": disp, "price": rate,
+                          "change_pct_24h": None, "currency": "USD",
+                          "source": "frankfurter"}
+                ts = _parse_date_ts((d or {}).get("date"))
+                if ts is not None:
+                    result["quote_ts"] = ts
+                return _record_quote_result("frankfurter", result)
             except Exception as exc:  # noqa: BLE001 - try next
-                record_source_result(src, False)
+                _record_failure(src, exc)
                 errors.append(f"{src}: {exc}")
                 continue
         raise MarketDataError(
@@ -1065,17 +1712,208 @@ class SentinelMarketProvider:
         return quotes
 
 
+# ── price class status + health loop (Pass #91) ───────────────────────
+def price_source_status() -> dict[str, Any]:
+    """The price class's learned state (Pass #91): one row per
+    provider (keyless roster + keyed upgrades) with tier, keyed
+    flag, learned health, outcome counts (fresh-served / failed /
+    stale / blocked / rate-limited / no-result), score and last
+    error class; the per-market chains in their current learned
+    order; and the discovery verdict.  Never raises."""
+    try:
+        rows = []
+        for src in list(SOURCES) + [s for s in
+                                    ("alphavantage", "twelvedata",
+                                     "finnhub") if s not in SOURCES]:
+            st = price_source_stats(src)
+            with _health_lock:
+                h = _source_health.get(src) or {}
+                cooling = time.time() < float(
+                    h.get("cooling_until") or 0.0)
+            rows.append({
+                "source": src, "tier": SOURCE_TIERS.get(src, 9),
+                "keyed": src in KEYED_SOURCES.values(),
+                "covers": (SOURCES.get(src) or {}).get("covers", ""),
+                "health": st["health"], "score": price_score(src),
+                "ok": st["ok"], "fail": st["fail"],
+                "stale": st["stale"], "blocked": st["blocked"],
+                "rate_limited": st["rate_limited"],
+                "no_result": st["no_result"],
+                "last_error_class": st["last_error_class"],
+                "last_quote_ts": st["last_quote_ts"],
+                "last_age_s": st["last_age_s"],
+                "cooling_down": cooling})
+        chains = {market: ordered_price_chain(
+            market, _keyed_chain(market) + list(chain))
+            for market, chain in _DEFAULT_CHAINS.items()}
+        return {
+            "sources": rows, "chains": chains,
+            "persisted": _price_store is not None,
+            "candidates_pending": 0,
+            "discovery": (
+                "no candidate intake for the price class: new price "
+                "providers are APIs and no genuine discovery channel "
+                "exists in code (named absence, Pass #91) — outcomes, "
+                "health, ordering and persistence only"),
+        }
+    except Exception:  # noqa: BLE001
+        return {"sources": [], "chains": {}, "persisted": False,
+                "candidates_pending": 0, "discovery": ""}
+
+
+def _price_probes() -> dict[str, Callable[[], tuple[float | None, str]]]:
+    """One bounded REAL fetch per keyless provider (Pass #91): the
+    honest probe for a quote API is a quote — one liquid symbol,
+    one call.  Each probe returns (provider_timestamp, timeframe)
+    where timeframe is "" for quote probes (cadence judged by
+    :func:`_quote_freshness`) or the bar timeframe for OHLC probes.
+    Keyed providers are deliberately ABSENT: probing them would
+    burn the owner's quota — they are judged by real-fetch
+    outcomes only."""
+    btc = normalize_symbol("BTC/USDT", "crypto")
+
+    def _binance() -> tuple[float | None, str]:
+        d = _json("https://api.binance.com/api/v3/ticker/24hr",
+                  {"symbol": btc["binance"]})
+        if not (d or {}).get("lastPrice"):
+            raise MarketDataError("binance: bad response (probe)")
+        ts = d.get("closeTime")
+        return (float(ts) / 1000.0 if ts else None), ""
+
+    def _kraken() -> tuple[float | None, str]:
+        return _frame_last_ts(_kraken_ohlc(btc, "1h", 1)), "1h"
+
+    def _coinbase() -> tuple[float | None, str]:
+        return _frame_last_ts(_coinbase_candles(btc, "1h", 1)), "1h"
+
+    def _coingecko() -> tuple[float | None, str]:
+        d = _json("https://api.coingecko.com/api/v3/simple/price",
+                  {"ids": "bitcoin", "vs_currencies": "usd"})
+        if "usd" not in ((d or {}).get("bitcoin") or {}):
+            raise MarketDataError("coingecko: no data for bitcoin")
+        return None, ""  # no timestamp on this path — honestly unknown
+
+    def _yahoo() -> tuple[float | None, str]:
+        d = _json("https://query1.finance.yahoo.com/v8/finance/chart/"
+                  "AAPL", {"interval": "1d", "range": "5d"})
+        meta = (d or {}).get("chart", {}).get("result", [{}])[0].get(
+            "meta", {})
+        if meta.get("regularMarketPrice") is None:
+            raise MarketDataError("yahoo: no data for AAPL")
+        ts = meta.get("regularMarketTime")
+        return (float(ts) if ts else None), ""
+
+    def _stooq() -> tuple[float | None, str]:
+        df = _stooq_csv(normalize_symbol("AAPL", "stocks"), "1d", 1)
+        return _frame_last_ts(df), "1d"
+
+    def _frankfurter() -> tuple[float | None, str]:
+        d = _json("https://api.frankfurter.dev/v2/rate/eur/usd")
+        if not (d or {}).get("rate"):
+            raise MarketDataError("frankfurter: bad response (probe)")
+        return _parse_date_ts(d.get("date")), ""
+
+    def _gold_api() -> tuple[float | None, str]:
+        q = _goldapi_quote(normalize_symbol("XAUUSD", "commodities"))
+        return q.get("quote_ts"), ""
+
+    def _yahoo_metals() -> tuple[float | None, str]:
+        df = _yahoo_metal_ohlc(
+            normalize_symbol("XAUUSD", "commodities"), "1d", 1)
+        return _frame_last_ts(df), "1d"
+
+    def _open_er_api() -> tuple[float | None, str]:
+        q = _open_er_api_quote(normalize_symbol("USDEUR", "forex"))
+        return q.get("quote_ts"), ""
+
+    def _ecb() -> tuple[float | None, str]:
+        q = _ecb_direct_quote(normalize_symbol("EURUSD", "forex"))
+        return q.get("quote_ts"), ""
+
+    return {"binance": _binance, "kraken": _kraken,
+            "coinbase": _coinbase, "coingecko": _coingecko,
+            "yahoo": _yahoo, "stooq": _stooq,
+            "frankfurter": _frankfurter, "gold_api": _gold_api,
+            "yahoo_metals": _yahoo_metals,
+            "open_er_api": _open_er_api, "ecb": _ecb}
+
+
+def verify_price_sources(now: float = 0.0) -> dict[str, Any]:
+    """The price health loop (Pass #91): probe every KEYLESS
+    provider with one bounded real fetch for a liquid symbol and
+    record the outcome through the same vocabulary as real fetches
+    (a probe IS a real fetch).  Keyed providers are never probed —
+    probing would burn quota — they are reported ``skipped_keyed``
+    and judged by real-fetch outcomes.  Persists via the recorder.
+    Never raises."""
+    now = now or time.time()
+    summary: dict[str, Any] = {
+        "checked": 0, "verified_live": 0, "stale": 0,
+        "rate_limited": 0, "bot_blocked": 0, "unverifiable": 0,
+        "stood_down": 0, "disabled": 0,
+        "skipped_keyed": sorted(KEYED_SOURCES.values()),
+        "changed": []}
+    bucket = {"verified-live": "verified_live", "stale": "stale",
+              "rate-limited": "rate_limited",
+              "bot-blocked": "bot_blocked",
+              "unverifiable": "unverifiable",
+              "stood-down": "stood_down", "disabled": "disabled"}
+    try:
+        for src, probe in _price_probes().items():
+            before = price_source_health(src)
+            try:
+                ts, timeframe = probe()
+            except Exception as exc:  # noqa: BLE001 - record, move on
+                kind, error_class = _classify_fetch_error(exc)
+                if kind == "no_result":
+                    # the probe symbol is liquid by construction:
+                    # no data for it is a source problem, not a
+                    # catalogue miss — record it unverifiable-grade
+                    kind, error_class = "failure", "probe_no_data"
+                if kind != "config":
+                    record_quote_outcome(src, kind,
+                                         error_class=error_class,
+                                         now=now)
+            else:
+                if timeframe:
+                    freshness = "unknown" if ts is None else (
+                        "stale" if (now - ts)
+                        > _ohlcv_stale_after_s(timeframe) else "fresh")
+                    age = None if ts is None else max(0.0, now - ts)
+                else:
+                    freshness, age = _quote_freshness(src, ts, now)
+                record_quote_outcome(
+                    src, {"fresh": "fresh", "stale": "stale"}.get(
+                        freshness, "served"),
+                    quote_ts=ts, age_s=age, now=now)
+            summary["checked"] += 1
+            after = price_source_health(src)
+            if bucket.get(after):
+                summary[bucket[after]] += 1
+            if before != after:
+                summary["changed"].append(
+                    {"source": src, "from": before, "to": after})
+    except Exception:  # noqa: BLE001 - the loop reports, never raises
+        _log.debug("price source health loop failed", exc_info=True)
+    return summary
+
+
 def source_status() -> dict[str, Any]:
     """Which sources are usable right now (keyless always; keyed iff env).
 
     Includes reliability tiers and live health (circuit-breaker state).
+    Pass #91: also carries the price class's learned state under
+    ``price_sources`` — this EXISTING surface is extended, not
+    replaced, so sentinel_bridge's doctor and every other reader
+    keep working.
     """
     keyed = {src: bool(_key(env)) for env, src in KEYED_SOURCES.items()}
     return {"keyless": list(SOURCES),
             "keyed": keyed,
             "tiers": SOURCE_TIERS,
             "default_chains": _DEFAULT_CHAINS,
-            "health": source_health()}
+            "health": source_health(),
+            "price_sources": price_source_status()}
 
 
 # ── TTL cache ─────────────────────────────────────────────────────────

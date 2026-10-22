@@ -2012,6 +2012,17 @@ class PartnerRuntime(
                     ensure_finance_jobs(self._scheduler)
                 except Exception as exc:  # noqa: BLE001 - optional
                     _log.warning("finance jobs not registered: %s", exc)
+                # Price sources: the quote-provider health loop
+                # (every 6h — one bounded real quote probe per
+                # keyless provider; keyed providers never probed;
+                # pass #91).
+                try:
+                    from ...finance.price_jobs import (
+                        ensure_price_source_health_jobs)
+                    ensure_price_source_health_jobs(self._scheduler)
+                except Exception as exc:  # noqa: BLE001 - optional
+                    _log.warning("price source health job not "
+                                 "registered: %s", exc)
                 # News: the continuous poll (every 30m — fetch, store,
                 # interest-score, push the high tier).  The digests
                 # ride the briefing slots above; this job is what
