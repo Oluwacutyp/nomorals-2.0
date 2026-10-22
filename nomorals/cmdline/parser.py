@@ -1943,6 +1943,11 @@ def _parser() -> argparse.ArgumentParser:
                      "nm pump study\\n"
                      "nm pump dossier <mint>\\n"
                      "nm pump calls\\n"
+                     "nm pump wallet <addr>\\n"
+                     "nm pump graph\\n"
+                     "nm pump attention <mint>\\n"
+                     "nm pump learn\\n"
+                     "nm pump shelf <query>\\n"
                      "nm pump sources\\n"
                      "nm pump provision"),
     )
@@ -1951,10 +1956,18 @@ def _parser() -> argparse.ArgumentParser:
     p_watch = pump_sub.add_parser("watch", help="one intake + evaluation cycle; publish calls")
     p_watch.add_argument("--no-deliver", action="store_true",
                          help="log calls without pushing them")
-    pump_sub.add_parser("study", help="grade due calls, recompute dev profiles")
+    pump_sub.add_parser("study", help="grade due calls, recompute dev profiles, rebuild the wallet graph, recalibrate, shelve")
     p_doss = pump_sub.add_parser("dossier", help="full evidence record for one token")
     p_doss.add_argument("mint")
     pump_sub.add_parser("calls", help="the call ledger")
+    p_wallet = pump_sub.add_parser("wallet", help="one wallet's realized-PnL record in the smart-money graph")
+    p_wallet.add_argument("wallet")
+    pump_sub.add_parser("graph", help="the smart-money graph: graded wallets + cohorts")
+    p_att = pump_sub.add_parser("attention", help="organic vs manufactured attention verdict for one token")
+    p_att.add_argument("mint")
+    pump_sub.add_parser("learn", help="scoring parameter version + recalibration journal")
+    p_shelf = pump_sub.add_parser("shelf", help="search the Library shelf of dossiers + wallets")
+    p_shelf.add_argument("query", nargs="+")
     pump_sub.add_parser("sources", help="memecoin sources on the registry")
     pump_sub.add_parser("provision", help="keyed RPC tier state (drive from chat: /pump provision helius)")
 

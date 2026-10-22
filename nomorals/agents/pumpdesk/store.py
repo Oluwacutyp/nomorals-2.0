@@ -15,6 +15,17 @@ JSON state files:
 * ``dossiers.json`` — the current dossier per mint.
 * ``dev_profiles.json`` — per-creator launch history + outcomes.
 * ``watchlists.json`` — dev wallets + smart wallets the desk tracks.
+* ``wallet_graph.json`` — the P2 smart-money graph: per-wallet
+  realized-PnL records + cohort clusters, rebuilt from the trade
+  ledger by the study cycle.
+* ``score_params.json`` / ``score_params.jsonl`` — the current
+  scoring parameter version + the append-only recalibration
+  history (the learning loop's journal: every adjustment, and
+  every refusal to adjust, is a record).
+* ``knowledge.jsonl`` — the desk's Library shelf: dossiers and
+  wallet records shelved as knowledge items with provenance
+  (teachings-item shape), retrievable after the desk forgets the
+  dossier itself.
 """
 
 from __future__ import annotations
@@ -67,6 +78,11 @@ class PumpStore:
         self._dossiers_path = os.path.join(self.dir, "dossiers.json")
         self._devs_path = os.path.join(self.dir, "dev_profiles.json")
         self._watch_path = os.path.join(self.dir, "watchlists.json")
+        self._graph_path = os.path.join(self.dir, "wallet_graph.json")
+        self._params_path = os.path.join(self.dir, "score_params.json")
+        self._params_log_path = os.path.join(self.dir,
+                                             "score_params.jsonl")
+        self._knowledge_path = os.path.join(self.dir, "knowledge.jsonl")
 
     # ── launches ──────────────────────────────────────────────────
 
@@ -214,3 +230,51 @@ class PumpStore:
 
     def watched_smart(self) -> set[str]:
         return set(self.watchlists().get("smart", {}))
+
+    # ── wallet graph (P2) ─────────────────────────────────────────
+
+    def save_graph(self, graph: dict[str, Any]) -> None:
+        self._save_json(self._graph_path, graph)
+
+    def graph(self) -> dict[str, Any]:
+        data = self._load_json(self._graph_path)
+        data.setdefault("wallets", {})
+        data.setdefault("clusters", [])
+        return data
+
+    # ── scoring parameters + recalibration journal (P2) ───────────
+
+    def score_params(self) -> Optional[dict[str, Any]]:
+        data = self._load_json(self._params_path)
+        return data or None
+
+    def save_score_params(self, params: dict[str, Any]) -> None:
+        self._save_json(self._params_path, params)
+
+    def record_param_event(self, event: dict[str, Any]) -> None:
+        _append_jsonl(self._params_log_path, event)
+
+    def param_events(self) -> list[dict[str, Any]]:
+        return _read_jsonl(self._params_log_path)
+
+    # ── knowledge shelf (P2) ──────────────────────────────────────
+
+    def shelve_knowledge(self, item: dict[str, Any]) -> bool:
+        """Append one knowledge item to the shelf.  Append-only
+        like every desk ledger: re-shelving the same key appends a
+        newer version and reads take the latest (see
+        :meth:`knowledge`), so a dossier's shelf record tracks its
+        outcome instead of freezing at first sight."""
+        _append_jsonl(self._knowledge_path, item)
+        return True
+
+    def knowledge(self) -> list[dict[str, Any]]:
+        """The shelf, deduped by key (latest wins)."""
+        seen: dict[str, dict[str, Any]] = {}
+        order: list[str] = []
+        for row in _read_jsonl(self._knowledge_path):
+            key = row.get("_key") or row.get("id", "")
+            if key not in seen:
+                order.append(key)
+            seen[key] = row
+        return [seen[k] for k in order]

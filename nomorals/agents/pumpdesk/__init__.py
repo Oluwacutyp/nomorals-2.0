@@ -38,27 +38,38 @@ def register(registry: Any) -> None:
         description=(
             "Pump.fun intelligence desk: action=watch (one intake + "
             "evaluation cycle: frontend candidates, dossier refresh, "
-            "de-rug gate, publish calls) | study (grade due calls, "
-            "recompute dev profiles, flag serial ruggers) | status "
-            "(launches, dossiers, call calibration vs the graduation "
-            "base rate, feed health) | dossier (mint — full evidence "
-            "record for one token) | calls (the call ledger) | "
-            "watch_dev / watch_smart / unwatch (wallet — the "
-            "watchlists) | provision (the desk's keyed RPC tier "
-            "state). Signals only — never trades."
+            "attention verification, de-rug gate, publish calls) | "
+            "study (grade due calls, recompute dev profiles, rebuild "
+            "the smart-money graph, recalibrate score parameters "
+            "from the graded journal, shelve dossiers into the "
+            "Library) | status (launches, dossiers, call "
+            "calibration vs the graduation base rate, wallet graph "
+            "+ learning state, feed health) | dossier (mint — full "
+            "evidence record for one token) | calls (the call "
+            "ledger) | wallet (wallet — the graph's realized-PnL "
+            "record for one wallet) | graph (the smart-money graph: "
+            "graded wallets + cohorts) | attention (mint — the "
+            "attention verifier's verdict: organic vs manufactured) "
+            "| learn (scoring parameter version + recalibration "
+            "journal) | shelf (query — search the Library shelf of "
+            "dossiers/wallets) | watch_dev / watch_smart / unwatch "
+            "(wallet — the watchlists) | provision (the desk's "
+            "keyed RPC tier state). Signals only — never trades."
         ),
         capability=Capability.DB_READ,
         parameters={
             "action": "str — watch|study|status|dossier|calls|"
+                      "wallet|graph|attention|learn|shelf|"
                       "watch_dev|watch_smart|unwatch|provision",
-            "mint": "str — token mint for action=dossier",
-            "wallet": "str — wallet for watch actions",
+            "mint": "str — token mint for action=dossier/attention",
+            "wallet": "str — wallet for watch/wallet actions",
+            "query": "str — search text for action=shelf",
             "note": "str — note attached to a watch action",
             "deliver": "bool — publish calls when action=watch",
         },
     )
     def pumpdesk(*, action: str = "status", mint: str = "",
-                 wallet: str = "", note: str = "",
+                 wallet: str = "", query: str = "", note: str = "",
                  deliver: bool = False) -> dict[str, Any]:
         act = (action or "status").strip().lower()
         desk = PumpDesk(context)
@@ -81,6 +92,22 @@ def register(registry: Any) -> None:
             return {"calls": [c.to_dict()
                               for c in desk.calls.log.calls()],
                     "calibration": desk.status()["calls"]}
+        if act == "wallet":
+            if not wallet:
+                return {"error": "action=wallet needs a wallet"}
+            return desk.wallet_view(wallet.strip())
+        if act == "graph":
+            return desk.graph_view()
+        if act == "attention":
+            if not mint:
+                return {"error": "action=attention needs a mint"}
+            return desk.attention_view(mint.strip())
+        if act == "learn":
+            return desk.learn_view()
+        if act == "shelf":
+            if not query:
+                return {"error": "action=shelf needs a query"}
+            return desk.shelf_view(query.strip())
         if act in ("watch_dev", "watch_smart"):
             if not wallet:
                 return {"error": f"action={act} needs a wallet"}
@@ -107,5 +134,6 @@ def register(registry: Any) -> None:
                              "session; the key is validated live, "
                              "then vaulted"}
         return {"error": f"unknown action {act!r} — watch|study|status|"
-                         "dossier|calls|watch_dev|watch_smart|unwatch|"
+                         "dossier|calls|wallet|graph|attention|learn|"
+                         "shelf|watch_dev|watch_smart|unwatch|"
                          "provision"}

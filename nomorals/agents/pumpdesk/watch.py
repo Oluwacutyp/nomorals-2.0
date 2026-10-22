@@ -1,14 +1,14 @@
 """Watchlists — the owner's eyes on the actors, not just tokens.
 
-P1 scope (design §5 puts the full smart-money graph in P2): the
-lists themselves, their use as intake priority (a watched dev's
-launch earns a dossier), the serial-rugger auto-flag feeding the
-dev list, and watched-wallet activity checks the watch cycle
-reports.  The smart list already feeds scoring today — as simple
-confluence (a watched smart wallet among a dossier's buyers),
-honestly labelled; the realized-PnL ledger that would *earn* a
-wallet its place on the list is P2's graph work, and nothing here
-pretends otherwise.
+The lists themselves, their use as intake priority (a watched
+dev's launch earns a dossier), the serial-rugger auto-flag
+feeding the dev list, and watched-wallet activity checks the
+watch cycle reports.  ``smart_confluence`` below is the P1
+set-intersection count, kept as the fallback for dossiers the
+wallet graph has not covered; P2's track-record confluence —
+wallets weighted by earned, realized-PnL records, cohorts
+counted once — lives in ``graph.py`` and supersedes it in the
+desk's refresh path whenever the graph covers a mint's buyers.
 """
 
 from __future__ import annotations

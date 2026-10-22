@@ -251,6 +251,18 @@ def build_dossier(store: Any, rpc: Any, mint: str,
             "price_sol": price / LAMPORTS_PER_SOL,
             "market_cap_sol": round(mc / LAMPORTS_PER_SOL, 3),
             "real_sol": round(_sol(state.real_sol_reserves), 3),
+            # virtual/real reserve divergence (P2): the share of
+            # the curve's apparent SOL depth that is neither the
+            # fixed 30 SOL virtual advance nor net real money —
+            # churn that washed through and out.  The score's
+            # manipulation component reads it.
+            "virtual_sol": round(_sol(state.virtual_sol_reserves), 3),
+            "reserve_divergence": round(max(
+                0.0, (state.virtual_sol_reserves
+                      - 30 * LAMPORTS_PER_SOL
+                      - state.real_sol_reserves)
+                / state.virtual_sol_reserves), 4)
+            if state.virtual_sol_reserves > 0 else None,
             "complete_flag": state.complete,
             "quote_mint": state.quote_mint,
         }
@@ -343,6 +355,10 @@ def render_dossier(d: dict[str, Any]) -> str:
                  f"({c['curve_pct_basis']}), {c['real_sol']:.1f} SOL in, "
                  f"mcap {c['market_cap_sol']:.1f} SOL, "
                  f"price {c['price_sol']:.8f} SOL")
+        if c.get("virtual_sol") is not None:
+            L.append(f"reserves: {c['virtual_sol']:.0f} SOL virtual / "
+                     f"{c['real_sol']:.1f} SOL real (divergence "
+                     f"{(c.get('reserve_divergence') or 0):.0%})")
         L.append(f"graduated: {'YES' if c.get('graduated') else 'no'}"
                  f" (curve complete flag: {c['complete_flag']})")
     else:

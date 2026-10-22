@@ -27,7 +27,7 @@ from __future__ import annotations
 import json
 import os
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from typing import Any, Optional
 
 __all__ = [
@@ -65,6 +65,10 @@ class PumpCall:
     target_mc_sol: float = 0.0
     invalidation_mc_sol: float = 0.0
     composite: float = 0.0
+    #: the verdict's components at publication (P2) — the learning
+    #: loop's evidence; older rows without them are excluded from
+    #: recalibration and the exclusion is counted, in the open.
+    components: dict = field(default_factory=dict)
     catalyst: str = ""
     risks: str = ""
     narrative: str = ""
@@ -167,6 +171,14 @@ class CallEngine:
             target_mc_sol=entry_mc * TARGET_MULTIPLE,
             invalidation_mc_sol=entry_mc * INVALIDATION_FRACTION,
             composite=float(getattr(verdict, "composite", 0.0)),
+            components={
+                "rug_risk": float(getattr(verdict, "rug_risk", 0.0)),
+                "manipulation": float(
+                    getattr(verdict, "manipulation", 0.0)),
+                "momentum": float(getattr(verdict, "momentum", 0.0)),
+                "smart_money": float(
+                    getattr(verdict, "smart_money", 0.0)),
+            },
             catalyst=getattr(verdict, "evidence", "")[:400],
             risks="; ".join(risks)[:400],
             call_id=f"pump-{dossier.get('mint', '')[:8]}-{int(now)}")

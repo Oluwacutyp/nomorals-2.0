@@ -20,6 +20,7 @@ import time
 from typing import Any, Optional
 
 from . import chain, dossier as _dossier, firehose as _firehose
+from . import graph as _graph, learn as _learn, shelf as _shelf
 from . import outcomes as _outcomes, score as _score, watch as _watch
 from .calls import CallEngine, calibration, render_call
 from .store import PumpStore, pumpdesk_dir
@@ -37,8 +38,10 @@ class PumpDesk:
     def __init__(self, context: Any = None, desk_dir: str = "",
                  store: Optional[PumpStore] = None,
                  notifier: Any = None, rpc: Any = None,
-                 registry: Any = None):
+                 registry: Any = None,
+                 attention_search: Any = None):
         self.context = context
+        self._attention_search = attention_search
         self.dir = desk_dir or pumpdesk_dir()
         self.store = store or PumpStore(self.dir)
         if notifier is None and context is not None:
@@ -200,6 +203,15 @@ class PumpDesk:
                                         self.store.watched_smart())
         if smart:
             d["smart_hits"] = smart
+        # P2: the wallet graph's track-record confluence supersedes
+        # the label count when the graph covers this mint's buyers
+        graph = self.store.graph()
+        if graph.get("wallets"):
+            conf = _graph.graph_confluence(self.store, mint,
+                                           graph=graph)
+            if conf["buyers_seen"]:
+                d["smart"] = conf
+        if smart or d.get("smart"):
             self.store.save_dossier(d)
         return d
 
@@ -273,10 +285,13 @@ class PumpDesk:
             out["stream"] = self.firehose.run_slice(stream_seconds)
         # 3. refresh + evaluate every dossiered mint; publish calls
         calls, reasons = [], []
+        params = _learn.current_params(self.store)
         for mint in sorted(self.store.dossiers()):
             d = self.refresh_dossier(mint)
+            self._attention_check(d)
             verdict = _score.evaluate(
-                d, smart_wallets=self.store.watched_smart())
+                d, smart_wallets=self.store.watched_smart(),
+                params=params)
             if verdict.verdict == "CALL_CANDIDATE":
                 call = self.calls.build_call(d, verdict)
                 if call is not None and not self._already_called(mint):
@@ -301,6 +316,37 @@ class PumpDesk:
         out["health"] = self._health_report()
         return out
 
+    #: Attention verdicts are cached on the dossier this long
+    #: before the verifier re-gathers off-chain evidence.
+    ATTENTION_TTL_S = 1800.0
+
+    def _attention_check(self, d: dict[str, Any],
+                         force: bool = False) -> dict[str, Any]:
+        """Run/refresh the attention verifier for one dossier
+        (cached on the dossier; a fresh verdict rides into the
+        score's manipulation component via dossier["attention"]).
+        Only dossiers past the sample floors earn the search —
+        attention evidence for a 3-trade token decides nothing."""
+        from . import attention as _attention
+        now = time.time()
+        cached = d.get("attention") or {}
+        if (not force and cached
+                and now - float(cached.get("checked_at") or 0)
+                < self.ATTENTION_TTL_S):
+            return cached
+        trades = d.get("trades") or {}
+        if (int(trades.get("trades", 0)) < _score.MIN_TRADES
+                and not force):
+            return cached
+        search_fn = self._attention_search
+        if search_fn is None:
+            search_fn = _attention.default_search_fn(self.context)
+        att = _attention.verify_attention(d, search_fn=search_fn,
+                                          store=self.store, now=now)
+        d["attention"] = att
+        self.store.save_dossier(d)
+        return att
+
     def _already_called(self, mint: str) -> bool:
         now = time.time()
         return any(c.mint == mint and c.expires_at > now
@@ -308,9 +354,14 @@ class PumpDesk:
 
     def study_cycle(self) -> dict[str, Any]:
         """The slower cycle: grade due calls, recompute dev
-        profiles, classify launch outcomes — the desk learning from
-        its own journal (weight recalibration is journaled here as a
-        proposal record, never silent drift: design §4.4.6)."""
+        profiles, classify launch outcomes — the desk learning
+        from its own journal.  P2 completes the loop: the wallet
+        graph is rebuilt from the trade ledger, the scoring
+        parameters recalibrate against the graded calls (every
+        attempt journaled — adjust, hold, or INSUFFICIENT_DATA,
+        never silent drift: design §4.4.6), and the dossiers and
+        wallet records that earned it are shelved into the
+        Library."""
         out: dict[str, Any] = {"at": time.time()}
         out["scoring"] = self.calls.score_due(
             self.store, snapshot_fn=_dex_snapshot)
@@ -322,7 +373,49 @@ class PumpDesk:
             if p.get("serial_rugger"):
                 self.store.watch_dev(p["creator"],
                                      note="auto: serial rugger")
+        graph = _graph.build_wallet_graph(self.store)
+        out["graph"] = {
+            "wallets": len(graph.get("wallets", {})),
+            "graded": sum(1 for w in graph.get("wallets", {}).values()
+                          if w.get("verdict") != "unknown"),
+            "clusters": len(graph.get("clusters", [])),
+        }
+        out["learning"] = _learn.recalibrate(
+            self.store, self.calls.log.calls())
+        out["shelved"] = _shelf.shelve_notable(
+            self.store, context=self.context)
         return out
+
+    # ── P2 views ──────────────────────────────────────────────────
+
+    def wallet_view(self, wallet: str) -> dict[str, Any]:
+        rec = _graph.wallet_record(self.store, wallet)
+        return {"wallet": wallet, "record": rec,
+                "rendered": _graph.render_wallet(rec, wallet)}
+
+    def graph_view(self) -> dict[str, Any]:
+        graph = self.store.graph()
+        return {"graph": {"wallets": len(graph.get("wallets", {})),
+                          "clusters": graph.get("clusters", []),
+                          "built_at": graph.get("built_at", 0.0)},
+                "rendered": _graph.render_graph(graph)}
+
+    def attention_view(self, mint: str) -> dict[str, Any]:
+        from . import attention as _attention
+        d = self.store.dossier(mint) or self.refresh_dossier(mint)
+        att = self._attention_check(d, force=True)
+        return {"mint": mint, "attention": att,
+                "rendered": _attention.render_attention(att)}
+
+    def learn_view(self) -> dict[str, Any]:
+        return {"params": _learn.current_params(self.store),
+                "events": self.store.param_events(),
+                "rendered": _learn.render_learning(self.store)}
+
+    def shelf_view(self, query: str) -> dict[str, Any]:
+        hits = _shelf.search_shelf(self.store, query)
+        return {"query": query, "hits": hits,
+                "rendered": _shelf.render_shelf_hits(hits, query)}
 
     # ── health (Pass-7 alert discipline) ──────────────────────────
 
@@ -373,6 +466,8 @@ class PumpDesk:
     def status(self) -> dict[str, Any]:
         from .sources import pump_status
         calls = self.calls.log.calls()
+        graph = self.store.graph()
+        wallets = graph.get("wallets", {})
         return {
             "launches_seen": len(self.store.launches()),
             "dossiers": len(self.store.dossiers()),
@@ -381,10 +476,23 @@ class PumpDesk:
                 1 for p in self.store.dev_profiles().values()
                 if p.get("serial_rugger")),
             "calls": calibration(calls),
+            "graph": {
+                "wallets": len(wallets),
+                "smart": sum(1 for w in wallets.values()
+                             if w.get("verdict") == "smart"),
+                "losing": sum(1 for w in wallets.values()
+                              if w.get("verdict") == "losing"),
+                "clusters": len(graph.get("clusters", [])),
+            },
+            "learning": {
+                "params": _learn.current_params(self.store),
+                "events": len(self.store.param_events()),
+            },
+            "shelf_items": len(self.store.knowledge()),
             "sources": pump_status(self.registry),
             "firehose": (self.firehose.stats
                          if self._firehose is not None else {}),
-            "execution": "none — signals only (P1); no wallet, no "
+            "execution": "none — signals only (P2); no wallet, no "
                          "signing, no orders",
         }
 
@@ -420,6 +528,18 @@ def render_status(st: dict[str, Any]) -> str:
         L.append(f"firehose: backend {fh.get('backend') or 'idle'}, "
                  f"{fh.get('events', 0)} events, {fh.get('drops', 0)} "
                  f"drops")
+    g = st.get("graph") or {}
+    if g:
+        L.append(f"wallet graph: {g.get('wallets', 0)} wallets "
+                 f"({g.get('smart', 0)} smart, {g.get('losing', 0)} "
+                 f"losing), {g.get('clusters', 0)} cohort(s)")
+    learn = st.get("learning") or {}
+    if learn:
+        params = learn.get("params") or {}
+        L.append(f"learning: parameter v{params.get('version', 1)}, "
+                 f"{learn.get('events', 0)} recalibration record(s); "
+                 f"shelf: {st.get('shelf_items', 0)} knowledge "
+                 f"item(s)")
     src = (st.get("sources") or {}).get("sources", [])
     if src:
         L.append("sources: " + ", ".join(

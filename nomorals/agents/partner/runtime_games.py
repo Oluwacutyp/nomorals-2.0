@@ -2927,9 +2927,17 @@ class RuntimeGamesMixin:
 
         /pump status     — launches, dossiers, call calibration, feeds
         /pump watch      — one intake + evaluation cycle now
-        /pump study      — grade due calls, recompute dev profiles
+        /pump study      — grade due calls, recompute dev profiles,
+                           rebuild the wallet graph, recalibrate,
+                           shelve into the Library
         /pump dossier <mint> — the full evidence record for a token
         /pump calls      — the call ledger (graded in the open)
+        /pump wallet <addr> — a wallet's graph record (realized PnL)
+        /pump graph      — the smart-money graph: graded wallets,
+                           cohorts
+        /pump attention <mint> — organic vs manufactured attention
+        /pump learn      — score parameter version + recalibrations
+        /pump shelf <query> — search the Library shelf
         /pump sources    — the desk's feeds on the shared registry
         /pump watch dev|smart <wallet> — track a wallet
         /pump unwatch <wallet> — stop tracking a wallet
@@ -2952,6 +2960,15 @@ class RuntimeGamesMixin:
                     "/pump dossier <mint> — curve state in SOL, dev "
                     "rug history, block-0 absorption, gate verdict\n"
                     "/pump calls — the call ledger\n"
+                    "/pump wallet <addr> — a wallet's realized-PnL "
+                    "record in the smart-money graph\n"
+                    "/pump graph — graded wallets + cohorts\n"
+                    "/pump attention <mint> — organic vs manufactured "
+                    "attention verdict\n"
+                    "/pump learn — scoring parameter version + the "
+                    "recalibration journal\n"
+                    "/pump shelf <query> — search the Library shelf "
+                    "of dossiers + wallets\n"
                     "/pump sources — memecoin feeds on the registry\n"
                     "/pump watch dev|smart <wallet> — track a wallet\n"
                     "/pump unwatch <wallet>\n"
@@ -3001,11 +3018,20 @@ class RuntimeGamesMixin:
         if verb == "study":
             rep = desk.study_cycle()
             sc = rep.get("scoring") or {}
+            g = rep.get("graph") or {}
+            ln = rep.get("learning") or {}
+            sh = rep.get("shelved") or {}
             return (f"pump study: {sc.get('scored_now', 0)} calls "
                     f"graded ({sc.get('wins_now', 0)} wins); "
                     f"{rep.get('dev_profiles', 0)} dev profiles; "
                     f"{rep.get('serial_ruggers', 0)} serial ruggers "
-                    f"auto-watched")
+                    f"auto-watched; wallet graph: "
+                    f"{g.get('wallets', 0)} wallets "
+                    f"({g.get('graded', 0)} graded, "
+                    f"{g.get('clusters', 0)} cohorts); learning: "
+                    f"{ln.get('status', 'n/a')}; shelved "
+                    f"{sh.get('dossiers', 0)} dossiers + "
+                    f"{sh.get('wallets', 0)} wallets into the Library")
         if verb == "dossier":
             if len(parts) < 2:
                 return "usage: /pump dossier <mint>"
@@ -3021,6 +3047,22 @@ class RuntimeGamesMixin:
         if verb == "calls":
             calls = [c.to_dict() for c in desk.calls.log.calls()]
             return render_calls(calls)
+        if verb == "wallet":
+            if len(parts) < 2:
+                return "usage: /pump wallet <addr>"
+            return desk.wallet_view(parts[1].strip())["rendered"]
+        if verb == "graph":
+            return desk.graph_view()["rendered"]
+        if verb == "attention":
+            if len(parts) < 2:
+                return "usage: /pump attention <mint>"
+            return desk.attention_view(parts[1].strip())["rendered"]
+        if verb == "learn":
+            return desk.learn_view()["rendered"]
+        if verb == "shelf":
+            if len(parts) < 2:
+                return "usage: /pump shelf <query>"
+            return desk.shelf_view(" ".join(parts[1:]))["rendered"]
         if verb == "sources":
             from ..pumpdesk.sources import pump_status
             st = pump_status(desk.registry)

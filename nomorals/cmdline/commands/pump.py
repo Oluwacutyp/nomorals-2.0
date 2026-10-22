@@ -36,10 +36,38 @@ def _cmd_pump(args: Any, context: Any) -> int:
     if action == "study":
         rep = desk.study_cycle()
         sc = rep.get("scoring") or {}
+        g = rep.get("graph") or {}
+        ln = rep.get("learning") or {}
+        sh = rep.get("shelved") or {}
         print(f"study: {sc.get('scored_now', 0)} calls graded "
               f"({sc.get('wins_now', 0)} wins), "
               f"{rep.get('dev_profiles', 0)} dev profiles, "
-              f"{rep.get('serial_ruggers', 0)} serial ruggers flagged")
+              f"{rep.get('serial_ruggers', 0)} serial ruggers flagged; "
+              f"graph: {g.get('wallets', 0)} wallets "
+              f"({g.get('graded', 0)} graded, {g.get('clusters', 0)} "
+              f"cohorts); learning: {ln.get('status', 'n/a')}; "
+              f"shelved {sh.get('dossiers', 0)} dossiers + "
+              f"{sh.get('wallets', 0)} wallets")
+        return 0
+
+    if action == "wallet":
+        print(desk.wallet_view(args.wallet)["rendered"])
+        return 0
+
+    if action == "graph":
+        print(desk.graph_view()["rendered"])
+        return 0
+
+    if action == "attention":
+        print(desk.attention_view(args.mint)["rendered"])
+        return 0
+
+    if action == "learn":
+        print(desk.learn_view()["rendered"])
+        return 0
+
+    if action == "shelf":
+        print(desk.shelf_view(" ".join(args.query))["rendered"])
         return 0
 
     if action == "dossier":
