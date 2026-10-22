@@ -1,6 +1,7 @@
 """``nm apk`` — ApkForge: intake, dissect, teach, diff (A1) +
 toolchain, decode, edit, patch, undo, build, keys, splits, jadx
-(A2 workbench)."""
+(A2 workbench) + bisect, signatures, hexpatch, artifacts, send
+(A3)."""
 
 from __future__ import annotations
 
@@ -9,11 +10,14 @@ from typing import Any
 
 def _cmd_apk(args: Any, context: Any) -> int:
     """Route `nm apk` subcommands."""
-    from ...agents.apkforge import (ApkForge, render_build_card,
+    from ...agents.apkforge import (ApkForge, render_artifacts,
+                                    render_bisect_card,
+                                    render_build_card,
                                     render_diff_card,
                                     render_dossier_card, render_list,
-                                    render_project, render_status,
-                                    render_toolchain)
+                                    render_project,
+                                    render_signatures,
+                                    render_status, render_toolchain)
 
     forge = ApkForge(context)
     action = args.apk_action
@@ -188,6 +192,61 @@ def _cmd_apk(args: Any, context: Any) -> int:
             return _fail(res)
         print(f"jadx → {res['jadx']} "
               f"({res.get('java_files', 'cached')} java files)")
+        return 0
+
+    if action == "bisect":
+        res = forge.bisect(args.series, args.check)
+        if res.get("error"):
+            return _fail(res)
+        print(render_bisect_card(res))
+        if res.get("diff_path"):
+            print(f"\ntransition diff: {res['diff_path']}")
+        return 0
+
+    if action == "signatures":
+        res = forge.signatures(args.op, prefix=args.prefix,
+                               label=args.label, kind=args.kind,
+                               reason=args.reason)
+        if res.get("error"):
+            return _fail(res)
+        if "card_text" in res:
+            print(res["card_text"])
+        elif "promoted" in res:
+            e = res["promoted"]
+            print(f"promoted {e['prefix']} — {e['label']} "
+                  f"({e['kind']}), evidence: "
+                  f"{e['provenance']['occurrences']} dossier(s)")
+        elif "demoted" in res:
+            print(f"demoted {res['demoted']['prefix']}")
+        else:
+            print(res.get("proposals"))
+        return 0
+
+    if action == "hexpatch":
+        import sys
+
+        raw = (sys.stdin.read() if args.patch_file == "-"
+               else open(args.patch_file, encoding="utf-8").read())
+        res = forge.hexpatch(args.project, raw)
+        if res.get("error"):
+            return _fail(res)
+        hr = res["hexpatch_result"]
+        print(f"hex patch {hr['patch']!r} applied as edit "
+              f"#{hr['edit_id']}: {hr['detail']}")
+        return 0
+
+    if action == "artifacts":
+        res = forge.artifacts()
+        print(render_artifacts(res))
+        return 0
+
+    if action == "send":
+        res = forge.send_artifact(args.artifact, args.platform,
+                                  args.chat_id)
+        if res.get("error"):
+            return _fail(res)
+        print(f"sent {res['artifact']['id']} → "
+              f"{res['sent']['platform']}:{res['sent']['chat_id']}")
         return 0
 
     print(f"unknown apk action: {action}")

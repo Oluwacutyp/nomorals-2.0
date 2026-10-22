@@ -2703,6 +2703,13 @@ class RuntimeGamesMixin:
         /apk splits <project> [list|extract <part>|merge|
                       installset|generate]
         /apk jadx <project>      — decompile to Java (reading only)
+        /apk bisect <p1,p2,…> <predicate> — the version where a
+                      dossier property flipped (git-bisect contract)
+        /apk signatures [promote|demote <prefix>] — tracker-table
+                      growth: census, proposals, journaled promotion
+        /apk hexpatch <project> <patch-json> — native .so byte patch
+        /apk artifacts           — Museum census (sendable cards)
+        /apk send <artifact> <platform> <chat> — deliver an artifact
         """
         from ..apkforge import (ApkForge, render_build_card,
                                 render_diff_card, render_dossier_card,
@@ -2737,6 +2744,16 @@ class RuntimeGamesMixin:
                 "/apk keys — vault keystores",
                 "/apk splits <project> [op] — bundle surgery",
                 "/apk jadx <project> — Java reading surface",
+                "/apk bisect <p1,p2,…> <predicate> — version where "
+                "a property flipped, e.g. permission: "
+                "android.permission.CAMERA",
+                "/apk signatures [promote|demote <prefix>] — "
+                "tracker table growth",
+                "/apk hexpatch <project> <patch-json> — native .so "
+                "byte patch",
+                "/apk artifacts — Museum census",
+                "/apk send <artifact> <platform> <chat> — deliver "
+                "an artifact file",
             ]))
 
         if verb in ("", "help"):
@@ -2919,6 +2936,65 @@ class RuntimeGamesMixin:
                     f"({res.get('java_files', 'cached')} java "
                     "files; reading surface only — edits happen "
                     "in the apktool project)")
+        if verb == "bisect":
+            chunks = (tail or "").strip().split(None, 2)
+            if len(chunks) < 3:
+                return ("usage: /apk bisect <p1,p2,…> <predicate> — "
+                        "e.g. /apk bisect apk_a,apk_b,apk_c "
+                        "permission: android.permission.CAMERA")
+            res = forge.bisect(chunks[1], chunks[2])
+            if res.get("error"):
+                return res["error"]
+            out = res["card_text"]
+            if res.get("diff_path"):
+                out += f"\n\ntransition diff: {res['diff_path']}"
+            return out
+        if verb == "signatures":
+            op = parts[1].lower() if len(parts) > 1 else "list"
+            kw = {}
+            if op in ("promote", "demote"):
+                if len(parts) < 3:
+                    return f"usage: /apk signatures {op} <prefix>"
+                kw["prefix"] = parts[2]
+                if op == "demote" and len(parts) > 3:
+                    kw["reason"] = " ".join(parts[3:])
+            res = forge.signatures(op, **kw)
+            if res.get("error"):
+                return res["error"]
+            if "card_text" in res:
+                return res["card_text"]
+            if "promoted" in res:
+                e = res["promoted"]
+                return (f"promoted {e['prefix']} — {e['label']} "
+                        f"({e['kind']}); journaled with its "
+                        f"evidence ({e['provenance']['occurrences']} "
+                        "dossier(s))")
+            if "demoted" in res:
+                return f"demoted {res['demoted']['prefix']} — journaled"
+            return str(res.get("proposals"))
+        if verb == "hexpatch":
+            chunks = (tail or "").strip().split(None, 2)
+            if len(chunks) < 3:
+                return "usage: /apk hexpatch <project> <patch-json>"
+            res = forge.hexpatch(chunks[1], chunks[2])
+            if res.get("error"):
+                return res["error"]
+            hr = res["hexpatch_result"]
+            return (f"hex patch {hr['patch']!r} applied as edit "
+                    f"#{hr['edit_id']}: {hr['detail']} — rebuild "
+                    f"with /apk build {chunks[1]}")
+        if verb == "artifacts":
+            res = forge.artifacts()
+            return res["card_text"]
+        if verb == "send":
+            if len(parts) < 4:
+                return ("usage: /apk send <artifact> <platform> "
+                        "<chat_id> — /apk artifacts lists ids")
+            res = forge.send_artifact(parts[1], parts[2], parts[3])
+            if res.get("error"):
+                return res["error"]
+            return (f"sent {res['artifact']['title']} → "
+                    f"{res['sent']['platform']}:{res['sent']['chat_id']}")
         return f"unknown /apk verb {verb!r}\n{_usage()}"
 
     # ── pump desk: /pump (pump.fun intelligence, signals only) ────────

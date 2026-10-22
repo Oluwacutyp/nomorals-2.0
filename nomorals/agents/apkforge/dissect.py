@@ -41,8 +41,10 @@ _CLASS_NAMES_CAP = 20000
 
 # Seed SDK/tracker signature list (package prefixes, Exodus-style).
 # Deliberately small in A1 and labeled as a seed in every dossier —
-# A3 grows it under the open-sources law.  Absence of a hit is never
-# proof of absence.
+# A3 grows the table from dissection evidence (signatures.py:
+# discovery → proposal → journaled promotion); grown entries join
+# dissections via dissect_apk's extra_signatures and are marked
+# origin="grown".  Absence of a hit is never proof of absence.
 SDK_SIGNATURES: tuple[tuple[str, str, str], ...] = (
     ("com.google.android.gms.ads", "Google AdMob", "ads"),
     ("com.google.android.gms.analytics", "Google Analytics (GMS)", "analytics"),
@@ -292,7 +294,8 @@ def apkid_scan(path: str | Path, timeout: int = 120) -> dict[str, Any]:
 
 # ── dex census ───────────────────────────────────────────────────────
 
-def _dex_census(a: Any) -> dict[str, Any]:
+def _dex_census(a: Any,
+                extra_signatures: tuple = ()) -> dict[str, Any]:
     from androguard.core.dex import DEX
 
     per_dex: list[dict[str, Any]] = []
@@ -399,12 +402,17 @@ def _dex_census(a: Any) -> dict[str, Any]:
     # classes of its own in this dex.
     dotted = [_dotted(c) for c in ref_types | set(class_names)]
     sdk_hits: list[dict[str, Any]] = []
-    for prefix, label, kind in SDK_SIGNATURES:
+    table = [(p, label, kind, "seed")
+             for p, label, kind in SDK_SIGNATURES]
+    table += [(p, label, kind, "grown")
+              for p, label, kind in extra_signatures]
+    for prefix, label, kind, origin in table:
         hits = [c for c in dotted
                 if c == prefix or c.startswith(prefix + ".")]
         if hits:
             sdk_hits.append({"name": label, "kind": kind,
                              "package_prefix": prefix,
+                             "origin": origin,
                              "class_count": len(hits)})
     return {
         "per_dex": per_dex,
@@ -428,8 +436,13 @@ def _dex_census(a: Any) -> dict[str, Any]:
 # ── main entry ───────────────────────────────────────────────────────
 
 def dissect_apk(path: str | Path, *, include_apkid: bool = True,
-                source_sha256: str = "") -> dict[str, Any]:
+                source_sha256: str = "",
+                extra_signatures: tuple = ()) -> dict[str, Any]:
     """Full static dissection → the Dossier (a plain dict).
+
+    ``extra_signatures`` carries the signature store's grown
+    (prefix, label, kind) entries (A3) — hits from them are marked
+    ``origin="grown"`` next to the compiled-in seeds.
 
     Raises RuntimeError when the dissect engine is unavailable or the
     file is not a parseable APK — callers surface that verbatim."""
@@ -541,7 +554,7 @@ def dissect_apk(path: str | Path, *, include_apkid: bool = True,
             "providers": _rows(a.get_providers()),
         }
 
-    census = _dex_census(a)
+    census = _dex_census(a, extra_signatures)
     all_strings = census.pop("_all_strings")
     sdk_hits = census.pop("sdk_hits")
 
@@ -643,8 +656,14 @@ def dissect_apk(path: str | Path, *, include_apkid: bool = True,
         "dex": census,
         "strings_total": len(all_strings),
         "sdk_signatures": sdk_hits,
-        "sdk_seed_note": "seed signature list (A1) — a hit is evidence; "
-                         "no hit is not proof of absence",
+        "sdk_seed_note": (
+            "signature table: A1 seed list"
+            + (f" + {len(extra_signatures)} grown entr"
+               f"{'y' if len(extra_signatures) == 1 else 'ies'} "
+               "(A3 discovery, journaled promotions)"
+               if extra_signatures else "")
+            + " — a hit is evidence; no hit is not proof of "
+              "absence"),
         "resources": {
             "by_top_dir": {k: {"count": res_counts[k],
                                "bytes": res_sizes[k]}
@@ -778,9 +797,10 @@ def render_dossier_md(d: dict[str, Any]) -> str:
         for u in dex["urls"][:25]:
             out.append(f"- {u}")
     if d.get("sdk_signatures"):
-        out.append("## SDK / tracker census (seed signatures)")
+        out.append("## SDK / tracker census (signature table)")
         for s in d["sdk_signatures"]:
-            out.append(f"- {s['name']} ({s['kind']}) — "
+            out.append(f"- {s['name']} ({s['kind']}"
+                       f"{', grown' if s.get('origin') == 'grown' else ''}) — "
                        f"{s['class_count']} classes under "
                        f"`{s['package_prefix']}`")
         out.append(f"_{d.get('sdk_seed_note', '')}_")

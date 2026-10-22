@@ -1909,6 +1909,26 @@ def _parser() -> argparse.ArgumentParser:
     a_sp.add_argument("--alias", default="")
     a_jx = apk_sub.add_parser("jadx", help="decompile to Java (reading surface)")
     a_jx.add_argument("project")
+    a_bi = apk_sub.add_parser("bisect", help="find the version where a dossier property flipped (git-bisect contract over the version series)")
+    a_bi.add_argument("series", nargs="+",
+                      help="project refs of ONE app (sorted by versionCode)")
+    a_bi.add_argument("--check", required=True,
+                      help="predicate: 'permission: …' | 'class: …' | 'tracker: …' | 'exported: …' | 'endpoint: …' | 'cert: …'")
+    a_sg = apk_sub.add_parser("signatures", help="tracker/SDK signature table growth: list|proposals|promote|demote")
+    a_sg.add_argument("op", nargs="?", default="list",
+                      choices=["list", "proposals", "promote", "demote"])
+    a_sg.add_argument("--prefix", default="")
+    a_sg.add_argument("--label", default="")
+    a_sg.add_argument("--kind", default="")
+    a_sg.add_argument("--reason", default="")
+    a_hx = apk_sub.add_parser("hexpatch", help="native .so byte-pattern patch (JSON file or - for stdin)")
+    a_hx.add_argument("project")
+    a_hx.add_argument("patch_file")
+    apk_sub.add_parser("artifacts", help="Museum census: projects, dossiers, builds as sendable cards")
+    a_se = apk_sub.add_parser("send", help="send an artifact via the chat gateway (needs the running runtime)")
+    a_se.add_argument("artifact")
+    a_se.add_argument("platform")
+    a_se.add_argument("chat_id")
 
     desk_p = sub.add_parser("desk", aliases=CLI_ALIASES["desk"],
         help="betting desk: crash pattern lab, verdicts library, timed signal calls (analysis only)",

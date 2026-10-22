@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from . import intake as intake_mod
+from . import signatures as sig_mod
 from .build import BuildError, build_project, render_build_card
 from .diff import diff_dossiers, render_diff_card, render_diff_md
 from .edit import (EditError, edit_manifest, edit_strings,
@@ -122,9 +123,11 @@ class ApkForge:
                              "apk list shows what has landed"}
         target, target_sha = self._dissect_target(proj)
         try:
-            dossier = dissect_apk(target,
-                                  include_apkid=include_apkid,
-                                  source_sha256=target_sha)
+            dossier = dissect_apk(
+                target,
+                include_apkid=include_apkid,
+                source_sha256=target_sha,
+                extra_signatures=sig_mod.active_signatures(self.root))
         except RuntimeError as exc:
             return {"error": str(exc)}
         if proj.kind != "apk":
@@ -149,11 +152,22 @@ class ApkForge:
                      f"v{ident.get('version_name')} — "
                      f"{dossier['dex']['totals']['classes']} classes, "
                      f"{len(dossier['permissions'])} permissions")
+        # A3 signature discovery: this dissection is evidence for
+        # the growing tracker table (candidate census + grown
+        # sightings).  A census failure is reported, never hidden,
+        # and never fails the dissection itself.
+        try:
+            observed = sig_mod.observe_dossier(self.root, proj.id,
+                                               dossier)
+        except Exception as exc:  # noqa: BLE001 — reported in-band
+            observed = {"error": f"signature observation failed: "
+                                 f"{exc}"}
         return {"project": self._card(proj), "dossier": dossier,
                 "card_text": render_dossier_card(dossier),
                 "md": md,
                 "dossier_path": str(proj.dir / "dossier.json"),
                 "dossier_md_path": str(proj.dir / "dossier.md"),
+                "signature_observation": observed,
                 "techforge_feed": techforge_feed(dossier)}
 
     def _ensure_dossier(self, proj: Project) -> dict[str, Any] | None:
@@ -412,6 +426,179 @@ class ApkForge:
                              "(reading surface only)")
         return {"project": self._card(proj), "jadx": str(out),
                 "java_files": len(java_files), "cached": False}
+
+    # ── bisect (A3) ──────────────────────────────────────────────
+    def bisect(self, series: Any, check: str) -> dict[str, Any]:
+        """Version-series bisect: order the landed versions of one
+        app by versionCode and halve on a dossier predicate (the
+        git-bisect good/bad/skip contract) to the exact version
+        where the property flipped, with the pair's diff as
+        evidence.  Journaled + resumable per series+predicate."""
+        from . import bisect as bisect_mod
+
+        refs = series if isinstance(series, list) else \
+            [r.strip() for r in str(series or "").split(",")
+             if r.strip()]
+        if len(refs) < 2:
+            return {"error": "bisect needs at least two versions "
+                             "of the same app"}
+        try:
+            pred = bisect_mod.parse_predicate(check)
+        except bisect_mod.BisectError as exc:
+            return {"error": str(exc)}
+        projects: list[Project] = []
+        for ref in refs:
+            proj = self.resolve(ref)
+            if proj is None:
+                return {"error": f"no project matches {ref!r} — "
+                                 "apk list shows what has landed"}
+            projects.append(proj)
+        dossiers: dict[str, dict[str, Any] | None] = {}
+        meta: dict[str, dict[str, Any]] = {}
+        packages: set[str] = set()
+        for proj in projects:
+            dossier = self._ensure_dossier(proj)
+            dossiers[proj.id] = dossier
+            ident = (dossier or {}).get("identity") or {}
+            code = ident.get("version_code")
+            if code is None:
+                code = proj.record.get("version_code")
+            if code is None:
+                return {"error": f"project {proj.id} has no "
+                                 "readable versionCode — a version "
+                                 "series cannot be ordered without "
+                                 "it; dissect it first or land a "
+                                 "parseable build"}
+            if ident.get("package"):
+                packages.add(str(ident["package"]))
+            meta[proj.id] = {
+                "version_name": ident.get("version_name")
+                                or proj.record.get("version_name", ""),
+                "version_code": int(code),
+                "created_at": float(proj.record.get("created_at")
+                                    or 0)}
+        if len(packages) > 1:
+            return {"error": "the series spans more than one app: "
+                             + ", ".join(sorted(packages))
+                             + " — a version series is one package"}
+        projects.sort(key=lambda p: (meta[p.id]["version_code"],
+                                     meta[p.id]["created_at"]))
+        ids = [p.id for p in projects]
+        state = bisect_mod.load_session(self.root, ids, check)
+        resumed = bool(state.get("resumed"))
+
+        def judge(pid: str) -> str:
+            v = bisect_mod.evaluate_predicate(dossiers.get(pid),
+                                              pred)
+            bisect_mod.record_verdict(self.root, state, pid, v)
+            return v
+
+        try:
+            result = bisect_mod.halve(ids, judge,
+                                      known=state["verdicts"])
+        except bisect_mod.BisectError as exc:
+            return {"error": str(exc)}
+        bisect_mod.finish_session(self.root, state, result)
+        out: dict[str, Any] = {
+            **result, "predicate": pred, "versions": meta,
+            "resumed": resumed, "session": state["key"],
+            "series_projects": [self._card(p) for p in projects]}
+        summary = bisect_mod.render_bisect_card(out)
+        for proj in projects:
+            proj.journal("bisect",
+                         f"check {check!r}: {result['status']}"
+                         + (f" — transition {result['transition']}"
+                            if result.get("transition") else ""))
+        if result.get("transition"):
+            older = self.resolve(result["transition"]["older"])
+            newer = self.resolve(result["transition"]["newer"])
+            da, db = dossiers[older.id], dossiers[newer.id]
+            if da is not None and db is not None:
+                delta = diff_dossiers(da, db)
+                out["diff"] = delta
+                out["diff_card"] = render_diff_card(delta)
+                report = (self.root / "bisects" / state["key"]
+                          / "transition-diff.md")
+                report.write_text(render_diff_md(delta),
+                                  encoding="utf-8")
+                out["diff_path"] = str(report)
+                summary = bisect_mod.render_bisect_card(out)
+        out["card_text"] = summary
+        return out
+
+    # ── signature growth (A3) ────────────────────────────────────
+    def signatures(self, op: str = "list", *, prefix: str = "",
+                   label: str = "", kind: str = "",
+                   reason: str = "") -> dict[str, Any]:
+        op = (op or "list").strip().lower()
+        try:
+            if op in ("list", "status"):
+                st = sig_mod.signatures_status(self.root)
+                return {"signatures": st,
+                        "card_text": sig_mod.render_signatures(st)}
+            if op == "proposals":
+                return {"proposals": sig_mod.proposals(self.root),
+                        "threshold": sig_mod.RECURRENCE_THRESHOLD}
+            if op == "promote":
+                entry = sig_mod.promote(self.root, prefix,
+                                        label=label, kind=kind)
+                return {"promoted": entry,
+                        "signatures":
+                            sig_mod.signatures_status(self.root)}
+            if op == "demote":
+                gone = sig_mod.demote(self.root, prefix,
+                                      reason=reason)
+                return {"demoted": gone,
+                        "signatures":
+                            sig_mod.signatures_status(self.root)}
+        except sig_mod.SignatureError as exc:
+            return {"error": str(exc)}
+        return {"error": f"unknown signatures op {op!r} — "
+                         "list|proposals|promote|demote"}
+
+    # ── native hex patching (A3) ────────────────────────────────
+    def hexpatch(self, ref: str, patch_doc: Any) -> dict[str, Any]:
+        from .hexpatch import HexPatchError, apply_hexpatch
+
+        proj = self._need_project(ref)
+        if isinstance(proj, dict):
+            return proj
+        try:
+            ensure_decoded(self.root, proj)
+            res = apply_hexpatch(proj, patch_doc)
+        except (HexPatchError, EditError, ToolchainError) as exc:
+            return {"error": str(exc)}
+        return {"project": self._card(proj), "hexpatch_result": res}
+
+    # ── Museum artifacts (A3) ────────────────────────────────────
+    def artifacts(self) -> dict[str, Any]:
+        from .museum import list_artifacts, render_artifacts
+
+        res = list_artifacts(self.root)
+        return {**res, "card_text": render_artifacts(res)}
+
+    def send_artifact(self, ref: str, platform: str,
+                      chat_id: str) -> dict[str, Any]:
+        """Deliver one artifact (project / dossier / build) through
+        the repo's real file-send surface — the card's path is the
+        file, sent as-is via the live gateway."""
+        from .museum import find_artifact
+
+        card = find_artifact(self.root, ref)
+        if card is None:
+            return {"error": f"no artifact matches {ref!r} — "
+                             "artifacts lists what exists"}
+        if not platform or not chat_id:
+            return {"error": "send needs a platform and chat_id"}
+        from ...tools.filesend import send_file
+
+        try:
+            sent = send_file(self.context, platform, chat_id,
+                             str(card["path"]),
+                             caption=f"🪓 {card['title']}")
+        except Exception as exc:  # noqa: BLE001 — ToolError + kin
+            return {"error": f"send failed: {exc}"}
+        return {"artifact": card, "sent": sent}
 
 
 # ── text renderers for the chat / CLI surfaces ───────────────────────
