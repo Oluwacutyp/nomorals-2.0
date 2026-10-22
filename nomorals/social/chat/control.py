@@ -459,6 +459,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "voices": (0, 0),      # /voices — list every voice, cloned vs built-in
     "bet": (0, None),        # /bet analyze <home> vs <away> [odds…] | bankroll | backtest
     "desk": (0, None),       # /desk status|study|signals|library|collect|sources|provision — the betting desk (crash lab + signal calls)
+    "apk": (0, None),        # /apk add|list|status|show|dissect|teach|diff — ApkForge: APK intake + dissection + version diff
     "finance": (0, None),    # /finance quote|analyze|signal|idea|backtest|strategies|compare|watch|doctor
     "weather": (0, None),    # /weather [place] — live conditions + forecast + alerts
     "tz": (0, None),         # /tz [time] — timezone conversion, labeled in owner tz
@@ -2119,6 +2120,10 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
             "usage": "/desk status | /desk study | /desk signals | /desk library | /desk collect | /desk sources | /desk provision",
             "example": "/desk status",
             "related": "/bet"},
+    "apk": {"what": "ApkForge, the APK workbench: lands APKs and bundle containers (upload or URL) with full provenance, dissects them statically with androguard + APKiD (manifest anatomy, permissions in plain language, components and what their exported flags expose, dex census, embedded SDKs/trackers, certificate, native libs, packer verdict), teaches from the actual dossier, and diffs two versions component by component (permissions, classes by structural hash, certificate, endpoints). A1 is dissect-only: editing, rebuilding and signing arrive in A2 and are reported as such, never faked.",
+            "usage": "/apk add <path-or-url> | /apk list | /apk status | /apk show <project> | /apk dissect <project> | /apk teach <project> [topic] | /apk diff <project> <other>",
+            "example": "/apk add https://example.com/app.apk",
+            "related": "/museum /filesend"},
     "finance": {"what": "the finance brain: Devon's native TA stack (regime detection, strategy committee, signal fusion, event backtester, risk manager — ported from the Sentinel.py engine) over free keyless market data (Binance/Stooq/Frankfurter). Quotes, regime analysis, signals, full trade plans with stops/targets, per-strategy backtests, and price alerts. Research only — never financial advice.",
             "usage": "/finance quote <sym> [market] | /finance analyze <sym> [market] [tf] | /finance signal <sym> [market] | /finance idea <sym> [market] [--profile P] | /finance backtest <sym> [market] [--profile P] [--strategy NAME] | /finance strategies | /finance compare <s1,s2> [market] | /finance watch <sym> <above|below> <price> [market] | /finance doctor",
             "example": "/finance idea BTC crypto --profile conservative",
@@ -2425,7 +2430,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
     ("tools & automation", ["schedule", "db", "artifact", "api", "connectors", "provision", "notion",
                             "gcal", "trello", "proxy", "workspace", "record",
                             "macro", "file", "publish", "notify", "proactive", "mission",
-                            "bet", "desk", "finance", "weather", "tz", "email", "gmail", "mail", "inbox", "routine", "home", "store", "track", "untrack", "trip", "travelclient", "contract", "legal", "research", "contracts", "regwatch", "uprofile", "vnote", "match", "cgroup", "challenge", "room", "scamcheck", "passport", "truecost", "value", "valuepick", "watch", "send", "leads", "guardrails", "competitor", "cost", "panel",
+                            "bet", "desk", "apk", "finance", "weather", "tz", "email", "gmail", "mail", "inbox", "routine", "home", "store", "track", "untrack", "trip", "travelclient", "contract", "legal", "research", "contracts", "regwatch", "uprofile", "vnote", "match", "cgroup", "challenge", "room", "scamcheck", "passport", "truecost", "value", "valuepick", "watch", "send", "leads", "guardrails", "competitor", "cost", "panel",
                            "exness", "stripe", "content",
                            "tempmail", "checkmail", "vnumber", "checksms",
                            "browser", "paper", "backup"]),
@@ -2681,7 +2686,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
     ("tools & automation",
      ["schedule", "db", "artifact", "api", "proxy", "workspace", "record", "macro", "file",
       "publish", "notify", "proactive", "mission", "features", "decode", "cookies", "cookielab", "cipher",
-      "monitor", "investigate", "bet", "desk", "finance", "weather", "tz", "email", "gmail", "mail", "inbox", "routine", "home", "store", "track", "untrack", "trip", "travelclient", "contract", "legal", "contracts", "regwatch", "uprofile", "vnote", "match", "cgroup", "challenge", "room", "scamcheck", "passport", "truecost", "value", "valuepick", "watch", "send", "leads", "panel",
+      "monitor", "investigate", "bet", "desk", "apk", "finance", "weather", "tz", "email", "gmail", "mail", "inbox", "routine", "home", "store", "track", "untrack", "trip", "travelclient", "contract", "legal", "contracts", "regwatch", "uprofile", "vnote", "match", "cgroup", "challenge", "room", "scamcheck", "passport", "truecost", "value", "valuepick", "watch", "send", "leads", "panel",
       "connectors", "provision", "notion", "gcal", "trello", "exness", "stripe",
       "guardrails", "content",
       "tempmail", "checkmail", "vnumber", "checksms", "browser", "paper", "backup"]),
@@ -2864,6 +2869,7 @@ LIST_ONELINERS: dict[str, str] = {
     "speak": "neural voice note of your text",
     "bet": "sports bet analyst: ensemble ML odds analysis + Kelly stakes",
     "desk": "betting desk: crash pattern lab, verdicts library, timed signal calls",
+    "apk": "ApkForge: land, dissect, learn from and diff APKs",
     "weather": "live weather, alerts, USA situations overview",
     "tz": "timezone conversion + your labeled local time",
     "stt": "transcribe an audio file",

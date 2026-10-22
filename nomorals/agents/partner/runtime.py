@@ -4504,6 +4504,8 @@ class PartnerRuntime(
             return self._control_bet(command.tail or arg, chat_key=chat_key)
         if kind == "desk":
             return self._control_desk(command.tail or arg, chat_key=chat_key)
+        if kind == "apk":
+            return self._control_apk(command.tail or arg, chat_key=chat_key)
         if kind == "money":
             from ..opportunities import handle_money_command
             return handle_money_command(command.tail or arg, self.context)

@@ -58,10 +58,13 @@ genimg = ["diffusers>=0.27", "rembg>=2.0"]
 browser = ["playwright>=1.42"]
 # Configuration formats.
 config = ["pyyaml>=6.0"]
+# ApkForge static analysis (pure Python: androguard parses, APKiD
+# fingerprints packers/compilers; runs on the Termux profile too).
+apk = ["androguard>=4.0", "apkid>=2.1"]
 # Development / test tooling.
 dev = ["pytest>=7.4", "ruff>=0.3"]
 # Everything.
-all = ["nomorals[fast,media,media-edit,train,finetune,hub,ta,datasci,docs,voice,chat,cloud,genimg,browser,config,dev]"]
+all = ["nomorals[fast,media,media-edit,train,finetune,hub,ta,datasci,docs,voice,chat,cloud,genimg,browser,config,apk,dev]"]
 
 # Everything. Install this and Devon just works — no pip-hint chasing.
 

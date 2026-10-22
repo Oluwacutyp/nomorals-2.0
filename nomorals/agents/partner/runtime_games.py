@@ -2676,6 +2676,87 @@ class RuntimeGamesMixin:
             return "\n".join(lines)
         return f"unknown /desk verb {verb!r}\n{_usage()}"
 
+    # ── ApkForge: /apk (intake + dissect + teach + diff) ──────────────
+    def _control_apk(self, tail: str, chat_key: str = "") -> str:
+        """/apk — ApkForge, the APK workbench (A1: dissect only).
+
+        /apk add <path-or-url>   — land an APK/bundle with provenance
+        /apk list                — landed projects
+        /apk status              — toolchain matrix + counts
+        /apk show <project>      — one project's card
+        /apk dissect <project>   — full static dissection -> dossier
+        /apk teach <project> [topic] — a lesson from the dossier
+        /apk diff <a> <b>        — component-wise diff of two versions
+        """
+        from ..apkforge import (ApkForge, render_diff_card,
+                                render_dossier_card, render_list,
+                                render_project, render_status)
+
+        forge = ApkForge(getattr(self, "context", None))
+        parts = (tail or "").strip().split()
+        verb = parts[0].lower() if parts else ""
+
+        def _usage() -> str:
+            return ("/apk add <path-or-url> — land an APK or bundle "
+                    "with provenance\n"
+                    "/apk list — landed projects\n"
+                    "/apk status — toolchain matrix + counts\n"
+                    "/apk show <project> — one project's card\n"
+                    "/apk dissect <project> — full static dissection "
+                    "-> dossier\n"
+                    "/apk teach <project> [topic] — a lesson from the "
+                    "dossier (overview|manifest|permissions|components|"
+                    "certificate|build|code)\n"
+                    "/apk diff <a> <b> — component-wise diff\n"
+                    "A1 dissects; editing/building/signing arrive in "
+                    "A2 and are never faked")
+
+        if verb in ("", "help"):
+            return _usage()
+        if verb == "status":
+            return render_status(forge.status())
+        if verb == "list":
+            return render_list(forge.list_projects())
+        if verb == "add":
+            if len(parts) < 2:
+                return "usage: /apk add <path-or-url>"
+            res = forge.add(parts[1])
+            if res.get("error"):
+                return res["error"]
+            return render_project(res["project"])
+        if verb == "show":
+            if len(parts) < 2:
+                return "usage: /apk show <project>"
+            proj = forge.resolve(parts[1])
+            if proj is None:
+                return f"no project matches {parts[1]!r} — /apk list"
+            return render_project(proj.card())
+        if verb == "dissect":
+            if len(parts) < 2:
+                return "usage: /apk dissect <project>"
+            res = forge.dissect(parts[1])
+            if res.get("error"):
+                return res["error"]
+            return (render_dossier_card(res["dossier"])
+                    + f"\n\nfull dossier: {res['dossier_path']}")
+        if verb == "teach":
+            if len(parts) < 2:
+                return "usage: /apk teach <project> [topic]"
+            res = forge.teach(parts[1],
+                              parts[2] if len(parts) > 2 else "overview")
+            if res.get("error"):
+                return res["error"]
+            return res["text"]
+        if verb == "diff":
+            if len(parts) < 3:
+                return "usage: /apk diff <project> <other>"
+            res = forge.diff(parts[1], parts[2])
+            if res.get("error"):
+                return res["error"]
+            return (render_diff_card(res["diff"])
+                    + f"\n\nfull report: {res['report_path']}")
+        return f"unknown /apk verb {verb!r}\n{_usage()}"
+
     def _control_predict(self, tail: str, chat_key: str, *,
                          message: Any = None) -> str:
         """The prediction pit — unlocked by beating challenges.

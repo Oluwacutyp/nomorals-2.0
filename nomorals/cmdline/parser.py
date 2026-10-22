@@ -42,6 +42,7 @@ CLI_ALIASES: dict[str, list[str]] = {
     "arena": ["ar"],
     "autonomy": ["auto"],
     "bet": ["bt"],
+    "apk": [],
     "desk": [],
     "book": ["bk"],
     "books": ["library", "lib"],
@@ -1833,6 +1834,35 @@ def _parser() -> argparse.ArgumentParser:
     b_rc.add_argument("--away", required=True)
     b_rc.add_argument("--score", required=True, help="HG-AG, e.g. 2-1")
     b_rc.add_argument("--league", default="GEN")
+
+    apk_p = sub.add_parser("apk", aliases=CLI_ALIASES["apk"],
+        help="ApkForge: land, dissect, learn from and diff APKs (A1: intake + dissect + diff)",
+        description=("nm apk status\n"
+                     "nm apk add <path-or-url>\n"
+                     "nm apk list\n"
+                     "nm apk show <project>\n"
+                     "nm apk dissect <project> [--no-apkid]\n"
+                     "nm apk teach <project> [topic]\n"
+                     "nm apk diff <project> <other>"),
+    )
+    apk_sub = apk_p.add_subparsers(dest="apk_action", required=True)
+    apk_sub.add_parser("status", help="toolchain matrix + project count")
+    a_add = apk_sub.add_parser("add", help="land an APK/bundle by path or URL")
+    a_add.add_argument("source")
+    apk_sub.add_parser("list", help="landed projects")
+    a_show = apk_sub.add_parser("show", help="one project's card")
+    a_show.add_argument("project")
+    a_dis = apk_sub.add_parser("dissect", help="full static dissection")
+    a_dis.add_argument("project")
+    a_dis.add_argument("--no-apkid", action="store_true",
+                       help="skip the APKiD packer/compiler scan")
+    a_teach = apk_sub.add_parser("teach", help="a lesson from the dossier")
+    a_teach.add_argument("project")
+    a_teach.add_argument("topic", nargs="?", default=None,
+                         help="overview|manifest|permissions|components|certificate|build|code")
+    a_diff = apk_sub.add_parser("diff", help="component-wise diff of two projects")
+    a_diff.add_argument("project")
+    a_diff.add_argument("other")
 
     desk_p = sub.add_parser("desk", aliases=CLI_ALIASES["desk"],
         help="betting desk: crash pattern lab, verdicts library, timed signal calls (analysis only)",

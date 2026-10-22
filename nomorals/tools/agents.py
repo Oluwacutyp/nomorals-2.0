@@ -32,6 +32,7 @@ _log = logging.getLogger(__name__)
 # package (like "memory.persona") is found via the nomorals.* fallback in
 # register() below.
 AGENT_TOOL_MODULES = (
+    "apkforge",
     "benchmark",
     "betdesk",
     "bisect",
