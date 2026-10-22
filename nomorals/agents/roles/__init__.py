@@ -417,56 +417,21 @@ class MissionCodingAgent(RoleAgent):
 
     @staticmethod
     def _settle(goal: str, result: Any) -> dict[str, Any]:
-        steps = list(getattr(result, "steps", None) or [])
-        out: dict[str, Any] = {
-            "goal": goal,
-            "engine": "coding_agent",
-            "ok": bool(result.ok),
-            "files": list(result.files or []),
-            "iterations": int(result.iterations or 0),
-            "verification": str(result.verification or ""),
-            "steps": steps,
-            "replans": int(result.replans or 0),
-            "review": dict(result.review or {}),
-            "output": str(result.output or "")[-2000:],
-            "seconds": round(float(result.seconds or 0.0), 2),
-            # Pass #65 (W7): the run's metered token usage rides the
-            # settlement as evidence, like the review verdict does.
-            "usage": dict(getattr(result, "usage", None) or {}),
-            # Pass #66: scope refusals the loop recorded ride along
-            # too — a step settled by its own allowlist says so here.
-            "scope_denials": list(
-                getattr(result, "scope_denials", None) or []),
-        }
-        # Pass #69: the loop's step account, pre-rendered by the one
-        # shared renderer — the owner's results view
-        # (missions.progress.payload_text) leads with it, so a coding
-        # step's per-step outcome is visible in /mission results
-        # instead of only the loop's raw output tail.  Absent when
-        # the run carried no steps (renderer returns "").
-        from ..coding import render_step_account
+        # Pass #70: the settlement shape lives in ONE builder —
+        # agents.coding.coding_settlement — shared with the
+        # orchestrator bridge (tools.agents.CodingRoleAgent), so the
+        # same run settles to the same dict whichever bridge drove
+        # it: the evidence keys (files, per-step status from #60,
+        # verification, review, metered usage from #65, scope
+        # denials from #66, the pre-rendered step account from #69)
+        # and, on failure, a top-level "error" naming the loop's
+        # reason (and its failed step, when it has one) — the shape
+        # the mission runner settles as a FAILED step.  This method
+        # stays as the bridge's named entry point; the shape is the
+        # builder's.
+        from ..coding import coding_settlement
 
-        account = render_step_account(result)
-        if account:
-            out["step_account"] = account
-        if result.ok:
-            return out
-        reason = str(result.error or "").strip()
-        if not reason and getattr(result, "needs_approval", False):
-            reason = ("coding run paused for plan approval, which a "
-                      "mission step cannot answer")
-        if not reason:
-            failed = [s for s in steps
-                      if isinstance(s, dict) and s.get("status") == "failed"]
-            if failed:
-                step = failed[0]
-                reason = (f"coding step {step.get('id', '?')} "
-                          f"({step.get('path', '?')}) failed: "
-                          f"{step.get('reason') or 'no reason recorded'}")
-            else:
-                reason = "coding run finished without verifying green"
-        out["error"] = reason
-        return out
+        return coding_settlement(result, goal=goal)
 
 
 class SnippetWriterAgent(RoleAgent):

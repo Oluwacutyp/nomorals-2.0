@@ -66,7 +66,8 @@ def core_request(task: str) -> str:
     return t
 
 __all__ = ["CodingAgent", "CodingResult", "extract_code_block",
-           "render_step_account", "STEP_ACCOUNT_FULL_LIMIT"]
+           "render_step_account", "STEP_ACCOUNT_FULL_LIMIT",
+           "coding_settlement"]
 
 _CODE_BLOCK_NL = re.compile(r"```(?:python|py)?[ \t]*\n(.*?)```", re.DOTALL)
 _CODE_BLOCK_INLINE = re.compile(r"```(?:python|py)?[ \t]+(.*?)```", re.DOTALL)
@@ -811,6 +812,90 @@ def render_step_account(result: Any) -> str:
                   else f"{total} tokens")
         lines.append(f"spend: ⚠ cap hit — {detail}")
     return "\n".join(lines)
+
+
+# ── Pass #70: ONE settlement shape for every bridge ─────────────────
+#
+# Two bridges drive this loop — MissionCodingAgent (mission runner)
+# and CodingRoleAgent (orchestrator) — and their outward dicts had
+# drifted apart: the mission settlement carried steps / iterations /
+# verification / replans / seconds / usage while the orchestrator
+# output carried none of them, named the output tail "summary" where
+# everything else says "output", and put the RAW result.error on the
+# dict always — so a run that failed with an empty error string read
+# as SUCCESS to consumers keying on a truthy "error" (the
+# orchestrator's dispatch check) while the identical run settled
+# FAILED through the mission bridge.  coding_settlement is now the
+# single builder both bridges call; each bridge adds only its native
+# transport fields around it (the mission's goal/engine ride inside).
+
+def _settlement_error(result: Any, steps: list[Any]) -> str:
+    """Why a non-green run failed — never an empty string.
+
+    The loop's own error wins; then the plan-approval pause (an
+    autonomous step has no approver, whichever bridge drove it);
+    then the first failed step, named; then the generic honest
+    fallback.  Moved here verbatim from the mission bridge (#61),
+    which was the only bridge that synthesized it.
+    """
+    reason = str(getattr(result, "error", "") or "").strip()
+    if not reason and getattr(result, "needs_approval", False):
+        reason = ("coding run paused for plan approval, which an "
+                  "autonomous step cannot answer")
+    if not reason:
+        failed = [s for s in steps
+                  if isinstance(s, dict) and s.get("status") == "failed"]
+        if failed:
+            step = failed[0]
+            reason = (f"coding step {step.get('id', '?')} "
+                      f"({step.get('path', '?')}) failed: "
+                      f"{step.get('reason') or 'no reason recorded'}")
+        else:
+            reason = "coding run finished without verifying green"
+    return reason
+
+
+def coding_settlement(result: Any, *, goal: str = "") -> dict[str, Any]:
+    """The coding account of one finished run, as a plain dict.
+
+    Same keys, same semantics, whichever bridge drove the loop:
+    ``goal`` / ``engine`` identify the run; ``ok`` / ``files`` /
+    ``iterations`` / ``verification`` / ``steps`` / ``replans`` /
+    ``review`` / ``output`` (the loop's output tail) / ``seconds`` /
+    ``usage`` / ``scope_denials`` are the evidence; ``step_account``
+    rides along when the run carried steps (#69's pre-rendered
+    account); ``capped`` appears only when the run hit its spend
+    cap (it also lives inside ``usage``).  ``error`` appears ONLY
+    on failure and is never empty there — consumers that settle on
+    a truthy ``error`` (mission runner, orchestrator dispatch) see
+    the same truth from either bridge.
+    """
+    steps = list(getattr(result, "steps", None) or [])
+    usage = dict(getattr(result, "usage", None) or {})
+    out: dict[str, Any] = {
+        "goal": goal,
+        "engine": "coding_agent",
+        "ok": bool(result.ok),
+        "files": list(result.files or []),
+        "iterations": int(result.iterations or 0),
+        "verification": str(result.verification or ""),
+        "steps": steps,
+        "replans": int(getattr(result, "replans", 0) or 0),
+        "review": dict(getattr(result, "review", None) or {}),
+        "output": str(result.output or "")[-2000:],
+        "seconds": round(float(result.seconds or 0.0), 2),
+        "usage": usage,
+        "scope_denials": list(
+            getattr(result, "scope_denials", None) or []),
+    }
+    if usage.get("capped"):
+        out["capped"] = True
+    account = render_step_account(result)
+    if account:
+        out["step_account"] = account
+    if not out["ok"]:
+        out["error"] = _settlement_error(result, steps)
+    return out
 
 
 # Pass #60 (W4): a plan is a list of STEPS, not a bare file list.  A step

@@ -1416,17 +1416,16 @@ class DevonAgent:
         if not goal:
             return "mission needs a 'goal'"
         context = self.context
-        goal_l = goal.lower()
         # wave 68: a status/progress QUERY is not a new mission — report
         # the REAL state of the named (or most recent) missions.
-        query_words = ("progress", "status", "how far", "update on",
-                       "what\'s the", "whats the", "where is")
-        if (any(w in goal_l for w in query_words)
-                and len(goal) < 120
-                and not any(w in goal_l for w in ("create", "build",
-                                                  "make", "gather"))):
-            return self._mission_progress_report(
-                name if name != "devon-mission" else "")
+        # Pass #70: WHICH of the two this message is gets decided by
+        # _mission_route (structure, then the brain's judgment) — the
+        # wave-68 keyword list + 120-char cap that used to decide it
+        # here sent every long status question to spawn a duplicate
+        # mission (the #67 swept lead, site #14).
+        route, name_filter = self._mission_route(goal, name)
+        if route == "status":
+            return self._mission_progress_report(name_filter)
         # wave 68: structure the request into a mission spec BEFORE it
         # runs (the brief agent), persist the spec with the mission, and
         # run unlimited (the budget, not an iteration guess, stops it).
@@ -1462,6 +1461,110 @@ class DevonAgent:
         return (f"mission started in background: {name} — {goal[:120]} "
                 f"(unlimited iterations; query it any time: "
                 f"\'/devon progress on {name}\')")
+
+    def _mission_route(self, goal: str,
+                       name: str) -> tuple[str, str]:
+        """Decide whether a mission-tool message asks about existing
+        missions (``"status"``) or asks for new work (``"new"``).
+
+        Returns ``(route, progress_filter)``.  Structure first — the
+        store is a fact: when NO missions exist, the message cannot
+        be a status query, and no model call is spent pretending
+        otherwise.  When missions exist and the message could be
+        either, the brain judges (``_mission_route_verdict``: one
+        bounded structured call over the roster, the #67 brief-call
+        pattern).  When no judgment is available (no router, call
+        failed, reply unparseable), the fallback is REPORT, not
+        spawn: a wrong report costs the owner one re-issued message,
+        while a wrong spawn starts an unlimited autonomous mission
+        (this tool spawns with max_iterations=0) that nobody asked
+        for.  Failing to act is recoverable; acting unasked is not.
+        """
+        name_arg = name if name != "devon-mission" else ""
+        try:
+            from ..missions.mission import MissionStore
+
+            rows = MissionStore(self.context.db).list(limit=10)
+        except Exception as exc:  # noqa: BLE001 - an unreadable store
+            # reads as an empty one; the spawn path will surface the
+            # real failure when it tries to persist.
+            _log.debug("mission roster unreadable: %s", exc)
+            rows = []
+        if not rows:
+            return "new", ""
+        verdict = self._mission_route_verdict(goal, name_arg, rows)
+        if verdict is not None:
+            intent, mission_name = verdict
+            if intent == "status":
+                return "status", mission_name or name_arg
+            return "new", ""
+        return "status", name_arg
+
+    def _mission_route_verdict(self, goal: str, name_arg: str,
+                               rows: list[Any]) -> tuple[str, str] | None:
+        """The brain's routing judgment, or None when unavailable.
+
+        One bounded call (temperature 0, strict JSON) through
+        ``brain_for`` — the same metered funnel every other call in
+        this agent uses (task-kind threading + router telemetry);
+        the response's usage counters are logged with the decision,
+        the way the brief agent surfaces its call's usage (#67).
+        The brain may only name a mission that actually exists —
+        structure checks the claim before it becomes the report
+        filter.
+        """
+        if getattr(self.context, "router", None) is None:
+            return None
+        roster = "\n".join(
+            f"- {m.name} [{m.status}] — {str(m.goal)[:120]}"
+            for m in rows)
+        system = (
+            "You route one owner message for an autonomous agent. "
+            "The owner either asks about the state of an existing "
+            "mission (status_query) or asks for new work to be "
+            "started as a mission (new_mission). Decide from the "
+            "message and the existing missions below. A question "
+            "about how a mission is doing, what it finished, or "
+            "whether it is stuck is a status_query however long it "
+            "is; an instruction to do, build, gather, fix, or "
+            "produce something new is a new_mission however it is "
+            "phrased. Reply with ONLY the JSON object: "
+            '{"intent": "status_query" | "new_mission", '
+            '"mission": "<existing mission name, or empty>"}'
+        )
+        user = (f"Existing missions:\n{roster}\n\n"
+                f"Owner message: {goal}"
+                + (f"\nThe message was addressed with the name: "
+                   f"{name_arg}" if name_arg else ""))
+        try:
+            response = brain_for(self.context).chat(
+                [Message.system(system), Message.user(user)],
+                SamplingParams(temperature=0.0, max_tokens=120,
+                               json_mode=True),
+                task_kind="chat")
+        except Exception as exc:  # noqa: BLE001 - judgment is a bonus
+            _log.debug("mission route judgment failed: %s", exc)
+            return None
+        if not getattr(response, "ok", False):
+            return None
+        usage = getattr(response, "usage", None)
+        _log.info("mission route judgment for %r: usage %s tokens",
+                  goal[:60],
+                  getattr(usage, "total_tokens", None))
+        data = self._extract_json(getattr(response, "text", "") or "")
+        if not data:
+            return None
+        intent = str(data.get("intent") or "")
+        if intent not in ("status_query", "new_mission"):
+            return None
+        mission_name = str(data.get("mission") or "")
+        if mission_name and not any(
+                mission_name.lower() in str(m.name).lower()
+                or str(m.name).lower() in mission_name.lower()
+                for m in rows):
+            mission_name = ""
+        return ("status" if intent == "status_query" else "new",
+                mission_name)
 
     def _mission_progress_report(self, name_filter: str) -> str:
         """The real, persisted state of missions — never a guess."""

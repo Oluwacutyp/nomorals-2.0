@@ -110,6 +110,18 @@ def register(registry: Any) -> None:
 
 #: Exact tool surface for the ``coding`` role.  Nothing else — no browser,
 #: no finance, no messaging, no network tools.
+#:
+#: Pass #70: this list and the ``coder`` RoleSpec allowlist
+#: (agents/role_specs.py) are ONE surface — the mission bridge scopes
+#: the loop by the spec, this bridge by this tuple, and the same run
+#: must meet the same surface either way.  They had drifted (each
+#: carried read/navigation names the other lacked); the union below
+#: is the harmonized set, and tests/test_pass70_harmonize.py pins the
+#: two lists equal plus every governed loop tool inside them, so
+#: they cannot silently diverge again.  The loop's governed surface
+#: (agents/coding.py: explore fs_read, edit_file, apply_patch,
+#: run_tests, lint, shell_run) is the first six entries' kin — the
+#: rest is the read/navigation surface around it.
 CODING_TOOLS: tuple[str, ...] = (
     "fs_read",
     "edit_file",
@@ -123,13 +135,19 @@ CODING_TOOLS: tuple[str, ...] = (
     "index_repo",    # Phase D: warm the code index the coding loop searches
     "repo_map",      # structural repo map (tools/repo_index)
     "symbol_search", # ranked symbol search / who-imports / callers
+    "show_diff",     # the working-tree diff as one read (fs.read)
+    "fs_list",       # workspace navigation (fs.read)
+    "fs_glob",
+    "fs_info",
+    "get_symbol",    # one symbol's source from the code index (mem.read)
 )
 
 #: Capability grant covering exactly the allowlisted tools' capabilities:
-#: fs.read (fs_read, git_status, git_diff, repo_map, symbol_search),
+#: fs.read (fs_read, fs_list, fs_glob, fs_info, git_status, git_diff,
+#: show_diff, index_repo, repo_map, symbol_search),
 #: fs.write (edit_file, apply_patch),
 #: exec.shell (shell_run, run_tests, lint),
-#: mem.read (search_code — reads the code index).
+#: mem.read (search_code, get_symbol — read the code index).
 #: The name check in RoleScopedRegistry still denies every non-allowlisted
 #: tool, whatever its capability.
 CODING_CAPABILITIES: CapabilitySet = CapabilitySet.of(
@@ -253,7 +271,7 @@ class CodingRoleAgent:
         return self.tools.names()
 
     def run(self, payload: dict[str, Any] | None) -> Any:
-        from ..agents.coding import CodingAgent
+        from ..agents.coding import CodingAgent, coding_settlement
 
         payload = payload or {}
         task_text = (payload.get("task") or payload.get("goal") or "").strip()
@@ -264,32 +282,42 @@ class CodingRoleAgent:
         # governed only this class's own (nonexistent) tool calls.
         agent = (CodingAgent(self.context, root=root, tools=self.tools)
                  if root else CodingAgent(self.context, tools=self.tools))
+        # Pass #70: the loop is driven exactly as the mission bridge
+        # drives it (roles.MissionCodingAgent) — an orchestrator-
+        # delegated step is the same kind of pre-authorized
+        # autonomous work, so: plan_mode=False (a plan-approval
+        # pause would strand the step with nobody able to approve
+        # it; the loop's "auto" default previously let a paused run
+        # return an empty error the orchestrator counted as
+        # success), the step payload's accept command and max_tokens
+        # cap are forwarded, and the defaults are the mission
+        # bridge's documented 5 iterations x 300s (the generous end
+        # of the existing callers' ranges — this bridge's old 120s
+        # was an undocumented inheritance from the chat caller).
+        # A payload may override max_iterations / timeout, as on
+        # the mission path.
+        raw_cap = payload.get("max_tokens")
         result = agent.run(
             task_text or "(no task text)",
+            accept=str(payload.get("accept")
+                       or payload.get("accept_command") or ""),
             max_iterations=int(payload.get("max_iterations", 5)),
-            timeout=float(payload.get("timeout", 120)),
+            timeout=float(payload.get("timeout", 300)),
+            plan_mode=False,
+            max_tokens=(None if raw_cap is None else int(raw_cap)),
             # Pass #66 (W10): an orchestrator-delegated step is a
             # long-running autonomous surface, like a mission step —
             # verify in the background, cap derived from the timeout.
             background_tests=True,
         )
-        output = {
-            "ok": result.ok,
-            "files": result.files,
-            "summary": result.output[-2000:],
-            "error": result.error,
-            "review": getattr(result, "review", {}),
-            "scope_denials": list(
-                getattr(result, "scope_denials", None) or []),
-        }
-        # Pass #69: the run's step account, pre-rendered by the shared
-        # renderer, rides the orchestrator output like the mission
-        # settlement's does — absent when the run carried no steps.
-        from ..agents.coding import render_step_account
-
-        account = render_step_account(result)
-        if account:
-            output["step_account"] = account
+        # Pass #70: ONE settlement builder for both bridges — the
+        # output below is agents.coding.coding_settlement, the same
+        # dict the mission bridge settles with (same keys, same
+        # values, error present only on failure and never empty
+        # there).  This bridge previously emitted its own drifted
+        # shape ("summary" for the output tail, the raw error
+        # always present, no steps/usage/iterations at all).
+        output = coding_settlement(result, goal=task_text)
         return SimpleNamespace(output=output, ok=result.ok)
 
 

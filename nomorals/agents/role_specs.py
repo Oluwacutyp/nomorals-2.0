@@ -216,10 +216,14 @@ BUILTIN_ROLES: dict[str, RoleSpec] = {
             "tests; never leave the tree red. Quote the issue id you claim to "
             "fix when revising debated work."
         ),
+        # Pass #70: this allowlist and tools/agents.py's CODING_TOOLS
+        # are ONE surface (the two coding bridges scope the same loop
+        # by them) — pinned equal by tests/test_pass70_harmonize.py.
         tool_allowlist=(
             "fs_read", "edit_file", "apply_patch", "shell_run", "run_tests",
             "lint", "git_status", "git_diff", "search_code", "index_repo",
             "show_diff", "fs_list", "fs_glob", "fs_info", "get_symbol",
+            "repo_map", "symbol_search",
         ),
         budget=_budget(1200, 500_000),
         output_contract=("files_changed", "tests_run", "tests_passed", "notes"),
