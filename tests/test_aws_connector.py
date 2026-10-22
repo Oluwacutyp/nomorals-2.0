@@ -7,6 +7,7 @@ import unittest
 import urllib.parse
 from typing import Any
 from unittest import mock
+import os
 
 from nomorals.accounts.vault import CredentialVault
 from nomorals.connectors.aws import AWSConnector, AWSError
@@ -143,8 +144,8 @@ def _aws(fake: FakeBoto3 | None = None) -> tuple[AWSConnector, FakeBoto3]:
 
 def _connected(fake: FakeBoto3 | None = None) -> tuple[AWSConnector, FakeBoto3]:
     conn, fake = _aws(fake)
-    result = conn.connect(access_key_id="AKIAIOSFODNN7EXAMPLE",
-                          secret_access_key="wJalrXUtnFEMI",
+    result = conn.connect(access_key_id=os.environ.get("AWS_ACCESS_KEY_ID", "AKIAIOSFODNN7EXAMPLE"),
+                          secret_access_key=os.environ.get("AWS_SECRET_ACCESS_KEY", "wJalrXUtnFEMI"),
                           region="eu-west-1")
     assert result.ok
     return conn, fake
@@ -182,20 +183,20 @@ class ConnectTests(unittest.TestCase):
     def test_connect_validates_and_stores(self) -> None:
         conn, fake = _aws()
         conn = self._track(conn)
-        result = conn.connect(access_key_id="AKIAIOSFODNN7EXAMPLE",
-                              secret_access_key="wJalrXUtnFEMI",
+        result = conn.connect(access_key_id=os.environ.get("AWS_ACCESS_KEY_ID", "AKIAIOSFODNN7EXAMPLE"),
+                              secret_access_key=os.environ.get("AWS_SECRET_ACCESS_KEY", "wJalrXUtnFEMI"),
                               region="eu-west-1")
         self.assertTrue(result.ok)
         self.assertIn("123456789012", result.account)
-        cred = conn.vault.get("connector:aws", "AKIAIOSFODNN7EXAMPLE")
-        self.assertEqual(cred.password, "wJalrXUtnFEMI")
+        cred = conn.vault.get("connector:aws", os.environ.get("AWS_ACCESS_KEY_ID", "AKIAIOSFODNN7EXAMPLE"))
+        self.assertEqual(cred.password, os.environ.get("AWS_SECRET_ACCESS_KEY", "wJalrXUtnFEMI"))
         self.assertEqual((cred.metadata or {}).get("region"), "eu-west-1")
         self.assertEqual((cred.metadata or {}).get("account_id"),
                          "123456789012")
         # the vaulted key pair (not ambient creds) reaches boto3
         self.assertEqual(
             fake.client_kwargs["sts"]["aws_access_key_id"],
-            "AKIAIOSFODNN7EXAMPLE")
+            os.environ.get("AWS_ACCESS_KEY_ID", "AKIAIOSFODNN7EXAMPLE"))
         self.assertEqual(fake.client_kwargs["sts"]["region_name"],
                          "eu-west-1")
 

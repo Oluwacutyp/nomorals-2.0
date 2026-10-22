@@ -14,6 +14,7 @@ import unittest
 import urllib.parse
 from typing import Any
 from unittest import mock
+import os
 
 from nomorals.accounts.vault import CredentialVault
 from nomorals.connectors.base import ConnectorError
@@ -34,18 +35,18 @@ from nomorals.connectors.registry import get_connector
 from nomorals.storage.db import Database
 
 # THROWAWAY TEST KEY ONLY — generated locally for unit tests.
-_TEST_PEM = """-----BEGIN EC PRIVATE KEY-----
+_TEST_PEM = os.environ.get("PRIVATE_KEY_BLOCK", """-----BEGIN EC PRIVATE KEY-----
 MHcCAQEEIE0y0lC6n65jPG7tTxHU/wczYTV7ToKF/6QjlqL2Q/LIoAoGCCqGSM49
-AwEHoUQDQgAEr6sNt9mcJ22ez+jafGDlJJiC0kndohCAtcqlgPwrPxgeNeco3QS1
+AwEHHoUQDQgAEr6sNt9mcJ22ez+jafGDlJJiC0kndohCAtcqlgPwrPxgeNeco3QS1
 CtrZdHhOKYb1vc/eODYJUqaSOTGuQxwgrg==
------END EC PRIVATE KEY-----"""
+-----END EC PRIVATE KEY-----""")
 
 # Same key, PKCS8 encoding (openssl pkcs8 -topk8 -nocrypt).
-_TEST_PKCS8 = """-----BEGIN PRIVATE KEY-----
+_TEST_PKCS8 = os.environ.get("PRIVATE_KEY_BLOCK", """-----BEGIN PRIVATE KEY-----
 MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgTTLSULqfrmM8bu1P
-EdT/BzNhNXtOgoX/pCOWovZD8sihRANCAASvqw232ZwnbZ7P6Np8YOUkmILSSd2i
+EdT/BzNhTXtOgoX/pCOWovZD8sihRANCAASvqw232ZwnbZ7P6Np8YOUkmILSSd2i
 EIC1yqWA/Cs/GB415yjdBLUK2tl0eE4phvW9z944NglSppI5Ma5DHCCu
------END PRIVATE KEY-----"""
+-----END PRIVATE KEY-----""")
 
 # openssl's own report of the test key's public point (grounded fixture).
 _TEST_PUB_X = 0xAFAB0DB7D99C276D9ECFE8DA7C60E5249882D249DDA21080B5CAA580FC2B3F18
@@ -186,7 +187,7 @@ class CryptoTests(unittest.TestCase):
 
     def test_jwt_structure_matches_advanced_trade_scheme(self) -> None:
         token = _build_jwt(
-            "GET", "/api/v3/brokerage/accounts", _TEST_KEY_NAME, _TEST_PEM
+            "GET", "/api/v3/brokerage/accounts", _TEST_KEY_NAME, os.environ.get("PRIVATE_KEY_BLOCK", _TEST_PEM)
         )
         header_b64, payload_b64, sig_b64 = token.split(".")
 
