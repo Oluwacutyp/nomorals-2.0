@@ -69,6 +69,15 @@ baseline becoming ready), a tick error — are classified by
 :func:`summarize_tick_event` and published once by the sampler tool
 itself. Silent ticks still persist the store and are recorded as
 the job's result: silence is a chat rule, not deleted evidence.
+
+**Alert discipline (Pass 7):** what the sampler tool publishes is
+classified for the ONE alert policy (``agents/alert_policy.py``) —
+an enforcement is self-resolving housekeeping and no longer pages on
+first instances (the throttle is the response; the event journals
+silently), its closure inherits the opening's tier, and only
+recurrence, failure, or an owner-actionable condition pages. The
+gate, the throttle and the quarantine are untouched: only paging
+is tiered, never enforcement.
 """
 
 from __future__ import annotations
@@ -657,7 +666,18 @@ def summarize_tick_event(result: Any,
     sample timestamps — silence is a chat-surface rule, not deleted
     evidence.
 
-    Returns ``{"title": str, "body": str, "critical": bool}``.
+    Returns ``{"title": str, "body": str, "critical": bool}`` — plus,
+    since Pass 7, ``subject`` and ``hints``: the alert-policy
+    classification the sampler tool hands to ``Notifier.publish``
+    (plain data — this module stays Layer 0; the policy itself lives
+    in ``agents/alert_policy.py``).  The classification encodes the
+    alert-discipline rule: an enforcement is self-resolving
+    housekeeping (the throttle IS the response) and logs silently on
+    first instances — paging only on recurrence, which is what turns
+    a marginal crossing into a real runaway; its closure inherits the
+    opening's tier; the baseline-ready milestone and the standing
+    sampling-unavailable condition are digest-tier notices; a sampler
+    error is a machinery failure and pages.
     """
     if not isinstance(result, dict):
         return None
@@ -669,6 +689,7 @@ def summarize_tick_event(result: Any,
     context.append(
         f"quarantined: {result.get('quarantined', 0)} · "
         f"baseline samples: {result.get('samples', 0)}")
+    gate_subject = "host process population (adaptive cancer gate)"
     if result.get("unavailable"):
         # A standing platform condition, not a per-tick event: the
         # monitor announces it exactly once, and that announcement
@@ -678,22 +699,44 @@ def summarize_tick_event(result: Any,
         if notes:
             return {"title": f"🛡️ {notes[0]}",
                     "body": "\n".join(notes[1:] + context),
-                    "critical": False}
+                    "critical": False,
+                    "subject": "immune process sampling",
+                    "hints": {"subject": "immune process sampling",
+                              "notice": True}}
         return None
     if result.get("ok") is False or result.get("error"):
         return {"title": "❌ immune sampler error",
                 "body": str(result.get("error") or "unknown error"),
-                "critical": False}
+                "critical": False,
+                "subject": "immune sampler",
+                "hints": {"subject": "immune sampler", "failed": True}}
     if result.get("enforced"):
         lines = [str(result.get("reason") or "the adaptive gate enforced")]
         lines += context
         lines += notes
         return {"title": "🛡️ immune gate ENFORCED",
-                "body": "\n".join(lines), "critical": True}
+                "body": "\n".join(lines), "critical": True,
+                "subject": gate_subject,
+                "hints": {"subject": gate_subject,
+                          "self_resolving": True,
+                          "incident_key": "adaptive-gate"}}
     if notes:
-        return {"title": f"🛡️ {notes[0]}",
+        first = notes[0]
+        if first.startswith("immune incident closed"):
+            hints = {"subject": gate_subject, "resolved": True,
+                     "incident_key": "adaptive-gate"}
+            subject = gate_subject
+        elif "baseline ready" in first:
+            hints = {"subject": "immune baseline", "notice": True}
+            subject = "immune baseline"
+        else:
+            hints = {"subject": "immune system", "notice": True}
+            subject = "immune system"
+        return {"title": f"🛡️ {first}",
                 "body": "\n".join(notes[1:] + context),
-                "critical": False}
+                "critical": False,
+                "subject": subject,
+                "hints": hints}
     return None
 
 

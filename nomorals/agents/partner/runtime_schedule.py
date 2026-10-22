@@ -364,7 +364,8 @@ class RuntimeScheduleMixin:
             return "no notifications yet — arena builds, research, news and tasks land here."
         marks = {"sent": "✓", "failed": "✗", "pending": "…",
                  "held-quiet-hours": "⏸", "disabled": "⊘",
-                 "muted": "⊘", "deduped": "⤺", "dead": "✖"}
+                 "muted": "⊘", "deduped": "⤺", "dead": "✖",
+                 "digest": "▤", "logged": "·"}
         attempt_marks = {"sent": "✓", "failed": "✗", "skipped": "…"}
         lines = [f"notifications ({len(rows)}):"]
         for row in rows:
@@ -399,7 +400,9 @@ class RuntimeScheduleMixin:
                     lines.append(f"      ↳ {amark} {where}"
                                  f"{detail}")
         lines.append("states: ✓sent ✗failed …pending ⏸held-quiet-hours "
-                     "⊘disabled/muted ⤺deduped ✖dead — see `nm briefing status`")
+                     "⊘disabled/muted ⤺deduped ✖dead ▤digest ·logged "
+                     "(alert policy: digest = batched here, logged = "
+                     "silent housekeeping) — see `nm briefing status`")
         return "\n".join(lines)
 
     def _control_proactive(self, arg: str) -> str:

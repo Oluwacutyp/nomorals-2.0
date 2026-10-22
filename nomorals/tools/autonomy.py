@@ -409,9 +409,17 @@ def register(registry: Any) -> None:
             if event is not None:
                 from ..agents.notifier import Notifier
 
+                # Pass 7 alert discipline: the event carries its
+                # alert-policy classification (subject + hints); the
+                # ONE policy in agents/alert_policy decides whether
+                # this pages, digests, or logs silently.  Enforcement
+                # itself already happened in the tick — only the
+                # paging is tiered, never the response.
                 Notifier(_context).publish(
                     "immune", event["title"], event["body"],
-                    critical=bool(event.get("critical")))
+                    critical=bool(event.get("critical")),
+                    alert_subject=str(event.get("subject") or ""),
+                    alert_hints=event.get("hints"))
         except Exception:  # noqa: BLE001 - reporting never breaks the tick
             pass
         return result

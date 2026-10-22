@@ -26,7 +26,8 @@ from ..core.logging_setup import get_logger
 _log = get_logger(__name__)
 
 __all__ = ["Notifier", "notify", "resolve_gateway", "DeliveryOutcome",
-           "ATTEMPT_SENT", "ATTEMPT_FAILED", "ATTEMPT_SKIPPED"]
+           "ATTEMPT_SENT", "ATTEMPT_FAILED", "ATTEMPT_SKIPPED",
+           "STATE_DIGEST", "STATE_LOGGED"]
 
 
 def resolve_gateway(context: Any) -> Any | None:
@@ -66,6 +67,12 @@ STATE_DISABLED = "disabled"        # proactive master/kind switch off
 STATE_MUTED = "muted"              # feature flag ``notifier`` off
 STATE_DEDUPED = "deduped"
 STATE_DEAD = "dead"                # dead-letter: delivery retries exhausted
+#: alert-policy tiers (Pass 7): the row is the whole delivery — a
+#: DIGEST row waits to be read batched on /notify, a LOGGED row is
+#: silent housekeeping kept only as journal evidence.  Both are
+#: intentionally unsent and never picked up by redelivery.
+STATE_DIGEST = "digest"
+STATE_LOGGED = "logged"
 
 #: delivery states that the redelivery queue is allowed to pick up.
 #: Intentionally-unsent states (disabled/deduped/muted/held-quiet-hours)
@@ -252,6 +259,8 @@ class Notifier:
         proactive_check: bool = True,
         output_kind: str | None = None,
         output_meta: dict[str, Any] | None = None,
+        alert_subject: str = "",
+        alert_hints: Any = None,
     ) -> dict[str, Any]:
         """Persist an alert and best-effort deliver it. Never raises.
 
@@ -281,7 +290,46 @@ class Notifier:
         has no triggering command, so without these it gets NO buttons
         (explicit empty) — never stale Retry/Expand/Next inherited
         from an old command.
+
+        ``alert_hints`` (Pass 7, :class:`~.alert_policy.AlertHints` or
+        a plain dict) classifies an *unsolicited* alert for the ONE
+        paging policy (:mod:`.alert_policy`): the decision may keep
+        the alert out of the owner's chat entirely — DIGEST (stored,
+        read batched on ``/notify``) or LOG (stored silently) — or
+        PAGE it as today.  A recurrence page bypasses dedupe (the
+        repeat IS the signal); failure/actionable pages keep dedupe.
+        Every decided page carries the policy's decision line in its
+        body, stating what escalated and naming the subject.  No
+        hints → historical behaviour, untouched.
         """
+        decision = None
+        if alert_hints is not None and self.db is not None:
+            from .alert_policy import AlertHints, AlertPolicy, \
+                TIER_DIGEST, TIER_LOG, TIER_PAGE
+
+            hints = AlertHints.coerce(alert_hints)
+            if hints is not None:
+                decision = AlertPolicy.from_context(self.context).decide(
+                    self.db, kind=kind, subject=alert_subject, hints=hints)
+                if decision.tier in (TIER_LOG, TIER_DIGEST):
+                    state = (STATE_LOGGED if decision.tier == TIER_LOG
+                             else STATE_DIGEST)
+                    result = self._store(kind, title, body, delivered=0,
+                                         delivery_state=state)
+                    result["attempts"] = []
+                    result["tier"] = decision.tier
+                    result["tier_reason"] = decision.reason
+                    result["subject"] = decision.subject
+                    return result
+                # TIER_PAGE: deliver as today.  Only a recurrence
+                # page forces past dedupe (the repeat IS the signal);
+                # failure/actionable pages keep dedupe, so a
+                # persisting failure re-pages on the dedupe cadence
+                # rather than once per tick.
+                if decision.force:
+                    force = True
+                body = (f"{body}\n{decision.body_line()}" if body
+                        else decision.body_line())
         if self.db is not None:
             # DEDUPE CHOKE POINT — every proactive send funnels through
             # here, including critical ones.  The same (kind, title) inside
@@ -374,12 +422,20 @@ class Notifier:
                 "attempted_at": time.time()}
 
     def _is_duplicate(self, kind: str, title: str) -> bool:
-        """True when the same (kind, title) alerted within the dedupe window."""
+        """True when the same (kind, title) alerted within the dedupe window.
+
+        Alert-policy DIGEST/LOG rows never "went out", so they do not
+        count as the alert having fired — a subject whose first
+        instances logged silently must still be able to page when the
+        policy escalates it inside the window.
+        """
         try:
             cutoff = time.time() - self.DEDUPE_WINDOW_SECONDS
             row = self.db.query_one(
-                "SELECT id FROM notifications WHERE kind = ? AND title = ? AND created_at > ?",
-                (kind, title, cutoff),
+                "SELECT id FROM notifications WHERE kind = ? AND title = ? "
+                "AND created_at > ? AND COALESCE(delivery_state, '') "
+                "NOT IN (?, ?)",
+                (kind, title, cutoff, STATE_DIGEST, STATE_LOGGED),
             )
             return row is not None
         except Exception:  # noqa: BLE001 - dedupe is best-effort
@@ -729,16 +785,19 @@ class Notifier:
     def pending(self) -> list[dict[str, Any]]:
         """Undelivered alerts that are still being worked (retryable or
         held).  Intentionally-unsent rows (``disabled``, ``deduped``,
-        ``muted``) and dead-lettered rows (``dead`` — retries exhausted)
-        are excluded — redeliver must not resurrect what the owner turned
-        off, and the dead queue has its own reader (:meth:`dead_letters`)."""
+        ``muted``, the alert-policy tiers ``digest`` / ``logged``) and
+        dead-lettered rows (``dead`` — retries exhausted) are excluded
+        — redeliver must not resurrect what the owner turned off or the
+        policy batched/silenced, and the dead queue has its own reader
+        (:meth:`dead_letters`)."""
         if self.db is None:
             return []
         try:
             return self.db.query(
                 "SELECT * FROM notifications WHERE delivered = 0 "
                 "AND COALESCE(delivery_state, '') NOT IN "
-                "('disabled', 'deduped', 'muted', 'dead') "
+                "('disabled', 'deduped', 'muted', 'dead', 'digest', "
+                "'logged') "
                 "ORDER BY created_at ASC LIMIT 20"
             )
         except Exception:  # noqa: BLE001
@@ -749,6 +808,39 @@ class Notifier:
                 )
             except Exception:  # noqa: BLE001
                 return []
+
+    def digest_pending(self, limit: int = 20) -> list[dict[str, Any]]:
+        """The bounded DIGEST buffer: alert-policy DIGEST-tier rows,
+        newest first.  These were worth recording but not worth a
+        page; ``/notify`` renders them batched.  Never raises."""
+        if self.db is None:
+            return []
+        try:
+            return self.db.query(
+                "SELECT * FROM notifications WHERE delivery_state = ? "
+                "ORDER BY created_at DESC LIMIT ?",
+                (STATE_DIGEST, max(1, int(limit))),
+            )
+        except Exception:  # noqa: BLE001 - pre-policy DBs have no rows
+            return []
+
+    def alert_journal(self, limit: int = 50, kind: str = "",
+                      subject: str = "") -> list[dict[str, Any]]:
+        """Recent alert-policy tier decisions (the audit read).
+
+        Every classified alert — paged, digested, or logged — leaves
+        one journal row with its tier and reason; this is how the
+        owner (or an audit) answers "why didn't that page me?".
+        Never raises."""
+        if self.db is None:
+            return []
+        try:
+            from .alert_policy import AlertPolicy
+
+            return AlertPolicy.journal(self.db, limit=limit, kind=kind,
+                                       subject=subject)
+        except Exception:  # noqa: BLE001
+            return []
 
     def dead_letters(self, limit: int = 10) -> list[dict[str, Any]]:
         """Dead-lettered notifications: delivery retries exhausted.
