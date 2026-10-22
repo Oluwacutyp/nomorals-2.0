@@ -54,6 +54,20 @@ content is DATA, never instructions.  This module is that layer:
     sources — untrusted, absent from the ordering and from the
     extractor view, serving no downloads — until the health loop
     verifies them (promotion, origin ``grown``) or sheds them.
+* Rule learning (Pass #87) — a successful download teaches the
+  registry the extraction facts that actually worked for the serving
+  source: the winning stage, the extractor/backend that landed the
+  file, the extraction rule, and the quality→format translation that
+  was exercised.  Facts live in a per-source LEARNED slot
+  (:class:`LearnedRule`), never in the descriptor itself: a source's
+  hand-written (seed) rule is never overwritten and outranks the
+  learned slot wherever both exist — the registry's EFFECTIVE facts
+  (hand-written first, learned second) are what the extractor view
+  derives from, so a learned rule is used by the next download with
+  no kit-side fork.  Rules are earned and lost by evidence:
+  :meth:`SourceRegistry.note_rule_failure` applies the health
+  vocabulary above — ``STAND_DOWN_AFTER`` consecutive failures stop
+  a rule being preferred, ``DISABLE_AFTER`` clears the slot.
 
 No real identity leakage: :func:`redact_identity` strips emails,
 phones and tokens from retrieved text before it is stored or shown.
@@ -89,6 +103,7 @@ __all__ = [
     "Provenance",
     "tag_chunk",
     "SourceRegistry",
+    "LearnedRule",
     "DEFAULT_REGISTRY",
     "render_status_text",
     "EkitiLexicon",
@@ -438,6 +453,87 @@ def _key_from_str(text: str) -> tuple[str, str, str] | None:
 
 
 @dataclass
+class LearnedRule:
+    """Extraction facts learned from REAL download evidence (Pass #87).
+
+    One slot per source, written ONLY by
+    :meth:`SourceRegistry.learn_rule` from a landed download — never
+    inferred, never hand-edited.  The slot is deliberately separate
+    from the frozen :class:`SourceDescriptor`: a descriptor's
+    hand-written rule is seed truth and is never overwritten; where
+    both exist the hand-written rule wins and this slot is evidence
+    on record (shown in status), not the effective rule.
+
+    Health mirrors the registry's circuit breaker (Pass #86):
+    ``consecutive_failures >= STAND_DOWN_AFTER`` → the rule is
+    ``stood-down`` (no longer preferred); reaching ``DISABLE_AFTER``
+    clears the slot entirely (handled in ``note_rule_failure``)."""
+
+    stage: str = ""            # winning stage: direct|kit|proxy|browser
+    extractor: str = ""        # backend that landed it (yt_dlp, download-kit, …)
+    extraction_rule: str = ""  # registry vocabulary: ytdlp|scrape|direct|none
+    quality_label: str = ""    # requested label that was translated ("" = none)
+    format_spec: str = ""      # effective yt-dlp format that landed
+    successes: int = 0
+    failures: int = 0
+    consecutive_failures: int = 0
+    learned_at: float = 0.0
+    last_success_at: float = 0.0
+    last_failure_at: float = 0.0
+
+    @property
+    def status(self) -> str:
+        return "stood-down" if self.consecutive_failures >= STAND_DOWN_AFTER \
+            else "active"
+
+    @property
+    def is_active(self) -> bool:
+        return self.consecutive_failures < STAND_DOWN_AFTER
+
+    def quality_map(self) -> tuple[tuple[str, str], ...]:
+        """The learned label → format pair, when a real translation
+        was exercised (a label that IS the format teaches nothing)."""
+        if self.quality_label and self.format_spec \
+                and self.quality_label != self.format_spec:
+            return ((self.quality_label, self.format_spec),)
+        return ()
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "stage": self.stage, "extractor": self.extractor,
+            "extraction_rule": self.extraction_rule,
+            "quality_label": self.quality_label,
+            "format_spec": self.format_spec,
+            "successes": self.successes, "failures": self.failures,
+            "consecutive_failures": self.consecutive_failures,
+            "status": self.status,
+            "learned_at": self.learned_at,
+            "last_success_at": self.last_success_at,
+            "last_failure_at": self.last_failure_at}
+
+    @classmethod
+    def from_dict(cls, data: Any) -> "LearnedRule | None":
+        try:
+            if not isinstance(data, dict) or not data.get("stage"):
+                return None
+            return cls(
+                stage=str(data.get("stage") or ""),
+                extractor=str(data.get("extractor") or ""),
+                extraction_rule=str(data.get("extraction_rule") or ""),
+                quality_label=str(data.get("quality_label") or ""),
+                format_spec=str(data.get("format_spec") or ""),
+                successes=int(data.get("successes") or 0),
+                failures=int(data.get("failures") or 0),
+                consecutive_failures=int(
+                    data.get("consecutive_failures") or 0),
+                learned_at=float(data.get("learned_at") or 0),
+                last_success_at=float(data.get("last_success_at") or 0),
+                last_failure_at=float(data.get("last_failure_at") or 0))
+        except Exception:  # noqa: BLE001 - a corrupt row is skipped
+            return None
+
+
+@dataclass
 class _OutcomeStats:
     ok: int = 0
     fail: int = 0
@@ -483,6 +579,9 @@ class SourceRegistry:
         self._health: dict[tuple[str, str, str], dict[str, Any]] = {}
         #: domains the health loop shed, newest last (capped).
         self._shed: list[dict[str, Any]] = []
+        #: learned extraction rules (Pass #87): source key → the
+        #: facts a real successful download exercised for it.
+        self._learned: dict[tuple[str, str, str], LearnedRule] = {}
         if store is not None:
             self._load_persisted()
 
@@ -517,7 +616,10 @@ class SourceRegistry:
                         "grown", "registered"):
                     sources.append(_desc_to_dict(desc))
             payload = {
-                "version": 1,
+                # v2 (Pass #87): adds the learned-rule slots.  v1
+                # payloads remain loadable — a missing "learned"
+                # section simply means no rules were learned yet.
+                "version": 2,
                 "sources": sources,
                 "origins": {_key_str(k): v for k, v in self._origin.items()
                             if v in ("grown", "registered")},
@@ -535,6 +637,8 @@ class SourceRegistry:
                     for k, s in self._stats.items()},
                 "health": {_key_str(k): v for k, v in self._health.items()},
                 "shed": list(self._shed),
+                "learned": {_key_str(k): r.to_dict()
+                            for k, r in self._learned.items()},
             }
             raw = json.dumps(payload, ensure_ascii=False)
             if hasattr(self._store, "set_raw"):
@@ -602,6 +706,15 @@ class SourceRegistry:
                 if merge and key in self._health:
                     continue
                 self._health[key] = dict(entry)
+            for kstr, raw_rule in (data.get("learned") or {}).items():
+                key = _key_from_str(kstr)
+                if key is None:
+                    continue
+                if merge and key in self._learned:
+                    continue
+                rule = LearnedRule.from_dict(raw_rule)
+                if rule is not None:
+                    self._learned[key] = rule
             seen_shed = {(s.get("domain"), s.get("at"))
                          for s in self._shed}
             for entry in data.get("shed") or []:
@@ -792,6 +905,145 @@ class SourceRegistry:
             self._persist()
         except Exception:  # noqa: BLE001
             pass
+
+    # ── rule learning (Pass #87) ──────────────────────────────────
+    def learn_rule(self, desc: SourceDescriptor, *, stage: str,
+                   extractor: str = "", extraction_rule: str = "",
+                   quality_label: str = "", format_spec: str = "",
+                   now: float = 0.0) -> bool:
+        """Record the extraction facts a REAL successful download
+        exercised for *desc*'s source.
+
+        Writes only the source's learned slot — the descriptor (and
+        any hand-written seed rule on it) is never mutated.  The same
+        facts again refresh the slot (successes + 1, failure streak
+        reset); different facts SUPERSEDE it — the newest landed
+        evidence is the rule.  Returns False (no write) when *desc*
+        is not a registered source (candidates and ghosts learn
+        nothing: a candidate must be promoted by the health loop
+        before it can hold a rule) or when no stage/rule facts are
+        supplied.  Never raises."""
+        try:
+            if desc is None or not stage or not extraction_rule:
+                return False
+            key = desc.key
+            if key not in self._by_key:
+                return False
+            now = now or time.time()
+            facts = (str(stage), str(extractor or ""),
+                     str(extraction_rule), str(quality_label or ""),
+                     str(format_spec or ""))
+            cur = self._learned.get(key)
+            if cur is not None and (cur.stage, cur.extractor,
+                                    cur.extraction_rule,
+                                    cur.quality_label,
+                                    cur.format_spec) == facts:
+                cur.successes += 1
+                cur.consecutive_failures = 0
+                cur.last_success_at = now
+            else:
+                self._learned[key] = LearnedRule(
+                    stage=facts[0], extractor=facts[1],
+                    extraction_rule=facts[2], quality_label=facts[3],
+                    format_spec=facts[4], successes=1,
+                    learned_at=now, last_success_at=now)
+            self._persist()
+            return True
+        except Exception:  # noqa: BLE001
+            return False
+
+    def learned_rule(self, desc: SourceDescriptor) -> LearnedRule | None:
+        """The learned slot for one source, in any state (active or
+        stood-down), or None when nothing was ever learned.  Never
+        raises."""
+        try:
+            if desc is None:
+                return None
+            return self._learned.get(desc.key)
+        except Exception:  # noqa: BLE001
+            return None
+
+    def active_learned_rule(
+            self, desc: SourceDescriptor) -> LearnedRule | None:
+        """The learned slot when it is currently PREFERRED (below the
+        stand-down threshold); None once it stands down."""
+        rule = self.learned_rule(desc)
+        return rule if rule is not None and rule.is_active else None
+
+    def learned_for_url(
+            self, url: str) -> tuple[SourceDescriptor, LearnedRule] | None:
+        """(source, active learned rule) for a URL, or None.
+
+        The learned rule is returned only when it is the source's
+        EFFECTIVE rule: a source with a hand-written (seed) rule
+        outranks its learned slot, which stays evidence-only, so this
+        returns None for such sources.  Never raises."""
+        try:
+            desc = self.for_url(url)
+            if desc is None or desc.extraction_rule:
+                return None
+            rule = self.active_learned_rule(desc)
+            if rule is None or not rule.extraction_rule \
+                    or rule.extraction_rule == "none":
+                return None
+            return desc, rule
+        except Exception:  # noqa: BLE001
+            return None
+
+    def effective_extraction_rule(self, desc: SourceDescriptor) -> str:
+        """The extraction rule that governs *desc*: its hand-written
+        rule when it declares one, else its ACTIVE learned rule,
+        else "".  This is what the extractor view derives from."""
+        try:
+            if desc.extraction_rule:
+                return desc.extraction_rule
+            rule = self.active_learned_rule(desc)
+            return rule.extraction_rule if rule is not None else ""
+        except Exception:  # noqa: BLE001
+            return desc.extraction_rule if desc is not None else ""
+
+    def effective_quality_map(
+            self, desc: SourceDescriptor) -> tuple[tuple[str, str], ...]:
+        """The quality map that governs *desc*: a source with a
+        hand-written rule is governed by its hand-written map alone
+        (the learned slot is evidence-only there); a rule-less
+        source is governed by its ACTIVE learned map."""
+        try:
+            if desc.extraction_rule:
+                return desc.quality_map
+            rule = self.active_learned_rule(desc)
+            return rule.quality_map() if rule is not None else ()
+        except Exception:  # noqa: BLE001
+            return desc.quality_map if desc is not None else ()
+
+    def note_rule_failure(self, desc: SourceDescriptor,
+                          now: float = 0.0) -> str:
+        """Record one failure THROUGH *desc*'s learned rule.
+
+        Applies the registry's health thresholds (Pass #86): the
+        rule stops being preferred at ``STAND_DOWN_AFTER``
+        consecutive failures and the slot is cleared at
+        ``DISABLE_AFTER``.  Returns the resulting state: "active" |
+        "stood-down" | "cleared" | "" (no rule on record).  A source
+        success is recorded through :meth:`learn_rule`, which resets
+        the streak.  Never raises."""
+        try:
+            if desc is None:
+                return ""
+            rule = self._learned.get(desc.key)
+            if rule is None:
+                return ""
+            rule.failures += 1
+            rule.consecutive_failures += 1
+            rule.last_failure_at = now or time.time()
+            if rule.consecutive_failures >= DISABLE_AFTER:
+                del self._learned[desc.key]
+                self._persist()
+                return "cleared"
+            self._persist()
+            return rule.status
+        except Exception:  # noqa: BLE001
+            return ""
 
     def score(self, desc: SourceDescriptor, now: float = 0.0) -> float:
         """Learned score 0..1: trust tier + domain-tier signal +
@@ -1041,6 +1293,7 @@ class SourceRegistry:
                 if origin in counts:
                     counts[origin] += 1
                 st = self.stats_for(desc)
+                learned = self.learned_rule(desc)
                 sources.append({
                     "domain": desc.domain, "name": desc.name,
                     "origin": origin,
@@ -1049,7 +1302,13 @@ class SourceRegistry:
                     "ok": st["ok"], "fail": st["fail"],
                     "success_rate": st["success_rate"],
                     "score": self.score(desc),
-                    "last_error_class": st["last_error_class"]})
+                    "last_error_class": st["last_error_class"],
+                    # Pass #87: hand-written rule vs learned rule,
+                    # kept distinct — the first is seed truth, the
+                    # second is evidence from real downloads.
+                    "extraction_rule": desc.extraction_rule,
+                    "learned_rule": learned.to_dict()
+                    if learned is not None else None})
             sources.sort(key=lambda s: (s["origin"], s["domain"]))
             candidates = []
             for key, desc in self._candidates.items():
@@ -1067,6 +1326,7 @@ class SourceRegistry:
                 "registered": counts["registered"],
                 "candidates_pending": len(self._candidates),
                 "shed_count": len(self._shed),
+                "learned_count": len(self._learned),
                 "persisted": self._store is not None,
                 "sources": sources, "candidates": candidates,
                 "shed_list": list(self._shed),
@@ -1074,6 +1334,7 @@ class SourceRegistry:
         except Exception:  # noqa: BLE001
             return {"total": 0, "seeds": 0, "grown": 0, "registered": 0,
                     "candidates_pending": 0, "shed_count": 0,
+                    "learned_count": 0,
                     "persisted": False, "sources": [], "candidates": [],
                     "shed_list": []}
 
@@ -1083,7 +1344,8 @@ def render_status_text(status: dict[str, Any]) -> str:
     the chat status surface.  Never raises."""
     try:
         lines = [
-            "📥 download sources — the registry grows live (pass #86):",
+            "📥 download sources — the registry grows live "
+            "(pass #86; downloads teach it rules, #87):",
             f"  {status.get('total', 0)} sources: "
             f"{status.get('seeds', 0)} seed, "
             f"{status.get('grown', 0)} grown, "
@@ -1093,6 +1355,11 @@ def render_status_text(status: dict[str, Any]) -> str:
             f"{status.get('candidates_pending', 0)}; "
             f"shed: {status.get('shed_count', 0)}",
         ]
+        if status.get("learned_count"):
+            lines.append(
+                f"  learned extraction rules: "
+                f"{status['learned_count']} (taught by successful "
+                "downloads; a seed's hand-written rule outranks them)")
         for src in status.get("sources") or []:
             lines.append(
                 f"  • {src['domain']} [{src['origin']}/"
@@ -1100,6 +1367,22 @@ def render_status_text(status: dict[str, Any]) -> str:
                 f"score={src['score']:.2f}"
                 + (f" last error: {src['last_error_class']}"
                    if src.get("last_error_class") else ""))
+            learned = src.get("learned_rule")
+            if learned:
+                fmt = (f"{learned['quality_label']}→"
+                       f"{learned['format_spec']}"
+                       if learned.get("quality_label")
+                       else learned.get("format_spec") or "-")
+                lines.append(
+                    f"    ↳ learned rule: stage={learned['stage']} "
+                    f"extractor={learned['extractor'] or '-'} "
+                    f"rule={learned['extraction_rule'] or '-'} "
+                    f"format={fmt} — evidence "
+                    f"ok×{learned['successes']} "
+                    f"fail×{learned['failures']} "
+                    f"[{learned['status']}]"
+                    + (" (seed rule outranks it)"
+                       if src.get("extraction_rule") else ""))
         for cand in status.get("candidates") or []:
             lines.append(
                 f"  ? {cand['domain']} [candidate/{cand['health']}] "

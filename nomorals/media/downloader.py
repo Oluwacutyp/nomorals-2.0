@@ -52,6 +52,20 @@ Profile gating (never designing down): ``termux`` gets tighter budgets
 ``laptop``/``workstation`` get the full run.  The stages are the same
 everywhere.
 
+Pass #87 — the chain teaches the registry.  At the ``_succeed``
+seam the facts that actually worked (winning stage, the extractor /
+backend that landed the file, and — for the stages that receive a
+format — the quality-label → format translation the descriptor
+performed) are recorded as a LEARNED rule on the serving source.
+A source with an active learned rule is consulted before the generic
+chain on its next download: its learned stage is attempted first
+and the learned descriptor (the registry's derived view) drives
+format translation.  A failure through the learned path is recorded
+against the rule (the registry stands it down / clears it on the
+#86 health thresholds) and the download still falls back to the
+generic chain in the SAME attempt.  A learned rule never bypasses
+the descriptor gate, the disk preflight, or the integrity ledger.
+
 ``download()`` never raises — it returns a :class:`DownloadReport`.
 """
 
@@ -594,6 +608,96 @@ class MediaDownloader:
         except Exception:  # noqa: BLE001 - intake never breaks downloads
             pass
 
+    # ── rule learning (Pass #87) ──────────────────────────────────
+
+    #: Stage → the registry's extraction-rule vocabulary, for the
+    #: stages whose mechanism the stage itself defines.  The direct
+    #: and proxy stages are refined by the backend that landed the
+    #: file (see :meth:`_learn_from_success`).
+    _STAGE_RULES = {"kit": "direct", "browser": "scrape"}
+
+    def _learned_for(self, url: str) -> Any | None:
+        """(descriptor, learned rule) when the registry holds an
+        ACTIVE learned rule that is *url*'s source's effective rule;
+        None otherwise.  Best-effort — the chain proceeds exactly as
+        before when there is nothing learned."""
+        try:
+            return self.source_registry().learned_for_url(url)
+        except Exception:  # noqa: BLE001 - learning never gates downloads
+            return None
+
+    def _note_rule_failure(self, desc: Any) -> None:
+        """Record one failure through *desc*'s learned rule (the
+        registry degrades / retires it on the #86 thresholds)."""
+        try:
+            self.source_registry().note_rule_failure(desc)
+        except Exception:  # noqa: BLE001 - bookkeeping never breaks downloads
+            pass
+
+    def _learn_from_success(self, report: DownloadReport,
+                            format_facts: dict[str, str] | None) -> None:
+        """Teach the registry what just worked, at the same seam
+        #86 hooked outcome recording (``_succeed``).
+
+        Only facts actually exercised are recorded: the winning
+        stage (the last stage log marked ok), the extractor/backend
+        that landed the file, the extraction rule that stage's
+        mechanism implies, and — only when the winning stage is one
+        that receives a format (direct / proxy) — the quality→format
+        translation that landed.  Sources the registry does not know
+        (candidate-only hosts) learn nothing: there is no source to
+        attach a rule to until the health loop promotes them."""
+        try:
+            winner = next((s for s in reversed(report.stages) if s.ok),
+                          None)
+            if winner is None or winner.stage not in (
+                    "direct", "kit", "proxy", "browser"):
+                return
+            reg = self.source_registry()
+            desc = reg.for_url(report.resolved_url or report.url)
+            if desc is None:
+                return
+            extractor = report.extractor or ""
+            if not extractor and "extractor=" in (winner.note or ""):
+                extractor = winner.note.split("extractor=", 1)[1].strip()
+            rule = self._STAGE_RULES.get(winner.stage, "")
+            if winner.stage in ("direct", "proxy"):
+                rule = "direct" if extractor == "direct" else "ytdlp"
+            facts = format_facts or {}
+            reg.learn_rule(
+                desc, stage=winner.stage, extractor=extractor,
+                extraction_rule=rule,
+                quality_label=facts.get("quality_label", "")
+                if winner.stage in ("direct", "proxy") else "",
+                format_spec=facts.get("format_spec", "")
+                if winner.stage in ("direct", "proxy") else "")
+        except Exception:  # noqa: BLE001 - bookkeeping never breaks downloads
+            pass
+
+    def _attempt_stage(self, stage: str, report: DownloadReport,
+                       url: str, target_dir: Path, audio_only: bool,
+                       format_spec: str, timeout: float,
+                       budget: dict[str, float],
+                       page_url: str = "") -> bool:
+        """Dispatch one chain stage by name (the chain's real stage
+        vocabulary).  Used for the canonical order and for the
+        learned-path-first attempt (Pass #87)."""
+        if stage == "direct":
+            return self._stage_direct(report, url, target_dir,
+                                      audio_only, format_spec, timeout,
+                                      budget)
+        if stage == "kit":
+            return self._stage_kit(report, url, target_dir, audio_only,
+                                   budget)
+        if stage == "proxy":
+            return self._stage_proxy(report, url, target_dir, audio_only,
+                                     format_spec, timeout, budget)
+        if stage == "browser":
+            return self._stage_browser(report, url, target_dir,
+                                       audio_only, page_url or url,
+                                       budget)
+        return False
+
     def _descriptor_for(self, url: str) -> Any | None:
         """Best extractor descriptor for *url*; None when the
         registry view itself is unavailable (chain proceeds as
@@ -637,12 +741,15 @@ class MediaDownloader:
         return self._ledger
 
     def _succeed(self, report: DownloadReport,
-                 started: float) -> DownloadReport:
+                 started: float,
+                 format_facts: dict[str, str] | None = None) -> DownloadReport:
         """Record a landed download in the kit's integrity ledger,
-        then finish.  Bookkeeping is best-effort — a ledger failure
-        never turns a real download into a reported failure."""
+        teach the registry the rule that worked (Pass #87), then
+        finish.  Bookkeeping is best-effort — a ledger failure never
+        turns a real download into a reported failure."""
         self._record_download_outcome(
             report, ok=True, latency_s=time.perf_counter() - started)
+        self._learn_from_success(report, format_facts)
         try:
             if report.ok and report.path:
                 digest = _sha256_of(Path(report.path))
@@ -732,6 +839,16 @@ class MediaDownloader:
         # instead of burning every stage to learn the same thing; a
         # caller's quality LABEL is translated to the descriptor's
         # yt-dlp format for this source.
+        # The quality→format translation that lands, tracked as
+        # evidence (Pass #87): when the matched descriptor translates
+        # the caller's label, (label, format) is the pair a success
+        # will teach; an audio-only request lands bestaudio through
+        # the direct stage's own override, which is the translation
+        # of record there.
+        format_facts = {"quality_label": "", "format_spec": format_spec}
+        if audio_only:
+            format_facts = {"quality_label": "audio",
+                            "format_spec": "bestaudio/best"}
         descriptor = self._descriptor_for(work_url)
         if descriptor is not None:
             if format_spec:
@@ -744,6 +861,10 @@ class MediaDownloader:
                     _log.info("download format label %r → %r via "
                               "descriptor %s", format_spec, mapped,
                               descriptor.name)
+                    if not audio_only:
+                        format_facts = {
+                            "quality_label": format_spec,
+                            "format_spec": mapped}
                     format_spec = mapped
             if not descriptor.downloadable:
                 report.extractor = descriptor.name
@@ -760,19 +881,45 @@ class MediaDownloader:
                 report.hint = ("find the same title on a downloadable "
                                "source, or play it in the source's own app")
                 return self._finish(report, started)
+        # Learned rule first (Pass #87): when this source has an
+        # active learned rule whose stage is not the chain's head,
+        # that stage is attempted BEFORE the generic order — the
+        # rule was earned by a real landing.  Its failure is recorded
+        # against the rule, the stage is not retried below, and the
+        # generic chain still runs in the SAME attempt (no regression
+        # vs the unlearned chain).  The descriptor gate and the disk
+        # preflight above already ran — a learned rule bypasses
+        # neither, and the integrity ledger still records the landing
+        # in ``_succeed``.
+        learned_pair = self._learned_for(work_url)
+        rule_failure_recorded = False
+        skip_stages: set[str] = set()
         try:
-            if self._stage_direct(report, work_url, target_dir, audio_only,
-                                  format_spec, timeout, budget):
-                return self._succeed(report, started)
-            if self._stage_kit(report, work_url, target_dir, audio_only,
-                               budget):
-                return self._succeed(report, started)
-            if self._stage_proxy(report, work_url, target_dir, audio_only,
-                                 format_spec, timeout, budget):
-                return self._succeed(report, started)
-            if self._stage_browser(report, work_url, target_dir, audio_only,
-                                   page_url or work_url, budget):
-                return self._succeed(report, started)
+            if learned_pair is not None:
+                learned_desc, learned_rule = learned_pair
+                if learned_rule.stage in ("kit", "proxy", "browser"):
+                    _log.info(
+                        "download learned rule host=%s stage=%s "
+                        "rule=%s — trying the learned path first",
+                        learned_desc.domain, learned_rule.stage,
+                        learned_rule.extraction_rule)
+                    if self._attempt_stage(
+                            learned_rule.stage, report, work_url,
+                            target_dir, audio_only, format_spec,
+                            timeout, budget, page_url):
+                        return self._succeed(report, started,
+                                             format_facts)
+                    self._note_rule_failure(learned_desc)
+                    rule_failure_recorded = True
+                    skip_stages.add(learned_rule.stage)
+            for stage_name in ("direct", "kit", "proxy", "browser"):
+                if stage_name in skip_stages:
+                    continue
+                if self._attempt_stage(
+                        stage_name, report, work_url, target_dir,
+                        audio_only, format_spec, timeout, budget,
+                        page_url):
+                    return self._succeed(report, started, format_facts)
         except Exception as exc:  # noqa: BLE001 — the chain never raises
             _log.warning("downloader crashed mid-chain on %s: %s",
                          url, exc)
@@ -788,6 +935,12 @@ class MediaDownloader:
         self._record_download_outcome(
             report, ok=False, error_class=report.failure.value,
             latency_s=time.perf_counter() - started)
+        # A total failure through a chain the learned rule governed
+        # (its stage ran in canonical position, or the learned-first
+        # attempt already recorded it — never twice) degrades the
+        # rule on the registry's health thresholds.
+        if learned_pair is not None and not rule_failure_recorded:
+            self._note_rule_failure(learned_pair[0])
         return self._finish(report, started)
 
     # ── stage 1: direct ───────────────────────────────────────────────

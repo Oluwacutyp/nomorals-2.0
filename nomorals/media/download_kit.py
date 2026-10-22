@@ -134,18 +134,40 @@ def descriptors_for_registry(registry: SourceRegistry) -> list[ExtractorDescript
     downloadable) becomes a descriptor here.  Sources without facts
     (news, discovery, search) get no descriptor and fall through to
     the structural fallbacks — the same behaviour they had while this
-    list was hand-maintained separately (and drifted)."""
+    list was hand-maintained separately (and drifted).
+
+    Pass #87: the facts read here are the registry's EFFECTIVE facts
+    (``effective_extraction_rule`` / ``effective_quality_map``) — a
+    source whose hand-written rule is empty but which LEARNED a rule
+    from real download evidence surfaces here as its own descriptor,
+    ahead of the generic fallback.  Still a pure view: precedence
+    and evidence live in the registry, never in this module."""
     out: list[ExtractorDescriptor] = []
     try:
         for src in registry.all():
-            if not src.extraction_rule:
+            rule = src.extraction_rule
+            qmap = src.quality_map
+            eff_rule = getattr(registry, "effective_extraction_rule", None)
+            if callable(eff_rule):
+                try:
+                    rule = eff_rule(src) or ""
+                except Exception:  # noqa: BLE001 - view degrades to seed facts
+                    rule = src.extraction_rule
+            if not rule:
                 continue
+            if not qmap:
+                eff_qmap = getattr(registry, "effective_quality_map", None)
+                if callable(eff_qmap):
+                    try:
+                        qmap = eff_qmap(src) or ()
+                    except Exception:  # noqa: BLE001
+                        qmap = src.quality_map
             out.append(ExtractorDescriptor(
                 name=(src.name or src.domain).lower().replace(" ", ""),
                 url_patterns=src.url_patterns or (re.escape(src.domain),),
                 auth_needed=src.auth_needed,
-                extraction_rule=src.extraction_rule,
-                quality_map=src.quality_map,
+                extraction_rule=rule,
+                quality_map=qmap,
                 licence=src.licence,
                 notes=src.notes,
                 downloadable=src.downloadable))
