@@ -68,6 +68,22 @@ content is DATA, never instructions.  This module is that layer:
   :meth:`SourceRegistry.note_rule_failure` applies the health
   vocabulary above — ``STAND_DOWN_AFTER`` consecutive failures stop
   a rule being preferred, ``DISABLE_AFTER`` clears the slot.
+* Music class goes open (Pass #88) — the music search chain
+  (``media/sources.py``) joins THIS registry as a source class of
+  its own (the registry's model fits without distortion: every chain
+  source is one host serving search).  The chain sources that were
+  never registered (Bandcamp, Internet Archive, MusicBrainz,
+  Openverse, Wikimedia, iTunes, Deezer — plus the chain's real
+  NetNaija host, ``netnaija.com``) are seeds below, declaring NO
+  extraction facts so the #76/#87 extractor view is unchanged.  The
+  resolver records search/resolve outcomes against them
+  (:meth:`SourceRegistry.record_outcome` for served/failed,
+  :meth:`SourceRegistry.record_no_result` for the weak no-hit
+  evidence a non-raising search API can actually offer), orders the
+  chain by the registry's score/health semantics, and appends
+  health-promoted grown sources — which the generic WordPress
+  scrape shape (``sources.DiscoveredBlogSource``) can serve.
+  :meth:`SourceRegistry.status` carries the class under ``music``.
 
 No real identity leakage: :func:`redact_identity` strips emails,
 phones and tokens from retrieved text before it is stored or shown.
@@ -537,6 +553,11 @@ class LearnedRule:
 class _OutcomeStats:
     ok: int = 0
     fail: int = 0
+    #: Searches that reached the source and found nothing (Pass #88).
+    #: Weak evidence: it sinks the source in score ordering (the
+    #: denominator below) but is NOT a failure — it never feeds the
+    #: health circuit breaker (see record_no_result).
+    no_result: int = 0
     latency_sum: float = 0.0
     latency_n: int = 0
     last_ok: float = 0.0
@@ -545,7 +566,7 @@ class _OutcomeStats:
 
     @property
     def success_rate(self) -> float:
-        total = self.ok + self.fail
+        total = self.ok + self.fail + self.no_result
         return (self.ok / total) if total else 0.5
 
     @property
@@ -619,6 +640,11 @@ class SourceRegistry:
                 # v2 (Pass #87): adds the learned-rule slots.  v1
                 # payloads remain loadable — a missing "learned"
                 # section simply means no rules were learned yet.
+                # Pass #88 grows NO new section and does NOT bump the
+                # version (the #87 pin asserts the writer's shape):
+                # per-source stats rows gain an optional "no_result"
+                # counter — key-tolerant in both directions (older
+                # loaders ignore it; its absence defaults to 0).
                 "version": 2,
                 "sources": sources,
                 "origins": {_key_str(k): v for k, v in self._origin.items()
@@ -630,6 +656,7 @@ class SourceRegistry:
                 "stats": {
                     _key_str(k): {
                         "ok": s.ok, "fail": s.fail,
+                        "no_result": s.no_result,
                         "latency_sum": s.latency_sum,
                         "latency_n": s.latency_n, "last_ok": s.last_ok,
                         "last_seen": s.last_seen,
@@ -691,6 +718,7 @@ class SourceRegistry:
                     self._stats[key] = _OutcomeStats(
                         ok=int(raw_stats.get("ok") or 0),
                         fail=int(raw_stats.get("fail") or 0),
+                        no_result=int(raw_stats.get("no_result") or 0),
                         latency_sum=float(raw_stats.get("latency_sum") or 0),
                         latency_n=int(raw_stats.get("latency_n") or 0),
                         last_ok=float(raw_stats.get("last_ok") or 0),
@@ -836,12 +864,14 @@ class SourceRegistry:
         try:
             st = self._stats.get(desc.key) or _OutcomeStats()
             return {"ok": st.ok, "fail": st.fail,
+                    "no_result": st.no_result,
                     "success_rate": round(st.success_rate, 3),
                     "avg_latency_s": round(st.avg_latency, 3),
                     "last_ok": st.last_ok, "last_seen": st.last_seen,
                     "last_error_class": st.last_error_class}
         except Exception:  # noqa: BLE001
-            return {"ok": 0, "fail": 0, "success_rate": 0.5,
+            return {"ok": 0, "fail": 0, "no_result": 0,
+                    "success_rate": 0.5,
                     "avg_latency_s": 0.0, "last_ok": 0.0,
                     "last_seen": 0.0, "last_error_class": ""}
 
@@ -850,6 +880,42 @@ class SourceRegistry:
         health loop or an outcome says otherwise)."""
         entry = self._health.get(desc.key) or {}
         return str(entry.get("status") or "unknown")
+
+    def origin_for(self, desc: SourceDescriptor) -> str:
+        """How *desc* entered the registry: "seed" | "grown" |
+        "registered" (Pass #88 — the resolver/status surface speak
+        this vocabulary without reaching into private state)."""
+        try:
+            return self._origin.get(desc.key, "registered")
+        except Exception:  # noqa: BLE001
+            return "registered"
+
+    def is_active(self, desc: SourceDescriptor) -> bool:
+        """True when *desc* is in the ACTIVE ordering — its health is
+        not stood-down / disabled / dead (the #86 vocabulary)."""
+        return self.health_for(desc) not in _INACTIVE_HEALTH
+
+    def record_no_result(self, desc: SourceDescriptor,
+                         fetched_at: float = 0.0) -> None:
+        """Record a search that reached *desc*'s source and found
+        nothing (Pass #88).
+
+        This is the honest outcome a non-raising search API offers
+        for a catalogue miss: it is evidence the source did not
+        serve, so it counts in the score denominator (the source
+        sinks gradually) — but it is NOT a failure: the trust ledger
+        and the health circuit breaker are untouched, so a healthy
+        niche source is never stood down for not carrying an obscure
+        track.  Dead-source detection stays with the health loop,
+        which probes the source directly.  Persists.  Never raises."""
+        try:
+            now = fetched_at or time.time()
+            st = self._stats.setdefault(desc.key, _OutcomeStats())
+            st.no_result += 1
+            st.last_seen = now
+            self._persist()
+        except Exception:  # noqa: BLE001
+            pass
 
     # ── learned ordering ──
     def record_outcome(self, desc: SourceDescriptor, ok: bool,
@@ -1280,6 +1346,55 @@ class SourceRegistry:
                        exc_info=True)
         return summary
 
+    # ── music class status (Pass #88) ──
+    def music_status(self) -> dict[str, Any]:
+        """The music search class's state in this registry: one row
+        per chain strategy (strategy → the host it fetches from, per
+        ``sources.MUSIC_SOURCE_DOMAINS``) with origin, health and
+        outcome counts, plus the grown music sources the health loop
+        promoted and the candidates still pending.  Never raises."""
+        try:
+            from .sources import MUSIC_SEARCH_SOURCES, MUSIC_SOURCE_DOMAINS
+
+            chain = []
+            for strategy in MUSIC_SEARCH_SOURCES:
+                domain = MUSIC_SOURCE_DOMAINS.get(strategy)
+                if not domain:
+                    continue  # workspace-scan: no host, not a source
+                desc = self.for_domain(domain)
+                if desc is None:
+                    chain.append({
+                        "strategy": strategy, "domain": domain,
+                        "origin": "missing", "health": "unknown",
+                        "ok": 0, "fail": 0, "no_result": 0,
+                        "score": 0.0})
+                    continue
+                st = self.stats_for(desc)
+                chain.append({
+                    "strategy": strategy, "domain": domain,
+                    "origin": self.origin_for(desc),
+                    "health": self.health_for(desc),
+                    "ok": st["ok"], "fail": st["fail"],
+                    "no_result": st["no_result"],
+                    "score": self.score(desc)})
+            grown = []
+            for key, desc in self._by_key.items():
+                if self._origin.get(key) != "grown" \
+                        or "music" not in desc.kinds:
+                    continue
+                st = self.stats_for(desc)
+                grown.append({
+                    "domain": desc.domain, "name": desc.name,
+                    "health": self.health_for(desc),
+                    "ok": st["ok"], "fail": st["fail"],
+                    "no_result": st["no_result"]})
+            grown.sort(key=lambda g: g["domain"])
+            return {"chain": chain, "grown": grown,
+                    "candidates_pending": len(self._candidates)}
+        except Exception:  # noqa: BLE001
+            return {"chain": [], "grown": [],
+                    "candidates_pending": len(self._candidates)}
+
     # ── status surface (Pass #86) ──
     def status(self) -> dict[str, Any]:
         """The registry's full growth state: seed vs grown sources,
@@ -1330,13 +1445,18 @@ class SourceRegistry:
                 "persisted": self._store is not None,
                 "sources": sources, "candidates": candidates,
                 "shed_list": list(self._shed),
+                # Pass #88: the music search class, in the same
+                # surface — no second status command.
+                "music": self.music_status(),
             }
         except Exception:  # noqa: BLE001
             return {"total": 0, "seeds": 0, "grown": 0, "registered": 0,
                     "candidates_pending": 0, "shed_count": 0,
                     "learned_count": 0,
                     "persisted": False, "sources": [], "candidates": [],
-                    "shed_list": []}
+                    "shed_list": [],
+                    "music": {"chain": [], "grown": [],
+                              "candidates_pending": 0}}
 
 
 def render_status_text(status: dict[str, Any]) -> str:
@@ -1383,6 +1503,25 @@ def render_status_text(status: dict[str, Any]) -> str:
                     f"[{learned['status']}]"
                     + (" (seed rule outranks it)"
                        if src.get("extraction_rule") else ""))
+        music = status.get("music") or {}
+        if music.get("chain"):
+            lines.append(
+                "🎵 music sources — the /play search chain, in the "
+                "same registry (pass #88):")
+            for row in music["chain"]:
+                lines.append(
+                    f"  ♪ {row['strategy']} → {row['domain']} "
+                    f"[{row['origin']}/{row['health']}] "
+                    f"ok={row['ok']} fail={row['fail']} "
+                    f"no-result={row['no_result']}")
+            for g in music.get("grown") or []:
+                lines.append(
+                    f"  ♪ grown:{g['domain']} [grown/{g['health']}] "
+                    f"ok={g['ok']} fail={g['fail']} — promoted by the "
+                    "health loop, serving via the generic blog shape")
+            lines.append(
+                f"  music candidates pending verification: "
+                f"{music.get('candidates_pending', 0)}")
         for cand in status.get("candidates") or []:
             lines.append(
                 f"  ? {cand['domain']} [candidate/{cand['health']}] "
@@ -1435,6 +1574,22 @@ def _seed(store: Any = None) -> SourceRegistry:
         ("US", "en", "tiktok.com", "TikTok", ("music", "film"), Licence.USER_UPLOAD, TrustTier.COMMUNITY, "Short video; yt-dlp tiktok extractor", 20),
         ("US", "en", "instagram.com", "Instagram", ("music", "film"), Licence.USER_UPLOAD, TrustTier.COMMUNITY, "Reels/posts; yt-dlp instagram extractor", 20),
         ("US", "en", "x.com", "X-Twitter", ("music", "film"), Licence.USER_UPLOAD, TrustTier.COMMUNITY, "Video posts; yt-dlp twitter extractor", 20),
+        # ── music search chain (Pass #88) ──
+        # The media/sources.py chain joins the SAME registry as a
+        # source class of its own.  These seeds declare NO extraction
+        # facts (see the extraction table below: patterns only, for
+        # subdomain crediting) — the #76/#87 extractor view derives
+        # nothing from a rule-less source, exactly as when these
+        # hosts were unregistered.  Domains are the hosts the chain
+        # actually fetches (sources.py _BASE / API hosts).
+        ("NG", "en", "netnaija.com", "NetNaija Music", ("music", "music-search"), Licence.UNLICENSED, TrustTier.UNVERIFIED, "Music chain host — WP ?s= search at netnaija.com (sources.py); thenetnaija.net above is the download-blog seed", 6),
+        ("US", "en", "bandcamp.com", "Bandcamp", ("music", "music-search"), Licence.USER_UPLOAD, TrustTier.COMMUNITY, "HTML search, keyless; full tracks via yt-dlp bandcamp extractor", 10),
+        ("US", "en", "archive.org", "Internet Archive", ("music", "music-search"), Licence.UNKNOWN, TrustTier.COMMUNITY, "advancedsearch JSON; full downloadable files", 10),
+        ("GLOBAL", "en", "musicbrainz.org", "MusicBrainz", ("music", "music-search"), Licence.LICENSED, TrustTier.VERIFIED, "Metadata only — no audio; discovery, never download", 10),
+        ("GLOBAL", "en", "api.openverse.org", "Openverse", ("music", "music-search"), Licence.LICENSED, TrustTier.COMMUNITY, "CC-licensed audio aggregator API; results point at creator hosts", 10),
+        ("GLOBAL", "en", "commons.wikimedia.org", "Wikimedia Commons", ("music", "music-search"), Licence.LICENSED, TrustTier.COMMUNITY, "Freely licensed audio files via the MediaWiki API", 10),
+        ("US", "en", "itunes.apple.com", "iTunes Search API", ("music", "music-search"), Licence.LICENSED, TrustTier.VERIFIED, "30-second previews only — last-resort in the chain", 10),
+        ("FR", "en", "api.deezer.com", "Deezer API", ("music", "music-search"), Licence.LICENSED, TrustTier.VERIFIED, "30-second previews only — last-resort in the chain", 10),
     ]
     # Download-extraction facts live ON the source (Pass #76): the
     # download kit's extractor registry derives its descriptors from
@@ -1457,6 +1612,20 @@ def _seed(store: Any = None) -> SourceRegistry:
         "tiktok.com": ("ytdlp", (r"tiktok\.com",), _Q, True),
         "instagram.com": ("ytdlp", (r"instagram\.com",), _Q, True),
         "x.com": ("ytdlp", (r"(twitter\.com|x\.com)",), _Q, True),
+        # Music-search seeds (Pass #88): patterns ONLY — an empty
+        # rule means the extractor view derives no descriptor (the
+        # pre-#88 behaviour for these hosts); the patterns exist so
+        # for_url credits subdomain URLs (artist.bandcamp.com,
+        # upload.wikimedia.org, audio-ssl.itunes.apple.com, Deezer
+        # preview CDNs) to the chain source that served them.
+        "netnaija.com": ("", (r"netnaija\.com",), (), True),
+        "bandcamp.com": ("", (r"bandcamp\.com",), (), True),
+        "archive.org": ("", (r"archive\.org",), (), True),
+        "musicbrainz.org": ("", (r"musicbrainz\.org",), (), False),
+        "api.openverse.org": ("", (r"openverse\.org",), (), True),
+        "commons.wikimedia.org": ("", (r"wikimedia\.org",), (), True),
+        "itunes.apple.com": ("", (r"itunes\.apple\.com",), (), True),
+        "api.deezer.com": ("", (r"deezer\.com",), (), True),
     }
     _pre_existing = set(reg._by_key)
     for nation, lang, domain, name, kinds, lic, tier, notes, rpm in seeds:

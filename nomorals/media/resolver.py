@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import os
 import re
+import time
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
@@ -81,6 +82,7 @@ def ytdlp_available() -> bool:
 #: of truth, imported from sources.py so the count is testable.
 #: Owner rule: MANY sources, never 1–2.
 from .sources import MUSIC_SEARCH_SOURCES as PLAY_TEXT_STRATEGY_NAMES  # noqa: E402
+from .sources import MUSIC_SOURCE_DOMAINS  # noqa: E402
 
 _AUDIO_EXTS = (
     ".mp3", ".wav", ".flac", ".ogg", ".m4a", ".opus",
@@ -156,12 +158,248 @@ class SourceResolver:
     """Strategy-chain audio source resolution."""
 
     def __init__(self, context: Any = None, *,
-                 soundcloud: Any = None, spotify: Any = None) -> None:
+                 soundcloud: Any = None, spotify: Any = None,
+                 source_registry: Any = None) -> None:
         self.context = context
         self._soundcloud = soundcloud if soundcloud is not None else \
             getattr(context, "soundcloud_adapter", None)
         self._spotify = spotify if spotify is not None else \
             getattr(context, "spotify_adapter", None)
+        # Source registry (Pass #88): the ONE registry the music
+        # chain credits outcomes to, takes its ordering from, and
+        # grows through.  Tests may inject; otherwise the shared
+        # DEFAULT_REGISTRY, bound to the context's KV store exactly
+        # as MediaDownloader binds it (Pass #86 pattern) — and only
+        # when the context carries a database, so db-less callers
+        # (pure/offline contexts) keep the pre-#88 behaviour exactly.
+        self._source_registry_injected = source_registry
+        self._source_registry_cache: Any = None
+        self._source_registry_resolved = False
+
+    # ── source registry: outcomes, ordering, growth (Pass #88) ──────
+
+    def _registry(self) -> Any:
+        """The source registry for music outcomes, or None when this
+        resolver has no registry to speak to (no injection and a
+        context without a database).  Never raises."""
+        if self._source_registry_resolved:
+            return self._source_registry_cache
+        self._source_registry_resolved = True
+        if self._source_registry_injected is not None:
+            self._source_registry_cache = self._source_registry_injected
+            return self._source_registry_cache
+        try:
+            db = getattr(self.context, "db", None) \
+                if self.context is not None else None
+            if db is None:
+                return None
+            from .source_registry import DEFAULT_REGISTRY
+            reg = DEFAULT_REGISTRY
+            try:
+                from ..storage.kv import KVStore
+                reg.bind_store(KVStore(db))
+            except Exception:  # noqa: BLE001 - persistence is an
+                # enhancement; its absence never sinks a resolution
+                pass
+            self._source_registry_cache = reg
+            return reg
+        except Exception:  # noqa: BLE001
+            return None
+
+    def _desc_for_strategy(self, reg: Any, name: str) -> Any:
+        """The registry descriptor a chain strategy serves from
+        (``sources.MUSIC_SOURCE_DOMAINS``), or None.  Never raises."""
+        try:
+            domain = MUSIC_SOURCE_DOMAINS.get(name)
+            if not domain:
+                return None
+            return reg.for_domain(domain)
+        except Exception:  # noqa: BLE001
+            return None
+
+    def _record_served(self, reg: Any, desc: Any, latency_s: float,
+                       out: Any = None) -> None:
+        """A strategy served: credit its source, and note any foreign
+        host the winning candidate points at as an UNTRUSTED
+        discovery candidate (search results genuinely carry such
+        hosts — Openverse results live on creator domains the
+        registry has never seen).  Best-effort; never raises."""
+        try:
+            if desc is not None:
+                reg.record_outcome(desc, True, latency_s=latency_s)
+            url = getattr(out, "path_or_url", "") if out is not None \
+                else ""
+            if url:
+                reg.note_candidate(url, via="music-search-result")
+        except Exception:  # noqa: BLE001 - bookkeeping never
+            # breaks resolution
+            pass
+
+    def _record_no_result(self, reg: Any, desc: Any) -> None:
+        """A search reached the source and found nothing: weak
+        evidence (see SourceRegistry.record_no_result)."""
+        try:
+            if desc is not None:
+                reg.record_no_result(desc)
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _record_failure(self, reg: Any, desc: Any, error_class: str,
+                        latency_s: float = 0.0) -> None:
+        """An operational failure against the serving source, with
+        the error class the code actually knows."""
+        try:
+            if desc is not None:
+                reg.record_outcome(desc, False, latency_s=latency_s,
+                                   error_class=error_class)
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _record_strategy_error(self, reg: Any, name: str, desc: Any,
+                               exc: ResolutionError,
+                               latency_s: float) -> None:
+        """Classify one strategy's ResolutionError into registry
+        evidence.  The taxonomy is honest about what the seam can
+        observe (the sources' ``search()`` never raises, so most
+        catalogue misses arrive as 'no … results'):
+
+        * not-applicable / not-configured (wrong URL shape, adapter
+          unwired, Spotify unlinked, no workspace, yt-dlp binary
+          missing for the yt-dlp strategies) → NO evidence: these
+          are facts about the query or this install, not the source;
+        * operational failures ('… failed …') → a real failure with
+          an error class, feeding the circuit breaker;
+        * everything else (no results, preview-only catalogue hits)
+          → a no-result: weak evidence, score-only.
+        """
+        try:
+            if desc is None:
+                return
+            msg = (exc.message or "").lower()
+            if ("not wired" in msg or "not linked" in msg
+                    or msg.startswith("not a ")
+                    or msg.startswith("not an ")
+                    or "no workspace" in msg
+                    or "no audio file" in msg
+                    or "no local audio" in msg):
+                return
+            if name in ("youtube-search", "youtube-music-search") \
+                    and not ytdlp_available():
+                return  # the binary is missing — an install fact
+            if "failed" in msg or "error" in msg:
+                self._record_failure(
+                    reg, desc,
+                    "search_failed" if "search" in msg
+                    else "resolve_failed",
+                    latency_s)
+            else:
+                self._record_no_result(reg, desc)
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _music_shim(self, reg: Any, name: str, fn: Callable,
+                    desc: Any) -> Callable:
+        """Wrap one chain strategy so its outcome lands in the
+        registry (Pass #88).  Transparent: same return, same raise."""
+
+        def run() -> ResolvedAudio:
+            t0 = time.perf_counter()
+            try:
+                out = fn()
+            except ResolutionError as exc:
+                self._record_strategy_error(
+                    reg, name, desc, exc, time.perf_counter() - t0)
+                raise
+            except Exception:
+                self._record_failure(reg, desc, "strategy_error",
+                                     time.perf_counter() - t0)
+                raise
+            latency = time.perf_counter() - t0
+            if isinstance(out, ResolvedAudio) and out.ok:
+                self._record_served(reg, desc, latency, out)
+            else:
+                self._record_no_result(reg, desc)
+            return out
+
+        return run
+
+    def _order_music(self, reg: Any,
+                     items: list[tuple[str, Any, Any]]
+                     ) -> list[tuple[str, Any, Any]]:
+        """Outcome-aware chain order (Pass #88), through the
+        registry's existing score/health semantics:
+
+        * NO learned state anywhere in the chain → the list is
+          returned untouched: day-one behaviour is today's chain
+          order, byte-for-byte;
+        * otherwise active sources sort by registry score (stable —
+          ties keep chain order) and stood-down / disabled / dead
+          sources are demoted to the end, in chain order: they leave
+          the active ordering (the #86 vocabulary) but the chain
+          still tries them last rather than pretending they do not
+          exist — the attempt log stays truthful.
+        Never raises; a registry hiccup returns the chain as-is."""
+        try:
+            evidence = False
+            for _name, _fn, desc in items:
+                if desc is None:
+                    continue
+                st = reg.stats_for(desc)
+                if st["ok"] or st["fail"] or st["no_result"] \
+                        or not reg.is_active(desc):
+                    evidence = True
+                    break
+            if not evidence:
+                return items
+            active = [it for it in items
+                      if it[2] is None or reg.is_active(it[2])]
+            inactive = [it for it in items
+                        if it[2] is not None and not reg.is_active(it[2])]
+            active.sort(key=lambda it: -reg.score(it[2])
+                        if it[2] is not None else 0.0)
+            return active + inactive
+        except Exception:  # noqa: BLE001
+            return items
+
+    def _grown_music(self, reg: Any) -> list[Any]:
+        """Registry descriptors for GROWN music sources: candidates
+        the health loop promoted (origin ``grown``, kind ``music``).
+        Candidates that were never promoted are NOT here — they
+        serve nothing.  Never raises."""
+        try:
+            return [d for d in reg.all()
+                    if reg.origin_for(d) == "grown"
+                    and "music" in d.kinds]
+        except Exception:  # noqa: BLE001
+            return []
+
+    def _s_grown_search(self, query: str, desc: Any) -> ResolvedAudio:
+        """One grown music source, served through the generic
+        WordPress blog shape (sources.DiscoveredBlogSource)."""
+        from .sources import DiscoveredBlogSource  # lazy: same layer
+
+        src = DiscoveredBlogSource(desc.domain)
+        cands = src.search(query, limit=5)
+        if not cands:
+            raise ResolutionError(
+                f"grown:{desc.domain}",
+                f"no results on grown source {desc.domain} for {query!r}")
+        c = cands[0]
+        return ResolvedAudio(
+            ok=True, path_or_url=c.url, title=c.title, artist=c.artist,
+            kind=f"grown:{desc.domain}",
+            source_name=f"{desc.name or desc.domain} (grown source)")
+
+    def _grown_search_many(self, desc: Any, query: str,
+                           limit: int) -> list[ResolvedAudio]:
+        from .sources import DiscoveredBlogSource  # lazy: same layer
+
+        src = DiscoveredBlogSource(desc.domain)
+        return [ResolvedAudio(
+            ok=True, path_or_url=c.url, title=c.title, artist=c.artist,
+            kind=f"grown:{desc.domain}",
+            source_name=f"{desc.name or desc.domain} (grown source)")
+            for c in src.search(query, limit=limit)]
 
     # ── public API ────────────────────────────────────────────────────
 
@@ -247,7 +485,28 @@ class SourceResolver:
             ("itunes-search", self._itunes_search_many),
             ("deezer-search", self._deezer_search_many),
         ]
+        # Pass #88: the sweep is a real music path — its outcomes
+        # land in the same registry (served / no-result / failure per
+        # source), its order follows the same learned ordering, and
+        # grown sources sweep too.  With no registry the sweep is
+        # exactly the list above, in this order.
+        reg = self._registry()
+        items: list[tuple[str, Any, Any]] = []
+        if reg is not None:
+            for name, fn in fns:
+                items.append(
+                    (name, fn, self._desc_for_strategy(reg, name)))
+            for desc in self._grown_music(reg):
+                items.append((
+                    f"grown:{desc.domain}",
+                    lambda d=desc: self._grown_search_many(d, q, limit),
+                    desc))
+            items = self._order_music(reg, items)
+            fns = [(name, fn) for name, fn, _d in items]
+        descs = {name: desc for name, _fn, desc in items}
         for name, fn in fns:
+            desc = descs.get(name)
+            t0 = time.perf_counter()
             try:
                 got = fn(q, limit)
             except Exception as exc:  # noqa: BLE001 — one source dying
@@ -255,12 +514,31 @@ class SourceResolver:
                 attempts.append(f"{name} — failed: {exc}")
                 _log.info("resolver candidates: %s failed: %s",
                           getattr(fn, "__name__", "?"), exc)
+                if reg is not None and desc is not None:
+                    self._record_failure(reg, desc, "search_failed",
+                                         time.perf_counter() - t0)
                 continue
             if got:
                 attempts.append(f"{name} — ok ({len(got)})")
                 out.extend(got)
+                if reg is not None and desc is not None:
+                    self._record_served(
+                        reg, desc, time.perf_counter() - t0, got[0])
+                    for extra in got[1:]:
+                        try:
+                            reg.note_candidate(
+                                extra.path_or_url,
+                                via="music-search-result")
+                        except Exception:  # noqa: BLE001
+                            pass
             else:
                 attempts.append(f"{name} — no results")
+                if reg is not None and desc is not None \
+                        and not (name == "soundcloud-search"
+                                 and self._soundcloud is None):
+                    # An unwired SoundCloud adapter returning [] is a
+                    # configuration fact, not source evidence.
+                    self._record_no_result(reg, desc)
         seen: set[tuple[str, str]] = set()
         deduped: list[ResolvedAudio] = []
         for r in out:
@@ -591,18 +869,46 @@ class SourceResolver:
                 or "play.spotify.com" in low:
             # Spotify serves no downloadable stream — handled explicitly
             # and honestly, never through extraction.
-            return self._run_chain(
+            out = self._run_chain(
                 result, [("spotify-link",
                           lambda: self._s_spotify_url(url))])
+            self._record_url_outcome(url, out)
+            return out
         # One uniform chain for every URL.  yt-dlp routes dynamically;
         # the SoundCloud API is purely a metadata optimization with a
         # yt-dlp fallback — its failure is never fatal.
-        return self._run_chain(result, [
+        out = self._run_chain(result, [
             ("audiomack", lambda: self._s_audiomack_url(url)),
             ("soundcloud-api", lambda: self._s_soundcloud_url(url)),
             ("yt-dlp", lambda: self._s_ytdlp_url(url)),
             ("direct-url", lambda: self._s_direct_url(url)),
         ])
+        self._record_url_outcome(url, out)
+        return out
+
+    def _record_url_outcome(self, url: str, out: ResolvedAudio) -> None:
+        """Credit/blame the source a pasted URL belongs to (Pass
+        #88): a resolve that yielded a playable URL is a success for
+        the URL's host source; a total failure is recorded against
+        it with the resolve_failed class.  A host the registry does
+        not know is noted as an UNTRUSTED discovery candidate (via
+        "play-url") — the play path's analogue of the downloader's
+        download-url intake (#86).  Best-effort; never raises."""
+        try:
+            reg = self._registry()
+            if reg is None:
+                return
+            desc = reg.for_url(url)
+            if desc is None:
+                reg.note_candidate(url, via="play-url")
+            elif out.ok:
+                reg.record_outcome(desc, True)
+            else:
+                reg.record_outcome(desc, False,
+                                   error_class="resolve_failed")
+        except Exception:  # noqa: BLE001 - bookkeeping never
+            # breaks resolution
+            pass
 
     def _resolve_text(self, query: str,
                       result: ResolvedAudio) -> ResolvedAudio:
@@ -616,7 +922,7 @@ class SourceResolver:
         # Music, MusicBrainz, Openverse, Wikimedia, iTunes, Deezer).
         # One source failing never ends the search — the chain keeps
         # going through ALL of them.
-        return self._run_chain(result, [
+        strategies: list[tuple[str, Callable[[], ResolvedAudio]]] = [
             ("workspace-scan", lambda: self._s_workspace_scan(query)),
             ("netnaija-search", lambda: self._s_netnaija_search(query)),
             ("notjustok-search", lambda: self._s_blog_search(
@@ -644,7 +950,32 @@ class SourceResolver:
             ("deezer-search", lambda: self._s_preview_search(
                 query, "DeezerSource", "deezer")),
             ("spotify-search", lambda: self._s_spotify_search(query)),
-        ])
+        ]
+        # Pass #88: the chain learns.  Each strategy is wrapped so
+        # its outcome lands in the ONE source registry against the
+        # source that served (sources.MUSIC_SOURCE_DOMAINS), the
+        # order becomes outcome-aware through the registry's
+        # score/health semantics, and health-promoted GROWN sources
+        # are appended as strategies of their own.  With no registry
+        # (db-less context) or no learned state, the chain below is
+        # exactly the list above, in this order.
+        reg = self._registry()
+        if reg is None:
+            return self._run_chain(result, strategies)
+        items: list[tuple[str, Any, Any]] = []
+        for name, fn in strategies:
+            desc = self._desc_for_strategy(reg, name)
+            items.append((name, self._music_shim(reg, name, fn, desc),
+                          desc))
+        for desc in self._grown_music(reg):
+            name = f"grown:{desc.domain}"
+            items.append((name, self._music_shim(
+                reg, name,
+                lambda d=desc: self._s_grown_search(query, d), desc),
+                desc))
+        ordered = self._order_music(reg, items)
+        return self._run_chain(
+            result, [(name, fn) for name, fn, _desc in ordered])
 
     def _s_blog_search(self, query: str, cls_name: str,
                        kind: str) -> ResolvedAudio:

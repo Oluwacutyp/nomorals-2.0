@@ -797,18 +797,32 @@ class PlaybackEngine:
                               "falling back to yt-dlp",
                               item.get("path"), exc)
                     url = str(item.get("path", ""))
-            if kind == "netnaija":
-                from .sources import NetNaijaSource, SourceCandidate
-                direct = NetNaijaSource().download_url(SourceCandidate(
-                    source="netnaija", title=title, url=url))
+            if kind == "netnaija" or kind.startswith("grown:"):
+                # Blog-shaped sources resolve the post page to a
+                # direct MP3 first (the generic download stages would
+                # otherwise fetch the post page itself).  Grown
+                # sources (Pass #88 — registry-promoted discoveries)
+                # use the same WordPress shape via
+                # DiscoveredBlogSource, pointed at their own domain.
+                from .sources import (
+                    DiscoveredBlogSource, NetNaijaSource, SourceCandidate)
+                if kind.startswith("grown:"):
+                    blog = DiscoveredBlogSource(kind.split(":", 1)[1])
+                    label = blog.domain
+                else:
+                    blog = NetNaijaSource()
+                    label = "NetNaija"
+                direct = blog.download_url(SourceCandidate(
+                    source=blog.name, title=title, url=url))
                 if not direct:
-                    _log.info("netnaija: no direct MP3 for %r; "
-                              "trying YouTube fallback", title)
+                    _log.info("%s: no direct MP3 for %r; "
+                              "trying YouTube fallback", label, title)
                     return self._download_youtube_fallback(
-                        item, title, "NetNaija download page unreachable",
-                        source_label="NetNaija")
+                        item, title,
+                        f"{label} download page unreachable",
+                        source_label=label)
                 url = direct
-                _log.info("netnaija: direct MP3 resolved for %r", title)
+                _log.info("%s: direct MP3 resolved for %r", label, title)
             if not url:
                 return {"ok": False, "reason": "no URL to download"}
             tools = getattr(self.context, "tools", None)

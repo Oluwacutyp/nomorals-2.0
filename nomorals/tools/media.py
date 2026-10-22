@@ -530,10 +530,12 @@ def register(registry: Any) -> None:
         "download_sources",
         description=(
             "Download source registry (the one registry behind every "
-            "download): action=status (seed vs grown sources, health, "
-            "outcome counts, candidates pending/shed) | health (run "
-            "the source health loop: re-verify sources + candidates, "
-            "promote verified candidates, shed dead ones)."
+            "download AND the /play music search chain): action=status "
+            "(seed vs grown sources, health, outcome counts, candidates "
+            "pending/shed, plus the music class: chain sources, grown "
+            "music sources, music candidates) | health (run the source "
+            "health loop: re-verify sources + candidates, promote "
+            "verified candidates, shed dead ones)."
         ),
         capability=Capability.NET_OUT,
     )

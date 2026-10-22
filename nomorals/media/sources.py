@@ -60,6 +60,8 @@ __all__ = [
     "SOURCE_CHAIN",
     "BROWSER_UA",
     "MUSIC_SEARCH_SOURCES",
+    "MUSIC_SOURCE_DOMAINS",
+    "DiscoveredBlogSource",
     "MUSIC_SOURCE_REGIONS",
     "GLOBAL_REGIONS",
     "music_covered_regions",
@@ -898,6 +900,31 @@ class TooXclusiveSource(NetNaijaSource):
     _BASE = "https://tooxclusive.com"
 
 
+class DiscoveredBlogSource(NetNaijaSource):
+    """A download blog DISCOVERED on the music path, promoted by the
+    source registry's health loop (Pass #88, open-sources law).
+
+    The registry (``source_registry.py``) is the growth pipeline: a
+    host encountered on the real path is noted as an UNTRUSTED
+    candidate, serves nothing, and only the health loop can promote
+    it (origin ``grown``).  A promoted host becomes searchable through
+    this class — the generic WordPress shape the scrape framework
+    already implements (``?s=`` search, entry-title result parsing,
+    multi-hop download pages ending in a direct media link), pointed
+    at the discovered domain.  Sites that are not WordPress-shaped
+    simply return [] / "" and the chain moves on, honestly.
+    """
+
+    def __init__(self, domain: str) -> None:
+        super().__init__()
+        host = (domain or "").strip().lower()
+        if host.startswith("www."):
+            host = host[4:]
+        self.domain = host
+        self._BASE = f"https://{host}"
+        self.name = f"grown:{host}"
+
+
 # ── the chain ─────────────────────────────────────────────────────────────
 
 #: Text-search priority for /play.  Regional blogs first (direct MP3s
@@ -942,6 +969,39 @@ MUSIC_SEARCH_SOURCES: tuple[str, ...] = (
     "deezer-search",
     "spotify-search",
 )
+
+#: The host each music chain strategy actually fetches from — the
+#: strategy's source in the ONE source registry (Pass #88).  This map
+#: is the music class's membership list: the resolver credits search /
+#: resolve outcomes to the registry descriptor for this domain, the
+#: registry's status surface renders the class from it, and the health
+#: loop verifies these hosts.  Domains are evidence from this module
+#: (each source's ``_BASE`` / API host), NOT the site's marketing
+#: domain — Deezer search fetches ``api.deezer.com``, Openverse
+#: ``api.openverse.org``, and the chain's NetNaija is ``netnaija.com``
+#: (the registry's older download-blog seed is ``thenetnaija.net``, a
+#: different host that also exists).  ``None`` = no host (the owner's
+#: own files).  Grown sources are not listed here — they are not
+#: strategies; the resolver appends them from the registry itself.
+MUSIC_SOURCE_DOMAINS: dict[str, str | None] = {
+    "workspace-scan": None,
+    "netnaija-search": "netnaija.com",
+    "notjustok-search": "notjustok.com",
+    "tooxclusive-search": "tooxclusive.com",
+    "soundcloud-search": "soundcloud.com",
+    "bandcamp-search": "bandcamp.com",
+    "youtube-search": "youtube.com",
+    "youtube-music-search": "youtube.com",
+    "archiveorg-search": "archive.org",
+    "boomplay-search": "boomplay.com",
+    "musicbrainz-search": "musicbrainz.org",
+    "openverse-search": "api.openverse.org",
+    "wikimedia-search": "commons.wikimedia.org",
+    "itunes-search": "itunes.apple.com",
+    "deezer-search": "api.deezer.com",
+    "spotify-search": "open.spotify.com",
+    "audiomack": "audiomack.com",
+}
 
 #: The six world regions coverage is measured against.  Nigeria/Africa
 #: is ONE region among many, not the focus — the owner rule is GLOBAL

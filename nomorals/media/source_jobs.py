@@ -11,7 +11,11 @@ Job:
 * ``download source health`` — every 6h, re-verify every registered
   download source and every pending discovery candidate through the
   source registry's own health loop: verified candidates are
-  promoted, dead ones shed, failing sources stand down.  Marked
+  promoted, dead ones shed, failing sources stand down.  Since
+  Pass #88 the music search class lives in the same registry, so
+  this one job also re-verifies the /play chain sources and can
+  promote the candidates the music path discovers — no second job,
+  no second binding.  Marked
   ``routine`` deliberately: the loop is self-reporting bookkeeping —
   its results land in the registry's status surface (``/download
   status``), not in owner alerts — but a FAILED run still records as
