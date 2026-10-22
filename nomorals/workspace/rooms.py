@@ -1143,7 +1143,8 @@ def ensure_rooms_tick_job(context: Any) -> dict[str, Any]:
         return {"name": ROOMS_TICK_JOB_NAME, "already_scheduled": True,
                 "job_id": have[0].get("id")}
     job = sched.add(ROOMS_TICK_JOB_NAME, "every 5m", "tool",
-                    {"tool": "room", "args": {"action": "tick"}})
+                    {"tool": "room", "args": {"action": "tick"}},
+                    routine=True)
     _log.info("scheduled rooms tick job: %s", ROOMS_TICK_JOB_NAME)
     return {"name": ROOMS_TICK_JOB_NAME, "scheduled": True,
             "job_id": job.get("id")}

@@ -718,6 +718,7 @@ def ensure_immune_sampler_job(scheduler: Any, *,
                     pass
                 break
         return scheduler.add(IMMUNE_SAMPLER_JOB, spec, "tool",
-                             {"tool": IMMUNE_SAMPLER_TOOL, "args": {}})
+                             {"tool": IMMUNE_SAMPLER_TOOL, "args": {}},
+                             routine=True)
     except Exception:  # noqa: BLE001 - scheduling is best-effort
         return None

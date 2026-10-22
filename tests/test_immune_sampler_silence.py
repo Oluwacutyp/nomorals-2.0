@@ -295,11 +295,20 @@ def test_legacy_sampler_job_is_retired_not_duplicated(tmp_path):
     assert len(jobs) == 1 and jobs[0]["id"] == kept_id
 
 
-def test_sampler_job_name_is_a_routine_tick_name():
-    # the scheduler silences successful runs of routine tick /
-    # heartbeat / sweep jobs — the sampler must classify as one
-    lname = IMMUNE_SAMPLER_JOB.lower()
-    assert "tick" in lname or "heartbeat" in lname or "sweep" in lname
+def test_sampler_job_registers_as_routine(tmp_path):
+    # Pass #71: routine classification is a first-class flag on the
+    # job definition, not a substring of its name — the sampler's
+    # registrar sets it explicitly, so the scheduler silences the
+    # job's successful runs whatever the job is called.  (Before #71
+    # this pinned the name rule itself: "tick" in the job name.)
+    from nomorals.agents.scheduler import Scheduler
+
+    sched = Scheduler(_ctx(tmp_path))
+    ensure_immune_sampler_job(sched)
+    jobs = [j for j in sched.list_jobs()
+            if j.get("name") == IMMUNE_SAMPLER_JOB]
+    assert len(jobs) == 1
+    assert jobs[0]["routine"] is True
 
 
 # ── the classifier + drain, unit level ────────────────────────────

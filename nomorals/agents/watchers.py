@@ -1883,7 +1883,8 @@ def ensure_sweeper_job(context: Any) -> dict[str, Any]:
         return {"name": SWEEPER_JOB_NAME, "already_scheduled": True,
                 "job_id": have[0].get("id")}
     job = sched.add(SWEEPER_JOB_NAME, "every 1m", "tool",
-                    {"tool": "watch", "args": {"action": "sweep"}})
+                    {"tool": "watch", "args": {"action": "sweep"}},
+                    routine=True)
     _log.info("scheduled sweeper job: %s", SWEEPER_JOB_NAME)
     return {"name": SWEEPER_JOB_NAME, "scheduled": True,
             "job_id": job.get("id")}

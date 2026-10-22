@@ -1486,6 +1486,6 @@ def ensure_agent_modes_tick_job(scheduler: Any, *,
                 break
         return scheduler.add(AGENT_MODES_TICK_JOB, spec, "tool",
                              {"tool": AGENT_MODES_TICK_TOOL, "args": {}},
-                             run_timeout_s=TICK_RUN_TIMEOUT_S)
+                             run_timeout_s=TICK_RUN_TIMEOUT_S, routine=True)
     except Exception:  # noqa: BLE001 - scheduling is best-effort
         return None

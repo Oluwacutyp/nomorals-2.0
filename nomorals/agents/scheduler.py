@@ -132,6 +132,67 @@ HEAVY_WEIGHT_THRESHOLD = 1.0
 MISSED_GRACE_SECONDS = 300.0
 
 
+def _legacy_routine_from_name(name: Any) -> bool:
+    """The PRE-#71 routine classification: a name-substring rule.
+
+    .. deprecated:: Pass #71
+
+    Routine classification is now the job's first-class ``routine``
+    field.  This function survives for exactly ONE purpose: the
+    one-time backfill of rows persisted before the field existed, so a
+    pre-flag database keeps the classification it had on day one.  It
+    is never consulted for a job that carries the field — renaming a
+    job cannot reclassify it.
+    """
+    lname = str(name or "").lower()
+    return "tick" in lname or "heartbeat" in lname or "sweep" in lname
+
+
+def _declared_failure(value: Any) -> str | None:
+    """The error text a tool/command result VALUE declares, or None.
+
+    The tool registry's outcome only vouches for the call machinery
+    (tool found, capability allowed, function returned); tools across
+    this codebase declare their own failure in the returned dict:
+
+    * ``{"ok": False, ...}`` — the operation did not succeed; the
+      error text rides in ``error`` (or ``reason``).  An ``ok`` of
+      exactly ``False`` declares failure no matter what else the dict
+      carries; an ``ok`` of ``True`` declares success even when an
+      ``error`` note rides along (a partial sub-failure the tool
+      already accounted for).
+    * ``{"error": <truthy>}`` with NO ``ok`` key — the bare-error
+      shape (argument/lookup failures: cipher, deals, delivery).
+
+    Anything else declares nothing: dicts with neither key, non-dict
+    values, strings.  Command payloads declare separately through
+    ``exit_code``/``timed_out`` in :meth:`Scheduler._run_command`.
+    """
+    if not isinstance(value, dict):
+        return None
+    if value.get("ok") is False:
+        return str(value.get("error") or value.get("reason") or "")
+    if "ok" not in value and value.get("error"):
+        return str(value.get("error"))
+    return None
+
+
+class _DeclaredFailure(RuntimeError):
+    """A job failure the payload's own result value declared.
+
+    Raised by the payload runners when a tool/command result declares
+    its own failure (see :func:`_declared_failure`), as opposed to the
+    call machinery failing (registry Err, raised exception, timeout).
+    The distinction matters exactly once: the run RECORDS failed
+    identically either way, but a declared failure is the job's own
+    report — and routine jobs are the self-reporting class whose
+    generic scheduler alert stays silent (their owning systems
+    publish their own events; the immune sampler's contract is the
+    canonical case).  A machinery failure has no other reporter, so
+    it pages as it always has.
+    """
+
+
 def _backoff_delay(
     strategy: str,
     base_delay: float,
@@ -595,6 +656,7 @@ class Scheduler:
         #: rows per job (K8s successfulJobsHistoryLimit, but per job).
         self.run_history_limit = max(1, int(run_history_limit or 200))
         self._ensure_blackout_column()
+        self._ensure_routine_column()
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
         self._running_jobs = 0
@@ -628,6 +690,49 @@ class Scheduler:
         except Exception as exc:  # noqa: BLE001
             if "duplicate column" not in str(exc).lower():
                 _log.debug("scheduler blackout column ensure failed: %s", exc)
+
+    def _ensure_routine_column(self) -> None:
+        """Lazily add ``schedule_jobs.routine`` and backfill it ONCE.
+
+        Pass #71: routine (quiet bookkeeping) classification used to be
+        a substring match on the job's name, computed at run time.  It
+        is now a first-class field.  Rows persisted before the field
+        existed load with the sentinel ``-1`` and are backfilled here —
+        exactly once, at first construction on the database — with the
+        value the legacy name rule computed for them, so every existing
+        job keeps its day-one classification.  New rows always carry an
+        explicit 0/1 from :meth:`add`, so the sentinel only ever
+        appears on pre-flag rows.  Idempotent and best-effort, like
+        the blackout column: a failure here must never stop the
+        scheduler (an unbackfilled row reads as non-routine until the
+        next construction retries).
+        """
+        if self.db is None:
+            return
+        try:
+            self.db.execute(
+                "ALTER TABLE schedule_jobs ADD COLUMN routine "
+                "INTEGER NOT NULL DEFAULT -1")
+        except Exception as exc:  # noqa: BLE001
+            if "duplicate column" not in str(exc).lower():
+                _log.debug("scheduler routine column ensure failed: %s",
+                           exc)
+                return
+        try:
+            stale = self.db.query(
+                "SELECT id, name FROM schedule_jobs WHERE routine < 0")
+        except Exception:  # noqa: BLE001
+            return
+        for row in stale or []:
+            try:
+                with self.db.transaction():
+                    self.db.execute(
+                        "UPDATE schedule_jobs SET routine = ? WHERE id = ?",
+                        (1 if _legacy_routine_from_name(row.get("name"))
+                         else 0, row.get("id")))
+            except Exception:  # noqa: BLE001
+                _log.debug("scheduler routine backfill failed for %s",
+                           row.get("id"), exc_info=True)
 
     # ── cross-system wiring (bus + ledger; both fail-open) ────────────────
 
@@ -685,6 +790,22 @@ class Scheduler:
         return False, reasons
 
     @staticmethod
+    def _is_routine(row: dict[str, Any]) -> bool:
+        """True when the job row carries the first-class routine flag.
+
+        Routine = quiet bookkeeping class: a successful run does not
+        page the owner.  The flag is data (Pass #71) — set explicitly
+        at registration, backfilled once for pre-flag rows — and is
+        NEVER derived from the job's name at run time.  An unset
+        sentinel (``-1``, a pre-flag row this process has not
+        backfilled) reads as non-routine: silence is opt-in.
+        """
+        try:
+            return int(row.get("routine") or 0) == 1
+        except (TypeError, ValueError):
+            return False
+
+    @staticmethod
     def _is_heavy(row: dict[str, Any]) -> bool:
         """True when the job row marks heavy work.
 
@@ -726,6 +847,7 @@ class Scheduler:
         weight: float = 0.0,
         blackout_dates: list[str] | str | None = None,
         start_jitter_s: float = 0.0,
+        routine: bool | None = None,
     ) -> dict[str, Any]:
         if self.db is None:
             raise RuntimeError("scheduler needs a database context")
@@ -771,6 +893,12 @@ class Scheduler:
                 f"overlap_policy must be one of {sorted(OVERLAP_POLICIES)}, "
                 f"got {overlap_policy!r}")
         run_timeout_s = max(0.0, float(run_timeout_s or 0.0))
+        # routine: None means "not specified" and lands on the
+        # conservative default False — a job's successes page the owner
+        # unless its registrar explicitly marks it quiet bookkeeping.
+        # (Pre-flag persisted rows never pass through here; they are
+        # backfilled with their legacy classification at construction.)
+        routine_flag = bool(routine) if routine is not None else False
         blackout = _parse_blackout_dates(blackout_dates)
         start_jitter_s = max(0.0, float(start_jitter_s or 0.0))
         # explicit timezone arg wins; daily spec may also embed one
@@ -809,9 +937,9 @@ class Scheduler:
                 "timezone, depends_on, depends_policy, max_retries, retry_delay, "
                 "retry_count, backoff, backoff_max_s, backoff_jitter, "
                 "missed_fire_policy, overlap_policy, run_timeout_s, heavy, weight, "
-                "blackout_dates) "
+                "blackout_dates, routine) "
                 "VALUES (?, ?, ?, ?, ?, ?, 1, ?, NULL, '', ?, ?, ?, ?, ?, ?, ?, "
-                "0, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     job_id, (name or "").strip() or "job", kind,
                     spec_str,
@@ -823,6 +951,7 @@ class Scheduler:
                     missed_fire_policy, overlap_policy, run_timeout_s,
                     1 if heavy else 0, float(weight or 0.0),
                     json.dumps(blackout),
+                    1 if routine_flag else 0,
                 ),
             )
         self._ledger("schedule", job_id,
@@ -1479,13 +1608,16 @@ class Scheduler:
 
     def _run_payload_guarded(
         self, row: dict[str, Any], timeout_s: float
-    ) -> tuple[bool, str, bool]:
+    ) -> tuple[bool, str, bool, bool]:
         """Execute the job payload with a wall-clock cap.
 
-        Returns ``(ok, summary, timed_out)``.  With ``timeout_s <= 0``
-        the payload runs inline (no cap); otherwise it runs on a daemon
-        worker thread and a join past the cap abandons the worker — the
-        tick loop is never blocked forever by a stuck tool or command.
+        Returns ``(ok, summary, timed_out, declared)`` — ``declared``
+        marks a failure the payload's own result value declared (see
+        :class:`_DeclaredFailure`), as opposed to a machinery failure.
+        With ``timeout_s <= 0`` the payload runs inline (no cap);
+        otherwise it runs on a daemon worker thread and a join past
+        the cap abandons the worker — the tick loop is never blocked
+        forever by a stuck tool or command.
         """
         box: dict[str, Any] = {}
 
@@ -1514,10 +1646,11 @@ class Scheduler:
                         f"job failed: timed out after {timeout_s:g}s "
                         "(worker abandoned; the job is marked failed but the "
                         "stuck call may still be running)",
-                        True)
+                        True, False)
         if "error" in box:
-            return False, f"job failed: {box['error']}", False
-        return True, str(box.get("result") or ""), False
+            return (False, f"job failed: {box['error']}", False,
+                    isinstance(box["error"], _DeclaredFailure))
+        return True, str(box.get("result") or ""), False, False
 
     def _execute(self, row: dict[str, Any], *,
                  trigger_source: str = "tick") -> dict[str, Any]:
@@ -1537,7 +1670,8 @@ class Scheduler:
         try:
             # the per-job cap wins; 0 falls back to the scheduler default
             timeout_s = float(row.get("run_timeout_s") or 0.0) or self.wall_seconds
-            ok, summary, timed_out = self._run_payload_guarded(row, timeout_s)
+            ok, summary, timed_out, declared = self._run_payload_guarded(
+                row, timeout_s)
         finally:
             with self._lock:
                 self._active.discard(job_id)
@@ -1609,19 +1743,28 @@ class Scheduler:
         # alert the owner - durable + multi-channel via the notifier.
         # Failures alert on the failure transition only (a stuck job must
         # not page every run). Successes notify too, except for routine
-        # tick/heartbeat jobs which would spam.  Message payloads are the
-        # exception the other way round: the message itself was already
-        # delivered to the owner's DM by _run_message - a second "job ran"
-        # alert would double-send.
-        lname = job_name.lower()
-        is_routine_tick = 'tick' in lname or 'heartbeat' in lname or 'sweep' in lname
+        # jobs (the job's own ``routine`` flag — quiet bookkeeping whose
+        # successes would spam).  Message payloads are the exception the
+        # other way round: the message itself was already delivered to
+        # the owner's DM by _run_message - a second "job ran" alert
+        # would double-send.
         alert = True
         if will_retry:
             alert = False  # retry pending - don't page until retries exhaust
         if not ok and prev_failed:
             alert = False  # still failing - the owner already knows
-        if ok and is_routine_tick:
-            alert = False  # routine tick succeeded - silent
+        if ok and self._is_routine(row):
+            alert = False  # routine job succeeded - silent
+        if not ok and declared and self._is_routine(row):
+            # A routine job's value-declared failure is the job's own
+            # report, and routine systems publish their own events (the
+            # immune sampler's errors are the canonical case: its tool
+            # already notified, with specifics).  The run still
+            # RECORDS failed — bookkeeping tells the truth — but the
+            # generic alert must not double-page what the system
+            # itself reported.  Machinery failures of routine jobs
+            # have no other reporter and still page (unchanged).
+            alert = False
         if ok and row.get("payload_kind") == "message":
             alert = False  # the message itself already went out
         if alert:
@@ -1697,6 +1840,15 @@ class Scheduler:
             from ..core.tool_render import render_tool_value
 
             text = render_tool_value(value, max_lines=30)
+        # The registry outcome vouches only for the call machinery; a
+        # tool VALUE can declare its own failure ({"ok": False, ...} —
+        # see _declared_failure).  A declared failure IS a failed run:
+        # raise through the same channel a registry Err takes, so the
+        # run records failed with the error text preserved instead of
+        # reading as a success in history/stats.
+        declared = _declared_failure(value)
+        if declared is not None:
+            raise _DeclaredFailure(f"tool {tool} failed: {declared or text}")
         return f"{tool}:\n{text}"
 
     def _run_command(self, payload: dict[str, Any]) -> str:
@@ -1714,6 +1866,19 @@ class Scheduler:
             raise RuntimeError(f"command failed: {getattr(outcome.error, 'message', outcome.error)}")
         value = outcome.value or {}
         stdout = str(value.get("stdout") or "")[:1200]
+        # A command declares failure the unix way: a nonzero exit code
+        # (or the sandbox's own timeout flag).  Recording "exit=3" as a
+        # successful run was the same lie as the ok:False tool value —
+        # fail through the raised channel, output preserved.  A value
+        # with NO exit_code declares nothing and keeps the old reading.
+        if isinstance(value, dict):
+            exit_code = value.get("exit_code")
+            if value.get("timed_out") or (
+                    isinstance(exit_code, int) and exit_code != 0):
+                detail = stdout or str(value.get("stderr") or "")[:600]
+                raise _DeclaredFailure(
+                    f"command failed: exit={exit_code}"
+                    + (f": {detail}" if detail else ""))
         return f"exit={value.get('exit_code')}\n{stdout}".strip()
 
     # ── loop ─────────────────────────────────────────────────────────────────
@@ -1959,6 +2124,7 @@ class Scheduler:
             "heavy": bool(int(row.get("heavy") or 0)),
             "weight": float(row.get("weight") or 0.0),
             "blackout_dates": blackout,
+            "routine": self._is_routine(row),
         }
 
 

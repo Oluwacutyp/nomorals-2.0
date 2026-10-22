@@ -1877,6 +1877,7 @@ class PartnerRuntime(
                             self._scheduler.add(
                                 "improvement tick", "every 6h", "tool",
                                 {"tool": "improve", "args": {"action": "cycle"}},
+                                routine=True,
                             )
                     except Exception as exc:  # noqa: BLE001 - optional
                         _log.warning(
@@ -1901,16 +1902,16 @@ class PartnerRuntime(
                 # "system works together without tripping commands" wiring.
                 # Research tick is light (due-check + gaps); wisdom tick is
                 # heavy (fetch + parse + index).
-                for _name, _spec, _tool, _heavy in (
+                for _name, _spec, _tool, _heavy, _routine in (
                     ("research organ tick", "every 30m",
-                     "research_organ_tick", False),
+                     "research_organ_tick", False, True),
                     ("wisdom organ tick", "every 6h",
-                     "wisdom_organ_tick", True),
+                     "wisdom_organ_tick", True, True),
                     # Memory consolidation: additive distillation on a
                     # schedule. She reviews and distills without being asked.
                     # Never deletes — consolidation is additive only.
                     ("memory consolidation", "every 12h",
-                     "memory_consolidate", False),
+                     "memory_consolidate", False, False),
                 ):
                     try:
                         _have = [j for j in self._scheduler.list_jobs()
@@ -1919,7 +1920,7 @@ class PartnerRuntime(
                             self._scheduler.add(
                                 _name, _spec, "tool",
                                 {"tool": _tool, "args": {}},
-                                heavy=_heavy,
+                                heavy=_heavy, routine=_routine,
                             )
                     except Exception as exc:  # noqa: BLE001 - optional
                         _log.warning("%s job not registered: %s", _name, exc)
@@ -2137,6 +2138,7 @@ class PartnerRuntime(
                                 "monitor tick", "every 5m", "tool",
                                 {"tool": "monitor",
                                  "args": {"action": "tick"}},
+                                routine=True,
                             )
                 except Exception as exc:  # noqa: BLE001 - optional
                     _log.warning("monitor tick job not registered: %s", exc)

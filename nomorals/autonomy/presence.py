@@ -966,6 +966,7 @@ def ensure_heartbeat_job(scheduler: Any) -> None:
                 spec="*/30 * * * *",
                 payload_kind="tool",
                 payload={"tool": "__presence_heartbeat__", "args": {}},
+                routine=True,
             )
             _log.info("presence heartbeat job registered")
     except Exception as exc:  # noqa: BLE001

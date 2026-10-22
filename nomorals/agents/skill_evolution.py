@@ -1009,12 +1009,12 @@ def ensure_improvement_schedule(context: Any) -> list[dict[str, Any]]:
     sched = Scheduler(context)
     jobs = [
         ("improve-evolution-tick", "every 24h", "skill_evolve",
-         {"action": "tick"}),
+         {"action": "tick"}, True),
         ("improve-synthesis-scan", "every 7d", "skill_synthesize",
-         {"action": "scan"}),
+         {"action": "scan"}, False),
     ]
     out = []
-    for name, spec, tool, args in jobs:
+    for name, spec, tool, args, routine in jobs:
         try:
             existing = context.db.query_one(
                 "SELECT id FROM schedule_jobs WHERE name=? LIMIT 1", (name,))
@@ -1024,7 +1024,8 @@ def ensure_improvement_schedule(context: Any) -> list[dict[str, Any]]:
             out.append({"name": name, "already_scheduled": True})
             continue
         try:
-            job = sched.add(name, spec, "tool", {"tool": tool, "args": args})
+            job = sched.add(name, spec, "tool", {"tool": tool, "args": args},
+                            routine=routine)
             out.append({"name": name, "scheduled": True,
                         "job_id": job.get("id")})
         except Exception as exc:  # noqa: BLE001
