@@ -1161,28 +1161,24 @@ def _to_ogg(path: Path) -> Path:
 
     Only for formats Groq cannot take at all (AAC, AMR, AIFF, ...).
     Relabelling those bytes with a supported extension would be lying
-    about the content — convert, don't hope. Raises ToolError when
-    ffmpeg is unavailable or the conversion fails.
+    about the content — convert, don't hope. The conversion itself is
+    the canonical :func:`wav_to_voice_ogg`; this wrapper keeps the
+    STT-upload contract — raise :class:`ToolError` when no OGG could
+    be produced (the voice-note converter falls back quietly instead).
     """
-    ffmpeg = shutil.which("ffmpeg")
-    if not ffmpeg:
+    converted, mime = wav_to_voice_ogg(str(path))
+    if mime == "audio/ogg" and Path(converted).is_file():
+        return Path(converted)
+    if shutil.which("ffmpeg") is None:
         raise ToolError(
             f"{path.suffix or 'extensionless'} audio is not a format Groq "
             "accepts and ffmpeg is unavailable to convert it "
             "(Termux: pkg install ffmpeg)"
         )
-    converted = path.with_suffix(".ogg")
-    proc = subprocess.run(
-        [ffmpeg, "-y", "-i", str(path), "-c:a", "libopus", "-b:a", "64k",
-         str(converted)],
-        capture_output=True, timeout=_STT_TIMEOUT, check=False,
+    raise ToolError(
+        f"ffmpeg conversion to ogg failed: {path} did not convert "
+        "to OGG/Opus"
     )
-    if proc.returncode != 0 or not converted.exists():
-        raise ToolError(
-            "ffmpeg conversion to ogg failed: "
-            f"{proc.stderr.decode('utf-8', 'replace')[:300]}"
-        )
-    return converted
 
 
 def _stt_upload_target(path: Path) -> tuple[Path, str]:

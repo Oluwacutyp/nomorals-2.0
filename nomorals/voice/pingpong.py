@@ -14,9 +14,7 @@ actually was a voice note.
 
 from __future__ import annotations
 
-import os
 import subprocess
-import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -293,20 +291,25 @@ def ogg_duration(ogg_path: str) -> float:
 
 
 def to_ogg(src_path: str) -> str:
-    """Convert any audio file to opus .ogg (Telegram sendVoice format)."""
+    """Convert any audio file to opus .ogg (Telegram sendVoice format).
+
+    The conversion itself is the canonical
+    :func:`nomorals.tools.audio.wav_to_voice_ogg`; this wrapper keeps
+    the ping-pong contract — raise RuntimeError when no OGG could be
+    produced, so callers fall back to text instead of sending an
+    unconverted file dressed as a voice note.
+    """
     src = Path(src_path)
     if src.suffix.lower() == ".ogg":
         return str(src)
-    dest = Path(tempfile.gettempdir()) / f"devon_reply_{os.getpid()}.ogg"
-    try:
-        proc = subprocess.run(
-            ["ffmpeg", "-y", "-loglevel", "error", "-i", str(src),
-             "-c:a", "libopus", "-b:a", "48k", str(dest)],
-            timeout=60, capture_output=True,
-        )
-    except FileNotFoundError as exc:
-        raise RuntimeError("ffmpeg not installed — cannot make voice notes") from exc
-    if proc.returncode != 0 or not dest.is_file():
-        raise RuntimeError(
-            f"ffmpeg conversion failed: {proc.stderr.decode()[:200]}")
-    return str(dest)
+    from ..tools.audio import wav_to_voice_ogg
+
+    converted, mime = wav_to_voice_ogg(str(src))
+    if mime == "audio/ogg":
+        return converted
+    import shutil
+
+    if shutil.which("ffmpeg") is None:
+        raise RuntimeError("ffmpeg not installed — cannot make voice notes")
+    raise RuntimeError(
+        f"ffmpeg conversion failed: {src} did not convert to OGG/Opus")

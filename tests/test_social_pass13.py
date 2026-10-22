@@ -60,9 +60,18 @@ def _make_context(owner_chats):
 
 
 def _audio_file():
+    # A REAL wav (Pass #72): delivery now goes through the shared
+    # voice transport, whose conversion to OGG/Opus must genuinely
+    # succeed for the voice-note assertions below to mean anything —
+    # garbage bytes would (honestly) land as a labelled file instead.
+    import wave
     fd, path = tempfile.mkstemp(suffix=".wav")
-    os.write(fd, b"RIFF....fake-wav")
     os.close(fd)
+    with wave.open(path, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(8000)
+        w.writeframes(b"\x00\x00" * 400)
     return path
 
 

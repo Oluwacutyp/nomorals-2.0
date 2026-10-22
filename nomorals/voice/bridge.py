@@ -124,6 +124,31 @@ class VoiceBridge:
             f"voice engine {type(engine).__name__!r} has neither "
             ".transcribe() (UniversalSTT) nor .stt.transcribe() (legacy)")
 
+    @staticmethod
+    def _voice_ogg(audio_path: str) -> str | None:
+        """Convert synthesized audio to OGG/Opus for a voice-note send.
+
+        Voice notes ARE OGG/Opus; the TTS engines hand back WAV/MP3.
+        Uses the canonical converter
+        (:func:`nomorals.tools.audio.wav_to_voice_ogg`). Returns the
+        converted path, or None when conversion is impossible — the
+        senders then refuse the send rather than flag an unconverted
+        file as a voice note.
+        """
+        from ..tools.audio import wav_to_voice_ogg
+
+        converted, mime = wav_to_voice_ogg(audio_path)
+        return converted if mime == "audio/ogg" else None
+
+    @staticmethod
+    def _cleanup(audio_path: str, send_path: str) -> None:
+        """Best-effort temp cleanup of the synthesis + converted files."""
+        for p in {audio_path, send_path}:
+            try:
+                Path(p).unlink(missing_ok=True)
+            except Exception:  # noqa: E103 - cleanup is best-effort
+                pass
+
     async def send_voice_whatsapp(
         self,
         chat: ChatRef,
@@ -157,14 +182,21 @@ class VoiceBridge:
                 _log.error("TTS failed to generate audio")
                 return False
 
+            # Convert first: WhatsApp voice notes are OGG/Opus — an
+            # unconverted MP3/WAV must not go out flagged as one.
+            send_path = self._voice_ogg(audio_path)
+            if send_path is None:
+                _log.error("Voice bridge: cannot send a WhatsApp voice "
+                           "note — OGG/Opus conversion unavailable "
+                           f"for {audio_path}")
+                return False
+
             # Send as voice note
-            result = self.whatsapp.send_voice(chat, audio_path, caption=caption)
+            result = self.whatsapp.send_voice(chat, send_path,
+                                              caption=caption)
 
             # Cleanup temp file
-            try:
-                Path(audio_path).unlink(missing_ok=True)
-            except Exception:  # noqa: E103 - temp file cleanup is best-effort
-                pass
+            self._cleanup(audio_path, send_path)
 
             if result.ok:
                 _log.info(f"Sent voice note to WhatsApp: {chat.chat_id}")
@@ -210,20 +242,26 @@ class VoiceBridge:
                 _log.error("TTS failed to generate audio")
                 return False
 
+            # Convert first: the voice_note=True flag is only honest
+            # on an OGG/Opus file — never on raw MP3/WAV TTS output.
+            send_path = self._voice_ogg(audio_path)
+            if send_path is None:
+                _log.error("Voice bridge: cannot send a Telegram voice "
+                           "note — OGG/Opus conversion unavailable "
+                           f"for {audio_path}")
+                return False
+
             # Send as voice note via Telegram
             # Telegram uses voice_note=True flag
             await self.telegram.client.send_file(
                 chat_id,
-                audio_path,
+                send_path,
                 voice_note=True,
                 caption=caption,
             )
 
             # Cleanup temp file
-            try:
-                Path(audio_path).unlink(missing_ok=True)
-            except Exception:  # noqa: E103 - temp file cleanup is best-effort
-                pass
+            self._cleanup(audio_path, send_path)
 
             _log.info(f"Sent voice note to Telegram: {chat_id}")
             return True
@@ -327,6 +365,17 @@ class VoiceBridge:
             return {"sent": 0, "failed": len(targets),
                     "receipts": [],
                     "error": f"synthesis failed: {exc}"}
+        # One synthesis, one conversion: every leg sends the OGG/Opus
+        # file. No conversion → no leg may claim a voice note.
+        send_path = self._voice_ogg(audio_path)
+        if send_path is None:
+            error = ("voice-note conversion unavailable "
+                     "(no OGG/Opus from the synthesized audio)")
+            return {"sent": 0, "failed": len(targets),
+                    "receipts": [{"platform": p, "chat": str(c),
+                                   "ok": False, "error": error}
+                                  for p, c in targets],
+                    "error": error}
         for platform, chat_id in targets:
             ok = False
             error = ""
@@ -337,7 +386,7 @@ class VoiceBridge:
                     if not self.whatsapp:
                         raise RuntimeError("WhatsApp adapter not available")
                     result = self.whatsapp.send_voice(
-                        chat_id, audio_path,
+                        chat_id, send_path,
                         caption=str(kwargs.get("caption", "")))
                     ok = bool(getattr(result, "ok", False))
                     error = str(getattr(result, "error", "") or "")
@@ -345,7 +394,7 @@ class VoiceBridge:
                     if not self.telegram:
                         raise RuntimeError("Telegram adapter not available")
                     await self.telegram.client.send_file(
-                        chat_id, audio_path, voice_note=True,
+                        chat_id, send_path, voice_note=True,
                         caption=str(kwargs.get("caption", "")))
                     ok = True
                 else:
@@ -359,8 +408,5 @@ class VoiceBridge:
                 sent += 1
             else:
                 failed += 1
-        try:
-            Path(audio_path).unlink(missing_ok=True)
-        except Exception:  # noqa: E103 - temp file cleanup is best-effort
-            pass
+        self._cleanup(audio_path, send_path)
         return {"sent": sent, "failed": failed, "receipts": receipts}

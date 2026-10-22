@@ -1628,7 +1628,7 @@ class PartnerRuntime(
         never silently drop the rest of the reply.
         """
         from ...voice.pingpong import ogg_duration
-        from ...social.chat.base import MediaRef
+        from ...social.chat.voice_transport import send_voice_note
         sent_any = False
         part_list = list(parts or [])
         for idx, part in enumerate(part_list):
@@ -1647,18 +1647,32 @@ class PartnerRuntime(
                                             seconds=secs, action="recording")
                     except Exception:  # noqa: BLE001 - cosmetic
                         pass
-                media = MediaRef(path=ogg_path, kind="audio",
-                                 name="reply.ogg", mime="audio/ogg",
-                                 voice_note=True)
                 adapter = self.gateway._adapter_for(message.chat.platform)
                 if adapter is None or self.gateway.dry_run:
                     return sent_any
-                result = adapter.send_media(message.chat, media)
-                if result.ok:
+                # The shared voice transport owns the send: it converts,
+                # uses the surface's native voice type, and reports a
+                # voice note only when a real bubble landed (a rejected
+                # bubble degrades to a labelled file inside the
+                # transport — still "went out", but never AS a voice
+                # note in the log or anywhere else).
+                delivery = send_voice_note(adapter, message.chat, ogg_path)
+                if delivery.ok:
                     sent_any = True
-                    _log.info("voice reply sent in %s", message.chat.key)
+                    if delivery.voice_note:
+                        _log.info("voice reply sent in %s", message.chat.key)
+                    else:
+                        _log.warning(
+                            "voice reply for %s went out as a file, "
+                            "not a voice note: %s",
+                            message.chat.key, delivery.reason)
                 else:
-                    _log.warning("voice reply send failed: %s", result.error)
+                    # The transport delivered nothing for this part —
+                    # treat it like a synthesis failure (the except
+                    # below): this part and everything after it fall
+                    # back to text instead of vanishing silently.
+                    raise RuntimeError(
+                        f"voice send failed: {delivery.reason}")
             except Exception as exc:  # noqa: BLE001 - fall back to text
                 _log.warning("voice reply failed, falling back to text: %s",
                              exc)

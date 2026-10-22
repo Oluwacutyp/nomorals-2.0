@@ -10,9 +10,11 @@ Pipeline (``run_pulse``):
 2. **Compose** — ``BriefingComposer`` builds the text briefing; the LLM
    then writes a conversational two-host script from it.
 3. **Voice** — ``UniversalTTS`` synthesizes each host turn; turns are
-   concatenated into one audio file, converted to OGG for the voice note.
-4. **Deliver** — text via ``Notifier.publish``, audio via the live gateway
-   as a Telegram voice bubble (``voice_note=True``).
+   concatenated into one audio file.
+4. **Deliver** — text via ``Notifier.publish``; audio via the shared
+   voice transport (``social.chat.voice_transport``): a voice bubble
+   when the surface lands one, a labelled audio file otherwise —
+   never a file passed off as a voice note.
 
 Every stage degrades gracefully: news failure → pulse still goes out with
 the briefing; voice failure → text still delivers; total failure → a short
@@ -581,12 +583,22 @@ def _deliver_audio(context: Any, audio_path: str) -> bool:
     the text did) and ``proactive_allowed`` per chat (a chat in quiet
     mode / with proactive off holds the text briefing — the voice note
     must not bypass that gate).
+
+    The send itself goes through the shared voice transport
+    (``social.chat.voice_transport``), like every other surface: it
+    converts to OGG/Opus, sends with the surface's native voice type,
+    and claims a voice note only when a real bubble landed. When the
+    transport can deliver nothing (no conversion possible, or the
+    surface rejected its sends), the pulse makes ONE labelled file
+    attempt per target — the audio still reaches the owner, reported
+    as a file, never as a voice note.
     """
     if not audio_path or not os.path.isfile(audio_path):
         return False
     try:
         from ..social.chat.base import ChatRef, MediaRef
         from ..social.chat.gateway import resolve_owner_targets
+        from ..social.chat.voice_transport import send_voice_note
         from ..partner.chat_modes import proactive_allowed
         from .notifier import resolve_gateway
         gateway = resolve_gateway(context)
@@ -594,11 +606,6 @@ def _deliver_audio(context: Any, audio_path: str) -> bool:
             _log.warning("morning-pulse: audio not delivered — %s",
                          _delivery_diagnosis(context))
             return False
-        # Telegram voice bubbles want OGG/Opus; try conversion, else WAV.
-        send_path, mime = _to_voice_ogg(audio_path)
-        media = MediaRef(path=send_path, kind="audio",
-                         name="morning-pulse.ogg", mime=mime,
-                         voice_note=True)
         settings = getattr(context, "settings", None)
         partner = getattr(settings, "partner", None)
         raw = getattr(partner, "owner_chats", "") or ""
@@ -633,41 +640,57 @@ def _deliver_audio(context: Any, audio_path: str) -> bool:
                 adapter = gateway._adapter_for(plat)
                 if adapter is None or getattr(gateway, "dry_run", False):
                     continue
-                result = adapter.send_media(
-                    ChatRef(platform=plat, chat_id=cid), media)
+                ref = ChatRef(platform=plat, chat_id=cid)
+                delivery = send_voice_note(adapter, ref, audio_path)
+                if delivery.ok:
+                    reached += 1
+                    if not delivery.voice_note:
+                        _log.info(
+                            "morning-pulse: audio reached %s:%s as a "
+                            "file, not a voice note — %s",
+                            plat, cid, delivery.reason)
+                    continue
+                # The transport sent nothing: one labelled file
+                # attempt — honest name, honest mime, no voice flag.
+                media = MediaRef(
+                    path=audio_path, kind="audio",
+                    name=os.path.basename(audio_path),
+                    mime=_audio_mime(audio_path))
+                result = adapter.send_media(ref, media)
                 if getattr(result, "ok", False):
                     reached += 1
+                    _log.info(
+                        "morning-pulse: audio reached %s:%s as a "
+                        "file, not a voice note — voice transport: %s",
+                        plat, cid, delivery.reason)
             except Exception:  # noqa: BLE001 — one dead channel skips
                 continue
-        _log.info("morning-pulse: voice note reached %d channel(s)", reached)
+        _log.info("morning-pulse: audio reached %d channel(s)", reached)
         return reached > 0
     except Exception as exc:  # noqa: BLE001
         _log.warning("morning-pulse: audio delivery failed: %s", exc)
         return False
 
 
-def _to_voice_ogg(wav_path: str) -> tuple[str, str]:
-    """Convert WAV → OGG/Opus for Telegram voice bubbles.
+def _audio_mime(path: str) -> str:
+    """Honest MIME for a labelled file send, from the file's suffix."""
+    return {".wav": "audio/wav", ".mp3": "audio/mpeg",
+            ".ogg": "audio/ogg", ".opus": "audio/ogg",
+            ".m4a": "audio/mp4"}.get(
+                os.path.splitext(path)[1].lower(), "application/octet-stream")
 
-    Returns (path, mime).  Falls back to the WAV itself when ffmpeg is
-    missing or conversion fails.
+
+def _to_voice_ogg(wav_path: str) -> tuple[str, str]:
+    """Legacy alias for the canonical WAV → OGG/Opus converter.
+
+    The conversion lives in exactly one place —
+    :func:`nomorals.tools.audio.wav_to_voice_ogg` (the voice transport
+    uses it for every surface). Kept under its old name for importers;
+    returns (path, mime), falling back to the original file + its
+    honest mime when conversion is impossible.
     """
-    import shutil
-    import subprocess
-    ffmpeg = shutil.which("ffmpeg")
-    if not ffmpeg:
-        return wav_path, "audio/wav"
-    ogg_path = os.path.splitext(wav_path)[0] + ".ogg"
-    try:
-        subprocess.run(
-            [ffmpeg, "-y", "-i", wav_path, "-c:a", "libopus",
-             "-b:a", "64k", ogg_path],
-            check=True, capture_output=True, timeout=120)
-        if os.path.isfile(ogg_path):
-            return ogg_path, "audio/ogg"
-    except Exception as exc:  # noqa: BLE001
-        _log.warning("morning-pulse: ffmpeg conversion failed: %s", exc)
-    return wav_path, "audio/wav"
+    from ..tools.audio import wav_to_voice_ogg
+    return wav_to_voice_ogg(wav_path)
 
 
 def _delivery_diagnosis(context: Any) -> str:

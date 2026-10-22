@@ -126,15 +126,25 @@ class VoiceNoteStore:
                          exc_info=True)
             self._db = None
 
-    # — sending —
+    # — recording —
 
-    def send_voice_note(self, chat_id: str, sender: str, audio_path: str,
-                        *, language: str = "en") -> VoiceNote | None:
+    def store_voice_note(self, chat_id: str, sender: str, audio_path: str,
+                         *, language: str = "en") -> VoiceNote | None:
         """Store a voice note: audio for tone, transcript for search.
 
         Copies the audio into Devon's vault, runs STT when the seam is
         wired (empty transcript + honest flag when it isn't). None when
         invalid/down — never raises.
+
+        This RECORDS the note — it does NOT deliver anything to a chat
+        (the store has no transport; a ``chat_id`` here is an opaque
+        community/gig identifier, not a platform target). The returned
+        :class:`VoiceNote` is the delivery handle: a caller holding a
+        chat adapter delivers ``note.audio_path`` itself through
+        ``social.chat.voice_transport.send_voice_note``, and only that
+        delivery may claim a voice note was sent. (This method was
+        previously named ``send_voice_note`` while only storing — the
+        name now says what the code does.)
         """
         if self._db is None:
             return None
@@ -311,7 +321,8 @@ class VoiceNoteStore:
 def _usage() -> str:
     return (
         "🎙️ /vnote — voice notes in chat. Audio for tone, transcript for search.\n"
-        "  /vnote send <chat_id> <audio_path> [language] — send a voice note\n"
+        "  /vnote send <chat_id> <audio_path> [language] — record a voice note\n"
+        "    (stored + transcribed in Devon's vault; NOT delivered to the chat)\n"
         "  /vnote search <query> [chat_id] — find by what was said\n"
         "  /vnote play <note_id> — where the audio lives\n"
         "  /vnote preview <public|private> <language> <text> — TTS preview\n"
@@ -340,14 +351,16 @@ def control_vnote(tail: str, context=None, chat=None,
             stt = getattr(context, "stt", None) if context else None
             real = s if stt is None else VoiceNoteStore(
                 db_path=s._db_path, vault_dir=s._vault, stt=stt)
-            n = real.send_voice_note(parts[1], sender or sender_id or "anon",
-                                     parts[2], language=lang)
+            n = real.store_voice_note(parts[1], sender or sender_id or "anon",
+                                      parts[2], language=lang)
             if n is None:
-                return ("couldn't send — check the chat id and that the "
+                return ("couldn't record — check the chat id and that the "
                         "file is real audio (wav/mp3/ogg/m4a/opus).")
             note = (f"\n  📝 “{n.transcript[:160]}”" if n.transcript
                     else "\n  (audio saved; transcription not available yet)")
-            return f"🎙️ voice note sent [{n.note_id}, {n.language}].{note}"
+            return (f"🎙️ voice note recorded [{n.note_id}, {n.language}] "
+                    f"— saved in Devon's vault (not delivered to "
+                    f"{parts[1]}).{note}")
 
         if cmd == "search":
             if len(parts) < 2:

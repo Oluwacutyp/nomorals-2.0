@@ -111,37 +111,37 @@ def test_format_profile_shows_voice_intro(store):
 
 # ── voice notes ─────────────────────────────────────────────────────────
 
-def test_send_voice_note_defaults_to_no_stt(vstore):
+def test_store_voice_note_defaults_to_no_stt(vstore):
     # The fixture store has no STT seam: audio is stored, transcript stays
     # empty — honest, never fabricated.
-    n = vstore.send_voice_note("chat1", "Ada", _audio(), language="pcm")
+    n = vstore.store_voice_note("chat1", "Ada", _audio(), language="pcm")
     assert n is not None and n.transcript == "" and n.language == "pcm"
 
 
-def test_send_voice_note_with_stt_seam():
+def test_store_voice_note_with_stt_seam():
     base = tempfile.mkdtemp()
     s = VoiceNoteStore(db_path=os.path.join(base, "vn.db"),
                        vault_dir=os.path.join(base, "v"),
                        stt=_mock_stt("the price is negotiable"))
-    n = s.send_voice_note("chat1", "Ada", _audio(), language="pcm")
+    n = s.store_voice_note("chat1", "Ada", _audio(), language="pcm")
     assert n is not None
     assert n.transcript == "the price is negotiable"
     assert n.language == "pcm" and n.stt_backend == "mock-stt"
     assert os.path.isfile(n.audio_path)
 
 
-def test_send_voice_note_no_stt_honest(vstore):
-    n = vstore.send_voice_note("chat1", "Ada", _audio())
+def test_store_voice_note_no_stt_honest(vstore):
+    n = vstore.store_voice_note("chat1", "Ada", _audio())
     assert n is not None
     assert n.transcript == "" and n.stt_backend == ""
 
 
-def test_send_voice_note_bad_input(vstore):
-    assert vstore.send_voice_note("", "Ada", _audio()) is None
-    assert vstore.send_voice_note("chat1", "Ada", "/nope.wav") is None
+def test_store_voice_note_bad_input(vstore):
+    assert vstore.store_voice_note("", "Ada", _audio()) is None
+    assert vstore.store_voice_note("chat1", "Ada", "/nope.wav") is None
     txt = tempfile.mktemp(suffix=".txt")
     open(txt, "w").write("x")
-    assert vstore.send_voice_note("chat1", "Ada", txt) is None
+    assert vstore.store_voice_note("chat1", "Ada", txt) is None
 
 
 def test_search_voice_notes():
@@ -149,11 +149,11 @@ def test_search_voice_notes():
     s = VoiceNoteStore(db_path=os.path.join(base, "vn.db"),
                        vault_dir=os.path.join(base, "v"),
                        stt=_mock_stt("the price is negotiable"))
-    s.send_voice_note("chat1", "Ada", _audio(), language="en")
+    s.store_voice_note("chat1", "Ada", _audio(), language="en")
     s2 = VoiceNoteStore(db_path=os.path.join(base, "vn.db"),
                         vault_dir=os.path.join(base, "v"),
                         stt=_mock_stt("see you tomorrow"))
-    s2.send_voice_note("chat2", "Emeka", _audio(), language="yo")
+    s2.store_voice_note("chat2", "Emeka", _audio(), language="yo")
     hits = s.search_voice_notes("price")
     assert len(hits) == 1 and hits[0].chat_id == "chat1"
     # chat-scoped search
@@ -166,7 +166,7 @@ def test_get_and_list():
     s = VoiceNoteStore(db_path=os.path.join(base, "vn.db"),
                        vault_dir=os.path.join(base, "v"),
                        stt=_mock_stt("hi"))
-    n = s.send_voice_note("chat1", "Ada", _audio())
+    n = s.store_voice_note("chat1", "Ada", _audio())
     assert s.get(n.note_id).sender == "Ada"
     assert s.get("vn_nope") is None
     assert len(s.list("chat1")) == 1
@@ -217,7 +217,7 @@ def test_vnote_send_and_search_chat():
     ctx = type("C", (), {"voice_note_store": s})()
     out = control_vnote(f"send grp1 {_audio()} pcm", context=ctx,
                         sender="Ada")
-    assert "voice note sent" in out and "pcm" in out
+    assert "voice note recorded" in out and "pcm" in out
     out2 = control_vnote("search traffic", context=ctx)
     assert "lagos traffic" in out2
 
@@ -229,7 +229,7 @@ def test_vnote_play_and_preview():
                        vault_dir=os.path.join(base, "v"),
                        stt=_mock_stt("hi"), tts=_mock_tts(out_audio))
     ctx = type("C", (), {"voice_note_store": s})()
-    n = s.send_voice_note("grp1", "Ada", _audio())
+    n = s.store_voice_note("grp1", "Ada", _audio())
     out = control_vnote(f"play {n.note_id}", context=ctx)
     assert n.note_id in out
     out2 = control_vnote("preview public en hello there", context=ctx)

@@ -512,31 +512,46 @@ class VoiceIntegration:
         rate: str = "+0%",
     ) -> Optional[str]:
         """Send a voice message to a chat.
-        
+
+        The synthesized audio (edge-tts MP3 by default) is converted
+        to OGG/Opus with the canonical converter first, and only the
+        converted file goes out with ``voice_note=True``. When
+        conversion is impossible the audio is delivered as a plain
+        file instead — never flagged as a voice note.
+
         Args:
             chat_id: Telegram chat ID
             text: Text to speak
             voice: Voice to use
             rate: Speech rate adjustment
-            
+
         Returns:
             Path to generated audio file
         """
         # Generate audio
         audio_path = await self.tts.synthesize(text, voice=voice, rate=rate)
-        
+
         # Send via Telegram if available
         if self.telegram:
             try:
+                from ..tools.audio import wav_to_voice_ogg
+
+                send_path, mime = wav_to_voice_ogg(audio_path)
+                as_voice = mime == "audio/ogg"
                 await self.telegram.send_file(
                     chat_id,
-                    audio_path,
-                    voice_note=True,
+                    send_path,
+                    voice_note=as_voice,
                 )
-                _log.info(f"Sent voice message to {chat_id}")
+                if as_voice:
+                    _log.info(f"Sent voice message to {chat_id}")
+                else:
+                    _log.info(
+                        f"Sent audio file to {chat_id} (voice-note "
+                        f"conversion unavailable; source stayed {mime})")
             except Exception as e:
                 _log.error(f"Failed to send voice message: {e}")
-        
+
         return audio_path
     
     async def transcribe(
