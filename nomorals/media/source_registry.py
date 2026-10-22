@@ -444,6 +444,7 @@ def _seed() -> SourceRegistry:
         ("US", "en", "soundcloud.com", "SoundCloud", ("music",), Licence.USER_UPLOAD, TrustTier.COMMUNITY, "Keyless api-v2 search", 20),
         ("US", "en", "open.spotify.com", "Spotify", ("music", "charts"), Licence.LICENSED, TrustTier.VERIFIED, "Metadata/playback only — never download", 20),
         ("US", "en", "en.wikipedia.org", "Wikipedia", ("news", "reference"), Licence.LICENSED, TrustTier.VERIFIED, "Reference", 20),
+        ("GB", "en", "reuters.com", "Reuters", ("news",), Licence.LICENSED, TrustTier.VERIFIED, "Global wire service", 15),
         # ── video/social globals (lived only in download_kit before
         # Pass #76 — now first-class sources like everything else) ──
         ("US", "en", "tiktok.com", "TikTok", ("music", "film"), Licence.USER_UPLOAD, TrustTier.COMMUNITY, "Short video; yt-dlp tiktok extractor", 20),

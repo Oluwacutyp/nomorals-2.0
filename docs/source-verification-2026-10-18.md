@@ -169,3 +169,9 @@ verification runs (news_verification round 2 + Accept-header retry round 3).
   `test_search_sources` needed NO edit: its registry expectation was already right — the failure
   was the harness missing `search/osint_browser.py`, which supplies the 2 browser OSINT specs.
 
+
+## Addendum — 2026-10-22 (Pass #80)
+
+### Added — verified-live (1)
+
+- **Reuters** (wires) — `https://news.google.com/rss/search?q=site:reuters.com&hl=en-US&gl=US&ceid=US:en` — ~100 items, newest <1h old at check, every item's `<source url="https://www.reuters.com">Reuters</source>`. Reuters publishes no direct public RSS (verified dead/walled 2026-10-01, above); it joins as a site-scoped Google News wire query — the aggregator family `wires` already carries. Verified live 2026-10-22 by parent live fetch (valid RSS 2.0, no wall). The pass's own re-fetch from the build sandbox was **unverifiable from this network** (the sandbox resolver maps news.google.com to a private-range address and Devon's SSRF guard refuses it — evidence about the verifier's network, not the source, per the classification rules above); SourceHealth re-checks it at runtime like every feed. Item links are Google News redirects, unwrapped at open time by `core/http.unwrap_redirect_url` (Pass 2); `parse_feed` now reads `<source>` so aggregator-carried items attribute to the publisher (reuters.com, trust 0.80 "established press") instead of news.google.com, and the news store's cross-run dedupe keys on normalized title as well as URL so the same wire story arriving via both Google News routes is delivered once. Reuters also joins `media/source_registry.py` as a provenance seed (GB/en, reuters.com, news, LICENSED/VERIFIED).

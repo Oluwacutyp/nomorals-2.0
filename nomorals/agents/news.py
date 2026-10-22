@@ -18,8 +18,10 @@ Every feed URL was live-fetched and classified 2026-10-18 (see
 answer bot-wall / 5xx / connection-reset from the verifier network are
 kept — they work from other networks — and ``agency.sourcehealth``
 re-checks them at runtime with a circuit breaker.
-The legacy wire services (Reuters/AP/AFP/…) no longer publish public RSS,
-so ``wires`` carries the working global aggregators instead.
+The legacy wire services (Reuters/AP/AFP/…) no longer publish public RSS;
+``wires`` carries Reuters via its site-scoped aggregator query
+(live-verified 2026-10-22 — every item attributed to reuters.com via its
+``<source>`` element) plus the working global aggregators.
 
 Coverage is GLOBAL, not Nigeria-limited: Nigeria/Africa is ONE region
 among many. Every region — Americas, Europe, Asia, Africa, Middle East,
@@ -173,10 +175,17 @@ FEED_CATEGORIES: dict[str, tuple[tuple[str, str], ...]] = {
         ("Hollywood Reporter", "https://www.hollywoodreporter.com/feed/"),
         ("Deadline", "https://deadline.com/feed/"),
     ),
-    # The legacy wires (Reuters/AP/AFP/…) publish no public RSS any more;
-    # verified dead/walled 2026-10-01. These are the working global
-    # wire-style aggregators.
+    # The legacy wires (Reuters/AP/AFP/…) publish no DIRECT public RSS
+    # any more; verified dead/walled 2026-10-01. Reuters is carried via
+    # its site-scoped Google News query — live-verified 2026-10-22
+    # (~100 items, newest <1h old, every item's <source> is
+    # reuters.com). Item links are Google News redirects (unwrapped at
+    # open time by core/http.unwrap_redirect_url) and items attribute
+    # to the publisher via parse_feed's <source> reading. The rest are
+    # the working global wire-style aggregators.
     "wires": (
+        ("Reuters",
+         "https://news.google.com/rss/search?q=site:reuters.com&hl=en-US&gl=US&ceid=US:en"),
         ("Google News", "https://news.google.com/rss?hl=en-US&gl=US&ceid=US:en"),
         ("Google News World",
          "https://news.google.com/rss/topics/CAAqJggKIiBDQkFTRWdvSUwyMHZNRGx1YlY4U0FtVnVHZ0pWVXlnQVAB?hl=en-US&gl=US&ceid=US%3Aen"),
@@ -321,7 +330,16 @@ def _short_summary(summary: str, limit: int = 200) -> str:
 
 
 def parse_feed(markup: str) -> list[dict[str, str]]:
-    """Parse RSS/Atom-ish markup into [{title, url, summary, source_ts}]."""
+    """Parse RSS/Atom-ish markup into item dicts.
+
+    Keys: title, url, summary, source_ts — plus ``source_name`` /
+    ``source_url`` from the item's ``<source>`` element when present:
+    the PUBLISHER of an aggregator-carried item. Google News item links
+    are redirects (news.google.com); without <source> the item would
+    attribute to the aggregator instead of the outlet that wrote it
+    (reuters.com, trust tier 0.80). Feeds without <source> yield ""
+    for both, exactly as before.
+    """
     items: list[dict[str, str]] = []
     try:
         root = ET.fromstring(markup)
@@ -331,7 +349,9 @@ def parse_feed(markup: str) -> list[dict[str, str]]:
         tag = node.tag.rsplit("}", 1)[-1].lower()
         if tag not in {"item", "entry"}:
             continue
-        item: dict[str, str] = {"title": "", "url": "", "summary": "", "source_ts": 0.0}
+        item: dict[str, str] = {"title": "", "url": "", "summary": "",
+                                "source_ts": 0.0,
+                                "source_name": "", "source_url": ""}
         for child in node:
             ctag = child.tag.rsplit("}", 1)[-1].lower()
             text = (child.text or "").strip()
@@ -339,6 +359,21 @@ def parse_feed(markup: str) -> list[dict[str, str]]:
                 item["title"] = _strip(text)
             elif ctag == "link":
                 item["url"] = text or (child.get("href") or "")
+            elif ctag == "source" and not item["source_url"] \
+                    and not item["source_name"]:
+                # RSS: <source url="https://www.reuters.com">Reuters</source>
+                item["source_url"] = (child.get("url") or "").strip()
+                item["source_name"] = _strip(text)
+                if not item["source_name"] or not item["source_url"]:
+                    # Atom <source> nests <title> / <link> children.
+                    for sub in child:
+                        stag = sub.tag.rsplit("}", 1)[-1].lower()
+                        stext = (sub.text or "").strip()
+                        if stag == "title" and not item["source_name"]:
+                            item["source_name"] = _strip(stext)
+                        elif stag == "link" and not item["source_url"]:
+                            item["source_url"] = stext or (
+                                sub.get("href") or "")
             elif ctag in {"description", "summary", "content"} and not item["summary"]:
                 item["summary"] = _strip(text)
             elif ctag in {"pubdate", "published", "updated", "dc:date"}:
@@ -490,6 +525,34 @@ class NewsAgent:
             deduped.append(it)
         fetched = deduped
 
+        # Cross-run memory: news_items is the organ's seen-store, and
+        # its contract (module docstring) is dedupe by URL + normalized
+        # title. URL alone is NOT a stable identity for
+        # aggregator-carried stories: the same Reuters story arrives
+        # via the generic Google News feed and via the Reuters
+        # site-scoped feed under DIFFERENT redirect URLs, so a URL-only
+        # check delivers it twice when the two routes surface it in
+        # different runs. A story whose normalized title was delivered
+        # recently is known under either route. (For aggregator items
+        # the normalized title embeds the publisher — "… - Reuters" —
+        # so this is effectively source+title.) The window is bounded:
+        # a genuinely new story reusing an old headline after a
+        # fortnight is news again.
+        known_titles: set[str] = set()
+        if self.db is not None:
+            try:
+                rows = self.db.query(
+                    "SELECT title FROM news_items WHERE created_at >= ?",
+                    (time.time() - 14 * 86400,))
+                for row in rows or []:
+                    raw = (row.get("title") if hasattr(row, "get")
+                           else row[0]) or ""
+                    key = re.sub(r"\W+", " ", str(raw).lower()).strip()
+                    if key:
+                        known_titles.add(key)
+            except Exception:  # noqa: BLE001
+                known_titles = set()
+
         fresh: list[dict[str, str]] = []
         for it in fetched:
             if self.db is not None:
@@ -498,6 +561,10 @@ class NewsAgent:
                 except Exception:  # noqa: BLE001
                     known = None
                 if known is not None:
+                    continue
+                title_key = re.sub(
+                    r"\W+", " ", (it.get("title") or "").lower()).strip()
+                if title_key and title_key in known_titles:
                     continue
             fresh.append(it)
         fresh.sort(key=lambda i: float(i.get("source_ts") or 0), reverse=True)
