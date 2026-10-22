@@ -312,7 +312,7 @@ class RuntimeSearchMixin:
     def _control_novel(self, tail: str, chat_key: str) -> str:
         """``/novel`` — story reader + continuer.
 
-        follow <url|title> | list | read <slug> [chapter] |
+        follow <url|title> | list | sources | read <slug> [chapter] |
         next <slug> | sync <slug> | continue <slug> [n]
 
         Following ingests the WHOLE story into its own library in the
@@ -329,6 +329,12 @@ class RuntimeSearchMixin:
             reader = StoryReader(self.context)
         except Exception as exc:  # noqa: BLE001
             return f"novel system failed: {exc}"
+
+        if verb == "sources":
+            # Book-source state from the ONE registry (pass #89):
+            # seed vs grown story sites, health, fetch outcomes,
+            # candidates pending verification.
+            return reader.source_status_text()
 
         if verb == "list":
             stories = reader.following()
@@ -687,6 +693,7 @@ class RuntimeSearchMixin:
                 return f"scene failed: {exc}"
 
         return ("usage: /novel follow <url|title> | /novel list | "
+                "/novel sources | "
                 "/novel read <slug> [chapter] | /novel next <slug> | "
                 "/novel continue <slug> [n] | /novel write <premise> [genre] | "
                 "/novel branch <slug> ... | /novel publish <slug> ... | "

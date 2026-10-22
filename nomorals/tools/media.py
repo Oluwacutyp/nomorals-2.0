@@ -530,10 +530,13 @@ def register(registry: Any) -> None:
         "download_sources",
         description=(
             "Download source registry (the one registry behind every "
-            "download AND the /play music search chain): action=status "
+            "download AND the /play music search chain AND the story "
+            "reader's book sites): action=status "
             "(seed vs grown sources, health, outcome counts, candidates "
             "pending/shed, plus the music class: chain sources, grown "
-            "music sources, music candidates) | health (run the source "
+            "music sources, music candidates, and the book class: "
+            "story sources, grown book sources, book candidates) | "
+            "health (run the source "
             "health loop: re-verify sources + candidates, promote "
             "verified candidates, shed dead ones)."
         ),

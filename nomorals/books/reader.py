@@ -30,7 +30,8 @@ from ..core.logging_setup import get_logger
 from ..core.profiles import get_profile_kind
 from .model import slugify
 from .sources import (ADAPTERS, Chapter, SourceAdapter, SourceError,
-                      StoryMeta, adapter_for_url, search_all)
+                      StoryMeta, adapter_for_url, book_registry_for_context,
+                      search_all)
 
 _log = get_logger(__name__)
 
@@ -101,8 +102,63 @@ def _norm_story_name(value: str) -> str:
 class StoryReader:
     """The owner's webnovel shelf."""
 
-    def __init__(self, context: Any) -> None:
+    def __init__(self, context: Any, *,
+                 source_registry: Any = None) -> None:
         self.context = context
+        # Source registry (Pass #89): the ONE media registry the book
+        # class credits fetch outcomes to, takes search ordering
+        # from, and grows through.  Tests may inject; otherwise the
+        # shared DEFAULT_REGISTRY bound to the context's KV store —
+        # and only when the context carries a database, so db-less
+        # callers keep the pre-#89 behaviour exactly (#88 pattern).
+        self._source_registry_injected = source_registry
+        self._source_registry_cache: Any = None
+        self._source_registry_resolved = False
+
+    def _registry(self) -> Any:
+        """The source registry for book outcomes, or None when this
+        reader has none to speak to.  Never raises."""
+        if self._source_registry_resolved:
+            return self._source_registry_cache
+        self._source_registry_resolved = True
+        self._source_registry_cache = book_registry_for_context(
+            self.context, injected=self._source_registry_injected)
+        return self._source_registry_cache
+
+    # ── book source status (Pass #89) ─────────────────────────────────
+    def source_status(self) -> dict[str, Any]:
+        """Book-source state from the ONE registry: seed vs grown
+        sources, health, outcome counts, candidates pending.  With
+        no registry (db-less context) this is the shared in-memory
+        registry's book class — the state this process has learned."""
+        reg = self._registry()
+        if reg is None:
+            from ..media.source_registry import DEFAULT_REGISTRY
+            reg = DEFAULT_REGISTRY
+        return reg.book_status()
+
+    def source_status_text(self) -> str:
+        """Human rendering of :meth:`source_status` for /novel sources."""
+        st = self.source_status()
+        lines = ["📚 book sources — story sites learn from fetch "
+                 "outcomes (pass #89; one registry with downloads "
+                 "and music):"]
+        for row in st.get("sources") or []:
+            lines.append(
+                f"  📖 {row['source']} → {row['domain']} "
+                f"[{row['origin']}/{row['health']}] ok={row['ok']} "
+                f"fail={row['fail']} blocked={row['blocked']} "
+                f"no-result={row['no_result']}")
+        for g in st.get("grown") or []:
+            lines.append(
+                f"  📖 grown:{g['domain']} [grown/{g['health']}] "
+                f"ok={g['ok']} fail={g['fail']} — promoted by the "
+                "health loop, serving via the universal reader shape")
+        lines.append(
+            f"  book candidates pending verification: "
+            f"{st.get('candidates_pending', 0)} (untrusted — they "
+            "serve nothing until the health loop promotes them)")
+        return "\n".join(lines)
 
     # ── paths ─────────────────────────────────────────────────────────────
     def _workspace(self) -> Path:
@@ -205,7 +261,27 @@ class StoryReader:
         tmp.replace(path)
 
     def _adapter(self, url: str) -> SourceAdapter:
-        return adapter_for_url(url)
+        reg = self._registry()
+        if reg is None:
+            return adapter_for_url(url)
+        try:
+            adapter = adapter_for_url(url, source_registry=reg)
+        except TypeError:  # a test double with the pre-#89 signature
+            adapter = adapter_for_url(url)
+        bind = getattr(adapter, "bind_book_registry", None)
+        if callable(bind):
+            bind(reg)
+        return adapter
+
+    def _search_all(self, query: str, *, limit: int = 10,
+                    sources: list[str] | None = None) -> list[Any]:
+        """search_all with this reader's registry, when it has one
+        (Pass #89) — the module function's pre-#89 call otherwise."""
+        reg = self._registry()
+        if reg is None:
+            return search_all(query, limit=limit, sources=sources)
+        return search_all(query, limit=limit, sources=sources,
+                          source_registry=reg)
 
     def follow(self, url_or_query: str, *,
                source: str = "") -> FollowedStory:
@@ -214,8 +290,9 @@ class StoryReader:
         if not target:
             raise ReaderError("follow needs a URL or a story title")
         if not target.startswith("http"):
-            hits = search_all(target, limit=8,
-                              sources=[source] if source else None)
+            hits = self._search_all(
+                target, limit=8,
+                sources=[source] if source else None)
             if not hits:
                 raise ReaderError(
                     f"no story found for {target!r} on any verified source")
@@ -287,7 +364,7 @@ class StoryReader:
     def search(self, query: str, *, limit: int = 10,
                sources: list[str] | None = None) -> list[dict[str, Any]]:
         return [h.to_dict() for h in
-                search_all(query, limit=limit, sources=sources)]
+                self._search_all(query, limit=limit, sources=sources)]
 
     # ── chapters ──────────────────────────────────────────────────────────
     def _chapter_path(self, slug: str, number: int) -> Path:

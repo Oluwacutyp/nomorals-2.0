@@ -38,10 +38,44 @@ be verified live — every domain was unresolvable from the build network on
 selectors + quality scoring) honestly flagged ``verified=False``; it will
 self-tune on the first successful fetch rather than pretend to know the
 markup.
+
+Open sources (Pass #89, the owner's open-sources law): this layer used
+to be a CLOSED-SOURCE class — no fetch outcome was recorded, no site
+held health state, no new story site could arrive without a code
+change, and a restart forgot everything.  Book/story sources now join
+the ONE media source registry (``media/source_registry.py``) as their
+own class — the registry's model fits without distortion (every book
+source is one host serving novel/chapter fetches; the same outcome /
+health / candidate vocabulary; the same KV persistence; the same
+health loop and scheduler job, so no parallel machinery anywhere):
+
+* every ``search`` / ``novel`` / ``chapter_list`` / ``fetch_chapter``
+  call on a registry-bound adapter records its outcome against the
+  serving site (see :meth:`SourceAdapter.bind_book_registry`):
+  success credits it, a failure records its error class, a bot-wall
+  (``SourceBlocked``) records as ``bot_block`` / health
+  ``bot-blocked`` — never dead — and a catalogue miss (empty search
+  or chapter list, a landed page with no chapter body) records as
+  weak evidence via ``record_no_result``: it sinks the score, never
+  trips the breaker;
+* :func:`search_all` orders its pool outcome-aware when a registry
+  is supplied (with zero learned state the order is exactly the
+  pre-#89 order);
+* discovery channels that genuinely exist on this path — redirect
+  targets, story-shaped links embedded in fetched pages (the
+  :class:`Fetcher` seam), and foreign hosts carried by search /
+  fetch results — are noted UNTRUSTED as registry candidates
+  (``kinds=("book",)``): they serve nothing and earn nothing until
+  the health loop promotes them, after which
+  :func:`grown_book_adapters` serves them through the universal
+  :class:`GenericAdapter` shape.  Channels that do NOT exist here:
+  no sitemap/feed/discovery listing is fetched by any book consumer,
+  and cover-image hosts are CDNs, not story sites — never intaken.
 """
 
 from __future__ import annotations
 
+import functools
 import gzip
 import http.client
 import http.cookiejar
@@ -67,6 +101,9 @@ __all__ = [
     "FreeWebNovelAdapter", "NovelFullAdapter", "RoyalRoadAdapter",
     "PandaNovelAdapter", "GenericAdapter",
     "ADAPTERS", "adapter_for_url", "search_all", "normalize_url",
+    "BOOK_SOURCE_DOMAINS", "BOOK_SOURCE_BY_DOMAIN", "BOOK_SEARCH_SOURCES",
+    "book_registry_for_context", "registry_desc_for_adapter",
+    "grown_book_adapters", "ordered_book_adapters",
 ]
 
 _BROWSER_UA = (
@@ -115,6 +152,368 @@ def normalize_url(url: str) -> str:
     return urllib.parse.urlunparse(
         (p.scheme or "https", netloc, path,
          "", urllib.parse.urlencode(qs), ""))
+
+
+# ── book/story source class in the ONE registry (Pass #89) ─────────────
+#
+# Membership maps for the class, mirroring media/sources.py's
+# MUSIC_SOURCE_DOMAINS (#88): the primary host each source serves
+# from, and every known domain (mirrors included, from the adapters'
+# own ``domains`` tuples + the descriptor table) mapped back to its
+# source id.  The media registry seeds exactly these domains.
+
+#: source id → primary domain (the host its search/meta fetches use)
+BOOK_SOURCE_DOMAINS: dict[str, str] = {
+    "freewebnovel": "freewebnovel.com",
+    "novelfull": "novelfull.net",
+    "royalroad": "royalroad.com",
+    "pandanovel": "pandanovel.com",
+    "gutenberg": "gutenberg.org",
+    "scribblehub": "scribblehub.com",
+    "ao3": "archiveofourown.org",
+    "wattpad": "wattpad.com",
+    "webnovel": "webnovel.com",
+}
+
+#: every known book-source domain (mirrors included) → source id
+BOOK_SOURCE_BY_DOMAIN: dict[str, str] = {
+    "freewebnovel.com": "freewebnovel",
+    "freewebnovel.io": "freewebnovel",
+    "novelfull.net": "novelfull",
+    "novelfull.org": "novelfull",
+    "readnovelfull.com": "novelfull",
+    "readnovelfull.net": "novelfull",
+    "royalroad.com": "royalroad",
+    "pandanovel.com": "pandanovel",
+    "pandasnovel.com": "pandanovel",
+    "panda-novel.com": "pandanovel",
+    "gutenberg.org": "gutenberg",
+    "scribblehub.com": "scribblehub",
+    "archiveofourown.org": "ao3",
+    "wattpad.com": "wattpad",
+    "webnovel.com": "webnovel",
+}
+
+#: The dedicated-adapter search pool, in search_all's day-one order.
+BOOK_SEARCH_SOURCES: tuple[str, ...] = (
+    "freewebnovel", "novelfull", "royalroad", "pandanovel",
+)
+
+
+def _book_host(url_or_domain: str) -> str:
+    """Bare host for a URL/domain (``www.``-insensitive), or ""."""
+    try:
+        text = str(url_or_domain or "").strip()
+        if "://" in text:
+            host = urllib.parse.urlparse(text).hostname or ""
+        elif "/" in text:
+            host = text.split("/", 1)[0]
+        else:
+            host = text
+        host = host.lower().split(":")[0]
+        return host[4:] if host.startswith("www.") else host
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def book_registry_for_context(context: Any = None,
+                              injected: Any = None) -> Any:
+    """The source registry book outcomes land in, or None.
+
+    Mirrors the #88 resolver's resolution exactly: an injected
+    registry wins; otherwise the shared ``DEFAULT_REGISTRY`` bound
+    to the context's KV store — and only when the context carries a
+    database, so db-less callers (pure/offline contexts, the fake-
+    adapter test harnesses) keep the pre-#89 behaviour exactly.
+    Never raises."""
+    if injected is not None:
+        return injected
+    try:
+        db = getattr(context, "db", None) if context is not None else None
+        if db is None:
+            return None
+        from ..media.source_registry import DEFAULT_REGISTRY
+        reg = DEFAULT_REGISTRY
+        try:
+            from ..storage.kv import KVStore
+            reg.bind_store(KVStore(db))
+        except Exception:  # noqa: BLE001 - persistence is an
+            # enhancement; its absence never sinks a fetch
+            pass
+        return reg
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _ensure_book_source(reg: Any, adapter: Any) -> Any:
+    """Register a descriptor-backed adapter's primary domain as a
+    book source (origin ``registered``) — the path by which an
+    owner-supplied descriptor (``descriptors.register_descriptor``)
+    becomes a first-class registry source.  Dedicated/generic
+    adapters never reach here.  Never raises."""
+    try:
+        from ..media.source_registry import (
+            Licence, SourceDescriptor, TrustTier)
+
+        domains = getattr(adapter, "domains", ()) or ()
+        if not domains:
+            return None
+        desc = SourceDescriptor(
+            nation="GLOBAL", language="en", domain=domains[0],
+            name=str(getattr(adapter, "name", "") or domains[0]),
+            kinds=("book", "book-search"), licence=Licence.UNKNOWN,
+            trust_tier=TrustTier.UNVERIFIED,
+            notes="descriptor-backed story source (books/descriptors.py)")
+        if reg.register(desc):
+            reg._persist()  # a registered source survives restarts too
+            return desc
+        return reg.for_domain(domains[0])
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def registry_desc_for_adapter(reg: Any, adapter: Any,
+                              *urls: str) -> Any:
+    """The registry descriptor that should be credited for *adapter*
+    (optionally resolving via the URLs it served): a book-class
+    source, or None when the registry does not know the serving
+    source (candidates and ghosts earn nothing — they must be
+    promoted by the health loop first, the #87 precedent).  Never
+    raises."""
+    try:
+        if reg is None or adapter is None:
+            return None
+        for url in urls:
+            host = _book_host(url or "")
+            if not host:
+                continue
+            desc = reg.for_domain(host)
+            if desc is not None and (
+                    "book" in desc.kinds
+                    or host in BOOK_SOURCE_BY_DOMAIN):
+                return desc
+        name = str(getattr(adapter, "name", "") or "")
+        if name.startswith("grown:"):
+            desc = reg.for_domain(name[len("grown:"):])
+            if desc is not None:
+                return desc
+        primary = BOOK_SOURCE_DOMAINS.get(name)
+        if primary:
+            desc = reg.for_domain(primary)
+            if desc is not None:
+                return desc
+        for domain in getattr(adapter, "domains", ()) or ():
+            desc = reg.for_domain(domain)
+            if desc is not None and "book" in desc.kinds:
+                return desc
+        if getattr(adapter, "descriptor", None) is not None:
+            return _ensure_book_source(reg, adapter)
+        return None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _book_error_evidence(exc: Exception) -> tuple[str, str]:
+    """Classify one adapter exception into registry evidence:
+    ``(kind, error_class)`` where kind is ``blocked`` | ``failure`` |
+    ``no_result`` | ``none``.
+
+    * ``SourceBlocked`` → blocked (bot-wall/CF: distinct from dead);
+    * configuration facts (an API key is not set, search is not
+      mapped for an unverified archive, a malformed story URL) →
+      ``none``: facts about this install/query, not the source;
+    * a landed page with no chapter body, a 404/410, a "not found"
+      → ``no_result``: the site answered, the story/chapter is what
+      is missing — weak evidence (#88 precedent);
+    * unreachable/timeout → failure, ``network_failure``; anything
+      else → failure, ``site_error`` (the downloader's vocabulary).
+    """
+    if isinstance(exc, SourceBlocked):
+        return "blocked", "bot_block"
+    msg = str(exc or "").lower()
+    if ("api needs" in msg or "not mapped" in msg
+            or "cannot parse" in msg or "no plain-text format" in msg):
+        return "none", ""
+    if ("no chapter body found" in msg
+            or "could not isolate chapter prose" in msg
+            or "no chapters detected" in msg
+            or "-> http 404" in msg or "-> http 410" in msg
+            or "not found" in msg):
+        return "no_result", ""
+    if ("unreachable" in msg or "timed out" in msg or "timeout" in msg
+            or "urlopen error" in msg):
+        return "failure", "network_failure"
+    return "failure", "site_error"
+
+
+def _book_result_urls(op: str, result: Any) -> list[str]:
+    """URLs a successful adapter call carries — the discovery
+    surface of the result itself (search hits, a chapter's
+    prev/next links, a chapter list)."""
+    try:
+        if op == "search":
+            return [h.url for h in result or [] if getattr(h, "url", "")]
+        if op == "novel":
+            return [result.url] if result and result.url else []
+        if op == "chapter_list":
+            return [u for _n, _t, u in result or [] if u]
+        if op == "fetch_chapter" and result is not None:
+            return [u for u in (result.url, result.prev_url,
+                                result.next_url) if u]
+    except Exception:  # noqa: BLE001
+        return []
+    return []
+
+
+def _note_book_result_urls(reg: Any, op: str, result: Any) -> None:
+    """Note foreign hosts carried by a fetch/search result as
+    UNTRUSTED book candidates.  Known sources refuse themselves in
+    the registry; a candidate serves and earns nothing until the
+    health loop promotes it.  Best-effort; never raises."""
+    try:
+        via = "book-search-result" if op == "search" \
+            else "book-fetch-result"
+        for url in _book_result_urls(op, result):
+            reg.note_candidate(url, via=via, kinds=("book",))
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _record_book_success(reg: Any, adapter: Any, op: str,
+                         result: Any, latency_s: float,
+                         arg_url: str) -> None:
+    """Credit one successful adapter call (or record its catalogue
+    miss as weak evidence).  Best-effort; never raises."""
+    try:
+        urls = _book_result_urls(op, result)
+        desc = registry_desc_for_adapter(
+            reg, adapter, *(urls or ([arg_url] if arg_url else [])))
+        _note_book_result_urls(reg, op, result)
+        if desc is None:
+            return
+        if op in ("search", "chapter_list") and not result:
+            reg.record_no_result(desc)
+        else:
+            reg.record_outcome(desc, True, latency_s=latency_s)
+    except Exception:  # noqa: BLE001 - bookkeeping never breaks a fetch
+        pass
+
+
+def _record_book_failure(reg: Any, adapter: Any, op: str,
+                         exc: Exception, latency_s: float,
+                         arg_url: str) -> None:
+    """Blame one failed adapter call, classified by
+    :func:`_book_error_evidence`.  Best-effort; never raises."""
+    try:
+        kind, error_class = _book_error_evidence(exc)
+        if kind == "none":
+            return
+        desc = registry_desc_for_adapter(
+            reg, adapter, arg_url if op != "search" else "")
+        if desc is None:
+            return
+        if kind == "blocked":
+            reg.record_blocked(desc, latency_s=latency_s)
+        elif kind == "no_result":
+            reg.record_no_result(desc)
+        else:
+            reg.record_outcome(desc, False, latency_s=latency_s,
+                               error_class=error_class)
+    except Exception:  # noqa: BLE001 - bookkeeping never breaks a fetch
+        pass
+
+
+def _wrap_book_op(op: str, fn: Any) -> Any:
+    """Wrap one concrete adapter operation so its outcome lands in
+    the registry the adapter is bound to (Pass #89).  Transparent:
+    with no registry bound, or nested inside another recorded call
+    on the same adapter (DescriptorAdapter delegating to
+    GenericAdapter), the call is the original, byte-for-byte."""
+
+    @functools.wraps(fn)
+    def wrapper(self: Any, *args: Any, **kwargs: Any) -> Any:
+        reg = getattr(self, "_book_registry", None)
+        if reg is None or getattr(self, "_book_rec_depth", 0):
+            return fn(self, *args, **kwargs)
+        self._book_rec_depth = getattr(self, "_book_rec_depth", 0) + 1
+        arg_url = str(args[0]) if args and isinstance(args[0], str) else ""
+        t0 = time.time()
+        try:
+            result = fn(self, *args, **kwargs)
+        except Exception as exc:  # noqa: BLE001 - recorded, then re-raised
+            _record_book_failure(reg, self, op, exc,
+                                 time.time() - t0, arg_url)
+            raise
+        else:
+            _record_book_success(reg, self, op, result,
+                                 time.time() - t0, arg_url)
+            return result
+        finally:
+            self._book_rec_depth -= 1
+
+    wrapper._book_recorded = True  # type: ignore[attr-defined]
+    return wrapper
+
+
+def grown_book_adapters(reg: Any) -> list[Any]:
+    """Adapters for GROWN book sources: candidates the health loop
+    promoted (origin ``grown``, kind ``book``), served through the
+    universal :class:`GenericAdapter` shape — the descriptor
+    reader's generic shape, the #88 ``DiscoveredBlogSource``
+    precedent.  Pending candidates are NOT here: they serve
+    nothing.  Never raises."""
+    try:
+        out = []
+        for desc in reg.all():
+            if reg.origin_for(desc) != "grown" \
+                    or "book" not in desc.kinds:
+                continue
+            adapter = GenericAdapter(name=f"grown:{desc.domain}",
+                                     domains=(desc.domain,))
+            adapter.bind_book_registry(reg)
+            out.append(adapter)
+        out.sort(key=lambda a: a.domains[0] if a.domains else a.name)
+        return out
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def ordered_book_adapters(adapters: list[Any], reg: Any) -> list[Any]:
+    """Outcome-aware adapter order (Pass #89), through the registry's
+    existing score/health semantics, mirroring the #88 resolver:
+
+    * NO learned state anywhere in the pool → the list is returned
+      untouched: day-one behaviour is the pre-#89 order, byte-for-byte;
+    * otherwise active sources sort by registry score (stable — ties
+      keep pool order) and stood-down / disabled / dead sources are
+      demoted to the end, in pool order: they leave the active
+      ordering but are still tried last rather than pretending they
+      do not exist.
+    Never raises; a registry hiccup returns the pool as-is."""
+    try:
+        items: list[tuple[Any, Any]] = []
+        evidence = False
+        for adapter in adapters:
+            desc = registry_desc_for_adapter(reg, adapter)
+            items.append((adapter, desc))
+            if desc is None:
+                continue
+            st = reg.stats_for(desc)
+            if st["ok"] or st["fail"] or st["no_result"] \
+                    or st.get("blocked") or not reg.is_active(desc):
+                evidence = True
+        if not evidence:
+            return list(adapters)
+        active = [it for it in items
+                  if it[1] is None or reg.is_active(it[1])]
+        inactive = [it for it in items
+                    if it[1] is not None and not reg.is_active(it[1])]
+        active.sort(key=lambda it: -reg.score(it[1])
+                    if it[1] is not None else 0.0)
+        return [a for a, _d in active] + [a for a, _d in inactive]
+    except Exception:  # noqa: BLE001
+        return list(adapters)
+
 
 #: markers that mean "you are looking at a bot wall, not content"
 _BLOCK_MARKERS = (
@@ -229,6 +628,9 @@ class Fetcher:
         self._browser_sessions: dict[str, Any] = {}
         self._last_fetch: dict[str, float] = {}
         self._ua_index = 0
+        #: the source registry this fetcher's adapter is bound to
+        #: (Pass #89) — discovery intake only; None = pre-#89 behaviour.
+        self._book_registry: Any = None
 
     def polite_wait(self, url: str) -> None:
         """Sleep until ``rate_limit`` seconds passed since the last fetch
@@ -368,7 +770,53 @@ class Fetcher:
             _log.info("plain HTTP blocked for %s — browser-context fallback",
                       url)
             final_url, html = self.browser_get(url)
-        return final_url, parse_html(html), html
+        dom = parse_html(html)
+        self._note_book_discoveries(url, final_url, dom)
+        return final_url, dom, html
+
+    def _note_book_discoveries(self, requested_url: str,
+                               final_url: str, dom: Node) -> None:
+        """Discovery intake at the fetch seam (Pass #89): the raw
+        page is only visible here, so this is where the book path's
+        genuine discovery channels are noted as UNTRUSTED registry
+        candidates (``kinds=("book",)``; they serve nothing until
+        the health loop promotes them):
+
+        * the redirect target — a fetch that lands on a foreign host
+          (the site's own mirror answering);
+        * story-shaped links embedded in the fetched page — links
+          whose path carries a novel/chapter/fiction/series/read
+          shape on a foreign host (a site linking its mirror, or the
+          same novel elsewhere).  Share/social/plain links carry no
+          story shape and are never intaken, and cover/CDN hosts are
+          not links at all here — not story sites, never intaken.
+
+        Best-effort; never raises, never changes the fetch result."""
+        reg = getattr(self, "_book_registry", None)
+        if reg is None:
+            return
+        try:
+            req_host = _book_host(requested_url)
+            fin_host = _book_host(final_url)
+            if fin_host and req_host and fin_host != req_host:
+                reg.note_candidate(final_url, via="book-redirect",
+                                   kinds=("book",))
+            seen: set[str] = set()
+            for href, _text in _links(dom, final_url):
+                host = _book_host(href)
+                if not host or host == fin_host or host in seen:
+                    continue
+                seen.add(host)
+                low = href.lower()
+                if any(tok in low for tok in
+                       ("/novel", "chapter", "/fiction", "/series",
+                        "/read/")):
+                    reg.note_candidate(href, via="book-page-link",
+                                       kinds=("book",))
+                if len(seen) >= 20:
+                    break
+        except Exception:  # noqa: BLE001 - intake never breaks a fetch
+            pass
 
 
 def _looks_blocked(html: str) -> bool:
@@ -459,9 +907,38 @@ class SourceAdapter(ABC):
     domains: tuple[str, ...] = ()
     #: False when the markup was never verified live (honest flag).
     verified: bool = True
+    #: The source registry this adapter's fetch outcomes land in
+    #: (Pass #89); None = unbound, pre-#89 behaviour exactly.
+    _book_registry: Any = None
+    _book_rec_depth: int = 0
+
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        # Pass #89: wrap each concrete fetch operation ONCE, at class
+        # creation, so every real fetch path (reader, download_story,
+        # direct adapter use) records its outcome through the one
+        # central seam — no per-adapter, per-callsite duplication.
+        super().__init_subclass__(**kwargs)
+        for _op in ("search", "novel", "chapter_list", "fetch_chapter"):
+            _fn = cls.__dict__.get(_op)
+            if callable(_fn) and not getattr(_fn, "_book_recorded", False):
+                setattr(cls, _op, _wrap_book_op(_op, _fn))
 
     def __init__(self, fetcher: Fetcher | None = None) -> None:
         self.fetcher = fetcher or Fetcher()
+
+    def bind_book_registry(self, reg: Any) -> "SourceAdapter":
+        """Bind the ONE media source registry: this adapter's fetch
+        outcomes, blocked walls and catalogue misses land in it, and
+        its fetcher notes book-path discoveries into it (Pass #89).
+        Returns self for chaining.  Never raises."""
+        try:
+            self._book_registry = reg
+            fetcher = getattr(self, "fetcher", None)
+            if isinstance(fetcher, Fetcher):
+                fetcher._book_registry = reg
+        except Exception:  # noqa: BLE001 - binding never breaks a fetch
+            pass
+        return self
 
     def matches(self, url: str) -> bool:
         host = (urllib.parse.urlparse(url).hostname or "").lower()
@@ -1111,9 +1588,23 @@ def _make_adapters() -> list[SourceAdapter]:
 ADAPTERS: list[SourceAdapter] = _make_adapters()
 
 
-def adapter_for_url(url: str) -> SourceAdapter:
+def adapter_for_url(url: str,
+                    source_registry: Any = None) -> SourceAdapter:
+    """The adapter serving *url*: a dedicated adapter, a descriptor
+    adapter, a health-promoted GROWN book source (when a registry is
+    supplied — served through the universal generic shape, named
+    ``grown:<host>``), else the self-tuning generic adapter for an
+    unknown host, honestly flagged.  When *source_registry* is given
+    the returned dedicated/descriptor/grown adapter is bound to it
+    so its fetch outcomes land in the one registry (Pass #89); a
+    pending candidate is never returned here — candidates serve
+    nothing, and the anonymous generic fallback for an explicitly
+    pasted URL is the pre-#89 owner-directed path, unbound, earning
+    no registry credit."""
     for adapter in ADAPTERS:
         if adapter.matches(url):
+            if source_registry is not None:
+                adapter.bind_book_registry(source_registry)
             return adapter
     # descriptor-driven legal sources (lazy import: descriptors imports
     # this module, so a top-level import would be circular)
@@ -1121,27 +1612,61 @@ def adapter_for_url(url: str) -> SourceAdapter:
         from .descriptors import descriptor_adapters
         for adapter in descriptor_adapters():
             if adapter.matches(url):
+                if source_registry is not None:
+                    adapter.bind_book_registry(source_registry)
                 return adapter
     except Exception:  # noqa: BLE001 - descriptor failure never breaks lookup
         pass
+    if source_registry is not None:
+        host = _book_host(url)
+        desc = source_registry.for_domain(host) if host else None
+        if desc is not None \
+                and source_registry.origin_for(desc) == "grown" \
+                and "book" in desc.kinds:
+            grown = GenericAdapter(name=f"grown:{host}", domains=(host,))
+            grown.bind_book_registry(source_registry)
+            return grown
     # unknown aggregator → the self-tuning generic adapter, honestly flagged
     host = (urllib.parse.urlparse(url).hostname or "unknown").lower()
     return GenericAdapter(name=f"generic:{host}", domains=(host,))
 
 
 def search_all(query: str, *, limit: int = 10,
-               sources: list[str] | None = None) -> list[SearchHit]:
-    """Search every (verified) source; failures are per-source, never fatal."""
+               sources: list[str] | None = None,
+               source_registry: Any = None) -> list[SearchHit]:
+    """Search every (verified) source; failures are per-source, never fatal.
+
+    With *source_registry* (Pass #89) the pool is bound for the
+    duration of the search (bindings restored afterwards — the
+    global adapters keep no stale registry) and ordered
+    outcome-aware via :func:`ordered_book_adapters`: with zero
+    learned state the order, and therefore the result, is exactly
+    the pre-#89 behaviour."""
+    pool = list(ADAPTERS)
+    previous: list[tuple[SourceAdapter, Any]] = []
+    if source_registry is not None:
+        pool = ordered_book_adapters(pool, source_registry)
+        for adapter in pool:
+            previous.append((adapter, adapter._book_registry))
+            adapter.bind_book_registry(source_registry)
     hits: list[SearchHit] = []
-    for adapter in ADAPTERS:
-        if sources and adapter.name not in sources:
-            continue
-        if not adapter.verified:
-            continue
-        try:
-            hits.extend(adapter.search(query, limit=limit))
-        except SourceError as exc:
-            _log.warning("story search failed on %s: %s", adapter.name, exc)
-        if len(hits) >= limit:
-            break
+    try:
+        for adapter in pool:
+            if sources and adapter.name not in sources:
+                continue
+            if not adapter.verified:
+                continue
+            try:
+                hits.extend(adapter.search(query, limit=limit))
+            except SourceError as exc:
+                _log.warning("story search failed on %s: %s",
+                             adapter.name, exc)
+            if len(hits) >= limit:
+                break
+    finally:
+        for adapter, old in previous:
+            adapter._book_registry = old
+            fetcher = getattr(adapter, "fetcher", None)
+            if isinstance(fetcher, Fetcher):
+                fetcher._book_registry = old
     return hits[:limit]

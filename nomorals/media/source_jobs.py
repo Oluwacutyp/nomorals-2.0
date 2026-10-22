@@ -15,7 +15,10 @@ Job:
   Pass #88 the music search class lives in the same registry, so
   this one job also re-verifies the /play chain sources and can
   promote the candidates the music path discovers — no second job,
-  no second binding.  Marked
+  no second binding.  Since Pass #89 the book/story class lives in
+  the same registry too, so this one job also re-verifies the story
+  sites and can promote the candidates the book path discovers —
+  still no second job, no second binding.  Marked
   ``routine`` deliberately: the loop is self-reporting bookkeeping —
   its results land in the registry's status surface (``/download
   status``), not in owner alerts — but a FAILED run still records as

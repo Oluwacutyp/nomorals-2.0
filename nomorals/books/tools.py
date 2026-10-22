@@ -48,7 +48,7 @@
     Reader (webnovel shelf):
     story_search / story_follow / story_unfollow / story_following
     story_read / story_next / story_prev / story_sync / story_progress
-    story_bookmark / story_download
+    story_bookmark / story_download / story_sources
     reader_updates    new-chapter report across followed stories
     reader_highlight  highlights add/list/remove/export
     reader_catch_up   read all unread cached chapters in order
@@ -256,6 +256,33 @@ def register(registry: Any) -> None:
         srcs = [s.strip() for s in sources.split(",") if s.strip()] or None
         return {"query": query,
                 "hits": _reader().search(query, limit=limit, sources=srcs)}
+
+    @registry.register(
+        "story_sources",
+        description=(
+            "Book/story source registry — the story-reader sites in "
+            "the ONE source registry (pass #89, same registry as "
+            "download_sources): action=status (seed vs grown book "
+            "sources, health, outcome counts incl. bot-blocked, book "
+            "candidates pending verification) | health (run the "
+            "shared source health loop: re-verify sources + "
+            "candidates, promote verified book candidates, shed "
+            "dead ones)."
+        ),
+        capability=Capability.NET_OUT,
+    )
+    def story_sources(*, action: str = "status") -> dict[str, Any]:
+        act = (action or "status").strip().lower()
+        if act == "health":
+            from .sources import book_registry_for_context
+            reg = book_registry_for_context(context)
+            if reg is None:
+                from ..media.source_registry import DEFAULT_REGISTRY
+                reg = DEFAULT_REGISTRY
+            return reg.verify_health()
+        if act == "status":
+            return _reader().source_status()
+        return {"error": f"unknown action {action!r} — status|health"}
 
     @registry.register(
         "story_follow",
@@ -1539,8 +1566,10 @@ def register(registry: Any) -> None:
         },
     )
     def story_download(url: str, limit: int = 0) -> dict[str, Any]:
-        from .sources import adapter_for_url, normalize_url
-        adapter = adapter_for_url(url)
+        from .sources import (adapter_for_url, book_registry_for_context,
+                              normalize_url)
+        adapter = adapter_for_url(
+            url, source_registry=book_registry_for_context(context))
         dl = adapter.download_story(url, limit=limit)
         return {"ok": True, "source": adapter.name,
                 "title": dl["meta"]["title"],
