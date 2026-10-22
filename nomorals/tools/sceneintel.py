@@ -28,14 +28,16 @@ def register(registry: Any) -> None:
 
     @registry.register(
         "film_search",
-        description=("Search movie download sources (NetNaija movies, Nkiri, "
-                     "FzMovies) for a film. ('find John Wick 4 to download', "
-                     "'get me that Nollywood movie'). Returns candidates."),
+        description=("Search movie download sources (Internet Archive, "
+                     "NetNaija movies, Nkiri, FzMovies, plus film sources "
+                     "the source registry has grown) for a film. ('find "
+                     "John Wick 4 to download', 'get me that Nollywood "
+                     "movie'). Returns candidates."),
         capability=Capability.NET_OUT,
     )
     def film_search(query: str, *, limit: int = 8) -> dict[str, Any]:
         from ..media.film_sources import search_films
-        cands = search_films(query, limit=limit)
+        cands = search_films(query, limit=limit, context=context)
         return {"ok": True, "candidates": [
             {"source": c.source, "title": c.title, "year": c.year,
              "quality": c.quality, "url": c.url} for c in cands]}
@@ -53,11 +55,38 @@ def register(registry: Any) -> None:
         from ..media.downloader import MediaDownloader
         cand = FilmCandidate(**{k: v for k, v in candidate.items()
                                 if k in FilmCandidate.__dataclass_fields__})
-        url = resolve_film_url(cand)
+        url = resolve_film_url(cand, context=context)
         dl = MediaDownloader()
         out = _out_dir(context, "films")
         path = dl.download(url, out_dir=str(out))
         return {"ok": True, "path": str(path), "url": url}
+
+    @registry.register(
+        "film_sources",
+        description=("Film source registry — the film search chain "
+                     "(Internet Archive, NetNaija movies, Nkiri, "
+                     "FzMovies) in the ONE source registry (pass #93, "
+                     "same registry as download_sources): action=status "
+                     "(per-source origin/health, served / failed / "
+                     "blocked / rate-limited / no-result counts, grown "
+                     "film sources, film candidates pending) | health "
+                     "(run the shared source health loop: film sources "
+                     "are probed through their real search endpoints)."),
+        capability=Capability.NET_OUT,
+    )
+    def film_sources(*, action: str = "status") -> dict[str, Any]:
+        from ..media.film_sources import film_registry_for_context
+        reg = film_registry_for_context(context)
+        if reg is None:
+            from ..media.source_registry import DEFAULT_REGISTRY
+
+            reg = DEFAULT_REGISTRY
+        act = (action or "status").strip().lower()
+        if act == "health":
+            return reg.verify_health()
+        if act == "status":
+            return reg.film_status()
+        return {"error": f"unknown action {act!r} — status|health"}
 
     # ── scene intelligence ────────────────────────────────────────
 

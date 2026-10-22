@@ -84,4 +84,6 @@ def test_sceneintel_tools_register():
                         and isinstance(dec.func, ast.Attribute)
                         and dec.func.attr == "register"):
                     n += 1
-    assert n == 7, f"expected 7 tools, found {n}"
+    # 8 since Pass #93 (the film_sources registry surface joined
+    # film_search / film_download)
+    assert n == 8, f"expected 8 tools, found {n}"

@@ -27,7 +27,13 @@ Job:
   class (reverse image search — the shared Bing/Yandex host
   descriptors) lives in the same registry too, so this one job
   also re-verifies those hosts — still no second job, no second
-  binding.  Marked
+  binding.  Since Pass #93 the film class (the film search
+  chain — Internet Archive, NetNaija movies, Nkiri, FzMovies)
+  lives in the same registry too, so this one job also
+  re-verifies the film sources — through their real search
+  endpoints (one bounded probe query each) — and can promote
+  the candidates the film path discovers — still no second
+  job, no second binding.  Marked
   ``routine`` deliberately: the loop is self-reporting bookkeeping —
   its results land in the registry's status surface (``/download
   status``), not in owner alerts — but a FAILED run still records as

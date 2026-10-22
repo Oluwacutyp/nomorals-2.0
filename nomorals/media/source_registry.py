@@ -169,6 +169,42 @@ content is DATA, never instructions.  This module is that layer:
   candidate intake — named absence, not invention.
   :meth:`SourceRegistry.status` carries the class under
   ``images``, and the ONE health loop / health job covers it.
+* Film class goes open (Pass #93) — the film/video search chain
+  (``media/film_sources.py`` — the ``film_search`` tool's roster:
+  Internet Archive films, NetNaija movies, Nkiri, FzMovies) joins
+  THIS registry as a source class of its own, for the same reason
+  books did: every chain source is one host serving film search,
+  so the model fits without distortion.  Two of the four hosts
+  are ALREADY registry descriptors (``archive.org``, a
+  music-search seed, Pass #88; ``thenetnaija.net``, the
+  download-blog seed, Pass #76) — both classes fetch the literal
+  same hosts, so the film class SHARES those descriptors and
+  extends their kinds (the #88 ``youtube.com`` / #92 Bing-Yandex
+  precedent); Nkiri and FzMovies are new seeds.  The seeds
+  declare NO extraction facts, so the #76/#87 extractor view is
+  unchanged.  The film seam records outcomes distinctly — the
+  chain previously flattened every outcome to ``[]``: served /
+  no-result (weak, #88) / bot-wall (:meth:`record_blocked`,
+  #89) / rate-limited (:meth:`record_rate_limited`, #90) /
+  operational failure, classified from the fetch evidence each
+  source now keeps (HTTP status, wall markers in the body).
+  Health probes are honest: film seeds carry their real search
+  URL template, and the ONE loop probes them through it with
+  one bounded probe query (``Avatar`` — the agency registry's
+  film probe), because a root page proves nothing about search
+  (the #90 reasoning).  Discovery is genuine on this path: film
+  search results are post-page URLs, and foreign hosts among
+  them intake through :meth:`note_candidate` with
+  ``kinds=("film",)``; health-promoted grown film sources serve
+  through the generic WordPress film shape
+  (``film_sources.DiscoveredFilmSource``).
+  :meth:`SourceRegistry.status` carries the class under
+  ``film``, and the ONE health loop / health job covers it — no
+  second job.  (``media/video.py`` VideoFinder is NOT this
+  class: it rides the web-search engines, #90, and ranks their
+  results — it has no source list of its own to open; and the
+  download leg of a found film already records its outcomes on
+  the download path, #86.)
 
 No real identity leakage: :func:`redact_identity` strips emails,
 phones and tokens from retrieved text before it is stored or shown.
@@ -1466,10 +1502,18 @@ class SourceRegistry:
         # purpose: probing them with a search would burn the
         # owner's quota, so they fall through to the root check
         # below and are judged by real-search outcomes.
-        if "web-search" in desc.kinds and desc.search_url_template:
+        # The film class (Pass #93) declares its real search
+        # templates for the same reason and is probed through them
+        # with the agency registry's film probe query ("Avatar").
+        probe_query = ""
+        if desc.search_url_template and "web-search" in desc.kinds:
+            probe_query = "Lagos Nigeria"
+        elif desc.search_url_template and "film-search" in desc.kinds:
+            probe_query = "Avatar"
+        if probe_query:
             try:
                 url = desc.search_url_template.format(
-                    query=urllib.parse.quote_plus("Lagos Nigeria"))
+                    query=urllib.parse.quote_plus(probe_query))
             except Exception:  # noqa: BLE001 - a bad template probes root
                 url = f"https://{desc.domain}/"
         try:
@@ -1483,7 +1527,8 @@ class SourceRegistry:
             status, body = 0, b""
             detail = str(exc)[:200]
         health, detail = _classify_health(status, body)
-        if "web-search" in desc.kinds and status == 429:
+        if ("web-search" in desc.kinds or "film-search" in desc.kinds) \
+                and status == 429:
             # a throttled search engine is rate-limited, not a bot
             # wall and not dead (Pass #90 vocabulary)
             health, detail = "rate-limited", "HTTP 429 rate limited"
@@ -1831,6 +1876,63 @@ class SourceRegistry:
             return {"engines": [], "link_only": [], "grown": [],
                     "candidates_pending": 0, "discovery": ""}
 
+    # ── film class status (Pass #93) ──
+    def film_status(self) -> dict[str, Any]:
+        """The film class's state in this registry: one row per
+        film chain source (source name → the host it fetches from,
+        per ``film_sources.FILM_SOURCE_DOMAINS`` — two of them the
+        shared ``archive.org`` / ``thenetnaija.net`` descriptors)
+        with origin, health and outcome counts (served / failed /
+        blocked / rate-limited / no-result), plus the grown film
+        sources the health loop promoted and the film candidates
+        still pending.  Never raises."""
+        try:
+            from .film_sources import (
+                FILM_SEARCH_SOURCES, FILM_SOURCE_DOMAINS)
+
+            def row(source: str, domain: str) -> dict[str, Any]:
+                desc = self.for_domain(domain)
+                if desc is None:
+                    return {"source": source, "domain": domain,
+                            "origin": "missing", "health": "unknown",
+                            "ok": 0, "fail": 0, "blocked": 0,
+                            "rate_limited": 0, "no_result": 0,
+                            "score": 0.0}
+                st = self.stats_for(desc)
+                return {"source": source, "domain": domain,
+                        "origin": self.origin_for(desc),
+                        "health": self.health_for(desc),
+                        "ok": st["ok"], "fail": st["fail"],
+                        "blocked": st["blocked"],
+                        "rate_limited": st["rate_limited"],
+                        "no_result": st["no_result"],
+                        "score": self.score(desc)}
+
+            sources = [row(name, FILM_SOURCE_DOMAINS[name])
+                       for name in FILM_SEARCH_SOURCES
+                       if FILM_SOURCE_DOMAINS.get(name)]
+            grown = []
+            for key, desc in self._by_key.items():
+                if self._origin.get(key) != "grown" \
+                        or "film" not in desc.kinds:
+                    continue
+                st = self.stats_for(desc)
+                grown.append({
+                    "domain": desc.domain, "name": desc.name,
+                    "health": self.health_for(desc),
+                    "ok": st["ok"], "fail": st["fail"],
+                    "blocked": st["blocked"],
+                    "no_result": st["no_result"]})
+            grown.sort(key=lambda g: g["domain"])
+            film_candidates = sum(
+                1 for d in self._candidates.values()
+                if "film" in d.kinds)
+            return {"sources": sources, "grown": grown,
+                    "candidates_pending": film_candidates}
+        except Exception:  # noqa: BLE001
+            return {"sources": [], "grown": [],
+                    "candidates_pending": 0}
+
     # ── status surface (Pass #86) ──
     def status(self) -> dict[str, Any]:
         """The registry's full growth state: seed vs grown sources,
@@ -1890,6 +1992,8 @@ class SourceRegistry:
                 "web_search": self.web_search_status(),
                 # Pass #92: the image class, same surface.
                 "images": self.image_status(),
+                # Pass #93: the film class, same surface.
+                "film": self.film_status(),
             }
         except Exception:  # noqa: BLE001
             return {"total": 0, "seeds": 0, "grown": 0, "registered": 0,
@@ -1906,7 +2010,9 @@ class SourceRegistry:
                                    "candidates_pending": 0},
                     "images": {"engines": [], "link_only": [],
                                "grown": [], "candidates_pending": 0,
-                               "discovery": ""}}
+                               "discovery": ""},
+                    "film": {"sources": [], "grown": [],
+                             "candidates_pending": 0}}
 
 
 def render_status_text(status: dict[str, Any]) -> str:
@@ -2053,6 +2159,27 @@ def render_status_text(status: dict[str, Any]) -> str:
                 "for reverse engines (result hosts are image "
                 "content, not engines) — outcomes/health only, "
                 "by design")
+        film = status.get("film") or {}
+        if film.get("sources"):
+            lines.append(
+                "🎬 film sources — the film search chain, in the "
+                "same registry (pass #93):")
+            for row in film.get("sources") or []:
+                lines.append(
+                    f"  🎬 {row['source']} → {row['domain']} "
+                    f"[{row['origin']}/{row['health']}] "
+                    f"ok={row['ok']} fail={row['fail']} "
+                    f"blocked={row['blocked']} "
+                    f"rate-limited={row['rate_limited']} "
+                    f"no-result={row['no_result']}")
+            for g in film.get("grown") or []:
+                lines.append(
+                    f"  🎬 grown:{g['domain']} [grown/{g['health']}] "
+                    f"ok={g['ok']} fail={g['fail']} — promoted by the "
+                    "health loop, serving via the generic film shape")
+            lines.append(
+                f"  film candidates pending verification: "
+                f"{film.get('candidates_pending', 0)}")
         for cand in status.get("candidates") or []:
             lines.append(
                 f"  ? {cand['domain']} [candidate/{cand['health']}] "
@@ -2071,7 +2198,7 @@ def _seed(store: Any = None) -> SourceRegistry:
     reg = SourceRegistry(store=store)
     seeds = [
         # ── Nigeria (first-class) ──
-        ("NG", "en", "thenetnaija.net", "NetNaija", ("music", "film"), Licence.UNLICENSED, TrustTier.UNVERIFIED, "WP ?s= search, multi-hop MP3", 6),
+        ("NG", "en", "thenetnaija.net", "NetNaija", ("music", "film", "film-search"), Licence.UNLICENSED, TrustTier.UNVERIFIED, "WP ?s= search, multi-hop MP3", 6),
         ("NG", "en", "audiomack.com", "Audiomack", ("music", "charts"), Licence.USER_UPLOAD, TrustTier.COMMUNITY, "Afrobeats home; yt-dlp audiomack extractor", 20),
         ("NG", "en", "boomplay.com", "Boomplay", ("music", "charts"), Licence.LICENSED, TrustTier.VERIFIED, "Streams protected — metadata only, never download", 10),
         ("NG", "en", "punchng.com", "Punch", ("news",), Licence.LICENSED, TrustTier.VERIFIED, "Nigerian daily", 15),
@@ -2115,12 +2242,22 @@ def _seed(store: Any = None) -> SourceRegistry:
         # actually fetches (sources.py _BASE / API hosts).
         ("NG", "en", "netnaija.com", "NetNaija Music", ("music", "music-search"), Licence.UNLICENSED, TrustTier.UNVERIFIED, "Music chain host — WP ?s= search at netnaija.com (sources.py); thenetnaija.net above is the download-blog seed", 6),
         ("US", "en", "bandcamp.com", "Bandcamp", ("music", "music-search"), Licence.USER_UPLOAD, TrustTier.COMMUNITY, "HTML search, keyless; full tracks via yt-dlp bandcamp extractor", 10),
-        ("US", "en", "archive.org", "Internet Archive", ("music", "music-search"), Licence.UNKNOWN, TrustTier.COMMUNITY, "advancedsearch JSON; full downloadable files", 10),
+        ("US", "en", "archive.org", "Internet Archive", ("music", "music-search", "film", "film-search"), Licence.UNKNOWN, TrustTier.COMMUNITY, "advancedsearch JSON; full downloadable files; the film chain searches mediatype:(movies) through the same API (media/film_sources.py, pass #93)", 10),
         ("GLOBAL", "en", "musicbrainz.org", "MusicBrainz", ("music", "music-search"), Licence.LICENSED, TrustTier.VERIFIED, "Metadata only — no audio; discovery, never download", 10),
         ("GLOBAL", "en", "api.openverse.org", "Openverse", ("music", "music-search"), Licence.LICENSED, TrustTier.COMMUNITY, "CC-licensed audio aggregator API; results point at creator hosts", 10),
         ("GLOBAL", "en", "commons.wikimedia.org", "Wikimedia Commons", ("music", "music-search"), Licence.LICENSED, TrustTier.COMMUNITY, "Freely licensed audio files via the MediaWiki API", 10),
         ("US", "en", "itunes.apple.com", "iTunes Search API", ("music", "music-search"), Licence.LICENSED, TrustTier.VERIFIED, "30-second previews only — last-resort in the chain", 10),
         ("FR", "en", "api.deezer.com", "Deezer API", ("music", "music-search"), Licence.LICENSED, TrustTier.VERIFIED, "30-second previews only — last-resort in the chain", 10),
+        # ── film chain hosts not already seeded (Pass #93) ──
+        # archive.org and thenetnaija.net above already carry the
+        # film class (their kinds were extended — one host, one
+        # descriptor, two class memberships, the #88/#92
+        # precedent); these two chain hosts (media/film_sources.py)
+        # were never registered.  NO extraction facts (no entry in
+        # the extraction table below), so the #76/#87 extractor
+        # view is unchanged.
+        ("NG", "en", "nkiri.com", "Nkiri", ("film", "film-search"), Licence.UNLICENSED, TrustTier.UNVERIFIED, "Nollywood/Hollywood/Korean film downloads — WP ?s= search (media/film_sources.py)", 6),
+        ("GLOBAL", "en", "fzmovies.net", "FzMovies", ("film", "film-search"), Licence.UNLICENSED, TrustTier.UNVERIFIED, "Mobile-friendly film download links — search.php search (media/film_sources.py)", 6),
         # ── book/story sites (Pass #89) ──
         # The story reader's sources join the SAME registry as a
         # class of their own: dedicated adapters (books/sources.py)
@@ -2182,6 +2319,22 @@ def _seed(store: Any = None) -> SourceRegistry:
         "itunes.apple.com": ("", (r"itunes\.apple\.com",), (), True),
         "api.deezer.com": ("", (r"deezer\.com",), (), True),
     }
+    # Real search endpoints the health loop probes through (Pass
+    # #93, film class): a root page proves nothing about search
+    # (the #90 reasoning), so the film chain's hosts carry their
+    # search URL template here — a side table keyed by domain,
+    # the same idiom as the extraction table above.  Only film
+    # hosts appear: the web-search engines carry theirs from
+    # their own seed block below, and no other seed declares one.
+    search_templates = {
+        "archive.org": ("https://archive.org/advancedsearch.php?q="
+                        "title%3A%28{query}%29+AND+mediatype%3A%28movies%29"
+                        "&fl[]=identifier&rows=5&output=json"),
+        "thenetnaija.net": "https://thenetnaija.net/?s={query}",
+        "nkiri.com": "https://nkiri.com/?s={query}",
+        "fzmovies.net": ("https://fzmovies.net/search.php?"
+                         "searchname={query}"),
+    }
     _pre_existing = set(reg._by_key)
     for nation, lang, domain, name, kinds, lic, tier, notes, rpm in seeds:
         rule, pats, qmap, can_dl = extraction.get(domain, ("", (), (), True))
@@ -2189,6 +2342,7 @@ def _seed(store: Any = None) -> SourceRegistry:
             nation=nation, language=lang, domain=domain, name=name,
             kinds=kinds, licence=lic, trust_tier=tier,
             rate_limit_per_min=rpm, notes=notes,
+            search_url_template=search_templates.get(domain, ""),
             extraction_rule=rule, url_patterns=pats, quality_map=qmap,
             downloadable=can_dl))
     # ── web-search engines (Pass #90) ──
