@@ -18,7 +18,12 @@ Job:
   no second binding.  Since Pass #89 the book/story class lives in
   the same registry too, so this one job also re-verifies the story
   sites and can promote the candidates the book path discovers —
-  still no second job, no second binding.  Marked
+  still no second job, no second binding.  Since Pass #90 the
+  web-search class lives in the same registry too, so this one job
+  also re-verifies the search engines — keyless engines through
+  their real search endpoints (one bounded probe query each),
+  keyed APIs by host root only, spending no search quota — still
+  no second job, no second binding.  Marked
   ``routine`` deliberately: the loop is self-reporting bookkeeping —
   its results land in the registry's status surface (``/download
   status``), not in owner alerts — but a FAILED run still records as

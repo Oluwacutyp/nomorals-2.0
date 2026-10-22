@@ -46,6 +46,23 @@ provenance, and the backend's native score stashed at
 ``provenance["backend_score"]``. Hits are BM25 re-ranked
 (:mod:`nomorals.search.rerank`) by default — disable per-query cost-free
 with ``NM_WEB_RERANK=0``.
+
+Pass #90 (open-sources law): the fixed-host backends are sources in
+the ONE media source registry (kinds ``search``/``web-search`` — see
+:data:`WEB_BACKEND_DOMAINS`), and every attempt on this path records
+its outcome there: served results credit the backend, an empty
+result set is weak no-result evidence (never a breaker trip), an
+operational failure records with an error class, and a 429 / quota
+signal records as rate-limited — its own class, a hard stop, never
+retried around. An auth failure (401/403 invalid key) records
+NOTHING: a wrong key is configuration, not evidence — and a backend
+dark for want of a key never reaches ``search`` at all (probe()
+skips it in the federated layer). SearXNG has no fixed host: its
+outcomes are recorded per configured instance, against a descriptor
+registered for that instance's host. ``web_ddgs`` has no single host
+at all (it aggregates other engines), so it gets NO descriptor and
+no credit — its component engines are recorded on the
+``tools/web.py`` chain, where they are hosts.
 """
 
 from __future__ import annotations
@@ -53,6 +70,8 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -74,8 +93,12 @@ __all__ = [
     "ExaWebSource",
     "BraveWebSource",
     "WEB_SPECS",
+    "WEB_BACKEND_DOMAINS",
     "web_source_names",
     "web_backends_configured",
+    "web_registry_for_context",
+    "registry_desc_for_backend",
+    "ordered_web_backend_names",
 ]
 
 #: Identify ourselves to shared infrastructure (SearXNG instances,
@@ -192,6 +215,197 @@ def _parse_ts(value: Any) -> float | None:
     return dt.timestamp()
 
 
+# ── the web-search class in the ONE source registry (Pass #90) ───────
+
+#: The host each federated backend actually fetches from — the
+#: backend's source in the ONE source registry.  Domains are
+#: evidence from each backend's ``_fetch`` URL, NOT marketing
+#: domains: Tavily search POSTs to ``api.tavily.com``, Serper to
+#: ``google.serper.dev``, the Brave API lives on
+#: ``api.search.brave.com`` (a different service from the public
+#: HTML page the tools/web.py chain scrapes).  ``None`` = no fixed
+#: host: SearXNG's host is the owner-configured instance (credited
+#: per instance — see :func:`registry_desc_for_backend`), and ddgs
+#: is a package aggregating other engines, so it has no host to
+#: credit honestly.
+WEB_BACKEND_DOMAINS: dict[str, str | None] = {
+    "web_searxng": None,
+    "web_ddgs": None,
+    "web_tavily": "api.tavily.com",
+    "web_serper": "google.serper.dev",
+    "web_exa": "api.exa.ai",
+    "web_brave": "api.search.brave.com",
+}
+
+
+def web_registry_for_context(context: Any = None,
+                             injected: Any = None) -> Any:
+    """The source registry web-search outcomes land in, or None.
+
+    Mirrors the #88/#89 resolution exactly: an injected registry
+    wins; otherwise the shared ``DEFAULT_REGISTRY`` bound to the
+    context's KV store — and only when the context carries a
+    database, so db-less callers keep the pre-#90 behaviour exactly.
+    Never raises."""
+    if injected is not None:
+        return injected
+    try:
+        db = getattr(context, "db", None) if context is not None else None
+        if db is None:
+            return None
+        from ..media.source_registry import DEFAULT_REGISTRY
+        reg = DEFAULT_REGISTRY
+        try:
+            from ..storage.kv import KVStore
+            reg.bind_store(KVStore(db))
+        except Exception:  # noqa: BLE001 - persistence is an
+            # enhancement; its absence never sinks a search
+            pass
+        return reg
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _ensure_searx_instance(reg: Any, instance_url: str) -> Any:
+    """The registry descriptor for one configured SearXNG instance
+    host, registering it (origin ``registered``) when new: an
+    owner-configured instance is a configured source, not a
+    discovery — it is trusted exactly as far as the owner's config
+    trusts it, carries the instance's real search template (the
+    health loop probes it like any keyless engine), and persists
+    through the registry like any registered source.  Never
+    raises."""
+    try:
+        host = urllib.parse.urlparse(instance_url or "").hostname or ""
+        host = host.lower()
+        if host.startswith("www."):
+            host = host[4:]
+        if not host:
+            return None
+        desc = reg.for_domain(host)
+        if desc is not None:
+            return desc if "web-search" in desc.kinds else None
+        from ..media.source_registry import (
+            Licence, SourceDescriptor, TrustTier)
+
+        base = str(instance_url or "").strip().rstrip("/")
+        desc = SourceDescriptor(
+            nation="GLOBAL", language="en", domain=host,
+            name=f"SearXNG instance ({host})",
+            kinds=("search", "web-search"), licence=Licence.UNKNOWN,
+            trust_tier=TrustTier.UNVERIFIED,
+            notes="owner-configured SearXNG instance (search/web.py)",
+            search_url_template=f"{base}/search?q={{query}}&format=json")
+        if reg.register(desc):
+            reg._persist()  # a registered source survives restarts too
+            return desc
+        return reg.for_domain(host)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def registry_desc_for_backend(reg: Any, source: Any) -> Any:
+    """The registry descriptor that should be credited for one
+    backend's attempt, or None when the backend has no creditable
+    host (ddgs) or is unconfigured (SearXNG with no instance).
+    Never raises."""
+    try:
+        if reg is None or source is None:
+            return None
+        name = str(getattr(source, "name", "") or "")
+        if name == "web_searxng":
+            instances = source._instances() \
+                if hasattr(source, "_instances") else []
+            if not instances:
+                return None
+            return _ensure_searx_instance(reg, instances[0])
+        domain = WEB_BACKEND_DOMAINS.get(name)
+        if not domain:
+            return None
+        return reg.for_domain(domain)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _backend_error_evidence(exc: BaseException) -> tuple[str, str]:
+    """Classify one backend exception into registry evidence:
+    ``(kind, error_class)`` where kind is ``rate_limited`` |
+    ``failure`` | ``none``.
+
+    * 429 / rate-limit / quota-or-credits-exhausted signals →
+      ``rate_limited`` (its own class, Pass #90 — the attempt is
+      recorded once and never retried);
+    * 401/403 invalid-key signals → ``none``: a wrong or missing
+      key is a fact about this install's configuration, not about
+      the engine's health;
+    * a non-JSON payload → failure, ``malformed_response``;
+    * a timeout → failure, ``timeout``; an ``HTTP <code>`` signal →
+      failure, ``http_<code>``; anything else → failure,
+      ``search_failed`` (transport failures land here — the stdlib
+      transport wraps them without a status).
+    """
+    msg = str(exc or "").lower()
+    if "429" in msg or "rate limit" in msg or "rate-limited" in msg \
+            or "432" in msg or "quota" in msg \
+            or "credits exhausted" in msg or "credit quota" in msg:
+        return "rate_limited", "rate_limited"
+    if "401" in msg or "403" in msg or "invalid api key" in msg \
+            or "invalid subscription" in msg:
+        return "none", ""
+    if "non-json" in msg:
+        return "failure", "malformed_response"
+    if "timed out" in msg or "timeout" in msg:
+        return "failure", "timeout"
+    match = re.search(r"http (\d{3})", msg)
+    if match:
+        return "failure", f"http_{match.group(1)}"
+    return "failure", "search_failed"
+
+
+def ordered_web_backend_names(reg: Any, names: list[str]) -> list[str]:
+    """Outcome-aware order for the federated web backends (Pass
+    #90), through the registry's score/health semantics, mirroring
+    the #88/#89 ordering:
+
+    * NO learned state anywhere among the named backends → the
+      list is returned untouched (day-one pin: ``WEB_SPECS`` order,
+      byte-for-byte);
+    * otherwise active backends sort by registry score (stable)
+      and stood-down / disabled / dead backends are demoted to the
+      end — demoted, never dropped.  Backends with no descriptor
+      (SearXNG without an instance, ddgs) keep their relative
+      place among the active set and earn no score.
+    Never raises."""
+    try:
+        if reg is None:
+            return list(names)
+        domains = WEB_BACKEND_DOMAINS
+        items: list[tuple[str, Any]] = []
+        evidence = False
+        for name in names:
+            domain = domains.get(name)
+            desc = reg.for_domain(domain) if domain else None
+            items.append((name, desc))
+            if desc is None:
+                continue
+            st = reg.stats_for(desc)
+            if st["ok"] or st["fail"] or st["no_result"] \
+                    or st.get("blocked") or st.get("rate_limited") \
+                    or not reg.is_active(desc):
+                evidence = True
+        if not evidence:
+            return list(names)
+        active = [it for it in items
+                  if it[1] is None or reg.is_active(it[1])]
+        inactive = [it for it in items
+                    if it[1] is not None and not reg.is_active(it[1])]
+        active.sort(key=lambda it: -reg.score(it[1])
+                    if it[1] is not None else 0.0)
+        return [n for n, _d in active] + [n for n, _d in inactive]
+    except Exception:  # noqa: BLE001
+        return list(names)
+
+
 # ── base ───────────────────────────────────────────────────────────────
 
 class WebSearchSource(SourceAdapter):
@@ -207,10 +421,73 @@ class WebSearchSource(SourceAdapter):
     result_type = "web"
     description = "live web search"
 
-    def __init__(self, context: Any = None) -> None:
+    def __init__(self, context: Any = None, *,
+                 source_registry: Any = None) -> None:
         # Web backends are configured via environment, not the context —
         # the parameter keeps build_adapters() uniform across sources.
         self._context = context
+        # Source registry (Pass #90): the ONE registry this backend's
+        # outcomes land in.  Tests may inject; otherwise resolved
+        # lazily from the context (see _registry) — and only when the
+        # context carries a database, so db-less callers keep the
+        # pre-#90 behaviour exactly.
+        self._source_registry_injected = source_registry
+        self._source_registry_cache: Any = None
+        self._source_registry_resolved = False
+
+    # -- source registry (Pass #90) ------------------------------------
+    def _registry(self) -> Any:
+        """The source registry for this backend's outcomes, or None
+        when it has none to speak to.  Never raises."""
+        if self._source_registry_resolved:
+            return self._source_registry_cache
+        self._source_registry_resolved = True
+        self._source_registry_cache = web_registry_for_context(
+            self._context, injected=self._source_registry_injected)
+        return self._source_registry_cache
+
+    def _record_search_outcome(self, raw_hits: list, latency_s: float) -> None:
+        """Credit one served attempt: results → served; an empty
+        result set → weak no-result evidence (#88 precedent — an
+        obscure query must never stand an engine down).
+        Best-effort; never raises."""
+        try:
+            reg = self._registry()
+            if reg is None:
+                return
+            desc = registry_desc_for_backend(reg, self)
+            if desc is None:
+                return
+            if raw_hits:
+                reg.record_outcome(desc, True, latency_s=latency_s)
+            else:
+                reg.record_no_result(desc)
+        except Exception:  # noqa: BLE001 - bookkeeping never breaks search
+            pass
+
+    def _record_search_failure(self, exc: BaseException,
+                               latency_s: float) -> None:
+        """Blame one failed attempt, classified by
+        :func:`_backend_error_evidence`.  Best-effort; never raises."""
+        try:
+            kind, error_class = _backend_error_evidence(exc)
+            if kind == "none":
+                return
+            reg = self._registry()
+            if reg is None:
+                return
+            desc = registry_desc_for_backend(reg, self)
+            if desc is None:
+                return
+            if kind == "rate_limited":
+                # recorded once — a 429 is a hard stop for this
+                # backend, never a cue to retry around it
+                reg.record_rate_limited(desc, latency_s=latency_s)
+            else:
+                reg.record_outcome(desc, False, latency_s=latency_s,
+                                   error_class=error_class)
+        except Exception:  # noqa: BLE001
+            pass
 
     # -- configuration -------------------------------------------------
     def _api_key(self) -> str:
@@ -271,12 +548,25 @@ class WebSearchSource(SourceAdapter):
     ) -> list[SearchResult]:
         # Date windows are applied by federated_search post-hoc (undated
         # web hits are kept); backends don't get lossy time_range mapping.
+        # Pass #90: the attempt's outcome lands in the source registry.
+        # SearXNG is the one exception at this level — its _fetch
+        # records per configured instance (its real unit of credit),
+        # so a search-level record would double-count it.
+        t0 = time.time()
         try:
             raw_hits = self._fetch(query, limit)
-        except WebBackendError:
+        except WebBackendError as exc:
+            if self.name != "web_searxng":
+                self._record_search_failure(exc, time.time() - t0)
             raise
         except Exception as exc:  # noqa: BLE001 - wrapped with backend name
-            raise WebBackendError(f"{self.name}: unexpected error: {exc}") from exc
+            wrapped = WebBackendError(
+                f"{self.name}: unexpected error: {exc}")
+            if self.name != "web_searxng":
+                self._record_search_failure(wrapped, time.time() - t0)
+            raise wrapped from exc
+        if self.name != "web_searxng":
+            self._record_search_outcome(raw_hits, time.time() - t0)
         results = [
             self._to_result(query, i, raw)
             for i, raw in enumerate(raw_hits[:limit])
@@ -352,6 +642,33 @@ class SearXNGWebSource(WebSearchSource):
             )
         return None
 
+    def _record_instance(self, instance: str, kind: str,
+                         latency_s: float = 0.0,
+                         error_class: str = "") -> None:
+        """Record one instance attempt against that instance's own
+        registry descriptor (Pass #90 — the instance is this
+        backend's real unit of credit).  Best-effort; never raises."""
+        try:
+            reg = self._registry()
+            if reg is None:
+                return
+            desc = _ensure_searx_instance(reg, instance)
+            if desc is None:
+                return
+            if kind == "served":
+                reg.record_outcome(desc, True, latency_s=latency_s)
+            elif kind == "no_result":
+                reg.record_no_result(desc)
+            elif kind == "blocked":
+                reg.record_blocked(desc, latency_s=latency_s)
+            elif kind == "rate_limited":
+                reg.record_rate_limited(desc, latency_s=latency_s)
+            else:
+                reg.record_outcome(desc, False, latency_s=latency_s,
+                                   error_class=error_class or "site_error")
+        except Exception:  # noqa: BLE001
+            pass
+
     def _fetch(self, query: str, limit: int) -> list[dict[str, Any]]:
         timeout = _timeout(12.0)
         params: dict[str, Any] = {
@@ -365,12 +682,28 @@ class SearXNGWebSource(WebSearchSource):
             params["engines"] = self._engines()
         errors: list[str] = []
         for instance in self._instances():
-            status, body = _http(
-                "GET", f"{instance}/search",
-                params=params,
-                timeout=timeout,
-            )
+            t0 = time.time()
+            try:
+                status, body = _http(
+                    "GET", f"{instance}/search",
+                    params=params,
+                    timeout=timeout,
+                )
+            except WebBackendError as exc:
+                # transport failure on this instance (the pre-#90 code
+                # aborted the loop here, and still does — the outcome
+                # is recorded, then the error propagates unchanged)
+                self._record_instance(
+                    instance, "failure", time.time() - t0,
+                    error_class=_backend_error_evidence(exc)[1]
+                    or "search_failed")
+                raise
             if status == 403:
+                # this instance refuses format=json — a wall on this
+                # instance, recorded blocked (never dead), then the
+                # pre-existing failover to the next instance continues
+                self._record_instance(instance, "blocked",
+                                      time.time() - t0)
                 errors.append(
                     f"{instance}: 403 — this instance has format=json "
                     "disabled in settings.yml; try another instance or "
@@ -378,12 +711,26 @@ class SearXNGWebSource(WebSearchSource):
                 )
                 continue
             if status == 429:
+                # recorded rate-limited ONCE for this instance — never
+                # re-queried; failover to a *different* configured
+                # instance is the pre-existing behaviour, not a retry
+                self._record_instance(instance, "rate_limited",
+                                      time.time() - t0)
                 errors.append(f"{instance}: 429 — instance rate-limited us")
                 continue
             if status != 200:
+                self._record_instance(
+                    instance, "failure", time.time() - t0,
+                    error_class=f"http_{status}")
                 errors.append(f"{instance}: HTTP {status}")
                 continue
-            payload = _json(status, body, "searxng")
+            try:
+                payload = _json(status, body, "searxng")
+            except WebBackendError:
+                self._record_instance(
+                    instance, "failure", time.time() - t0,
+                    error_class="malformed_response")
+                raise
             out = []
             for r in payload.get("results", []) or []:
                 out.append({
@@ -394,6 +741,9 @@ class SearXNGWebSource(WebSearchSource):
                     "score": r.get("score"),
                     "published": r.get("publishedDate"),
                 })
+            self._record_instance(
+                instance, "served" if out else "no_result",
+                time.time() - t0)
             return out
         raise WebBackendError(
             "searxng: all instances failed: " + "; ".join(errors)

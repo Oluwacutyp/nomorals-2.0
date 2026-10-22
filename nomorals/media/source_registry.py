@@ -104,6 +104,34 @@ content is DATA, never instructions.  This module is that layer:
   through the universal GenericAdapter shape.
   :meth:`SourceRegistry.status` carries the class under ``books``,
   and the ONE health loop / health job covers it — no second job.
+* Web-search class goes open (Pass #90) — the web-search engines
+  join THIS registry as a source class of their own, for the same
+  reason music and books did: every fixed-host engine is one host
+  serving search queries, so the model fits without distortion.
+  Two homes are wired: the keyless HTML-scrape chain in
+  ``tools/web.py`` (``SEARCH_ENGINE_DOMAINS``) and the federated
+  backends in ``search/web.py`` (``WEB_BACKEND_DOMAINS`` — the
+  keyed Tavily/Serper/Exa/Brave APIs, ``auth_needed``, plus
+  SearXNG, whose descriptor is the owner-configured instance host,
+  registered per instance; ddgs has no single host and gets NO
+  descriptor — credit is never invented).  The seeds declare NO
+  extraction facts, so the #76/#87 extractor view is unchanged.
+  Outcomes land distinctly: served / no-result (weak, #88) /
+  operational failure / bot-wall (:meth:`record_blocked`, #89) /
+  rate-limited (:meth:`record_rate_limited` — HTTP 429 is its own
+  class, health ``rate-limited``, never ``dead``; a 429 is recorded
+  once and never retried around).  Health probes are honest and
+  quota-aware: keyless engines are probed through their real
+  search URL template with one bounded probe query per loop;
+  keyed APIs are never probed with a search call (that would burn
+  quota) — the loop checks only the host root and downgrades a
+  non-live root verdict to ``unverifiable``, leaving keyed engines
+  to be judged by real-search outcomes.  Discovery verdict for
+  this class: NO genuine discovery channel exists in code (search
+  result hosts are content sources, not engines), so the class
+  ships with no candidate intake — named absence, not invention.
+  :meth:`SourceRegistry.status` carries the class under
+  ``web_search``, and the ONE health loop / health job covers it.
 
 No real identity leakage: :func:`redact_identity` strips emails,
 phones and tokens from retrieved text before it is stored or shown.
@@ -578,6 +606,11 @@ class _OutcomeStats:
     #: is classified distinctly — health ``bot-blocked``, never
     #: ``dead`` (see record_blocked).
     blocked: int = 0
+    #: Rate-limit outcomes (Pass #90): an HTTP 429 counts as a
+    #: failure to serve (it sinks the score) but is classified
+    #: distinctly — health ``rate-limited``, never ``dead`` (see
+    #: record_rate_limited).  A 429 is recorded, never retried.
+    rate_limited: int = 0
     #: Searches that reached the source and found nothing (Pass #88).
     #: Weak evidence: it sinks the source in score ordering (the
     #: denominator below) but is NOT a failure — it never feeds the
@@ -672,6 +705,8 @@ class SourceRegistry:
                 # loaders ignore it; its absence defaults to 0).
                 # Pass #89 follows the same discipline: stats rows
                 # gain an optional "blocked" counter, same tolerance.
+                # Pass #90 likewise: an optional "rate_limited"
+                # counter, same tolerance, version stays 2.
                 "version": 2,
                 "sources": sources,
                 "origins": {_key_str(k): v for k, v in self._origin.items()
@@ -684,6 +719,7 @@ class SourceRegistry:
                     _key_str(k): {
                         "ok": s.ok, "fail": s.fail,
                         "blocked": s.blocked,
+                        "rate_limited": s.rate_limited,
                         "no_result": s.no_result,
                         "latency_sum": s.latency_sum,
                         "latency_n": s.latency_n, "last_ok": s.last_ok,
@@ -747,6 +783,8 @@ class SourceRegistry:
                         ok=int(raw_stats.get("ok") or 0),
                         fail=int(raw_stats.get("fail") or 0),
                         blocked=int(raw_stats.get("blocked") or 0),
+                        rate_limited=int(
+                            raw_stats.get("rate_limited") or 0),
                         no_result=int(raw_stats.get("no_result") or 0),
                         latency_sum=float(raw_stats.get("latency_sum") or 0),
                         latency_n=int(raw_stats.get("latency_n") or 0),
@@ -894,13 +932,15 @@ class SourceRegistry:
             st = self._stats.get(desc.key) or _OutcomeStats()
             return {"ok": st.ok, "fail": st.fail,
                     "blocked": st.blocked,
+                    "rate_limited": st.rate_limited,
                     "no_result": st.no_result,
                     "success_rate": round(st.success_rate, 3),
                     "avg_latency_s": round(st.avg_latency, 3),
                     "last_ok": st.last_ok, "last_seen": st.last_seen,
                     "last_error_class": st.last_error_class}
         except Exception:  # noqa: BLE001
-            return {"ok": 0, "fail": 0, "blocked": 0, "no_result": 0,
+            return {"ok": 0, "fail": 0, "blocked": 0, "rate_limited": 0,
+                    "no_result": 0,
                     "success_rate": 0.5,
                     "avg_latency_s": 0.0, "last_ok": 0.0,
                     "last_seen": 0.0, "last_error_class": ""}
@@ -992,6 +1032,55 @@ class SourceRegistry:
                 entry["status"] = "stood-down"
             else:
                 entry["status"] = "bot-blocked"
+            self._persist()
+        except Exception:  # noqa: BLE001
+            pass
+
+    def record_rate_limited(self, desc: SourceDescriptor,
+                            latency_s: float = 0.0,
+                            fetched_at: float = 0.0) -> None:
+        """Record a rate-limit outcome against *desc* (Pass #90, the
+        web-search engines' HTTP 429 / quota signal).
+
+        Distinct from a failure AND from death, mirroring
+        :meth:`record_blocked`'s discipline: the engine did not
+        serve (a ``rate_limited`` + ``fail`` count, error class
+        ``rate_limited`` — the score sinks), but being throttled is
+        evidence about this moment's quota, not the engine's
+        existence, so the health status becomes ``rate-limited``
+        — never ``dead`` — and the trust ledger is untouched.
+        Repeated rate limits follow the health loop's own
+        transitions: ``STAND_DOWN_AFTER`` consecutive stand the
+        source down, ``DISABLE_AFTER`` disable it; a later success
+        re-activates through :meth:`record_outcome`.  Recording is
+        all this does: callers must NOT retry, rotate or re-query
+        around a 429 — it is a hard stop for that provider.
+        Persists.  Never raises."""
+        try:
+            now = fetched_at or time.time()
+            st = self._stats.setdefault(desc.key, _OutcomeStats())
+            st.rate_limited += 1
+            st.fail += 1
+            st.last_error_class = "rate_limited"
+            st.latency_sum += max(0.0, latency_s)
+            st.latency_n += 1
+            st.last_seen = now
+            entry = self._health.setdefault(desc.key, {
+                "status": "unknown", "consecutive_failures": 0,
+                "fail_count": 0, "last_checked": 0.0, "last_ok": 0.0,
+                "last_error": ""})
+            entry["last_checked"] = now
+            entry["consecutive_failures"] = int(
+                entry.get("consecutive_failures") or 0) + 1
+            entry["fail_count"] = int(entry.get("fail_count") or 0) + 1
+            entry["last_error"] = "rate_limited"
+            consec = entry["consecutive_failures"]
+            if consec >= DISABLE_AFTER:
+                entry["status"] = "disabled"
+            elif consec >= STAND_DOWN_AFTER:
+                entry["status"] = "stood-down"
+            else:
+                entry["status"] = "rate-limited"
             self._persist()
         except Exception:  # noqa: BLE001
             pass
@@ -1329,6 +1418,20 @@ class SourceRegistry:
             "fail_count": 0, "last_checked": 0.0, "last_ok": 0.0,
             "last_error": ""})
         url = f"https://{desc.domain}/"
+        # Honest probes for the web-search class (Pass #90): a
+        # keyless engine is probed through its REAL search endpoint
+        # — one bounded probe query per loop (the agency registry's
+        # "Lagos Nigeria") — because its root page proves nothing
+        # about search.  Keyed search APIs declare NO template on
+        # purpose: probing them with a search would burn the
+        # owner's quota, so they fall through to the root check
+        # below and are judged by real-search outcomes.
+        if "web-search" in desc.kinds and desc.search_url_template:
+            try:
+                url = desc.search_url_template.format(
+                    query=urllib.parse.quote_plus("Lagos Nigeria"))
+            except Exception:  # noqa: BLE001 - a bad template probes root
+                url = f"https://{desc.domain}/"
         try:
             res = fetcher(url)
             if hasattr(res, "status"):
@@ -1340,6 +1443,21 @@ class SourceRegistry:
             status, body = 0, b""
             detail = str(exc)[:200]
         health, detail = _classify_health(status, body)
+        if "web-search" in desc.kinds and status == 429:
+            # a throttled search engine is rate-limited, not a bot
+            # wall and not dead (Pass #90 vocabulary)
+            health, detail = "rate-limited", "HTTP 429 rate limited"
+        if "web-search" in desc.kinds and desc.auth_needed \
+                and health != "verified-live":
+            # The root route of a keyed search API is NOT its search
+            # route: a non-live root verdict proves nothing about
+            # the engine, so it is downgraded to unverifiable and
+            # the engine's health is left to real-search outcomes
+            # (record_outcome / record_rate_limited).  No search
+            # call was made and no quota was spent reaching here.
+            health, detail = "unverifiable", (
+                f"keyed search API root probe: {detail} — root is "
+                "not the search route; judged by real-search outcomes")
         entry["last_checked"] = now
         if health == "verified-live":
             entry["status"] = "verified-live"
@@ -1377,9 +1495,11 @@ class SourceRegistry:
         summary: dict[str, Any] = {
             "checked": 0, "verified_live": 0, "promoted": 0, "shed": 0,
             "stood_down": 0, "disabled": 0, "dead": 0, "bot_blocked": 0,
+            "rate_limited": 0,
             "unverifiable": 0, "changed": []}
         bucket = {"verified-live": "verified_live", "dead": "dead",
                   "bot-blocked": "bot_blocked",
+                  "rate-limited": "rate_limited",
                   "unverifiable": "unverifiable",
                   "stood-down": "stood_down", "disabled": "disabled"}
         try:
@@ -1532,6 +1652,76 @@ class SourceRegistry:
             return {"sources": [], "grown": [],
                     "candidates_pending": 0}
 
+    # ── web-search class status (Pass #90) ──
+    def web_search_status(self) -> dict[str, Any]:
+        """The web-search class's state in this registry: one row
+        per keyless scrape engine (``tools/web.py``
+        ``SEARCH_ENGINE_DOMAINS``) and per federated backend
+        (``search/web.py`` ``WEB_BACKEND_DOMAINS``) with origin,
+        health and outcome counts (served / failed / blocked /
+        rate-limited / no-result), plus grown web-search sources
+        and web-search candidates still pending.  Backends with no
+        fixed host carry ``domain=None``: SearXNG is credited per
+        configured instance (its instance rows appear in the full
+        source list when registered), and ddgs — a package
+        aggregating other engines — has no descriptor by design.
+        Never raises."""
+        try:
+            from ..search.web import WEB_BACKEND_DOMAINS
+            from ..tools.web import SEARCH_ENGINE_DOMAINS
+
+            def row(name_key: str, name: str,
+                    domain: str | None) -> dict[str, Any]:
+                if not domain:
+                    return {name_key: name, "domain": None,
+                            "origin": "none", "health": "no-fixed-host",
+                            "ok": 0, "fail": 0, "blocked": 0,
+                            "rate_limited": 0, "no_result": 0,
+                            "score": 0.0}
+                desc = self.for_domain(domain)
+                if desc is None:
+                    return {name_key: name, "domain": domain,
+                            "origin": "missing", "health": "unknown",
+                            "ok": 0, "fail": 0, "blocked": 0,
+                            "rate_limited": 0, "no_result": 0,
+                            "score": 0.0}
+                st = self.stats_for(desc)
+                return {name_key: name, "domain": domain,
+                        "origin": self.origin_for(desc),
+                        "health": self.health_for(desc),
+                        "ok": st["ok"], "fail": st["fail"],
+                        "blocked": st["blocked"],
+                        "rate_limited": st["rate_limited"],
+                        "no_result": st["no_result"],
+                        "score": self.score(desc)}
+
+            engines = [row("engine", name, domain) for name, domain
+                       in SEARCH_ENGINE_DOMAINS.items()]
+            backends = [row("backend", name, domain) for name, domain
+                        in WEB_BACKEND_DOMAINS.items()]
+            grown = []
+            for key, desc in self._by_key.items():
+                if self._origin.get(key) != "grown" \
+                        or "web-search" not in desc.kinds:
+                    continue
+                st = self.stats_for(desc)
+                grown.append({
+                    "domain": desc.domain, "name": desc.name,
+                    "health": self.health_for(desc),
+                    "ok": st["ok"], "fail": st["fail"],
+                    "rate_limited": st["rate_limited"],
+                    "no_result": st["no_result"]})
+            grown.sort(key=lambda g: g["domain"])
+            web_candidates = sum(
+                1 for d in self._candidates.values()
+                if "web-search" in d.kinds)
+            return {"engines": engines, "backends": backends,
+                    "grown": grown,
+                    "candidates_pending": web_candidates}
+        except Exception:  # noqa: BLE001
+            return {"engines": [], "backends": [], "grown": [],
+                    "candidates_pending": 0}
+
     # ── status surface (Pass #86) ──
     def status(self) -> dict[str, Any]:
         """The registry's full growth state: seed vs grown sources,
@@ -1587,6 +1777,8 @@ class SourceRegistry:
                 "music": self.music_status(),
                 # Pass #89: the book/story class, same surface.
                 "books": self.book_status(),
+                # Pass #90: the web-search class, same surface.
+                "web_search": self.web_search_status(),
             }
         except Exception:  # noqa: BLE001
             return {"total": 0, "seeds": 0, "grown": 0, "registered": 0,
@@ -1597,7 +1789,10 @@ class SourceRegistry:
                     "music": {"chain": [], "grown": [],
                               "candidates_pending": 0},
                     "books": {"sources": [], "grown": [],
-                              "candidates_pending": 0}}
+                              "candidates_pending": 0},
+                    "web_search": {"engines": [], "backends": [],
+                                   "grown": [],
+                                   "candidates_pending": 0}}
 
 
 def render_status_text(status: dict[str, Any]) -> str:
@@ -1683,6 +1878,40 @@ def render_status_text(status: dict[str, Any]) -> str:
             lines.append(
                 f"  book candidates pending verification: "
                 f"{books.get('candidates_pending', 0)}")
+        web = status.get("web_search") or {}
+        if web.get("engines") or web.get("backends"):
+            lines.append(
+                "🔎 web search sources — the search engines, in the "
+                "same registry (pass #90):")
+            for row in web.get("engines") or []:
+                lines.append(
+                    f"  🔎 {row['engine']} → {row['domain']} "
+                    f"[{row['origin']}/{row['health']}] "
+                    f"ok={row['ok']} fail={row['fail']} "
+                    f"blocked={row['blocked']} "
+                    f"rate-limited={row['rate_limited']} "
+                    f"no-result={row['no_result']}")
+            for row in web.get("backends") or []:
+                if row.get("domain"):
+                    lines.append(
+                        f"  🔎 {row['backend']} → {row['domain']} "
+                        f"[{row['origin']}/{row['health']}] "
+                        f"ok={row['ok']} fail={row['fail']} "
+                        f"rate-limited={row['rate_limited']} "
+                        f"no-result={row['no_result']}")
+                else:
+                    lines.append(
+                        f"  🔎 {row['backend']} → (no fixed host — "
+                        "credited per configured instance or not a "
+                        "host at all; see the pass #90 notes)")
+            for g in web.get("grown") or []:
+                lines.append(
+                    f"  🔎 grown:{g['domain']} [grown/{g['health']}] "
+                    f"ok={g['ok']} fail={g['fail']}")
+            lines.append(
+                "  web-search discovery: no candidate channel "
+                "exists for engines (result hosts are content, not "
+                "engines) — outcomes/health only, by design")
         for cand in status.get("candidates") or []:
             lines.append(
                 f"  ? {cand['domain']} [candidate/{cand['health']}] "
@@ -1821,6 +2050,47 @@ def _seed(store: Any = None) -> SourceRegistry:
             rate_limit_per_min=rpm, notes=notes,
             extraction_rule=rule, url_patterns=pats, quality_map=qmap,
             downloadable=can_dl))
+    # ── web-search engines (Pass #90) ──
+    # The web-search class joins the SAME registry: the keyless
+    # HTML-scrape chain (tools/web.py _SEARCH_ENGINES — domains are
+    # the hosts _engine_url actually fetches) and the federated
+    # keyed API backends (search/web.py — domains are the API hosts
+    # _fetch actually calls).  These seeds declare NO extraction
+    # facts (no entry in the extraction table above), so the
+    # #76/#87 extractor view is unchanged.  Keyless engines carry
+    # their real search URL template — the health loop probes them
+    # through it with one bounded probe query.  Keyed APIs carry
+    # auth_needed and NO template: a search probe would burn the
+    # owner's quota, so the loop checks only the host root and the
+    # engines are judged by real-search outcomes (see _verify_one).
+    # SearXNG (owner-configured instance host) and ddgs (a package,
+    # no single host) are deliberately NOT seeded here.
+    web_seeds = [
+        # (nation, domain, name, notes, search_url_template, auth)
+        ("US", "html.duckduckgo.com", "DuckDuckGo HTML", "Keyless scrape chain engine (tools/web.py)", "https://html.duckduckgo.com/html/?q={query}", False),
+        ("US", "lite.duckduckgo.com", "DuckDuckGo Lite", "Keyless scrape chain engine (tools/web.py)", "https://lite.duckduckgo.com/lite/?q={query}", False),
+        ("US", "bing.com", "Bing", "Keyless scrape chain engine (tools/web.py)", "https://www.bing.com/search?q={query}&count=10", False),
+        ("GB", "mojeek.com", "Mojeek", "Keyless scrape chain engine (tools/web.py)", "https://www.mojeek.com/search?q={query}", False),
+        ("DE", "ecosia.org", "Ecosia", "Keyless scrape chain engine (tools/web.py)", "https://www.ecosia.org/search?q={query}", False),
+        ("US", "search.yahoo.com", "Yahoo Search", "Keyless scrape chain engine (tools/web.py)", "https://search.yahoo.com/search?p={query}", False),
+        ("NL", "startpage.com", "Startpage", "Keyless scrape chain engine (tools/web.py)", "https://www.startpage.com/sp/search?query={query}", False),
+        ("RU", "yandex.com", "Yandex", "Keyless scrape chain engine (tools/web.py)", "https://yandex.com/search/?text={query}", False),
+        ("US", "search.brave.com", "Brave (HTML search)", "Keyless HTML search page — distinct from the Brave Search API below (tools/web.py)", "https://search.brave.com/search?q={query}", False),
+        ("FR", "qwant.com", "Qwant", "Keyless scrape chain engine (tools/web.py)", "https://www.qwant.com/?q={query}&t=web", False),
+        ("US", "api.tavily.com", "Tavily API", "Keyed federated backend (search/web.py) — judged by real-search outcomes, never probed with a search call", "", True),
+        ("US", "google.serper.dev", "Serper API", "Keyed federated backend (search/web.py) — judged by real-search outcomes, never probed with a search call", "", True),
+        ("US", "api.exa.ai", "Exa API", "Keyed federated backend (search/web.py) — judged by real-search outcomes, never probed with a search call", "", True),
+        ("US", "api.search.brave.com", "Brave Search API", "Keyed federated backend (search/web.py) — the API host, distinct from the HTML search page above", "", True),
+    ]
+    for nation, domain, name, notes, template, auth in web_seeds:
+        reg.register(SourceDescriptor(
+            nation=nation, language="en", domain=domain, name=name,
+            kinds=("search", "web-search"),
+            licence=Licence.LICENSED if auth else Licence.UNKNOWN,
+            trust_tier=TrustTier.VERIFIED if auth
+            else TrustTier.UNVERIFIED,
+            rate_limit_per_min=10, notes=notes,
+            auth_needed=auth, search_url_template=template))
     # Everything the seed loop registered is a SEED (origin + floor
     # set); anything the store restored before seeding keeps the
     # origin it was persisted with.

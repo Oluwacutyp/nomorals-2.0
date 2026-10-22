@@ -68,6 +68,11 @@ from .sources import (
     valid_source_names,
     valid_types,
 )
+from .web import (
+    WEB_BACKEND_DOMAINS,
+    WebSearchSource,
+    ordered_web_backend_names,
+)
 
 __all__ = ["federated_search", "parse_date", "list_sources"]
 
@@ -161,6 +166,53 @@ def _resolve_weights(
     return [float(w) for w in source_weights]
 
 
+def _apply_web_ordering(
+    names: list[str],
+    adapters: dict[str, SourceAdapter],
+    context: Any,
+) -> list[str]:
+    """Outcome-aware ordering of the WEB backends among themselves
+    (Pass #90), via the ONE source registry the backends record
+    into.  Only the web backends' own slots are permuted — local
+    and OSINT sources keep their canonical positions, and ranking's
+    source-order tie-break is untouched.  Day-one pin: with no
+    learned state (or no registry — a db-less context, prebuilt
+    test adapters) the names are returned byte-for-byte.  Never
+    raises."""
+    try:
+        positions = [
+            i for i, n in enumerate(names)
+            if n in WEB_BACKEND_DOMAINS
+            and isinstance(adapters.get(n), WebSearchSource)
+        ]
+        if len(positions) < 2:
+            return names
+        reg = None
+        for i in positions:
+            adapter = adapters[names[i]]
+            resolve = getattr(adapter, "_registry", None)
+            if callable(resolve):
+                reg = resolve()
+            if reg is not None:
+                break
+        if reg is None:
+            from .web import web_registry_for_context
+
+            reg = web_registry_for_context(context)
+        if reg is None:
+            return names
+        subset = [names[i] for i in positions]
+        ordered = ordered_web_backend_names(reg, subset)
+        if ordered == subset:
+            return names
+        out = list(names)
+        for i, n in zip(positions, ordered):
+            out[i] = n
+        return out
+    except Exception:  # noqa: BLE001 - ordering never breaks a search
+        return names
+
+
 def federated_search(
     query: str,
     *,
@@ -242,6 +294,11 @@ def federated_search(
             if lazy is None:
                 raise SearchError(f"no adapter built for source {name!r}")
             adapters[name] = lazy
+
+    # Pass #90: with learned evidence, the web backends consult the
+    # registry's scores/health for their relative order (day-one:
+    # canonical order, byte-for-byte).
+    names = _apply_web_ordering(names, adapters, context)
 
     response = SearchResponse(query=query)
     per_source = max(limit * 2, 10)

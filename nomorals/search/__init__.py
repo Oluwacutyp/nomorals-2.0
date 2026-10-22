@@ -71,6 +71,7 @@ from .sources import (
     valid_types,
 )
 from .web import (
+    WEB_BACKEND_DOMAINS,
     WEB_SPECS,
     BraveWebSource,
     DdgsWebSource,
@@ -101,6 +102,7 @@ __all__ = [
     "ExaWebSource",
     "BraveWebSource",
     "WEB_SPECS",
+    "WEB_BACKEND_DOMAINS",
     "web_source_names",
     "web_backends_configured",
     "SOURCE_SPECS",

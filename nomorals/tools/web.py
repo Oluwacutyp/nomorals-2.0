@@ -7,6 +7,22 @@ DuckDuckGo HTML, DDG lite, Bing, Mojeek, Ecosia, Yahoo, Startpage,
 Yandex.  One engine failing or returning nothing never ends the search;
 the chain continues through ALL of them.
 
+Pass #90 (open-sources law): every engine in this chain is a source in
+the ONE media source registry (``media/source_registry.py``, kinds
+``search``/``web-search`` — see :data:`SEARCH_ENGINE_DOMAINS`).  Every
+attempt on the real path records its outcome there: served results
+credit the engine, an empty page is weak no-result evidence (it sinks
+the score, never trips the breaker), a transport/HTTP failure records
+with an error class, an HTTP 403 bot wall records as blocked (never
+dead), and an HTTP 429 records as rate-limited — its own class, a hard
+stop for that engine: recorded once, never retried around.  With no
+learned state the engine order is :data:`_SEARCH_ENGINES` byte-for-byte
+(the day-one pin); with evidence, :func:`ordered_search_engines` sorts
+active engines by registry score and demotes stood-down/disabled/dead
+engines to the end — demoted, never dropped from the record or the
+chain.  There is NO discovery intake on this path: search result hosts
+are content sources, not engines.
+
 Fetch detects the page charset (Content-Type header first, then ``<meta>``)
 instead of blindly assuming UTF-8. ``web_extract`` adds readability-style
 main-content extraction for article pages.
@@ -30,7 +46,9 @@ from ..core.logging_setup import get_logger
 from ..core.policy import Capability
 from ..core.text import approx_token_count, normalize_text
 
-__all__ = ["html_to_text", "readability_extract", "web_extract", "register"]
+__all__ = ["html_to_text", "readability_extract", "web_extract", "register",
+           "SEARCH_ENGINE_DOMAINS", "web_registry_for_context",
+           "ordered_search_engines"]
 
 _log = get_logger(__name__)
 
@@ -199,8 +217,14 @@ def register(registry: Any) -> None:
     )
     def web_search(query: str, *, max_results: int = 8, site: str = "", freshness: str = "") -> dict[str, Any]:
         needle = f"{query} site:{site}" if site else query
+        # Pass #90: the chain's outcomes land in the ONE source
+        # registry, and its order consults what the registry has
+        # learned (day-one pin: no evidence → _SEARCH_ENGINES order).
+        reg = web_registry_for_context(context)
+        engines = ordered_search_engines(reg) if reg is not None \
+            else list(_SEARCH_ENGINES)
         results, engines_used, engines_failed = _run_engines(
-            search_client, needle)
+            search_client, needle, registry=reg, engines=engines)
         # No click-tracking URL leaves the search layer: every result
         # names the real destination, so downstream fetchers never chase
         # a tracker into its host's robots.txt.
@@ -211,10 +235,38 @@ def register(registry: Any) -> None:
             "query": needle,
             "count": len(results[:max_results]),
             "engines": engines_used,
-            "engines_tried": list(_SEARCH_ENGINES),
+            "engines_tried": engines,
             "engines_failed": engines_failed,
             "results": results[:max_results],
         }
+
+    @registry.register(
+        "search_sources",
+        description=(
+            "Web-search source registry — the search engines (the "
+            "keyless scrape chain AND the federated Tavily/Serper/"
+            "Exa/Brave/SearXNG backends) in the ONE source registry "
+            "(pass #90, same registry as download_sources): "
+            "action=status (per-engine origin/health, served / "
+            "failed / blocked / rate-limited / no-result counts) | "
+            "health (run the shared source health loop: keyless "
+            "engines probed through their real search endpoints, "
+            "keyed APIs root-checked only — no quota spent)."
+        ),
+        capability=Capability.NET_OUT,
+    )
+    def search_sources(*, action: str = "status") -> dict[str, Any]:
+        reg = web_registry_for_context(context)
+        if reg is None:
+            from ..media.source_registry import DEFAULT_REGISTRY
+
+            reg = DEFAULT_REGISTRY
+        act = (action or "status").strip().lower()
+        if act == "health":
+            return reg.verify_health()
+        if act == "status":
+            return reg.web_search_status()
+        return {"error": f"unknown action {act!r} — status|health"}
 
     @registry.register(
         "web_download",
@@ -444,6 +496,156 @@ _SEARCH_ENGINES: tuple[str, ...] = (
     "qwant",
 )
 
+#: The host each chain engine actually fetches from — the engine's
+#: source in the ONE source registry (Pass #90).  This map is the
+#: scrape chain's membership list for the web-search class: the
+#: chain credits outcomes to the registry descriptor for this
+#: domain, the registry's status surface renders the class from it,
+#: and the health loop verifies these hosts (through the search URL
+#: templates the seeds carry).  Domains are evidence from
+#: :func:`_engine_url`, NOT the engines' marketing domains — the
+#: DuckDuckGo engine fetches ``html.duckduckgo.com`` and the Brave
+#: engine fetches the public HTML page at ``search.brave.com``
+#: (the Brave Search *API* is a different host and a different
+#: class member, in ``search/web.py``).
+SEARCH_ENGINE_DOMAINS: dict[str, str] = {
+    "duckduckgo": "html.duckduckgo.com",
+    "duckduckgo-lite": "lite.duckduckgo.com",
+    "bing": "bing.com",
+    "mojeek": "mojeek.com",
+    "ecosia": "ecosia.org",
+    "yahoo": "search.yahoo.com",
+    "startpage": "startpage.com",
+    "yandex": "yandex.com",
+    "brave": "search.brave.com",
+    "qwant": "qwant.com",
+}
+
+
+def web_registry_for_context(context: Any = None,
+                             injected: Any = None) -> Any:
+    """The source registry web-search outcomes land in, or None.
+
+    Mirrors the #88/#89 resolution exactly: an injected registry
+    wins; otherwise the shared ``DEFAULT_REGISTRY`` bound to the
+    context's KV store — and only when the context carries a
+    database, so db-less callers (pure/offline contexts, the fake-
+    client test harnesses) keep the pre-#90 behaviour exactly.
+    Never raises."""
+    if injected is not None:
+        return injected
+    try:
+        db = getattr(context, "db", None) if context is not None else None
+        if db is None:
+            return None
+        from ..media.source_registry import DEFAULT_REGISTRY
+        reg = DEFAULT_REGISTRY
+        try:
+            from ..storage.kv import KVStore
+            reg.bind_store(KVStore(db))
+        except Exception:  # noqa: BLE001 - persistence is an
+            # enhancement; its absence never sinks a search
+            pass
+        return reg
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _engine_desc(reg: Any, engine: str) -> Any:
+    """The registry descriptor for one chain engine, or None.
+    Never raises."""
+    try:
+        domain = SEARCH_ENGINE_DOMAINS.get(engine)
+        if not domain or reg is None:
+            return None
+        return reg.for_domain(domain)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def ordered_search_engines(reg: Any,
+                           engines: tuple[str, ...] | None = None) -> list[str]:
+    """Outcome-aware engine order (Pass #90), through the registry's
+    score/health semantics, mirroring the #88 resolver / #89 adapter
+    ordering:
+
+    * NO learned state anywhere in the chain → the list is returned
+      untouched: day-one behaviour is :data:`_SEARCH_ENGINES`,
+      byte-for-byte;
+    * otherwise active engines sort by registry score (stable —
+      ties keep chain order) and stood-down / disabled / dead
+      engines are demoted to the end, in chain order: they leave
+      the active ordering but are still tried last rather than
+      pretending they do not exist.
+    Never raises; a registry hiccup returns the chain as-is."""
+    pool = list(engines) if engines is not None else list(_SEARCH_ENGINES)
+    try:
+        if reg is None:
+            return pool
+        items: list[tuple[str, Any]] = []
+        evidence = False
+        for engine in pool:
+            desc = _engine_desc(reg, engine)
+            items.append((engine, desc))
+            if desc is None:
+                continue
+            st = reg.stats_for(desc)
+            if st["ok"] or st["fail"] or st["no_result"] \
+                    or st.get("blocked") or st.get("rate_limited") \
+                    or not reg.is_active(desc):
+                evidence = True
+        if not evidence:
+            return pool
+        active = [it for it in items
+                  if it[1] is None or reg.is_active(it[1])]
+        inactive = [it for it in items
+                    if it[1] is not None and not reg.is_active(it[1])]
+        active.sort(key=lambda it: -reg.score(it[1])
+                    if it[1] is not None else 0.0)
+        return [e for e, _d in active] + [e for e, _d in inactive]
+    except Exception:  # noqa: BLE001
+        return pool
+
+
+def _record_engine_outcome(reg: Any, engine: str, kind: str,
+                           latency_s: float = 0.0,
+                           error_class: str = "") -> None:
+    """Record one chain attempt's outcome against its engine's
+    registry source.  ``kind``: served | no_result | failure |
+    blocked | rate_limited.  Best-effort; never raises — bookkeeping
+    must never break a search."""
+    try:
+        if reg is None:
+            return
+        desc = _engine_desc(reg, engine)
+        if desc is None:
+            return
+        if kind == "served":
+            reg.record_outcome(desc, True, latency_s=latency_s)
+        elif kind == "no_result":
+            reg.record_no_result(desc)
+        elif kind == "blocked":
+            reg.record_blocked(desc, latency_s=latency_s)
+        elif kind == "rate_limited":
+            # recorded once — a 429 is a hard stop for this engine,
+            # never a cue to retry, rotate or re-query around it
+            reg.record_rate_limited(desc, latency_s=latency_s)
+        else:
+            reg.record_outcome(desc, False, latency_s=latency_s,
+                               error_class=error_class or "site_error")
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _engine_error_class(exc: BaseException) -> str:
+    """The error class a chain transport exception earns: a timeout
+    is its own class; anything else is a network failure."""
+    msg = f"{type(exc).__name__}: {exc}".lower()
+    if "timed out" in msg or "timeout" in msg:
+        return "timeout"
+    return "network_failure"
+
+
 #: Host fragments that mark a link as the engine's own chrome, not a
 #: result — the generic parser drops these.
 _ENGINE_CHROME_HOSTS = (
@@ -484,29 +686,58 @@ def _engine_parser(engine: str) -> Any:
     }[engine]
 
 
-def _run_engines(client: Any, needle: str) -> tuple[
+def _run_engines(client: Any, needle: str, *,
+                 registry: Any = None,
+                 engines: Any = None) -> tuple[
         list[dict[str, str]], list[str], list[str]]:
     """Run ALL engines, merge results.  One engine failing or returning
     nothing never ends the search — the chain continues through all of
-    them.  Returns (results, engines_with_results, engines_failed)."""
+    them.  Returns (results, engines_with_results, engines_failed).
+
+    Pass #90: when *registry* is given, every attempt records its
+    outcome against the engine's registry source (served / no-result
+    / failure with error class / blocked on a 403 bot wall /
+    rate-limited on a 429 — recorded once, never retried), and the
+    iteration order is *engines* when supplied, else the registry's
+    learned order over the chain (day-one pin: no learned state →
+    :data:`_SEARCH_ENGINES` byte-for-byte).  With no registry this
+    is the pre-#90 function, exactly."""
     encoded = urllib.parse.quote_plus(needle)
     results: list[dict[str, str]] = []
     used: list[str] = []
     failed: list[str] = []
-    for engine in _SEARCH_ENGINES:
+    order = list(engines) if engines is not None \
+        else ordered_search_engines(registry)
+    for engine in order:
+        t0 = time.time()
         try:
             response = client.get(_engine_url(engine, encoded))
         except Exception as exc:  # noqa: BLE001 - try the next engine
             _log.debug("search engine %s failed: %s", engine,
                        classify(exc).message)
+            _record_engine_outcome(
+                registry, engine, "failure", time.time() - t0,
+                error_class=_engine_error_class(exc))
             failed.append(engine)
             continue
         if not getattr(response, "ok", True):
             # An HTTP error status (403 bot wall, 429, 5xx) is a FAILED
             # engine, not "no results" — report it as one.  (Duck-typed
             # responses without an ``ok`` attribute are treated as OK.)
+            status = int(getattr(response, "status", 0) or 0)
             _log.debug("search engine %s returned HTTP %s", engine,
                        getattr(response, "status", "?"))
+            if status == 429:
+                _record_engine_outcome(
+                    registry, engine, "rate_limited", time.time() - t0)
+            elif status == 403:
+                _record_engine_outcome(
+                    registry, engine, "blocked", time.time() - t0)
+            else:
+                _record_engine_outcome(
+                    registry, engine, "failure", time.time() - t0,
+                    error_class=f"http_{status}" if status
+                    else "site_error")
             failed.append(engine)
             continue
         try:
@@ -514,12 +745,19 @@ def _run_engines(client: Any, needle: str) -> tuple[
         except Exception as exc:  # noqa: BLE001 - a parser bug must not
             # kill the other engines
             _log.debug("search engine %s parser failed: %s", engine, exc)
+            _record_engine_outcome(
+                registry, engine, "failure", time.time() - t0,
+                error_class="malformed_response")
             failed.append(engine)
             continue
         if got:
+            _record_engine_outcome(
+                registry, engine, "served", time.time() - t0)
             used.append(engine)
             results.extend(got)
         else:
+            _record_engine_outcome(
+                registry, engine, "no_result", time.time() - t0)
             _log.debug("search engine %s returned no results", engine)
     return results, used, failed
 

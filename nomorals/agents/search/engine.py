@@ -112,6 +112,12 @@ class SearchEngine:
                freshness: str = "") -> list[dict[str, str]]:
         """Rank results from the keyless engine chain (web_search tool).
 
+        Pass #90: every engine attempt inside that tool records its
+        outcome in the ONE source registry (served / no-result /
+        failure / blocked / rate-limited), and the chain's order
+        consults what the registry has learned — see
+        ``tools/web.py``.  This method's contract is unchanged.
+
         ``max_results`` defaults to an adaptive count inferred from the
         query (see :mod:`nomorals.search.adaptive`): short factoid
         queries get fewer hits, broad research questions get more.  An
