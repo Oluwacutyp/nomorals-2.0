@@ -65,6 +65,10 @@ _log = get_logger(__name__)
 _CAPTCHA_MARKERS = (
     "g-recaptcha", "h-captcha", "cf-turnstile", "data-sitekey",
     "geetest", "funcaptcha", "captcha-image", "captcha_image",
+    # ByteDance/TikTok slider verify: in-house markup, no sitekey —
+    # without these the fetch classifier calls it a bot-wall with
+    # "nothing to solve", but the local slider solver solves it.
+    "captcha_verify_container", "secsdk-captcha",
 )
 
 #: body markers for an interactive bot-wall interstitial
@@ -410,6 +414,7 @@ class CaptchaFlow:
                  audit_path: str | Path | None = None,
                  ocr_fn: Callable[..., Any] | None = None,
                  audio_fn: Callable[..., Any] | None = None,
+                 slider_fn: Callable[..., Any] | None = None,
                  service_fn: Callable[..., Any] | None = None,
                  ping_owner: Callable[[dict[str, Any]], Any] | None = None,
                  fetcher: Callable[..., Any] | None = None,
@@ -419,6 +424,7 @@ class CaptchaFlow:
         self.audit_path = Path(audit_path) if audit_path else None
         self.ocr_fn = ocr_fn
         self.audio_fn = audio_fn
+        self.slider_fn = slider_fn
         self.service_fn = service_fn
         self.ping_owner = ping_owner
         self.fetcher = fetcher
@@ -448,6 +454,53 @@ class CaptchaFlow:
                 _log.debug("captcha-flow ledger write failed", exc_info=True)
         self._audit({"kind": kind, "site": site, "stage": stage,
                      "ok": ok, "cost_usd": round(float(cost), 6)})
+
+    # -- local kind-solver stage ---------------------------------------------
+    def _local_stage(self, ch: dict[str, Any], *, kind: str, site: str,
+                     tried: list[str]) -> dict[str, Any] | None:
+        """Dispatch to the per-kind local solver registry.
+
+        Returns the result dict on a local clear, ``None`` to fall
+        through to the later stages (no solver for the kind, no live
+        session, or the local attempt failed — the failure is
+        recorded either way).
+        """
+        fn = self.slider_fn
+        if fn is None:
+            try:
+                from ..browser import slider_solver as _ss  # noqa: F401
+                from ..browser.kind_solvers import kind_solver_for
+            except Exception:  # noqa: BLE001 - spine import is additive
+                return None
+            if kind_solver_for(kind) is None:
+                return None
+            metadata = ch.get("metadata") or {}
+            session = metadata.get("session") or metadata.get("tab")
+            if session is None:
+                self._record(kind, site, "local_no_session", ok=False)
+                return None
+
+            def fn(challenge_dict: dict[str, Any],
+                   _session: Any = session) -> dict[str, Any]:
+                from ..browser.kind_solvers import kind_solver_for as kf
+                solver_fn = kf(str(challenge_dict.get("kind") or ""))
+                if solver_fn is None:
+                    return {"ok": False,
+                            "detail": "kind solver vanished"}
+                return solver_fn(_session, challenge_dict)
+
+        tried.append("local")
+        try:
+            res = fn(ch) or {}
+        except Exception as exc:  # noqa: BLE001 - later stages remain
+            res = {"ok": False, "error": str(exc)}
+        ok = bool(res.get("ok"))
+        self._record(kind, site, f"local_{kind}", ok=ok)
+        if ok:
+            return {"ok": True, "stage": f"local_{kind}", "kind": kind,
+                    "local": True,
+                    "detail": str(res.get("detail") or "")}
+        return None
 
     # -- solve ---------------------------------------------------------------
     def solve(self, challenge: Any, *,
@@ -500,15 +553,36 @@ class CaptchaFlow:
         html = str(ch.get("html") or ch.get("body") or "")
         if html and kind in ("", "unknown"):
             found = detect(html, page_url)
-            if not found:
+            if found:
+                kind = found[0].kind
+            else:
+                # slider markup is invisible to the token detector —
+                # the browser layer's slider detection names it.
+                try:
+                    from ..browser.slider_solver import (
+                        detect_slider_challenge)
+                    if detect_slider_challenge(html, page_url) is not None:
+                        kind = "slider"
+                except Exception:  # noqa: BLE001 - detection is additive
+                    pass
+            if kind in ("", "unknown"):
                 self._record(kind, site, "passive", ok=True)
                 return {"ok": True, "stage": "passive",
                         "kind": "no_challenge",
                         "detail": "passive detection found no challenge"}
-            kind = found[0].kind
 
         tried: list[str] = ["passive"]
         self._record(kind, site, "passive", ok=True)
+
+        # stage 1b — local kind solver (in-session; the slider solver
+        # is the first registrant). Runs BEFORE any paid stage whenever
+        # the kind has a registered local solver AND the challenge
+        # carries a live session (or a caller injected a solver fn).
+        # No session → recorded skip, flow continues unchanged.
+        local_out = self._local_stage(ch, kind=kind, site=site,
+                                      tried=tried)
+        if local_out is not None:
+            return local_out
 
         # stage 2 — OCR / image model (image captchas only)
         if kind == "image_captcha" and self.ocr_fn is not None:

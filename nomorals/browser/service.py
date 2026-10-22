@@ -16,6 +16,7 @@ extract/upload/download on the live DOM.
 
 from __future__ import annotations
 
+import base64
 import http.cookiejar
 import importlib.util
 import json
@@ -2432,6 +2433,119 @@ class RenderedTab:
         return {"path": str(out), "selector": selector,
                 "tab_id": self.tab_id}
 
+    # -- slider-solver primitives -------------------------------------
+    # The session side of nomorals.browser.slider_solver's tab
+    # protocol: pure element pixels, element geometry, and a stepwise
+    # mouse path (the trajectory itself is the solver's business).
+
+    def element_image_bytes(self, selector: str) -> bytes:
+        """Raw bytes of ONE element's own pixels.
+
+        A ``<canvas>`` exports itself (``toDataURL`` — its own pixels,
+        never composited with whatever overlaps it). An ``<img>``
+        fetches its source bytes in-page (session cookies included),
+        so a puzzle background comes back WITHOUT the piece element
+        that overlaps it on screen. Anything else — or any failure
+        above — falls back to a locator screenshot of the element.
+        """
+        page = self._require_loaded()
+        selector = (selector or "").strip()
+        if not selector:
+            raise BrowserError("rendered element_image_bytes needs a "
+                               "selector")
+        try:
+            data_url = page.evaluate(
+                "(sel) => { const el = document.querySelector(sel); "
+                "return (el && el.tagName === 'CANVAS') "
+                "? el.toDataURL('image/png') : ''; }", selector)
+        except Exception:  # noqa: BLE001 - fall through to screenshot
+            data_url = ""
+        if data_url:
+            return base64.b64decode(str(data_url).split(",", 1)[1])
+        try:
+            b64 = page.evaluate(
+                "async (sel) => { const el = document.querySelector(sel); "
+                "if (!el || el.tagName !== 'IMG' || !el.currentSrc) "
+                "return ''; "
+                "try { const r = await fetch(el.currentSrc, "
+                "{credentials: 'include'}); if (!r.ok) return ''; "
+                "const buf = await r.arrayBuffer(); "
+                "const bytes = new Uint8Array(buf); let s = ''; "
+                "for (let i = 0; i < bytes.length; i += 32768) { "
+                "s += String.fromCharCode.apply(null, "
+                "bytes.subarray(i, i + 32768)); } "
+                "return btoa(s); } catch (e) { return ''; } }",
+                selector)
+        except Exception:  # noqa: BLE001 - fall through to screenshot
+            b64 = ""
+        if b64:
+            return base64.b64decode(str(b64))
+        locator_fn = getattr(page, "locator", None)
+        if not callable(locator_fn):
+            raise BrowserError("this page driver cannot capture elements")
+        try:
+            raw = locator_fn(selector).screenshot()
+        except Exception as exc:  # noqa: BLE001 - opaque
+            raise self._action_error(
+                "element_image_bytes", exc,
+                detail=f"selector {selector!r}") from exc
+        if not raw:
+            raise BrowserError(
+                f"element capture of {selector!r} produced no image")
+        return bytes(raw)
+
+    def element_box(self, selector: str) -> dict[str, Any]:
+        """Viewport CSS-pixel box ``{x, y, width, height}`` of an element."""
+        page = self._require_loaded()
+        selector = (selector or "").strip()
+        if not selector:
+            raise BrowserError("rendered element_box needs a selector")
+        locator_fn = getattr(page, "locator", None)
+        if not callable(locator_fn):
+            raise BrowserError("this page driver cannot locate elements")
+        try:
+            box = locator_fn(selector).bounding_box()
+        except Exception as exc:  # noqa: BLE001 - opaque
+            raise self._action_error(
+                "element_box", exc, detail=f"selector {selector!r}"
+            ) from exc
+        if not box:
+            raise BrowserError(
+                f"element {selector!r} has no bounding box "
+                "(detached or invisible)")
+        return {"x": float(box["x"]), "y": float(box["y"]),
+                "width": float(box["width"]),
+                "height": float(box["height"])}
+
+    def mouse_drag_path(self, points: Any) -> None:
+        """Walk a mouse path: press at the first point, move through
+        the rest honouring per-point delays, release at the last.
+
+        ``points`` are ``(x, y, delay_ms)`` in viewport CSS pixels —
+        the trajectory (easing, overshoot, jitter) is synthesized by
+        the caller (the slider solver); this is only the hand.
+        """
+        page = self._require_loaded()
+        pts = [(float(p[0]), float(p[1]), int(p[2]) if len(p) > 2 else 0)
+               for p in (points or [])]
+        if not pts:
+            raise BrowserError("mouse_drag_path needs at least one point")
+        try:
+            page.mouse.move(pts[0][0], pts[0][1])
+            page.mouse.down()
+            for x, y, delay in pts[1:]:
+                if delay > 0:
+                    time.sleep(delay / 1000.0)
+                page.mouse.move(x, y)
+            page.mouse.up()
+        except Exception as exc:  # noqa: BLE001 - input errors are opaque
+            try:
+                page.mouse.up()
+            except Exception:  # noqa: BLE001 - best effort release
+                pass
+            raise BrowserError(
+                f"rendered mouse_drag_path failed: {exc}") from exc
+
     def pdf(self, path: str | os.PathLike[str] | None = None
             ) -> dict[str, Any]:
         """Save the current page as a PDF (receipts, articles, invoices —
@@ -2965,6 +3079,26 @@ class RenderedTabTakeoverAdapter:
 
     def scroll_norm(self, dx: float, dy: float) -> None:
         self._tab.scroll_norm(dx, dy)
+
+    # -- slider-solver protocol (delegate; fail loudly when absent) ---
+
+    def element_image_bytes(self, selector: str) -> bytes:
+        fn = getattr(self._tab, "element_image_bytes", None)
+        if not callable(fn):
+            raise BrowserError("this tab cannot capture element images")
+        return bytes(fn(selector))
+
+    def element_box(self, selector: str) -> dict[str, Any]:
+        fn = getattr(self._tab, "element_box", None)
+        if not callable(fn):
+            raise BrowserError("this tab cannot report element boxes")
+        return dict(fn(selector))
+
+    def mouse_drag_path(self, points: Any) -> None:
+        fn = getattr(self._tab, "mouse_drag_path", None)
+        if not callable(fn):
+            raise BrowserError("this tab cannot perform mouse drags")
+        fn(points)
 
 
 class BrowserService:

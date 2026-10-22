@@ -688,11 +688,19 @@ class TrialFlow:
         bank = IdentityBank(db=self.db, vault=vault)
         persona = bank.get(persona_id) or bank.get_or_mint(platform)
         attempts = SignupAttemptStore(self.db)
+
+        def _local_slider_attempt(tab: Any, page_url: str = "") -> Any:
+            # Composition-root wiring: the driver's local captcha
+            # attempt is the browser layer's in-session slider solver.
+            from ...browser.slider_solver import try_local_slider_solve
+            return try_local_slider_solve(tab, page_url)
+
         driver = SignupDriver(
             creator,
             attempts,
             notify=lambda t, b, aid: self._notify_owner(t, b, chat_key),
             page_factory=self._trial_page_factory,
+            slider_solve=_local_slider_attempt,
         )
         # Research→execute handoff: if /trial start already found the
         # signup URL, hand it to the driver instead of guessing.

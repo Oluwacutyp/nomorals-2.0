@@ -29,14 +29,29 @@ def _cmd_captcha(args: argparse.Namespace, context: Any) -> int:
         svc = ServiceBackend()
         from ...tools.captcha import rate_limiter as _rl
         import os as _os2
+        # The local slider backend registers via captcha.py's public
+        # register_backend seam when its module is imported — import
+        # it here so this status never under-reports local solving,
+        # and surface its availability honestly (vision stack? kinds?)
+        # alongside the service backend's key state.
+        backends = ["service", "takeover", "detect", "pipeline"]
+        local: dict[str, Any] = {}
+        try:
+            from ...browser.slider_solver import local_slider_status
+            local = local_slider_status(settings)
+            backends.append("local_slider")
+        except Exception as exc:  # noqa: BLE001 - status stays honest
+            local = {"backend": "local_slider", "available": False,
+                     "detail": f"local status unavailable: {exc}"}
         return _out({
-            "backends": ["service", "takeover", "detect"],
+            "backends": backends,
             "service_available": svc.available(),
             "api_key_configured": svc.available(),
+            "local_slider": local,
             "solver_enabled": _os2.environ.get("NM_CAPTCHA_SOLVER", "1") != "0",
             "rate_limit": _rl(settings).status(),
             "audit_log": _audit_path(settings),
-            "kinds": list(CaptchaKind.ALL),
+            "kinds": list(CaptchaKind.ALL) + ["slider"],
         })
 
     if action == "detect":

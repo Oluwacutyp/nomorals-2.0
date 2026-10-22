@@ -4,8 +4,15 @@ When Devon hits a wall (Cloudflare / Turnstile / CAPTCHA / bot check),
 she does not hand it to the owner first. She works a strategy ladder,
 memory-ranked:
 
-    retry -> wait_for_proof_of_work -> captcha_service -> fresh_session
-    -> owner_takeover (LAST RESORT ONLY)
+    retry -> wait_for_proof_of_work -> local_solver -> captcha_service
+    -> fresh_session -> owner_takeover (LAST RESORT ONLY)
+
+``local_solver`` is the kind-extensible rung: it dispatches through
+:mod:`nomorals.browser.kind_solvers` to whatever local solver is
+registered for the wall's kind (today: the in-session slider solver
+for ``slider``/``geetest``). For slider walls it runs FIRST — a reload
+would discard the rendered puzzle. Kinds with no registered local
+solver skip the rung entirely, leaving the ladder exactly as it was.
 
 Every attempt is recorded (strategy, outcome, ms, detail) into
 :class:`ChallengeMemory` when one is attached, and — when escalation
@@ -39,6 +46,7 @@ __all__ = [
     "DEFAULT_ORDER",
     "STRATEGY_CAPTCHA_SERVICE",
     "STRATEGY_FRESH_SESSION",
+    "STRATEGY_LOCAL_SOLVER",
     "STRATEGY_RETRY",
     "STRATEGY_TAKEOVER",
     "STRATEGY_WAIT",
@@ -48,13 +56,20 @@ __all__ = [
 
 STRATEGY_RETRY = "retry"
 STRATEGY_WAIT = "wait_proof_of_work"
+STRATEGY_LOCAL_SOLVER = "local_solver"
 STRATEGY_CAPTCHA_SERVICE = "captcha_service"
 STRATEGY_FRESH_SESSION = "fresh_session"
 STRATEGY_TAKEOVER = "owner_takeover"
 
 #: Default strategy order when memory has no opinion.
-DEFAULT_ORDER = [STRATEGY_RETRY, STRATEGY_WAIT, STRATEGY_CAPTCHA_SERVICE,
-                 STRATEGY_FRESH_SESSION, STRATEGY_TAKEOVER]
+DEFAULT_ORDER = [STRATEGY_RETRY, STRATEGY_WAIT, STRATEGY_LOCAL_SOLVER,
+                 STRATEGY_CAPTCHA_SERVICE, STRATEGY_FRESH_SESSION,
+                 STRATEGY_TAKEOVER]
+
+#: Kinds whose wall IS a locally-solvable widget: the local rung goes
+#: first for these (a reload discards the rendered puzzle), and the
+#: rung is applicable at all only when a kind solver is registered.
+_LOCAL_FIRST_KINDS = ("slider", "geetest")
 
 
 class TabLike(Protocol):
@@ -137,6 +152,22 @@ def detect_challenge_signal(html: str = "", url: str = "", *,
                                vendor=vendor_from_detection(detection),
                                detection=detection, url=url,
                                evidence=f"wall marker: {detection}")
+    # Slider-class walls next — BEFORE the token-captcha scan, whose
+    # image-captcha heuristic (any <img> with "captcha" in the tag)
+    # would otherwise swallow the slider widget's own images and
+    # misname the wall. Slider structure (container + drag handle +
+    # puzzle image) is specific enough not to steal real token
+    # captchas, which have none of it.
+    try:
+        from .slider_solver import detect_slider_challenge
+        info = detect_slider_challenge(html or "", url or "")
+    except Exception:  # noqa: BLE001 - detection never blocks
+        info = None
+    if info is not None:
+        kind = ("geetest" if info.vendor == "geetest" else info.kind)
+        return ChallengeSignal(kind=kind, vendor=info.vendor,
+                               detection="slider-wall", url=url,
+                               evidence=f"slider widget: {info.evidence}")
     try:
         from ..tools.captcha import detect as _captcha_detect
         found = _captcha_detect(html or "", url or "")
@@ -149,6 +180,14 @@ def detect_challenge_signal(html: str = "", url: str = "", *,
                                url=url,
                                evidence=f"captcha widget: {first.kind}")
     return None
+
+
+def _coerce_local_result(result: Any) -> tuple[bool, str]:
+    """Local solver results arrive as dicts or result objects."""
+    if isinstance(result, dict):
+        return bool(result.get("ok")), str(result.get("detail") or "")
+    return (bool(getattr(result, "ok", False)),
+            str(getattr(result, "detail", "") or ""))
 
 
 def format_escalation_message(*, signal_kind: str, url: str,
@@ -192,6 +231,8 @@ class ChallengeSolver:
     def __init__(self, *,
                  memory: ChallengeMemory | None = None,
                  service_solve: Callable[[Any], Any] | None = None,
+                 local_solve: Callable[[Any, Any], Any] | None = None,
+                 slider_solver: Any | None = None,
                  fresh_session: Callable[[], Any] | None = None,
                  takeover_manager: Any | None = None,
                  notifier: Callable[[str, str], Any] | None = None,
@@ -201,6 +242,8 @@ class ChallengeSolver:
                  clock: Callable[[], float] | None = None) -> None:
         self._memory = memory
         self._service_solve = service_solve
+        self._local_solve = local_solve
+        self._slider_solver = slider_solver
         self._fresh_session = fresh_session
         self._takeover_manager = takeover_manager
         self._notifier = notifier
@@ -253,6 +296,10 @@ class ChallengeSolver:
         for strategy in order:
             if strategy == STRATEGY_TAKEOVER:
                 break  # handled below, after every self-solve rung
+            if strategy == STRATEGY_LOCAL_SOLVER and \
+                    not self._local_applicable(signal):
+                continue  # no local solver for this kind: rung absent,
+                # not a failed attempt — the ladder is unchanged
             record = self._attempt(strategy, tab=tab, signal=signal)
             attempts.append(record)
             if self._recheck(tab, page_html):
@@ -328,14 +375,66 @@ class ChallengeSolver:
 
     # -- ladder ------------------------------------------------------------------
     def _ordered(self, signal: ChallengeSignal) -> list[str]:
+        if signal.kind in _LOCAL_FIRST_KINDS:
+            base = [STRATEGY_LOCAL_SOLVER, STRATEGY_RETRY, STRATEGY_WAIT,
+                    STRATEGY_CAPTCHA_SERVICE, STRATEGY_FRESH_SESSION,
+                    STRATEGY_TAKEOVER]
+        else:
+            base = list(DEFAULT_ORDER)
         if self._memory is not None:
             try:
                 return self._memory.rank_strategies(
-                    _site_of(signal.url), signal.kind,
-                    list(DEFAULT_ORDER))
+                    _site_of(signal.url), signal.kind, base)
             except Exception:  # noqa: BLE001 - memory never blocks solving
                 _log.debug("challenge memory rank failed", exc_info=True)
-        return list(DEFAULT_ORDER)
+        return base
+
+    # -- local kind solvers --------------------------------------------------
+
+    def _local_applicable(self, signal: ChallengeSignal) -> bool:
+        """True when SOME local solver can run for this wall's kind.
+
+        Sources, in order: an injected ``local_solve`` callable, an
+        injected ``slider_solver``, or the kind registry
+        (:mod:`nomorals.browser.kind_solvers`) — importing the slider
+        solver module is what registers slider/geetest there.
+        """
+        if self._local_solve is not None or self._slider_solver is not None:
+            return True
+        try:
+            from . import slider_solver as _slider  # noqa: F401 - registers
+            from .kind_solvers import kind_solver_for
+            return kind_solver_for(signal.kind) is not None
+        except Exception:  # noqa: BLE001 - a broken solver is not a wall
+            return False
+
+    def _attempt_local(self, *, tab: TabLike | None,
+                       signal: ChallengeSignal,
+                       done: Callable[[bool, str], AttemptRecord]
+                       ) -> AttemptRecord:
+        if self._local_solve is not None:
+            result = self._local_solve(tab, signal)
+            ok, detail = _coerce_local_result(result)
+            return done(ok, detail or (
+                "local solver cleared the challenge" if ok
+                else "local solver failed"))
+        if tab is None:
+            return done(False, "no tab for a local solve")
+        if self._slider_solver is not None:
+            out = self._slider_solver.solve_tab(tab)
+            return done(bool(getattr(out, "ok", False)),
+                        str(getattr(out, "detail", "") or ""))
+        from . import slider_solver as _slider  # noqa: F401 - registers
+        from .kind_solvers import kind_solver_for
+        fn = kind_solver_for(signal.kind)
+        if fn is None:
+            return done(False, f"no local solver registered for kind "
+                               f"{signal.kind!r}")
+        result = fn(tab, {"kind": signal.kind, "page_url": signal.url})
+        ok, detail = _coerce_local_result(result)
+        return done(ok, detail or (
+            "local solver cleared the challenge" if ok
+            else "local solver failed"))
 
     def _attempt(self, strategy: str, *, tab: TabLike | None,
                  signal: ChallengeSignal) -> AttemptRecord:
@@ -357,6 +456,9 @@ class ChallengeSolver:
                 # time; for other walls the wait is just a settle pause.
                 self._sleep(self._wait_s)
                 return done(True, f"waited {self._wait_s:g}s")
+            if strategy == STRATEGY_LOCAL_SOLVER:
+                return self._attempt_local(tab=tab, signal=signal,
+                                           done=done)
             if strategy == STRATEGY_CAPTCHA_SERVICE:
                 if self._service_solve is None:
                     return done(False, "no solving service configured")

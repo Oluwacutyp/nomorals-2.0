@@ -1828,6 +1828,17 @@ def seed_session_from_persisted(session: Any, session_dir: str) -> int:
 
 
 def register(registry: Any) -> None:
+    # Side effect with a purpose: importing the local slider solver
+    # registers its `local_slider` backend + slider/geetest kind
+    # solvers, so captcha status in this process tells the truth
+    # about local solving. Additive — a failure here never sinks the
+    # browser tool.
+    try:
+        from ..browser.slider_solver import register_local_backend
+        register_local_backend()
+    except Exception:  # noqa: BLE001
+        _log.debug("local slider backend registration skipped",
+                   exc_info=True)
     context = registry.context
     settings = getattr(context, "settings", None) if context is not None else None
     tools_settings = getattr(settings, "tools", None) if settings else None

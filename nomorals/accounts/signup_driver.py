@@ -519,6 +519,7 @@ class SignupDriver:
         *,
         notify: NotifyHook | None = None,
         page_factory: PageFactory | None = None,
+        slider_solve: Callable[[Any, str], Any] | None = None,
         temp_email_provider: str = "tempmail",
         verify_timeout_s: float = 240.0,
         verify_poll_s: float = 12.0,
@@ -527,6 +528,11 @@ class SignupDriver:
         self.attempts = attempts
         self.notify = notify
         self.page_factory = page_factory
+        # Injected local in-session captcha attempt (composition
+        # wires the browser slider solver — this L2 module imports
+        # nothing from the browser layer). Signature:
+        # (tab, page_url) -> {"attempted", "ok", "detail"}.
+        self.slider_solve = slider_solve
         self.temp_email_provider = temp_email_provider
         self.verify_timeout_s = verify_timeout_s
         self.verify_poll_s = verify_poll_s
@@ -1009,6 +1015,27 @@ class SignupDriver:
                     })
         except Exception:  # noqa: BLE001
             pass
+        # Local in-session attempt FIRST (injected): a slider-class
+        # wall has no token for the creator's solver to fetch — it is
+        # cleared by acting in this tab, or not at all. Only a local
+        # failure (or no local attempt) falls through to the token
+        # solver → checkpoint path below, unchanged.
+        if self.slider_solve is not None:
+            try:
+                local = self.slider_solve(tab, page_url)
+            except Exception as exc:  # noqa: BLE001 - fall through
+                _log.warning("local captcha attempt raised, falling "
+                             "back to solver/checkpoint: %s", exc)
+                local = None
+            if isinstance(local, dict) and local.get("ok"):
+                _log.info("signup %s: captcha solved locally, "
+                          "continuing", attempt.service)
+                self._notify(
+                    f"captcha auto-solved — {attempt.service}",
+                    f"local solver cleared the challenge "
+                    f"({local.get('detail', '')}); continuing the "
+                    f"signup.", attempt.id)
+                return
         try:
             token = self.creator.attempt_captcha_solve(
                 kind=challenge.get("kind", "unknown"),
