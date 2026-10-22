@@ -220,7 +220,13 @@ def _gate_status_lines(monitor: Any) -> List[str]:
             f"({st['threshold_reason']})"
         )
     age = st["last_tick_age_s"]
-    if st["sampler_running"]:
+    sampling_down = st.get("sampling_available") is False
+    if sampling_down:
+        # Never present a live sampler where no sample can land:
+        # the tick may be running, but sampling itself is down.
+        sampler = "ticking, but process sampling is UNAVAILABLE " \
+                  "on this platform"
+    elif st["sampler_running"]:
         sampler = "running"
     elif age is None:
         sampler = "no tick yet"
@@ -232,6 +238,12 @@ def _gate_status_lines(monitor: Any) -> List[str]:
         f"quarantined: {st['quarantined']} incident sample(s) · "
         f"store: {st['store_path']}",
     ]
+    if sampling_down:
+        lines.append(
+            "  sampling: UNAVAILABLE — "
+            f"{st.get('sampling_reason') or 'no backend could count processes'}; "
+            "no process sample has ever been collected on this host, "
+            "so the baseline cannot learn here")
     if st["incident_active"]:
         cause = "gate enforcement" if st["gate_incident"] else "fever"
         lines.append(
@@ -254,6 +266,10 @@ def _gate(state: _ImmuneState, monitor: Any, rest: str) -> str:
     if not rest:
         out = monitor.tick()
         if not out["sampled"]:
+            if out.get("unavailable"):
+                return ("🛡️ gate: process sampling unavailable on this "
+                        f"platform — {out.get('error') or out.get('reason') or ''} "
+                        "Nothing consulted, nothing learned.")
             return ("🛡️ gate: no live process sample available on this "
                     "platform — nothing consulted, nothing learned.")
         sample = out.get("sample") or {}

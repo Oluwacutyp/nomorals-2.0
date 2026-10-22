@@ -50,7 +50,7 @@ The real enforcer for a host-population sample is the immune
 system's own organism-level response: the incident opens, a bounded
 :class:`~nomorals.immune.fever.Fever` starts (announced, never
 silent), a receipt is kept, and learning quarantines until the
-population falls back under its own baseline. A ``/proc`` population
+population falls back under its own baseline. A host-population
 sample names no single process to arrest — arrest stays the manual
 ``/immune arrest <id> system`` path; nothing is fabricated here.
 An extra ``enforce_fn`` may be injected (tests, future wiring); it
@@ -58,9 +58,12 @@ runs after the incident response is already in place.
 
 **Reporting contract (Pass 3):** the sampler job's name carries the
 scheduler's routine-tick marker, so the scheduler's generic per-run
-success alert never fires for it — a tick that sampled nothing (or
-learned routinely, or quarantined under an already-announced
-incident) is a NON-event and reaches no chat surface. Real events —
+success alert never fires for it — a tick that sampled nothing on
+a platform that can sample (or learned routinely, or quarantined
+under an already-announced incident) is a NON-event and reaches no
+chat surface. A platform that cannot sample at all is different:
+the tick records a declared failure (Pass #71) and the condition is
+announced exactly once — see :meth:`ImmuneMonitor.tick`. Real events —
 an enforcement, an announcement (fever start, incident close, the
 baseline becoming ready), a tick error — are classified by
 :func:`summarize_tick_event` and published once by the sampler tool
@@ -84,6 +87,7 @@ from .baseline import (
     AdaptiveBaseline,
     collect_process_sample,
     sample_over_thresholds,
+    sampling_availability,
 )
 from .fever import Fever
 
@@ -123,7 +127,7 @@ STORE_ENV_VAR = "NM_IMMUNE_BASELINE_STORE"
 STORE_VERSION = 1
 
 #: Durable sampler job: name, tool payload, cadence. One minute: the
-#: process population is cheap to read from /proc, and a runaway is
+#: process population is cheap to count on any platform, and a runaway is
 #: visible within a minute of starting. The name carries the
 #: scheduler's routine-tick marker ("tick" — the same convention as
 #: "agent modes tick" / "improvement tick"), so the scheduler's
@@ -274,6 +278,7 @@ class ImmuneMonitor:
                  window: Optional[int] = BASELINE_WINDOW,
                  enforce_fn: Optional[Callable[[Any], Any]] = None,
                  collect: Optional[Callable[..., Optional[Dict[str, float]]]] = None,
+                 availability: Optional[Callable[[], Dict[str, Any]]] = None,
                  ) -> None:
         self.store = BaselineStore(
             path if path is not None else default_store_path())
@@ -286,6 +291,11 @@ class ImmuneMonitor:
         self._last_sample_at = data["last_sample_at"]
         self._extra_enforce_fn = enforce_fn
         self._collect = collect
+        self._availability_probe = availability
+        #: The sampling-unavailable condition is announced exactly
+        #: once per monitor lifetime (a standing platform fact is
+        #: news once, not every minute) — see :meth:`tick`.
+        self._sampling_unavailable_announced = False
         self._lock = threading.Lock()
         #: The organism fever the gate itself starts on enforcement.
         self.fever = Fever(announce_fn=self._announce)
@@ -403,24 +413,81 @@ class ImmuneMonitor:
     # ── sampling ──────────────────────────────────────────────────
 
     def collect_sample(self) -> Optional[Dict[str, float]]:
-        """One live process sample (None where /proc is unavailable)."""
+        """One live process sample (None where sampling cannot run)."""
         collect = self._collect or collect_process_sample
         return collect(self.baseline)
+
+    def _probe_sampling(self) -> Dict[str, Any]:
+        """Can this platform produce a process sample at all?
+
+        The availability fact (:func:`sampling_availability`, or the
+        injected probe): ``{"available", "backend", "platform",
+        "reason"}``. A probe failure is itself an unavailable answer
+        with the failure as the reason — never an exception, never a
+        guessed "available".
+        """
+        probe = self._availability_probe or sampling_availability
+        try:
+            avail = probe()
+        except Exception as exc:  # noqa: BLE001 - probe must not raise
+            return {"available": False, "backend": "", "platform": "",
+                    "reason": f"sampling availability probe failed: {exc}"}
+        if not isinstance(avail, dict) or "available" not in avail:
+            return {"available": False, "backend": "", "platform": "",
+                    "reason": "sampling availability probe returned "
+                              f"no verdict: {avail!r}"}
+        return avail
 
     def tick(self, sample: Optional[Dict[str, Any]] = None, *,
              now: Optional[float] = None) -> Dict[str, Any]:
         """One sampler tick — the live decision loop (module docstring).
 
         ``sample`` may be injected (tests, manual probes); by default
-        the real sample is collected from /proc. Returns a report
-        dict: what was sampled, whether it was learned or
+        the real sample is collected live from the host. Returns a
+        report dict: what was sampled, whether it was learned or
         quarantined, and whether the gate enforced.
+
+        A tick that collects nothing splits in two, honestly: when
+        the platform CAN sample but this tick got no sample, the
+        report is the Pass-3 no-sample non-event (``ok``). When the
+        platform cannot sample at all — a standing fact, probed via
+        :meth:`_probe_sampling` — the report is a declared failure
+        (``ok: False``, ``unavailable: True``) so the scheduler's run
+        record tells the truth under the Pass #71 contract instead of
+        logging an ok-success with "sampled: no" buried in it, and
+        the condition is announced exactly once (the monitor's
+        announcement, drained and published by the sampler tool) —
+        a permanent platform fact must not page every minute.
         """
         now = time.time() if now is None else now
         with self._lock:
             self._last_tick_at = now
             live = sample if sample is not None else self.collect_sample()
             if live is None:
+                avail = self._probe_sampling()
+                if not avail.get("available"):
+                    reason = str(avail.get("reason") or
+                                 "no backend could count processes")
+                    if not self._sampling_unavailable_announced:
+                        self._sampling_unavailable_announced = True
+                        self._announce(
+                            "immune process sampling unavailable on "
+                            f"this platform — {reason}; no sample can "
+                            "be collected here, so the adaptive "
+                            "baseline cannot learn and the gate stays "
+                            "report-only")
+                    self._persist()
+                    return {"ok": False, "unavailable": True,
+                            "sampling_available": False,
+                            "backend": str(avail.get("backend") or ""),
+                            "error": "process sampling unavailable on "
+                                     f"this platform: {reason}",
+                            "sampled": False, "learned": False,
+                            "enforced": False,
+                            "quarantined": self._quarantined,
+                            "samples": len(self.baseline),
+                            "reason": "process sampling unavailable on "
+                                      f"this platform: {reason}"}
                 self._persist()
                 return {"ok": True, "sampled": False, "learned": False,
                         "enforced": False, "quarantined": self._quarantined,
@@ -525,11 +592,15 @@ class ImmuneMonitor:
             th = self.baseline.thresholds()
             tick_age = (now - self._last_tick_at) \
                 if self._last_tick_at else None
+            avail = self._probe_sampling()
             return {
                 "samples": len(self.baseline),
                 "min_samples": MIN_SAMPLES,
                 "baseline_status": th.status,
                 "ready": th.status == "ready",
+                "sampling_available": bool(avail.get("available")),
+                "sampling_backend": str(avail.get("backend") or ""),
+                "sampling_reason": str(avail.get("reason") or ""),
                 "spawned_p95": th.spawned_p95,
                 "growth_p95": th.growth_p95,
                 "threshold_reason": th.reason,
@@ -575,9 +646,13 @@ def summarize_tick_event(result: Any,
       closed, the baseline became ready).
 
     Everything else is a non-event and returns None: no live sample
-    on this platform, a routine sample learned into an already-warm
-    baseline, a sample quarantined under an already-announced
-    incident. Non-events are still recorded — the tick result is the
+    on a platform that can sample, a routine sample learned into an
+    already-warm baseline, a sample quarantined under an
+    already-announced incident. (A platform that cannot sample at
+    all is a standing condition, not a per-tick event: it is
+    announced exactly once by the monitor and classified here, and
+    its ticks record as declared failures — see :meth:`tick`.)
+    Non-events are still recorded — the tick result is the
     job's ``last_result`` and the baseline store keeps the tick and
     sample timestamps — silence is a chat-surface rule, not deleted
     evidence.
@@ -587,10 +662,6 @@ def summarize_tick_event(result: Any,
     if not isinstance(result, dict):
         return None
     notes = [str(a).strip() for a in (announcements or []) if str(a).strip()]
-    if result.get("ok") is False or result.get("error"):
-        return {"title": "❌ immune sampler error",
-                "body": str(result.get("error") or "unknown error"),
-                "critical": False}
     context: List[str] = []
     desc = _sample_desc(result.get("sample"))
     if desc:
@@ -598,6 +669,21 @@ def summarize_tick_event(result: Any,
     context.append(
         f"quarantined: {result.get('quarantined', 0)} · "
         f"baseline samples: {result.get('samples', 0)}")
+    if result.get("unavailable"):
+        # A standing platform condition, not a per-tick event: the
+        # monitor announces it exactly once, and that announcement
+        # (drained into ``notes`` on the transition tick) is the one
+        # notification. Later unavailable ticks return None — the
+        # failed run record is their evidence, not a page a minute.
+        if notes:
+            return {"title": f"🛡️ {notes[0]}",
+                    "body": "\n".join(notes[1:] + context),
+                    "critical": False}
+        return None
+    if result.get("ok") is False or result.get("error"):
+        return {"title": "❌ immune sampler error",
+                "body": str(result.get("error") or "unknown error"),
+                "critical": False}
     if result.get("enforced"):
         lines = [str(result.get("reason") or "the adaptive gate enforced")]
         lines += context

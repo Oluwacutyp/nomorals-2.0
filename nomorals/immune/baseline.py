@@ -16,11 +16,18 @@ the fixed numbers with percentiles computed from an
   samples. A threshold of 0 on either leg (degenerate baseline) is
   treated as insufficient — a leg that has only ever seen zero
   cannot say what "too much" is for that leg.
-* :func:`collect_process_sample` reads the live process count from
-  ``/proc`` on Linux (stdlib only) and derives growth as the ratio of
-  the current count to the median of prior counts. On non-Linux, or
-  when ``/proc`` is unreadable, it returns ``None`` — no fabricated
-  sample, no enforcement.
+* :func:`collect_process_sample` reads the live process count via
+  the platform backend — ``/proc`` on POSIX, Win32
+  ``EnumProcesses`` (ctypes, stdlib only) on Windows, and optional
+  ``psutil`` (when importable) as the cross-platform fallback — and
+  derives growth as the ratio of the current count to the median of
+  prior counts. The sample shape is identical on every platform
+  (:data:`SAMPLE_KEYS`), so the learner cannot tell which OS a
+  sample came from. When no backend can count on this platform it
+  returns ``None`` — no fabricated sample, no enforcement — and
+  :func:`sampling_availability` reports exactly that, with the
+  reason, so callers can distinguish "platform cannot sample" from
+  "no sample this tick".
 
 The legacy fixed-threshold ``consult_then_enforce`` in ``police.py``
 is untouched: existing callers keep their behaviour, and new callers
@@ -36,9 +43,11 @@ from typing import Any, Dict, List, Optional
 
 __all__ = [
     "MIN_SAMPLES",
+    "SAMPLE_KEYS",
     "AdaptiveBaseline",
     "Thresholds",
     "collect_process_sample",
+    "sampling_availability",
     "adaptive_consult_then_enforce",
     "sample_over_thresholds",
 ]
@@ -188,18 +197,172 @@ class AdaptiveBaseline:
         return statistics.median(s["processes_spawned"] for s in self._samples)
 
 
-def collect_process_sample(baseline: Optional[AdaptiveBaseline] = None) -> Optional[Dict[str, float]]:
-    """Read the live process count; derive growth vs. baseline median.
+#: The sample-shape contract. Every platform backend produces a
+#: count; :func:`collect_process_sample` shapes it into exactly
+#: these keys (floats), so :class:`AdaptiveBaseline` consumes a
+#: Windows sample identically to a Linux one — the learner cannot
+#: tell which OS a sample came from, and a future backend cannot
+#: silently drift the fields.
+SAMPLE_KEYS = ("processes_spawned", "process_growth")
 
-    Returns ``None`` on non-Linux or when ``/proc`` is unreadable —
-    no fabricated sample. Growth is ``current / median(prior)`` when
-    a baseline with prior samples is supplied, else 1.0 (no history).
-    """
+
+# ── platform backends: one count, three routes ────────────────────
+#
+# The repo carries ZERO mandatory third-party dependencies
+# (pyproject: ``dependencies = []``), and psutil is not declared in
+# any optional group either — so the primary backends are stdlib:
+# ``/proc`` on POSIX (the original route, unchanged) and Win32
+# ``EnumProcesses`` via ctypes on Windows. psutil, when importable,
+# is the cross-platform fallback, following the optional-accelerator
+# convention of ``nomorals/power/monitor.py`` (try-import, injectable
+# module, degrade cleanly). Every backend returns the live process
+# COUNT or ``None`` — never a fabricated number.
+
+def _count_processes_proc() -> Optional[int]:
+    """POSIX: count numeric entries in ``/proc`` (the original)."""
     try:
         entries = os.listdir("/proc")
     except OSError:
         return None
-    current = float(sum(1 for name in entries if name.isdigit()))
+    return sum(1 for name in entries if name.isdigit())
+
+
+def _count_processes_win32(ctypes_mod: Any = None) -> Optional[int]:
+    """Windows: count processes via psapi ``EnumProcesses`` (ctypes).
+
+    PID 0 (the System Idle Process) is excluded: it has no ``/proc``
+    counterpart on POSIX, and the learner compares counts across
+    time on ONE host — a constant phantom would only shift the
+    baseline, but excluding it keeps the semantics "live processes"
+    on both platforms. The buffer doubles until the returned byte
+    count fits (a full buffer means the list may be truncated).
+    """
+    ct = ctypes_mod
+    if ct is None:
+        try:
+            import ctypes as ct
+        except Exception:  # noqa: BLE001 - no ctypes, no backend
+            return None
+    try:
+        windll = getattr(ct, "windll", None)
+        if windll is None:
+            return None
+        psapi = windll.psapi
+        size = 1024
+        while size <= (1 << 20):
+            buf = (ct.c_ulong * size)()
+            returned = ct.c_ulong(0)
+            if not psapi.EnumProcesses(
+                    ct.byref(buf), ct.sizeof(buf), ct.byref(returned)):
+                return None
+            n = int(returned.value) // int(ct.sizeof(ct.c_ulong()))
+            if n < size:
+                return sum(1 for pid in buf[:n] if pid)
+            size *= 2
+        return None
+    except Exception:  # noqa: BLE001 - any ctypes failure: no sample
+        return None
+
+
+def _count_processes_psutil(psutil_mod: Any = None) -> Optional[int]:
+    """Optional accelerator: ``len(psutil.pids())`` when available."""
+    mod = psutil_mod
+    if mod is None:
+        try:
+            import psutil as mod
+        except Exception:  # noqa: BLE001 - not installed: no backend
+            return None
+    try:
+        return len(mod.pids())
+    except Exception:  # noqa: BLE001 - a broken psutil must not lie
+        return None
+
+
+def _process_count(*, os_name: Optional[str] = None,
+                   proc_count_fn: Any = None,
+                   win32_count_fn: Any = None,
+                   psutil_count_fn: Any = None
+                   ) -> Any:
+    """Dispatch to the platform backends, in order.
+
+    Returns ``(count, backend, reason)``: ``count`` is an int and
+    ``backend`` one of ``"proc"`` / ``"win32"`` / ``"psutil"`` on
+    success; ``(None, "", reason)`` when every applicable backend
+    failed, with the attempted backends named in the reason. The
+    ``*_count_fn`` parameters are the injection seam (tests, future
+    backends) — each is a zero-arg callable returning a count or
+    ``None``.
+    """
+    name = os.name if os_name is None else os_name
+    if name == "nt":
+        attempts = [
+            ("win32", win32_count_fn or _count_processes_win32),
+            ("psutil", psutil_count_fn or _count_processes_psutil),
+        ]
+    else:
+        attempts = [
+            ("proc", proc_count_fn or _count_processes_proc),
+            ("psutil", psutil_count_fn or _count_processes_psutil),
+        ]
+    tried: List[str] = []
+    for backend, fn in attempts:
+        tried.append(backend)
+        try:
+            count = fn()
+        except Exception:  # noqa: BLE001 - a backend must not raise
+            count = None
+        if count is not None:
+            return int(count), backend, ""
+    return None, "", (
+        "no backend could count processes "
+        f"(tried: {', '.join(tried)})")
+
+
+def sampling_availability(count_fn: Any = None) -> Dict[str, Any]:
+    """Can this platform produce a live process sample at all?
+
+    Returns ``{"available": bool, "backend": str, "platform": str,
+    "reason": str}``. The probe is a real count attempt (cheap and
+    side-effect free). ``available=False`` is a standing platform
+    fact — distinct from a single tick collecting nothing — and the
+    reason names what was tried. ``count_fn`` is the injection seam:
+    a zero-arg callable returning ``(count, backend, reason)``.
+    """
+    if count_fn is not None:
+        count, backend, reason = count_fn()
+    else:
+        count, backend, reason = _process_count()
+    if count is None:
+        return {"available": False, "backend": "",
+                "platform": os.name,
+                "reason": reason or "no backend could count processes"}
+    return {"available": True, "backend": backend,
+            "platform": os.name, "reason": ""}
+
+
+def collect_process_sample(baseline: Optional[AdaptiveBaseline] = None,
+                           *, count_fn: Any = None
+                           ) -> Optional[Dict[str, float]]:
+    """Read the live process count; derive growth vs. baseline median.
+
+    The count comes from the platform backend (``/proc`` on POSIX,
+    Win32 ``EnumProcesses`` on Windows, psutil when importable as a
+    fallback — see :func:`_process_count`); the returned sample has
+    exactly :data:`SAMPLE_KEYS` on every platform. Returns ``None``
+    when no backend can count on this platform — no fabricated
+    sample (see :func:`sampling_availability` for the reason).
+    Growth is ``current / median(prior)`` when a baseline with prior
+    samples is supplied, else 1.0 (no history). ``count_fn`` is the
+    injection seam: a zero-arg callable returning
+    ``(count, backend, reason)``.
+    """
+    if count_fn is not None:
+        count, _backend, _reason = count_fn()
+    else:
+        count, _backend, _reason = _process_count()
+    if count is None:
+        return None
+    current = float(count)
     growth = 1.0
     if baseline is not None:
         median = baseline.median_spawned()

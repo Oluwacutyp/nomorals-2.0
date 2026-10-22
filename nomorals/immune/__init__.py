@@ -30,11 +30,13 @@ from __future__ import annotations
 from .adaptive import AntigenBundle, LabelledAntigen, label_antigen, present, should_create_antibody
 from .baseline import (
     MIN_SAMPLES,
+    SAMPLE_KEYS,
     AdaptiveBaseline,
     Thresholds,
     adaptive_consult_then_enforce,
     collect_process_sample,
     sample_over_thresholds,
+    sampling_availability,
 )
 from .wiring import (
     BASELINE_WINDOW,
@@ -117,10 +119,12 @@ __all__ = [
     "emit_immune_event",
     # adaptive baseline (percentile cancer thresholds)
     "MIN_SAMPLES",
+    "SAMPLE_KEYS",
     "AdaptiveBaseline",
     "Thresholds",
     "adaptive_consult_then_enforce",
     "collect_process_sample",
+    "sampling_availability",
     "sample_over_thresholds",
     # wiring (persisted baseline, live sampler, incident quarantine)
     "BASELINE_WINDOW",
