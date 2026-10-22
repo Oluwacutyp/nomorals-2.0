@@ -710,6 +710,16 @@ def payload_text(payload: Any) -> str:
     if isinstance(payload, (list, tuple)):
         return "\n".join(t for t in (payload_text(i) for i in payload) if t)
     if isinstance(payload, dict):
+        # Pass #69: a payload carrying a pre-rendered step account
+        # (a mission coding settlement's ``step_account``) leads with
+        # it — the account is the readable summary; the payload's own
+        # text (the loop's output) follows as evidence, not instead.
+        account = payload.get("step_account")
+        if isinstance(account, str) and account.strip():
+            rest = {k: v for k, v in payload.items()
+                    if k != "step_account"}
+            body = payload_text(rest)
+            return account.strip() + (f"\n\n{body}" if body else "")
         for key in _PAYLOAD_TEXT_KEYS:
             value = payload.get(key)
             if isinstance(value, str) and value.strip():

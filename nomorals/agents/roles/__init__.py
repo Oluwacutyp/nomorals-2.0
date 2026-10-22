@@ -438,6 +438,17 @@ class MissionCodingAgent(RoleAgent):
             "scope_denials": list(
                 getattr(result, "scope_denials", None) or []),
         }
+        # Pass #69: the loop's step account, pre-rendered by the one
+        # shared renderer — the owner's results view
+        # (missions.progress.payload_text) leads with it, so a coding
+        # step's per-step outcome is visible in /mission results
+        # instead of only the loop's raw output tail.  Absent when
+        # the run carried no steps (renderer returns "").
+        from ..coding import render_step_account
+
+        account = render_step_account(result)
+        if account:
+            out["step_account"] = account
         if result.ok:
             return out
         reason = str(result.error or "").strip()

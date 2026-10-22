@@ -65,7 +65,8 @@ def core_request(task: str) -> str:
         t = "\n".join(lines[end:]).strip()
     return t
 
-__all__ = ["CodingAgent", "CodingResult", "extract_code_block"]
+__all__ = ["CodingAgent", "CodingResult", "extract_code_block",
+           "render_step_account", "STEP_ACCOUNT_FULL_LIMIT"]
 
 _CODE_BLOCK_NL = re.compile(r"```(?:python|py)?[ \t]*\n(.*?)```", re.DOTALL)
 _CODE_BLOCK_INLINE = re.compile(r"```(?:python|py)?[ \t]+(.*?)```", re.DOTALL)
@@ -621,6 +622,195 @@ def _blank_step_verify(note: str) -> dict[str, Any]:
     unverified-at-this-step state, never a pass and never a fail."""
     return {"ran": False, "ok": None, "tests": [], "failed": [],
             "checks": 0, "executed_total": 0, "note": note}
+
+
+# ── Pass #69: the step account, rendered for the owner ──────────────
+#
+# Since #60 a run's result carries a rich per-step account — and
+# until this pass no owner surface showed any of it: chat /code, the
+# coremind build replies, /task directives, `nm code` and the mission
+# results view all rendered a flat one-liner (or, for missions, only
+# the loop's raw output tail), so a 5-step run with one failed step
+# and one unverified step read exactly like a clean run.
+# render_step_account is the ONE renderer every surface calls.
+
+#: Plans with at most this many steps render every step line.  Longer
+#: plans collapse: the counts header, every NON-quiet step (failed /
+#: skipped / planned / unverified / verify-failed) named individually,
+#: and one summary line for the done-and-verified remainder — a
+#: collapse never hides a failure.
+STEP_ACCOUNT_FULL_LIMIT = 8
+
+#: Chat discipline: one step = one line, never longer than this.
+_STEP_LINE_CAP = 150
+_STEP_GIST_CAP = 56
+_STEP_REASON_CAP = 64
+_STEP_TEST_ID_CAP = 48
+_STEP_TEST_NAMES_SHOWN = 3
+_RUN_LINE_CAP = 140
+
+_STEP_MARKS = {"done": "✓", "failed": "✗", "skipped": "↷",
+               "planned": "•"}
+
+
+def _account_field(source: Any, name: str) -> Any:
+    """One result field from a CodingResult, its to_dict(), or a
+    settlement-shaped dict — the renderer accepts all three."""
+    if isinstance(source, dict):
+        return source.get(name)
+    return getattr(source, name, None)
+
+
+def _one_line(text: Any, cap: int, *, tail: bool = False) -> str:
+    """Collapse whitespace and fit ``text`` to ``cap`` chars.
+
+    ``tail=True`` keeps the END (step reasons carry their payload
+    last — pass #68 places failing test names at the tail)."""
+    flat = " ".join(str(text or "").split())
+    if len(flat) <= cap:
+        return flat
+    if tail:
+        return "…" + flat[-(cap - 1):]
+    return flat[:cap - 1].rstrip() + "…"
+
+
+def _step_is_quiet(step: dict[str, Any]) -> bool:
+    """A step a collapsed rendering may fold into the summary count:
+    done, and its verify record (when one exists) ran green.  A done
+    step whose isolated check never ran is NOT quiet — the honest
+    unverified state always gets its own line."""
+    if step.get("status") != "done":
+        return False
+    verify = step.get("verify")
+    if not isinstance(verify, dict):
+        return True
+    if not verify.get("ran"):
+        return False
+    return verify.get("ok") is not False
+
+
+def _step_account_line(step: dict[str, Any]) -> str:
+    status = str(step.get("status") or "")
+    mark = _STEP_MARKS.get(status, "?")
+    sid = str(step.get("id") or "?")
+    gist = _one_line(step.get("instructions") or step.get("path") or "",
+                     _STEP_GIST_CAP)
+    line = f"  {mark} {sid}" + (f" {gist}" if gist else "")
+    attempts = step.get("attempts") or 0
+    if isinstance(attempts, int) and attempts > 1:
+        line += f" ({attempts} attempts)"
+    verify = step.get("verify")
+    if isinstance(verify, dict):
+        if verify.get("ran") and verify.get("ok"):
+            line += " · tests ✓"
+        elif verify.get("ran"):
+            failed = [str(t) for t in verify.get("failed") or []]
+            if failed:
+                shown = ", ".join(
+                    _one_line(t, _STEP_TEST_ID_CAP, tail=True)
+                    for t in failed[:_STEP_TEST_NAMES_SHOWN])
+                extra = (f" +{len(failed) - _STEP_TEST_NAMES_SHOWN} more"
+                         if len(failed) > _STEP_TEST_NAMES_SHOWN else "")
+                line += f" · tests ✗: {shown}{extra}"
+            else:
+                line += " · tests ✗"
+        else:
+            # The note leads with its fact ("no tests cover…", "no
+            # isolated check ran…") — head-truncated, unlike reasons.
+            note = _one_line(verify.get("note") or
+                             "no isolated check ran for this step",
+                             _STEP_REASON_CAP)
+            line += f" · not verified: {note}"
+    if status in ("failed", "skipped") and step.get("reason"):
+        line += " — " + _one_line(step["reason"], _STEP_REASON_CAP,
+                                  tail=True)
+    # Final length cap only — the segments are already collapsed, and
+    # a whitespace-collapsing pass would eat the line's indent.
+    if len(line) > _STEP_LINE_CAP:
+        line = line[:_STEP_LINE_CAP - 1].rstrip() + "…"
+    return line
+
+
+def render_step_account(result: Any) -> str:
+    """The run's step account as Telegram-safe plain text.
+
+    Accepts a :class:`CodingResult`, its ``to_dict()``, or a dict of
+    the same shape (a mission settlement).  Returns "" when the
+    result carries no steps — callers then render exactly what they
+    rendered before this pass (the byte-compatible fallback for
+    older / snippet-shaped results).
+
+    Per step: status mark, id + instruction gist, attempts when > 1,
+    the #68 verify state (tests ✓ / failing test names / the honest
+    not-verified note), and the reason tail for failed/skipped steps.
+    Run-level lines ride along ONLY when the data carries them:
+    review unavailable or failed (#63 — a clean review is silent),
+    scope denials named (#66), the spend cap when hit (#65).
+    """
+    steps = [s for s in (_account_field(result, "steps") or [])
+             if isinstance(s, dict)]
+    if not steps:
+        return ""
+    counts = {"done": 0, "failed": 0, "skipped": 0, "planned": 0}
+    for step in steps:
+        status = str(step.get("status") or "")
+        if status in counts:
+            counts[status] += 1
+    parts = [f"{counts[k]} {k}" for k in
+             ("done", "failed", "skipped", "planned") if counts[k]]
+    header = "steps: " + (" · ".join(parts) if parts
+                          else f"{len(steps)} total")
+    replans = _account_field(result, "replans") or 0
+    if replans:
+        header += f" · {replans} re-plan(s)"
+    lines = [header]
+    if len(steps) <= STEP_ACCOUNT_FULL_LIMIT:
+        lines.extend(_step_account_line(s) for s in steps)
+    else:
+        folded = 0
+        for step in steps:
+            if _step_is_quiet(step):
+                folded += 1
+            else:
+                lines.append(_step_account_line(step))
+        if folded:
+            lines.append(f"  ✓ … +{folded} more done steps")
+    review = _account_field(result, "review") or {}
+    if isinstance(review, dict) and review:
+        if review.get("available") is False:
+            notes = "; ".join(str(n) for n in review.get("notes") or [])
+            detail = notes or "the reviewer could not run"
+            lines.append(_one_line(
+                f"review: ⚠ unavailable — {detail}", _RUN_LINE_CAP))
+        elif review.get("passed") is False:
+            objections = "; ".join(
+                str(o) for o in review.get("objections") or [])
+            suffix = f" — {objections}" if objections else ""
+            lines.append(_one_line(f"review: ✗ failed{suffix}",
+                                   _RUN_LINE_CAP))
+    denials = _account_field(result, "scope_denials") or []
+    if denials:
+        named = []
+        for denial in denials[:2]:
+            if isinstance(denial, dict):
+                tool = str(denial.get("tool") or "?")
+                reason = _one_line(denial.get("reason") or "", 44,
+                                   tail=True)
+                named.append(f"{tool}: {reason}" if reason else tool)
+            else:
+                named.append(str(denial))
+        extra = f" +{len(denials) - 2} more" if len(denials) > 2 else ""
+        lines.append(_one_line(
+            f"scope: ⚠ {len(denials)} denied — "
+            f"{'; '.join(named)}{extra}", _RUN_LINE_CAP))
+    usage = _account_field(result, "usage") or {}
+    if isinstance(usage, dict) and usage.get("capped"):
+        total = int(usage.get("total_tokens") or 0)
+        cap = usage.get("cap")
+        detail = (f"{total} tokens (cap {int(cap)})" if cap
+                  else f"{total} tokens")
+        lines.append(f"spend: ⚠ cap hit — {detail}")
+    return "\n".join(lines)
 
 
 # Pass #60 (W4): a plan is a list of STEPS, not a bare file list.  A step

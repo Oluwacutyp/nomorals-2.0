@@ -2119,20 +2119,26 @@ class CoreMind:
                     "real signup flow.")
 
         def job() -> str:
-            from .coding import CodingAgent
+            from .coding import CodingAgent, render_step_account
 
             started = time.time()
             result = CodingAgent(self.context).run(intent.target,
                                                    max_iterations=5,
                                                    timeout=CODING_JOB_TIMEOUT_S)
             elapsed = time.time() - started
+            # Pass #69: the step account rides the build reply (empty
+            # for step-less results — the reply is then unchanged).
+            account = render_step_account(result)
+            account_bit = f"{account}\n" if account else ""
             if result.ok:
                 files = ", ".join(getattr(result, "files", []) or []) or "output"
                 return (f"✅ built “{intent.target[:70]}” in {result.iterations} "
                         f"iteration(s), {elapsed:.0f}s — {files}\n"
+                        f"{account_bit}"
                         f"run output:\n{str(getattr(result, 'output', ''))[:800]}")
             return (f"❌ the builder gave up after {result.iterations} "
-                    f"iteration(s): {str(getattr(result, 'error', ''))[:400]}")
+                    f"iteration(s): {str(getattr(result, 'error', ''))[:400]}\n"
+                    f"{account_bit}".rstrip())
 
         return self._send_async(
             chat_key, job, job_id,
@@ -2988,7 +2994,7 @@ def _dispatch_inline(mind: CoreMind, fn: Callable, intent: Intent, job_id: str) 
         mind._job_done(job_id, True)
         return f"🔎 research done — “{intent.target[:80]}”\n\n{report.to_text()[:4000]}"
     if intent.kind == "build":
-        from .coding import CodingAgent
+        from .coding import CodingAgent, render_step_account
 
         started = time.time()
         result = CodingAgent(mind.context).run(intent.target, max_iterations=5,
@@ -2996,12 +3002,18 @@ def _dispatch_inline(mind: CoreMind, fn: Callable, intent: Intent, job_id: str) 
         elapsed = time.time() - started
         ok = bool(result.ok)
         mind._job_done(job_id, ok)
+        # Pass #69: the step account rides the build reply (empty for
+        # step-less results — the reply is then unchanged).
+        account = render_step_account(result)
+        account_bit = f"{account}\n" if account else ""
         if ok:
             files = ", ".join(getattr(result, "files", []) or []) or "output"
             return (f"✅ built “{intent.target[:70]}” in {result.iterations} "
                     f"iteration(s), {elapsed:.0f}s — {files}\n"
+                    f"{account_bit}"
                     f"{str(getattr(result, 'output', ''))[:800]}")
-        return f"❌ gave up: {str(getattr(result, 'error', ''))[:400]}"
+        return (f"❌ gave up: {str(getattr(result, 'error', ''))[:400]}\n"
+                f"{account_bit}".rstrip())
     if intent.kind == "browse":
         from ..tools.browser import BrowserSession
 

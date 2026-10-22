@@ -51,6 +51,17 @@ def _tokens_suffix(result: Any) -> str:
     return suffix
 
 
+def _print_step_account(result: Any) -> None:
+    """Pass #69: print the run's step account (the shared renderer in
+    agents/coding.py) under the stats line — nothing prints for a
+    step-less result, so those runs read exactly as before."""
+    from ...agents.coding import render_step_account
+
+    account = render_step_account(result)
+    if account:
+        print(account)
+
+
 def _cmd_code_approve(args: argparse.Namespace, context: Any,
                       plan_id: str) -> int:
     """Approve a paused plan-mode plan and execute it within its scope."""
@@ -67,8 +78,10 @@ def _cmd_code_approve(args: argparse.Namespace, context: Any,
         print(f"files: {', '.join(result.files) or '(none)'}  "
               f"iterations: {result.iterations}  seconds: {result.seconds:.1f}"
               f"{_tokens_suffix(result)}")
+        _print_step_account(result)
     else:
         print(f"FAILED: {result.error}")
+        _print_step_account(result)
     return 0 if result.ok else 1
 
 
@@ -101,6 +114,7 @@ def _cmd_code_run(args: argparse.Namespace, context: Any, task: str) -> int:
     print(f"task: {task}")
     print(f"file: {args.file}  iterations: {result.iterations}  "
           f"seconds: {result.seconds:.1f}{_tokens_suffix(result)}")
+    _print_step_account(result)
     if result.ok:
         print("OK — acceptance command passed")
     else:

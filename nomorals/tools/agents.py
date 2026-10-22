@@ -273,18 +273,24 @@ class CodingRoleAgent:
             # verify in the background, cap derived from the timeout.
             background_tests=True,
         )
-        return SimpleNamespace(
-            output={
-                "ok": result.ok,
-                "files": result.files,
-                "summary": result.output[-2000:],
-                "error": result.error,
-                "review": getattr(result, "review", {}),
-                "scope_denials": list(
-                    getattr(result, "scope_denials", None) or []),
-            },
-            ok=result.ok,
-        )
+        output = {
+            "ok": result.ok,
+            "files": result.files,
+            "summary": result.output[-2000:],
+            "error": result.error,
+            "review": getattr(result, "review", {}),
+            "scope_denials": list(
+                getattr(result, "scope_denials", None) or []),
+        }
+        # Pass #69: the run's step account, pre-rendered by the shared
+        # renderer, rides the orchestrator output like the mission
+        # settlement's does — absent when the run carried no steps.
+        from ..agents.coding import render_step_account
+
+        account = render_step_account(result)
+        if account:
+            output["step_account"] = account
+        return SimpleNamespace(output=output, ok=result.ok)
 
 
 def agent_for(registry: Any, role: str) -> Any | None:

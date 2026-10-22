@@ -242,17 +242,23 @@ class DirectivesAgent:
         return "\n".join(lines)
 
     def _code(self, task: str) -> str:
-        from .coding import CodingAgent
+        from .coding import CodingAgent, render_step_account
 
         agent = CodingAgent(self.context)
         result = agent.run(task, max_iterations=3, timeout=90.0)
+        # Pass #69: the step account rides the directive's result
+        # (empty for step-less results — the string is then unchanged).
+        account = render_step_account(result)
+        account_bit = f"{account}\n" if account else ""
         if result.ok:
             files = ", ".join(getattr(result, "files", []) or []) or "output"
             return (
                 f"code done in {result.iterations} iteration(s): {files}\n"
+                f"{account_bit}"
                 f"{str(getattr(result, 'output', ''))[:400]}"
             )
-        return f"coding bot gave up after {result.iterations} iteration(s): {getattr(result, 'error', '')}"
+        return (f"coding bot gave up after {result.iterations} iteration(s): "
+                f"{getattr(result, 'error', '')}\n{account_bit}".rstrip())
 
     def _model(self, instruction: str) -> str:
         if self.router is None:
