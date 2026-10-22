@@ -79,6 +79,11 @@ class UpdateReport:
     ok: bool = False
     rolled_back: bool = False
     pre_update_snapshot: str = ""
+    #: Revisions the tree moved between this run ("" when unknown —
+    #: no pull ran, or git could not say). Equal values mean the pull
+    #: landed nothing: the tree was already up to date.
+    from_sha: str = ""
+    to_sha: str = ""
     steps: list[dict[str, Any]] = field(default_factory=list)
     error: str = ""
     seconds: float = 0.0
@@ -93,6 +98,8 @@ class UpdateReport:
             "ok": self.ok,
             "rolled_back": self.rolled_back,
             "pre_update_snapshot": self.pre_update_snapshot,
+            "from_sha": self.from_sha,
+            "to_sha": self.to_sha,
             "steps": self.steps,
             "error": self.error,
             "seconds": round(self.seconds, 3),
@@ -103,6 +110,13 @@ class UpdateReport:
         """Plain-text update report."""
         lines = [f"update — {'✓ OK' if self.ok else '✗ FAILED'}"
                  f" ({self.seconds:.1f}s)"]
+        if self.from_sha and self.to_sha:
+            if self.from_sha == self.to_sha:
+                lines.append(f"  at {self.to_sha[:12]} — already up to date")
+            else:
+                lines.append(f"  {self.from_sha[:12]} → {self.to_sha[:12]}")
+        elif self.to_sha:
+            lines.append(f"  at {self.to_sha[:12]}")
         for step in self.steps:
             mark = "✓" if step.get("ok") else "✗"
             lines.append(f"  {mark} {step.get('step')}")
@@ -314,6 +328,7 @@ class UpdateManager:
         previous_sha = self._git_sha() if pull else ""
         self._tx_from_sha = previous_sha
         self._tx_to_sha = ""
+        report.from_sha = previous_sha
 
         # Step 0.5: preflight — never destroy the owner's uncommitted
         # work. A locally modified file that the incoming update also
@@ -367,6 +382,7 @@ class UpdateManager:
                 return report
             new_sha = self._git_sha()
             self._tx_to_sha = new_sha
+            report.to_sha = new_sha
             self._journal({"run_id": run_id, "event": "step", "step": "git_pull",
                            "ts": time.time(), "ok": ok, "detail": detail,
                            "from_sha": previous_sha, "to_sha": new_sha})
