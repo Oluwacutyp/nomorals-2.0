@@ -141,8 +141,11 @@ def estate_status(settings: Any = None) -> dict[str, Any]:
         "local_cloudflare",
         available=True,
         detail="state machine: managed wait needs only a live "
-               "tab; the vault-cookie rung needs a wired cookie "
-               "store",
+               "tab; the vault-cookie rung is wired by default "
+               "to the accounts vault (pass #81) — clearance "
+               "cookies live encrypted under the #74 unlock door; "
+               "a locked vault reports the rung unavailable, "
+               "with the reason",
         fallbacks="owner ask → takeover")
     kinds[cloudflare_solver.CLOUDFLARE_LADDER_KIND] = _row(
         cloudflare_solver.CLOUDFLARE_LADDER_KIND, "cloudflare",

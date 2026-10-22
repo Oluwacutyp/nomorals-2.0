@@ -1847,6 +1847,25 @@ def register(registry: Any) -> None:
         from ..browser import captcha_estate as _estate  # noqa: F401
     except Exception:  # noqa: BLE001
         _log.debug("captcha estate registration skipped", exc_info=True)
+    # Pass #81: arm the Cloudflare cookie rung by default — bind
+    # this registry context's accounts vault as the solver's
+    # production cookie store (the context-binding seam, as with
+    # finance in Pass #75). The adapter is built once here and the
+    # vault itself opens lazily inside it, so registration stays
+    # side-effect free; a context without a database installs no
+    # factory and the rung stays honestly unwired there.
+    try:
+        from ..accounts.cf_cookie_store import default_cf_cookie_store
+        from ..browser.cloudflare_solver import (
+            set_default_cookie_store_factory)
+        _cf_store = default_cf_cookie_store(
+            registry.context, actor="cloudflare-solver")
+        if _cf_store is not None:
+            set_default_cookie_store_factory(
+                lambda _store=_cf_store: _store)
+    except Exception:  # noqa: BLE001
+        _log.debug("cf cookie store default wiring skipped",
+                   exc_info=True)
     context = registry.context
     settings = getattr(context, "settings", None) if context is not None else None
     tools_settings = getattr(settings, "tools", None) if settings else None

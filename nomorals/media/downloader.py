@@ -512,7 +512,11 @@ class MediaDownloader:
         self._kit_downloader = kit_downloader  # → download_kit.ResumeDownloader
         self._ledger = ledger                # → download_kit.IntegrityLedger
         # Cloudflare gate vault (Pass #79): the kit's duck-typed
-        # cookie store (get/set); None = the gate only detects.
+        # cookie store (get/set). An injected store wins; when none
+        # is injected, _cf_cookie_store() lazily defaults to the
+        # accounts-vault adapter (Pass #81) whenever this context
+        # carries a database — None only where there is no vault
+        # to back it, and there the gate only detects, as before.
         self._cookie_store = cookie_store
 
     # ── download-kit accessors (Pass #76) ─────────────────────────────
@@ -532,6 +536,27 @@ class MediaDownloader:
             return self._extractor_registry().best_for(url)
         except Exception:  # noqa: BLE001
             return None
+
+    def _cf_cookie_store(self) -> Any:
+        """The Cloudflare gate's cookie store.
+
+        Pass #81: an explicitly injected store wins; otherwise the
+        production default is the accounts-vault adapter, built
+        lazily (like the other kit accessors — construction stays
+        side-effect free, and the vault itself opens only when the
+        gate actually consults the store). Contexts without a
+        database keep the old truth: no store, the gate detects
+        and asks only."""
+        if self._cookie_store is None:
+            try:
+                from ..accounts.cf_cookie_store import (
+                    default_cf_cookie_store)
+                self._cookie_store = default_cf_cookie_store(
+                    self.context, actor="downloader-cloudflare")
+            except Exception:  # noqa: BLE001 - store is an
+                # enhancement; its absence never sinks a download
+                self._cookie_store = None
+        return self._cookie_store
 
     def _kit(self) -> Any:
         if self._kit_downloader is None:
@@ -1086,7 +1111,7 @@ class MediaDownloader:
             if not body:
                 return
             from .cloudflare_gate import CloudflareGate
-            gate = CloudflareGate(self._cookie_store)
+            gate = CloudflareGate(self._cf_cookie_store())
             if not gate.inspect(body):
                 return
             decision = gate.cookie_decision(page_url)

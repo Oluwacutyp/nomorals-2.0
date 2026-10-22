@@ -28,9 +28,17 @@ the machine's first consumer:
    tab's cookies on any verified clear).
 
 The vault store is the kit's duck-typed mapping (``get``/``set``) —
-injected via the constructor or the challenge metadata; no
-production vault adapter existed, so an unwired store simply means
-the cookie rung reports itself unwired, honestly.
+injected via the constructor or the challenge metadata. Since
+Pass #81 a production default exists behind those injections: the
+accounts-vault adapter (``nomorals.accounts.cf_cookie_store``),
+installed as a factory at the tool-registration seam
+(``tools/browser.py::register`` binds the registry context's
+vault, the Pass #75 pattern). Resolution order: constructor store
+→ challenge metadata → production default → none (and only then
+does the cookie rung report itself unwired, honestly). A wired
+store whose vault cannot open in the calling context reports
+itself *unavailable, with the vault's reason* — a different truth
+from unwired, and from wired-but-empty.
 
 Kind strings, and one deliberate non-registration: this solver
 registers under ``cloudflare`` (the kind name flows use) and as
@@ -70,6 +78,7 @@ __all__ = [
     "solve_cloudflare_kind",
     "LocalCloudflareBackend",
     "register_local_backend",
+    "set_default_cookie_store_factory",
 ]
 
 #: The estate's canonical kind name for Cloudflare interstitials.
@@ -82,6 +91,36 @@ CLOUDFLARE_LADDER_KIND = "cloudflare-challenge"
 def _domain_of(url: str) -> str:
     host = urlparse(url or "").hostname
     return (host or "").lower()
+
+
+# ── production default store (Pass #81) ─────────────────────────────────
+
+_DEFAULT_STORE_FACTORY: Callable[[], Any] | None = None
+
+
+def set_default_cookie_store_factory(
+        factory: Callable[[], Any] | None) -> None:
+    """Install (or clear, with None) the production default store
+    factory. Called by the tool-registration seam with a factory
+    bound to the live registry context; the factory returns the
+    store (or None when that context has no vault to back one)."""
+    global _DEFAULT_STORE_FACTORY
+    _DEFAULT_STORE_FACTORY = factory
+
+
+def _default_cookie_store() -> Any:
+    """The production default store, or None when no factory is
+    installed or the factory's context carries no vault."""
+    factory = _DEFAULT_STORE_FACTORY
+    if factory is None:
+        return None
+    try:
+        return factory()
+    except Exception:  # noqa: BLE001 - a broken default degrades
+        # to the honest unwired rung, never to a crash
+        _log.debug("cf default cookie store factory failed",
+                   exc_info=True)
+        return None
 
 
 def _clearance_from(tab: Any) -> str:
@@ -120,8 +159,10 @@ class CloudflareSolver:
             return self._store
         if challenge:
             metadata = challenge.get("metadata") or {}
-            return metadata.get("cookie_store")
-        return None
+            store = metadata.get("cookie_store")
+            if store is not None:
+                return store
+        return _default_cookie_store()
 
     def _is_challenged(self, tab: Any) -> bool:
         try:
@@ -221,8 +262,17 @@ class CloudflareSolver:
                                  "cookie is needed")
         if status == "expired":
             return result(False, payload)
-        # status == "ask": the kit asks exactly once; the message IS
-        # the detail the owner sees on the escalation path.
+        # status == "ask". A wired store whose vault cannot open in
+        # this context (Pass #81) names that instead of the generic
+        # ask: the rung is down for a reason, and the reason is the
+        # actionable part — owner takeover is next either way.
+        reason = str(getattr(store, "unavailable_reason", "") or "")
+        if reason:
+            return result(False, "the cookie vault is unavailable "
+                                 f"in this context ({reason}) — "
+                                 "owner takeover is next")
+        # the kit asks exactly once; the message IS the detail the
+        # owner sees on the escalation path.
         ask = machine.ask_owner()
         return result(False, ask or payload)
 

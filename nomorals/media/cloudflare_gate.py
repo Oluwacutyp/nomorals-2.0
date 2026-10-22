@@ -20,7 +20,10 @@ do about it:
 
 The store is the kit's duck-typed mapping (``get``/``set``); with
 no store wired the gate only ever *detects* — it never pretends a
-cookie exists.
+cookie exists. Since Pass #81 the downloader wires the production
+default itself (the accounts-vault adapter), so a *wired but
+locked* vault is reported as unavailable, with the vault's reason
+— a distinct truth from "no store" and from "no cookie stored".
 """
 from __future__ import annotations
 
@@ -74,6 +77,17 @@ class CloudflareGate:
                                        "downloads"}
         domain = (urlparse(url or "").hostname or "").lower()
         status, payload = get_or_request_cookie(self._store, domain)
+        reason = str(getattr(self._store, "unavailable_reason", "")
+                     or "")
+        if status == "ask" and reason:
+            # Pass #81: a wired store whose vault cannot open in
+            # this context says so — "unavailable, here's why" is a
+            # different truth from "no cookie stored, ask the
+            # owner", and the report must not blur them.
+            ask = self.machine.ask_owner()
+            return {"action": "ask", "cookie": "",
+                    "message": f"cookie vault unavailable ({reason})"
+                               + (f" — {ask}" if ask else "")}
         if status == "have":
             self.machine.feed("cookie_provided")
             return {"action": "inject",
