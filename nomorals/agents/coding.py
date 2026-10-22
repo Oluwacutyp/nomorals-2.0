@@ -1705,7 +1705,7 @@ class CodingAgent:
                     # design and needs no scoping.
                     tres = _pytest_mod.run_tests(
                         repo=str(workdir),
-                        timeout=min(max(timeout * 5.0, 60.0), 600.0),
+                        timeout=max(timeout * 5.0, 60.0),
                         changed_files=list(changed) or None,
                         full_suite_gate=full_suite_gate)
                 # Pass #58: ZERO executed tests is never green.  The
@@ -1725,7 +1725,7 @@ class CodingAgent:
                                   if (workdir / d).is_dir()] or ["."]
                     wide = _pytest_mod.run_tests(
                         paths=wide_paths, repo=str(workdir),
-                        timeout=min(max(timeout * 5.0, 60.0), 600.0))
+                        timeout=max(timeout * 5.0, 60.0))
                     if not _tests_nothing_ran(wide):
                         tres = wide
                 if _tests_nothing_ran(tres):
@@ -2766,7 +2766,7 @@ class CodingAgent:
             cwd=workdir,
             timeout=timeout,
             env=env,
-            limits=SandboxLimits(cpu_seconds=int(min(max(timeout, 5.0), 600.0))),
+            limits=SandboxLimits(cpu_seconds=int(max(timeout, 5.0))),
         )
 
     def _journal(
