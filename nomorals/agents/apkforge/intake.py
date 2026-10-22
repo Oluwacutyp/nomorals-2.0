@@ -151,8 +151,9 @@ def land_file(root: Path, source_path: str | Path, *,
                           "version_code": ident.get("version_code")})
         inventory["parts"] = parts
         inventory["note"] = (
-            "bundle container — parts inventoried in A1; merging / "
-            "AAB conversion is A2 (bundletool), not yet built")
+            "bundle container — parts inventoried; merging / "
+            "device sets / AAB conversion run through the A2 "
+            "splits ops (bundletool / APKEditor)")
         proj.record["package"] = ""
         proj.record["title"] = src.name
     else:

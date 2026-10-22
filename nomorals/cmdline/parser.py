@@ -1837,7 +1837,7 @@ def _parser() -> argparse.ArgumentParser:
     b_rc.add_argument("--league", default="GEN")
 
     apk_p = sub.add_parser("apk", aliases=CLI_ALIASES["apk"],
-        help="ApkForge: land, dissect, learn from and diff APKs (A1: intake + dissect + diff)",
+        help="ApkForge: land, dissect, edit, build + sign and diff APKs (A1 + A2 workbench)",
         description=("nm apk status\n"
                      "nm apk add <path-or-url>\n"
                      "nm apk list\n"
@@ -1864,6 +1864,51 @@ def _parser() -> argparse.ArgumentParser:
     a_diff = apk_sub.add_parser("diff", help="component-wise diff of two projects")
     a_diff.add_argument("project")
     a_diff.add_argument("other")
+    a_tc = apk_sub.add_parser("toolchain", help="Java toolchain: status | provision")
+    a_tc.add_argument("op", nargs="?", default="status",
+                      choices=["status", "provision"])
+    a_dec = apk_sub.add_parser("decode", help="apktool-decode a project")
+    a_dec.add_argument("project")
+    a_ed = apk_sub.add_parser("edit", help="journaled edit of the decoded project")
+    a_ed.add_argument("project")
+    a_ed.add_argument("op", choices=["manifest", "strings", "replace",
+                                     "add", "remove"])
+    a_ed.add_argument("--label", default="")
+    a_ed.add_argument("--version-name", default="")
+    a_ed.add_argument("--version-code", default="")
+    a_ed.add_argument("--min-sdk", default="")
+    a_ed.add_argument("--target-sdk", default="")
+    a_ed.add_argument("--debuggable", default="")
+    a_ed.add_argument("--allow-backup", default="")
+    a_ed.add_argument("--add-permission", default="")
+    a_ed.add_argument("--remove-permission", default="")
+    a_ed.add_argument("--name", default="", help="string name (strings op)")
+    a_ed.add_argument("--value", default="", help="string value (strings op)")
+    a_ed.add_argument("--locale", default="")
+    a_ed.add_argument("--target", default="", help="decoded path (file ops)")
+    a_ed.add_argument("--source", default="", help="source file (file ops)")
+    a_pa = apk_sub.add_parser("patch", help="apply a fail-closed fingerprint patch (JSON file or - for stdin)")
+    a_pa.add_argument("project")
+    a_pa.add_argument("patch_file")
+    apk_sub.add_parser("edits", help="list a project's edits").add_argument("project")
+    a_un = apk_sub.add_parser("undo", help="revert an edit from its snapshot")
+    a_un.add_argument("project")
+    a_un.add_argument("edit_id", nargs="?", default="")
+    a_bu = apk_sub.add_parser("build", help="rebuild + zipalign + vault-key sign + verify")
+    a_bu.add_argument("project")
+    a_bu.add_argument("--alias", default="")
+    a_ke = apk_sub.add_parser("keys", help="vault keystores: list | ensure")
+    a_ke.add_argument("op", nargs="?", default="list",
+                      choices=["list", "ensure"])
+    a_ke.add_argument("--alias", default="")
+    a_sp = apk_sub.add_parser("splits", help="bundle surgery: list|extract|merge|installset|generate")
+    a_sp.add_argument("project")
+    a_sp.add_argument("op", nargs="?", default="list")
+    a_sp.add_argument("--part", default="")
+    a_sp.add_argument("--spec", default="", help="device spec JSON (installset)")
+    a_sp.add_argument("--alias", default="")
+    a_jx = apk_sub.add_parser("jadx", help="decompile to Java (reading surface)")
+    a_jx.add_argument("project")
 
     desk_p = sub.add_parser("desk", aliases=CLI_ALIASES["desk"],
         help="betting desk: crash pattern lab, verdicts library, timed signal calls (analysis only)",

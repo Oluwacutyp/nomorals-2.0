@@ -160,6 +160,17 @@ class Project:
         except (OSError, json.JSONDecodeError):
             return None
 
+    def card(self) -> dict[str, Any]:
+        """The project card (museum shape + identity conveniences)
+        — the same dict the forge hands its surfaces."""
+        card = museum_card(self, self.read_dossier())
+        card["package"] = self.package
+        card["version_name"] = self.record.get("version_name", "")
+        card["version_code"] = self.record.get("version_code")
+        card["kind_detail"] = self.kind
+        card["has_dossier"] = (self.dir / "dossier.json").exists()
+        return card
+
 
 def create_project(root: Path, *, source_sha256: str, kind: str,
                    original_name: str,

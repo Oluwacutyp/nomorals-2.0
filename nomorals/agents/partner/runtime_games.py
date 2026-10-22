@@ -2676,9 +2676,9 @@ class RuntimeGamesMixin:
             return "\n".join(lines)
         return f"unknown /desk verb {verb!r}\n{_usage()}"
 
-    # ── ApkForge: /apk (intake + dissect + teach + diff) ──────────────
+    # ── ApkForge: /apk (A1 dissect + A2 workbench) ─────────────────
     def _control_apk(self, tail: str, chat_key: str = "") -> str:
-        """/apk — ApkForge, the APK workbench (A1: dissect only).
+        """/apk — ApkForge, the APK workbench.
 
         /apk add <path-or-url>   — land an APK/bundle with provenance
         /apk list                — landed projects
@@ -2687,29 +2687,57 @@ class RuntimeGamesMixin:
         /apk dissect <project>   — full static dissection -> dossier
         /apk teach <project> [topic] — a lesson from the dossier
         /apk diff <a> <b>        — component-wise diff of two versions
+        /apk toolchain [provision] — Java toolchain state / provision
+        /apk decode <project>    — apktool-decode the original
+        /apk edit <project> manifest <field> <value> — label |
+                      version_name | version_code | min_sdk |
+                      target_sdk | debuggable | allow_backup
+        /apk edit <project> permission add|remove <permission>
+        /apk edit <project> strings <name> <value>
+        /apk patch <project> <patch-json> — fail-closed patch
+        /apk edits <project>     — the edit journal
+        /apk undo <project> [edit#] — revert an edit (snapshot-exact)
+        /apk build <project> [key-alias] — rebuild + zipalign +
+                      vault-key sign + verify (build card)
+        /apk keys                — vault keystores (fingerprints)
+        /apk splits <project> [list|extract <part>|merge|
+                      installset|generate]
+        /apk jadx <project>      — decompile to Java (reading only)
         """
-        from ..apkforge import (ApkForge, render_diff_card,
-                                render_dossier_card, render_list,
-                                render_project, render_status)
+        from ..apkforge import (ApkForge, render_build_card,
+                                render_diff_card, render_dossier_card,
+                                render_list, render_project,
+                                render_status, render_toolchain)
 
         forge = ApkForge(getattr(self, "context", None))
         parts = (tail or "").strip().split()
         verb = parts[0].lower() if parts else ""
 
         def _usage() -> str:
-            return ("/apk add <path-or-url> — land an APK or bundle "
-                    "with provenance\n"
-                    "/apk list — landed projects\n"
-                    "/apk status — toolchain matrix + counts\n"
-                    "/apk show <project> — one project's card\n"
-                    "/apk dissect <project> — full static dissection "
-                    "-> dossier\n"
-                    "/apk teach <project> [topic] — a lesson from the "
-                    "dossier (overview|manifest|permissions|components|"
-                    "certificate|build|code)\n"
-                    "/apk diff <a> <b> — component-wise diff\n"
-                    "A1 dissects; editing/building/signing arrive in "
-                    "A2 and are never faked")
+            return ("\n".join([
+                "/apk add <path-or-url> — land an APK or bundle "
+                "with provenance",
+                "/apk list — landed projects",
+                "/apk status — toolchain matrix + counts",
+                "/apk show <project> — one project's card",
+                "/apk dissect <project> — full static dissection "
+                "-> dossier",
+                "/apk teach <project> [topic] — a lesson from the "
+                "dossier (overview|manifest|permissions|components|"
+                "certificate|build|code)",
+                "/apk diff <a> <b> — component-wise diff",
+                "/apk toolchain [provision] — Java toolchain",
+                "/apk decode <project> — apktool decode",
+                "/apk edit <project> manifest <field> <value>",
+                "/apk edit <project> permission add|remove <perm>",
+                "/apk edit <project> strings <name> <value>",
+                "/apk patch <project> <patch-json>",
+                "/apk edits <project> · /apk undo <project> [#]",
+                "/apk build <project> [alias] — rebuild+sign+verify",
+                "/apk keys — vault keystores",
+                "/apk splits <project> [op] — bundle surgery",
+                "/apk jadx <project> — Java reading surface",
+            ]))
 
         if verb in ("", "help"):
             return _usage()
@@ -2755,6 +2783,142 @@ class RuntimeGamesMixin:
                 return res["error"]
             return (render_diff_card(res["diff"])
                     + f"\n\nfull report: {res['report_path']}")
+        if verb == "toolchain":
+            if len(parts) > 1 and parts[1] == "provision":
+                res = forge.toolchain_provision()
+                if res.get("error"):
+                    return res["error"]
+                return ("toolchain provisioned: "
+                        f"new={res['provisioned_now']} "
+                        f"present={res['already_present']} "
+                        f"smoke={res['smoke_apktool_build']}")
+            return render_toolchain(forge.toolchain_status())
+        if verb == "decode":
+            if len(parts) < 2:
+                return "usage: /apk decode <project>"
+            res = forge.decode(parts[1])
+            if res.get("error"):
+                return res["error"]
+            return f"decoded → {res['decoded']}"
+        if verb == "edit":
+            if len(parts) < 4:
+                return ("usage: /apk edit <project> manifest "
+                        "<field> <value> | permission add|remove "
+                        "<perm> | strings <name> <value>")
+            proj_ref, kind = parts[1], parts[2].lower()
+            rest = parts[3:]
+            if kind == "manifest":
+                if len(rest) < 2:
+                    return "usage: /apk edit <p> manifest <field> <value>"
+                field, value = rest[0], " ".join(rest[1:])
+                kw = {field: value}
+                if field in ("debuggable", "allow_backup"):
+                    kw[field] = value.lower() in ("true", "1", "yes")
+                res = forge.edit(proj_ref, "manifest", **kw)
+            elif kind == "permission":
+                if len(rest) < 2:
+                    return ("usage: /apk edit <p> permission "
+                            "add|remove <permission>")
+                key = ("add_permission" if rest[0] == "add"
+                       else "remove_permission")
+                res = forge.edit(proj_ref, "manifest",
+                                 **{key: rest[1]})
+            elif kind == "strings":
+                if len(rest) < 2:
+                    return ("usage: /apk edit <p> strings <name> "
+                            "<value>")
+                res = forge.edit(proj_ref, "strings", name=rest[0],
+                                 value=" ".join(rest[1:]))
+            else:
+                return f"unknown edit kind {kind!r} — manifest|permission|strings"
+            if res.get("error"):
+                return res["error"]
+            ed = res["edit"]
+            return (f"edit #{ed['edit_id']} applied: {ed['detail']} "
+                    f"(snapshot {ed['snapshot']}) — undo with "
+                    f"/apk undo {proj_ref} {ed['edit_id']}")
+        if verb == "patch":
+            chunks = (tail or "").strip().split(None, 2)
+            if len(chunks) < 3:
+                return "usage: /apk patch <project> <patch-json>"
+            res = forge.patch(chunks[1], chunks[2])
+            if res.get("error"):
+                return res["error"]
+            pr = res["patch_result"]
+            return (f"patch {pr['patch']!r} applied as edit "
+                    f"#{pr['edit_id']}: {pr['detail']}")
+        if verb == "edits":
+            if len(parts) < 2:
+                return "usage: /apk edits <project>"
+            res = forge.edits(parts[1])
+            if res.get("error"):
+                return res["error"]
+            if not res["edits"]:
+                return "no edits yet on this project"
+            return "\n".join(
+                f"  #{e['edit_id']} {e['op']}: {e.get('detail', '')}"
+                + (" (undone)" if e["undone"] else "")
+                for e in res["edits"])
+        if verb == "undo":
+            if len(parts) < 2:
+                return "usage: /apk undo <project> [edit#]"
+            res = forge.undo(parts[1],
+                             int(parts[2]) if len(parts) > 2
+                             and parts[2].isdigit() else None)
+            if res.get("error"):
+                return res["error"]
+            return (f"edit #{res['undo']['undone_edit_id']} reverted "
+                    "— pre-edit bytes restored from snapshot")
+        if verb == "build":
+            if len(parts) < 2:
+                return "usage: /apk build <project> [key-alias]"
+            res = forge.build(parts[1],
+                              alias=parts[2] if len(parts) > 2 else "")
+            if res.get("error"):
+                return res["error"]
+            return res["card_text"]
+        if verb == "keys":
+            res = forge.keys()
+            if res.get("error"):
+                return res["error"]
+            if not res["keystores"]:
+                return ("no ApkForge keystores in the vault yet — "
+                        "the class key is generated + vaulted on "
+                        "first build")
+            return "\n".join(
+                f"  {k['alias']}: cert {k['cert_sha256'][:24]}…"
+                + (" (DEBUG)" if k["debug"] else "")
+                for k in res["keystores"])
+        if verb == "splits":
+            if len(parts) < 2:
+                return "usage: /apk splits <project> [op]"
+            op = parts[2].lower() if len(parts) > 2 else "list"
+            kw = {}
+            if op == "extract" and len(parts) > 3:
+                kw["part"] = parts[3]
+            res = forge.splits(parts[1], op, **kw)
+            if res.get("error"):
+                return res["error"]
+            if op == "list":
+                rows = res["parts"]
+                if not rows:
+                    return "this project has no bundle parts"
+                return "\n".join(
+                    f"  {p['name']} — {p.get('size', 0):,} bytes · "
+                    f"{p.get('package') or '—'}"
+                    for p in rows)
+            return str({k: v for k, v in res.items()
+                        if k != "project"})
+        if verb == "jadx":
+            if len(parts) < 2:
+                return "usage: /apk jadx <project>"
+            res = forge.jadx(parts[1])
+            if res.get("error"):
+                return res["error"]
+            return (f"jadx decompile → {res['jadx']} "
+                    f"({res.get('java_files', 'cached')} java "
+                    "files; reading surface only — edits happen "
+                    "in the apktool project)")
         return f"unknown /apk verb {verb!r}\n{_usage()}"
 
     # ── pump desk: /pump (pump.fun intelligence, signals only) ────────

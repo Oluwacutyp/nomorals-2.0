@@ -640,12 +640,16 @@ class ApkForgeA1(unittest.TestCase):
     def test_status_capability_honesty(self):
         st = self.forge.status()
         self.assertEqual(st["capabilities"]["dissect"], "full")
-        self.assertEqual(st["capabilities"]["edit"],
-                         "A2 — not yet built")
-        self.assertEqual(st["capabilities"]["build"],
-                         "A2 — not yet built")
-        self.assertEqual(st["capabilities"]["sign"],
-                         "A2 — not yet built")
+        # A2: edit/build/sign are real ops now — the matrix must
+        # report their probed state (full once provisioned, an
+        # honest "not provisioned" before), never the A1-era
+        # "not yet built" placeholder and never a fake "full".
+        for cap in ("edit", "build", "sign", "splits_merge"):
+            state = st["capabilities"][cap]
+            self.assertNotIn("not yet built", state)
+            self.assertTrue(
+                state == "full" or "unavailable" in state,
+                f"{cap} reported an unverifiable state: {state!r}")
         self.assertIn("install", st["capabilities"]["install_test"])
 
 
