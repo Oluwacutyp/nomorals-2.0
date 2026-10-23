@@ -9,10 +9,20 @@ so the table now *grows* from the class's own evidence:
 * **Discovery** — every dissection is observed.  Package prefixes
   that are not the app's own tree, not framework roots, and not
   covered by the active table are counted as *candidates*, once per
-  dossier, with the dossiers that evidenced them.
-* **Proposal** — a candidate seen in >= ``RECURRENCE_THRESHOLD``
+  dossier, with the dossiers that evidenced them.  Discovery reads
+  BOTH kinds of census evidence (A5): the classes a dossier
+  *defines* and the types it merely *references* — the common case
+  is an app calling an SDK whose classes live in another dex or a
+  shared runtime, so the reference table is where its signature
+  actually shows up.  Occurrence counts are kept split
+  (defined vs referenced) on every candidate, proposal and
+  promotion, so the evidence never loses which kind it was.
+* **Proposal** — a candidate seen in >= the recurrence threshold
   distinct dossiers becomes a proposal: a standing, evidence-backed
-  suggestion, nothing more.  Proposals never match anything.
+  suggestion, nothing more.  Proposals never match anything.  The
+  threshold is config (``NOMORALS_APKFORGE_SIG_THRESHOLD``, read at
+  discovery time; ``RECURRENCE_THRESHOLD`` is its default), not a
+  buried constant.
 * **Promotion** — an explicit, journaled act (surface op) moves a
   proposal into the active table with its evidence attached.  Only
   promoted entries join dissections, marked ``origin="grown"`` next
@@ -33,6 +43,7 @@ flagging is a report, not a mutation; demotion stays a decision.
 from __future__ import annotations
 
 import json
+import os
 import time
 from pathlib import Path
 from typing import Any
@@ -42,6 +53,7 @@ from .dissect import SDK_SIGNATURES, _pkg_of
 __all__ = [
     "SignatureError",
     "RECURRENCE_THRESHOLD",
+    "recurrence_threshold",
     "active_signatures",
     "load_state",
     "observe_dossier",
@@ -55,13 +67,36 @@ __all__ = [
 STATE_NAME = "signatures_state.json"
 EVENTS_NAME = "signatures.jsonl"
 
-#: A prefix must appear in this many distinct dossiers before it is
-#: proposed for the active table.
+#: Default recurrence threshold: a prefix must appear in this many
+#: distinct dossiers before it is proposed for the active table.
+#: The live value is config — see recurrence_threshold().
 RECURRENCE_THRESHOLD = 3
 
 #: Minimum classes a prefix must account for in one dossier to count
 #: as an occurrence there (one stray class is noise, not an SDK).
 _MIN_CLASSES_PER_DOSSIER = 2
+
+#: Minimum referenced types a prefix must account for in one dossier
+#: to count as a referenced occurrence there — the same noise
+#: discipline as defined classes, applied to the reference table.
+_MIN_REFS_PER_DOSSIER = 2
+
+
+def recurrence_threshold() -> int:
+    """The live recurrence threshold, read from config at call
+    time: ``NOMORALS_APKFORGE_SIG_THRESHOLD`` (the class's
+    NOMORALS_APKFORGE_* env config surface, intake.py's pattern)
+    when it parses to an int >= 1, else RECURRENCE_THRESHOLD."""
+    raw = os.environ.get("NOMORALS_APKFORGE_SIG_THRESHOLD",
+                         "").strip()
+    if raw:
+        try:
+            value = int(raw)
+        except ValueError:
+            value = 0
+        if value >= 1:
+            return value
+    return RECURRENCE_THRESHOLD
 
 #: Package roots that are the platform/framework, never an SDK.
 _FRAMEWORK_ROOTS = (
@@ -171,17 +206,12 @@ def _covered(prefix: str, table: list[dict[str, Any]]) -> bool:
 
 # ── discovery ────────────────────────────────────────────────────────
 
-def _candidate_prefixes(dossier: dict[str, Any]) -> dict[str, int]:
-    """Unknown package prefixes in one dossier → class counts.
-
-    Candidates are drawn from the dex census: every package the app
-    *defines* classes in (class_names) plus the package rollup,
-    rolled up to 2- and 3-segment prefixes and the full package.
-    The app's own tree and framework roots never become candidates
-    (the caller filters against the active table)."""
-    dex = dossier.get("dex") or {}
+def _prefix_counts(per_package: dict[str, int],
+                   dossier: dict[str, Any]) -> dict[str, int]:
+    """Roll a package → count map up to candidate prefixes
+    (2- and 3-segment prefixes + the full package), dropping the
+    app's own tree and the framework roots."""
     own = str((dossier.get("identity") or {}).get("package") or "")
-    per_package = _dossier_packages(dossier)
     counts: dict[str, int] = {}
     for pkg, n in per_package.items():
         if own and (pkg == own or pkg.startswith(own + ".")):
@@ -197,8 +227,30 @@ def _candidate_prefixes(dossier: dict[str, Any]) -> dict[str, int]:
             if len(prefix.split(".")) < 2:
                 continue
             counts[prefix] = counts.get(prefix, 0) + n
-    return {p: n for p, n in counts.items()
-            if n >= _MIN_CLASSES_PER_DOSSIER}
+    return counts
+
+
+def _candidate_prefixes(dossier: dict[str, Any]) -> dict[str, dict[str, int]]:
+    """Unknown package prefixes in one dossier → split counts
+    ``{"defined": n, "referenced": m}``.
+
+    Defined counts come from the dex census of classes the app
+    *defines*; referenced counts from the types it *references*
+    without defining (dissect's referenced census — method/field
+    tables and superclasses).  A prefix is a candidate when either
+    source clears its per-dossier noise floor; the split is kept
+    so a proposal's evidence says which kind carried it."""
+    defined = _prefix_counts(_dossier_packages(dossier), dossier)
+    referenced = _prefix_counts(
+        _dossier_referenced_packages(dossier), dossier)
+    out: dict[str, dict[str, int]] = {}
+    for prefix in sorted(set(defined) | set(referenced)):
+        d_n = defined.get(prefix, 0)
+        r_n = referenced.get(prefix, 0)
+        if d_n >= _MIN_CLASSES_PER_DOSSIER or \
+                r_n >= _MIN_REFS_PER_DOSSIER:
+            out[prefix] = {"defined": d_n, "referenced": r_n}
+    return out
 
 
 def _dossier_packages(dossier: dict[str, Any]) -> dict[str, int]:
@@ -217,24 +269,54 @@ def _dossier_packages(dossier: dict[str, Any]) -> dict[str, int]:
     return per_package
 
 
+def _dossier_referenced_packages(
+        dossier: dict[str, Any]) -> dict[str, int]:
+    """package → referenced-type count, from the dex census's
+    referenced set (A5 dossiers carry ``referenced_packages``
+    directly; the rollup is derivable from ``referenced_types``
+    for dossiers that carry the list form)."""
+    dex = dossier.get("dex") or {}
+    rollup = dex.get("referenced_packages")
+    if isinstance(rollup, dict) and rollup:
+        return {str(pkg): int(n) for pkg, n in rollup.items()
+                if pkg and int(n or 0) > 0}
+    per_package: dict[str, int] = {}
+    for name in dex.get("referenced_types") or []:
+        text = str(name)
+        if "/" in text or text.startswith("L"):
+            pkg = _pkg_of(text)
+        else:
+            pkg = text.rsplit(".", 1)[0] if "." in text else ""
+        if pkg:
+            per_package[pkg] = per_package.get(pkg, 0) + 1
+    return per_package
+
+
 def observe_dossier(root: Path, project_id: str,
                     dossier: dict[str, Any], *,
-                    threshold: int = RECURRENCE_THRESHOLD
+                    threshold: int | None = None
                     ) -> dict[str, Any]:
     """Count one dissection's unknown prefixes into the candidate
     census, and record sightings of already-grown entries (their
-    health evidence).  Returns what changed: new candidates and
-    prefixes that crossed the proposal threshold with this dossier."""
+    health evidence).  ``threshold`` defaults to the configured
+    recurrence threshold, read at discovery time.  Returns what
+    changed: new candidates and prefixes that crossed the proposal
+    threshold with this dossier."""
+    if threshold is None:
+        threshold = recurrence_threshold()
     state = load_state(root)
     per_package = _dossier_packages(dossier)
+    seen_packages = set(per_package) | set(
+        _dossier_referenced_packages(dossier))
     if project_id not in state["observed_projects"]:
         state["observed_projects"].append(project_id)
     # grown-entry sightings: health-check evidence for the entries
-    # already in the table.
+    # already in the table — a sighting in either census counts
+    # (an SDK later apps only reference is still alive).
     for entry in state["grown"]:
         prefix = str(entry["prefix"])
         if any(pkg == prefix or pkg.startswith(prefix + ".")
-               for pkg in per_package):
+               for pkg in seen_packages):
             sightings = entry.setdefault("sightings", [])
             if project_id not in sightings:
                 sightings.append(project_id)
@@ -244,19 +326,36 @@ def observe_dossier(root: Path, project_id: str,
     new_candidates: list[str] = []
     newly_proposed: list[str] = []
     now = time.time()
-    for prefix, n in sorted(counts.items()):
+    for prefix, split in sorted(counts.items()):
         if _covered(prefix, table) or prefix in demoted:
             continue
         cand = state["candidates"].get(prefix)
         if cand is None:
             cand = {"dossiers": [], "classes_total": 0,
+                    "defined_classes_total": 0,
+                    "referenced_types_total": 0,
                     "first_seen": now, "last_seen": now,
                     "proposed": False}
             state["candidates"][prefix] = cand
             new_candidates.append(prefix)
         if project_id not in cand["dossiers"]:
+            # legacy candidates (pre-A5 state) carry only the
+            # combined total, which was defined-only evidence —
+            # seed the split from it so totals never regress.
+            cand.setdefault(
+                "defined_classes_total",
+                int(cand.get("classes_total") or 0))
+            cand.setdefault("referenced_types_total", 0)
             cand["dossiers"].append(project_id)
-            cand["classes_total"] = int(cand["classes_total"]) + n
+            cand["defined_classes_total"] = int(
+                cand.get("defined_classes_total") or 0) \
+                + split["defined"]
+            cand["referenced_types_total"] = int(
+                cand.get("referenced_types_total") or 0) \
+                + split["referenced"]
+            cand["classes_total"] = int(
+                cand["defined_classes_total"]
+                + cand["referenced_types_total"])
             cand["last_seen"] = now
             if not cand["proposed"] \
                     and len(cand["dossiers"]) >= threshold:
@@ -266,6 +365,10 @@ def observe_dossier(root: Path, project_id: str,
                 _event(root, "signature_proposed", prefix=prefix,
                        dossiers=list(cand["dossiers"]),
                        classes_total=cand["classes_total"],
+                       defined_classes_total=cand[
+                           "defined_classes_total"],
+                       referenced_types_total=cand[
+                           "referenced_types_total"],
                        threshold=threshold)
     _save_state(root, state)
     return {"observed_project": project_id,
@@ -275,8 +378,10 @@ def observe_dossier(root: Path, project_id: str,
 
 
 def proposals(root: Path, *,
-              threshold: int = RECURRENCE_THRESHOLD
+              threshold: int | None = None
               ) -> list[dict[str, Any]]:
+    if threshold is None:
+        threshold = recurrence_threshold()
     state = load_state(root)
     out = []
     for prefix, cand in sorted(state["candidates"].items()):
@@ -285,6 +390,10 @@ def proposals(root: Path, *,
                         "dossiers": list(cand["dossiers"]),
                         "occurrences": len(cand["dossiers"]),
                         "classes_total": cand["classes_total"],
+                        "defined_classes_total": int(
+                            cand.get("defined_classes_total") or 0),
+                        "referenced_types_total": int(
+                            cand.get("referenced_types_total") or 0),
                         "first_seen": cand["first_seen"],
                         "last_seen": cand["last_seen"]})
     out.sort(key=lambda r: (-r["occurrences"], r["prefix"]))
@@ -316,11 +425,12 @@ def promote(root: Path, prefix: str, *, label: str = "",
             "promotion needs discovery evidence (dissect apps "
             "containing it first); refusing to add an unevidenced "
             "signature")
-    if len(cand.get("dossiers") or []) < RECURRENCE_THRESHOLD:
+    threshold = recurrence_threshold()
+    if len(cand.get("dossiers") or []) < threshold:
         raise SignatureError(
             f"{prefix} has been seen in "
             f"{len(cand.get('dossiers') or [])} dossier(s), below "
-            f"the recurrence threshold {RECURRENCE_THRESHOLD} — "
+            f"the recurrence threshold {threshold} — "
             "not yet a proposal")
     entry = {
         "prefix": prefix,
@@ -336,6 +446,10 @@ def promote(root: Path, prefix: str, *, label: str = "",
             "dossiers": list(cand["dossiers"]),
             "occurrences": len(cand["dossiers"]),
             "classes_total": cand["classes_total"],
+            "defined_classes_total": int(
+                cand.get("defined_classes_total") or 0),
+            "referenced_types_total": int(
+                cand.get("referenced_types_total") or 0),
             "first_seen": cand["first_seen"],
             "last_seen": cand["last_seen"],
         },
@@ -379,8 +493,10 @@ def demote(root: Path, prefix: str, *,
 # ── status / health ──────────────────────────────────────────────────
 
 def signatures_status(root: Path, *,
-                      threshold: int = RECURRENCE_THRESHOLD
+                      threshold: int | None = None
                       ) -> dict[str, Any]:
+    if threshold is None:
+        threshold = recurrence_threshold()
     state = load_state(root)
     observed = state["observed_projects"]
     grown = []
@@ -404,6 +520,10 @@ def signatures_status(root: Path, *,
         "candidates": [
             {"prefix": p, "occurrences": len(c["dossiers"]),
              "classes_total": c["classes_total"],
+             "defined_classes_total": int(
+                 c.get("defined_classes_total") or 0),
+             "referenced_types_total": int(
+                 c.get("referenced_types_total") or 0),
              "proposed": bool(c.get("proposed"))}
             for p, c in sorted(state["candidates"].items())],
         "proposals": proposals(root, threshold=threshold),
@@ -430,7 +550,11 @@ def render_signatures(st: dict[str, Any]) -> str:
         for p in props:
             lines.append(f"  {p['prefix']} — seen in "
                          f"{p['occurrences']} dossiers, "
-                         f"{p['classes_total']} classes")
+                         f"{p['classes_total']} types "
+                         f"({p.get('defined_classes_total', 0)} "
+                         f"defined, "
+                         f"{p.get('referenced_types_total', 0)} "
+                         "referenced)")
     cands = [c for c in st.get("candidates") or []
              if not c.get("proposed")]
     if cands:

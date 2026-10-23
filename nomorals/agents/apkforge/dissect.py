@@ -27,6 +27,7 @@ __all__ = [
     "render_dossier_md",
     "SDK_SIGNATURES",
     "androguard_available",
+    "elf_info",
 ]
 
 try:  # androguard logs verbosely via loguru; scope-silence its logger
@@ -387,7 +388,10 @@ def _dex_census(a: Any,
                         "methods": d_methods,
                         "sha256": _sha256_bytes(blob)})
     rollup = Counter(_pkg_of(c) for c in class_names)
+    ref_rollup = Counter(_pkg_of(c) for c in ref_types if _pkg_of(c))
     truncated = len(class_names) > _CLASS_NAMES_CAP
+    ref_dotted = sorted({_dotted(c) for c in ref_types})
+    ref_truncated = len(ref_dotted) > _CLASS_NAMES_CAP
     urls = sorted({u for s in all_strings for u in _URL_RE.findall(s)})
     domains = sorted({dom.lower() for s in all_strings
                       for dom in _DOMAIN_RE.findall(s)} - {
@@ -426,10 +430,212 @@ def _dex_census(a: Any,
         "class_names": sorted(set(class_names))[:_CLASS_NAMES_CAP],
         "class_names_truncated": truncated,
         "class_hashes": class_hashes,
+        # The full referenced-type set (A5): every type the dex
+        # names without defining — method/field table class names
+        # and superclasses — in dotted form, plus its package
+        # rollup.  Signature discovery (signatures.py) reads this:
+        # an SDK an app merely *calls* leaves its evidence here,
+        # not in class_names.
+        "referenced_types": ref_dotted[:_CLASS_NAMES_CAP],
+        "referenced_types_truncated": ref_truncated,
+        "referenced_packages": {pkg: n for pkg, n
+                                in sorted(ref_rollup.items()) if pkg},
         "urls": urls,
         "domains": [d for d in domains if d][:200],
         "_all_strings": all_strings,
         "sdk_hits": sdk_hits,
+    }
+
+
+# ── ELF census (native libraries, A5) ──────────────────────────────
+
+_ELF_MACHINES = {3: "x86", 40: "ARM", 62: "x86-64", 183: "AArch64",
+                 243: "RISC-V", 8: "MIPS", 20: "PowerPC",
+                 50: "IA-64", 75: "VAX"}
+_ELF_TYPES = {0: "none", 1: "relocatable", 2: "executable",
+              3: "shared object", 4: "core"}
+# dynamic relocation type names for the two Android ABIs that
+# matter here; anything else reports as its numeric type.
+_RELOC_NAMES = {
+    62: {1: "R_X86_64_64", 2: "R_X86_64_PC32", 6: "R_X86_64_GLOB_DAT",
+         7: "R_X86_64_JUMP_SLOT", 8: "R_X86_64_RELATIVE",
+         10: "R_X86_64_32", 11: "R_X86_64_32S", 24: "R_X86_64_IRELATIVE"},
+    183: {257: "R_AARCH64_ABS64", 275: "R_AARCH64_GLOB_DAT",
+          282: "R_AARCH64_JUMP_SLOT", 1024: "R_AARCH64_TLSDESC",
+          1025: "R_AARCH64_ADR_GOT_PAGE",
+          1026: "R_AARCH64_LD64_GOT_LO12_NC",
+          1027: "R_AARCH64_RELATIVE", 1032: "R_AARCH64_IRELATIVE"},
+    40: {2: "R_ARM_ABS32", 21: "R_ARM_GLOB_DAT", 22: "R_ARM_JUMP_SLOT",
+         23: "R_ARM_RELATIVE"},
+}
+
+
+def elf_info(data: bytes) -> dict[str, Any] | None:
+    """Parse one ELF image's own bytes → its census, or None when
+    the bytes are not a readable ELF.  Header, section table,
+    dynamic symbol table, dynamic string table, soname, and the
+    dynamic relocation sections — the readelf facts, from the
+    class's own parser (no external tool in the census path)."""
+    import struct
+
+    if len(data) < 16 or data[:4] != b"\x7fELF":
+        return None
+    ei_class, ei_data = data[4], data[5]
+    if ei_class not in (1, 2) or ei_data not in (1, 2):
+        return None
+    en = "<" if ei_data == 1 else ">"
+    is64 = ei_class == 2
+    try:
+        if is64:
+            (e_type, e_machine, _ver, _entry, _phoff, shoff, _flags,
+             _ehsize, _phentsize, _phnum, shentsize, shnum,
+             shstrndx) = struct.unpack_from(
+                 en + "HHIQQQIHHHHHH", data, 16)
+            sh_fmt, sh_size = en + "IIQQQQIIQQ", 64
+        else:
+            (e_type, e_machine, _ver, _entry, _phoff, shoff, _flags,
+             _ehsize, _phentsize, _phnum, shentsize, shnum,
+             shstrndx) = struct.unpack_from(
+                 en + "HHIIIIIHHHHHH", data, 16)
+            sh_fmt, sh_size = en + "IIIIIIIIII", 40
+    except struct.error:
+        return None
+
+    def _cstr(blob: bytes, off: int) -> str:
+        if off < 0 or off >= len(blob):
+            return ""
+        end = blob.find(b"\x00", off)
+        if end < 0:
+            end = len(blob)
+        return blob[off:end].decode("utf-8", "replace")
+
+    # section headers
+    sections: list[dict[str, Any]] = []
+    if shoff and shentsize >= sh_size and shnum:
+        for i in range(shnum):
+            at = shoff + i * shentsize
+            if at + sh_size > len(data):
+                break
+            try:
+                vals = struct.unpack_from(sh_fmt, data, at)
+            except struct.error:
+                break
+            if is64:
+                (name_i, sh_type, _fl, _addr, offset, size, link,
+                 _info, _align, entsize) = vals
+            else:
+                (name_i, sh_type, _fl, _addr, offset, size, link,
+                 _info, _align, entsize) = vals
+            sections.append({"name_i": name_i, "type": sh_type,
+                             "offset": offset, "size": size,
+                             "link": link, "entsize": entsize,
+                             "name": ""})
+        if 0 <= shstrndx < len(sections):
+            tab = sections[shstrndx]
+            blob = data[tab["offset"]:tab["offset"] + tab["size"]]
+            for sec in sections:
+                sec["name"] = _cstr(blob, sec["name_i"])
+    by_name = {s["name"]: s for s in sections if s["name"]}
+
+    # dynamic symbols (.dynsym + its linked string table)
+    dyn_symbols: list[str] = []
+    dynsym = by_name.get(".dynsym")
+    if dynsym and dynsym["entsize"]:
+        strtab = sections[dynsym["link"]] \
+            if 0 <= dynsym["link"] < len(sections) else None
+        blob = b""
+        if strtab is not None:
+            blob = data[strtab["offset"]:
+                        strtab["offset"] + strtab["size"]]
+        sym_size = 24 if is64 else 16
+        count = dynsym["size"] // (dynsym["entsize"] or sym_size)
+        for i in range(count):
+            at = dynsym["offset"] + i * (dynsym["entsize"] or sym_size)
+            try:
+                if is64:
+                    (name_i,) = struct.unpack_from(en + "I", data, at)
+                else:
+                    (name_i,) = struct.unpack_from(en + "I", data, at)
+            except struct.error:
+                break
+            name = _cstr(blob, name_i)
+            if name:
+                dyn_symbols.append(name)
+
+    # soname from .dynamic (DT_SONAME=14, string via linked strtab)
+    soname = ""
+    dynamic = by_name.get(".dynamic")
+    if dynamic:
+        strtab = sections[dynamic["link"]] \
+            if 0 <= dynamic["link"] < len(sections) else None
+        blob = b""
+        if strtab is not None:
+            blob = data[strtab["offset"]:
+                        strtab["offset"] + strtab["size"]]
+        dyn_size = 16 if is64 else 8
+        entsize = dynamic["entsize"] or dyn_size
+        if entsize:
+            for i in range(dynamic["size"] // entsize):
+                at = dynamic["offset"] + i * entsize
+                try:
+                    if is64:
+                        tag, val = struct.unpack_from(en + "qQ",
+                                                      data, at)
+                    else:
+                        tag, val = struct.unpack_from(en + "iI",
+                                                      data, at)
+                except struct.error:
+                    break
+                if tag == 0:
+                    break
+                if tag == 14:
+                    soname = _cstr(blob, val)
+
+    # dynamic relocations: every relocation section's entries,
+    # typed.  A linked .so carries .rela.dyn (+ .rela.plt) or the
+    # 32-bit .rel.* forms; their presence is what "this library is
+    # really linked, with cross-references to resolve" means.
+    reloc_sections: list[str] = []
+    reloc_types: set[str] = set()
+    reloc_count = 0
+    type_names = _RELOC_NAMES.get(e_machine, {})
+    for sec in sections:
+        name = sec["name"]
+        if name not in (".rela.dyn", ".rela.plt", ".rel.dyn",
+                        ".rel.plt") or not sec["entsize"]:
+            continue
+        reloc_sections.append(name)
+        n = sec["size"] // sec["entsize"]
+        reloc_count += n
+        for i in range(n):
+            at = sec["offset"] + i * sec["entsize"]
+            try:
+                if is64:
+                    (_off, info, _add) = struct.unpack_from(
+                        en + "QQq", data, at)
+                    rtype = info & 0xFFFFFFFF
+                else:
+                    (_off, info) = struct.unpack_from(en + "II",
+                                                      data, at)
+                    rtype = info & 0xFF
+            except struct.error:
+                break
+            reloc_types.add(type_names.get(rtype, f"type-{rtype}"))
+
+    return {
+        "elf_class": 64 if is64 else 32,
+        "endianness": "little" if ei_data == 1 else "big",
+        "machine": _ELF_MACHINES.get(e_machine, f"machine-{e_machine}"),
+        "machine_id": e_machine,
+        "object_type": _ELF_TYPES.get(e_type, f"type-{e_type}"),
+        "sections": [s["name"] for s in sections if s["name"]],
+        "dynamic_symbols": dyn_symbols[:100],
+        "dynamic_symbol_count": len(dyn_symbols),
+        "soname": soname,
+        "relocations": {"count": reloc_count,
+                        "sections": sorted(reloc_sections),
+                        "types": sorted(reloc_types)},
+        "has_relocations": reloc_count > 0,
     }
 
 
@@ -579,6 +785,18 @@ def dissect_apk(path: str | Path, *, include_apkid: bool = True,
                 native.append({"abi": parts[1] if len(parts) > 2 else "",
                                "name": parts[-1], "path": name,
                                "size": info.file_size})
+        # ELF census per native lib (A5): parse the library's own
+        # bytes — sections, dynamic symbols, relocations — so the
+        # census describes a real linked image, not a zip listing.
+        for row in native:
+            if row["size"] > 64 * 1024 * 1024:
+                continue
+            try:
+                parsed = elf_info(zf.read(row["path"]))
+            except Exception:  # noqa: BLE001 — census stays a listing
+                parsed = None
+            if parsed is not None:
+                row["elf"] = parsed
     native.sort(key=lambda n: (n["abi"], n["name"]))
     arsc = {"present": "resources.arsc" in (a.get_files() or []),
             "parsed": False, "string_count": None}
@@ -809,6 +1027,14 @@ def render_dossier_md(d: dict[str, Any]) -> str:
     if d.get("native"):
         for n in d["native"]:
             extra = f" — APKiD: {', '.join(n['apkid'])}" if n.get("apkid") else ""
+            elf = n.get("elf") or {}
+            if elf:
+                rel = elf.get("relocations") or {}
+                extra += (f" — ELF{elf.get('elf_class')} "
+                          f"{elf.get('machine')}, "
+                          f"{elf.get('dynamic_symbol_count', 0)} "
+                          f"dynamic symbols, "
+                          f"{rel.get('count', 0)} relocations")
             out.append(f"- {n['path']} ({n['size']:,} bytes){extra}")
     else:
         out.append("- none")

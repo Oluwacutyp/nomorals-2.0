@@ -60,7 +60,11 @@ def _cmd_apk(args: Any, context: Any) -> int:
         return 0
 
     if action == "teach":
-        res = forge.teach(args.project, args.topic or "overview")
+        res = forge.teach(args.project, args.topic or "overview",
+                          target_class=getattr(args, "target_class",
+                                               "") or "",
+                          method=getattr(args, "method", "") or "",
+                          mapping=getattr(args, "mapping", "") or "")
         if res.get("error"):
             return _fail(res)
         print(res["text"])

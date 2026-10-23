@@ -175,21 +175,34 @@ class ApkForge:
                 "techforge_feed": techforge_feed(dossier)}
 
     def _ensure_dossier(self, proj: Project) -> dict[str, Any] | None:
+        dossier, _err = self._ensure_dossier_report(proj)
+        return dossier
+
+    def _ensure_dossier_report(
+            self, proj: Project) -> tuple[dict[str, Any] | None, str]:
+        """_ensure_dossier with the failure kept: (dossier, "")
+        or (None, the dissection's own error text) — the bisect
+        judge records that text as a skip's reason."""
         dossier = proj.read_dossier()
         _target, target_sha = self._dissect_target(proj)
         if dossier is not None and \
                 dossier.get("source_sha256") == target_sha:
-            return dossier
+            return dossier, ""
         res = self.dissect(proj.id)
         if res.get("error"):
-            return None
-        return res["dossier"]
+            return None, str(res["error"])
+        return res["dossier"], ""
 
     # ── teach ────────────────────────────────────────────────────────
-    def teach(self, ref: str, topic: str = "") -> dict[str, Any]:
+    def teach(self, ref: str, topic: str = "", *,
+              target_class: str = "", method: str = "",
+              mapping: str = "") -> dict[str, Any]:
         proj = self.resolve(ref)
         if proj is None:
             return {"error": f"no project matches {ref!r}"}
+        if target_class:
+            return self._teach_code(proj, target_class,
+                                    method=method, mapping=mapping)
         dossier = self._ensure_dossier(proj)
         if dossier is None:
             return {"error": "could not dissect this project — "
@@ -198,6 +211,84 @@ class ApkForge:
         proj.journal("teach", f"topic={lesson['topic']} "
                               f"source={lesson['source']}")
         return {"project": self._card(proj), **lesson}
+
+    def _teach_code(self, proj: Project, target_class: str, *,
+                    method: str = "",
+                    mapping: str = "") -> dict[str, Any]:
+        """Teach v2 (A5): one class's method walked in smali AND
+        jadx Java — the smali from the decoded tree, the Java from
+        the jadx surface (mapping-restored when a mapping is given
+        or the project carries one)."""
+        from . import teach as teach_mod
+        from .edit import EditError as _EditError
+        from .edit import ensure_decoded as _ensure_decoded
+
+        dotted = teach_mod.normalize_class_name(target_class)
+        try:
+            decoded = _ensure_decoded(self.root, proj)
+        except _EditError as exc:
+            return {"error": str(exc)}
+        smali_path = teach_mod.find_smali_path(decoded, dotted)
+        if smali_path is None:
+            return {"error": f"no smali for class {dotted} in the "
+                             "decoded tree — the class is not in "
+                             "this APK, or decode produced no smali "
+                             "for its dex"}
+        smali_text = smali_path.read_text(encoding="utf-8",
+                                          errors="replace")
+        # mapping: explicit param (project-relative, jadx idiom),
+        # else a mapping.txt the project itself carries.
+        mpath: Path | None = None
+        if mapping:
+            cand = Path(mapping).expanduser()
+            if not cand.is_absolute():
+                cand = proj.dir / cand
+            if not cand.exists():
+                return {"error": f"mapping file does not exist: "
+                                 f"{cand}"}
+            mpath = cand
+        elif (proj.dir / "mapping.txt").exists():
+            mpath = proj.dir / "mapping.txt"
+        original = dotted
+        if mpath is not None:
+            original = teach_mod.parse_mapping(
+                mpath.read_text(encoding="utf-8",
+                                errors="replace")).get(dotted,
+                                                        dotted)
+        jres = self.jadx(proj.id,
+                         mapping=str(mpath) if mpath else "")
+        if jres.get("error"):
+            return {"error": f"jadx side of the lesson failed: "
+                             f"{jres['error']}"}
+        jadx_dir = Path(jres["jadx"])
+        simple = (original.rsplit(".", 1)[-1]) + ".java"
+        hits = sorted(jadx_dir.rglob(simple))
+        pkg_tail = Path(*original.split(".")[:-1])
+        java_path: Path | None = None
+        for hit in hits:
+            if hit.parent == jadx_dir / "sources" / pkg_tail or \
+                    hit.parent.name == pkg_tail.name:
+                java_path = hit
+                break
+        if java_path is None and hits:
+            java_path = hits[0]
+        java_text = java_path.read_text(encoding="utf-8",
+                                        errors="replace") \
+            if java_path is not None else ""
+        lesson = teach_mod.teach_code_lesson(
+            self.context, class_name=dotted, original_name=original,
+            method=method, smali_text=smali_text,
+            java_text=java_text, mapping_used=mpath is not None)
+        if lesson.get("error"):
+            return lesson
+        proj.journal("teach",
+                     f"v2 class={dotted} "
+                     f"method={lesson['method']} "
+                     f"source={lesson['source']}"
+                     + (f" mapping={mpath.name}" if mpath else ""))
+        return {"project": self._card(proj), **lesson,
+                "smali_path": str(smali_path),
+                "java_path": str(java_path) if java_path else ""}
 
     # ── diff ─────────────────────────────────────────────────────────
     def diff(self, ref_a: str, ref_b: str) -> dict[str, Any]:
@@ -679,11 +770,14 @@ class ApkForge:
                                  "apk list shows what has landed"}
             projects.append(proj)
         dossiers: dict[str, dict[str, Any] | None] = {}
+        dossier_errors: dict[str, str] = {}
         meta: dict[str, dict[str, Any]] = {}
         packages: set[str] = set()
         for proj in projects:
-            dossier = self._ensure_dossier(proj)
+            dossier, derr = self._ensure_dossier_report(proj)
             dossiers[proj.id] = dossier
+            if derr:
+                dossier_errors[proj.id] = derr
             ident = (dossier or {}).get("identity") or {}
             code = ident.get("version_code")
             if code is None:
@@ -712,17 +806,57 @@ class ApkForge:
         state = bisect_mod.load_session(self.root, ids, check)
         resumed = bool(state.get("resumed"))
 
-        def judge(pid: str) -> str:
-            v = bisect_mod.evaluate_predicate(dossiers.get(pid),
-                                              pred)
-            bisect_mod.record_verdict(self.root, state, pid, v)
-            return v
+        def skip_detail(pid: str, dossier: Any) -> str:
+            return (dossier_errors.get(pid)
+                    or bisect_mod.dossier_damage(dossier)
+                    or "this version's dossier cannot judge the "
+                       "predicate (field missing)")
 
-        try:
-            result = bisect_mod.halve(ids, judge,
-                                      known=state["verdicts"])
-        except bisect_mod.BisectError as exc:
-            return {"error": str(exc)}
+        if pred["kind"] == "exported":
+            # three-valued component states: the session records
+            # states, and the state driver names every boundary
+            # crossing (A5).  Known verdicts in any other shape
+            # (a pre-A5 session) are not states — drop them.
+            known = {k: v for k, v in state["verdicts"].items()
+                     if v in bisect_mod.COMPONENT_STATES
+                     or v == bisect_mod.SKIP}
+
+            def state_judge(pid: str) -> str:
+                dossier = dossiers.get(pid)
+                v = bisect_mod.component_state(
+                    dossier, pred["value"])
+                if v is None:
+                    v = bisect_mod.SKIP
+                bisect_mod.record_verdict(
+                    self.root, state, pid, v,
+                    detail=skip_detail(pid, dossier)
+                    if v == bisect_mod.SKIP else "")
+                return v
+
+            try:
+                result = bisect_mod.halve_states(ids, state_judge,
+                                                 known=known)
+            except bisect_mod.BisectError as exc:
+                return {"error": str(exc)}
+        else:
+            def judge(pid: str) -> str:
+                dossier = dossiers.get(pid)
+                v = bisect_mod.evaluate_predicate(dossier, pred)
+                bisect_mod.record_verdict(
+                    self.root, state, pid, v,
+                    detail=skip_detail(pid, dossier)
+                    if v == bisect_mod.SKIP else "")
+                return v
+
+            try:
+                result = bisect_mod.halve(ids, judge,
+                                          known=state["verdicts"])
+            except bisect_mod.BisectError as exc:
+                return {"error": str(exc)}
+        details = dict(state.get("skip_details") or {})
+        result["skip_reasons"] = {
+            pid: details[pid] for pid in result.get("skipped") or []
+            if details.get(pid)}
         bisect_mod.finish_session(self.root, state, result)
         out: dict[str, Any] = {
             **result, "predicate": pred, "versions": meta,
@@ -763,7 +897,7 @@ class ApkForge:
                         "card_text": sig_mod.render_signatures(st)}
             if op == "proposals":
                 return {"proposals": sig_mod.proposals(self.root),
-                        "threshold": sig_mod.RECURRENCE_THRESHOLD}
+                        "threshold": sig_mod.recurrence_threshold()}
             if op == "promote":
                 entry = sig_mod.promote(self.root, prefix,
                                         label=label, kind=kind)

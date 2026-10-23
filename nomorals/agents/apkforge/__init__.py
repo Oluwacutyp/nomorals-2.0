@@ -28,6 +28,17 @@ and Museum wiring — projects, dossiers and builds as one listable
 artifact census, sendable through the repo's file-send surface.
 Installing/testing on a device stays out of scope by design
 (no device lab organ).
+A5 burns down the class's named weaknesses: signature discovery
+reads the referenced-type census (not just defined classes), its
+evidence split defined vs referenced, under a config recurrence
+threshold; the bisect's exported: predicate is three-valued
+(absent / present-not-exported / present-exported) with every
+state crossing reported by name, and damaged specimens (a dex
+androguard cannot parse) skip with the real parse error
+journaled; the native census parses real ELF images — sections,
+dynamic symbols, relocations — instead of listing zip entries;
+teach v2 walks one method in its smali and its jadx Java side
+by side, divergences named.
 """
 
 from __future__ import annotations
@@ -90,8 +101,12 @@ def register(registry: Any) -> None:
             "dossier card + full MD) | teach (Android anatomy "
             "lessons from this APK's own dossier; "
             "topic=overview|manifest|permissions|components|"
-            "certificate|code|build) | diff (two projects: "
-            "permissions/components/cert/dex deltas) | bisect "
+            "certificate|code|build) | teach v2 (target_class = a "
+            "class in the project, method optional, mapping = an "
+            "R8 mapping.txt: one method walked in its smali AND "
+            "its jadx Java, divergences named) | diff (two "
+            "projects: permissions/components/cert/dex deltas) | "
+            "bisect "
             "(series = comma-separated project refs of ONE app; "
             "check = a dossier predicate like 'permission: "
             "android.permission.CAMERA', 'class: com.x.Y', "
@@ -115,6 +130,13 @@ def register(registry: Any) -> None:
                        "dissect|teach, or the first project for diff",
             "other": "str — second project for action=diff",
             "topic": "str — teach topic (see description)",
+            "target_class": "str — teach v2: the class to walk, "
+                            "dotted or descriptor form",
+            "method": "str — teach v2: the method to walk "
+                      "(default: first real method in both forms)",
+            "mapping": "str — teach v2: an R8/ProGuard mapping.txt "
+                       "(project-relative or absolute) for name "
+                       "restoration",
             "series": "str — comma-separated project refs "
                       "(action=bisect)",
             "check": "str — dossier predicate (action=bisect)",
@@ -124,7 +146,9 @@ def register(registry: Any) -> None:
     def apkforge(*, action: str = "status", source: str = "",
                  project: str = "", other: str = "",
                  topic: str = "", series: str = "", check: str = "",
-                 op: str = "") -> dict[str, Any]:
+                 op: str = "", target_class: str = "",
+                 method: str = "", mapping: str = ""
+                 ) -> dict[str, Any]:
         act = (action or "status").strip().lower()
         forge = ApkForge(context)
         if act == "status":
@@ -136,7 +160,9 @@ def register(registry: Any) -> None:
         if act == "dissect":
             return forge.dissect(project)
         if act == "teach":
-            return forge.teach(project, topic)
+            return forge.teach(project, topic,
+                               target_class=target_class,
+                               method=method, mapping=mapping)
         if act == "diff":
             return forge.diff(project, other)
         if act == "bisect":

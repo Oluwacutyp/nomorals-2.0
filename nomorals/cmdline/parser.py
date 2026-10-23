@@ -1861,6 +1861,12 @@ def _parser() -> argparse.ArgumentParser:
     a_teach.add_argument("project")
     a_teach.add_argument("topic", nargs="?", default=None,
                          help="overview|manifest|permissions|components|certificate|build|code")
+    a_teach.add_argument("--class", dest="target_class", default="",
+                         help="teach v2: walk this class's method in smali + jadx Java")
+    a_teach.add_argument("--method", dest="method", default="",
+                         help="teach v2: the method to walk (default: first real method)")
+    a_teach.add_argument("--mapping", dest="mapping", default="",
+                         help="teach v2: R8 mapping.txt for name restoration")
     a_diff = apk_sub.add_parser("diff", help="component-wise diff of two projects")
     a_diff.add_argument("project")
     a_diff.add_argument("other")
