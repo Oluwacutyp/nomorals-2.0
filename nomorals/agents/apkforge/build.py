@@ -131,15 +131,16 @@ def render_build_card(card: dict[str, Any]) -> str:
     sig = card.get("signing") or {}
     schemes = ", ".join(f"{k}={'yes' if v else 'no'}"
                         for k, v in (sig.get("schemes") or {}).items())
+    signer_kind = ("DEBUG key — shared public identity, install testing "
+                   "only" if sig.get("debug_key")
+                   else "Devon class keystore, vault-held")
     lines = [
         f"🪓 **built + signed** — {card.get('package')} "
         f"v{card.get('version_name')} (build {card.get('build_seq')})",
         f"file: {card.get('output')}",
         f"sha256: {str(card.get('output_sha256'))[:16]}… · "
         f"{card.get('size', 0):,} bytes",
-        f"signed by: alias {sig.get('alias')} "
-        f"({'DEBUG key — shared public identity, install testing only'
-          if sig.get('debug_key') else 'Devon class keystore, vault-held'})",
+        f"signed by: alias {sig.get('alias')} ({signer_kind})",
         f"cert sha256: {str(sig.get('cert_sha256'))[:24]}…",
         f"schemes verified: {schemes or '—'}",
         f"built from source {str(card.get('source_sha256'))[:16]}… "

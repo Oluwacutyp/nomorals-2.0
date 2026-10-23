@@ -110,9 +110,11 @@ def _certificate_lesson(d: dict[str, Any]) -> list[str]:
              "everything**", ""]
     for c in signing.get("certificates") or []:
         lines.append(f"- signer: {c.get('subject')}")
-        lines.append(f"- issuer: {c.get('issuer')} "
-                     f"({'self-signed — the signer vouches for itself, '
-                     'typical of direct-distributed apps' if c.get('self_signed') else 'issued by a separate CA'})")
+        issuer_kind = ("self-signed — the signer vouches for itself, "
+                       "typical of direct-distributed apps"
+                       if c.get("self_signed")
+                       else "issued by a separate CA")
+        lines.append(f"- issuer: {c.get('issuer')} ({issuer_kind})")
         lines.append(f"- SHA-256 fingerprint: `{c.get('sha256')}`")
         lines.append(f"- valid {c.get('not_before')} → {c.get('not_after')}")
     if not signing.get("certificates"):
