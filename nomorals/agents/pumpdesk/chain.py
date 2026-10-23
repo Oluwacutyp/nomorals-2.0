@@ -40,6 +40,8 @@ import urllib.request
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
+from .wsclient import TRANSPORT_DENIED_CLASS, TransportDeniedError
+
 __all__ = [
     "PUMP_PROGRAM", "PUMPSWAP_PROGRAM", "SOL_MINT",
     "b58encode", "b58decode", "find_program_address",
@@ -49,7 +51,15 @@ __all__ = [
     "MintInfo", "parse_mint_account",
     "price_quote_per_token", "market_cap_quote", "curve_pct",
     "SolanaRPC", "RoutedRPC", "RPCError",
+    "TransportDeniedError", "TRANSPORT_DENIED_CLASS",
+    "SOURCE_BUDGET_CLASS",
 ]
+
+#: Registry error class recorded when a source's per-cycle hard
+#: time budget is spent: the source degrades for the rest of the
+#: cycle (its route fails over / its reads name the gap) instead
+#: of stalling the desk.
+SOURCE_BUDGET_CLASS = "source-budget-exhausted"
 
 #: pump.fun program (design §1.4/§7.12, verified).
 PUMP_PROGRAM = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"
@@ -417,23 +427,87 @@ class RPCError(Exception):
     pass
 
 
+def _provider_error(body: bytes) -> Optional[dict[str, Any]]:
+    """The JSON-RPC error object inside an error body, if any:
+    {code, message}.  Providers that reject at the HTTP layer
+    still speak JSON-RPC in the body (dRPC's plan refusal is an
+    HTTP 400 carrying ``code 35``) — that object is the actual
+    diagnosis and must not be thrown away."""
+    try:
+        data = json.loads((body or b"").decode("utf-8", "replace"))
+    except ValueError:
+        return None
+    err = data.get("error") if isinstance(data, dict) else None
+    if isinstance(err, dict) and (err.get("message") or err.get("code")):
+        return {"code": err.get("code"),
+                "message": str(err.get("message") or "")}
+    if isinstance(err, str) and err:
+        return {"code": None, "message": err}
+    return None
+
+
+def _is_transport_denied(exc: BaseException) -> bool:
+    """True when *exc* is the OS refusing the connection itself:
+    a builtin PermissionError, the desk's wrapped form, or a
+    URLError whose reason is one (urllib wraps the socket error
+    on some paths/versions and lets it escape bare on others —
+    both are the same failure and get the same name)."""
+    if isinstance(exc, (PermissionError, TransportDeniedError)):
+        return True
+    if isinstance(exc, urllib.error.URLError):
+        return isinstance(exc.reason, (PermissionError,
+                                       TransportDeniedError))
+    return False
+
+
 class SolanaRPC:
     """Minimal Solana JSON-RPC client over urllib (stdlib — the
     house HTTP idiom; proxy env honoured by urllib's opener).
 
     ``on_outcome(ok, latency_s, error_class)`` is the desk's hook
     into the ONE source registry: every call grades the endpoint,
-    no bespoke health code."""
+    no bespoke health code.
+
+    ``budget_s`` is the source's hard time budget for one desk
+    cycle (0 = unbounded, the standalone default): elapsed call
+    time accrues against it across calls, each call's socket
+    timeout is clamped to what remains, and a call that arrives
+    with the budget spent fails fast with
+    :data:`SOURCE_BUDGET_CLASS` — the route degrades for the rest
+    of the cycle instead of stalling the desk (the 2026-10-23
+    failure: ~16.5s stalls repeated across routes and dossiers
+    until the whole watch job timed out).  The desk resets the
+    budget at the top of every cycle (``reset_budget``)."""
 
     def __init__(self, endpoint: str = "https://api.mainnet-beta.solana.com",
                  timeout: float = 20.0,
                  on_outcome: Optional[Callable[..., None]] = None,
-                 user_agent: str = "nomorals-pumpdesk"):
+                 user_agent: str = "",
+                 budget_s: float = 0.0):
         self.endpoint = endpoint
         self.timeout = timeout
         self.on_outcome = on_outcome
+        if not user_agent:
+            from .sources import desk_user_agent
+            user_agent = desk_user_agent()
         self.user_agent = user_agent
+        self.budget_s = max(0.0, float(budget_s or 0.0))
+        self._budget_spent = 0.0
         self._id = 0
+
+    # ── per-cycle source budget ───────────────────────────────────
+
+    def reset_budget(self) -> None:
+        """Start a fresh cycle for this source: its spent time
+        zeroes.  Called by the desk at the top of every cycle."""
+        self._budget_spent = 0.0
+
+    def budget_left(self) -> float:
+        """Seconds of this cycle's budget remaining (inf when the
+        client is unbounded)."""
+        if self.budget_s <= 0:
+            return float("inf")
+        return max(0.0, self.budget_s - self._budget_spent)
 
     def _report(self, ok: bool, t0: float, error_class: str = "") -> None:
         if self.on_outcome is not None:
@@ -451,31 +525,72 @@ class SolanaRPC:
     def call(self, method: str, params: list) -> Any:
         t0 = time.time()
         attempt = 0
-        while True:
-            attempt += 1
-            self._id += 1
-            body = json.dumps({"jsonrpc": "2.0", "id": self._id,
-                               "method": method,
-                               "params": params}).encode()
-            req = urllib.request.Request(
-                self.endpoint, data=body,
-                headers={"Content-Type": "application/json",
-                         "User-Agent": self.user_agent})
-            try:
-                with urllib.request.urlopen(req,
-                                            timeout=self.timeout) as resp:
-                    data = json.loads(resp.read().decode("utf-8"))
-                break
-            except urllib.error.HTTPError as exc:
-                if exc.code == 429 and attempt <= self.RATE_LIMIT_RETRIES:
-                    time.sleep(0.5 * (2 ** (attempt - 1)))
-                    continue
-                self._report(False, t0, f"http-{exc.code}")
-                raise RPCError(f"{method}: HTTP {exc.code}") from exc
-            except Exception as exc:  # noqa: BLE001
-                self._report(False, t0, type(exc).__name__)
-                raise RPCError(f"{method}: {exc}") from exc
+        try:
+            while True:
+                attempt += 1
+                left = self.budget_left()
+                if left <= 0:
+                    self._report(False, t0, SOURCE_BUDGET_CLASS)
+                    raise RPCError(
+                        f"{method}: source budget exhausted "
+                        f"({self.budget_s:.0f}s this cycle) for "
+                        f"{self.endpoint} — the source degrades, "
+                        f"the desk fails over")
+                sock_timeout = min(self.timeout, left) \
+                    if left != float("inf") else self.timeout
+                self._id += 1
+                body = json.dumps({"jsonrpc": "2.0", "id": self._id,
+                                   "method": method,
+                                   "params": params}).encode()
+                req = urllib.request.Request(
+                    self.endpoint, data=body,
+                    headers={"Content-Type": "application/json",
+                             "User-Agent": self.user_agent})
+                try:
+                    with urllib.request.urlopen(
+                            req, timeout=sock_timeout) as resp:
+                        data = json.loads(resp.read().decode("utf-8"))
+                    break
+                except urllib.error.HTTPError as exc:
+                    if exc.code == 429 \
+                            and attempt <= self.RATE_LIMIT_RETRIES:
+                        time.sleep(0.5 * (2 ** (attempt - 1)))
+                        continue
+                    detail = None
+                    try:
+                        detail = _provider_error(exc.read())
+                    except Exception:  # noqa: BLE001 - body is a bonus
+                        detail = None
+                    if detail is not None:
+                        cls = (f"rpc-error-{detail['code']}"
+                               if detail["code"] is not None
+                               else "rpc-error")
+                        self._report(False, t0, cls)
+                        raise RPCError(
+                            f"{method}: HTTP {exc.code} — provider "
+                            f"error {detail['code']}: "
+                            f"{detail['message']}") from exc
+                    self._report(False, t0, f"http-{exc.code}")
+                    raise RPCError(f"{method}: HTTP {exc.code}") from exc
+                except Exception as exc:  # noqa: BLE001
+                    if _is_transport_denied(exc):
+                        self._report(False, t0, TRANSPORT_DENIED_CLASS)
+                        raise RPCError(
+                            f"{method}: transport denied (the OS "
+                            f"refused the connection): {exc}") from exc
+                    self._report(False, t0, type(exc).__name__)
+                    raise RPCError(f"{method}: {exc}") from exc
+        finally:
+            self._budget_spent += time.time() - t0
         if isinstance(data, dict) and data.get("error"):
+            detail = _provider_error(json.dumps(data).encode())
+            if detail is not None:
+                cls = (f"rpc-error-{detail['code']}"
+                       if detail["code"] is not None else "rpc-error")
+                self._report(False, t0, cls)
+                raise RPCError(
+                    f"{method}: provider error {detail['code']}: "
+                    f"{detail['message']}")
             self._report(False, t0, "rpc-error")
             raise RPCError(f"{method}: {data['error']}")
         self._report(True, t0)
@@ -598,6 +713,15 @@ class RoutedRPC:
     @property
     def endpoints(self) -> list[str]:
         return [c.endpoint for c in self.clients]
+
+    def reset_budgets(self) -> None:
+        """Fresh per-cycle budget for every route (the desk calls
+        this at the top of each cycle).  Duck-typed: route doubles
+        without budgets are simply skipped."""
+        for client in self.clients:
+            reset = getattr(client, "reset_budget", None)
+            if callable(reset):
+                reset()
 
     def _route(self, method: str, *args: Any, **kwargs: Any) -> Any:
         last_exc: Optional[Exception] = None

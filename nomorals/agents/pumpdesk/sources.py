@@ -27,8 +27,10 @@ from typing import Any
 __all__ = [
     "MEMCOIN_SEEDS", "ensure_pump_sources", "pump_status",
     "pump_registry_for_context", "ensure_provisioning",
-    "HELIUS_SERVICE", "rpc_endpoint_from_env", "rpc_routes",
-    "PUBLIC_RPC_ENDPOINTS",
+    "HELIUS_SERVICE", "PUMPPORTAL_SERVICE", "rpc_endpoint_from_env",
+    "rpc_routes", "PUBLIC_RPC_ENDPOINTS",
+    "desk_user_agent", "desk_source_budget_s", "pumpportal_api_key",
+    "DEFAULT_USER_AGENT", "DEFAULT_SOURCE_BUDGET_S",
 ]
 
 #: (nation, domain, name, auth_needed, notes)
@@ -148,6 +150,68 @@ def pump_status(registry: Any) -> dict[str, Any]:
     return {"sources": rows, "count": len(rows)}
 
 
+# ── desk network config (ONE surface) ────────────────────────────────
+#
+# Every desk fetch resolves its user-agent and its per-source time
+# budget HERE — never as a literal scattered through the fetch
+# modules.  Both read the process settings (``tools.user_agent`` /
+# ``tools.pumpdesk_source_budget_s``) when a settings load is
+# available, and degrade to the desk defaults when it is not
+# (context-free CLI runs, tests): absence of config is a default,
+# never an exception.
+
+#: The desk's historical UA — the fallback when no configured UA
+#: exists, kept in exactly one place.
+DEFAULT_USER_AGENT = "nomorals-pumpdesk"
+
+#: Fallback per-source, per-cycle hard budget (seconds) — mirrors
+#: the ToolSettings default; see that field for the sizing note.
+DEFAULT_SOURCE_BUDGET_S = 45.0
+
+
+def _tools_settings() -> Any:
+    try:
+        from ...core.config import get_settings
+        return get_settings().tools
+    except Exception:  # noqa: BLE001 - config absence degrades
+        return None
+
+
+def desk_user_agent() -> str:
+    """The ONE user-agent every desk fetch sends: the configured
+    ``tools.user_agent`` when settings provide one, else the desk
+    default.  Never raises."""
+    tools = _tools_settings()
+    ua = str(getattr(tools, "user_agent", "") or "").strip()
+    return ua or DEFAULT_USER_AGENT
+
+
+def desk_source_budget_s() -> float:
+    """The hard per-source time budget for one desk cycle
+    (seconds): ``tools.pumpdesk_source_budget_s`` when configured,
+    else the desk default.  Never raises; a non-positive or
+    unreadable value falls back to the default rather than
+    disabling the budget."""
+    tools = _tools_settings()
+    try:
+        value = float(getattr(tools, "pumpdesk_source_budget_s", 0)
+                      or 0)
+    except (TypeError, ValueError):
+        value = 0.0
+    return value if value > 0 else DEFAULT_SOURCE_BUDGET_S
+
+
+def pumpportal_api_key() -> str:
+    """The PumpPortal API key, read per call from the provisioning
+    env bridge (``PUMPPORTAL_API_KEY`` — the vault→env bridge
+    writes it when the owner provisions ``/pump provision
+    pumpportal``, exactly the Helius pattern).  "" when the desk
+    runs keyless: the free subscriptions (new-token + migration)
+    need no key; the metered trade streams do (PumpPortal, since
+    May 2026).  The value is never logged or rendered anywhere."""
+    return os.environ.get("PUMPPORTAL_API_KEY", "").strip()
+
+
 # ── RPC endpoint selection ────────────────────────────────────────────
 
 #: Keyless public RPC routes, in seed preference order:
@@ -216,9 +280,10 @@ def rpc_endpoint_from_env() -> tuple[str, str]:
     return (first["endpoint"], first["source"])
 
 
-# ── self-provisioning: the keyed RPC tier ─────────────────────────────
+# ── self-provisioning: the keyed tiers ───────────────────────────────
 
 HELIUS_SERVICE = "helius"
+PUMPPORTAL_SERVICE = "pumpportal"
 
 
 def _validate_helius(token: str, http_get: Any) -> Any:
@@ -244,10 +309,20 @@ def _validate_helius(token: str, http_get: Any) -> Any:
 
 
 def ensure_provisioning() -> list[str]:
-    """Register Helius with the real self-provisioning registry
-    (idempotent).  The owner provisions it like any other service:
-    his own account, live validation, vault, env bridge
-    (``HELIUS_API_KEY`` is read per call by the desk)."""
+    """Register the desk's keyed tiers with the real
+    self-provisioning registry (idempotent).  The owner provisions
+    each like any other service: his own account, vault, env
+    bridge — the desk reads the bridged env keys per call
+    (``HELIUS_API_KEY`` in :func:`rpc_routes`,
+    ``PUMPPORTAL_API_KEY`` in :func:`pumpportal_api_key`).
+
+    Helius carries a LIVE validator (its REST surface answers a
+    key check by GET).  PumpPortal deliberately carries NONE:
+    PumpPortal exposes no GET-only key check — its keyed surfaces
+    are the trade POST API and the metered data socket — so the
+    framework's answer for it is an honest ``inconclusive``, never
+    a fabricated ok; the key's truth is proven by the socket's
+    subscription acks on first use."""
     from ...accounts.provisioning import (
         ProvisionService, _VALIDATORS, register_provision_service)
     _VALIDATORS.setdefault("helius_key", _validate_helius)
@@ -263,4 +338,16 @@ def ensure_provisioning() -> list[str]:
         validator="helius_key",
         flow="",
     ))
-    return [HELIUS_SERVICE]
+    register_provision_service(ProvisionService(
+        id=PUMPPORTAL_SERVICE,
+        display="PumpPortal",
+        aliases=("pumpportal-data",),
+        vault_service="pumpportal",
+        env_keys=("PUMPPORTAL_API_KEY",),
+        login_url="https://pumpportal.fun",
+        token_url="",
+        signup_url="https://pumpportal.fun",
+        validator="",
+        flow="",
+    ))
+    return [HELIUS_SERVICE, PUMPPORTAL_SERVICE]

@@ -17,20 +17,40 @@ import urllib.error
 import urllib.request
 from typing import Callable, Optional
 
+from .wsclient import TransportDeniedError
+
 __all__ = ["DEX_API", "token_snapshot", "token_attention",
            "default_http_get"]
 
 DEX_API = "https://api.dexscreener.com"
 
 
-def default_http_get(url: str, headers: dict) -> tuple[int, str]:
+def default_http_get(url: str, headers: dict,
+                     timeout: float = 20.0) -> tuple[int, str]:
+    """The DexScreener transport: the desk's configured UA (the
+    ONE config surface — sources.desk_user_agent) unless the
+    caller overrides it, and a hard timeout the caller sizes from
+    the source's cycle budget.  A transport denial (builtin
+    PermissionError out of the socket layer) is re-raised as
+    TransportDeniedError — never recorded under the raw class
+    name, which the house taxonomy reads as a policy denial."""
+    from .sources import desk_user_agent
     req = urllib.request.Request(url, headers={
-        "User-Agent": "nomorals-pumpdesk", **(headers or {})})
+        "User-Agent": desk_user_agent(), **(headers or {})})
     try:
-        with urllib.request.urlopen(req, timeout=20) as resp:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
             return resp.status, resp.read().decode("utf-8", "replace")
     except urllib.error.HTTPError as exc:
         return exc.code, exc.read().decode("utf-8", "replace")
+    except PermissionError as exc:
+        raise TransportDeniedError(
+            f"transport denied fetching {url}: {exc}") from exc
+    except urllib.error.URLError as exc:
+        if isinstance(exc.reason, PermissionError):
+            raise TransportDeniedError(
+                f"transport denied fetching {url}: "
+                f"{exc.reason}") from exc
+        raise
 
 
 def token_snapshot(mint: str,

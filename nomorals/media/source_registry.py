@@ -1153,9 +1153,31 @@ class SourceRegistry:
 
     def health_for(self, desc: SourceDescriptor) -> str:
         """Current health status for one source ("unknown" until the
-        health loop or an outcome says otherwise)."""
+        health loop or an outcome says otherwise).
+
+        One state is never presented on zero evidence: ``dead``.
+        A source whose recorded-attempts ledger is completely empty
+        (no ok / fail / blocked / rate-limited / no-result outcome
+        and no ``last_seen`` — consumers have never actually tried
+        it) reads ``unprobed``, however a root probe classified it:
+        an API host whose root path 404s has not been attempted,
+        and calling it dead is how a never-used grader wore a
+        death certificate (the DexScreener case, 2026-10-23:
+        health ``dead`` beside ok 0 / fail 0 / last_seen 0.0).
+        Once any real attempt is recorded, the stored status —
+        dead included — is presented as-is: dead-after-failures
+        is a real state, dead-before-any-attempt is not."""
         entry = self._health.get(desc.key) or {}
-        return str(entry.get("status") or "unknown")
+        status = str(entry.get("status") or "unknown")
+        if status == "dead":
+            st = self._stats.get(desc.key)
+            if st is None or (st.ok == 0 and st.fail == 0
+                              and st.blocked == 0
+                              and st.rate_limited == 0
+                              and st.no_result == 0
+                              and st.last_seen == 0.0):
+                return "unprobed"
+        return status
 
     def origin_for(self, desc: SourceDescriptor) -> str:
         """How *desc* entered the registry: "seed" | "grown" |

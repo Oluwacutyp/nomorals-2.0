@@ -23,7 +23,8 @@ import struct
 from typing import Optional
 from urllib.parse import urlparse
 
-__all__ = ["WebSocketClient", "WSClosed", "WSHandshakeError"]
+__all__ = ["WebSocketClient", "WSClosed", "WSHandshakeError",
+           "TransportDeniedError", "TRANSPORT_DENIED_CLASS"]
 
 
 class WSClosed(Exception):
@@ -32,6 +33,30 @@ class WSClosed(Exception):
 
 class WSHandshakeError(Exception):
     pass
+
+
+#: Registry error-class vocabulary for a transport denial (see
+#: TransportDeniedError) — one string every desk fetch path records
+#: for this failure, so the health record speaks one language.
+TRANSPORT_DENIED_CLASS = "transport-denied"
+
+
+class TransportDeniedError(Exception):
+    """The OS / network layer refused the connection itself: a
+    builtin ``PermissionError`` out of the socket layer (on
+    Windows, WSAEACCES 10013 — a firewall or endpoint-protection
+    rule forbidding the outbound connection).
+
+    This is a FETCH-LAYER condition and must never be recorded
+    under the raw class name ``PermissionError``: the house error
+    taxonomy (``core.errors.classify``) maps that builtin to
+    ``CapabilityDenied`` ("policy.denied"), so a health record
+    wearing it reads as Devon's own policy stack denying the
+    fetch — the misreading that sent the 2026-10-23 pump.fun
+    frontend failure hunting through Cloudflare theories.  Every
+    desk transport wraps the builtin into this type at the seam
+    where it escapes, and the registry records
+    :data:`TRANSPORT_DENIED_CLASS` for it."""
 
 
 _GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -64,9 +89,13 @@ class WebSocketClient:
     expires with no message, OSError on transport failure."""
 
     def __init__(self, url: str, timeout: float = 20.0,
-                 user_agent: str = "nomorals-pumpdesk"):
+                 user_agent: str = ""):
         self.url = url
         self.timeout = timeout
+        if not user_agent:
+            # the desk's ONE UA surface (config-backed)
+            from .sources import desk_user_agent
+            user_agent = desk_user_agent()
         self.user_agent = user_agent
         self._sock: Optional[socket.socket] = None
         self._buf = b""
@@ -107,10 +136,17 @@ class WebSocketClient:
             raise WSHandshakeError(f"unsupported scheme {u.scheme!r}")
         host = u.hostname or ""
         port = u.port or (443 if u.scheme == "wss" else 80)
-        raw = self._open_tunnel(host, port)
-        if u.scheme == "wss":
-            raw = ssl.create_default_context().wrap_socket(
-                raw, server_hostname=host)
+        try:
+            raw = self._open_tunnel(host, port)
+            if u.scheme == "wss":
+                raw = ssl.create_default_context().wrap_socket(
+                    raw, server_hostname=host)
+        except PermissionError as exc:
+            # the OS refused the connection itself (WSAEACCES on
+            # Windows) — a transport denial, never a policy one
+            raise TransportDeniedError(
+                f"transport denied connecting to {host}:{port}: "
+                f"{exc}") from exc
         key = base64.b64encode(os.urandom(16)).decode()
         path = u.path or "/"
         if u.query:

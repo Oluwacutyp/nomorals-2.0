@@ -261,6 +261,17 @@ class ToolSettings:
     user_agent: str = "NoMoralsCore/0.1 (+https://github.com/Oluwacutyp/No-morals-ai)"
     robots_txt: bool = True
     http_timeout: float = 30.0
+    #: Pump desk: hard per-source time budget (seconds) for one
+    #: watch/study cycle.  Every feed source (each RPC route, the
+    #: frontend poll, the DexScreener reads) spends at most this
+    #: long per cycle; a source that exhausts it degrades alone
+    #: while the desk keeps serving from the rest.  Sized against
+    #: the observed failure (2026-10-23): public RPC reads stalling
+    #: ~16.5s apiece, repeated across routes and dossiers, blew
+    #: the 300s watch-job budget — 45s caps one source's total
+    #: damage per cycle at a fraction of the job budget while
+    #: leaving room for several honest slow reads.
+    pumpdesk_source_budget_s: float = 45.0
     max_concurrent_downloads: int = 4
 
 

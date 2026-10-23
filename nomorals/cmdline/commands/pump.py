@@ -104,8 +104,13 @@ def _cmd_pump(args: Any, context: Any) -> int:
               + ", ".join(ids))
         print(f"  helius (HELIUS_API_KEY): "
               f"{'present' if os.environ.get('HELIUS_API_KEY', '').strip() else 'MISSING'}")
-        print("drive it with /pump provision helius in chat (owner's "
-              "own account; validated live, then vaulted)")
+        print(f"  pumpportal (PUMPPORTAL_API_KEY): "
+              f"{'present' if os.environ.get('PUMPPORTAL_API_KEY', '').strip() else 'MISSING'}")
+        print("drive it with /pump provision helius or /pump "
+              "provision pumpportal in chat (owner's own account; "
+              "then vaulted — Helius validated live, PumpPortal "
+              "has no GET key check so its validation is "
+              "inconclusive by design)")
         return 0
 
     print(f"unknown pump action {action!r}")

@@ -83,6 +83,8 @@ class PumpStore:
         self._params_log_path = os.path.join(self.dir,
                                              "score_params.jsonl")
         self._knowledge_path = os.path.join(self.dir, "knowledge.jsonl")
+        self._health_log_path = os.path.join(self.dir,
+                                             "health_events.jsonl")
 
     # ── launches ──────────────────────────────────────────────────
 
@@ -256,6 +258,18 @@ class PumpStore:
 
     def param_events(self) -> list[dict[str, Any]]:
         return _read_jsonl(self._params_log_path)
+
+    # ── feed-health journal (resilience pass) ─────────────────────
+
+    def record_health_event(self, event: dict[str, Any]) -> None:
+        """Append one desk feed-state transition (stand-down
+        entered / recovered, with the per-source reasons at the
+        time).  Append-only like every desk ledger: the desk's
+        state history is auditable, never rewritten."""
+        _append_jsonl(self._health_log_path, event)
+
+    def health_events(self) -> list[dict[str, Any]]:
+        return _read_jsonl(self._health_log_path)
 
     # ── knowledge shelf (P2) ──────────────────────────────────────
 

@@ -36,12 +36,15 @@ import urllib.request
 from typing import Any, Callable, Optional
 
 from . import chain
-from .wsclient import WebSocketClient, WSClosed
+from .wsclient import (
+    TRANSPORT_DENIED_CLASS, TransportDeniedError, WebSocketClient,
+    WSClosed)
 
 __all__ = [
     "PUMPPORTAL_WS", "Prefilter", "frontend_candidate",
     "fetch_frontend", "fetch_coin_row", "base_backoff",
     "PumpPortalBackend", "RpcLogBackend", "Firehose",
+    "TransportDeniedError", "TRANSPORT_DENIED_CLASS",
 ]
 
 PUMPPORTAL_WS = "wss://pumpportal.fun/api/data"
@@ -123,10 +126,13 @@ def frontend_candidate(row: dict[str, Any]) -> Optional[dict[str, Any]]:
 def fetch_frontend(http_get: Callable, limit: int = 50,
                    sort: str = "market_cap") -> list[dict[str, Any]]:
     """Recent coins from the frontend API (backfill/discovery).
-    ``http_get(url, headers) -> (status, text)`` — the house shape."""
+    ``http_get(url, headers) -> (status, text)`` — the house shape.
+    The UA resolves through the desk's ONE config surface
+    (sources.desk_user_agent), never a per-call literal."""
+    from .sources import desk_user_agent
     url = (f"{FRONTEND_API}/coins?offset=0&limit={int(limit)}"
            f"&sort={sort}&order=DESC&includeNsfw=true")
-    status, text = http_get(url, {"User-Agent": "nomorals-pumpdesk"})
+    status, text = http_get(url, {"User-Agent": desk_user_agent()})
     if status != 200:
         raise IOError(f"frontend api answered HTTP {status}")
     rows = json.loads(text)
@@ -146,11 +152,12 @@ def fetch_coin_row(http_get: Callable, mint: str,
     """The frontend API's current coin row for one mint (reply
     count, declared socials, creation time), or None when the
     mint is not in the scanned pages."""
+    from .sources import desk_user_agent
     for page in range(max(1, int(pages))):
         url = (f"{FRONTEND_API}/coins?offset={page * int(page_size)}"
                f"&limit={int(page_size)}&sort=market_cap&order=DESC"
                f"&includeNsfw=true")
-        status, text = http_get(url, {"User-Agent": "nomorals-pumpdesk"})
+        status, text = http_get(url, {"User-Agent": desk_user_agent()})
         if status != 200:
             raise IOError(f"frontend api answered HTTP {status}")
         rows = json.loads(text)
@@ -162,13 +169,31 @@ def fetch_coin_row(http_get: Callable, mint: str,
     return None
 
 
-def _urllib_get(url: str, headers: dict) -> tuple[int, str]:
+def _urllib_get(url: str, headers: dict,
+                timeout: float = 20.0) -> tuple[int, str]:
+    """The desk's plain-GET transport.  ``timeout`` is a hard
+    ceiling the caller sizes from the source's cycle budget.
+
+    A transport denial (builtin PermissionError — the OS refusing
+    the connection, WSAEACCES on Windows — bare or wrapped as a
+    URLError's reason) is re-raised as TransportDeniedError: the
+    raw class name is the house taxonomy's POLICY denial, and a
+    fetch-layer refusal must never be recorded under it."""
     req = urllib.request.Request(url, headers=headers)
     try:
-        with urllib.request.urlopen(req, timeout=20) as resp:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
             return resp.status, resp.read().decode("utf-8", "replace")
     except urllib.error.HTTPError as exc:
         return exc.code, exc.read().decode("utf-8", "replace")
+    except PermissionError as exc:
+        raise TransportDeniedError(
+            f"transport denied fetching {url}: {exc}") from exc
+    except urllib.error.URLError as exc:
+        if isinstance(exc.reason, PermissionError):
+            raise TransportDeniedError(
+                f"transport denied fetching {url}: "
+                f"{exc.reason}") from exc
+        raise
 
 
 # ── backoff ───────────────────────────────────────────────────────────
@@ -198,18 +223,40 @@ class _Control:
         self.q.put(("stop",))
 
 
+def _default_ws_client(url: str) -> WebSocketClient:
+    """The production socket factory: the desk's configured UA,
+    resolved through the ONE config surface."""
+    from .sources import desk_user_agent
+    return WebSocketClient(url, user_agent=desk_user_agent())
+
+
 class PumpPortalBackend:
-    """PumpPortal free subs: token creation + migration events."""
+    """PumpPortal subs: token creation + migration events (free),
+    plus the metered trade streams when an API key is provisioned.
+
+    The key (sources.pumpportal_api_key — the vault→env bridge,
+    read per serve by the Firehose) rides the socket URL as
+    ``?api-key=`` — PumpPortal's own convention for its keyed
+    endpoints.  Keyless, the backend serves exactly the free
+    subscriptions it always did; the key is never logged."""
 
     name = "pumpportal"
     domain = "pumpportal.fun"
 
-    def __init__(self, client_factory: Callable[[str], Any] = None):
-        self._factory = client_factory or (lambda url: WebSocketClient(url))
+    def __init__(self, client_factory: Callable[[str], Any] = None,
+                 api_key: str = ""):
+        self._factory = client_factory or _default_ws_client
+        self.api_key = api_key or ""
+
+    @property
+    def ws_url(self) -> str:
+        if self.api_key:
+            return f"{PUMPPORTAL_WS}?api-key={self.api_key}"
+        return PUMPPORTAL_WS
 
     def serve(self, emit: Emit, ctl: _Control,
               heartbeat_s: float = 120.0) -> None:
-        ws = self._factory(PUMPPORTAL_WS)
+        ws = self._factory(self.ws_url)
         ws.connect()
         try:
             ws.send_text(json.dumps({"method": "subscribeNewToken"}))
@@ -289,7 +336,7 @@ class RpcLogBackend:
                  client_factory: Callable[[str], Any] = None,
                  max_watched: int = 30):
         self.http_endpoint = rpc_http_endpoint
-        self._factory = client_factory or (lambda url: WebSocketClient(url))
+        self._factory = client_factory or _default_ws_client
         self.max_watched = max_watched
         self._watched: dict[str, str] = {}   # mint -> curve
 
@@ -421,6 +468,10 @@ class Firehose:
     its class — the health loop (stand-down 3 / disable 10) decides
     what gets skipped next round."""
 
+    #: Grace a slice worker gets beyond its slice window to honour
+    #: the stop signal before it is declared stuck and abandoned.
+    SLICE_GRACE_S = 5.0
+
     def __init__(self, emit: Emit, registry: Any = None,
                  rpc_http_endpoint: str =
                  "https://api.mainnet-beta.solana.com",
@@ -437,10 +488,38 @@ class Firehose:
         self.stats = {"connects": 0, "drops": 0, "events": 0,
                       "backend": "", "last_event_at": 0.0,
                       "last_error": ""}
+        #: every worker thread this firehose has spawned and not
+        #: yet reaped (the standing consumer + slice workers).
+        #: Python cannot kill a thread, so a worker that ignores
+        #: its stop signal is ABANDONED — daemon, signalled, never
+        #: awaited or reused — and stays visible here until it
+        #: actually exits, so a leak is a number, not a rumour.
+        self._workers: set[threading.Thread] = set()
+        self._workers_lock = threading.Lock()
+
+    # ── worker accounting ─────────────────────────────────────────
+
+    def _track_worker(self, t: threading.Thread) -> None:
+        with self._workers_lock:
+            self._workers.add(t)
+
+    def _prune_workers(self) -> None:
+        with self._workers_lock:
+            self._workers = {t for t in self._workers if t.is_alive()}
+
+    def live_workers(self) -> int:
+        """Worker threads currently alive (dead ones are reaped
+        from the ledger on every read).  A healthy desk returns to
+        its baseline after every cycle — the leak test pins it."""
+        self._prune_workers()
+        with self._workers_lock:
+            return len(self._workers)
 
     def _backends(self) -> list:
+        from .sources import pumpportal_api_key
         out = []
-        pp = PumpPortalBackend(self._factory)
+        pp = PumpPortalBackend(self._factory,
+                               api_key=pumpportal_api_key())
         rpc = RpcLogBackend(self.rpc_http_endpoint, self._factory)
         rpc._watched = getattr(self, "_watched_seed", {})
         for backend in (pp, rpc):
@@ -474,7 +553,18 @@ class Firehose:
 
     def run_slice(self, seconds: float = 20.0) -> dict[str, Any]:
         """One bounded consume window on the best healthy backend.
-        Returns a report (never raises): the job-cycle shape."""
+        Returns a report (never raises): the job-cycle shape.
+
+        The serve loop runs in a supervised worker thread, joined
+        with the slice window plus a grace period.  A worker that
+        does not honour the stop signal inside that bound is
+        declared stuck: the failure is recorded
+        (``worker-stuck``), stop is signalled again, and the
+        daemon worker is ABANDONED — never awaited, never reused;
+        the next slice spawns a fresh worker.  A stuck fetch can
+        therefore cost one worker, never the desk (pre-fix, the
+        serve loop ran on the caller's thread and a wedged
+        backend wedged the whole watch job with it)."""
         backends = self._backends()
         if not backends:
             return {"ok": False, "detail": "all intake backends are "
@@ -493,18 +583,47 @@ class Firehose:
         timer = threading.Timer(seconds, self.ctl.stop)
         timer.daemon = True
         timer.start()
+        outcome: dict[str, Any] = {}
+
+        def _serve() -> None:
+            try:
+                backend.serve(_emit, self.ctl)
+                outcome["ok"] = True
+            except Exception as exc:  # noqa: BLE001 - a drop is data
+                outcome["error"] = exc
+
+        worker = threading.Thread(target=_serve, daemon=True,
+                                  name="pumpdesk-firehose-slice")
+        self._track_worker(worker)
+        worker.start()
         try:
-            backend.serve(_emit, self.ctl)
+            worker.join(timeout=max(0.1, float(seconds))
+                        + self.SLICE_GRACE_S)
+            if worker.is_alive():
+                self.ctl.stop()
+                self.stats["drops"] += 1
+                self.stats["last_error"] = (
+                    "WorkerStuck: backend serve ignored its stop "
+                    "signal past the slice budget; worker abandoned")
+                self._record(backend.domain, False,
+                             error_class="worker-stuck")
+                return {"ok": False, "backend": backend.name,
+                        "events": got["n"],
+                        "detail": self.stats["last_error"],
+                        "worker_stuck": True}
+            if "error" in outcome:
+                exc = outcome["error"]
+                self.stats["drops"] += 1
+                self.stats["last_error"] = \
+                    f"{type(exc).__name__}: {exc}"
+                self._record(backend.domain, False,
+                             error_class=type(exc).__name__)
+                return {"ok": False, "backend": backend.name,
+                        "events": got["n"],
+                        "detail": self.stats["last_error"]}
             self._record(backend.domain, True)
             return {"ok": True, "backend": backend.name,
                     "events": got["n"]}
-        except Exception as exc:  # noqa: BLE001 - a drop is data
-            self.stats["drops"] += 1
-            self.stats["last_error"] = f"{type(exc).__name__}: {exc}"
-            self._record(backend.domain, False,
-                         error_class=type(exc).__name__)
-            return {"ok": False, "backend": backend.name,
-                    "events": got["n"], "detail": self.stats["last_error"]}
         finally:
             timer.cancel()
 
@@ -543,6 +662,7 @@ class Firehose:
 
         self._thread = threading.Thread(target=_loop, daemon=True,
                                         name="pumpdesk-firehose")
+        self._track_worker(self._thread)
         self._thread.start()
         return True
 

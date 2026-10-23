@@ -110,26 +110,31 @@ def default_search_fn(context: Any) -> Callable:
     return _search
 
 
-def default_platform_fn() -> Callable:
+def default_platform_fn(http_get: Callable = None) -> Callable:
     """The production platform leg: the token's current coin row
     from the pump.fun frontend API (bounded list scan — the API
-    has no by-mint route).  A failure yields None (a named gap)."""
+    has no by-mint route).  A failure yields None (a named gap).
+    The desk injects its budgeted transport as ``http_get`` so
+    the scan shares the frontend source's cycle budget."""
     def _platform(mint: str) -> Optional[dict[str, Any]]:
         try:
             from .firehose import _urllib_get, fetch_coin_row
-            return fetch_coin_row(_urllib_get, mint)
+            return fetch_coin_row(http_get or _urllib_get, mint)
         except Exception:  # noqa: BLE001 - no evidence, honestly
             return None
     return _platform
 
 
-def default_dex_fn() -> Callable:
+def default_dex_fn(http_get: Callable = None) -> Callable:
     """The production DexScreener leg: the best pair's declared
-    socials + paid-boost state.  A failure yields None."""
+    socials + paid-boost state.  A failure yields None.  The desk
+    injects its recording transport as ``http_get`` so the read
+    lands in the source registry; the plain default serves
+    context-free callers."""
     def _dex(mint: str) -> Optional[dict[str, Any]]:
         try:
             from .outcomes import default_http_get, token_attention
-            return token_attention(mint, default_http_get)
+            return token_attention(mint, http_get or default_http_get)
         except Exception:  # noqa: BLE001 - no evidence, honestly
             return None
     return _dex

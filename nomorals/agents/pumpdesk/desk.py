@@ -77,7 +77,7 @@ class PumpDesk:
     @property
     def rpc(self) -> Any:
         if self._rpc is None:
-            from .sources import rpc_routes
+            from .sources import desk_source_budget_s, rpc_routes
             reg = self.registry
 
             def _outcome_for(domain: str) -> Any:
@@ -90,12 +90,190 @@ class PumpDesk:
                 return _outcome
 
             clients = [
-                chain.SolanaRPC(route["endpoint"],
-                                on_outcome=_outcome_for(route["domain"]))
+                chain.SolanaRPC(
+                    route["endpoint"],
+                    on_outcome=_outcome_for(route["domain"]),
+                    budget_s=desk_source_budget_s())
                 for route in rpc_routes(reg)
             ]
             self._rpc = chain.RoutedRPC(clients)
         return self._rpc
+
+    # ── feed-source state (resilience pass) ───────────────────────
+
+    #: Registry health values that mean a source is DOWN.
+    _DOWN_HEALTH = ("stood-down", "disabled", "dead")
+    #: Health values that mean a source is serving impaired.
+    _IMPAIRED_HEALTH = ("bot-blocked", "rate-limited", "unverifiable")
+
+    @staticmethod
+    def _error_class_of(exc: BaseException) -> str:
+        """The registry error class for a fetch failure: a
+        transport denial records as ``transport-denied`` on every
+        path (never the raw ``PermissionError`` — the house
+        taxonomy's policy-denial name); everything else records
+        its real class."""
+        if isinstance(exc, chain.TransportDeniedError):
+            return chain.TRANSPORT_DENIED_CLASS
+        return type(exc).__name__
+
+    def _record_source(self, domain: str, ok: bool,
+                       error_class: str = "") -> None:
+        """Record one real fetch outcome for a registry source by
+        domain.  Guarded: registry trouble never sinks a cycle."""
+        try:
+            desc = self.registry.for_domain(domain)
+            if desc is not None:
+                self.registry.record_outcome(
+                    desc, ok, error_class=error_class)
+        except Exception:  # noqa: BLE001 - recording is advisory
+            pass
+
+    def _reset_source_budgets(self) -> None:
+        """Fresh per-cycle time budget for every RPC route
+        (duck-typed: injected RPC doubles without budgets are
+        skipped)."""
+        rpc = self._rpc
+        if rpc is not None:
+            reset = getattr(rpc, "reset_budgets", None)
+            if callable(reset):
+                reset()
+
+    def _budgeted_http_get(self) -> Any:
+        """An ``http_get(url, headers)`` closure whose TOTAL spend
+        is capped at the frontend source's cycle budget — multi-
+        page scans included.  Past the cap it fails fast with
+        TimeoutError instead of paging a stalled source forever:
+        the source degrades for this cycle, the desk moves on."""
+        from .sources import desk_source_budget_s
+        budget = desk_source_budget_s()
+        spent = {"s": 0.0}
+
+        def _get(url: str, headers: dict) -> tuple[int, str]:
+            left = budget - spent["s"]
+            if left <= 0:
+                raise TimeoutError(
+                    f"frontend source budget exhausted "
+                    f"({budget:.0f}s this cycle) — the source "
+                    f"degrades, the desk fails over")
+            t0 = time.time()
+            try:
+                return _firehose._urllib_get(
+                    url, headers, timeout=max(1.0, left))
+            finally:
+                spent["s"] += time.time() - t0
+
+        return _get
+
+    def _dex_http_get(self) -> Any:
+        """The DexScreener transport with outcome recording: every
+        real read lands in the ONE registry for
+        api.dexscreener.com — success when the API answers 200
+        (a 'no pair' answer included: the source SERVED), failure
+        with its real class otherwise.  This is the recording the
+        grader's reads never had, which is how DexScreener could
+        sit at ok 0 / fail 0 / last_seen 0.0 while a root probe
+        wore it as dead.  The transport timeout is the source's
+        cycle budget."""
+        from .sources import desk_source_budget_s
+
+        def _get(url: str, headers: dict) -> tuple[int, str]:
+            try:
+                status, text = _outcomes.default_http_get(
+                    url, headers,
+                    timeout=max(1.0, desk_source_budget_s()))
+            except Exception as exc:  # noqa: BLE001 - recorded, re-raised
+                self._record_source(
+                    "api.dexscreener.com", False,
+                    error_class=self._error_class_of(exc))
+                raise
+            self._record_source(
+                "api.dexscreener.com", status == 200,
+                error_class="" if status == 200 else f"http-{status}")
+            return status, text
+
+        return _get
+
+    def _dex_snapshot(self, mint: str) -> Optional[dict]:
+        """Call-grading snapshot over the recording transport."""
+        return _outcomes.token_snapshot(mint, self._dex_http_get())
+
+    def _source_states(self) -> list[dict[str, Any]]:
+        """Per-source feed state from the ONE registry, in the
+        desk's vocabulary: ok / degraded / down / unprobed, each
+        with its reason.  A source with zero recorded attempts is
+        ``unprobed`` — never down (it has not failed; it has not
+        been tried)."""
+        from .sources import pump_status
+        out: list[dict[str, Any]] = []
+        for row in pump_status(self.registry)["sources"]:
+            stats = row.get("stats") or {}
+            attempts = sum(int(stats.get(k) or 0) for k in
+                           ("ok", "fail", "blocked", "rate_limited",
+                            "no_result"))
+            health = row.get("health", "unknown")
+            last_err = str(stats.get("last_error_class") or "")
+            if health in self._DOWN_HEALTH:
+                state = "down"
+            elif attempts == 0:
+                state = "unprobed"
+            elif last_err or health in self._IMPAIRED_HEALTH:
+                state = "degraded"
+            else:
+                state = "ok"
+            reason = ""
+            if state in ("down", "degraded"):
+                reason = last_err or health
+            out.append({
+                "domain": row.get("domain", ""), "name": row.get("name", ""),
+                "health": health, "active": row.get("active", True),
+                "attempts": attempts, "ok": int(stats.get("ok") or 0),
+                "fail": int(stats.get("fail") or 0),
+                "last_error_class": last_err, "state": state,
+                "reason": reason})
+        return out
+
+    def _desk_state(self, states: list[dict[str, Any]]) -> dict[str, Any]:
+        """The desk-level feed state.  STAND-DOWN is explicit and
+        named: at least one source is down AND nothing is serving
+        (every source is down or never attempted) — the desk says
+        so instead of emitting a misleading all-feeds blob or
+        partial garbage.  Recovery is automatic: the state is
+        recomputed from the registry on every cycle/status, so
+        the first success anywhere lifts it."""
+        down = [s for s in states if s["state"] == "down"]
+        degraded = [s for s in states if s["state"] == "degraded"]
+        serving = [s for s in states if s["state"] in ("ok", "degraded")]
+        if down and not serving:
+            name = "stand-down"
+        elif down or degraded:
+            name = "degraded"
+        else:
+            name = "ok"
+        return {"state": name, "down": down, "degraded": degraded,
+                "sources": states}
+
+    def _journal_desk_state(self, desk_state: dict[str, Any],
+                            at: float) -> None:
+        """Journal desk feed-state TRANSITIONS to the store's
+        health ledger (stand-down entered, recovered, degraded —
+        each with the per-source reasons at the time).  Steady
+        state journals nothing.  Never raises."""
+        try:
+            events = self.store.health_events()
+            last = events[-1].get("state") if events else None
+            current = desk_state["state"]
+            if last == current:
+                return
+            self.store.record_health_event({
+                "at": at, "state": current, "from": last,
+                "sources": [
+                    {"domain": s["domain"], "health": s["health"],
+                     "state": s["state"], "reason": s["reason"]}
+                    for s in desk_state["sources"]],
+            })
+        except Exception:  # noqa: BLE001 - journaling never sinks
+            pass
 
     @property
     def firehose(self) -> _firehose.Firehose:
@@ -262,9 +440,13 @@ class PumpDesk:
         calls, and the health report.  Every leg reports its own
         outcome; a dead leg never kills the cycle."""
         out: dict[str, Any] = {"at": time.time()}
-        # 1. frontend candidate poll (backfill/discovery)
+        self._reset_source_budgets()
+        # 1. frontend candidate poll (backfill/discovery) — one
+        #    source, one hard budget: the poll spends at most the
+        #    source's cycle budget, so a wedged frontend degrades
+        #    this leg only.
         try:
-            rows = _firehose.fetch_frontend(_firehose._urllib_get,
+            rows = _firehose.fetch_frontend(self._budgeted_http_get(),
                                             limit=50)
             promoted = 0
             for row in rows:
@@ -277,15 +459,11 @@ class PumpDesk:
                 self.refresh_dossier(mint)
                 promoted += 1
             out["frontend"] = {"rows": len(rows), "promoted": promoted}
-            desc = self.registry.for_domain("frontend-api-v3.pump.fun")
-            if desc is not None:
-                self.registry.record_outcome(desc, True)
+            self._record_source("frontend-api-v3.pump.fun", True)
         except Exception as exc:  # noqa: BLE001 - a leg reports
             out["frontend"] = {"error": f"{type(exc).__name__}: {exc}"}
-            desc = self.registry.for_domain("frontend-api-v3.pump.fun")
-            if desc is not None:
-                self.registry.record_outcome(
-                    desc, False, error_class=type(exc).__name__)
+            self._record_source("frontend-api-v3.pump.fun", False,
+                                error_class=self._error_class_of(exc))
         # 2. bounded stream slice (jobs/tests); the runtime's thread
         #    consumer is the standing intake — a slice here also
         #    serves hosts where the thread never started.
@@ -320,8 +498,23 @@ class PumpDesk:
         out["watch_activity"] = _watch.watch_activity(
             self.store, since=self._last_watch_at)
         self._last_watch_at = out["at"]
-        # 5. module health → alert policy (hints, Pass-7 discipline)
-        out["health"] = self._health_report()
+        # 5. feed state: per-source degradation is named in the
+        #    report; a total outage is the explicit stand-down
+        #    state (journaled on transition), never a blob.
+        states = self._source_states()
+        desk_state = self._desk_state(states)
+        self._journal_desk_state(desk_state, at=out["at"])
+        out["sources"] = states
+        out["degraded_sources"] = [
+            s["domain"] for s in states
+            if s["state"] in ("degraded", "down")]
+        out["stand_down"] = (
+            {"state": "stand-down",
+             "reasons": {s["domain"]: (s["reason"] or s["health"])
+                         for s in desk_state["down"]}}
+            if desk_state["state"] == "stand-down" else None)
+        # 6. module health → alert policy (hints, Pass-7 discipline)
+        out["health"] = self._health_report(states)
         return out
 
     #: Attention verdicts are cached on the dossier this long
@@ -355,10 +548,11 @@ class PumpDesk:
         # named gaps instead of reaching for the network.
         platform_fn = self._attention_platform
         if platform_fn is None and self.context is not None:
-            platform_fn = _attention.default_platform_fn()
+            platform_fn = _attention.default_platform_fn(
+                self._budgeted_http_get())
         dex_fn = self._attention_dex
         if dex_fn is None and self.context is not None:
-            dex_fn = _attention.default_dex_fn()
+            dex_fn = _attention.default_dex_fn(self._dex_http_get())
         att = _attention.verify_attention(
             d, search_fn=search_fn, store=self.store, now=now,
             platform_fn=platform_fn, dex_fn=dex_fn)
@@ -382,8 +576,9 @@ class PumpDesk:
         wallet records that earned it are shelved into the
         Library."""
         out: dict[str, Any] = {"at": time.time()}
+        self._reset_source_budgets()
         out["scoring"] = self.calls.score_due(
-            self.store, snapshot_fn=_dex_snapshot)
+            self.store, snapshot_fn=self._dex_snapshot)
         profiles = _dossier.refresh_dev_profiles(self.store)
         out["dev_profiles"] = len(profiles)
         out["serial_ruggers"] = sum(1 for p in profiles.values()
@@ -438,17 +633,44 @@ class PumpDesk:
 
     # ── health (Pass-7 alert discipline) ──────────────────────────
 
-    def _health_report(self) -> dict[str, Any]:
+    def _health_report(self, states: Any = None) -> dict[str, Any]:
         """Feed health from the registry; a newly-dead backend is
         published WITH hints — the policy decides PAGE vs DIGEST;
-        closures/recurrence are the policy's business, not ours."""
+        closures/recurrence are the policy's business, not ours.
+        A total outage publishes as the desk's STAND-DOWN (one
+        named state with per-source reasons), not as N separate
+        feed deaths."""
         from .sources import pump_status
         st = pump_status(self.registry)
-        dead = [s for s in st["sources"]
-                if s["health"] in ("disabled", "stood-down", "dead")]
+        if states is None:
+            states = self._source_states()
+        desk_state = self._desk_state(states)
+        dead = [s for s in states if s["state"] == "down"]
         reported = []
-        if dead and self.notifier is not None:
+        if self.notifier is not None and \
+                desk_state["state"] == "stand-down":
+            try:
+                reasons = "; ".join(
+                    f"{s['domain']}: {s['reason'] or s['health']}"
+                    for s in dead)
+                res = self.notifier.publish(
+                    "pumpdesk",
+                    "pump desk STAND-DOWN: all feeds down",
+                    f"every feed source is down or unattempted — "
+                    f"the desk has stood down and will recover "
+                    f"automatically when any feed answers. "
+                    f"per-source: {reasons}",
+                    alert_subject="pumpdesk stand-down",
+                    alert_hints={"failed": True,
+                                 "subject": "pumpdesk stand-down"})
+                reported.append({"domain": "stand-down",
+                                 "tier": res.get("tier", "")})
+            except Exception:  # noqa: BLE001 - alerting never sinks
+                pass
+        elif dead and self.notifier is not None:
+            by_domain = {s["domain"]: s for s in st["sources"]}
             for s in dead:
+                row = by_domain.get(s["domain"], {})
                 try:
                     res = self.notifier.publish(
                         "pumpdesk",
@@ -456,7 +678,7 @@ class PumpDesk:
                         f"the {s['name']} intake backend is "
                         f"{s['health']} in the source registry — the "
                         f"desk is running on its remaining feeds. "
-                        f"stats: {s['stats']}",
+                        f"stats: {row.get('stats', {})}",
                         alert_subject=f"pumpdesk feed {s['domain']}",
                         alert_hints={"failed": True,
                                      "subject": s["domain"]})
@@ -465,6 +687,7 @@ class PumpDesk:
                 except Exception:  # noqa: BLE001 - alerting never sinks
                     pass
         return {"sources": st["sources"], "dead": dead,
+                "desk_state": desk_state["state"],
                 "alerted": reported}
 
     # ── stream supervision ────────────────────────────────────────
@@ -487,6 +710,12 @@ class PumpDesk:
         calls = self.calls.log.calls()
         graph = self.store.graph()
         wallets = graph.get("wallets", {})
+        states = self._source_states()
+        desk_state = self._desk_state(states)
+        firehose_stats: dict[str, Any] = {}
+        if self._firehose is not None:
+            firehose_stats = dict(self.firehose.stats)
+            firehose_stats["workers"] = self.firehose.live_workers()
         return {
             "launches_seen": len(self.store.launches()),
             "dossiers": len(self.store.dossiers()),
@@ -509,8 +738,17 @@ class PumpDesk:
             },
             "shelf_items": len(self.store.knowledge()),
             "sources": pump_status(self.registry),
-            "firehose": (self.firehose.stats
-                         if self._firehose is not None else {}),
+            "desk_state": {
+                "state": desk_state["state"],
+                "degraded_sources": [
+                    s["domain"] for s in states
+                    if s["state"] in ("degraded", "down")],
+                "down_reasons": {
+                    s["domain"]: (s["reason"] or s["health"])
+                    for s in desk_state["down"]},
+                "sources": states,
+            },
+            "firehose": firehose_stats,
             "execution": "none — signals only (P2); no wallet, no "
                          "signing, no orders",
         }
@@ -563,6 +801,18 @@ def render_status(st: dict[str, Any]) -> str:
     if src:
         L.append("sources: " + ", ".join(
             f"{s['domain']} [{s['health']}]" for s in src))
+    ds = st.get("desk_state") or {}
+    if ds.get("state") == "stand-down":
+        reasons = ds.get("down_reasons") or {}
+        detail = "; ".join(f"{d}: {r}" for d, r in reasons.items())
+        L.append("⛔ STAND-DOWN — all feeds down; the desk is "
+                 "serving nothing and will recover automatically "
+                 "when any feed answers"
+                 + (f" ({detail})" if detail else ""))
+    elif ds.get("state") == "degraded":
+        names = ", ".join(ds.get("degraded_sources") or [])
+        L.append(f"⚠️ degraded feeds: {names} — the desk is "
+                 f"serving from its remaining sources")
     L.append(str(st.get("execution", "")))
     return "\n".join(L)
 

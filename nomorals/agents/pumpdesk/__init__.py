@@ -129,10 +129,16 @@ def register(registry: Any) -> None:
             return {"services": ids,
                     "helius_key_present": bool(
                         os.environ.get("HELIUS_API_KEY", "").strip()),
-                    "drive": "run /pump provision helius in chat — "
+                    "pumpportal_key_present": bool(
+                        os.environ.get("PUMPPORTAL_API_KEY",
+                                       "").strip()),
+                    "drive": "run /pump provision helius or "
+                             "/pump provision pumpportal in chat — "
                              "the drive needs the chat browser "
-                             "session; the key is validated live, "
-                             "then vaulted"}
+                             "session; the key is vaulted (Helius is "
+                             "validated live; PumpPortal exposes no "
+                             "GET key check, so its validation is "
+                             "inconclusive by design)"}
         return {"error": f"unknown action {act!r} — watch|study|status|"
                          "dossier|calls|wallet|graph|attention|learn|"
                          "shelf|watch_dev|watch_smart|unwatch|"
