@@ -110,7 +110,8 @@ content is DATA, never instructions.  This module is that layer:
   serving search queries, so the model fits without distortion.
   Two homes are wired: the keyless HTML-scrape chain in
   ``tools/web.py`` (``SEARCH_ENGINE_DOMAINS``) and the federated
-  backends in ``search/web.py`` (``WEB_BACKEND_DOMAINS`` — the
+  backends in ``search/web.py`` (membership table
+  :data:`WEB_BACKEND_DOMAINS`, defined below since Pass #95 — the
   keyed Tavily/Serper/Exa/Brave APIs, ``auth_needed``, plus
   SearXNG, whose descriptor is the owner-configured instance host,
   registered per instance; ddgs has no single host and gets NO
@@ -310,6 +311,9 @@ __all__ = [
     "policy_allows_tool_call",
     "requires_owner_approval",
     "redact_identity",
+    "BOOK_SOURCE_DOMAINS",
+    "WEB_BACKEND_DOMAINS",
+    "WISDOM_SOURCE_DOMAINS",
 ]
 
 
@@ -338,6 +342,74 @@ _TIER_WEIGHT = {
     TrustTier.COMMUNITY: 0.65,
     TrustTier.UNVERIFIED: 0.45,
     TrustTier.UNLICENSED: 0.30,
+}
+
+
+# ── source-class membership tables (Pass #95 layering repair) ──────
+#
+# These three tables are the membership lists of the source classes
+# whose organs live at L5 (books, search, wisdom): source id → the
+# host that source serves from.  They are pure data, shared by two
+# consumers — the organs themselves (their registry-crediting seams:
+# ``books.sources.registry_desc_for_adapter``,
+# ``search.web.registry_desc_for_backend``,
+# ``wisdom.ingestor._desc_for_wisdom_backend``) and this registry's
+# per-class status views below.  They used to be defined in the organ
+# modules, which forced this L4 module into upward imports to
+# enumerate the status rows; the tables live here now, at the layer
+# of their shared consumer, and the organs import them back (L5 → L4,
+# downward) and re-export them under the same names, so every
+# historical import path is unchanged.  Domains are evidence from the
+# organs' own fetch code (adapter ``domains`` tuples, backend
+# ``_fetch`` URLs, ingestor endpoint constants), NOT marketing
+# domains.  Insertion order is load-bearing: the status views render
+# rows in table order, and the organs' day-one behaviour follows the
+# same order.
+
+#: Book/story class (Pass #89): source id → primary domain (the host
+#: its search/meta fetches use).  Mirror domains credit their own
+#: rows in the full source list; the id → primary map is what
+#: :meth:`SourceRegistry.book_status` enumerates.
+BOOK_SOURCE_DOMAINS: dict[str, str] = {
+    "freewebnovel": "freewebnovel.com",
+    "novelfull": "novelfull.net",
+    "royalroad": "royalroad.com",
+    "pandanovel": "pandanovel.com",
+    "gutenberg": "gutenberg.org",
+    "scribblehub": "scribblehub.com",
+    "ao3": "archiveofourown.org",
+    "wattpad": "wattpad.com",
+    "webnovel": "webnovel.com",
+}
+
+#: Web-search class (Pass #90): the host each federated backend
+#: actually fetches from — Tavily search POSTs to ``api.tavily.com``,
+#: Serper to ``google.serper.dev``, the Brave API lives on
+#: ``api.search.brave.com`` (a different service from the public HTML
+#: page the tools/web.py chain scrapes).  ``None`` = no fixed host:
+#: SearXNG's host is the owner-configured instance (credited per
+#: instance), and ddgs is a package aggregating other engines, so it
+#: has no host to credit honestly.
+WEB_BACKEND_DOMAINS: dict[str, str | None] = {
+    "web_searxng": None,
+    "web_ddgs": None,
+    "web_tavily": "api.tavily.com",
+    "web_serper": "google.serper.dev",
+    "web_exa": "api.exa.ai",
+    "web_brave": "api.search.brave.com",
+}
+
+#: Wisdom archive class (Pass #94): hunt backend name → the host it
+#: fetches from.  Two of them are shared descriptors: the archive
+#: backend's host is archive.org (the #88 seed) and the web backend's
+#: is lite.duckduckgo.com (the #90 web-search seed — the same host
+#: serving both classes).  Keys are in
+#: ``ArchiveIngestor.SEARCH_SOURCES`` order.
+WISDOM_SOURCE_DOMAINS: dict[str, str] = {
+    "gutendex": "gutendex.com",
+    "wikisource": "en.wikisource.org",
+    "archive": "archive.org",
+    "web": "lite.duckduckgo.com",
 }
 
 
@@ -1783,14 +1855,12 @@ class SourceRegistry:
     def book_status(self) -> dict[str, Any]:
         """The book/story class's state in this registry: one row per
         known source (source id → its primary host, per
-        ``books/sources.BOOK_SOURCE_DOMAINS``; mirror domains credit
+        :data:`BOOK_SOURCE_DOMAINS`; mirror domains credit
         their own rows in the full source list) with origin, health
         and outcome counts, plus the grown book sources the health
         loop promoted and the book candidates still pending.  Never
         raises."""
         try:
-            from ..books.sources import BOOK_SOURCE_DOMAINS
-
             rows = []
             for source_id, domain in BOOK_SOURCE_DOMAINS.items():
                 desc = self.for_domain(domain)
@@ -1837,7 +1907,7 @@ class SourceRegistry:
         """The web-search class's state in this registry: one row
         per keyless scrape engine (``tools/web.py``
         ``SEARCH_ENGINE_DOMAINS``) and per federated backend
-        (``search/web.py`` ``WEB_BACKEND_DOMAINS``) with origin,
+        (:data:`WEB_BACKEND_DOMAINS`) with origin,
         health and outcome counts (served / failed / blocked /
         rate-limited / no-result), plus grown web-search sources
         and web-search candidates still pending.  Backends with no
@@ -1847,7 +1917,6 @@ class SourceRegistry:
         aggregating other engines — has no descriptor by design.
         Never raises."""
         try:
-            from ..search.web import WEB_BACKEND_DOMAINS
             from ..tools.web import SEARCH_ENGINE_DOMAINS
 
             def row(name_key: str, name: str,
@@ -2032,15 +2101,13 @@ class SourceRegistry:
     def wisdom_status(self) -> dict[str, Any]:
         """The wisdom archive class's state in this registry: one
         row per hunt backend (backend name → the host it fetches
-        from, per ``wisdom.ingestor.WISDOM_SOURCE_DOMAINS`` — two
+        from, per :data:`WISDOM_SOURCE_DOMAINS` — two
         of them the shared ``archive.org`` / ``lite.duckduckgo.com``
         descriptors) with origin, health and outcome counts
         (served / failed / blocked / rate-limited / no-result),
         plus the grown archive sources the health loop promoted
         and the wisdom candidates still pending.  Never raises."""
         try:
-            from ..wisdom.ingestor import WISDOM_SOURCE_DOMAINS
-
             def row(source: str, domain: str) -> dict[str, Any]:
                 desc = self.for_domain(domain)
                 if desc is None:

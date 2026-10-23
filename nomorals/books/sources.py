@@ -91,6 +91,7 @@ from pathlib import Path
 from typing import Any
 
 from ..core.logging_setup import get_logger
+from ..media.source_registry import BOOK_SOURCE_DOMAINS
 from ..tools.browser import Node, parse_html
 
 _log = get_logger(__name__)
@@ -161,19 +162,12 @@ def normalize_url(url: str) -> str:
 # from, and every known domain (mirrors included, from the adapters'
 # own ``domains`` tuples + the descriptor table) mapped back to its
 # source id.  The media registry seeds exactly these domains.
-
-#: source id → primary domain (the host its search/meta fetches use)
-BOOK_SOURCE_DOMAINS: dict[str, str] = {
-    "freewebnovel": "freewebnovel.com",
-    "novelfull": "novelfull.net",
-    "royalroad": "royalroad.com",
-    "pandanovel": "pandanovel.com",
-    "gutenberg": "gutenberg.org",
-    "scribblehub": "scribblehub.com",
-    "ao3": "archiveofourown.org",
-    "wattpad": "wattpad.com",
-    "webnovel": "webnovel.com",
-}
+#
+# Pass #95: :data:`BOOK_SOURCE_DOMAINS` itself is defined in
+# ``media/source_registry.py`` — the table is shared with the
+# registry's own status views, so it lives at the registry's layer
+# and is imported back here (downward); the name, contents and order
+# are unchanged for every consumer of this module.
 
 #: every known book-source domain (mirrors included) → source id
 BOOK_SOURCE_BY_DOMAIN: dict[str, str] = {

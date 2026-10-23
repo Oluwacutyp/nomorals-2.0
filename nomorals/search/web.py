@@ -78,6 +78,7 @@ import urllib.request
 from datetime import datetime, timezone
 from typing import Any
 
+from ..media.source_registry import WEB_BACKEND_DOMAINS
 from .base import SourceAdapter
 from .errors import SearchError
 from .model import SearchResult
@@ -216,26 +217,14 @@ def _parse_ts(value: Any) -> float | None:
 
 
 # ── the web-search class in the ONE source registry (Pass #90) ───────
-
-#: The host each federated backend actually fetches from — the
-#: backend's source in the ONE source registry.  Domains are
-#: evidence from each backend's ``_fetch`` URL, NOT marketing
-#: domains: Tavily search POSTs to ``api.tavily.com``, Serper to
-#: ``google.serper.dev``, the Brave API lives on
-#: ``api.search.brave.com`` (a different service from the public
-#: HTML page the tools/web.py chain scrapes).  ``None`` = no fixed
-#: host: SearXNG's host is the owner-configured instance (credited
-#: per instance — see :func:`registry_desc_for_backend`), and ddgs
-#: is a package aggregating other engines, so it has no host to
-#: credit honestly.
-WEB_BACKEND_DOMAINS: dict[str, str | None] = {
-    "web_searxng": None,
-    "web_ddgs": None,
-    "web_tavily": "api.tavily.com",
-    "web_serper": "google.serper.dev",
-    "web_exa": "api.exa.ai",
-    "web_brave": "api.search.brave.com",
-}
+#
+# :data:`WEB_BACKEND_DOMAINS` — the host each federated backend
+# actually fetches from, i.e. the backend's source in the ONE source
+# registry — is defined in ``media/source_registry.py`` (Pass #95:
+# the table is shared with the registry's own status views, so it
+# lives at the registry's layer and is imported back here, downward;
+# the name, contents and order are unchanged for every consumer of
+# this module, ``search.federated`` included).
 
 
 def web_registry_for_context(context: Any = None,

@@ -534,7 +534,7 @@ class VoiceIntegration:
         # Send via Telegram if available
         if self.telegram:
             try:
-                from ..tools.audio import wav_to_voice_ogg
+                from ..core.audio_convert import wav_to_voice_ogg
 
                 send_path, mime = wav_to_voice_ogg(audio_path)
                 as_voice = mime == "audio/ogg"

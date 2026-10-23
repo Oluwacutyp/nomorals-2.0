@@ -70,6 +70,7 @@ from ..core.logging_setup import get_logger
 from ..documents.errors import DocumentError
 from ..documents.model import full_text
 from ..documents.parsers import parse_bytes
+from ..media.source_registry import WISDOM_SOURCE_DOMAINS
 from ..tools.web import RobotsCache
 from .corpus import CanonCorpus, ManifestEntry
 from .errors import CorpusError, IngestError
@@ -133,23 +134,17 @@ _LINK_RE = re.compile(
 WISDOM_KIND = "wisdom-archive"
 
 #: The host each wisdom search backend actually fetches from — the
-#: backend's membership in the ONE source registry (Pass #94).
-#: This map is the wisdom class's membership list: the search seam
-#: credits outcomes to the registry descriptor for this domain,
-#: the registry's status surface renders the class from it, and
-#: the health loop probes the two template-carrying seeds through
-#: their real search endpoints.  Domains are evidence from this
-#: module (each backend's endpoint constant), NOT marketing
-#: domains: the web backend's host is lite.duckduckgo.com (the
-#: #90 web-search seed — the same host serving both classes), and
-#: the archive backend's is archive.org (the #88 seed).  Keys are
-#: in :attr:`ArchiveIngestor.SEARCH_SOURCES` order.
-WISDOM_SOURCE_DOMAINS: dict[str, str] = {
-    "gutendex": "gutendex.com",
-    "wikisource": "en.wikisource.org",
-    "archive": "archive.org",
-    "web": "lite.duckduckgo.com",
-}
+#: backend's membership in the ONE source registry (Pass #94) — is
+#: :data:`WISDOM_SOURCE_DOMAINS`, defined in
+#: ``media/source_registry.py`` (Pass #95: the map is the wisdom
+#: class's membership list, shared with the registry's own status
+#: views, so it lives at the registry's layer and is imported back
+#: here, downward; the name, contents and order are unchanged for
+#: every consumer of this module).  The search seam credits outcomes
+#: to the registry descriptor for the mapped domain, the registry's
+#: status surface renders the class from it, and the health loop
+#: probes the two template-carrying seeds through their real search
+#: endpoints.
 
 
 class ArchiveIngestor:
