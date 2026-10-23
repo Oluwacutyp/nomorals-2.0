@@ -1648,16 +1648,19 @@ class Scheduler:
 
     def _run_payload_guarded(
         self, row: dict[str, Any], timeout_s: float
-    ) -> tuple[bool, str, bool, bool]:
+    ) -> tuple[bool, str, bool, bool, Any]:
         """Execute the job payload with a wall-clock cap.
 
-        Returns ``(ok, summary, timed_out, declared)`` — ``declared``
-        marks a failure the payload's own result value declared (see
-        :class:`_DeclaredFailure`), as opposed to a machinery failure.
-        With ``timeout_s <= 0`` the payload runs inline (no cap);
-        otherwise it runs on a daemon worker thread and a join past
-        the cap abandons the worker — the tick loop is never blocked
-        forever by a stuck tool or command.
+        Returns ``(ok, summary, timed_out, declared, doc)`` —
+        ``declared`` marks a failure the payload's own result value
+        declared (see :class:`_DeclaredFailure`), as opposed to a
+        machinery failure; ``doc`` is the Formatting-F3 presentation
+        Doc for a successful tool run (see :mod:`.job_reports`), or
+        None for every other payload/outcome.  With ``timeout_s <= 0``
+        the payload runs inline (no cap); otherwise it runs on a
+        daemon worker thread and a join past the cap abandons the
+        worker — the tick loop is never blocked forever by a stuck
+        tool or command.
         """
         box: dict[str, Any] = {}
 
@@ -1667,7 +1670,8 @@ class Scheduler:
                 if row["payload_kind"] == "message":
                     box["result"] = self._run_message(payload)
                 elif row["payload_kind"] == "tool":
-                    box["result"] = self._run_tool(payload)
+                    box["result"], box["doc"] = self._run_tool_report(
+                        payload, job_name=str(row.get("name") or ""))
                 else:
                     box["result"] = self._run_command(payload)
             except Exception as exc:  # noqa: BLE001 - a job failure is a result
@@ -1686,11 +1690,12 @@ class Scheduler:
                         f"job failed: timed out after {timeout_s:g}s "
                         "(worker abandoned; the job is marked failed but the "
                         "stuck call may still be running)",
-                        True, False)
+                        True, False, None)
         if "error" in box:
             return (False, f"job failed: {box['error']}", False,
-                    isinstance(box["error"], _DeclaredFailure))
-        return True, str(box.get("result") or ""), False, False
+                    isinstance(box["error"], _DeclaredFailure), None)
+        return True, str(box.get("result") or ""), False, False, \
+            box.get("doc")
 
     def _execute(self, row: dict[str, Any], *,
                  trigger_source: str = "tick") -> dict[str, Any]:
@@ -1710,8 +1715,8 @@ class Scheduler:
         try:
             # the per-job cap wins; 0 falls back to the scheduler default
             timeout_s = float(row.get("run_timeout_s") or 0.0) or self.wall_seconds
-            ok, summary, timed_out, declared = self._run_payload_guarded(
-                row, timeout_s)
+            ok, summary, timed_out, declared, report_doc = \
+                self._run_payload_guarded(row, timeout_s)
         finally:
             with self._lock:
                 self._active.discard(job_id)
@@ -1809,23 +1814,45 @@ class Scheduler:
             alert = False  # the message itself already went out
         if alert:
             try:
-                # The alert body is the job's own rendered summary
-                # (already human-readable — see _run_tool). Cut at a
-                # line boundary, never mid-line, and pass the job
-                # through so the push gets ADAPTIVE buttons about
-                # that job (Recall / Jobs / Re-run), never the stale
-                # Retry/Expand/Next from an old command.
-                body_lines = summary.splitlines()
-                body = "\n".join(body_lines[:40])
-                if len(body_lines) > 40:
-                    body += f"\n… (+{len(body_lines) - 40} more lines)"
-                self.notifier.publish(
-                    "schedule",
-                    f"{'✅' if ok else '❌'} scheduled: {job_name}",
-                    body,
-                    output_kind="scheduled",
-                    output_meta={"job": job_name, "ok": ok},
-                )
+                # The alert is the job's own report, and the job is
+                # passed through so the push gets ADAPTIVE buttons
+                # about that job (Recall / Jobs / Re-run), never the
+                # stale Retry/Expand/Next from an old command.
+                # Formatting F3: a tool run's report is a presentation
+                # Doc (see _run_tool_report / job_reports) and a
+                # failure's report is an error Doc carrying the
+                # failure text — the Notifier renders either per
+                # platform and stores its canonical body.  Only the
+                # remaining string results (command payloads) take
+                # the legacy path: the summary string cut at a line
+                # boundary, never mid-line.  ``last_result`` keeps the
+                # stored string form in every branch.
+                title = f"{'✅' if ok else '❌'} scheduled: {job_name}"
+                if report_doc is not None:
+                    self.notifier.publish(
+                        "schedule", title, "", doc=report_doc,
+                        output_kind="scheduled",
+                        output_meta={"job": job_name, "ok": ok},
+                    )
+                elif not ok:
+                    from .job_reports import failure_doc
+
+                    self.notifier.publish(
+                        "schedule", title, "",
+                        doc=failure_doc(job_name, summary),
+                        output_kind="scheduled",
+                        output_meta={"job": job_name, "ok": ok},
+                    )
+                else:
+                    body_lines = summary.splitlines()
+                    body = "\n".join(body_lines[:40])
+                    if len(body_lines) > 40:
+                        body += f"\n… (+{len(body_lines) - 40} more lines)"
+                    self.notifier.publish(
+                        "schedule", title, body,
+                        output_kind="scheduled",
+                        output_meta={"job": job_name, "ok": ok},
+                    )
             except Exception:  # noqa: BLE001
                 _log.debug("scheduler notification failed")
         return {
@@ -1860,6 +1887,22 @@ class Scheduler:
         return f"stored ({state}): {text[:200]}"
 
     def _run_tool(self, payload: dict[str, Any]) -> str:
+        text, _doc = self._run_tool_report(payload)
+        return text
+
+    def _run_tool_report(self, payload: dict[str, Any], *,
+                         job_name: str = "") -> tuple[str, Any]:
+        """Run a tool payload; return ``(stored string, report Doc)``.
+
+        The string is the run's stored form — ``"{tool}:\\n"`` plus
+        the legacy :func:`render_tool_value` rendering — byte-identical
+        to what the scheduler has always recorded in ``last_result``
+        (the Pass #71/#75 suites pin its content; failure-transition
+        and dependency logic read its ``"job failed"`` counterpart).
+        The Doc (Formatting F3, :mod:`.job_reports`) is the
+        *published* form — the report the owner reads — or None when
+        it could not be built; building it never fails the run.
+        """
         tool = str(payload.get("tool") or "").strip()
         args = payload.get("args") or {}
         if not isinstance(args, dict):
@@ -1889,7 +1932,15 @@ class Scheduler:
         declared = _declared_failure(value)
         if declared is not None:
             raise _DeclaredFailure(f"tool {tool} failed: {declared or text}")
-        return f"{tool}:\n{text}"
+        doc = None
+        try:
+            from .job_reports import job_report_doc
+
+            doc = job_report_doc(tool, value, job_name=job_name)
+        except Exception:  # noqa: BLE001 - a report bug must not fail the job
+            _log.debug("job report build failed for tool %s", tool,
+                       exc_info=True)
+        return f"{tool}:\n{text}", doc
 
     def _run_command(self, payload: dict[str, Any]) -> str:
         command = str(payload.get("command") or "").strip()

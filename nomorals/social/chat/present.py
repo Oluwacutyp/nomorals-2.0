@@ -218,7 +218,11 @@ class Field:
     overrides the default stringification; ``unit`` is appended after
     the formatted value; ``mono`` code-styles the value; ``fields``
     is the nested schema for a dict value (default: humanized keys,
-    empties hidden).
+    empties hidden). ``list_limit`` (Formatting F3) caps how many
+    items of a list value render — scalar items join up to the cap,
+    dict items flatten to one line each up to the cap — with the
+    remainder carried as an explicit ``… (+N more)`` tail; 0 (the
+    default) renders the whole list, the F2 behaviour.
     """
 
     key: str
@@ -229,6 +233,7 @@ class Field:
     unit: str = ""
     mono: bool = False
     fields: tuple["Field", ...] | None = None
+    list_limit: int = 0
 
 
 def humanize_key(key: Any) -> str:
@@ -333,9 +338,14 @@ def _dict_rows(data: Mapping[str, Any],
         if isinstance(value, (list, tuple)):
             scalars = [x for x in value if not isinstance(x, Mapping)]
             dicts = [x for x in value if isinstance(x, Mapping)]
+            limit = fld.list_limit if fld.list_limit > 0 else 0
             if scalars and not dicts:
-                text = ", ".join(_scalar_text(x) for x in scalars
+                shown = scalars[:limit] if limit else scalars
+                text = ", ".join(_scalar_text(x) for x in shown
                                  if not _is_empty(x))
+                if limit and len(scalars) > limit:
+                    tail = f"… (+{len(scalars) - limit} more)"
+                    text = f"{text}, {tail}" if text else tail
                 if text:
                     rows.append(KV(label, text, mono=fld.mono))
                 elif not fld.hide_empty:
@@ -349,9 +359,15 @@ def _dict_rows(data: Mapping[str, Any],
                              and not isinstance(v, (Mapping, list, tuple))]
                     lines.append(" · ".join(parts) if parts
                                  else _scalar_text(item))
+                if limit and len(lines) > limit:
+                    lines = lines[:limit] + [
+                        f"… (+{len(lines) - limit} more)"]
                 if scalars:
-                    rows.append(KV(
-                        label, ", ".join(_scalar_text(x) for x in scalars)))
+                    shown = scalars[:limit] if limit else scalars
+                    joined = ", ".join(_scalar_text(x) for x in shown)
+                    if limit and len(scalars) > limit:
+                        joined += f", … (+{len(scalars) - limit} more)"
+                    rows.append(KV(label, joined))
                 if lines:
                     sections.append(Section(label, lines=tuple(lines)))
             continue
