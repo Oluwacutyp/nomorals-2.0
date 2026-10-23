@@ -13,12 +13,14 @@ from __future__ import annotations
 from typing import Any
 
 from .crash import CrashRound, CrashStore, betdesk_dir
+from .books import SessionBookCollector
 from .desk import BettingDesk, render_collect, render_library, \
     render_status
 from .jobs import ensure_betdesk_jobs
 
 __all__ = [
     "BettingDesk", "CrashRound", "CrashStore", "betdesk_dir",
+    "SessionBookCollector",
     "ensure_betdesk_jobs", "render_collect", "render_library",
     "render_status",
     "register",

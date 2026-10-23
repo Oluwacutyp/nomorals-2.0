@@ -31,7 +31,8 @@ import time
 from typing import Any, Optional
 
 from . import lab as _lab
-from .collectors import SEED_PROVIDERS, collect_all, import_rounds_file
+from .books import SessionBookCollector
+from .collectors import SEED_PROVIDERS, collect_all
 from .crash import CrashStore, betdesk_dir
 from .signals import SignalEngine
 
@@ -175,40 +176,19 @@ class BettingDesk:
         return out
 
     def import_inbox(self) -> list[dict[str, Any]]:
-        """Import CSV/JSONL files dropped in ``<desk>/inbox/``.
+        """Import CSV/JSONL files dropped in ``<desk>/inbox/``,
+        through the session-book collector (:mod:`.books`): each
+        file is imported once through the existing import path,
+        filed as a session-book record, and moved to ``inbox/done/``
+        — a file is studied once, never re-read every cycle, and a
+        failed export is on the book by name instead of re-failing
+        silently forever."""
+        return SessionBookCollector(self.dir, self.store).sweep()
 
-        File name convention: ``<provider>__<game>.csv`` (or .jsonl).
-        Imported files move to ``inbox/done/`` — a file is studied
-        once, never re-read every cycle.
-        """
-        inbox = os.path.join(self.dir, "inbox")
-        if not os.path.isdir(inbox):
-            return []
-        done_dir = os.path.join(inbox, "done")
-        results = []
-        for name in sorted(os.listdir(inbox)):
-            path = os.path.join(inbox, name)
-            if not os.path.isfile(path):
-                continue
-            stem = name.rsplit(".", 1)[0]
-            parts = stem.split("__", 1)
-            if len(parts) != 2:
-                results.append({"file": name, "ok": False,
-                                "detail": "name must be "
-                                          "<provider>__<game>.csv"})
-                continue
-            try:
-                res = import_rounds_file(self.store, path, parts[0],
-                                         parts[1])
-                res["file"] = name
-                if res.get("ok"):
-                    os.makedirs(done_dir, exist_ok=True)
-                    os.replace(path, os.path.join(done_dir, name))
-                results.append(res)
-            except Exception as exc:  # noqa: BLE001
-                results.append({"file": name, "ok": False,
-                                "detail": f"{type(exc).__name__}: {exc}"})
-        return results
+    def session_book(self) -> dict[str, Any]:
+        """The session book: what owner-session exports the desk
+        holds, what they landed, and what failed — by name."""
+        return SessionBookCollector(self.dir, self.store).summary()
 
     # ── signals ───────────────────────────────────────────────────────
 
@@ -279,6 +259,7 @@ class BettingDesk:
             "provisioning": _provisioning_view(self.vault),
             "library_records": len(lib),
             "sports_fixtures": sports_fixtures,
+            "session_book": self.session_book(),
         }
 
 
@@ -357,6 +338,15 @@ def render_status(st: dict[str, Any]) -> str:
     else:
         L.append("signals: no calls published yet (nothing has validated "
                  "as callable — see /desk library)")
+    book = st.get("session_book") or {}
+    if book.get("imports_recorded"):
+        L.append(f"session books: {book.get('files_booked', 0)} export "
+                 f"files booked (+{book.get('rounds_landed', 0)} rounds "
+                 f"landed, {book.get('duplicates_skipped', 0)} "
+                 f"duplicates skipped)")
+        for f in book.get("failures", []):
+            L.append(f"  book failure {f.get('file', '')}: "
+                     f"{str(f.get('detail', ''))[:160]}")
     L.append(f"signal lead floor: {st.get('min_lead_seconds', 120)}s")
     for p in st.get("provisioning", []):
         if not p["key_present"]:

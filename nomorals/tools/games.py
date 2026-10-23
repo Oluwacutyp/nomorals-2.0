@@ -6,7 +6,12 @@ menu. Actions: list | start | move | state | join | spectate | invent |
 tournament.
 
 Games are PUBLIC: no owner gating here. Anyone in a group can play —
-per the standing rule, games are never gated for outsiders.
+per the standing rule, games are never gated for outsiders. The one
+exception is bank administration: wiping the verified trivia bank is
+not a game action, so ``trivia_bank purge`` refuses on this surface
+and the purge itself lives in the separate ``trivia_bank_purge``
+tool, registered with the owner capability — the same gate the
+codebase puts on every owner-only operation.
 """
 from __future__ import annotations
 
@@ -72,8 +77,9 @@ def register(registry: Any) -> None:
             "tournament (start a multi-game bracket), trivia_bank (the "
             "verified Library question bank behind trivia: sub=status "
             "(stock by source + admission rate) | refill (run one "
-            "refiller tick) | purge (drop one question by its text in "
-            "game=, or the whole bank)). Games are public — "
+            "refiller tick)). Purging the bank is owner-only and is "
+            "NOT an action of this tool — it runs through the "
+            "owner-gated trivia_bank_purge tool. Games are public — "
             "anyone can play."
         ),
         capability="social.play",
@@ -107,10 +113,15 @@ def register(registry: Any) -> None:
                         "bank": forge.bank_status(),
                         "note": forge.render_bank_status()}
             if sub_act == "purge":
-                return {"ok": True, **forge.purge_bank(game)}
+                return {"ok": False,
+                        "error": "trivia_bank purge is owner-only — "
+                                 "refused on the public games surface. "
+                                 "Purging the verified bank runs "
+                                 "through the owner-gated "
+                                 "trivia_bank_purge tool."}
             return {"ok": False,
                     "error": f"unknown trivia_bank sub {sub_act!r} — "
-                             "status|refill|purge"}
+                             "status|refill"}
 
         if action == "list":
             items = []
@@ -215,6 +226,23 @@ def register(registry: Any) -> None:
 
         return {"ok": False,
                 "error": f"unknown action {action!r} — list/start/move/state/join/spectate/invent/tournament"}
+
+    @registry.register(
+        "trivia_bank_purge",
+        description=(
+            "Purge the verified trivia bank behind the games tool: "
+            "drop one banked question by its exact text (question=), "
+            "or the whole bank when question is empty. OWNER ONLY — "
+            "the bank is verified stock; wiping it is an owner "
+            "operation, never a public game action."
+        ),
+        capability="owner",
+    )
+    def trivia_bank_purge(*, question: str = "") -> dict[str, Any]:
+        """Run the bank purge (owner capability enforced by the
+        registry at call time)."""
+        forge = _engine(registry).forge
+        return {"ok": True, **forge.purge_bank(question)}
 
 
 def _invented_names(eng: Any) -> set[str]:

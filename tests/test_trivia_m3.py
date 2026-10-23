@@ -109,6 +109,15 @@ def _scripted_suggest(*, maths_answer: str = "96",
     absent from the evidence).
     """
     def suggest(prompt: str) -> str:
+        if "Solve it yourself" in prompt:
+            # the semantic gate's independent solve: the scripted
+            # brain works the baker story blind and lands on the
+            # same answer by the same operation.
+            if "12 trays of 8 rolls" in prompt:
+                return json.dumps({
+                    "answer": "96", "op": "multiply",
+                    "why": "multiply: 12 trays with 8 rolls in each"})
+            return "{}"
         if "WORD problem" in prompt:
             return json.dumps({
                 "question": "A baker makes 12 trays of 8 rolls for "

@@ -16,9 +16,13 @@ in the briefing as a short ranked shortlist:
   itself: the fetched page must carry positive availability evidence
   (worldwide / work-from-anywhere / Nigeria named / …) and no hard
   exclusion (US-only, must-reside-in, …).  No evidence → dropped.
-* **A payout method that works from Nigeria** — the page must name at
-  least one qualifying rail (Payoneer, Wise, Grey, Deel, bank/wire
-  transfer, crypto, …).  PayPal alone never qualifies: a Nigerian
+* **A payout method that works from Nigeria** — at least one
+  qualifying rail (Payoneer, Wise, Grey, Deel, bank/wire transfer,
+  crypto, …) must be named, on the candidate page or on a
+  payout doc it links to (payments / fees / how-it-works pages on
+  the same domain — platforms commonly keep their payout terms
+  there, and a candidate silent on payouts is vetted against them
+  before it is dropped).  PayPal alone never qualifies: a Nigerian
   personal PayPal cannot receive payments, so a PayPal-only platform
   is a dead end dressed as an opportunity.
 
@@ -47,14 +51,16 @@ import re
 import time
 from pathlib import Path
 from typing import Any, Callable, Optional
-from urllib.parse import urlsplit
+from urllib.parse import urljoin, urlsplit
 
 __all__ = [
     "SHORTLIST_MAX",
     "VERIFY_BUDGET",
+    "MAX_PAYOUT_DOCS",
     "FRESH_S",
     "WeeklyOpportunityHunt",
     "verify_candidate",
+    "payout_doc_links",
     "platform_of",
     "run_weekly_hunt",
     "register",
@@ -65,8 +71,13 @@ _log = logging.getLogger(__name__)
 #: Entries in one week's shortlist — a briefing section, not a dump.
 SHORTLIST_MAX = 5
 #: Verification fetches per run, in hunter rank order.  Bounded so a
-#: fat scan week cannot turn the job into an unbounded crawl.
+#: fat scan week cannot turn the job into an unbounded crawl.  Every
+#: vetting fetch counts against it: the candidate page, the link
+#: read, and each payout doc followed.
 VERIFY_BUDGET = 12
+#: Payout docs followed per candidate when its own page names no
+#: qualifying rail — same-domain payments/fees/how-it-works pages.
+MAX_PAYOUT_DOCS = 3
 #: Consecutive failed verifications before a platform is deprioritized.
 DEPRIORITIZE_STREAK = 3
 #: A deprioritized platform is re-probed at most this often — platforms
@@ -165,31 +176,158 @@ def _default_fetch(url: str) -> str:
         return ""
 
 
+# ── payout docs: the candidate page's own linked evidence ────────────
+#
+# A platform's payout terms often live one click off the landing
+# page — a payments, fees or how-it-works page.  The signals below
+# only SELECT which links get fetched; they are never evidence
+# themselves.  The evidence standard is unchanged: a qualifying rail
+# named in fetched page text (PAYOUT_RAILS), or the candidate drops.
+
+#: Anchor/URL signals that a link leads to payout terms.
+_PAYOUT_LINK_RE = re.compile(
+    r"pay|fees?|withdraw|earn|billing|how[-_ ]it[-_ ]works"
+    r"|get[-_ ]paid", re.I)
+
+
+def _same_domain(host_a: str, host_b: str) -> bool:
+    """Same site: equal hosts (www-stripped) or one a subdomain of
+    the other — help.example.com serves example.com's terms, an
+    unrelated host does not."""
+    a, b = platform_of(host_a), platform_of(host_b)
+    if not a or not b:
+        return False
+    return a == b or a.endswith("." + b) or b.endswith("." + a)
+
+
+def payout_doc_links(candidate_url: str,
+                     links: Any) -> list[str]:
+    """Select the payout docs worth fetching off a candidate page:
+    same-domain links whose URL or anchor text signals payout
+    relevance, deduped, in page order, capped at MAX_PAYOUT_DOCS.
+    Off-domain links are never followed — a stranger's payments
+    page proves nothing about this platform."""
+    out: list[str] = []
+    for item in links or []:
+        try:
+            href, anchor = item
+        except (TypeError, ValueError):
+            continue
+        href = str(href or "").strip()
+        if not href.startswith(("http://", "https://")):
+            continue
+        if href.rstrip("/") == candidate_url.rstrip("/"):
+            continue  # the page itself — already vetted
+        if not _same_domain(href, candidate_url):
+            continue
+        if not (_PAYOUT_LINK_RE.search(href)
+                or _PAYOUT_LINK_RE.search(str(anchor or ""))):
+            continue
+        if href not in out:
+            out.append(href)
+        if len(out) >= MAX_PAYOUT_DOCS:
+            break
+    return out
+
+
+class _AnchorParser:
+    """Minimal <a href> harvest (stdlib html.parser)."""
+
+    def __init__(self) -> None:
+        from html.parser import HTMLParser
+
+        outer = self
+
+        class _P(HTMLParser):
+            def __init__(self) -> None:
+                super().__init__(convert_charrefs=True)
+                self.links: list = []
+                self._href = ""
+                self._text: list = []
+
+            def handle_starttag(self, tag, attrs):
+                if tag == "a":
+                    self._href = dict(attrs).get("href") or ""
+                    self._text = []
+
+            def handle_data(self, data):
+                if self._href:
+                    self._text.append(data)
+
+            def handle_endtag(self, tag):
+                if tag == "a" and self._href:
+                    self.links.append(
+                        (self._href, " ".join(self._text).strip()))
+                    self._href = ""
+                    self._text = []
+
+        self._parser = _P()
+
+    def parse(self, markup: str, base_url: str) -> list:
+        try:
+            self._parser.feed(markup)
+        except Exception:  # noqa: BLE001 - malformed HTML: what parsed
+            pass
+        return [(urljoin(base_url, href), anchor)
+                for href, anchor in self._parser.links if href]
+
+
+def _default_fetch_links(url: str) -> list:
+    """The candidate page's outbound links as (absolute href, anchor
+    text).  [] on ANY failure — a page whose links cannot be read
+    simply has no payout docs to follow."""
+    try:
+        from ..core.http import HttpClient
+        from ..tools.web import _decode_body
+
+        resp = HttpClient(timeout=30.0).get(url)
+        markup = _decode_body(resp.body, resp.content_type)
+        return _AnchorParser().parse(markup, url)
+    except Exception:  # noqa: BLE001 - fail-closed by design
+        _log.debug("opportunity hunt: link harvest failed for %s",
+                   url, exc_info=True)
+        return []
+
+
 def verify_candidate(opp: Any,
-                     fetch_text: Callable[[str], str]) -> dict[str, Any]:
-    """Vet ONE candidate against its own source page.
+                     fetch_text: Callable[[str], str],
+                     fetch_links: Optional[Callable[[str], list]] = None
+                     ) -> dict[str, Any]:
+    """Vet ONE candidate against its own source page — and, when the
+    page names no payout rail, against the payout docs it links to.
 
     Returns a verdict dict.  ``ok`` is True only when BOTH checks
-    pass on evidence found in the fetched page:
+    pass on evidence found in fetched page text:
 
     * ``eligibility`` — positive availability evidence and no hard
-      exclusion;
-    * ``payout`` — at least one Nigeria-workable payout rail named.
+      exclusion, read off the candidate page itself;
+    * ``payout`` — at least one Nigeria-workable payout rail named,
+      on the candidate page or on one of its same-domain payout
+      docs (payments / fees / how-it-works).  The verdict's
+      ``payout_evidence_url`` names the page that carried the
+      proof, so the stored evidence is auditable.
 
     Failure kinds: ``unverifiable`` (page unreadable/thin, or a check
     found no evidence either way) and ``excluded`` (the page itself
     restricts signup).  Both fail closed — the candidate is dropped.
+    A payout drop distinguishes its two shapes in ``reason``: "no
+    payout doc found" (nothing reachable to check) vs "payout doc
+    found, no qualifying rail" (the docs were read and none names a
+    qualifying rail).  ``fetches`` counts every vetting fetch made —
+    the run's VERIFY_BUDGET is spent against it.
     """
     verdict: dict[str, Any] = {
         "ok": False, "kind": "unverifiable", "reason": "",
         "eligibility_evidence": "", "payout_rail": "",
-        "payout_evidence": "",
+        "payout_evidence": "", "payout_evidence_url": "",
+        "payout_docs_checked": [], "fetches": 0,
     }
     text = ""
     try:
         text = fetch_text(opp.url) or ""
     except Exception:  # noqa: BLE001 - a broken fetch is no evidence
         text = ""
+    verdict["fetches"] += 1
     if len(text.strip()) < MIN_EVIDENCE_CHARS:
         verdict["reason"] = "source page unreadable or too thin to vet"
         return verdict
@@ -209,16 +347,47 @@ def verify_candidate(opp: Any,
         verdict["reason"] = "no availability evidence on the page"
         return verdict
     verdict["eligibility_evidence"] = _evidence(text, m)
-    for pat, label in PAYOUT_RAILS:
-        pm = pat.search(text)
-        if pm:
-            verdict["ok"] = True
-            verdict["kind"] = "verified"
-            verdict["payout_rail"] = label
-            verdict["payout_evidence"] = _evidence(text, pm)
+
+    def _rail_in(page_text: str, page_url: str) -> bool:
+        for pat, label in PAYOUT_RAILS:
+            pm = pat.search(page_text)
+            if pm:
+                verdict["ok"] = True
+                verdict["kind"] = "verified"
+                verdict["payout_rail"] = label
+                verdict["payout_evidence"] = _evidence(page_text, pm)
+                verdict["payout_evidence_url"] = page_url
+                return True
+        return False
+
+    if _rail_in(text, opp.url):
+        return verdict
+    # The candidate page is silent on payouts: follow its payout
+    # docs (same domain only, bounded) before dropping it.
+    doc_urls: list[str] = []
+    if fetch_links is not None:
+        verdict["fetches"] += 1
+        try:
+            doc_urls = payout_doc_links(
+                opp.url, fetch_links(opp.url) or [])
+        except Exception:  # noqa: BLE001 - unreadable links: no docs
+            doc_urls = []
+    for doc_url in doc_urls:
+        verdict["fetches"] += 1
+        verdict["payout_docs_checked"].append(doc_url)
+        try:
+            doc_text = fetch_text(doc_url) or ""
+        except Exception:  # noqa: BLE001 - a broken doc is no evidence
+            doc_text = ""
+        if doc_text and _rail_in(doc_text, doc_url):
             return verdict
-    verdict["reason"] = ("no Nigeria-workable payout method named "
-                          "on the page")
+    if verdict["payout_docs_checked"]:
+        verdict["reason"] = ("payout doc found, no qualifying rail: "
+                              "the linked payout pages name no "
+                              "Nigeria-workable payout method")
+    else:
+        verdict["reason"] = ("no Nigeria-workable payout method named "
+                              "on the page — no payout doc found")
     return verdict
 
 
@@ -235,12 +404,17 @@ class WeeklyOpportunityHunt:
 
     The hunter itself is used exactly as it ships (injected or built
     from settings); this class adds the vetting, the cross-run memory
-    and the stored shortlist the briefing renders.  ``fetch_text``
-    and ``now_fn`` are seams for tests.
+    and the stored shortlist the briefing renders.  ``fetch_text``,
+    ``fetch_links`` and ``now_fn`` are seams for tests.  The link
+    seam arms itself only alongside the real text fetch: an injected
+    ``fetch_text`` without an injected ``fetch_links`` keeps the
+    pre-doc behaviour (no link following), so a canned-page test can
+    never wander onto the live network.
     """
 
     def __init__(self, settings: Any = None, hunter: Any = None,
                  fetch_text: Optional[Callable[[str], str]] = None,
+                 fetch_links: Optional[Callable[[str], list]] = None,
                  now_fn: Callable[[], float] = time.time) -> None:
         self.settings = settings
         if hunter is None:
@@ -249,6 +423,13 @@ class WeeklyOpportunityHunt:
             hunter = OpportunityHunter(settings=settings)
         self.hunter = hunter
         self._fetch = fetch_text or _default_fetch
+        if fetch_links is not None:
+            self._fetch_links: Optional[Callable[[str], list]] = \
+                fetch_links
+        elif fetch_text is None:
+            self._fetch_links = _default_fetch_links
+        else:
+            self._fetch_links = None
         self._now = now_fn
 
     @classmethod
@@ -337,7 +518,8 @@ class WeeklyOpportunityHunt:
         now = float(now if now is not None else self._now())
         state = self.load_state()
         record: dict[str, Any] = {
-            "at": now, "candidates": 0, "checks": 0, "verified": 0,
+            "at": now, "candidates": 0, "checks": 0, "fetches": 0,
+            "verified": 0,
             "dropped_unverifiable": 0, "dropped_excluded": 0,
             "skipped_shown": 0, "skipped_deprioritized": 0,
             "hit_rate": None,
@@ -360,10 +542,10 @@ class WeeklyOpportunityHunt:
         platforms = state.setdefault("platforms", {})
         entries: list[dict[str, Any]] = []
         newly: list[str] = []
-        checks = passes = 0
+        checks = passes = fetches = 0
         for opp in candidates:
             if len(entries) >= SHORTLIST_MAX \
-                    or checks >= VERIFY_BUDGET:
+                    or fetches >= VERIFY_BUDGET:
                 break
             if opp.id in shown:
                 record["skipped_shown"] += 1
@@ -378,8 +560,10 @@ class WeeklyOpportunityHunt:
                     < REPROBE_AFTER_S:
                 record["skipped_deprioritized"] += 1
                 continue
-            verdict = verify_candidate(opp, self._fetch)
+            verdict = verify_candidate(opp, self._fetch,
+                                       self._fetch_links)
             checks += 1
+            fetches += int(verdict.get("fetches") or 1)
             ps["checks"] = int(ps.get("checks") or 0) + 1
             ps["last_checked"] = now
             if verdict["ok"]:
@@ -399,6 +583,8 @@ class WeeklyOpportunityHunt:
                     "eligibility_evidence":
                         verdict["eligibility_evidence"],
                     "payout_evidence": verdict["payout_evidence"],
+                    "payout_evidence_url":
+                        verdict.get("payout_evidence_url", ""),
                 })
             else:
                 ps["fail_streak"] = int(ps.get("fail_streak") or 0) + 1
@@ -409,6 +595,7 @@ class WeeklyOpportunityHunt:
                 else:
                     record["dropped_unverifiable"] += 1
         record["checks"] = checks
+        record["fetches"] = fetches
         record["verified"] = passes
         record["hit_rate"] = (round(passes / checks, 3)
                               if checks else None)

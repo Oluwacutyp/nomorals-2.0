@@ -25,8 +25,10 @@ served — and the discard is counted, so bank stats stay honest.
 Maths enters through both doors (owner's have-it-all correction):
 procedural :class:`~nomorals.games.math_class.MathClass` problems
 (verified by construction, worked solution attached) *and* brain-posed
-word problems whose claimed answers are cross-verified by an
-independent computation before banking. ``deal()`` mixes the sources:
+word problems admitted only through the arithmetic gate plus a
+semantic gate — an independent blind solve of the story must
+reproduce the claimed answer with the same operation the poser's
+expression computes — before banking. ``deal()`` mixes the sources:
 library/bank questions take at least half a dealt set when the bank
 has fresh stock, the generative forge serves the rest, and the
 template forge remains the last-resort filler. A background refiller
@@ -66,7 +68,8 @@ __all__ = ["TriviaForge", "TRIVIA_TOPICS", "ANTI_REPEAT_DEFAULT",
            "TriviaBank", "LibraryQuestionSource",
            "BANK_TARGET", "BANK_CAP", "LIBRARY_SHARE",
            "verify_library_candidate", "verify_llm_maths",
-           "safe_eval_arith", "maths_distractors", "source_tag",
+           "verify_llm_maths_semantic", "safe_eval_arith",
+           "maths_distractors", "source_tag",
            "render_bank_status"]
 
 #: question topic pools, weighted by generality. The interest profile
@@ -303,6 +306,192 @@ def verify_llm_maths(question: str, answer: Any,
     tol = max(1e-6, abs(computed) * 1e-6)
     if abs(computed - float(claimed)) > tol:
         return False, "answer mismatch", computed
+    return True, "", computed
+
+
+# ── the semantic gate: an independent solve ──────────────────────────
+#
+# verify_llm_maths proves ARITHMETIC: the poser's expression computes
+# the claimed answer from the question's own numbers.  It cannot see
+# that the story needed a different operation — "gave away 4 and 3,
+# how many left" posed with expression "12 + 4 + 3" and answer 19
+# passes it cleanly.  The semantic gate adds the missing read: a
+# solver pass that sees ONLY the question (never the expression, the
+# claimed answer, or the worked line) must independently produce the
+# claimed answer, and the operation family its justification names
+# must be the operation the poser's expression actually computes at
+# its root.  The poser's own worked line, when it gives one, is held
+# to the same root.  Every failure is a rejection — an unverified
+# word problem is never banked on arithmetic alone.
+
+#: the operation families the gate reasons in.
+OP_FAMILIES = ("add", "subtract", "multiply", "divide", "compare")
+
+_AST_FAMILY: dict[type, str] = {
+    ast.Add: "add", ast.Sub: "subtract", ast.Mult: "multiply",
+    ast.Div: "divide", ast.FloorDiv: "divide", ast.Mod: "divide",
+    ast.Pow: "power",
+}
+
+#: (family, phrases that name it) — comparison phrases first, so
+#: "how many more" reads as compare, not as a stray "more".
+_FAMILY_PHRASES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("compare", ("how many more", "how many fewer", "how many less",
+                 "more than", "fewer than", "less than",
+                 "greater than", "difference between", "compare")),
+    ("subtract", ("subtract", "minus", "difference", "gave away",
+                  "given away", "give away", "take away", "left over",
+                  "remain", "spent", "lost")),
+    ("multiply", ("multiply", "multiplied", "times", "product")),
+    ("divide", ("divide", "divided", "split", "shared", "sharing",
+                "quotient")),
+    ("add", ("add", "added", "adding", "plus", "sum", "altogether",
+             "combined", "in total", "total of")),
+)
+
+
+def _named_families(text: Any) -> set[str]:
+    """The operation families a line of working NAMES — by verb
+    phrase or by operator symbol ("12 × 8" names multiply with no
+    verb at all).  Empty when the line names none."""
+    raw = str(text or "")
+    t = " " + _norm_text(raw) + " "
+    fams: set[str] = set()
+    for fam, phrases in _FAMILY_PHRASES:
+        if any(p in t for p in phrases):
+            fams.add(fam)
+    if "×" in raw or "*" in raw:
+        fams.add("multiply")
+    if "÷" in raw or re.search(r"\d\s*/\s*\d", raw):
+        fams.add("divide")
+    if re.search(r"\d\s*\+\s*\d", raw):
+        fams.add("add")
+    if re.search(r"\d\s*[-−]\s*\d", raw):
+        fams.add("subtract")
+    return fams
+
+
+def _expr_root_family(expression: str) -> str:
+    """The operation family at the ROOT of the poser's expression —
+    the final computation the story is claimed to come down to.
+    "" when the expression has no operation at all."""
+    try:
+        tree = ast.parse(str(expression or ""), mode="eval")
+    except (SyntaxError, ValueError):
+        return ""
+    node = tree.body
+    while isinstance(node, ast.UnaryOp):
+        node = node.operand
+    if isinstance(node, ast.BinOp):
+        return _AST_FAMILY.get(type(node.op), "")
+    return ""
+
+
+def _family_matches(solver_family: str, root_family: str) -> bool:
+    """Does the solver's named family agree with the expression's
+    root?  A comparison's numeric answer IS a difference, so a
+    solver naming "compare" agrees with a subtraction root — and
+    with nothing else."""
+    if solver_family == root_family:
+        return True
+    return solver_family == "compare" and root_family == "subtract"
+
+
+_SOLVER_PROMPT = (
+    "Here is a maths problem. Solve it yourself, from the story "
+    "alone — you are given no working and no proposed answer. "
+    "Return ONLY a JSON object: {\"answer\": \"<the numeric "
+    "answer>\", \"op\": \"<the operation the story needs: add, "
+    "subtract, multiply, divide or compare>\", \"why\": \"<one "
+    "line: the operation you used and why the story needs "
+    "it>\"}.\n\nProblem: ")
+
+
+def _independent_solve(question: str,
+                       suggest: Callable[[str], str]
+                       ) -> tuple[float | None, str, str]:
+    """The blind second solve.  Returns (answer, family, why) or
+    (None, reject_reason, "")."""
+    try:
+        raw = (suggest(_SOLVER_PROMPT + str(question)) or "").strip()
+    except Exception:  # noqa: BLE001 - a dead brain proves nothing
+        return None, "independent solve failed", ""
+    m = _JSON_OBJ_RE.search(raw)
+    cand = None
+    if m:
+        try:
+            cand = json.loads(m.group(0))
+        except Exception:  # noqa: BLE001
+            cand = None
+    if not isinstance(cand, dict):
+        return None, "independent solve unparseable", ""
+    from .math_class import parse_answer
+
+    ans = parse_answer(cand.get("answer"))
+    if ans is None or isinstance(ans, complex):
+        return None, "independent solve unparseable", ""
+    why = str(cand.get("why") or "").strip()
+    op = str(cand.get("op") or "").strip().lower()
+    if op in OP_FAMILIES:
+        family = op
+    else:
+        named = _named_families(why)
+        if len(named) != 1:
+            return None, "independent solve unparseable", ""
+        family = named.pop()
+    return float(ans), family, why
+
+
+def verify_llm_maths_semantic(question: str, answer: Any,
+                              expression: str, worked: Any,
+                              suggest: Callable[[str], str] | None
+                              ) -> tuple[bool, str, float | None]:
+    """The full admission gate for a brain-posed maths problem.
+
+    Layers, all fail-closed, in order: (1) the arithmetic gate
+    (:func:`verify_llm_maths`); (2) the poser's worked line, when it
+    gives one, must name the operation family its expression's root
+    computes; (3) an INDEPENDENT solve — a separate brain pass that
+    sees only the question — must reproduce the claimed answer and
+    name the same operation family as the expression's root.
+    Disagreement anywhere, an unparseable justification, or no brain
+    to solve with rejects the candidate: the bank keeps the
+    procedural MathClass door, and no word problem ships on
+    arithmetic alone.  Returns (ok, reason, computed).
+    """
+    ok, reason, computed = verify_llm_maths(question, answer,
+                                            expression)
+    if not ok or computed is None:
+        return False, reason, computed
+    root = _expr_root_family(expression)
+    if not root:
+        return False, "expression has no operation", None
+    worked_line = str(worked or "").strip()
+    if worked_line:
+        named = _named_families(worked_line)
+        if not named:
+            return False, "worked line names no operation", None
+        if root not in named:
+            return False, ("worked line inconsistent with "
+                           f"expression: line names "
+                           f"{'/'.join(sorted(named))}, expression "
+                           f"computes {root}"), None
+    if suggest is None:
+        return False, "no brain for independent solve", None
+    s_ans, s_fam, _why = _independent_solve(question, suggest)
+    if s_ans is None:
+        return False, s_fam, None
+    from .math_class import parse_answer
+
+    claimed = parse_answer(answer)
+    tol = max(1e-6, abs(float(claimed)) * 1e-6)
+    if abs(s_ans - float(claimed)) > tol:
+        return False, ("independent solve disagrees: story solves "
+                       f"to {_fmt_num(s_ans)}, claimed "
+                       f"{_fmt_num(float(claimed))}"), None
+    if not _family_matches(s_fam, root):
+        return False, (f"independent solve names {s_fam}, "
+                       f"expression computes {root}"), None
     return True, "", computed
 
 
@@ -1224,8 +1413,10 @@ class TriviaBank:
 
     def _tick_maths_llm(self, report: dict[str, Any], count: Any, *,
                         max_items: int, now: float) -> None:
-        """Brain-posed maths: believed only after the independent
-        computation reproduces the claimed answer (owner correction:
+        """Brain-posed maths: believed only after the arithmetic
+        gate AND the semantic gate — an independent blind solve of
+        the story must reproduce the claimed answer with the same
+        operation the poser's expression computes (owner correction:
         maths uses BOTH paths, the LLM path cross-verified)."""
         suggest = self._forge._suggest
         if suggest is None:
@@ -1242,11 +1433,12 @@ class TriviaBank:
                 "a short real-world story with numbers — whose answer "
                 "is a single number. Also give the arithmetic "
                 "expression that computes the answer from the numbers "
-                "in the problem, using only + - * / and parentheses. "
-                "Every number in the expression must appear in the "
-                "question. Return ONLY a JSON object: "
+                "in the problem, using only + - * / and parentheses, "
+                "and one line of working that names the operation "
+                "used. Every number in the expression must appear in "
+                "the question. Return ONLY a JSON object: "
                 '{"question": "...", "answer": "...", '
-                '"expression": "..."}')
+                '"expression": "...", "worked": "..."}')
             try:
                 raw = (suggest(prompt) or "").strip()
             except Exception:  # noqa: BLE001
@@ -1261,24 +1453,26 @@ class TriviaBank:
             if not isinstance(cand, dict):
                 count(False, "unparseable", "maths_llm")
                 continue
-            ok, reason, computed = verify_llm_maths(
+            ok, reason, computed = verify_llm_maths_semantic(
                 cand.get("question"), cand.get("answer"),
-                cand.get("expression"))
+                cand.get("expression"), cand.get("worked"), suggest)
             if not ok or computed is None:
                 count(False, reason, "maths_llm")
                 continue
             answer_text = str(cand["answer"]).strip()
+            equation = (f"{cand['expression']} = "
+                        f"{_fmt_num(computed, answer_text)}")
+            worked = str(cand.get("worked") or "").strip()
             entry = {
                 "q": str(cand["question"]).strip(),
                 "answer": answer_text,
                 "distractors": maths_distractors(
                     computed, answer_text, rng),
                 "source": {"type": "maths_llm", "ref": "brain",
-                           "label": "Brain-posed — computation-checked"},
-                "evidence": f"{cand['expression']} = "
-                            f"{_fmt_num(computed, answer_text)}",
-                "solution": f"{cand['expression']} = "
-                            f"{_fmt_num(computed, answer_text)}",
+                           "label": "Brain-posed — independently "
+                                    "solved + computation-checked"},
+                "evidence": equation,
+                "solution": worked or equation,
                 "theme": "maths", "difficulty": difficulty,
                 "kind": "maths_llm", "verified_at": now, "teach": None}
             ok2, reason2 = self._admit(entry)
