@@ -54,10 +54,13 @@ _FALLBACK_CAPS = {
     "webhook": 8000,
 }
 
-#: Tags Telegram HTML mode accepts.
+#: Tags Telegram HTML mode accepts (Bot API formatting options —
+#: includes the <tg-time> / <tg-emoji> elements the presentation
+#: layer emits for timestamp footers; added in Formatting Pass F2).
 TELEGRAM_TAGS = {
     "b", "strong", "i", "em", "u", "ins", "s", "del", "strike",
     "code", "pre", "a", "blockquote", "tg-spoiler",
+    "tg-time", "tg-emoji",
 }
 
 _TAG_RE = re.compile(r"<(/?)([A-Za-z][A-Za-z0-9\-]*)\b([^>]*)>")
@@ -269,7 +272,7 @@ def _span_regex(platform: str) -> re.Pattern[str] | None:
     if platform in ("telegram", "telegram-bot"):
         return re.compile(
             r"<(b|strong|i|em|u|ins|s|del|strike|code|pre|a|blockquote|"
-            r"tg-spoiler)(\s[^>]*)?>.*?</\1>",
+            r"tg-spoiler|tg-time|tg-emoji)(\s[^>]*)?>.*?</\1>",
             re.DOTALL)
     if platform == "whatsapp":
         return re.compile(

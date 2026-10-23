@@ -25,7 +25,8 @@ from ..core.logging_setup import get_logger
 
 _log = get_logger(__name__)
 
-__all__ = ["Notifier", "notify", "resolve_gateway", "DeliveryOutcome",
+__all__ = ["Notifier", "notify", "notify_doc", "resolve_gateway",
+           "DeliveryOutcome",
            "ATTEMPT_SENT", "ATTEMPT_FAILED", "ATTEMPT_SKIPPED",
            "STATE_DIGEST", "STATE_LOGGED"]
 
@@ -250,7 +251,7 @@ class Notifier:
     def publish(
         self,
         kind: str,
-        title: str,
+        title: str = "",
         body: str = "",
         *,
         force: bool = False,
@@ -261,6 +262,7 @@ class Notifier:
         output_meta: dict[str, Any] | None = None,
         alert_subject: str = "",
         alert_hints: Any = None,
+        doc: Any = None,
     ) -> dict[str, Any]:
         """Persist an alert and best-effort deliver it. Never raises.
 
@@ -301,7 +303,36 @@ class Notifier:
         Every decided page carries the policy's decision line in its
         body, stating what escalated and naming the subject.  No
         hints → historical behaviour, untouched.
+
+        ``doc`` (Formatting Pass F2) is a
+        :class:`~nomorals.social.chat.present.Doc` the producer built
+        instead of strings: the stored title/body derive from it
+        (title ← ``doc.title`` when no title is given; body ← its
+        canonical dialect body), so dedupe, ``/notify``, the Termux
+        fallback and redelivery treat it exactly like a string alert,
+        while delivery renders it per target platform through the
+        presentation layer — HTML + explicit parse mode on the
+        Telegram family, the native dialect elsewhere — with the
+        Doc's own actions as its buttons.  Redelivery of a stored
+        row goes through the string path (the row is all that
+        survives a restart), formatted by the gateway like any
+        dialect body.  A non-Doc ``doc`` is a producer bug: logged
+        and ignored, never a lost alert.
         """
+        if doc is not None:
+            from ..social.chat.present import Doc as _Doc
+            from ..social.chat.present import body_text as _doc_body
+
+            if isinstance(doc, _Doc):
+                if not title:
+                    title = doc.title
+                if not body:
+                    body = _doc_body(doc)
+            else:
+                _log.warning("notifier: publish(doc=...) got a non-Doc "
+                             "%s — ignoring it, delivering strings",
+                             type(doc).__name__)
+                doc = None
         decision = None
         if alert_hints is not None and self.db is not None:
             from .alert_policy import AlertHints, AlertPolicy, \
@@ -328,8 +359,16 @@ class Notifier:
                 # rather than once per tick.
                 if decision.force:
                     force = True
-                body = (f"{body}\n{decision.body_line()}" if body
-                        else decision.body_line())
+                _line = decision.body_line()
+                body = (f"{body}\n{_line}" if body else _line)
+                if doc is not None:
+                    # The Doc render is what the owner reads — the
+                    # escalation line rides its footer too.
+                    from dataclasses import replace as _dc_replace
+
+                    doc = _dc_replace(
+                        doc, footer=(f"{doc.footer}\n{_line}"
+                                     if doc.footer else _line))
         if self.db is not None:
             # DEDUPE CHOKE POINT — every proactive send funnels through
             # here, including critical ones.  The same (kind, title) inside
@@ -380,7 +419,7 @@ class Notifier:
             return result
         outcome = self._deliver(kind, title, body, channels=channels,
                                 output_kind=output_kind,
-                                output_meta=output_meta)
+                                output_meta=output_meta, doc=doc)
         reached = outcome.delivered
         if reached:
             result = self._store(kind, title, body, delivered=1,
@@ -413,6 +452,16 @@ class Notifier:
         self._record_attempts(nid, outcome.attempts)
         result["attempts"] = outcome.attempts
         return result
+
+    def publish_doc(self, kind: str, doc: Any, **kw: Any) -> dict[str, Any]:
+        """Publish a producer-built presentation Doc (Formatting F2).
+
+        Sugar over ``publish(kind, "", "", doc=doc)``: the stored
+        title/body derive from the Doc, delivery renders it per
+        platform.  Every other ``publish`` keyword (``critical``,
+        ``channels``, ``alert_hints``, …) passes through.
+        """
+        return self.publish(kind, "", "", doc=doc, **kw)
 
     @staticmethod
     def _termux_attempt(title: str) -> dict[str, Any]:
@@ -487,7 +536,8 @@ class Notifier:
     def _deliver(self, kind: str, title: str, body: str,
                  channels: list[str] | None = None,
                  output_kind: str | None = None,
-                 output_meta: dict[str, Any] | None = None) -> DeliveryOutcome:
+                 output_meta: dict[str, Any] | None = None,
+                 doc: Any = None) -> DeliveryOutcome:
         """Send to the owner's resolved channels.  Never raises.
 
         Returns a :class:`DeliveryOutcome` — one attempt record per
@@ -513,6 +563,12 @@ class Notifier:
         the title), delivery attaches ADAPTIVE buttons about that
         output; otherwise it sends explicit NO buttons (``[]``), so the
         adapter cannot fall through to stale origin buttons.
+
+        ``doc`` (F2): when a presentation Doc rides along, each target
+        receives the Doc rendered for its own platform (see
+        :meth:`_deliver_doc_send`) and the Doc's actions — when it has
+        any — replace the adaptive buttons.  The string ``text`` built
+        below is still what the row stores and what redelivery sends.
         """
         from ..social.chat.base import ChatRef
         from ..social.chat.gateway import resolve_owner_targets
@@ -539,6 +595,20 @@ class Notifier:
                 buttons = _kb if _kb else []
         except Exception:  # noqa: BLE001 - buttons never break delivery
             buttons = []
+
+        if doc is not None:
+            # A Doc's own actions describe THIS output — they win over
+            # the output_kind-derived adaptive buttons.
+            try:
+                from ..social.chat.present import actions_rows
+
+                _doc_rows = actions_rows(doc)
+                if _doc_rows:
+                    buttons = _doc_rows
+            except Exception:  # noqa: BLE001 - buttons never break delivery
+                pass
+        #: per-platform Doc renders, computed once per _deliver pass
+        _doc_renders: dict[str, Any] = {}
 
         outcome = DeliveryOutcome()
         if self.gateway is None:
@@ -618,30 +688,37 @@ class Notifier:
                     f"session")
                 continue
             try:
-                # Explicit buttons (adaptive, or [] for none) — the
-                # adapter must NOT derive buttons from the last inbound
-                # command for a push.
-                try:
-                    result = self.gateway.send(
-                        target.platform,
-                        ChatRef(platform=target.platform,
-                                chat_id=target.chat_id),
-                        text, buttons=buttons)
-                except TypeError as exc:
-                    # A gateway whose send() predates the buttons kwarg
-                    # (minimal doubles, older adapters): buttons are an
-                    # enhancement, never a delivery requirement — retry
-                    # plain rather than failing the push. Any other
-                    # TypeError re-raises into the failure path below.
-                    if "buttons" not in str(exc):
-                        raise
-                    _log.debug("notifier: gateway.send rejects buttons — "
-                               "retrying plain")
-                    result = self.gateway.send(
-                        target.platform,
-                        ChatRef(platform=target.platform,
-                                chat_id=target.chat_id),
-                        text)
+                if doc is not None:
+                    # Presentation-layer delivery (F2): the Doc rendered
+                    # for THIS target's platform, its parse mode
+                    # explicit, its actions as the buttons.
+                    result = self._deliver_doc_send(
+                        target, doc, buttons, _doc_renders)
+                else:
+                    # Explicit buttons (adaptive, or [] for none) — the
+                    # adapter must NOT derive buttons from the last inbound
+                    # command for a push.
+                    try:
+                        result = self.gateway.send(
+                            target.platform,
+                            ChatRef(platform=target.platform,
+                                    chat_id=target.chat_id),
+                            text, buttons=buttons)
+                    except TypeError as exc:
+                        # A gateway whose send() predates the buttons kwarg
+                        # (minimal doubles, older adapters): buttons are an
+                        # enhancement, never a delivery requirement — retry
+                        # plain rather than failing the push. Any other
+                        # TypeError re-raises into the failure path below.
+                        if "buttons" not in str(exc):
+                            raise
+                        _log.debug("notifier: gateway.send rejects buttons — "
+                                   "retrying plain")
+                        result = self.gateway.send(
+                            target.platform,
+                            ChatRef(platform=target.platform,
+                                    chat_id=target.chat_id),
+                            text)
             except Exception as exc:  # noqa: BLE001 - one dead channel skips
                 attempt["state"] = ATTEMPT_FAILED
                 attempt["error"] = f"send raised: {exc}"[:300]
@@ -663,6 +740,68 @@ class Notifier:
                              target.platform, target.chat_id,
                              attempt["error"])
         return outcome
+
+    def _deliver_doc_send(self, target: Any, doc: Any,
+                          buttons: list[list[tuple[str, str]]],
+                          renders: dict[str, Any]) -> Any:
+        """One Doc → one gateway send for one target (Formatting F2).
+
+        The Doc is rendered for the target's platform through the
+        presentation layer (cached per platform in ``renders``) and
+        sent with its parse mode explicit on the Telegram family —
+        the gateway then applies it to EVERY chunk with its balanced
+        markup chunking (the F1 formatted path), so a long Doc
+        arrives formatted throughout, never just on the last chunk.
+
+        Degradation mirrors the string path's buttons philosophy —
+        an enhancement is never a delivery requirement: a gateway
+        whose ``send()`` predates a kwarg loses that kwarg, not the
+        alert. Buttons drop first; dropping the parse mode swaps the
+        HTML for the plain rendering (raw HTML without a parse mode
+        would render as literal tags). Any other error propagates to
+        the caller's per-target failure path.
+        """
+        from ..social.chat.base import ChatRef
+        from ..social.chat.present import render as _render_doc
+
+        platform = str(target.platform or "")
+        rendered = renders.get(platform)
+        if rendered is None:
+            rendered = _render_doc(doc, platform)
+            renders[platform] = rendered
+        chat = ChatRef(platform=target.platform, chat_id=target.chat_id)
+        text, parse_mode = rendered.text, rendered.parse_mode
+        use_buttons = True
+        for _attempt in range(3):
+            kw: dict[str, Any] = {}
+            if use_buttons:
+                kw["buttons"] = buttons
+            if parse_mode:
+                kw["parse_mode"] = parse_mode
+            try:
+                return self.gateway.send(platform, chat, text, **kw)
+            except TypeError as exc:
+                msg = str(exc)
+                if use_buttons and "buttons" in msg:
+                    use_buttons = False
+                    _log.debug("notifier: gateway.send rejects buttons "
+                               "— retrying without (doc path)")
+                    continue
+                if parse_mode and "parse_mode" in msg:
+                    plain = renders.get("__plain__")
+                    if plain is None:
+                        plain = _render_doc(doc, "local")
+                        renders["__plain__"] = plain
+                    text, parse_mode = plain.text, ""
+                    _log.debug("notifier: gateway.send rejects "
+                               "parse_mode — retrying with the plain "
+                               "rendering (doc path)")
+                    continue
+                raise
+        # Reached only if a gateway rejects a kwarg its error message
+        # doesn't name — the bare send either lands or fails honestly
+        # into the caller's failure path.
+        return self.gateway.send(platform, chat, text)
 
     def _record_attempts(self, nid: str,
                          attempts: list[dict[str, Any]]) -> None:
@@ -1146,3 +1285,11 @@ def notify(context: Any, kind: str, title: str, body: str = "", **kw: Any) -> di
     escape hatch for that too.
     """
     return Notifier(context).publish(kind, title, body, **kw)
+
+
+def notify_doc(context: Any, kind: str, doc: Any, **kw: Any) -> dict[str, Any]:
+    """One-call helper for presentation Docs (Formatting F2):
+    ``notify_doc(context, "finance", doc)`` — the stored title/body
+    derive from the Doc and delivery renders it per platform.  See
+    :meth:`Notifier.publish` for the ``doc`` contract."""
+    return Notifier(context).publish(kind, "", "", doc=doc, **kw)
