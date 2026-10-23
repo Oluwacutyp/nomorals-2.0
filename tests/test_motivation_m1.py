@@ -42,6 +42,19 @@ def _ts(year, month, day, hour, minute=0) -> float:
                     tzinfo=LAGOS).timestamp()
 
 
+def _future_ts(hour, minute=0, *, days=7) -> float:
+    """`hour:minute` Lagos, `days` ahead of the real today.
+
+    Tests that ARM one-shots through Scheduler.add must never hand it
+    a fixed calendar date: the scheduler validates against the real
+    clock, so a hardcoded date turns into "one-shot time is in the
+    past" the day real time crosses it (the 2026-10-23 pins did
+    exactly that on 2026-10-23). Pure-function tests keep _ts."""
+    day = datetime.now(LAGOS).date() + timedelta(days=days)
+    return datetime(day.year, day.month, day.day, hour, minute,
+                    tzinfo=LAGOS).timestamp()
+
+
 def _ctx(test: unittest.TestCase, **over: object) -> SimpleNamespace:
     tmp = tempfile.mkdtemp(prefix="m1-")
     test.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
@@ -396,7 +409,7 @@ class CatchupBackstopTests(unittest.TestCase):
 
     def test_backstop_rearms_broken_chain(self):
         ctx = _ctx(self)
-        now = _ts(2026, 10, 23, 3, 0)  # inert day-part for catch-up
+        now = _future_ts(3, 0)  # inert day-part for catch-up
         armed = mot.ensure_motivation_jobs(ctx, rng=random.Random(1),
                                            now=now)
         self.assertTrue(armed["windows"]["morning"]["scheduled"])
@@ -422,7 +435,7 @@ class CatchupBackstopTests(unittest.TestCase):
             calls.append({"tool": tool, **args})
             if tool == "motivation" and args.get("action") == "backstop":
                 value = mot.motivation_backstop(
-                    ctx, now=_ts(2026, 10, 23, 3, 0),
+                    ctx, now=_future_ts(3, 0),
                     rng=random.Random(1))
                 return SimpleNamespace(ok=True, value=value, error=None)
             return SimpleNamespace(ok=True, value={}, error=None)
@@ -487,7 +500,7 @@ class ToolSurfaceTests(unittest.TestCase):
 
     def test_ensure_is_idempotent(self):
         ctx = _ctx(self)
-        now = _ts(2026, 10, 23, 3, 0)
+        now = _future_ts(3, 0)
         first = mot.ensure_motivation_jobs(ctx, rng=random.Random(9),
                                            now=now)
         second = mot.ensure_motivation_jobs(ctx, rng=random.Random(9),
