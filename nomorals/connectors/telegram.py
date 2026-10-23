@@ -15,6 +15,7 @@ bots cannot join groups on their own.
 
 from __future__ import annotations
 
+import re
 import time
 from typing import Any
 
@@ -37,6 +38,23 @@ _log = get_logger(__name__)
 API_BASE = "https://api.telegram.org"
 TOKEN_ENV = "TELEGRAM_BOT_TOKEN"
 DOCS_URL = "https://core.telegram.org/bots/api"
+
+# The house-dialect gate (Formatting F7): text matching ANY of these
+# patterns is presentation-layer input — the same detection the chat
+# gateway applies at its send boundary (gateway._present_outbound),
+# mirrored here so the connector does not import the gateway (the
+# gateway sits above connectors in the layer map's dependency flow
+# for chat; platforms.to_telegram is the shared leaf both use).
+_HOUSE_DIALECT = re.compile(
+    r"\*\*[^*]+\*\*"                       # **bold**
+    r"|`[^`\n]+`"                           # `code`
+    r"|\[[^\]\n]+\]\([^)\n]+\)"             # [label](url)
+    r"|~~[^~\n]+~~"                         # ~~strike~~
+    r"|__[^_\n]+__"                         # __underline__
+    r"|\*[^*\n]+\*"                         # *italic*
+    r"|</?(?:b|strong|i|em|u|ins|s|strike|del|code|pre|a|blockquote"
+    r"|tg-spoiler|tg-emoji|tg-time)\b"      # producer HTML spans
+)
 
 
 class TelegramError(ConnectorError):
@@ -175,9 +193,28 @@ class TelegramConnector(Connector):
         ``chat_id`` is a numeric id, ``@channelusername``, or (for a bot
         that the user messaged first) the user's id. Text over 4096
         characters is rejected by Telegram — split it before calling.
+
+        Formatting F7 — the F1 transport decision applies here too:
+        with NO explicit ``parse_mode``, text written in the house
+        dialect (``**bold**``, backtick code, markdown links, the
+        F7 italic/strike/underline forms) is presented through
+        :func:`nomorals.social.chat.platforms.to_telegram` and sent
+        with ``parse_mode="HTML"`` — the same conversion the chat
+        gateway applies.  Plain prose passes through untouched, and
+        text that ALREADY carries paired HTML is never double-
+        converted (to_telegram stashes producer spans and returns
+        them verbatim; a bare ``&`` in the prose between spans is
+        escaped exactly once, precisely the gateway's treatment of
+        pre-formatted text).  An explicit ``parse_mode`` is always
+        the caller's word: no conversion happens.
         """
         if not str(text):
             raise ConnectorError("refusing to send an empty message")
+        if not parse_mode and _HOUSE_DIALECT.search(text):
+            from ..social.chat.platforms import to_telegram
+
+            text = to_telegram(text)
+            parse_mode = "HTML"
         if len(text) > 4096:
             raise ConnectorError(
                 f"message is {len(text)} chars; telegram caps sendMessage "

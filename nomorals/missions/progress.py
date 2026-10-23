@@ -1097,7 +1097,10 @@ class MissionMilestones:
             # alert while collapsing repeats of the same one.
             title = f"mission stalled [{stall.get('code')}]: {mission.name}"
             body = render_status_text(self.store.detail(mission.id))
-            res = self._notifier.publish(self.KIND, title, body)
+            res = self._notifier.publish(
+                self.KIND, title, body,
+                alert_hints={"actionable": True,
+                             "subject": f"mission {mission.name}"})
             self._fanout(mission, title, body)
             self._mark(mission, key, title)
             return res
@@ -1130,7 +1133,11 @@ class MissionMilestones:
                 if digest:
                     body += f"\nresult: {digest}"
                 body += f"\nfull results: /mission results {mission.id}"
-            res = self._notifier.publish(self.KIND, title, body)
+            res = self._notifier.publish(
+                self.KIND, title, body,
+                alert_hints=({"failed": True,
+                              "subject": f"mission {mission.name}"}
+                             if status == "failed" else None))
             self._fanout(mission, title, body)
             self._mark(mission, key, title)
             return res

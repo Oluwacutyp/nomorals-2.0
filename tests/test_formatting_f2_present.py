@@ -496,5 +496,87 @@ class GatewayDocEndToEndTests(unittest.TestCase):
         self.assertIn("ledger line 299", joined)
 
 
+class ProducerConformanceTests(unittest.TestCase):
+    """Formatting F7 (scope F4): the conformance gate stands over
+    ALL converted producers — fixture Docs built by the real F3
+    (job_reports), F5 (alert_templates) and F7 (command/tool report)
+    builders must render conformantly on every platform: chunks
+    balanced, no literal **dialect on telegram-bot, no HTML leak to
+    whatsapp/local/terminal."""
+
+    PLATFORMS = ConformanceTests.PLATFORMS
+
+    @staticmethod
+    def _producer_docs():
+        from nomorals.agents import alert_templates as at
+        from nomorals.agents import job_reports as jr
+
+        return {
+            "job_report generic": jr.job_report_doc("web_search", {
+                "ok": True, "query": "gold & silver prices",
+                "results": [{"title": "hit", "url": "https://x.test"}]}),
+            "job_report string": jr.job_report_doc(
+                "shell_run", "exit=0\nall **done** here"),
+            "failure doc": jr.failure_doc("nightly", "exit=3: bad flag"),
+            "command report": jr.command_report_doc(
+                "greeter", "echo hi",
+                {"exit_code": 0, "stdout": "hi there\nbye", "stderr": ""}),
+            "command failure": jr.command_failure_doc(
+                "greeter", "ls --nope", "command failed: exit=3"),
+            "tool result": jr.tool_result_doc("media_probe", {
+                "ok": True, "duration_s": 12.5, "codec": "opus"}),
+            "immune event": at.immune_event_doc({
+                "title": "🛡 Immune: spawn throttle",
+                "body": "spawn rate **high** & rising\n"
+                        "sample: 5000 spawned",
+                "tone": "warn",
+                "facts": [("Spawned", 5000), ("Growth", "50/s")]}),
+            "watcher hit": at.watcher_hit_doc(
+                title="Price moved", watcher_name="gold watch",
+                watcher_id="w1", severity="urgent", kind="price",
+                summary="XAUUSD crossed **2400** & held"),
+            "ops finding": at.ops_finding_doc({
+                "kind": "stuck_mission", "title": "Mission stuck",
+                "body": "no progress",
+                "data": {"id": "abcdef123456", "goal": "research gold",
+                         "iterations": 4, "completed": [1, 2],
+                         "last_error": "timeout"}}),
+            "backup result": at.backup_result_doc({
+                "backup_id": "nightly", "ok": True, "bytes": 123456}),
+            "upgrade proposed": at.upgrade_proposed_doc(
+                pid="u1", title="Faster search",
+                rationale="because the index is stale"),
+            "research job": at.research_job_doc({
+                "query": "gold outlook", "state": "done",
+                "report": {"summary": "Gold is bid & rising",
+                           "sources": [{"n": 1, "title": "Wire",
+                                        "url": "https://x.test/1"}]}}),
+        }
+
+    def test_all_producer_docs_conform_everywhere(self):
+        for name, doc in self._producer_docs().items():
+            for platform, check_as in self.PLATFORMS.items():
+                with self.subTest(producer=name, platform=platform):
+                    parts = chunks(doc, platform)
+                    self.assertTrue(parts)
+                    for part in parts:
+                        self.assertEqual(
+                            check_message(check_as, part.text), [],
+                            f"{name} on {platform}: {part.text[:80]!r}")
+                        self.assertLessEqual(
+                            len(part.text), max_text_for(check_as))
+
+    def test_no_literal_stars_or_html_leaks(self):
+        for name, doc in self._producer_docs().items():
+            with self.subTest(producer=name):
+                for part in chunks(doc, "telegram-bot"):
+                    self.assertNotIn("**", part.text)
+                for platform in ("whatsapp", "local"):
+                    for part in chunks(doc, platform):
+                        self.assertNotIn("<b>", part.text)
+                        self.assertNotIn("<blockquote", part.text)
+                        self.assertNotIn("<tg-time", part.text)
+
+
 if __name__ == "__main__":
     unittest.main()

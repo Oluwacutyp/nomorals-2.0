@@ -93,6 +93,21 @@ _MD_BOLD = re.compile(r"\*\*(.+?)\*\*")
 #: lone `code` — not adjacent to another backtick (leaves ``` blocks alone)
 _MD_CODE = re.compile(r"(?<!`)`([^`\n]+)`(?!`)")
 _MD_LINK = re.compile(r"\[([^\]]+)\]\(([^)]+)\)")
+#: Formatting F7 (the F1 deferral, closed): the remaining house-dialect
+#: spans — ``~~strike~~``, ``__underline__``, single-``*`` italic.  All
+#: three are deliberately conservative: the content must start and end
+#: with a non-space character and stay on one line, so arithmetic
+#: (``2 * 3 * 4``), spaced markers (``a ~~ b``) and unpaired markers
+#: stay literal.  The italic pattern additionally refuses asterisks
+#: adjacent to another ``*`` — ``**`` is bold's, and an unpaired
+#: ``**`` stays literal rather than half-converting.
+_MD_STRIKE = re.compile(r"~~(?=\S)([^~\n]+?)(?<=\S)~~")
+#: underline additionally refuses word-flanked pairs (``a__b__c``,
+#: ``x__init__y``): double underscores inside identifiers are prose,
+#: not emphasis.  Content itself may not contain ``_`` at all.
+_MD_UNDER = re.compile(
+    r"(?<![A-Za-z0-9_])__(?=\S)([^_\n]+?)(?<=\S)__(?![A-Za-z0-9_])")
+_MD_ITALIC = re.compile(r"(?<!\*)\*(?=\S)([^*\n]+?)(?<=\S)\*(?!\*)")
 
 
 def strip_html(text: str) -> str:
@@ -110,6 +125,9 @@ def to_plain(text: str) -> str:
         out = _MD_LINK.sub(r"\1: \2", out)
         out = _MD_BOLD.sub(r"\1", out)
         out = _MD_CODE.sub(r"\1", out)
+        # F7 spans strip as pairs before the single-char leftovers
+        out = _MD_STRIKE.sub(r"\1", out)
+        out = _MD_UNDER.sub(r"\1", out)
         # whatsapp-style leftovers
         out = re.sub(r"\*([^*\n]+)\*", r"\1", out)
         out = re.sub(r"_([^_\n]+)_", r"\1", out)
@@ -157,15 +175,16 @@ _MD_FENCE = re.compile(r"```(?:[A-Za-z0-9_+-]*\n)?(.*?)```", re.S)
 def to_telegram(text: str) -> str:
     """Canonical house dialect → Telegram HTML, escaping-correct.
 
-    The house dialect is markdown-ish: ``**bold**``, `` `code` ``,
-    ```` ``` ```` fences, ``[text](url)`` links. Everything that is not
-    one of those spans — and not a paired Telegram-HTML element a
-    producer authored directly — is HTML-escaped, so user-derived
-    content interpolated into a title or body can neither break the
-    entity parse (a stray ``<`` used to fail the whole Bot API send)
-    nor inject tags. Paired HTML elements pass through verbatim.
-    Unpaired markers (a stray ``**``) stay literal — content fidelity
-    over cleverness. Never raises.
+    The house dialect is markdown-ish: ``**bold**``, ``*italic*``,
+    ``~~strike~~``, ``__underline__``, `` `code` ``, ```` ``` ```` fences,
+    ``[text](url)`` links. Everything that is not one of those spans —
+    and not a paired Telegram-HTML element a producer authored
+    directly — is HTML-escaped, so user-derived content interpolated
+    into a title or body can neither break the entity parse (a stray
+    ``<`` used to fail the whole Bot API send) nor inject tags.
+    Paired HTML elements pass through verbatim.  Unpaired markers
+    (a stray ``**``) and space-edged pairs (``2 * 3 * 4``) stay
+    literal — content fidelity over cleverness. Never raises.
     """
     try:
         out = str(text or "")
@@ -198,6 +217,18 @@ def to_telegram(text: str) -> str:
         #    title is still user text).
         out = _MD_BOLD.sub(
             lambda m: _keep(f"<b>{_html.escape(m.group(1))}</b>"), out)
+        # 4b. The F7 spans: strike, underline, single-* italic.  Same
+        #     treatment as bold (content escaped, span stashed) and
+        #     the same conservatism — a marker pair whose content
+        #     starts or ends with a space, or an unpaired marker,
+        #     never matches, so literal prose asterisks/tildes reach
+        #     step 5 untouched and render as themselves.
+        out = _MD_STRIKE.sub(
+            lambda m: _keep(f"<s>{_html.escape(m.group(1))}</s>"), out)
+        out = _MD_UNDER.sub(
+            lambda m: _keep(f"<u>{_html.escape(m.group(1))}</u>"), out)
+        out = _MD_ITALIC.sub(
+            lambda m: _keep(f"<i>{_html.escape(m.group(1))}</i>"), out)
         # 5. Everything left is literal text: escape it.
         out = _html.escape(out)
         # 6. Restore the stashed markup, outermost first: a span

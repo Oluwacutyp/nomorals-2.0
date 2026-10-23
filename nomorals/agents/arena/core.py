@@ -639,7 +639,11 @@ class Arena:
                 _send(self.context, "arena_build",
                       f"arena build review: {name}" if name
                       else "arena build review",
-                      text)
+                      text,
+                      alert_hints={
+                          "actionable": True,
+                          "subject": (f"arena build {name}" if name
+                                      else "arena build")})
             except Exception:  # noqa: BLE001 - a push must never kill the loop
                 pass
 

@@ -376,6 +376,8 @@ def request_human_action(
             f"{instructions}\n\nResolve with: "
             f"nm connectors checkpoint resolve --id {cp.id}",
             critical=True,
+            alert_hints={"actionable": True,
+                         "subject": f"connector checkpoint {connector_id}"},
         )
     if sys.stdin.isatty():
         print(f"\n{title}\n{instructions}\n")

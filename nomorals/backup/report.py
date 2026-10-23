@@ -26,18 +26,24 @@ KIND = "backup"
 
 def _publish(target: Any, title: str, body: str, *,
              critical: bool = False,
-             doc: Any = None) -> dict[str, Any]:
+             doc: Any = None,
+             alert_hints: Any = None) -> dict[str, Any]:
     """Publish via a Notifier, a context, or nowhere — never raises.
 
     Formatting F5: callers pass a presentation ``doc`` (built in
     ``agents/alert_templates`` — backup is L5, a peer of agents); the
     stored body is the Doc's canonical body and delivery renders the
-    Doc per platform, under the exact historical kind + title."""
+    Doc per platform, under the exact historical kind + title.
+
+    Pass 7 completion (F7): callers also pass ``alert_hints`` — the
+    family's classification (see the report functions below)."""
     if target is None:
         _log.info("backup report (no notifier): %s — %s", title, body)
         return {"delivered": False, "reason": "no notifier"}
     try:
         kw: dict[str, Any] = {}
+        if alert_hints is not None:
+            kw["alert_hints"] = alert_hints
         if doc is not None:
             from ..social.chat.present import body_text
 
@@ -75,7 +81,8 @@ def report_backup_result(
     )
     from ..agents.alert_templates import backup_result_doc
 
-    return _publish(target, title, body, doc=backup_result_doc(result))
+    return _publish(target, title, body, doc=backup_result_doc(result),
+                    alert_hints={"notice": True, "subject": backup_id})
 
 
 def report_backup_failure(
@@ -91,7 +98,8 @@ def report_backup_failure(
     from ..agents.alert_templates import backup_failure_doc
 
     return _publish(target, title, body, critical=True,
-                    doc=backup_failure_doc(backup_id, error))
+                    doc=backup_failure_doc(backup_id, error),
+                    alert_hints={"failed": True, "subject": backup_id})
 
 
 def report_drill(target: Any, drill_report: Any) -> dict[str, Any]:
@@ -105,7 +113,9 @@ def report_drill(target: Any, drill_report: Any) -> dict[str, Any]:
 
     if getattr(drill_report, "ok", False):
         return _publish(target, f"restore drill PASS: {drill_report.backup_id}",
-                        summary, doc=backup_drill_doc(drill_report))
+                        summary, doc=backup_drill_doc(drill_report),
+                        alert_hints={"notice": True,
+                                     "subject": drill_report.backup_id})
     body = (
         f"{summary}\nFailed steps: {', '.join(failed) or 'unknown'}.\n"
         "A backup never restored is a hypothesis — investigate before "
@@ -113,7 +123,9 @@ def report_drill(target: Any, drill_report: Any) -> dict[str, Any]:
     )
     return _publish(target, f"RESTORE DRILL FAIL: {drill_report.backup_id}",
                     body, critical=True,
-                    doc=backup_drill_doc(drill_report))
+                    doc=backup_drill_doc(drill_report),
+                    alert_hints={"failed": True,
+                                 "subject": drill_report.backup_id})
 
 
 def report_queued(target: Any, result: dict[str, Any]) -> dict[str, Any]:
@@ -127,4 +139,6 @@ def report_queued(target: Any, result: dict[str, Any]) -> dict[str, Any]:
     )
     from ..agents.alert_templates import backup_queued_doc
 
-    return _publish(target, title, body, doc=backup_queued_doc(result))
+    return _publish(target, title, body, doc=backup_queued_doc(result),
+                    alert_hints={"self_resolving": True,
+                                 "subject": backup_id})

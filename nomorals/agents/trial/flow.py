@@ -795,7 +795,14 @@ class TrialFlow:
         else:
             outcome = "done" if ok else "failed"
         self._audit("assist_finish", platform, f"run {run_id}: {outcome}")
-        self._notify_owner(f"trial assist — {platform}", note, chat_key)
+        _finish_hints = {
+            "paused_for_human": {"actionable": True},
+            "failed": {"failed": True},
+            "done": {"notice": True},
+        }.get(outcome, {"notice": True})
+        _finish_hints["subject"] = f"trial assist {platform}"
+        self._notify_owner(f"trial assist — {platform}", note, chat_key,
+                           alert_hints=_finish_hints)
 
     # ── durable assist-run state ──────────────────────────────────────────
     #
@@ -985,7 +992,10 @@ class TrialFlow:
                 _title = f"trial assist interrupted — {platform}"
                 _doc = trial_notice_doc(_title, note)
                 notifier.publish("trial", _title, body_text(_doc),
-                                 force=True, doc=_doc)
+                                 force=True, doc=_doc,
+                                 alert_hints={
+                                     "actionable": True,
+                                     "subject": f"trial assist {platform}"})
             except Exception:  # noqa: BLE001 - reporting must not crash
                 _log.exception("trial interrupt report failed for %s", rid)
         return recovered
@@ -1294,7 +1304,10 @@ class TrialFlow:
 
                 _doc = trial_notice_doc(title, note)
                 notify().publish("trial", title, body_text(_doc),
-                                 force=True, doc=_doc)
+                                 force=True, doc=_doc,
+                                 alert_hints={
+                                     "notice": True,
+                                     "subject": "sms code watches"})
             except Exception:  # noqa: BLE001 - reporting never crashes
                 _log.exception("sms watch recovery report failed")
 
@@ -1384,7 +1397,14 @@ class TrialFlow:
                     _doc = trial_notice_doc(_title, result)
                     _notifier().publish(
                         "trial", _title, body_text(_doc), force=True,
-                        doc=_doc)
+                        doc=_doc,
+                        alert_hints=(
+                            {"actionable": True,
+                             "subject": f"sms watch {number}"} if code else
+                            {"failed": True,
+                             "subject": f"sms watch {number}"} if error else
+                            {"notice": True,
+                             "subject": f"sms watch {number}"}))
                 except Exception:  # noqa: BLE001 - reporting never crashes
                     _log.exception("resumed sms watch report failed: %s",
                                    wid)
@@ -1445,8 +1465,15 @@ class TrialFlow:
         except Exception:  # noqa: BLE001 - audit never breaks the action
             _log.debug("trial action audit write failed")
 
-    def _notify_owner(self, title: str, body: str, chat_key: str = "") -> None:
-        """Deliver a background-run report to the owner. Never raises."""
+    def _notify_owner(self, title: str, body: str, chat_key: str = "",
+                      alert_hints: Any = None) -> None:
+        """Deliver a background-run report to the owner. Never raises.
+
+        ``alert_hints`` (Pass 7 completion, F7) is supplied by call
+        sites that KNOW the outcome (assist finish, sms watch close);
+        the signup driver's own callback carries no outcome field, so
+        its reports stay un-tiered rather than classified by guessing
+        at the title text."""
         try:
             from ..notifier import Notifier
             from ..alert_templates import trial_notice_doc
@@ -1460,7 +1487,7 @@ class TrialFlow:
             # Doc under the exact historical kind + title.
             doc = trial_notice_doc(title, body)
             notifier.publish("trial", title, body_text(doc), force=True,
-                             doc=doc)
+                             doc=doc, alert_hints=alert_hints)
         except Exception:  # noqa: BLE001 - reporting must not crash the run
             _log.exception("trial owner notification failed")
 
@@ -1568,7 +1595,10 @@ class TrialFlow:
             self._set_sms_watch_state(watch_id, "timeout", note=result)
             self._audit("sms_watch", "", "error")
             self._notify_owner(f"sms code watch — {number}", result,
-                               chat_key)
+                               chat_key,
+                               alert_hints={
+                                   "failed": True,
+                                   "subject": f"sms watch {number}"})
             return
         finally:
             try:
@@ -1584,7 +1614,13 @@ class TrialFlow:
         self._audit("sms_watch", "",
                     "code received" if code else "timeout, no code")
         self._notify_owner(f"sms code watch — {number}", result,
-                           chat_key)
+                           chat_key,
+                           alert_hints=(
+                               {"actionable": True,
+                                "subject": f"sms watch {number}"}
+                               if code else
+                               {"notice": True,
+                                "subject": f"sms watch {number}"}))
 
     def _stash_temp_number(self, info: dict[str, Any]) -> None:
         if self.db is None:

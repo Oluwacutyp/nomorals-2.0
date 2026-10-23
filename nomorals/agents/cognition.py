@@ -908,6 +908,9 @@ class CognitiveLoop:
             "🏋️ automatic training run starting",
             f"policy due: {reason_text}\n"
             "I'll report when it finishes — `nm train status` any time.",
+            # Pass 7 completion (F7): noteworthy, not actionable —
+            # it digests into the next briefing instead of paging.
+            alert_hints={"notice": True, "subject": "automatic training"},
         )
         result = job.run(force=True)
         return {"status": result.status, "run_id": result.run_id,

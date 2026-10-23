@@ -673,7 +673,8 @@ class ResearchLoop:
                 proposals=record["proposals_created"],
                 signals=summary)
             res = Notifier(self.context).publish(
-                "research", title, body_text(doc), doc=doc)
+                "research", title, body_text(doc), doc=doc,
+                alert_hints={"notice": True, "subject": "research loop"})
             return bool(isinstance(res, dict)
                         and res.get("delivered") not in (False, 0)
                         and not res.get("deduped"))

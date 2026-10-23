@@ -206,7 +206,21 @@ def ops_alerts(context: Any, *, force: bool = False,
             from ..social.chat.present import body_text
 
             doc = ops_finding_doc(f)
-            notify(context, "ops", f["title"], body_text(doc), doc=doc)
+            # Pass 7 completion (F7): classify by what the finding
+            # IS (its structured kind), never its title text.  A
+            # stuck mission pages — the self-heal already had its
+            # chance and the mission is still stuck (failure to
+            # resolve); an unrecovered pivot is the same shape.  A
+            # chronic routing role is noteworthy housekeeping: it
+            # digests, and the policy's recurrence counting (on the
+            # finding's stable key) is what could ever escalate it.
+            _hints = {
+                "stuck_mission": {"failed": True},
+                "unrecovered_pivot": {"failed": True},
+                "chronic_role": {"notice": True},
+            }.get(f["kind"], {"notice": True})
+            notify(context, "ops", f["title"], body_text(doc), doc=doc,
+                   alert_subject=f["key"], alert_hints=_hints)
         except Exception:  # noqa: BLE001 - alerting must never raise
             pass
         sent.append(f)

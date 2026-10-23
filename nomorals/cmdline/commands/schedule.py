@@ -109,7 +109,10 @@ def _schedule_list(args: Any, context: Any) -> int:
         print(f"  [{state}] {job['name']} — {job['kind']} {job['spec']} "
               f"(next: {nxt}){marker}")
         if job.get("last_result"):
-            print(f"        last: {job['last_result'][:80]}")
+            from ...agents.job_reports import summarize_last_result
+
+            print(f"        last: "
+                  f"{summarize_last_result(job, with_mark=False)}")
     return 0
 
 
@@ -139,8 +142,10 @@ def _schedule_health(args: Any, context: Any) -> int:
               f"(in {nxt.get('in_s', '?')}s)")
     last = h.get("last_job")
     if last:
+        from ...agents.job_reports import summarize_last_result
+
         print(f"  last ran: {'✅' if last.get('ok') else '❌'} {last['name']} — "
-              f"{last.get('last_result', '')[:80]}")
+              f"{summarize_last_result(last, with_mark=False)}")
     d = h.get("delivery") or {}
     q = d.get("queue") or {}
     print(f"  delivery queue: {q.get('retryable', 0)} retrying, "

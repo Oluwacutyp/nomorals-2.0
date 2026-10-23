@@ -592,6 +592,8 @@ class MonitorAgent:
                         body=f"{streak} consecutive failures, latest: "
                              f"{error[:200]}. Re-enable manually if the "
                              f"target is fixed.",
+                        alert_hints={"failed": True,
+                                     "subject": row["target"]},
                     )
                 except Exception:  # noqa: BLE001
                     pass
@@ -606,6 +608,8 @@ class MonitorAgent:
                         title=f"watch down: {row['target']}",
                         body=f"3 consecutive check failures, "
                              f"latest: {error[:200]}",
+                        alert_hints={"failed": True,
+                                     "subject": row["target"]},
                     )
                 except Exception:  # noqa: BLE001
                     pass

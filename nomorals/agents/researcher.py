@@ -469,6 +469,8 @@ class ResearchAgent:
                 "research",
                 f"research ({dom}/{researcher.name}) score {scores['total']:.2f}: {topic[:60]}",
                 f"suggestion: {suggestion}\ndigest: {digest[:900]}",
+                alert_hints={"notice": True,
+                             "subject": f"research {dom}/{topic[:60]}"},
             )
         if (status == "notified" and self._auto_apply_enabled()
                 and dom == "tech" and scores["total"] >= self._auto_apply_threshold()

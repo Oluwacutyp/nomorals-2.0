@@ -2568,8 +2568,18 @@ class MissionRunner:
                 f"Error: {(error or '')[:500]}\n"
                 f"Resume with: nm mission redrive {mission.id}"
             )
-            Notifier(self.context).publish(
-                "mission", f"\u274c mission failed: {mission.name}", body)
+            _notifier = Notifier(self.context)
+            _title = f"\u274c mission failed: {mission.name}"
+            try:
+                _notifier.publish(
+                    "mission", _title, body,
+                    alert_hints={"failed": True,
+                                 "subject": f"mission {mission.name}"})
+            except TypeError:
+                # A notifier whose publish predates the alert_policy
+                # kwargs (the module-level Notifier is a known test
+                # seam): the escalation still lands, un-tiered.
+                _notifier.publish("mission", _title, body)
             self._ledger("escalated", mission,
                          f"escalated failure to owner: {(error or '')[:120]}",
                          ok=False)

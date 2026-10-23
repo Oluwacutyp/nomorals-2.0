@@ -6,6 +6,33 @@ import json
 import time
 from typing import Any, Callable
 
+
+def _notify_row_excerpt(row: Any) -> str:
+    """The /notify body excerpt for one stored row (Formatting F7).
+
+    A row stored with its presentation Doc (``doc_json``, F7)
+    presents FROM the Doc through the layer: its own summary line,
+    whole — never the stored canonical body sliced mid-word.  Rows
+    without a Doc (every string publish, every pre-F7 row) keep the
+    historical excerpt exactly.  Never raises.
+    """
+    try:
+        raw = row.get("doc_json") if isinstance(row, dict) else None
+        if raw:
+            from ...social.chat.present import body_text, doc_from_json
+
+            doc = doc_from_json(raw)
+            if doc is not None:
+                text = doc.summary or body_text(doc)
+                first = next(
+                    (line.strip() for line in str(text).splitlines()
+                     if line.strip()), "")
+                if first:
+                    return " ".join(first.split())
+    except Exception:  # noqa: BLE001 - the view must never break on a row
+        pass
+    return str(row.get("body", "")).replace("\n", " ")[:80]
+
 class RuntimeScheduleMixin:
     """RuntimeScheduleMixin for :class:`PartnerRuntime`."""
 
@@ -32,8 +59,12 @@ class RuntimeScheduleMixin:
                 mark = "✅" if r["ok"] else "❌"
                 ts = time.strftime("%m-%d %H:%M",
                                    time.localtime(r["started_at"]))
-                lines.append(f"  {mark} {ts} {r['seconds']}s "
-                             f"[{r['trigger_source']}] {r['result'][:90]}")
+                from ..job_reports import summarize_last_result
+
+                lines.append(
+                    f"  {mark} {ts} {r['seconds']}s "
+                    f"[{r['trigger_source']}] "
+                    f"{summarize_last_result({'last_result': r['result']}, with_mark=False)}")
             return "\n".join(lines)
         if verb in {"status", "list"}:
             jobs = scheduler.list_jobs()
@@ -66,7 +97,15 @@ class RuntimeScheduleMixin:
                 if extras:
                     lines[-1] += " [" + ", ".join(extras) + "]"
                 if job.get("last_result"):
-                    lines.append(f"        last: {job['last_result'][:80]}")
+                    # Formatting F7: re-presented from the job row's
+                    # data (job_reports) — the result's own first
+                    # fact line, whole — instead of slicing the
+                    # stored contract string mid-word at 80 chars.
+                    # The stored string itself is untouched.
+                    from ..job_reports import summarize_last_result
+
+                    lines.append(
+                        f"        last: {summarize_last_result(job)}")
             return "\n".join(lines)
         if verb == "add":
             return self._schedule_add(parts[1:], scheduler)
@@ -160,9 +199,12 @@ class RuntimeScheduleMixin:
                          f"(in {nxt.get('in_s', '?')}s)")
         last = h.get("last_job")
         if last:
+            from ..job_reports import summarize_last_result
+
             mark = "✅" if last.get("ok") else "❌"
-            lines.append(f"  last ran: {mark} {last['name']} — "
-                         f"{last.get('last_result', '')[:80]}")
+            lines.append(
+                f"  last ran: {mark} {last['name']} — "
+                f"{summarize_last_result(last, with_mark=False)}")
         d = h.get("delivery") or {}
         q = d.get("queue") or {}
         lines.append(f"  delivery queue: {q.get('retryable', 0)} retrying, "
@@ -373,7 +415,7 @@ class RuntimeScheduleMixin:
             state = row.get("delivery_state") or (
                 "sent" if row.get("delivered") else "pending")
             mark = marks.get(state, "?")
-            body = str(row.get("body", "")).replace("\n", " ")[:80]
+            body = _notify_row_excerpt(row)
             lines.append(f"  {when} [{row.get('kind')}] {mark} {state} "
                          f"{row.get('title', '')[:50]}")
             if body:

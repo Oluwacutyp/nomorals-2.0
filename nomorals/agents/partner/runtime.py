@@ -2391,7 +2391,10 @@ class PartnerRuntime(
             from ..notifier import Notifier
 
             Notifier(self.context, gateway=self.gateway).publish(
-                "update", title, body, force=True, critical=failed)
+                "update", title, body, force=True, critical=failed,
+                alert_hints=({"failed": True, "subject": "self-update"}
+                             if failed else
+                             {"notice": True, "subject": "self-update"}))
         except Exception as exc:  # noqa: BLE001 - reporting is best-effort
             _log.warning("update recovery notice not delivered: %s", exc)
 
@@ -2609,7 +2612,12 @@ class PartnerRuntime(
             from ..notifier import Notifier
 
             Notifier(self.context, gateway=self.gateway).publish(
-                "missions", title, body, force=True)
+                "missions", title, body, force=True,
+                alert_hints=({"failed": True,
+                              "subject": "boot mission resume"}
+                             if failed else
+                             {"notice": True,
+                              "subject": "boot mission resume"}))
         except Exception as exc:  # noqa: BLE001 - reporting is best-effort
             _log.warning("boot mission resume notice not delivered: %s", exc)
 
@@ -4980,10 +4988,16 @@ class PartnerRuntime(
         """Run one tool and stream its styled output back to the chat.
 
         Human-readable (header + structured ``key: value`` lines), never
-        a raw JSON dump.
+        a raw JSON dump.  Formatting F7: the rendering converged onto
+        the presentation layer — the result becomes a
+        :func:`~nomorals.agents.job_reports.tool_result_doc` (the
+        F3-style generic Doc: summary first, noise suppressed, detail
+        expandable) rendered in the canonical dialect, which the
+        gateway's F1 presentation converts per platform at send.
+        ``core.output_style.render_output`` stays as a module; this
+        path no longer renders through it.
         """
         from ...core.idempotency_keys import scoped_idempotency_key
-        from ...core.output_style import render_output
 
         # Control commands are re-runnable by redelivery of the same
         # inbound message: under that message's scope (set by
@@ -5000,5 +5014,8 @@ class PartnerRuntime(
         chat = self._ref_from_key(chat_key)
         if not outcome.ok:
             return f"{tool} failed: {getattr(outcome.error, 'message', outcome.error)}"
-        text = render_output(kind="tool", title=tool, payload=outcome.value)
+        from ...social.chat.present import canonical_text
+        from ..job_reports import tool_result_doc
+
+        text = canonical_text(tool_result_doc(tool, outcome.value))
         return self._send_long_checked(chat.platform, chat, text[:6000])

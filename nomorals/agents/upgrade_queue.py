@@ -257,7 +257,8 @@ class UpgradeQueue:
             files=files, tests=tests, claim_ids=claim_ids,
             conflicts=conflicts)
         notify(self.context, "upgrade_proposal",
-               f"new upgrade proposal: {title}", body_text(doc), doc=doc)
+               f"new upgrade proposal: {title}", body_text(doc), doc=doc,
+               alert_hints={"actionable": True, "subject": title})
         return pid
 
     # --------------------------------------------- dedup / conflict internals
@@ -320,7 +321,8 @@ class UpgradeQueue:
                                  target_id=target["id"])
         notify(self.context, "upgrade_proposal",
                f"upgrade proposal merged: {new['title']}",
-               body_text(doc), doc=doc)
+               body_text(doc), doc=doc,
+               alert_hints={"notice": True, "subject": new["title"]})
 
     def _make_conflict_note(self, existing: dict[str, Any], *,
                             other_id: str, other_title: str,
@@ -394,7 +396,8 @@ class UpgradeQueue:
                                   by=by, approved=True)
         notify(self.context, "upgrade_proposal",
                f"upgrade approved: {row['title']}",
-               body_text(doc), doc=doc)
+               body_text(doc), doc=doc,
+               alert_hints={"notice": True, "subject": row["title"]})
         return self.get(proposal_id) or {}
 
     def deny(self, proposal_id: str, reason: str, by: str = "owner") -> dict:
@@ -415,7 +418,8 @@ class UpgradeQueue:
                                   by=by, approved=False, reason=reason)
         notify(self.context, "upgrade_proposal",
                f"upgrade denied: {row['title']}",
-               body_text(doc), doc=doc)
+               body_text(doc), doc=doc,
+               alert_hints={"notice": True, "subject": row["title"]})
         return self.get(proposal_id) or {}
 
     def record_implemented(self, proposal_id: str, result: dict) -> dict:
@@ -436,7 +440,10 @@ class UpgradeQueue:
                                       evo_id=evo_id, result=result)
         notify(self.context, "upgrade_proposal",
                f"upgrade {status}: {proposal_id}",
-               body_text(doc), doc=doc)
+               body_text(doc), doc=doc,
+               alert_hints=({"notice": True, "subject": proposal_id}
+                            if ok else
+                            {"failed": True, "subject": proposal_id}))
         return self.get(proposal_id) or {}
 
     # --------------------------------------------------------------- helpers

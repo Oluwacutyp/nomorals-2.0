@@ -44,6 +44,32 @@ Renderers never raise (the platforms.py contract): an unexpected
 failure degrades to the plain rendering, then to the bare title.
 Construction, by contrast, fails fast — an unknown ``tone`` is a
 producer bug and raises immediately.
+
+Typography conventions (Formatting F7 — encoded here, in the layer,
+so producers inherit them instead of re-inventing them per surface):
+
+* **Status is the tone's icon.** A Doc's banner icon comes from
+  :data:`TONE_ICONS` (✅/⚠️/❌/ℹ️ — the same vocabulary as
+  ``agents/render.py``) unless the producer sets an explicit icon
+  for a *named thing* (a surface's own signpost, e.g. the briefing's
+  ☀️).  Decorative emoji in summaries/sections are not a status
+  language and producers should not invent new ones.
+* **Section signposts are semantic.** A section title names what
+  the section IS ("Results", "Detail", "Fired alerts"); the shared
+  signposts for cross-surface concepts live in :data:`SIGNPOSTS`
+  (the alert digest's 🧾 is the F7 entry) — a new cross-surface
+  concept gets its signpost here, once.
+* **Times are data, not strings.** A Doc that carries a moment
+  sets ``footer_unix``; Telegram renders it as a client-localized
+  ``<tg-time>``, other transports as a labeled UTC string.  A
+  producer never hand-formats a timestamp into prose.
+* **Links are KV urls.** A link belongs in ``KV(url=...)`` (rich
+  platforms render an anchor, plain ones ``label: url``), never
+  hand-written markup in a summary.
+* **The footer is provenance.** One line: where this came from,
+  what happens next, or the policy line that escalated it — set by
+  the producer (or the Notifier's policy seam), rendered last and
+  quiet (italic on rich transports).
 """
 
 from __future__ import annotations
@@ -60,8 +86,9 @@ _log = logging.getLogger(__name__)
 
 __all__ = [
     "Doc", "Section", "KV", "Field", "Rendered",
-    "TONE_ICONS", "TONES",
-    "render", "render_text", "chunks", "body_text", "actions_rows",
+    "TONE_ICONS", "TONES", "SIGNPOSTS",
+    "render", "render_text", "chunks", "body_text", "canonical_text",
+    "actions_rows", "doc_to_json", "doc_from_json",
     "from_dict", "humanize_key",
 ]
 
@@ -78,6 +105,13 @@ TONE_ICONS: dict[str, str] = {
 #: accepted tones (``fail`` is accepted as render.ICONS' spelling of
 #: the error tone and normalized to ``error``).
 TONES = frozenset(TONE_ICONS)
+
+#: Cross-surface section signposts (see the typography conventions in
+#: the module docstring): one icon per shared concept, defined once
+#: here so the surfaces that carry the concept never drift apart.
+SIGNPOSTS: dict[str, str] = {
+    "alert_digest": "🧾",
+}
 
 _TONE_ALIASES = {"fail": "error"}
 
@@ -660,3 +694,131 @@ def chunks(doc: Doc, platform: Any = "telegram-bot") -> list[Rendered]:
     except Exception:  # noqa: BLE001 - fall back to the whole render
         _log.debug("present: balanced chunking failed", exc_info=True)
     return [rendered]
+
+
+def canonical_text(doc: Doc) -> str:
+    """The Doc rendered whole (title included) in the canonical
+    house dialect — the form chat surfaces hand to the gateway's
+    string path, whose F1 presentation converts it per platform at
+    send exactly like any producer string.  (:func:`body_text` is
+    the same dialect without the title, for the Notifier's stored
+    rows, whose banner re-adds the title.)"""
+    try:
+        return _render(doc, "canonical")
+    except Exception:  # noqa: BLE001
+        return _render(doc, "plain")
+
+
+# ── Doc persistence (Formatting F7) ──────────────────────────────────
+#
+# A published Doc used to survive only as its canonical body string:
+# redelivery re-sent the string and lost the structure (expandable
+# quotes, tg-time footers, per-platform rendering).  The Notifier now
+# stores this JSON form alongside the string (``notifications.
+# doc_json``) and redelivery reconstructs the Doc from it.  The form
+# is a plain JSON object mirroring the dataclasses field for field;
+# anything that does not parse back into a valid Doc is rejected
+# (``None``) and the caller falls back to the string — a corrupt
+# stored form must never lose the alert.
+
+_DOC_JSON_FORMAT = 1
+
+
+def _json_scalar(value: Any) -> Any:
+    """KV values persist as JSON scalars; anything richer degrades
+    to its house stringification (what the renderers would print)."""
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    return _scalar_text(value)
+
+
+def doc_to_json(doc: Doc) -> str:
+    """Serialize a Doc for storage.  Never raises for a real Doc."""
+    import json
+
+    payload = {
+        "v": _DOC_JSON_FORMAT,
+        "title": doc.title,
+        "icon": doc.icon,
+        "tone": doc.tone,
+        "summary": doc.summary,
+        "sections": [
+            {
+                "title": s.title,
+                "rows": [
+                    {"label": kv.label, "value": _json_scalar(kv.value),
+                     "mono": bool(kv.mono), "url": kv.url}
+                    for kv in s.rows
+                ],
+                "lines": list(s.lines),
+                "quote": list(s.quote),
+                "expandable": bool(s.expandable),
+            }
+            for s in doc.sections
+        ],
+        "footer": doc.footer,
+        "footer_unix": doc.footer_unix,
+        "actions": [[list(pair) for pair in row] for row in doc.actions],
+        "overflow_text": doc.overflow_text,
+    }
+    return json.dumps(payload, ensure_ascii=False)
+
+
+def doc_from_json(text: Any) -> Doc | None:
+    """Rebuild a Doc from :func:`doc_to_json` output.
+
+    Returns ``None`` for anything else — wrong type, bad JSON, wrong
+    shape, an invalid tone — so callers fall back to the stored
+    string form.  Never raises.
+    """
+    import json
+
+    try:
+        if not isinstance(text, str) or not text.strip():
+            return None
+        payload = json.loads(text)
+        if not isinstance(payload, dict):
+            return None
+        if int(payload.get("v") or 0) != _DOC_JSON_FORMAT:
+            return None
+        sections = []
+        for raw in payload.get("sections") or []:
+            if not isinstance(raw, dict):
+                return None
+            rows = []
+            for kv in raw.get("rows") or []:
+                if not isinstance(kv, dict) or "label" not in kv:
+                    return None
+                rows.append(KV(str(kv.get("label") or ""),
+                               kv.get("value", ""),
+                               mono=bool(kv.get("mono")),
+                               url=str(kv.get("url") or "")))
+            sections.append(Section(
+                title=str(raw.get("title") or ""),
+                rows=tuple(rows),
+                lines=tuple(str(x) for x in raw.get("lines") or []),
+                quote=tuple(str(x) for x in raw.get("quote") or []),
+                expandable=bool(raw.get("expandable")),
+            ))
+        actions = []
+        for row in payload.get("actions") or []:
+            actions.append(tuple(
+                (str(pair[0]), str(pair[1])) for pair in row
+                if isinstance(pair, (list, tuple)) and len(pair) == 2))
+        footer_unix = payload.get("footer_unix")
+        return Doc(
+            title=str(payload.get("title") or ""),
+            icon=str(payload.get("icon") or ""),
+            tone=str(payload.get("tone") or "info"),
+            summary=str(payload.get("summary") or ""),
+            sections=tuple(sections),
+            footer=str(payload.get("footer") or ""),
+            footer_unix=(float(footer_unix)
+                         if isinstance(footer_unix, (int, float))
+                         and not isinstance(footer_unix, bool)
+                         else None),
+            actions=tuple(actions),
+            overflow_text=str(payload.get("overflow_text") or ""),
+        )
+    except Exception:  # noqa: BLE001 - a bad stored form is a fallback
+        return None

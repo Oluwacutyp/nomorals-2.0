@@ -3024,6 +3024,40 @@ def _apply_kv_store_ttl(db: object) -> None:
     )
 
 
+def _apply_notifications_doc_and_digest_fold(db: object) -> None:
+    """Formatting F7 storage: two additive columns on ``notifications``.
+
+    * ``doc_json`` (nullable TEXT) — the presentation Doc a row was
+      published with, serialized by ``social.chat.present``.  NULL on
+      every row written before this migration and on every string
+      publish: those rows keep behaving exactly as they always have
+      (redelivery through the string path).  Doc rows redeliver WITH
+      their structure (expandable quotes, tg-time footers).
+    * ``digest_folded_at`` (nullable REAL) — when an alert-policy
+      DIGEST row was folded into a delivered briefing (Pass 7's digest
+      tier, surfaced by the briefing's alert-digest section).  NULL =
+      not yet folded; the fold is exactly-once per row.
+
+    Guarded per column like the earlier _apply_* migrations: a build
+    that hand-applied one of the columns skips that ALTER, and a
+    database without the table at all (it is created by an earlier
+    migration in this same chain) is a no-op.
+    """
+    try:
+        cols = {r["name"] for r in db.query(  # type: ignore[attr-defined]
+            "PRAGMA table_info(notifications)")}
+    except Exception:  # noqa: BLE001 — table missing entirely: skip
+        return
+    if not cols:
+        return
+    if "doc_json" not in cols:
+        db.execute(  # type: ignore[attr-defined]
+            "ALTER TABLE notifications ADD COLUMN doc_json TEXT")
+    if "digest_folded_at" not in cols:
+        db.execute(  # type: ignore[attr-defined]
+            "ALTER TABLE notifications ADD COLUMN digest_folded_at REAL")
+
+
 def _apply_conversation_scope_rekey(db: object) -> None:
     """Re-key conversation history from session-record ids to conversation ids.
 
@@ -3190,6 +3224,8 @@ MIGRATIONS: tuple[Migration, ...] = (
               fn=_apply_kv_store_ttl),
     Migration(87, "conversation_scope_rekey",
               fn=_apply_conversation_scope_rekey),
+    Migration(88, "notifications_doc_and_digest_fold",
+              fn=_apply_notifications_doc_and_digest_fold),
 )
 
 

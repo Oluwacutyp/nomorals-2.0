@@ -327,6 +327,18 @@ def _fetch_news(context: Any) -> list[dict[str, Any]]:
 
 def _compose_briefing(context: Any) -> str:
     """Briefing compose stage.  Returns the text (possibly a fallback)."""
+    text, _briefing = _compose_briefing_doc(context)
+    return text
+
+
+def _compose_briefing_doc(context: Any) -> tuple[str, Any]:
+    """Compose stage, Doc form: ``(text, briefing)``.
+
+    The briefing object rides along so the delivery stage can do
+    its delivery-confirmed bookkeeping (F7: the alert-digest fold —
+    see :func:`mark_briefing_digest_folded`) against exactly the
+    sections that were composed, budgets applied.
+    """
     from .morning_briefing import BriefingComposer
     from datetime import datetime
     from ..core.tz import safe_zoneinfo
@@ -335,7 +347,7 @@ def _compose_briefing(context: Any) -> str:
     tz = safe_zoneinfo(pulse_timezone(context))
     date = datetime.now(tz).strftime("%Y-%m-%d")
     briefing = composer.compose(context, date)
-    return briefing.render_text()
+    return briefing.render_text(), briefing
 
 
 def run_pulse(context: Any) -> dict[str, Any]:
@@ -370,8 +382,14 @@ def run_pulse(context: Any) -> dict[str, Any]:
         stages.append("news")
 
     # ── 2. compose ───────────────────────────────────────────────────
-    ok, briefing_text, secs, att = _run_stage(
-        "compose", lambda: _compose_briefing(context))
+    _composed: dict[str, Any] = {}
+
+    def _compose() -> str:
+        text, briefing = _compose_briefing_doc(context)
+        _composed["briefing"] = briefing
+        return text
+
+    ok, briefing_text, secs, att = _run_stage("compose", _compose)
     briefing_text = briefing_text or "(briefing unavailable tonight)"
     _ledger(context, "stage",
             f"compose: {'ok' if ok else 'fallback'} ({att} attempt(s))",
@@ -401,6 +419,19 @@ def run_pulse(context: Any) -> dict[str, Any]:
     text_ok = _deliver_text(context, briefing_text)
     audio_ok = _deliver_audio(context, audio_path) if audio_path else False
     stages.append("deliver")
+    if text_ok and _composed.get("briefing") is not None:
+        # The composed briefing reached the owner: fold its alert
+        # digest (F7 — each digest item surfaces in exactly one
+        # briefing).  Text delivery is the confirmation; the voice
+        # script is derived prose, so an audio-only delivery does
+        # not consume the digest.
+        try:
+            from .morning_briefing import mark_briefing_digest_folded
+
+            mark_briefing_digest_folded(context, _composed["briefing"])
+        except Exception:  # noqa: BLE001 — bookkeeping never blocks
+            _log.debug("morning-pulse: digest fold marking failed",
+                       exc_info=True)
 
     # ── 6. the full story list ───────────────────────────────────────
     # Every undelivered story, as its own delivery, in confirmed

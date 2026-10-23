@@ -57,7 +57,9 @@ from ..social.chat.present import (Doc, Field, KV, Section, from_dict,
 
 _log = logging.getLogger(__name__)
 
-__all__ = ["job_report_doc", "failure_doc"]
+__all__ = ["job_report_doc", "failure_doc",
+           "command_report_doc", "command_failure_doc",
+           "tool_result_doc", "summarize_last_result"]
 
 #: Lists longer than this render their head + an explicit tail count.
 _LIST_LIMIT = 10
@@ -536,3 +538,137 @@ def failure_doc(job_name: str, summary: str) -> Doc:
     it exists only for the publish path."""
     return Doc(title=f"scheduled: {job_name}", icon="❌", tone="error",
                summary=str(summary or ""))
+
+
+# ── command payloads (Formatting F7 — the F3 residue) ───────────────
+
+def _quote_section(heading: str, text: str) -> Section | None:
+    """Prose as an expandable quote section with the house counted
+    tail past the prose line limit; None when the text is empty."""
+    lines = [line for line in str(text or "").splitlines()
+             if line.strip()]
+    if not lines:
+        return None
+    shown = lines[:_PROSE_LINE_LIMIT]
+    if len(lines) > _PROSE_LINE_LIMIT:
+        shown = shown + [
+            f"… (+{len(lines) - _PROSE_LINE_LIMIT} more lines)"]
+    return Section(heading, quote=tuple(shown), expandable=True)
+
+
+def command_report_doc(job_name: str, command: str,
+                       value: Mapping[str, Any]) -> Doc:
+    """The published report for one successful command run (F7).
+
+    The stored ``last_result`` string (``exit=N`` + the head of
+    stdout) is unchanged — this Doc is the published form: the
+    command named as a mono row, its exit code as a fact, stdout as
+    prose/detail in an expandable section (stderr likewise when the
+    command wrote any), and a summary taken from stdout's own first
+    line — never invented.
+    """
+    value = value or {}
+    exit_code = value.get("exit_code")
+    stdout = str(value.get("stdout") or "")
+    stderr = str(value.get("stderr") or "")
+    first = next((line.strip() for line in stdout.splitlines()
+                  if line.strip()), "")
+    if first:
+        summary = first[:200]
+    elif exit_code is not None:
+        summary = f"Command finished (exit {exit_code})."
+    else:
+        summary = "Command finished."
+    rows = []
+    if exit_code is not None:
+        rows.append(KV("Exit code", exit_code))
+    rows.append(KV("Command", str(command or ""), mono=True))
+    sections: list[Section] = [Section("Run", rows=tuple(rows))]
+    out_section = _quote_section("Output", stdout)
+    if out_section is not None:
+        sections.append(out_section)
+    err_section = _quote_section("Errors", stderr)
+    if err_section is not None:
+        sections.append(err_section)
+    return Doc(title=f"scheduled: {job_name}", icon="✅", tone="ok",
+               summary=summary, sections=tuple(sections))
+
+
+def command_failure_doc(job_name: str, command: str,
+                        summary: str) -> Doc:
+    """:func:`failure_doc` for a command payload: the failure text
+    is the summary (exactly as stored), and the command that failed
+    is named as a mono row — a failed run names what failed."""
+    return Doc(title=f"scheduled: {job_name}", icon="❌", tone="error",
+               summary=str(summary or ""),
+               sections=(Section("Run", rows=(
+                   KV("Command", str(command or ""), mono=True),)),))
+
+
+# ── chat tool results (Formatting F7 — the C2 convergence) ──────────
+
+def tool_result_doc(tool: str, value: Any) -> Doc:
+    """The F3-style generic Doc for an interactive tool result.
+
+    The same builders the scheduler publishes (hand builders where
+    they exist, the schema fallback otherwise), titled by the tool
+    instead of the job: chat surfaces render this Doc instead of the
+    raw ``render_tool_value`` dump, so an interactive result gets
+    the same summary-first, noise-suppressed treatment as a
+    scheduled report.  Never raises (via :func:`job_report_doc`'s
+    own degradation)."""
+    try:
+        builder = _BUILDERS.get(tool)
+        if builder is not None and isinstance(value, Mapping):
+            return builder(tool, value, title=tool)
+        if isinstance(value, str):
+            return _string_doc(tool, value, title=tool)
+        if isinstance(value, Mapping):
+            return _generic_doc(tool, value, title=tool)
+        return _value_doc(tool, value, title=tool)
+    except Exception:  # noqa: BLE001 - degrade, never fail the reply
+        _log.debug("job_reports: chat builder failed for %s", tool,
+                   exc_info=True)
+        return Doc(title=tool, icon="✅", tone="ok",
+                   summary=f"{humanize_key(tool) or 'Tool'} finished.")
+
+
+def summarize_last_result(job: Mapping[str, Any], *,
+                          with_mark: bool = True) -> str:
+    """One display line for a job row's last outcome (Formatting F7).
+
+    The jobs/status views used to slice the stored
+    ``schedule_jobs.last_result`` contract string at 80 chars —
+    mid-word, mid-fact.  This re-presents the SAME row data: the
+    outcome mark from the row's own failure contract (the documented
+    ``"job failed"`` prefix the health gates read), then the stored
+    string's own first content line whole — for a tool job that is
+    the result's first fact line, with the redundant ``"{tool}:"``
+    header line (the F3 storage shape) folded away.  The stored
+    string itself is never touched.  ``with_mark=False`` for views
+    that already carry their own outcome mark.  Never raises.
+    """
+    try:
+        raw = str(job.get("last_result") or "")
+        if not raw.strip():
+            return ""
+        failed = raw.startswith("job failed")
+        lines = [line.strip() for line in raw.splitlines()
+                 if line.strip()]
+        if not lines:
+            return ""
+        first = lines[0]
+        # the "{tool}:\n" storage header is a label, not a result —
+        # the next line is the first fact (when there is one)
+        if first.endswith(":") and len(lines) > 1:
+            first = lines[1]
+            # a leading "ok: yes" restates the mark — the next line
+            # is the first fact the run actually reported
+            if first.lower().startswith("ok:") and len(lines) > 2:
+                first = lines[2]
+        if not with_mark:
+            return first
+        mark = "❌" if failed else "✅"
+        return f"{mark} {first}"
+    except Exception:  # noqa: BLE001 - a view must never break on data
+        return ""

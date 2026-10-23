@@ -1673,7 +1673,8 @@ class Scheduler:
                     box["result"], box["doc"] = self._run_tool_report(
                         payload, job_name=str(row.get("name") or ""))
                 else:
-                    box["result"] = self._run_command(payload)
+                    box["result"], box["doc"] = self._run_command_report(
+                        payload, job_name=str(row.get("name") or ""))
             except Exception as exc:  # noqa: BLE001 - a job failure is a result
                 box["error"] = exc
 
@@ -1822,11 +1823,16 @@ class Scheduler:
                 # Doc (see _run_tool_report / job_reports) and a
                 # failure's report is an error Doc carrying the
                 # failure text — the Notifier renders either per
-                # platform and stores its canonical body.  Only the
-                # remaining string results (command payloads) take
-                # the legacy path: the summary string cut at a line
-                # boundary, never mid-line.  ``last_result`` keeps the
-                # stored string form in every branch.
+                # platform and stores its canonical body.  Formatting
+                # F7: command payloads publish Docs the same way
+                # (see _run_command_report); only residual string
+                # results take the legacy path below: the summary
+                # string cut at a line boundary, never mid-line.
+                # ``last_result`` keeps the stored string form in
+                # every branch.  A failure publish is classified for
+                # the alert policy (Pass 7 completion): a failed job
+                # is a failure-to-resolve event and pages as one,
+                # its subject the job's name.
                 title = f"{'✅' if ok else '❌'} scheduled: {job_name}"
                 if report_doc is not None:
                     self.notifier.publish(
@@ -1835,13 +1841,26 @@ class Scheduler:
                         output_meta={"job": job_name, "ok": ok},
                     )
                 elif not ok:
-                    from .job_reports import failure_doc
+                    from .job_reports import (command_failure_doc,
+                                              failure_doc)
 
+                    _fail_doc = failure_doc(job_name, summary)
+                    if row.get("payload_kind") == "command":
+                        try:
+                            _cmd = str((json.loads(
+                                row.get("payload") or "{}") or {}
+                            ).get("command") or "")
+                        except Exception:  # noqa: BLE001 - name is a bonus
+                            _cmd = ""
+                        if _cmd:
+                            _fail_doc = command_failure_doc(
+                                job_name, _cmd, summary)
                     self.notifier.publish(
                         "schedule", title, "",
-                        doc=failure_doc(job_name, summary),
+                        doc=_fail_doc,
                         output_kind="scheduled",
                         output_meta={"job": job_name, "ok": ok},
+                        alert_hints={"failed": True, "subject": job_name},
                     )
                 else:
                     body_lines = summary.splitlines()
@@ -1943,6 +1962,24 @@ class Scheduler:
         return f"{tool}:\n{text}", doc
 
     def _run_command(self, payload: dict[str, Any]) -> str:
+        text, _doc = self._run_command_report(payload)
+        return text
+
+    def _run_command_report(self, payload: dict[str, Any], *,
+                            job_name: str = "") -> tuple[str, Any]:
+        """Run a command payload; return ``(stored string, report Doc)``.
+
+        The string is the run's stored form — ``exit=N`` plus the
+        head of stdout — byte-identical to what the scheduler has
+        always recorded.  The Doc (Formatting F7, the F3 residue:
+        :func:`.job_reports.command_report_doc`) is the *published*
+        form — stdout as prose/detail, the command and its exit
+        code as facts — or None when it could not be built; building
+        it never fails the run.  Declared failures (nonzero exit,
+        timeout) raise exactly as they always have, before any Doc
+        exists; the failure report is built at the publish site from
+        the failure text (see :func:`.job_reports.command_failure_doc`).
+        """
         command = str(payload.get("command") or "").strip()
         if not command:
             raise ValueError("empty command payload")
@@ -1970,7 +2007,15 @@ class Scheduler:
                 raise _DeclaredFailure(
                     f"command failed: exit={exit_code}"
                     + (f": {detail}" if detail else ""))
-        return f"exit={value.get('exit_code')}\n{stdout}".strip()
+        doc = None
+        try:
+            from .job_reports import command_report_doc
+
+            doc = command_report_doc(job_name, command, value)
+        except Exception:  # noqa: BLE001 - a report bug must not fail the job
+            _log.debug("command report build failed for %r", command,
+                       exc_info=True)
+        return f"exit={value.get('exit_code')}\n{stdout}".strip(), doc
 
     # ── loop ─────────────────────────────────────────────────────────────────
     def start(self, *, catch_up: bool = True,

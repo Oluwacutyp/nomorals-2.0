@@ -699,7 +699,10 @@ class Inbox:
                                 result_summary=f"quarantined: {reason}")
             self._notify("inbox", f"inbox: quarantined {dest.name}",
                          f"{reason}; release with `nm inbox release {item.id}`",
-                         critical=True)
+                         critical=True,
+                         alert_hints={
+                             "actionable": True,
+                             "subject": f"inbox quarantine {dest.name}"})
             log.warning("inbox: quarantined %s (%s)", dest.name, reason)
             return item
 
@@ -711,14 +714,19 @@ class Inbox:
                                 error="too large — confirm processing")
             self._notify("inbox", f"inbox: {dest.name} is too large",
                          f"{size} bytes exceeds the {MAX_FILE_BYTES}-byte cap. "
-                         f"Reply to confirm or `nm inbox retry {item.id}`.")
+                         f"Reply to confirm or `nm inbox retry {item.id}`.",
+                         alert_hints={
+                             "actionable": True,
+                             "subject": f"inbox file {dest.name}"})
             return item
         if self._inbox_size() > MAX_INBOX_BYTES:
             item = self._insert(dest.name, str(dest), room, kind="file",
                                 status="needs_input",
                                 result_summary="inbox total over 2GB cap")
             self._notify("inbox", "inbox: total size over cap",
-                         "Inbox exceeds 2GB; oldest items should be archived.")
+                         "Inbox exceeds 2GB; oldest items should be archived.",
+                         alert_hints={"notice": True,
+                                      "subject": "inbox size cap"})
             return item
 
         kind = kind_hint or self._detect_kind(dest)
@@ -1329,11 +1337,25 @@ class Inbox:
         return Notifier(ctx, gateway=None)  # CLI context: persist only
 
     def _notify(self, kind: str, title: str, body: str = "",
-                *, critical: bool = False) -> None:
+                *, critical: bool = False,
+                alert_hints: Any = None) -> None:
         notifier = self._notifier or self._default_notifier()
         try:
-            notifier.publish(kind, title, redact_secrets(body),
-                             critical=critical)
+            kw: dict[str, Any] = {"critical": critical}
+            if alert_hints is not None:
+                kw["alert_hints"] = alert_hints
+            try:
+                notifier.publish(kind, title, redact_secrets(body), **kw)
+            except TypeError:
+                # The funnel predates F7 and may wrap notifier
+                # objects whose publish predates the alert_policy
+                # kwargs: retry without the classification rather
+                # than drop the notification — delivery first,
+                # tiering degrades for foreign notifiers only.
+                if "alert_hints" not in kw:
+                    raise
+                kw.pop("alert_hints")
+                notifier.publish(kind, title, redact_secrets(body), **kw)
         except Exception as exc:  # noqa: BLE001 - notify never breaks intake
             log.warning("inbox: notify failed (%s): %s", title, exc)
 

@@ -705,7 +705,7 @@ class WhatsAppAdapter(ChatAdapter):
         return result
 
     def send_media(self, chat: ChatRef, media: MediaRef, *,
-                   caption: str = "") -> SendResult:
+                   caption: str = "", parse_mode: str = "") -> SendResult:
         """Send a photo/video/audio/document via the bridge's send_media.
 
         When the bridge is down the media is queued (path + caption) and

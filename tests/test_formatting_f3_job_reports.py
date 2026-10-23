@@ -334,7 +334,15 @@ def test_scheduler_declared_failure_publishes_error_doc(tmp_path):
     assert "declared boom" in _last_result(sched.context, job["id"])
 
 
-def test_scheduler_command_success_keeps_string_publish(tmp_path):
+def test_scheduler_command_success_publishes_report_doc(tmp_path):
+    # Formatting F7 (scope C4) consciously supersedes the F3-era pin
+    # ``test_scheduler_command_success_keeps_string_publish``: _run_command
+    # reports were the named F3 residue, and F7 publishes them as Docs
+    # (job_reports.command_report_doc — stdout as prose/detail, the
+    # command and exit code as fact rows).  What F3 actually protected
+    # is unchanged and still pinned here: the STORED last_result
+    # string stays byte-identical, and the published body still
+    # carries the run's output text.
     tools = _Tools(_ok({"exit_code": 0, "stdout": "hello out"}))
     sched = _sched(tmp_path, tools)
     job = sched.add("cmd job", "every 1h", "command",
@@ -343,8 +351,14 @@ def test_scheduler_command_success_keeps_string_publish(tmp_path):
     assert out["ok"] is True, out
     calls = [c for c in sched.notifier.calls if c["kind"] == "schedule"]
     assert len(calls) == 1, calls
-    assert calls[0]["kw"].get("doc") is None
-    assert "hello out" in calls[0]["body"]
+    doc = calls[0]["kw"].get("doc")
+    assert isinstance(doc, Doc), calls[0]
+    assert doc.title == "scheduled: cmd job"
+    # the publish carries body="" + the Doc (publish derives the
+    # stored body from the Doc) — the output rides the Doc itself
+    from nomorals.social.chat.present import canonical_text
+    assert "hello out" in canonical_text(doc)
+    assert _last_result(sched.context, job["id"]) == "exit=0\nhello out"
 
 
 def test_scheduler_string_tool_result_publishes_doc(tmp_path):

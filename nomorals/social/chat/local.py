@@ -105,7 +105,8 @@ class LocalAdapter(ChatAdapter):
         # The console has no typing indicator; the latency itself is the signal.
         return False
 
-    def send_media(self, chat: ChatRef, media: MediaRef, *, caption: str = "") -> SendResult:
+    def send_media(self, chat: ChatRef, media: MediaRef, *, caption: str = "",
+                   parse_mode: str = "") -> SendResult:
         print(f"her: [media: {media.path}]" + (f" — {caption}" if caption else ""), file=self._out)
         self.stats["sent"] += 1
         return SendResult(ok=True, platform=self.name)

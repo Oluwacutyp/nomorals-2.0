@@ -63,7 +63,10 @@ def _cmd_pulse(args: Any, context: Any) -> int:
                   f"overlap={job.get('overlap_policy')} "
                   f"timeout={job.get('run_timeout_s')}s")
             if job.get("last_result"):
-                print(f"  last: {job['last_result'][:100]}")
+                from ...agents.job_reports import summarize_last_result
+
+                print(f"  last: "
+                      f"{summarize_last_result(job, with_mark=False)}")
         else:
             print("morning pulse: no scheduler job "
                   "(starts automatically with the runtime)")

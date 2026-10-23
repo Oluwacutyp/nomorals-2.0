@@ -1286,7 +1286,9 @@ class AlertEngine:
                     kind="watcher",
                     title=_notice_title,
                     body=body_text(_notice_doc),
-                    critical=False, doc=_notice_doc)
+                    critical=False, doc=_notice_doc,
+                    alert_hints={"failed": True,
+                                 "subject": watcher.name})
                 self.store.record_alert(
                     watcher.id, severity="important", channel="notifier",
                     status="sent", title=f"watcher erroring: {watcher.name}",
@@ -1316,7 +1318,9 @@ class AlertEngine:
                     kind="watcher",
                     title=f"watcher paused: {watcher.name}",
                     body=body_text(_notice_doc), critical=False,
-                    doc=_notice_doc)
+                    doc=_notice_doc,
+                    alert_hints={"notice": True,
+                                 "subject": watcher.name})
                 self.store.record_alert(
                     watcher.id, severity="important", channel="notifier",
                     status="sent", title=f"watcher paused: {watcher.name}",

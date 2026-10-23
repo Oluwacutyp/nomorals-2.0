@@ -104,7 +104,8 @@ class WebAdapter(ChatAdapter):
             until = self._typing_until.get(key, 0.0)
         return time.time() < until
 
-    def send_media(self, chat: ChatRef, media: MediaRef, *, caption: str = "") -> SendResult:
+    def send_media(self, chat: ChatRef, media: MediaRef, *, caption: str = "",
+                   parse_mode: str = "") -> SendResult:
         text = f"[media: {media.path}]" + (f" — {caption}" if caption else "")
         return self.send(chat, text, reply_to="")
 

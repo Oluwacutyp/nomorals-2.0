@@ -458,7 +458,12 @@ class ChatAdapter(ABC):
         message so plain-text messages are never accidentally parsed.
         """
 
-    def send_media(self, chat: ChatRef, media: MediaRef, *, caption: str = "") -> SendResult:
+    def send_media(self, chat: ChatRef, media: MediaRef, *, caption: str = "",
+                   parse_mode: str = "") -> SendResult:
+        # ``parse_mode`` (Formatting F7) is the caption's parse mode,
+        # mirroring send(): adapters whose platform formats captions
+        # (the Telegram family) apply it — with the plain-text retry
+        # on an entity rejection; every other adapter ignores it.
         return SendResult(ok=False, platform=self.name, error="media not supported")
 
     def edit_media(self, chat: ChatRef, message_id: str, media: MediaRef,

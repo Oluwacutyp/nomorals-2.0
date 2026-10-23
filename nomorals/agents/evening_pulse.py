@@ -181,6 +181,30 @@ def run_evening_pulse(context: Any) -> dict[str, Any]:
         briefing_text = "Evening recap: day summary unavailable."
         result["ok"] = False
 
+    # Formatting F7: the alert-policy DIGEST tier folds into the
+    # evening briefing too.  This pulse composes LLM prose rather
+    # than BriefingComposer sections, so the fold rides as an
+    # appended block in the shared line format; the rows are marked
+    # folded only when the publish below confirms delivery, so a
+    # failed delivery leaves the digest for the next briefing.
+    digest_ids: list[str] = []
+    try:
+        from .morning_briefing import alert_digest_lines
+        from .notifier import Notifier
+        from ..social.chat.present import SIGNPOSTS
+
+        _digest_rows = Notifier(context).digest_unfolded(limit=20)
+        _digest_lines = alert_digest_lines(_digest_rows)
+        if _digest_lines:
+            briefing_text = (
+                briefing_text.rstrip()
+                + f"\n\n{SIGNPOSTS['alert_digest']} Alert digest\n"
+                + "\n".join(_digest_lines))
+            digest_ids = [str(r.get("id") or "") for r in _digest_rows
+                          if r.get("id")]
+    except Exception:  # noqa: BLE001 — the fold never sinks the pulse
+        digest_ids = []
+
     # Stage 5: deliver
     def _deliver() -> bool:
         from .morning_pulse import _ledger
@@ -188,7 +212,13 @@ def run_evening_pulse(context: Any) -> dict[str, Any]:
         try:
             notifier = getattr(context, "notifier", None)
             if notifier:
-                notifier.publish("evening-pulse", briefing_text)
+                res = notifier.publish("evening-pulse", briefing_text)
+                if digest_ids and isinstance(res, dict) \
+                        and res.get("delivered"):
+                    try:
+                        notifier.mark_digest_folded(digest_ids)
+                    except Exception:  # noqa: BLE001 — bookkeeping only
+                        pass
                 return True
         except Exception:  # noqa: BLE001
             pass

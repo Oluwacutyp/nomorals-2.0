@@ -64,6 +64,7 @@ _log = get_logger(__name__)
 #: NOT the gateway's business — it passes through byte-identical.
 _HOUSE_DIALECT = re.compile(
     r"\*\*|`|\[[^\]\n]+\]\([^)\n]+\)"
+    r"|~~[^~\n]+~~|__[^_\n]+__|\*[^*\n]+\*"
     r"|<(?:b|strong|i|em|u|ins|s|strike|del|code|pre|a|blockquote|"
     r"tg-spoiler)[\s>]")
 
@@ -615,10 +616,23 @@ class ChatGateway:
         media: MediaRef,
         *,
         caption: str = "",
+        caption_parse_mode: str = "",
     ) -> tuple[SendResult, int]:
         """Send one media item with classified retry."""
         def _call() -> SendResult:
-            result = adapter.send_media(chat, media, caption=caption)
+            if caption_parse_mode:
+                try:
+                    result = adapter.send_media(
+                        chat, media, caption=caption,
+                        parse_mode=caption_parse_mode)
+                except TypeError:
+                    # An adapter without the F7 caption kwarg
+                    # (third-party or test double): the file still
+                    # goes, the caption unparsed — formatting
+                    # degrades, delivery doesn't.
+                    result = adapter.send_media(chat, media, caption=caption)
+            else:
+                result = adapter.send_media(chat, media, caption=caption)
             if result.ok:
                 self.touch(chat)
             return result
@@ -655,9 +669,11 @@ class ChatGateway:
                 kind=str(media.get("kind") or "file"),
                 name=str(media.get("name") or ""),
             )
+            cap_mode = str(media.get("caption_parse_mode") or "")
             result, attempts = self._send_one_media(
                 adapter, chat, ref,
                 caption=str(media.get("caption") or ""),
+                caption_parse_mode=cap_mode,
             )
             # A caption that was chunked at submit time: the remainder
             # goes out as text, in order, as part of the same row.
@@ -665,7 +681,7 @@ class ChatGateway:
             if result.ok and rest:
                 for piece in rest:
                     piece_result, _ = self._send_one_chunk(
-                        adapter, chat, str(piece))
+                        adapter, chat, str(piece), parse_mode=cap_mode)
                     if not piece_result.ok:
                         return piece_result, attempts
             return result, attempts
@@ -1006,6 +1022,22 @@ class ChatGateway:
             else [caption]
         caption_first = caption_chunks[0]
         caption_rest = caption_chunks[1:]
+        # Formatting F7: a caption that fits ONE chunk goes through
+        # the same presentation layer as text (to_telegram for the
+        # Telegram family) and rides with its explicit parse mode —
+        # matching send()'s behavior, including the adapters'
+        # plain-text retry on an entity rejection.  A caption the
+        # presentation would push past the caption cap, or one that
+        # already needed several raw chunks, keeps the pre-F7 raw
+        # path untouched: chunking formatted text mid-tag would
+        # corrupt it, and a plain caption is unchanged either way.
+        caption_parse_mode = ""
+        if caption_first and not caption_rest:
+            presented, mode = _present_outbound(
+                chat.platform, caption_first, "")
+            if mode and (limits.max_caption <= 0
+                         or caption_width(presented) <= limits.max_caption):
+                caption_first, caption_parse_mode = presented, mode
         media = MediaRef(path=target, mime="", kind=kind,
                          name=os.path.basename(target))
         use_durable = durable if durable is not None else self.durable_outbox
@@ -1017,7 +1049,8 @@ class ChatGateway:
                     durable_kind=durable_kind, group_id=group_id,
                     media={"path": target, "mime": "", "kind": kind,
                            "name": os.path.basename(target),
-                           "caption": caption_first},
+                           "caption": caption_first,
+                           "caption_parse_mode": caption_parse_mode},
                     caption_rest=caption_rest,
                 )
                 if not self.durable_drain_sync:
@@ -1027,7 +1060,8 @@ class ChatGateway:
 
         def _do() -> SendResult:
             result, _attempts = self._send_one_media(
-                adapter, chat, media, caption=caption_first)
+                adapter, chat, media, caption=caption_first,
+                caption_parse_mode=caption_parse_mode)
             if not result.ok:
                 return result
             for piece in caption_rest:

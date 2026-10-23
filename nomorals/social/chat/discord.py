@@ -404,7 +404,8 @@ class DiscordAdapter(ChatAdapter):
         return SendResult(ok=False, platform=self.name, error=last_error,
                           seconds=time.perf_counter() - started)
 
-    def send_media(self, chat: ChatRef, media: MediaRef, *, caption: str = "") -> SendResult:
+    def send_media(self, chat: ChatRef, media: MediaRef, *, caption: str = "",
+                   parse_mode: str = "") -> SendResult:
         started = time.perf_counter()
         dc = self._dc()
         if dc is None:

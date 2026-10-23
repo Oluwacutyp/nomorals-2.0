@@ -313,12 +313,16 @@ class Notifier:
         while delivery renders it per target platform through the
         presentation layer — HTML + explicit parse mode on the
         Telegram family, the native dialect elsewhere — with the
-        Doc's own actions as its buttons.  Redelivery of a stored
-        row goes through the string path (the row is all that
-        survives a restart), formatted by the gateway like any
-        dialect body.  A non-Doc ``doc`` is a producer bug: logged
-        and ignored, never a lost alert.
+        Doc's own actions as its buttons.  Since F7 the row also
+        stores the Doc's serialized form (``doc_json``, migration
+        88), so redelivery reconstructs the Doc and re-renders it
+        per platform WITH its structure; rows written before F7
+        (NULL ``doc_json``) redeliver through the string path,
+        formatted by the gateway like any dialect body.  A non-Doc
+        ``doc`` is a producer bug: logged and ignored, never a lost
+        alert.
         """
+        doc_json = ""
         if doc is not None:
             from ..social.chat.present import Doc as _Doc
             from ..social.chat.present import body_text as _doc_body
@@ -333,6 +337,8 @@ class Notifier:
                              "%s — ignoring it, delivering strings",
                              type(doc).__name__)
                 doc = None
+            if doc is not None:
+                doc_json = self._serialize_doc(doc)
         decision = None
         if alert_hints is not None and self.db is not None:
             from .alert_policy import AlertHints, AlertPolicy, \
@@ -346,7 +352,8 @@ class Notifier:
                     state = (STATE_LOGGED if decision.tier == TIER_LOG
                              else STATE_DIGEST)
                     result = self._store(kind, title, body, delivered=0,
-                                         delivery_state=state)
+                                         delivery_state=state,
+                                         doc_json=doc_json)
                     result["attempts"] = []
                     result["tier"] = decision.tier
                     result["tier_reason"] = decision.reason
@@ -369,6 +376,9 @@ class Notifier:
                     doc = _dc_replace(
                         doc, footer=(f"{doc.footer}\n{_line}"
                                      if doc.footer else _line))
+                    # the stored form must be the Doc actually
+                    # delivered (decision line included)
+                    doc_json = self._serialize_doc(doc)
         if self.db is not None:
             # DEDUPE CHOKE POINT — every proactive send funnels through
             # here, including critical ones.  The same (kind, title) inside
@@ -388,14 +398,16 @@ class Notifier:
                 if not force and not feature_enabled(self.context, "notifier"):
                     # still record it — the owner can read the queue with /notify
                     result = self._store(kind, title, body, delivered=0,
-                                         delivery_state=STATE_MUTED)
+                                         delivery_state=STATE_MUTED,
+                                         doc_json=doc_json)
                     result["attempts"] = []
                     return result
                 if proactive_check:
                     gate = proactive_gate(self.context, kind)
                     if gate is not None:
                         result = self._store(kind, title, body, delivered=0,
-                                             delivery_state=gate)
+                                             delivery_state=gate,
+                                             doc_json=doc_json)
                         result["attempts"] = []
                         return result
         nid = new_id()
@@ -405,7 +417,7 @@ class Notifier:
             if self._termux_fallback(title, body):
                 result = self._store(kind, title, body, delivered=1,
                                      delivery_state=STATE_SENT, channel="termux",
-                                     nid=nid)
+                                     nid=nid, doc_json=doc_json)
                 attempts = [self._termux_attempt(title)]
                 self._record_attempts(nid, attempts)
                 result["attempts"] = attempts
@@ -414,7 +426,8 @@ class Notifier:
             # immediately (a hot-starting platform should drain the queue
             # at once); backoff engages after an attempt actually fails.
             result = self._store(kind, title, body, delivered=0,
-                                 delivery_state=STATE_PENDING, nid=nid)
+                                 delivery_state=STATE_PENDING, nid=nid,
+                                 doc_json=doc_json)
             result["attempts"] = []
             return result
         outcome = self._deliver(kind, title, body, channels=channels,
@@ -424,7 +437,8 @@ class Notifier:
         if reached:
             result = self._store(kind, title, body, delivered=1,
                                  delivery_state=STATE_SENT,
-                                 channel=outcome.first_channel, nid=nid)
+                                 channel=outcome.first_channel, nid=nid,
+                                 doc_json=doc_json)
             self._record_attempts(nid, outcome.attempts)
             result["attempts"] = outcome.attempts
             return result
@@ -436,7 +450,7 @@ class Notifier:
         if self._termux_fallback(title, body):
             result = self._store(kind, title, body, delivered=1,
                                  delivery_state=STATE_SENT, channel="termux",
-                                 nid=nid)
+                                 nid=nid, doc_json=doc_json)
             attempts = outcome.attempts + [self._termux_attempt(title)]
             self._record_attempts(nid, attempts)
             result["attempts"] = attempts
@@ -448,7 +462,8 @@ class Notifier:
         state = STATE_SENT if reached else STATE_FAILED
         result = self._store(kind, title, body,
                              delivered=1 if reached else 0,
-                             delivery_state=state, nid=nid)
+                             delivery_state=state, nid=nid,
+                             doc_json=doc_json)
         self._record_attempts(nid, outcome.attempts)
         result["attempts"] = outcome.attempts
         return result
@@ -490,10 +505,28 @@ class Notifier:
         except Exception:  # noqa: BLE001 - dedupe is best-effort
             return False
 
+    @staticmethod
+    def _serialize_doc(doc: Any) -> str:
+        """The stored JSON form of a publish's Doc (Formatting F7).
+
+        Empty string when there is no Doc or serialization fails —
+        the row then behaves exactly like a string row (redelivery
+        through the string path).  Never raises."""
+        if doc is None:
+            return ""
+        try:
+            from ..social.chat.present import doc_to_json
+
+            return doc_to_json(doc)
+        except Exception:  # noqa: BLE001 - storage is best-effort
+            _log.debug("notifier: doc serialization failed", exc_info=True)
+            return ""
+
     def _store(self, kind: str, title: str, body: str, delivered: int,
                delivery_state: str = "", channel: str = "",
                retry_count: int = 0, next_retry_at: float = 0.0,
                nid: str | None = None,
+               doc_json: str = "",
                ) -> dict[str, Any]:
         nid = nid or new_id()
         if self.db is not None:
@@ -502,32 +535,44 @@ class Notifier:
                     self.db.execute(
                         "INSERT INTO notifications (id, kind, title, body, delivered, "
                         "delivery_state, channel, retry_count, next_retry_at, "
-                        "created_at) "
-                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        "doc_json, created_at) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                         (nid, kind, title, body, delivered, delivery_state,
-                         channel, retry_count, next_retry_at, time.time()),
+                         channel, retry_count, next_retry_at,
+                         doc_json or None, time.time()),
                     )
-            except Exception:  # noqa: BLE001 - pre-migration-83: no retry cols
+            except Exception:  # noqa: BLE001 - pre-F7: no doc_json column
                 try:
                     with self.db.transaction():
                         self.db.execute(
                             "INSERT INTO notifications (id, kind, title, body, delivered, "
-                            "delivery_state, created_at) "
-                            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                            "delivery_state, channel, retry_count, next_retry_at, "
+                            "created_at) "
+                            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                             (nid, kind, title, body, delivered, delivery_state,
-                             time.time()),
+                             channel, retry_count, next_retry_at, time.time()),
                         )
-                except Exception:  # noqa: BLE001 - pre-migration: no delivery_state
+                except Exception:  # noqa: BLE001 - pre-migration-83: no retry cols
                     try:
-                        # pre-migration DBs lack delivery_state — store anyway
                         with self.db.transaction():
                             self.db.execute(
                                 "INSERT INTO notifications (id, kind, title, body, delivered, "
-                                "created_at) VALUES (?, ?, ?, ?, ?, ?)",
-                                (nid, kind, title, body, delivered, time.time()),
+                                "delivery_state, created_at) "
+                                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                                (nid, kind, title, body, delivered, delivery_state,
+                                 time.time()),
                             )
-                    except Exception:  # noqa: BLE001
-                        pass
+                    except Exception:  # noqa: BLE001 - pre-migration: no delivery_state
+                        try:
+                            # pre-migration DBs lack delivery_state — store anyway
+                            with self.db.transaction():
+                                self.db.execute(
+                                    "INSERT INTO notifications (id, kind, title, body, delivered, "
+                                    "created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                                    (nid, kind, title, body, delivered, time.time()),
+                                )
+                        except Exception:  # noqa: BLE001
+                            pass
         return {"id": nid, "kind": kind, "title": title,
                 "delivered": bool(delivered),
                 "delivery_state": delivery_state,
@@ -609,6 +654,35 @@ class Notifier:
                 pass
         #: per-platform Doc renders, computed once per _deliver pass
         _doc_renders: dict[str, Any] = {}
+
+        # Formatting F7 — the document route for Doc overflow (survey
+        # §D.7 ladder rung 3, made deliberate): when a Doc's
+        # overflow_text is itself document-sized (LongOutput's own
+        # route decision), the overflow travels as a file attachment
+        # via gateway.send_file instead of an ever-longer expandable
+        # quote, and the in-chat Doc notes the attachment.  Targets
+        # where the file send fails keep the full inline Doc — the
+        # attachment is an enhancement, never a delivery requirement.
+        # The temp file lives for this _deliver pass only.
+        _overflow: dict[str, Any] | None = None
+        if doc is not None and getattr(doc, "overflow_text", "") \
+                and self.gateway is not None \
+                and hasattr(self.gateway, "send_file"):
+            try:
+                from ..social.chat.progress_throttle import LongOutput
+
+                _route, _ = LongOutput().route(doc.overflow_text)
+                if _route == "document":
+                    import tempfile
+
+                    _fd, _path = tempfile.mkstemp(
+                        prefix="devon-overflow-", suffix=".txt")
+                    with os.fdopen(_fd, "w", encoding="utf-8") as _fh:
+                        _fh.write(doc.overflow_text)
+                    _overflow = {"path": _path,
+                                 "chars": len(doc.overflow_text)}
+            except Exception:  # noqa: BLE001 - inline overflow remains
+                _overflow = None
 
         outcome = DeliveryOutcome()
         if self.gateway is None:
@@ -693,7 +767,8 @@ class Notifier:
                     # for THIS target's platform, its parse mode
                     # explicit, its actions as the buttons.
                     result = self._deliver_doc_send(
-                        target, doc, buttons, _doc_renders)
+                        target, doc, buttons, _doc_renders,
+                        overflow=_overflow)
                 else:
                     # Explicit buttons (adaptive, or [] for none) — the
                     # adapter must NOT derive buttons from the last inbound
@@ -739,11 +814,17 @@ class Notifier:
                 _log.warning("notifier: send to %s:%s failed: %s",
                              target.platform, target.chat_id,
                              attempt["error"])
+        if _overflow is not None:
+            try:
+                os.unlink(_overflow["path"])
+            except OSError:
+                pass
         return outcome
 
     def _deliver_doc_send(self, target: Any, doc: Any,
                           buttons: list[list[tuple[str, str]]],
-                          renders: dict[str, Any]) -> Any:
+                          renders: dict[str, Any],
+                          overflow: dict[str, Any] | None = None) -> Any:
         """One Doc → one gateway send for one target (Formatting F2).
 
         The Doc is rendered for the target's platform through the
@@ -760,16 +841,50 @@ class Notifier:
         HTML for the plain rendering (raw HTML without a parse mode
         would render as literal tags). Any other error propagates to
         the caller's per-target failure path.
+
+        ``overflow`` (F7): the prepared document-route payload for a
+        Doc whose overflow_text is document-sized.  The file goes
+        FIRST (so the in-chat note never claims an attachment that
+        didn't land); when it lands, this target receives the Doc
+        copy whose overflow moved into the attachment, its footer
+        noting the fact.  When it doesn't, the target receives the
+        full Doc with the overflow inline, exactly as before F7.
         """
         from ..social.chat.base import ChatRef
         from ..social.chat.present import render as _render_doc
 
         platform = str(target.platform or "")
-        rendered = renders.get(platform)
+        chat = ChatRef(platform=target.platform, chat_id=target.chat_id)
+        variant = ""
+        if overflow is not None:
+            try:
+                from ..social.chat.progress_throttle import LongOutput
+
+                file_res = self.gateway.send_file(
+                    platform, chat, overflow["path"],
+                    caption=LongOutput().caption(doc.overflow_text))
+                if getattr(file_res, "ok", False):
+                    from dataclasses import replace as _dc_replace
+
+                    note = ("📄 full detail attached as a document "
+                            f"({overflow['chars']:,} chars)")
+                    doc = _dc_replace(
+                        doc, overflow_text="",
+                        footer=(f"{doc.footer}\n{note}" if doc.footer
+                                else note))
+                    variant = "|attached"
+                else:
+                    _log.debug("notifier: overflow document send failed "
+                               "for %s — overflow stays inline", platform)
+            except Exception:  # noqa: BLE001 - inline overflow remains
+                _log.debug("notifier: overflow document send raised for "
+                           "%s — overflow stays inline", platform,
+                           exc_info=True)
+        cache_key = platform + variant
+        rendered = renders.get(cache_key)
         if rendered is None:
             rendered = _render_doc(doc, platform)
-            renders[platform] = rendered
-        chat = ChatRef(platform=target.platform, chat_id=target.chat_id)
+            renders[cache_key] = rendered
         text, parse_mode = rendered.text, rendered.parse_mode
         use_buttons = True
         for _attempt in range(3):
@@ -788,10 +903,10 @@ class Notifier:
                                "— retrying without (doc path)")
                     continue
                 if parse_mode and "parse_mode" in msg:
-                    plain = renders.get("__plain__")
+                    plain = renders.get("__plain__" + variant)
                     if plain is None:
                         plain = _render_doc(doc, "local")
-                        renders["__plain__"] = plain
+                        renders["__plain__" + variant] = plain
                     text, parse_mode = plain.text, ""
                     _log.debug("notifier: gateway.send rejects "
                                "parse_mode — retrying with the plain "
@@ -963,6 +1078,53 @@ class Notifier:
         except Exception:  # noqa: BLE001 - pre-policy DBs have no rows
             return []
 
+    def digest_unfolded(self, limit: int = 20) -> list[dict[str, Any]]:
+        """DIGEST-tier rows not yet folded into a briefing, oldest
+        first (Formatting F7): the briefing's alert-digest section
+        drains this queue FIFO, and :meth:`mark_digest_folded` —
+        called only after the briefing carrying them is confirmed
+        delivered — takes them out of the queue, so each digest item
+        surfaces in exactly one briefing.  Pre-F7 databases (no
+        ``digest_folded_at`` column) return []: folding is an F7
+        behaviour and never guesses at an unmigrated store.  Never
+        raises."""
+        if self.db is None:
+            return []
+        try:
+            return self.db.query(
+                "SELECT * FROM notifications WHERE delivery_state = ? "
+                "AND COALESCE(digest_folded_at, 0) = 0 "
+                "ORDER BY created_at ASC LIMIT ?",
+                (STATE_DIGEST, max(1, int(limit))),
+            )
+        except Exception:  # noqa: BLE001 - pre-F7 DBs have no fold column
+            return []
+
+    def mark_digest_folded(self, ids: Any) -> int:
+        """Mark DIGEST rows folded into a delivered briefing (F7).
+
+        Only rows still in the digest state are touched — a row the
+        owner already saw another way is never re-marked.  Returns
+        the number of rows marked.  Never raises."""
+        if self.db is None:
+            return 0
+        clean = [str(i) for i in (ids or []) if i]
+        if not clean:
+            return 0
+        try:
+            with self.db.transaction():
+                marked = 0
+                for nid in clean:
+                    cur = self.db.execute(
+                        "UPDATE notifications SET digest_folded_at = ? "
+                        "WHERE id = ? AND delivery_state = ? "
+                        "AND COALESCE(digest_folded_at, 0) = 0",
+                        (time.time(), nid, STATE_DIGEST))
+                    marked += int(getattr(cur, "rowcount", 0) or 0)
+            return marked
+        except Exception:  # noqa: BLE001 - pre-F7 DBs have no fold column
+            return 0
+
     def alert_journal(self, limit: int = 50, kind: str = "",
                       subject: str = "") -> list[dict[str, Any]]:
         """Recent alert-policy tier decisions (the audit read).
@@ -1064,8 +1226,21 @@ class Notifier:
             attempts += 1
         outcome = DeliveryOutcome()
         if self.gateway is not None:
+            # Formatting F7: a row stored with its Doc (doc_json,
+            # migration 88) redelivers WITH its structure — the Doc
+            # is reconstructed and rendered per platform again.
+            # Pre-F7 rows (NULL) and unparseable forms keep the
+            # historical string path, byte for byte.
+            doc = None
+            if row.get("doc_json"):
+                try:
+                    from ..social.chat.present import doc_from_json
+
+                    doc = doc_from_json(row.get("doc_json"))
+                except Exception:  # noqa: BLE001 - fall back to string
+                    doc = None
             outcome = self._deliver(row["kind"], row.get("title", ""),
-                                    row.get("body", ""))
+                                    row.get("body", ""), doc=doc)
         # record this pass's per-channel attempts against the row, so
         # /notify shows every retry's channel detail, not just the last.
         self._record_attempts(str(row.get("id") or ""), outcome.attempts)

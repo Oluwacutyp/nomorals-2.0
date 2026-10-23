@@ -1645,7 +1645,9 @@ class ResearchPipeline:
                 from .notifier import notify as _send
 
                 res = _send(context, "research",
-                            f"Research done: {query[:60]}", brief)
+                            f"Research done: {query[:60]}", brief,
+                            alert_hints={"notice": True,
+                                         "subject": f"research {query[:60]}"})
                 notified = bool(isinstance(res, dict)
                                 and res.get("delivered"))
             except Exception as e:  # noqa: BLE001 - notify is best-effort

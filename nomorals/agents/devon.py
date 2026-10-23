@@ -1612,7 +1612,13 @@ class DevonAgent:
         outcome = tools.call(tool, **kwargs)
         if not outcome.ok:
             raise ToolError(outcome_message(outcome.error))
-        return render_tool_value(outcome.value)
+        # Formatting F7: registry results reach the chat through the
+        # presentation layer's generic Doc treatment (job_reports),
+        # not the raw render_tool_value dump.
+        from ..social.chat.present import canonical_text
+        from .job_reports import tool_result_doc
+
+        return canonical_text(tool_result_doc(tool, outcome.value))
 
     def _tool_dns_lookup(self, args: dict[str, Any]) -> str:
         return self._registry_tool(
@@ -1939,7 +1945,11 @@ class DevonAgent:
         result = tools.call("api_call", connector=name, params=params_json)
         if not result.ok:
             return f"api: {outcome_message(result.error)}"
-        return f"api {name}:\n" + render_tool_value(result.value)
+        from ..social.chat.present import canonical_text
+        from .job_reports import tool_result_doc
+
+        return canonical_text(
+            tool_result_doc(f"api {name}", result.value))
 
     def _tool_connector(self, args: dict[str, Any]) -> str:
         """Devon's own service integrations — the planner's answer to
@@ -2087,7 +2097,10 @@ class DevonAgent:
         result = self.context.tools.call("media_edit_probe", path=source)
         if not result.ok:
             return f"media_probe: {outcome_message(result.error)}"
-        return render_tool_value(result.value)
+        from ..social.chat.present import canonical_text
+        from .job_reports import tool_result_doc
+
+        return canonical_text(tool_result_doc("media_probe", result.value))
 
     def _tool_media_convert(self, args: dict[str, Any]) -> str:
         source = str(args.get("source") or "").strip()
@@ -2107,7 +2120,11 @@ class DevonAgent:
         if not result.ok:
             return (f"media_capability: "
                     f"{outcome_message(result.error)}")
-        return render_tool_value(result.value)
+        from ..social.chat.present import canonical_text
+        from .job_reports import tool_result_doc
+
+        return canonical_text(
+            tool_result_doc("media_capability", result.value))
 
     def _tool_swarm(self, args: dict[str, Any]) -> str:
         from .swarm import SwarmAgent

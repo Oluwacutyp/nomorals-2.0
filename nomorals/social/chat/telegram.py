@@ -1552,7 +1552,8 @@ class TelegramAdapter(ChatAdapter):
         self._remember_sent(getattr(result, "id", None))  # self-chat loop guard
         return result
 
-    def send_media(self, chat: ChatRef, media: MediaRef, *, caption: str = "") -> SendResult:
+    def send_media(self, chat: ChatRef, media: MediaRef, *, caption: str = "",
+                   parse_mode: str = "") -> SendResult:
         client = self._client
         if client is None:
             return SendResult(ok=False, platform=self.name, error="not connected")
@@ -1566,19 +1567,40 @@ class TelegramAdapter(ChatAdapter):
             kwargs = self._thread_kwargs(chat)
             if getattr(media, "voice_note", False):
                 kwargs["voice_note"] = True
+            # F7: the caption's parse mode rides Telethon's own
+            # parser (same accepted spellings as send()).
+            if parse_mode in ("html", "HTML", "md", "markdown"):
+                kwargs["parse_mode"] = parse_mode
 
-            async def _one() -> Any:
+            async def _one(cap: str = caption, **overrides: Any) -> Any:
+                call_kwargs = {**kwargs, **overrides}
                 try:
                     result = await client.send_file(
-                        entity, media.path, caption=caption or None, **kwargs
+                        entity, media.path, caption=cap or None, **call_kwargs
                     )
                 except TypeError:  # older Telethon without message_thread_id
-                    kwargs.pop("message_thread_id", None)
-                    result = await client.send_file(entity, media.path, caption=caption or None)
+                    call_kwargs.pop("message_thread_id", None)
+                    result = await client.send_file(entity, media.path, caption=cap or None)
                 self._remember_sent(getattr(result, "id", None))  # self-chat loop guard
                 return result
 
-            return await self._send_with_flood_retry(_one, "send_file")
+            try:
+                return await self._send_with_flood_retry(_one, "send_file")
+            except Exception as exc:  # noqa: BLE001 - classified below
+                if not ("parse_mode" in kwargs
+                        and _is_entity_parse_error(exc)):
+                    raise
+                # The caption's markup was rejected: retry once as
+                # PLAIN text (tags stripped, no parse mode) — mirrors
+                # send()'s fallback; the file itself must still land.
+                _log.warning(
+                    "telegram: caption entity parse rejected (%s) — "
+                    "retrying send_file as plain text", exc)
+                from .platforms import strip_html
+
+                return await self._send_with_flood_retry(
+                    lambda: _one(strip_html(caption), parse_mode=None),
+                    "send_file")
 
         try:
             result = self._run_on_loop(_do())
@@ -2943,7 +2965,8 @@ class TelegramBotAdapter(ChatAdapter):
             return SendResult(ok=False, platform=self.name, error=str(exc),
                               seconds=time.perf_counter() - started)
 
-    def send_media(self, chat: ChatRef, media: MediaRef, *, caption: str = "") -> SendResult:
+    def send_media(self, chat: ChatRef, media: MediaRef, *, caption: str = "",
+                   parse_mode: str = "") -> SendResult:
         started = time.perf_counter()
         path = Path(media.path)
         if not path.is_file():
@@ -2963,11 +2986,34 @@ class TelegramBotAdapter(ChatAdapter):
             }.get(media.kind, "sendDocument")
         field = {"sendPhoto": "photo", "sendVideo": "video",
                  "sendVoice": "voice", "sendAudio": "audio"}.get(method, "document")
+        cap = for_platform("telegram-bot").max_caption
         try:
             data: dict[str, Any] = {"chat_id": chat.chat_id}
             if caption:
-                data["caption"] = caption[:for_platform("telegram-bot").max_caption]
-            result = self._api_upload(method, data, field, path)
+                # A caption carrying a parse mode arrives pre-fitted
+                # by the gateway (F7): it is sent whole — truncating
+                # HTML mid-tag would break the entity parse.  Plain
+                # captions keep the historical truncation.
+                data["caption"] = caption if parse_mode else caption[:cap]
+            if parse_mode in ("HTML", "Markdown", "MarkdownV2"):
+                data["parse_mode"] = parse_mode
+            try:
+                result = self._api_upload(method, data, field, path)
+            except Exception as exc:  # noqa: BLE001 - classified below
+                if not (parse_mode and _is_entity_parse_error(exc)):
+                    raise
+                # The API rejected the caption's markup itself: retry
+                # as PLAIN text (tags stripped, caption cap applied),
+                # mirroring send()'s fallback — a formatting failure
+                # must never eat the file.
+                _log.warning(
+                    "telegram-bot: caption entity parse rejected (%s) "
+                    "— retrying %s as plain text", exc, method)
+                from .platforms import strip_html
+
+                data.pop("parse_mode", None)
+                data["caption"] = strip_html(caption)[:cap]
+                result = self._api_upload(method, data, field, path)
             self.stats["sent"] += 1
             return SendResult(ok=True, platform=self.name,
                               message_id=str(result.get("message_id", "")),

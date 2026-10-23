@@ -405,6 +405,8 @@ class RuntimeReachMixin:
                     body=message,
                     force=True,
                     channels=["telegram"],
+                    alert_hints={"actionable": True,
+                                 "subject": "browser wall"},
                 )
             except Exception:  # noqa: BLE001 - notify failure is reported
                 _log.warning("takeover escalation notify failed",

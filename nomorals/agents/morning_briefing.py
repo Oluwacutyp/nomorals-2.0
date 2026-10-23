@@ -31,6 +31,7 @@ from typing import Any
 
 from ..core.ids import new_id
 from ..core.logging_setup import get_logger
+from ..social.chat.present import SIGNPOSTS
 
 _log = get_logger(__name__)
 
@@ -1032,6 +1033,128 @@ class PaidTasksProvider(_Provider):
             source=self.source, items=items, lines=lines)
 
 
+def alert_digest_lines(rows: list[dict[str, Any]]) -> list[str]:
+    """One line per DIGEST-tier row: the alert's title, its kind in
+    parens — the whole line, nothing sliced mid-word.  Shared by the
+    composer provider below and the evening pulse's fold, so the two
+    briefing surfaces render the digest identically."""
+    lines = []
+    for row in rows or []:
+        title = " ".join(str(row.get("title") or "").split())
+        kind = str(row.get("kind") or "").strip()
+        if not title:
+            continue
+        lines.append(f"• {title}" + (f" ({kind})" if kind else ""))
+    return lines
+
+
+class AlertDigestProvider(_Provider):
+    """The alert-policy DIGEST tier, folded into the briefing (F7).
+
+    Pass 7 batched non-actionable alerts into the DIGEST tier —
+    stored, journaled, readable on ``/notify`` — but they never
+    reached the owner's daily read.  This provider drains the
+    unfolded digest queue (oldest first) into a section: the title
+    and one line per item.  An empty queue is NO section.  The
+    ``since`` window deliberately does not apply: the fold queue IS
+    the backlog, and windowing it would strand older items forever.
+
+    Collecting marks NOTHING.  Folding is a delivery-time act (see
+    :func:`mark_briefing_digest_folded`): only a briefing confirmed
+    delivered consumes its items, so a failed delivery leaves the
+    digest intact for the next briefing — the same per-segment
+    discipline F6 set for news.
+    """
+    name = "alert_digest"
+    title = f"{SIGNPOSTS['alert_digest']} Alert digest"
+    priority = 65  # after the day's substance, before Research (70)
+    source = "notifier"
+
+    def collect(self, ctx: Any, since: float) -> BriefingSection | None:
+        try:
+            from .notifier import Notifier
+
+            rows = Notifier(ctx).digest_unfolded(limit=20)
+        except Exception as exc:  # noqa: BLE001 — a section never sinks it
+            _log.debug("alert digest provider skipped: %s", exc)
+            return None
+        lines = alert_digest_lines(rows)
+        if not lines:
+            return None
+        items = [{
+            "id": str(row.get("id") or ""),
+            "title": str(row.get("title") or ""),
+            "kind": str(row.get("kind") or ""),
+            "body": " ".join(str(row.get("body") or "").split())[:300],
+            "created_at": row.get("created_at"),
+        } for row in rows]
+        return BriefingSection(
+            name=self.name, title=self.title, priority=self.priority,
+            source=self.source, items=items, lines=lines)
+
+
+def mark_briefing_digest_folded(ctx: Any, briefing: Any) -> int:
+    """Fold a DELIVERED briefing's alert-digest items (F7).
+
+    Called by the delivery paths once — and only once — the
+    briefing is confirmed delivered: the digest section's item ids
+    (the ones that survived the composer's budgets into the final
+    briefing) are marked folded, so each digest item appears in
+    exactly one briefing.  Returns the number marked.  Never raises.
+    """
+    try:
+        ids = [str(i.get("id") or "")
+               for s in getattr(briefing, "sections", []) or []
+               if getattr(s, "name", "") == AlertDigestProvider.name
+               for i in (getattr(s, "items", []) or [])
+               if i.get("id")]
+        if not ids:
+            return 0
+        from .notifier import Notifier
+
+        return Notifier(ctx).mark_digest_folded(ids)
+    except Exception:  # noqa: BLE001 — bookkeeping never blocks delivery
+        _log.debug("alert digest fold marking failed", exc_info=True)
+        return 0
+
+
+def mark_briefing_news_delivered(ctx: Any, briefing: Any) -> int:
+    """Mark a DELIVERED briefing's news highlights in the ledger (F7).
+
+    The F6 leftover: ``run_briefing``'s news section draws from the
+    same undelivered ledger as the pulses but never marked what it
+    showed, so the morning pulse then delivered those stories a
+    second time in full.  Now the briefing marks exactly the stories
+    its (budget-clipped) news section carried — by URL, falling back
+    to the row id the provider embedded — under the ``briefing``
+    channel, through the ledger's own door (:meth:`NewsAgent.
+    mark_delivered`).  Dedupe by construction: whichever surface
+    delivers first, the other's undelivered set no longer holds the
+    story.  Only ever called on a confirmed delivery.  Never raises.
+    """
+    try:
+        keys: list[str] = []
+        for s in getattr(briefing, "sections", []) or []:
+            if getattr(s, "name", "") != "news":
+                continue
+            for item in getattr(s, "items", []) or []:
+                url = str(item.get("url") or "").strip()
+                if url:
+                    keys.append(url)
+                    continue
+                raw = str(item.get("id") or "")
+                if raw.startswith("news-"):
+                    keys.append(raw[len("news-"):])
+        if not keys:
+            return 0
+        from .news import NewsAgent
+
+        return NewsAgent(ctx).mark_delivered(keys, channel="briefing")
+    except Exception:  # noqa: BLE001 — bookkeeping never blocks delivery
+        _log.debug("briefing news marking failed", exc_info=True)
+        return 0
+
+
 class GoalsProvider(_Provider):
     """Goal triage: overdue + due-soon goals, then the mission-control
     pick with its next action.  The "what needs attention today" content
@@ -1171,6 +1294,13 @@ class BriefingComposer:
         # shortlist in state → provider returns None.
         try:
             self.providers.append(PaidTasksProvider())
+        except Exception:  # noqa: BLE001
+            pass
+        # Alert digest (Pass 7's DIGEST tier folded in, F7): local
+        # class, constructed defensively like paid tasks — an empty
+        # unfolded digest queue → provider returns None.
+        try:
+            self.providers.append(AlertDigestProvider())
         except Exception:  # noqa: BLE001
             pass
         # Readiness (health coaching, build-map #53): lazy import to avoid
@@ -1505,6 +1635,15 @@ def _deliver(context: Any, briefing: Briefing,
         _log.warning("briefing delivery failed: %s", exc)
         delivered = False
         delivery_state = "failed"
+    if delivered:
+        # Delivery-confirmed bookkeeping (F7): the briefing's alert
+        # digest folds (each item surfaces exactly once) and its
+        # news highlights enter the delivery ledger, so the morning
+        # pulse never re-delivers the same stories.  A failed
+        # delivery reaches neither marker — the digest and the
+        # stories stay queued for the next surface.
+        mark_briefing_digest_folded(context, briefing)
+        mark_briefing_news_delivered(context, briefing)
     return {"ok": True, "briefing_id": briefing.id, "date": briefing.date,
             "sections": len(briefing.sections),
             "word_count": briefing.word_count(),
