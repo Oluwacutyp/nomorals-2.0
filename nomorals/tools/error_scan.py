@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import ast
 import re
+import subprocess
 import sys
 import time
 from dataclasses import dataclass, field
@@ -195,7 +196,30 @@ class _Visitor(ast.NodeVisitor):
         self.generic_visit(node)
 
 
-def _iter_py_files(paths: list[str]) -> list[Path]:
+def _git_tracked_files(root: Path) -> set[Path] | None:
+    """Resolved paths in the git index for the work tree holding
+    ``root``, or None when git cannot answer (not a work tree, git
+    missing) — callers then keep the plain filesystem walk."""
+    try:
+        top = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "--show-toplevel"],
+            capture_output=True, text=True, timeout=30)
+        if top.returncode != 0:
+            return None
+        toplevel = Path(top.stdout.strip())
+        proc = subprocess.run(
+            ["git", "-C", str(toplevel), "ls-files", "-z"],
+            capture_output=True, timeout=60)
+        if proc.returncode != 0:
+            return None
+        names = proc.stdout.decode("utf-8", "replace").split("\0")
+        return {(toplevel / name).resolve() for name in names if name}
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+
+
+def _iter_py_files(paths: list[str],
+                   tracked_only: bool = False) -> list[Path]:
     files: list[Path] = []
     for raw in paths:
         p = Path(raw)
@@ -204,17 +228,37 @@ def _iter_py_files(paths: list[str]) -> list[Path]:
         elif p.is_dir():
             files.extend(sorted(p.rglob("*.py")))
     # skip vendored / generated code: not ours to fix
-    return [f for f in files
-            if "vendor" not in f.parts and "node_modules" not in f.parts
-            and "__pycache__" not in f.parts]
+    files = [f for f in files
+             if "vendor" not in f.parts and "node_modules" not in f.parts
+             and "__pycache__" not in f.parts]
+    if tracked_only and files:
+        # The tracked tree is what an install actually runs: untracked
+        # strays on disk (scratch modules, half-written experiments)
+        # are not part of the codebase and must not be scanned as if
+        # they were. If git cannot answer for any root, keep the full
+        # walk — the scan is descriptive, never a gate.
+        tracked: set[Path] = set()
+        for raw in paths:
+            found = _git_tracked_files(Path(raw))
+            if found is None:
+                return files
+            tracked |= found
+        files = [f for f in files if f.resolve() in tracked]
+    return files
 
 
 def scan(paths: list[str] | None = None,
-         repo: str | None = None) -> ScanReport:
-    """Scan Python sources for error-handling problems. Never rewrites code."""
+         repo: str | None = None,
+         *, tracked_only: bool = False) -> ScanReport:
+    """Scan Python sources for error-handling problems. Never rewrites code.
+
+    With ``tracked_only=True`` the file set is restricted to the git
+    index (the tracked tree), so untracked files sitting in the scanned
+    directories are ignored.
+    """
     started = time.perf_counter()
     roots = paths or ([repo] if repo else ["."])
-    py_files = _iter_py_files(roots)
+    py_files = _iter_py_files(roots, tracked_only=tracked_only)
     findings: list[Finding] = []
     failed = 0
     for path in py_files:

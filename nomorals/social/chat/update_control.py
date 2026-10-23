@@ -165,8 +165,23 @@ def _rollback_line(report: Any) -> str:
     The render already says "rolled back" when the rollback completed;
     this line covers every other terminal state so a failed update in
     chat always says what happened to the tree — including the worst
-    case, a rollback that itself failed.
+    case, a rollback that itself failed.  A deferred database restore
+    (the live DB was locked by this very process) is named as what it
+    is — scheduled for the next boot — never as a failed rollback.
     """
+    deferred = str(_report_field(report, "db_restore_deferred", "")
+                   or "")
+    if deferred:
+        snap = str(_report_field(report, "pre_update_snapshot", "") or "")
+        if _report_field(report, "rolled_back", False):
+            return (f"↩ code rolled back to the pre-update commit; the "
+                    f"database restore from snapshot {snap} is deferred "
+                    "to the next boot (the live database is locked by "
+                    "the running process) and applies before the "
+                    "database opens.")
+        return ("↩ database restore deferred to the next boot (the live "
+                "database is locked by the running process), but the "
+                "code restore did not complete — see the report above.")
     if _report_field(report, "rolled_back", False):
         snap = str(_report_field(report, "pre_update_snapshot", "") or "")
         return f"↩ rolled back to pre-update snapshot {snap}."

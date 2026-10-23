@@ -89,6 +89,27 @@ def _update_recovery_notice(receipt: dict) -> tuple[str, str]:
             "Check the install before trusting it; a manual snapshot "
             "restore may be needed.",
         )
+    if action == "pending_restore_applied":
+        return (
+            "deferred database restore applied at startup",
+            "A failed self-update could not restore the database "
+            "while Devon was running (the running process holds the "
+            "database open), so the restore was deferred. At this "
+            f"startup I applied it: the database is back to the "
+            f"pre-update snapshot ({snap}). Nothing else is pending "
+            "from that update.",
+        )
+    if action == "pending_restore_failed":
+        return (
+            "deferred database restore FAILED at startup",
+            "A failed self-update deferred its database restore to "
+            "this startup because the database was locked while Devon "
+            f"ran, and the restore still could not be applied "
+            f"({receipt.get('error') or 'unknown error'}). Devon is "
+            "booting on the post-update database paired with "
+            "rolled-back code — check the install before trusting "
+            "it; a manual snapshot restore may be needed.",
+        )
     # aborted (and any future close-out action): died before the
     # dangerous steps, so nothing was changed and nothing restored.
     return (
@@ -2382,7 +2403,8 @@ class PartnerRuntime(
         raises.
         """
         title, body = _update_recovery_notice(receipt)
-        failed = receipt.get("action") == "rollback_failed"
+        failed = receipt.get("action") in (
+            "rollback_failed", "pending_restore_failed")
         if failed:
             _log.error("update crash recovery FAILED: %s", body)
         else:

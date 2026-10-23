@@ -11,6 +11,7 @@ cycle of mutual imports.
 from __future__ import annotations
 
 import ast
+import subprocess
 import unittest
 from pathlib import Path
 
@@ -374,7 +375,40 @@ def module_layer(rel_path: Path) -> int:
     return LAYERS.get(head, SHARED_LAYER)
 
 
+def _tracked_files() -> list[Path] | None:
+    """Package files in the git index, or None when git cannot say.
+
+    The architecture gate guards the TRACKED tree: an untracked stray
+    file (a scratch module, a half-written experiment, a leftover from
+    another tool) is not part of the codebase and must not fail — or
+    even be parsed by — the gate.  The self-update health check relies
+    on this: it walks the tree the pull installed, not whatever else
+    happens to sit on the host's disk.  When git cannot answer (an
+    exported tree, git missing), None tells the caller to fall back
+    to the plain filesystem walk.
+    """
+    repo_root = PACKAGE_ROOT.parent
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(repo_root), "ls-files", "-z", "--full-name",
+             "--", "nomorals"],
+            capture_output=True, timeout=60)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if proc.returncode != 0:
+        return None
+    names = proc.stdout.decode("utf-8", "replace").split("\0")
+    files = sorted(
+        p for p in ((repo_root / name) for name in names
+                    if name.endswith(".py"))
+        if p.is_file())
+    return files or None
+
+
 def iter_modules() -> list[Path]:
+    tracked = _tracked_files()
+    if tracked is not None:
+        return tracked
     return sorted(p for p in PACKAGE_ROOT.rglob("*.py"))
 
 
@@ -477,7 +511,10 @@ class TestLayering(unittest.TestCase):
     def test_core_has_no_intra_project_imports(self) -> None:
         """L1 is the kernel: it may not depend on any other subpackage."""
         offenders: list[str] = []
-        for path in (PACKAGE_ROOT / "core").rglob("*.py"):
+        core_root = PACKAGE_ROOT / "core"
+        for path in iter_modules():
+            if core_root not in path.parents:
+                continue
             tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
             module_parts = tuple(path.relative_to(PACKAGE_ROOT).with_suffix("").parts)
             for target, lineno in imported_nomorals(tree, module_parts):
