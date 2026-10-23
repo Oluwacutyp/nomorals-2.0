@@ -2753,7 +2753,7 @@ class TelegramBotAdapter(ChatAdapter):
             url = _BOT_FILE_API.format(token=self.token, path=path)
             resp = self._sess().get(url, timeout=60)
             resp.raise_for_status()
-            dest.write_bytes(resp.content)
+            dest.write_bytes(resp.body)
         except Exception as exc:  # noqa: BLE001
             _log.debug("telegram-bot media download failed: %s", exc)
             return [MediaRef(path="", kind=fkind, name=orig_fname, mime=fmime,
@@ -2780,7 +2780,7 @@ class TelegramBotAdapter(ChatAdapter):
             url = _BOT_FILE_API.format(token=self.token, path=path)
             resp = self._sess().get(url, timeout=60)
             resp.raise_for_status()
-            dest.write_bytes(resp.content)
+            dest.write_bytes(resp.body)
             return str(dest)
         except Exception as exc:  # noqa: BLE001 - best-effort
             _log.debug("telegram-bot download_file failed: %s", exc)

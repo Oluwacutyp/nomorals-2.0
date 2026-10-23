@@ -38,6 +38,7 @@ from typing import Any
 from unittest import mock
 
 from nomorals.agents.partner.brain import PartnerBrain
+from nomorals.core.http import HttpResponse
 from nomorals.social.chat.base import (
     ChatKind, ChatMessage, ChatRef, MediaRef)
 from nomorals.social.chat.telegram import TelegramBotAdapter
@@ -95,11 +96,11 @@ class BotApiVoiceVsAudioTest(unittest.TestCase):
         else:
             adapter._api = lambda name, **kw: {  # type: ignore[method-assign]
                 "file_size": 1234, "file_path": "voice/note.ogg"}
-        resp = SimpleNamespace(content=b"OGGDATA")
-        resp.raise_for_status = lambda: None
-        if fail_download:
-            resp.raise_for_status = lambda: (_ for _ in ()).throw(
-                RuntimeError("download down"))
+        # Real HttpResponse shape (Pass #99 alignment): a .content-only
+        # fake let this suite pass while every real download failed.
+        # The failure case is a 500 — raise_for_status() raises on it.
+        resp = (HttpResponse(status=500, body=b"") if fail_download
+                else HttpResponse(status=200, body=b"OGGDATA"))
         adapter._sess = lambda: SimpleNamespace(get=lambda *a, **k: resp)  # type: ignore[method-assign]
         return adapter
 
@@ -107,6 +108,11 @@ class BotApiVoiceVsAudioTest(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="nm-vn-") as tmp:
             media = self._adapter(tmp)._inbound_media(
                 {"voice": {"file_id": "v1"}}, ChatKind.DM)
+            # the download actually landed, byte-exact (not the
+            # placeholder) — read inside the with, before cleanup
+            self.assertTrue(media[0].path)
+            with open(media[0].path, "rb") as fh:
+                self.assertEqual(fh.read(), b"OGGDATA")
         self.assertEqual(len(media), 1)
         self.assertEqual(media[0].kind, "voice")
         self.assertTrue(media[0].is_voice)

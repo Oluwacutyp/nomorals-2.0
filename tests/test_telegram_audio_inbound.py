@@ -15,6 +15,7 @@ import unittest
 from types import SimpleNamespace
 from typing import Any
 
+from nomorals.core.http import HttpResponse
 from nomorals.social.chat.base import ChatKind
 from nomorals.social.chat.telegram import (
     TelegramBotAdapter, _kind_for_mime, _mime_for, _mime_for_download)
@@ -84,8 +85,12 @@ class BotApiInboundMediaTest(unittest.TestCase):
         adapter = TelegramBotAdapter(token="x" * 40, media_dir=tmp)
         adapter._api = lambda name, **kw: {  # type: ignore[method-assign]
             "file_size": 1234, "file_path": "voice/note.ogg"}
-        resp = SimpleNamespace(content=b"OGGDATA")
-        resp.raise_for_status = lambda: None
+        # The session seam returns the CORE HttpResponse in production
+        # (body/status, no requests-style .content/.status_code) — the
+        # fake must carry that exact shape or the download path is
+        # tested against a contract production never returns (Pass #99:
+        # a .content-shaped fake masked a 100%-broken media download).
+        resp = HttpResponse(status=200, body=b"OGGDATA")
         adapter._sess = lambda: SimpleNamespace(get=lambda *a, **k: resp)  # type: ignore[method-assign]
         return adapter
 

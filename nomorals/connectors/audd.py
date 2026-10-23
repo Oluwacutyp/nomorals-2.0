@@ -346,7 +346,7 @@ class AudDConnector(Connector):
             data = resp.json()
         except Exception as exc:
             raise AudDError(
-                f"AudD returned non-JSON (HTTP {resp.status_code})"
+                f"AudD returned non-JSON (HTTP {resp.status})"
             ) from exc
         if not isinstance(data, dict):
             raise AudDError("AudD returned an unexpected response shape")

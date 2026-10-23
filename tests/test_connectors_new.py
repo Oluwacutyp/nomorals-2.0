@@ -9,6 +9,7 @@ import unittest
 import urllib.request
 
 from nomorals.core.errors import ValidationError
+from nomorals.core.http import HttpResponse
 from nomorals.social.chat.base import ChatKind, ChatRef, MediaRef
 from nomorals.social.chat.telegram import TelegramBotAdapter, _chunk_text
 from nomorals.social.chat.webhook import WebhookAdapter
@@ -71,8 +72,13 @@ class FakeSession:
     def post_json(self, url: str, params: dict, timeout: float = 30) -> FakeResponse:
         return self.post(url, json=params)
 
-    def get(self, url: str, **kwargs: object) -> FakeResponse:
-        return FakeResponse({"ok": True}, content=b"fake-bytes")
+    def get(self, url: str, **kwargs: object) -> HttpResponse:
+        # File downloads run on the core HttpClient contract — the
+        # adapter reads resp.body after raise_for_status(). Return the
+        # real response shape, not a look-alike: a .content-only fake
+        # here masked the resp.body drift this suite exists to catch
+        # (Pass #99 alignment).
+        return HttpResponse(status=200, body=b"fake-bytes")
 
 
 def _bot(**kwargs: object) -> TelegramBotAdapter:
@@ -217,6 +223,10 @@ class ConvertTests(unittest.TestCase):
             self.assertEqual(m.media[0].kind, "image")
             # largest file_id chosen
             self.assertIn("def", m.media[0].path)
+            # the download actually landed, byte-exact
+            from pathlib import Path
+            self.assertEqual(Path(m.media[0].path).read_bytes(),
+                             b"fake-bytes")
 
 
 class WebhookTests(unittest.TestCase):
