@@ -245,16 +245,19 @@ class UpgradeQueue:
         for e in conflicts:
             self._attach_conflict_note(e["id"], other_id=pid,
                                        other_title=title, now=now)
-        body = rationale[:400]
-        if source:
-            body = f"[source: {source}]\n{body}"
-        if conflicts:
-            names = ", ".join(
-                f"{c['id']}: {str(c.get('title') or '')[:60]}"
-                for c in conflicts[:4])
-            body = f"{body}\n\nconflicts with: {names}"
+        # Formatting F5: the filing publishes as a presentation Doc
+        # (rationale complete — the old body cut it at 400 chars —
+        # facts as rows, conflicts named) under the exact historical
+        # kind + title.
+        from .alert_templates import upgrade_proposed_doc
+        from ..social.chat.present import body_text
+
+        doc = upgrade_proposed_doc(
+            pid=pid, title=title, rationale=rationale, source=source,
+            files=files, tests=tests, claim_ids=claim_ids,
+            conflicts=conflicts)
         notify(self.context, "upgrade_proposal",
-               f"new upgrade proposal: {title}", body)
+               f"new upgrade proposal: {title}", body_text(doc), doc=doc)
         return pid
 
     # --------------------------------------------- dedup / conflict internals
@@ -310,11 +313,14 @@ class UpgradeQueue:
                                        other_title=target.get("title") or "",
                                        now=now)
         _log.info("upgrade proposal %s merged into %s", pid, target["id"])
+        from .alert_templates import upgrade_merged_doc
+        from ..social.chat.present import body_text
+
+        doc = upgrade_merged_doc(pid=pid, title=new['title'],
+                                 target_id=target["id"])
         notify(self.context, "upgrade_proposal",
                f"upgrade proposal merged: {new['title']}",
-               f"filed as {pid}; near-duplicate of open proposal "
-               f"{target['id']} — merged in with provenance instead of a "
-               "new queue entry.")
+               body_text(doc), doc=doc)
 
     def _make_conflict_note(self, existing: dict[str, Any], *,
                             other_id: str, other_title: str,
@@ -381,10 +387,14 @@ class UpgradeQueue:
             "decided_at = ?, decided_by = ? WHERE id = ?",
             (time.time(), by, proposal_id),
         )
+        from .alert_templates import upgrade_decided_doc
+        from ..social.chat.present import body_text
+
+        doc = upgrade_decided_doc(pid=proposal_id, title=row['title'],
+                                  by=by, approved=True)
         notify(self.context, "upgrade_proposal",
                f"upgrade approved: {row['title']}",
-               f"proposal_id={proposal_id} decided_by={by} — "
-               "dispatching to the evolution agent for implementation.")
+               body_text(doc), doc=doc)
         return self.get(proposal_id) or {}
 
     def deny(self, proposal_id: str, reason: str, by: str = "owner") -> dict:
@@ -398,9 +408,14 @@ class UpgradeQueue:
             "decided_at = ?, decided_by = ? WHERE id = ?",
             (reason, time.time(), by, proposal_id),
         )
+        from .alert_templates import upgrade_decided_doc
+        from ..social.chat.present import body_text
+
+        doc = upgrade_decided_doc(pid=proposal_id, title=row['title'],
+                                  by=by, approved=False, reason=reason)
         notify(self.context, "upgrade_proposal",
                f"upgrade denied: {row['title']}",
-               f"proposal_id={proposal_id} decided_by={by}\nReason: {reason}")
+               body_text(doc), doc=doc)
         return self.get(proposal_id) or {}
 
     def record_implemented(self, proposal_id: str, result: dict) -> dict:
@@ -414,9 +429,14 @@ class UpgradeQueue:
             "evolution_proposal_id = ? WHERE id = ?",
             (status, json.dumps(result), evo_id, proposal_id),
         )
+        from .alert_templates import upgrade_implemented_doc
+        from ..social.chat.present import body_text
+
+        doc = upgrade_implemented_doc(pid=proposal_id, status=status,
+                                      evo_id=evo_id, result=result)
         notify(self.context, "upgrade_proposal",
                f"upgrade {status}: {proposal_id}",
-               f"evolution_proposal_id={evo_id}\n{json.dumps(result)[:400]}")
+               body_text(doc), doc=doc)
         return self.get(proposal_id) or {}
 
     # --------------------------------------------------------------- helpers

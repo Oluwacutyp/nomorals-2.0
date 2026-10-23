@@ -25,21 +25,33 @@ KIND = "backup"
 
 
 def _publish(target: Any, title: str, body: str, *,
-             critical: bool = False) -> dict[str, Any]:
-    """Publish via a Notifier, a context, or nowhere — never raises."""
+             critical: bool = False,
+             doc: Any = None) -> dict[str, Any]:
+    """Publish via a Notifier, a context, or nowhere — never raises.
+
+    Formatting F5: callers pass a presentation ``doc`` (built in
+    ``agents/alert_templates`` — backup is L5, a peer of agents); the
+    stored body is the Doc's canonical body and delivery renders the
+    Doc per platform, under the exact historical kind + title."""
     if target is None:
         _log.info("backup report (no notifier): %s — %s", title, body)
         return {"delivered": False, "reason": "no notifier"}
     try:
+        kw: dict[str, Any] = {}
+        if doc is not None:
+            from ..social.chat.present import body_text
+
+            body = body_text(doc)
+            kw["doc"] = doc
         if hasattr(target, "publish"):
             return dict(target.publish(
-                KIND, title, body, critical=critical
+                KIND, title, body, critical=critical, **kw
             ))
         from ..agents.notifier import Notifier
 
         notifier = Notifier(target)
         return dict(notifier.publish(
-            KIND, title, body, critical=critical
+            KIND, title, body, critical=critical, **kw
         ))
     except Exception as exc:  # noqa: BLE001 - reporting never raises
         _log.warning("backup report publish failed: %s", exc)
@@ -61,7 +73,9 @@ def report_backup_result(
         f"Release: {result.get('tag', '')}. "
         f"Manifest committed: {result.get('manifest_pushed', False)}."
     )
-    return _publish(target, title, body)
+    from ..agents.alert_templates import backup_result_doc
+
+    return _publish(target, title, body, doc=backup_result_doc(result))
 
 
 def report_backup_failure(
@@ -74,7 +88,10 @@ def report_backup_failure(
         "The previous generation is intact. Check the run log and re-run; "
         "a queued snapshot (if any) will retry with backoff."
     )
-    return _publish(target, title, body, critical=True)
+    from ..agents.alert_templates import backup_failure_doc
+
+    return _publish(target, title, body, critical=True,
+                    doc=backup_failure_doc(backup_id, error))
 
 
 def report_drill(target: Any, drill_report: Any) -> dict[str, Any]:
@@ -84,16 +101,19 @@ def report_drill(target: Any, drill_report: Any) -> dict[str, Any]:
     steps = drill_report.to_dict().get("steps", []) \
         if hasattr(drill_report, "to_dict") else []
     failed = [s["name"] for s in steps if not s.get("ok")]
+    from ..agents.alert_templates import backup_drill_doc
+
     if getattr(drill_report, "ok", False):
         return _publish(target, f"restore drill PASS: {drill_report.backup_id}",
-                        summary)
+                        summary, doc=backup_drill_doc(drill_report))
     body = (
         f"{summary}\nFailed steps: {', '.join(failed) or 'unknown'}.\n"
         "A backup never restored is a hypothesis — investigate before "
         "the next generation ships."
     )
     return _publish(target, f"RESTORE DRILL FAIL: {drill_report.backup_id}",
-                    body, critical=True)
+                    body, critical=True,
+                    doc=backup_drill_doc(drill_report))
 
 
 def report_queued(target: Any, result: dict[str, Any]) -> dict[str, Any]:
@@ -105,4 +125,6 @@ def report_queued(target: Any, result: dict[str, Any]) -> dict[str, Any]:
         f"shipped: {result.get('reason', 'network down')}. It waits in the "
         "local outbox and retries with backoff — this is not a silent skip."
     )
-    return _publish(target, title, body)
+    from ..agents.alert_templates import backup_queued_doc
+
+    return _publish(target, title, body, doc=backup_queued_doc(result))

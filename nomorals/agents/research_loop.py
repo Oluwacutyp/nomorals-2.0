@@ -653,16 +653,27 @@ class ResearchLoop:
             title = ("research loop: %d finding(s), %d proposal(s)"
                      % (record["findings_count"],
                         record["proposals_created"]))
-            body = "\n\n".join(briefs)[:3000]
             summary = signals_summary(record.get("signals") or
                                       usefulness_signals(self.context))
-            # Point at /proposals: the notification says "proposal(s)"
-            # and that is where the owner looks — it used to read only
-            # the proactive queue and always came back empty for these
-            # upgrade tickets. /proposals now lists both queues.
-            body = (f"{body}\n\nReview: /proposals — upgrade tickets "
-                    f"also via /upgrade list\nsignals: {summary}")[:3200]
-            res = Notifier(self.context).publish("research", title, body)
+            # Formatting F5: the digest publishes as a presentation
+            # Doc — briefs complete in an expandable section (the old
+            # body cut them at 3000 chars), counts as rows, the
+            # signals line as the summary, and the /proposals pointer
+            # as the footer.  Point at /proposals: the notification
+            # says "proposal(s)" and that is where the owner looks —
+            # it used to read only the proactive queue and always came
+            # back empty for these upgrade tickets. /proposals now
+            # lists both queues.
+            from .alert_templates import research_loop_doc
+            from ..social.chat.present import body_text
+
+            doc = research_loop_doc(
+                title=title, briefs=briefs,
+                findings=record["findings_count"],
+                proposals=record["proposals_created"],
+                signals=summary)
+            res = Notifier(self.context).publish(
+                "research", title, body_text(doc), doc=doc)
             return bool(isinstance(res, dict)
                         and res.get("delivered") not in (False, 0)
                         and not res.get("deduped"))

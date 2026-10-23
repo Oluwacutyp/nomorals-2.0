@@ -199,7 +199,14 @@ def ops_alerts(context: Any, *, force: bool = False,
         if db is not None:
             _kv_set(db, f"opsalert:{key}", now)
         try:
-            notify(context, "ops", f["title"], f["body"])
+            # Formatting F5: the finding publishes as a presentation
+            # Doc (its structured facts as rows) under the exact
+            # historical kind + title.
+            from .alert_templates import ops_finding_doc
+            from ..social.chat.present import body_text
+
+            doc = ops_finding_doc(f)
+            notify(context, "ops", f["title"], body_text(doc), doc=doc)
         except Exception:  # noqa: BLE001 - alerting must never raise
             pass
         sent.append(f)

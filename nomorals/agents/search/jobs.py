@@ -280,26 +280,16 @@ def _deliver(context: Any, job: dict[str, Any]) -> None:
     channels).  Best-effort — a dead notifier must not lose the row."""
     try:
         from ..notifier import notify
+        from ...agents.alert_templates import research_job_doc
+        from ...social.chat.present import body_text
 
-        query = job.get("query", "")
-        if job.get("state") == "done":
-            report = job.get("report") or {}
-            lines = [f"Research done: {query}", ""]
-            summary = str(report.get("summary") or "").strip()
-            if summary:
-                lines.append(summary[:1500])
-            sources = report.get("sources") or []
-            if sources:
-                lines.append("")
-                lines.append("Sources:")
-                for s in sources[:8]:
-                    lines.append(f"  [{s.get('n')}] {s.get('title') or s.get('url')} — {s.get('url')}")
-            notify(context, "research", f"Research ready: {query[:80]}",
-                   "\n".join(lines), force=True)
-        else:
-            notify(context, "research", f"Research failed: {query[:80]}",
-                   f"The background research run failed: {job.get('error') or 'unknown error'}",
-                   force=True)
+        # Formatting F5: completion publishes as a presentation Doc
+        # (report summary leads, sources as link rows — all of them,
+        # not the old [:8] / summary[:1500] cuts) under the exact
+        # historical kind + titles.
+        doc = research_job_doc(job)
+        notify(context, "research", doc.title, body_text(doc),
+               force=True, doc=doc)
     except Exception as exc:  # noqa: BLE001
         _log.debug("research job delivery failed: %s", exc)
 

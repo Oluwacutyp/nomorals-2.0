@@ -979,9 +979,13 @@ class TrialFlow:
                     if gw is None:
                         gw = getattr(context, "gateway", None)
                     notifier = Notifier(context, gateway=gw)
-                notifier.publish("trial",
-                                 f"trial assist interrupted — {platform}",
-                                 note, force=True)
+                from ..alert_templates import trial_notice_doc
+                from ...social.chat.present import body_text
+
+                _title = f"trial assist interrupted — {platform}"
+                _doc = trial_notice_doc(_title, note)
+                notifier.publish("trial", _title, body_text(_doc),
+                                 force=True, doc=_doc)
             except Exception:  # noqa: BLE001 - reporting must not crash
                 _log.exception("trial interrupt report failed for %s", rid)
         return recovered
@@ -1285,7 +1289,12 @@ class TrialFlow:
                          f"{len(resumed)} resumed, {len(expired)} expired")
                 note = "\n".join(lines)
             try:
-                notify().publish("trial", title, note, force=True)
+                from ..alert_templates import trial_notice_doc
+                from ...social.chat.present import body_text
+
+                _doc = trial_notice_doc(title, note)
+                notify().publish("trial", title, body_text(_doc),
+                                 force=True, doc=_doc)
             except Exception:  # noqa: BLE001 - reporting never crashes
                 _log.exception("sms watch recovery report failed")
 
@@ -1368,9 +1377,14 @@ class TrialFlow:
                     )
                     _finish(wid, "timeout", "", result)
                 try:
+                    from ..alert_templates import trial_notice_doc
+                    from ...social.chat.present import body_text
+
+                    _title = f"sms code watch — {number}"
+                    _doc = trial_notice_doc(_title, result)
                     _notifier().publish(
-                        "trial", f"sms code watch — {number}",
-                        result, force=True)
+                        "trial", _title, body_text(_doc), force=True,
+                        doc=_doc)
                 except Exception:  # noqa: BLE001 - reporting never crashes
                     _log.exception("resumed sms watch report failed: %s",
                                    wid)
@@ -1435,12 +1449,18 @@ class TrialFlow:
         """Deliver a background-run report to the owner. Never raises."""
         try:
             from ..notifier import Notifier
+            from ..alert_templates import trial_notice_doc
+            from ...social.chat.present import body_text
 
             gateway = self.gateway
             if gateway is None:
                 gateway = getattr(self.context, "gateway", None)
             notifier = Notifier(self.context, gateway=gateway)
-            notifier.publish("trial", title, body, force=True)
+            # Formatting F5: the notice publishes as a presentation
+            # Doc under the exact historical kind + title.
+            doc = trial_notice_doc(title, body)
+            notifier.publish("trial", title, body_text(doc), force=True,
+                             doc=doc)
         except Exception:  # noqa: BLE001 - reporting must not crash the run
             _log.exception("trial owner notification failed")
 

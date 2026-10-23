@@ -1219,9 +1219,22 @@ class AlertEngine:
     def _send(self, watcher: Watcher, title: str, body: str,
               now: float) -> dict[str, Any]:
         critical = watcher.severity == "urgent"
-        res = self.notifier.publish(kind="watcher", title=title, body=body,
+        # Formatting F5: the hit publishes as a presentation Doc
+        # (facts as rows, the summary prose complete — no length cut
+        # anywhere on this path) under the exact historical kind +
+        # title; the audit log below keeps the raw strings.
+        from .alert_templates import watcher_hit_doc
+        from ..social.chat.present import body_text
+
+        doc = watcher_hit_doc(
+            title=title, watcher_name=watcher.name,
+            watcher_id=watcher.id, severity=watcher.severity,
+            kind=watcher.kind, summary=body)
+        res = self.notifier.publish(kind="watcher", title=title,
+                                    body=body_text(doc),
                                     critical=critical,
-                                    channels=watcher.channels or None)
+                                    channels=watcher.channels or None,
+                                    doc=doc)
         channel = ",".join(watcher.channels) if watcher.channels else "notifier"
         # audit log stays honest: only "sent" when a channel was reached
         audit_status = (res.get("delivery_state")
@@ -1259,13 +1272,21 @@ class AlertEngine:
             watcher.last_check = now
             self.store.save(watcher)
             if watcher.error_streak == _ERROR_NOTICE_STREAK:
+                from .alert_templates import watcher_notice_doc
+                from ..social.chat.present import body_text
+
+                _notice_title = f"watcher erroring: {watcher.name}"
+                _notice_body = (
+                    f"{watcher.error_streak} consecutive check "
+                    f"failures; latest: {result.error[:200]}. "
+                    f"It stays quiet until it recovers.")
+                _notice_doc = watcher_notice_doc(_notice_title,
+                                                 _notice_body)
                 self.notifier.publish(
                     kind="watcher",
-                    title=f"watcher erroring: {watcher.name}",
-                    body=f"{watcher.error_streak} consecutive check "
-                         f"failures; latest: {result.error[:200]}. "
-                         f"It stays quiet until it recovers.",
-                    critical=False)
+                    title=_notice_title,
+                    body=body_text(_notice_doc),
+                    critical=False, doc=_notice_doc)
                 self.store.record_alert(
                     watcher.id, severity="important", channel="notifier",
                     status="sent", title=f"watcher erroring: {watcher.name}",
@@ -1286,9 +1307,16 @@ class AlertEngine:
                 notice = (f"⏸ {watcher.name}: flapping "
                           f"({len(flips)} flips in the last hour) — paused. "
                           f"Say `nm watch resume {watcher.id}` to re-enable.")
-                self.notifier.publish(kind="watcher",
-                                      title=f"watcher paused: {watcher.name}",
-                                      body=notice, critical=False)
+                from .alert_templates import watcher_notice_doc
+                from ..social.chat.present import body_text
+
+                _notice_doc = watcher_notice_doc(
+                    f"watcher paused: {watcher.name}", notice)
+                self.notifier.publish(
+                    kind="watcher",
+                    title=f"watcher paused: {watcher.name}",
+                    body=body_text(_notice_doc), critical=False,
+                    doc=_notice_doc)
                 self.store.record_alert(
                     watcher.id, severity="important", channel="notifier",
                     status="sent", title=f"watcher paused: {watcher.name}",
@@ -1349,20 +1377,27 @@ class AlertEngine:
         if all(self._held_in_quiet_hours(h, now) for h in held):
             return {"action": "none", "reason": "quiet hours",
                     "held": len(held)}
-        lines = []
         by_watcher: dict[str, list[str]] = {}
         for h in held:
             by_watcher.setdefault(h["watcher_id"], []).append(
                 f"• [{h['severity']}] {h['title']}")
+        groups: list[tuple[str, list[str]]] = []
         for wid, items in by_watcher.items():
             watcher = self.store.get(wid)
             name = watcher.name if watcher else wid[:8]
-            lines.append(f"**{name}**")
-            lines.extend(items[:5])
-        body = "\n".join(lines)[:3500]
-        res = self.notifier.publish(kind="watcher",
-                                    title=f"👁 watcher digest ({len(held)})",
-                                    body=body, critical=False)
+            groups.append((name, items))
+        # Formatting F5: the digest publishes as a Doc — one section
+        # per watcher, EVERY held line carried.  The old code cut the
+        # joined body at [:3500], slicing mid-sentence and dropping
+        # the tail silently; the Doc path chunks losslessly instead.
+        from .alert_templates import watcher_digest_doc
+        from ..social.chat.present import body_text
+
+        doc = watcher_digest_doc(len(held), groups)
+        res = self.notifier.publish(
+            kind="watcher",
+            title=f"👁 watcher digest ({len(held)})",
+            body=body_text(doc), critical=False, doc=doc)
         self.store.mark_digested([h["id"] for h in held])
         self.store.set_state("last_digest_ts", str(now))
         return {"action": "digested", "count": len(held),

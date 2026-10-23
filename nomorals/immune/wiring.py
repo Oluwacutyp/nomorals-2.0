@@ -670,7 +670,13 @@ def summarize_tick_event(result: Any,
     since Pass 7, ``subject`` and ``hints``: the alert-policy
     classification the sampler tool hands to ``Notifier.publish``
     (plain data — this module stays Layer 0; the policy itself lives
-    in ``agents/alert_policy.py``).  The classification encodes the
+    in ``agents/alert_policy.py``).  Since Formatting F5 it also
+    carries ``tone`` and ``facts`` — again plain data: the severity
+    tone and the sample's structured values (spawned / growth /
+    quarantined / baseline samples) as ``(label, value)`` pairs, so
+    the presentation template in ``agents/alert_templates.py`` can
+    render labeled rows from values instead of parsing the composed
+    prose back apart.  The classification encodes the
     alert-discipline rule: an enforcement is self-resolving
     housekeeping (the throttle IS the response) and logs silently on
     first instances — paging only on recurrence, which is what turns
@@ -683,12 +689,18 @@ def summarize_tick_event(result: Any,
         return None
     notes = [str(a).strip() for a in (announcements or []) if str(a).strip()]
     context: List[str] = []
+    facts: List[Any] = []
     desc = _sample_desc(result.get("sample"))
     if desc:
         context.append(f"sample: {desc}")
+        sample = result.get("sample") or {}
+        facts.append(("Spawned", sample.get("processes_spawned")))
+        facts.append(("Growth", sample.get("process_growth")))
     context.append(
         f"quarantined: {result.get('quarantined', 0)} · "
         f"baseline samples: {result.get('samples', 0)}")
+    facts.append(("Quarantined", result.get("quarantined", 0)))
+    facts.append(("Baseline samples", result.get("samples", 0)))
     gate_subject = "host process population (adaptive cancer gate)"
     if result.get("unavailable"):
         # A standing platform condition, not a per-tick event: the
@@ -701,6 +713,8 @@ def summarize_tick_event(result: Any,
                     "body": "\n".join(notes[1:] + context),
                     "critical": False,
                     "subject": "immune process sampling",
+                    "tone": "warn",
+                    "facts": facts,
                     "hints": {"subject": "immune process sampling",
                               "notice": True}}
         return None
@@ -709,6 +723,8 @@ def summarize_tick_event(result: Any,
                 "body": str(result.get("error") or "unknown error"),
                 "critical": False,
                 "subject": "immune sampler",
+                "tone": "error",
+                "facts": [],
                 "hints": {"subject": "immune sampler", "failed": True}}
     if result.get("enforced"):
         lines = [str(result.get("reason") or "the adaptive gate enforced")]
@@ -717,6 +733,8 @@ def summarize_tick_event(result: Any,
         return {"title": "🛡️ immune gate ENFORCED",
                 "body": "\n".join(lines), "critical": True,
                 "subject": gate_subject,
+                "tone": "error",
+                "facts": facts,
                 "hints": {"subject": gate_subject,
                           "self_resolving": True,
                           "incident_key": "adaptive-gate"}}
@@ -726,16 +744,21 @@ def summarize_tick_event(result: Any,
             hints = {"subject": gate_subject, "resolved": True,
                      "incident_key": "adaptive-gate"}
             subject = gate_subject
+            tone = "ok"
         elif "baseline ready" in first:
             hints = {"subject": "immune baseline", "notice": True}
             subject = "immune baseline"
+            tone = "ok"
         else:
             hints = {"subject": "immune system", "notice": True}
             subject = "immune system"
+            tone = "info"
         return {"title": f"🛡️ {first}",
                 "body": "\n".join(notes[1:] + context),
                 "critical": False,
                 "subject": subject,
+                "tone": tone,
+                "facts": facts,
                 "hints": hints}
     return None
 

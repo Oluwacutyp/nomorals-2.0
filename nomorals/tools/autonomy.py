@@ -407,7 +407,9 @@ def register(registry: Any) -> None:
             event = wiring.summarize_tick_event(
                 result, monitor.drain_announcements())
             if event is not None:
+                from ..agents.alert_templates import immune_event_doc
                 from ..agents.notifier import Notifier
+                from ..social.chat.present import body_text
 
                 # Pass 7 alert discipline: the event carries its
                 # alert-policy classification (subject + hints); the
@@ -415,11 +417,17 @@ def register(registry: Any) -> None:
                 # this pages, digests, or logs silently.  Enforcement
                 # itself already happened in the tick — only the
                 # paging is tiered, never the response.
+                # Formatting F5: the same event also publishes as a
+                # presentation Doc (its structured facts as labeled
+                # rows) under the exact historical kind + title, so
+                # the policy sees identical inputs.
+                doc = immune_event_doc(event)
                 Notifier(_context).publish(
-                    "immune", event["title"], event["body"],
+                    "immune", event["title"], body_text(doc),
                     critical=bool(event.get("critical")),
                     alert_subject=str(event.get("subject") or ""),
-                    alert_hints=event.get("hints"))
+                    alert_hints=event.get("hints"),
+                    doc=doc)
         except Exception:  # noqa: BLE001 - reporting never breaks the tick
             pass
         return result

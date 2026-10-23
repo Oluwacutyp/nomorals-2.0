@@ -134,11 +134,13 @@ class DirectivesAgent:
         try:
             result = self._execute(row["text"])
             self._set(row["id"], "done", result=result)
-            self._notify(f"task done: {row['text'][:70]}", result[:1500])
+            # Formatting F5: the FULL result rides the notice's Doc
+            # (expandable tail) — the old publish cut it at 1500 chars.
+            self._notify(f"task done: {row['text'][:70]}", result)
             return {"ok": True, "id": row["id"], "result": result}
         except Exception as exc:  # noqa: BLE001
             self._set(row["id"], "failed", error=str(exc))
-            self._notify(f"task failed: {row['text'][:70]}", str(exc)[:500])
+            self._notify(f"task failed: {row['text'][:70]}", str(exc))
             return {"ok": False, "id": row["id"], "error": str(exc)}
 
     def _execute(self, text: str) -> str:
@@ -279,7 +281,13 @@ class DirectivesAgent:
         if self.notifier is None:
             return
         try:
-            self.notifier.publish("task", title, body)
+            # Formatting F5: the outcome publishes as a presentation
+            # Doc under the exact historical kind + title.
+            from .alert_templates import task_notice_doc
+            from ..social.chat.present import body_text
+
+            doc = task_notice_doc(title, body)
+            self.notifier.publish("task", title, body_text(doc), doc=doc)
         except Exception:  # noqa: BLE001
             pass
 

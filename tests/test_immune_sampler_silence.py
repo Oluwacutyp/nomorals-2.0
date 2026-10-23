@@ -230,7 +230,11 @@ def test_enforcement_notifies_once_with_specifics(tmp_path):
     assert note["kind"] == "immune"  # never the generic scheduled alert
     assert "ENFORCED" in note["title"]
     assert "5000" in note["body"]  # the offending sample, named
-    assert "quarantined" in note["body"]
+    # Formatting F5: the stored body is the alert Doc's canonical
+    # body — the sample's facts ride as labeled rows ("Quarantined")
+    # instead of the old composed prose line; the specifics named
+    # here are unchanged.
+    assert "quarantined" in note["body"].lower()
     # the runaway stops: the closing tick is itself an event, once
     box["fn"] = lambda: dict(NORMAL)
     _run_due(sched, ctx, job_id)
