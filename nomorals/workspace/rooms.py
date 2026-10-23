@@ -40,6 +40,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from ..core.errors import ToolError
 from ..core.logging_setup import get_logger
 from ..core.ids import new_short_id
 from .inbox import redact_secrets
@@ -1121,6 +1122,27 @@ class RoomManager:
 # ── scheduler ─────────────────────────────────────────────────────────────
 
 ROOMS_TICK_JOB_NAME = "rooms tick"
+
+
+def resolve_room_ref(context: Any, ref: str) -> tuple[bytes, str]:
+    """``room:<slug>:<path>`` → bytes, resolved inside the room sandbox.
+
+    The vision tool's room-reference reader lives here (the rooms organ
+    owns the sandbox) and is injected into tools.vision by the
+    composition root — tools (L4) may not import workspace (L5).
+    """
+    _, slug, rel = ref.split(":", 2)
+
+    settings = getattr(context, "settings", None) if context is not None else None
+    workspace = Path(getattr(settings, "workspace_dir", "workspace"))
+    manager = RoomManager(workspace)
+    room = manager.get(slug)
+    if room is None:
+        raise ToolError(f"room reference {ref!r}: no such room")
+    target = RoomContext(manager, room).path(rel)
+    if not target.is_file():
+        raise ToolError(f"room reference {ref!r}: not a file")
+    return target.read_bytes(), f"room:{slug}:{rel}"
 
 
 def ensure_rooms_tick_job(context: Any) -> dict[str, Any]:

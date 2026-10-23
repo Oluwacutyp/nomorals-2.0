@@ -50,6 +50,7 @@ __all__ = [
     "read_text",
     "register",
     "resolve_image",
+    "set_room_resolver",
     "vision_capabilities",
 ]
 
@@ -175,21 +176,29 @@ def _resolve_inbox_ref(context: Any, ref: str) -> tuple[bytes, str]:
     return target.read_bytes(), f"inbox:{item_id}"
 
 
+# ── room reference resolver (T1.6 injection) ────────────────────────────
+# The rooms organ is L5 (workspace.rooms); this L4 tool module may not
+# import it. The composition root (agents.context.build_context)
+# injects workspace.rooms.resolve_room_ref — the same seam the media
+# layers use for connector factories. Unwired, a room: reference fails
+# honestly by name instead of importing upward.
+_ROOM_RESOLVER: Any = None
+
+
+def set_room_resolver(resolver: Any | None) -> None:
+    """Install (or clear, with None) the room: reference resolver."""
+    global _ROOM_RESOLVER
+    _ROOM_RESOLVER = resolver
+
+
 def _resolve_room_ref(context: Any, ref: str) -> tuple[bytes, str]:
     """``room:<slug>:<path>`` → bytes, resolved inside the room sandbox."""
     _, slug, rel = ref.split(":", 2)
-    from ..workspace.rooms import RoomContext, RoomManager
-
-    settings = getattr(context, "settings", None) if context is not None else None
-    workspace = Path(getattr(settings, "workspace_dir", "workspace"))
-    manager = RoomManager(workspace)
-    room = manager.get(slug)
-    if room is None:
-        raise ToolError(f"room reference {ref!r}: no such room")
-    target = RoomContext(manager, room).path(rel)
-    if not target.is_file():
-        raise ToolError(f"room reference {ref!r}: not a file")
-    return target.read_bytes(), f"room:{slug}:{rel}"
+    if _ROOM_RESOLVER is None:
+        raise ToolError(
+            f"room reference {ref!r}: no room resolver wired "
+            "(agents.context.build_context installs one at boot)")
+    return _ROOM_RESOLVER(context, ref)
 
 
 def _resolve_attachment(context: Any, ref: str) -> tuple[bytes, str]:

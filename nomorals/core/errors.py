@@ -728,6 +728,69 @@ def classify_user_error(exc: BaseException | Any) -> str:
     return "bug"
 
 
+# ── failure categorization + fingerprinting ─────────────────────────────
+# Moved here from agents/failure.py (T1.6 layering repair): pure,
+# deterministic error-text functions (stdlib only) that lower layers
+# need — the tool registry (L4) records tool failures with the same
+# fingerprint the failure analyzer (L5) groups lessons by, and core is
+# the only home both may import. agents/failure.py re-exports both
+# names, so existing import and mock paths are unchanged.
+
+# Map a raw error string to a coarse category — deterministic, no model.
+_CATEGORIES: list[tuple[str, str]] = [
+    ("NameError|not defined", "undefined_name"),
+    ("IndexError|index out of range", "bad_index"),
+    ("ZeroDivisionError|division by zero", "division_by_zero"),
+    ("KeyError", "missing_key"),
+    ("TypeError", "type_mismatch"),
+    ("AttributeError", "bad_attribute"),
+    ("FileNotFound|No such file", "missing_file"),
+    ("Connection|timeout|timed out|refused", "network"),
+    ("assert|AssertionError", "assertion"),
+    ("SyntaxError", "syntax"),
+    ("ModuleNotFound|ImportError", "import"),
+    ("permission|denied|401|403", "permission"),
+    ("no such tool|unknown tool", "tool_selection"),
+    ("timeout|wall-clock|budget", "budget"),
+]
+
+
+def categorize(error: str) -> str:
+    low = (error or "").lower()
+    # re.I: the patterns use exact Python exception casing
+    # ("NameError", "KeyError") but the input is lowercased
+    for pattern, category in _CATEGORIES:
+        if re.search(pattern, low, re.I):
+            return category
+    return "other"
+
+
+# A stable, deterministic fingerprint (normalized error class + skill +
+# operation) so repeat failures match lessons exactly instead of by fuzzy
+# text. Numbers become "#", quoted literals become "?", so "timeout after
+# 30s" and "timeout after 120s" fingerprint identically.
+_FINGERPRINT_NOISE = re.compile(r"\d+")
+_FINGERPRINT_QUOTED = re.compile(r"'[^']*'|\"[^\"]*\"")
+
+
+def failure_fingerprint(source: str, error: str, operation: str = "",
+                        skill: str = "") -> str:
+    """Deterministic fingerprint for a failure: source|category|skill|
+    operation|normalized-first-line."""
+    first = next((l.strip() for l in (error or "").splitlines() if l.strip()),
+                 "")[:200].lower()
+    first = _FINGERPRINT_QUOTED.sub("?", first)
+    first = _FINGERPRINT_NOISE.sub("#", first)
+    first = re.sub(r"\s+", " ", first).strip()[:120]
+    return "|".join([
+        (source or "").strip().lower()[:40],
+        categorize(error),
+        (skill or "").strip().lower()[:60],
+        (operation or "").strip().lower()[:60],
+        first,
+    ])
+
+
 _USER_ERROR_HINTS = {
     "auth": "check the key for that provider",
     "format": "the file may be misnamed or in an unsupported format",

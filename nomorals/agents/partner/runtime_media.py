@@ -3488,7 +3488,7 @@ class RuntimeMediaMixin:
 
     def _control_apps(self, tail: str) -> str:
         """/apps [list|stacks|build <name> --stack …|info <name>]."""
-        from ...builders import AppBuilder, STACKS
+        from ...builders.app_builder import AppBuilder, STACKS
 
         tail = (tail or "").strip()
         tokens = tail.split() if tail else []

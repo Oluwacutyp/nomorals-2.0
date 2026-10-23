@@ -25,6 +25,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ..llm.brain import brain_for
+from ..core.errors import categorize, failure_fingerprint  # noqa: F401 — re-exported (T1.6: defined in core.errors)
 from ..core.ids import new_short_id
 from ..core.logging_setup import get_logger
 from .skills import SkillLibrary
@@ -62,31 +63,11 @@ class FailureCase:
 
 
 # ── failure fingerprinting ──────────────────────────────────────────────────
-# A stable, deterministic fingerprint (normalized error class + skill +
-# operation) so repeat failures match lessons exactly instead of by fuzzy
-# text. Numbers become "#", quoted literals become "?", so "timeout after
-# 30s" and "timeout after 120s" fingerprint identically.
-
-_FINGERPRINT_NOISE = re.compile(r"\d+")
-_FINGERPRINT_QUOTED = re.compile(r"'[^']*'|\"[^\"]*\"")
-
-
-def failure_fingerprint(source: str, error: str, operation: str = "",
-                        skill: str = "") -> str:
-    """Deterministic fingerprint for a failure: source|category|skill|
-    operation|normalized-first-line."""
-    first = next((l.strip() for l in (error or "").splitlines() if l.strip()),
-                 "")[:200].lower()
-    first = _FINGERPRINT_QUOTED.sub("?", first)
-    first = _FINGERPRINT_NOISE.sub("#", first)
-    first = re.sub(r"\s+", " ", first).strip()[:120]
-    return "|".join([
-        (source or "").strip().lower()[:40],
-        categorize(error),
-        (skill or "").strip().lower()[:60],
-        (operation or "").strip().lower()[:60],
-        first,
-    ])
+# categorize() and failure_fingerprint() live in core/errors.py (T1.6
+# layering repair: the L4 tool registry needs the same fingerprint the
+# analyzer groups lessons by) and are re-exported above, so
+# ``agents.failure.categorize`` / ``.failure_fingerprint`` keep working
+# for every existing importer and mock path.
 
 
 @dataclass
@@ -143,35 +124,6 @@ class Lesson:
             fingerprint=row.get("fingerprint", "") or "",
             demoted=bool(row.get("demoted", 0)),
         )
-
-
-# Map a raw error string to a coarse category — deterministic, no model.
-_CATEGORIES: list[tuple[str, str]] = [
-    ("NameError|not defined", "undefined_name"),
-    ("IndexError|index out of range", "bad_index"),
-    ("ZeroDivisionError|division by zero", "division_by_zero"),
-    ("KeyError", "missing_key"),
-    ("TypeError", "type_mismatch"),
-    ("AttributeError", "bad_attribute"),
-    ("FileNotFound|No such file", "missing_file"),
-    ("Connection|timeout|timed out|refused", "network"),
-    ("assert|AssertionError", "assertion"),
-    ("SyntaxError", "syntax"),
-    ("ModuleNotFound|ImportError", "import"),
-    ("permission|denied|401|403", "permission"),
-    ("no such tool|unknown tool", "tool_selection"),
-    ("timeout|wall-clock|budget", "budget"),
-]
-
-
-def categorize(error: str) -> str:
-    low = (error or "").lower()
-    # re.I: the patterns use exact Python exception casing
-    # ("NameError", "KeyError") but the input is lowercased
-    for pattern, category in _CATEGORIES:
-        if re.search(pattern, low, re.I):
-            return category
-    return "other"
 
 
 class FailureAnalyzer:

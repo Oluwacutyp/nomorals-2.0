@@ -390,6 +390,23 @@ def build_context(
     except Exception as exc:  # noqa: BLE001 — media factories are optional
         _log.debug("media connector factories not wired: %s", exc)
 
+    # Tool service factories (T1.6): L4 tool modules may not import the
+    # L5 services they drive — proxylab schedules through
+    # agents.scheduler, vision resolves room: references through
+    # workspace.rooms — so the composition root injects them here, same
+    # pattern as the media factories above. Best-effort: an unwired
+    # factory makes that surface fail honestly by name.
+    try:
+        from ..tools.proxylab import set_scheduler_factory as _set_sched_factory
+        from ..tools.vision import set_room_resolver as _set_room_resolver
+        from ..workspace.rooms import resolve_room_ref as _resolve_room_ref
+        from .scheduler import Scheduler as _Scheduler
+
+        _set_sched_factory(_Scheduler)
+        _set_room_resolver(_resolve_room_ref)
+    except Exception as exc:  # noqa: BLE001 — tool factories are optional
+        _log.debug("tool service factories not wired: %s", exc)
+
     if db_recovered:
         # Surfaced in status/diagnostics: the owner should know their data
         # was quarantined, and where the old file went.

@@ -68,6 +68,7 @@ __all__ = [
     "register",
     "proxy_discover",
     "proxy_sources",
+    "set_scheduler_factory",
 ]
 
 SCHEMES = ("http", "https", "socks4", "socks5")
@@ -82,6 +83,42 @@ DEFAULT_SOURCES: tuple[tuple[str, str, str], ...] = _BUILTIN_CATALOG
 
 _UA = ("Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 "
        "Firefox/128.0")
+
+# ── scheduler factory (T1.6 injection) ──────────────────────────────────
+# The job Scheduler is an L5 agent service (agents.scheduler); this L4
+# tool module may not import it statically. The composition root
+# (agents.context.build_context) injects a factory
+# ``factory(context) -> Scheduler`` — the same seam the media layers use
+# for connector factories. When no factory was injected (bare
+# registries, tests, tool-only processes), the scheduler is resolved
+# BY NAME at call time via importlib — the same dynamic contract
+# ToolRegistry.register_builtins uses to load every tool module — so
+# the tool surface behaves exactly as it did with the old function-
+# local import; it fails honestly by name only if that resolution
+# itself fails.
+_SCHEDULER_FACTORY: Any = None
+
+
+def set_scheduler_factory(factory: Any | None) -> None:
+    """Install (or clear, with None) the scheduler factory."""
+    global _SCHEDULER_FACTORY
+    _SCHEDULER_FACTORY = factory
+
+
+def _scheduler(context: Any) -> Any:
+    if _SCHEDULER_FACTORY is not None:
+        return _SCHEDULER_FACTORY(context)
+    import importlib
+
+    try:
+        module = importlib.import_module("nomorals.agents.scheduler")
+    except Exception as exc:  # noqa: BLE001 — surface the real cause
+        raise RuntimeError(
+            "proxy scheduling unavailable: could not resolve "
+            f"nomorals.agents.scheduler ({type(exc).__name__}: {exc}); "
+            "agents.context.build_context wires a factory at boot"
+        ) from exc
+    return module.Scheduler(context)
 
 #: per-profile concurrency (profile-gating, not designing down: the
 #: lab does the same work everywhere, just with fewer parallel
@@ -1714,9 +1751,7 @@ class ProxyLab:
             pass
         schedule: dict[str, Any] = {}
         try:
-            from ..agents.scheduler import Scheduler
-
-            jobs = Scheduler(self.context).list_jobs(include_disabled=True)
+            jobs = _scheduler(self.context).list_jobs(include_disabled=True)
             job = next((j for j in jobs if j.get("name") == "proxy_refresh"),
                        None)
             if job:
@@ -2670,14 +2705,15 @@ def register(registry: Any) -> None:
     )
     def proxy_schedule(*, enabled: str = "true",
                        every_minutes: str = "") -> dict[str, Any]:
-        from ..agents.scheduler import Scheduler
-
         want = str(enabled or "true").lower() not in {"0", "false", "no", "off"}
         try:
             every = max(5, min(int(every_minutes or 30), 1440))
         except ValueError:
             every = 30
-        scheduler = Scheduler(context)
+        try:
+            scheduler = _scheduler(context)
+        except RuntimeError as exc:
+            return {"scheduled": False, "error": str(exc)}
         job_name = "proxy_refresh"
         jobs = scheduler.list_jobs(include_disabled=True)
         existing = next((j for j in jobs if j.get("name") == job_name), None)

@@ -506,8 +506,11 @@ class ToolRegistry:
         # up without any extra wiring — auto-registration is the contract.
         # The media system (music writer / player / video finder) lives in
         # its own package and registers through the same decorator surface.
+        # Books likewise: loaded by dotted name through importlib — the
+        # same dynamic contract every builtin above uses — because the
+        # registry (L4) may not statically import the books organ (L5).
         try:
-            from ..books import tools as _books
+            _books = _importlib.import_module("nomorals.books.tools")
             _books.register(self)
         except Exception as exc:  # noqa: BLE001
             _log.warning("tool module 'books' failed to register: %s: %s",
@@ -607,10 +610,16 @@ class ToolRegistry:
 
         Delegates to ``nomorals.tools.agents.agent_for``; unknown roles
         return None so the orchestrator falls through to "no handler".
+        tools.agents is an L5 composition module (see MODULE_PINS in
+        tests/test_layering.py), so the registry resolves it by name at
+        call time — the same dynamic loading contract
+        :meth:`register_builtins` uses for every builtin — instead of
+        importing upward statically.
         """
-        from .agents import agent_for as _agent_for
+        import importlib as _importlib
 
-        return _agent_for(self, role)
+        _agents = _importlib.import_module(f"{__package__}.agents")
+        return _agents.agent_for(self, role)
 
     def schemas(self, *, capabilities: CapabilitySet | None = None) -> list[dict[str, Any]]:
         """Tool list for a model prompt, filtered to what the caller may use."""
@@ -981,7 +990,7 @@ class ToolRegistry:
         try:
             fingerprint = ""
             try:
-                from ..agents.failure import failure_fingerprint
+                from ..core.errors import failure_fingerprint
 
                 fingerprint = failure_fingerprint(
                     "tool", detail[:500], "", tool)
@@ -1002,7 +1011,7 @@ class ToolRegistry:
     @staticmethod
     def _failure_family(text: str) -> str:
         try:
-            from ..agents.failure import categorize
+            from ..core.errors import categorize
 
             return categorize(text)
         except Exception:  # noqa: BLE001

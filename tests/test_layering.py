@@ -248,11 +248,35 @@ MODULE_PINS: dict[str, int] = {
     "nomorals.tools.games": 5,       # -> games.*
     "nomorals.tools.services": 5,    # -> connectors.registry
     "nomorals.tools.trading": 5,     # -> connectors.* + agents.financial_expert
+    # T1.6 (pass #96): the foundation-vs-composition split completed for
+    # the remaining agent-composed tool modules. Each is a tool *surface*
+    # over an L5 organ — it composes that organ the way tools.deals
+    # composes integrations.naija_deals — and none has a static importer
+    # below L5 (the registry loads tool modules by name at runtime).
+    "nomorals.tools.agents": 5,        # agent-tool bridge -> agents.*
+    "nomorals.tools.code_executor": 5, # plan executor -> agents.coding
+    "nomorals.tools.edit_loop": 5,     # coding edit engine (agents.coding composes it)
+    "nomorals.tools.decoder_agent": 5, # tool over agents.decoder/context
+    "nomorals.tools.weather": 5,       # tool surface over agents.weather
+    "nomorals.tools.workspace": 5,     # tool surface over workspace/goals/projects
     # Low-level adapters inside higher-level packages.
     "nomorals.integrations.voice_integration": 1,
     "nomorals.integrations.sentinel_bridge": 2,  # vendored-sentinel bridge
     "nomorals.integrations.market_data": 2,     # keyless market-data plumbing (imports only core)
-    "nomorals.integrations.naija_shopping": 4,   # shopping adapter (uses tools)
+    # T1.6 re-pin 4 -> 5 (pass #96, flagged): the L4 pin never satisfied
+    # the pin rule (max_imported <= L <= min_importer_layer) — the
+    # engine's cross-site matcher composes integrations.naija_deals
+    # (L5), so max_imported is 5, and every static importer is L5
+    # (finance.alerts/overview, tools.deals, integrations.expose,
+    # integrations/__init__). L5 is the unique layer that fits.
+    "nomorals.integrations.naija_shopping": 5,   # price/deal engine composing naija_deals
+    # AppBuilder is an application service, not an entry point: the
+    # module imports core (L1) + storage (L2) only (the framework
+    # imports inside it are template strings for generated apps), and
+    # its importers are the partner runtime (L5), tools.build_app (L7)
+    # and the builders package itself (L7). The rest of builders/
+    # (run/serve/smoke lifecycle) stays L7. T1.6 re-pin (pass #96).
+    "nomorals.builders.app_builder": 5,
     # Thin tool-registry bridge for the builders organ: its only job is to
     # expose builders/app_builder's register() hook under the name the
     # tool registry's register_builtins() imports.  An entry-point-layer
@@ -310,36 +334,20 @@ MODULE_PINS: dict[str, int] = {
 #: unit is too coarse for them; the scheduled repair is splitting tools/ into
 #: a foundation half (L4) and an agent-composition half (L5).
 #: Added 2026-10-01 during the layering-map completion.
-KNOWN_VIOLATIONS: frozenset[tuple[str, str]] = frozenset({
-    ("nomorals.agents.partner.runtime_media", "nomorals.builders"),
-    ("nomorals.tools.agents", "nomorals.agents.coding"),
-    ("nomorals.tools.code_executor", "nomorals.agents.coding"),
-    ("nomorals.tools.edit_loop", "nomorals.agents.coding"),
-    ("nomorals.tools.decoder_agent", "nomorals.agents.decoder"),
-    ("nomorals.tools.decoder_agent", "nomorals.agents.context"),
-    ("nomorals.tools.proxylab", "nomorals.agents.scheduler"),
-    ("nomorals.tools.weather", "nomorals.agents.weather"),
-    ("nomorals.tools.workspace", "nomorals.agents.goals"),
-    ("nomorals.tools.workspace", "nomorals.agents.projects"),
-    ("nomorals.tools.registry", "nomorals.agents.failure"),
-    ("nomorals.tools.vision", "nomorals.workspace.rooms"),
-    ("nomorals.tools.workspace", "nomorals.workspace.rooms"),
-    ("nomorals.tools.workspace", "nomorals.workspace"),
-    # Lazy optional auto-registration: tools/registry probes the books tool
-    # surface inside try/except so one broken package never breaks the
-    # registry.  Benign by construction; documented, not silently exempted.
-    ("nomorals.tools.registry", "nomorals.books"),
-    # Deferred optional-dependency imports (function-local, try/except-guarded
-    # where fallible): the static AST check can't see they never run at
-    # import time.  Documented here rather than exempted silently.
-    # T1.5 removed the sweep(finance) pair (finance.commands/tools pinned
-    # L5, so connectors.exness is same-layer now), the sweep(research)
-    # pair (research L4 -> memory L3 is downward), and the sweep(security)
-    # pair (security L3 -> core L1 is downward): the edges-as-violations
-    # are gone, so the entries go with them.
-    # sweep(integrations): deal-hunter reuse inside one grouping method.
-    ("nomorals.integrations.naija_shopping", "nomorals.integrations.naija_deals"),
-})
+#: EMPTIED 2026-10-23 by T1.6 (pass #96) — all sixteen pairs repaired:
+#: the composition tool modules are pinned at L5 above (the split,
+#: enforced through MODULE_PINS); categorize/failure_fingerprint moved
+#: down to core.errors (agents.failure re-exports them); proxylab and
+#: vision were inverted onto composition-root factories
+#: (set_scheduler_factory / set_room_resolver, wired in
+#: agents.context.build_context); the registry's books probe was
+#: aligned to the registry's own dynamic-loading contract (importlib
+#: by dotted name, same try/except failure recording); runtime_media
+#: now imports the builders.app_builder leaf (pinned at its true
+#: layer); and the naija_shopping pin was corrected 4 -> 5 (it never
+#: satisfied the pin rule). The empty set stays as the ratchet: any
+#: future upward import fails this test.
+KNOWN_VIOLATIONS: frozenset[tuple[str, str]] = frozenset()
 
 
 def _pin_for(dotted: str) -> int | None:
