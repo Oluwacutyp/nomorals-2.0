@@ -1,6 +1,10 @@
 """ApkForge — Devon's APK class (A1: intake + dissect + teach +
 diff; A2: editor + builder + signing + splits; A3: version bisect,
-tracker-signature growth, native hex patching, Museum wiring).
+tracker-signature growth, native hex patching, Museum wiring;
+A4: build-from-source — the manual aapt2/javac/d8 pipeline, the
+R8 variant with mapping-based jadx name restoration, the Gradle
+route with a real AAB output, project scaffolding, and general
+text-file editing of the decoded tree).
 
 Lands APKs and bundle containers from the owner's uploads or by
 URL, dissects them with androguard + APKiD into a Dossier whose
@@ -39,6 +43,7 @@ from .forge import (ApkForge, render_list, render_project,
 from .museum import render_artifacts
 from .project import apkforge_dir, museum_card, techforge_feed
 from .signatures import render_signatures
+from .srcbuild import render_srcbuild_card
 
 __all__ = [
     "ApkForge",
@@ -50,6 +55,7 @@ __all__ = [
     "render_status",
     "render_toolchain",
     "render_build_card",
+    "render_srcbuild_card",
     "render_dossier_card",
     "render_dossier_md",
     "render_diff_card",
@@ -148,18 +154,27 @@ def register(registry: Any) -> None:
         description=(
             "ApkForge workbench (A2: editor + builder + signing + "
             "splits; A3: native hex patching, signature promotion, "
-            "artifact send) over projects landed by the apkforge "
-            "tool. action=toolchain (op=status|provision — pinned, "
-            "sha256-verified JDK/apktool/jadx/bundletool/APKEditor/"
-            "build-tools, probe-executed capability report) | "
+            "artifact send; A4: build-from-source, scaffolding, "
+            "general text editing) over projects landed by the "
+            "apkforge tool. action=toolchain (op=status|provision|"
+            "provision-srcbuild — pinned, sha256-verified "
+            "JDK/apktool/jadx/bundletool/APKEditor/build-tools, "
+            "plus the A4 srcbuild set: SDK platform 35, "
+            "cmdline-tools, R8, Gradle; probe-executed capability "
+            "report) | "
             "decode (apktool decode the original into the project) "
-            "| edit (op=manifest|strings|replace|add|remove; "
+            "| edit (op=manifest|strings|replace|add|remove|write; "
             "manifest changes via fields: label, version_name, "
             "version_code, min_sdk, target_sdk, debuggable, "
             "allow_backup, add_permission, remove_permission, "
             "add_component, remove_component; strings via "
-            "name/value/locale; files via target/source — every "
-            "edit journaled + snapshotted) | patch (a fail-closed "
+            "name/value/locale; resource files via target/source; "
+            "write = a general TEXT file write into the decoded "
+            "tree (smali above all — target = decoded path, "
+            "content in value or from the source file; binaries "
+            "refuse by name) — every edit journaled + snapshotted) "
+            "| read (one text file from the decoded tree: project "
+            "+ target) | patch (a fail-closed "
             "fingerprint patch document as JSON in 'patch') | "
             "hexpatch (A3: a native byte-pattern patch document as "
             "JSON in 'patch' — target lib/<abi>/*.so in the decoded "
@@ -170,10 +185,24 @@ def register(registry: Any) -> None:
             "edits | undo (edit_id optional) | build (apktool "
             "rebuild → zipalign → sign with the vault-held class "
             "keystore → verify; card prints the re-sign facts) | "
+            "buildsrc (A4 — build an app from a SOURCE project: "
+            "source = local dir | .zip | git URL | .zip URL; route "
+            "auto-detected — gradle wrapper/build files → the "
+            "Gradle route (variant=debug|release|all; bundle=true "
+            "also runs bundleRelease for a real .aab), simple "
+            "manifest+res+java layout → the manual aapt2 compile/"
+            "link → javac → d8 pipeline (r8=true for the R8 "
+            "shrinking variant with mapping.txt); output signed + "
+            "verified, card names the route) | new (A4 — scaffold "
+            "a real buildable app project: name, package via "
+            "'value'; lands in the sources area, ready for "
+            "buildsrc) | "
             "keys (op=list|ensure, alias) | splits (op=list|"
             "extract|merge|installset|generate; part / spec JSON "
             "for a device) | jadx (decompile to readable Java — "
-            "reading surface only) | signatures (op=promote|demote "
+            "reading surface only; mapping = a ProGuard/R8 "
+            "mapping.txt path restores original class names) | "
+            "signatures (op=promote|demote "
             "— A3 tracker-table growth: promote a proposed prefix "
             "(prefix; label via 'label', kind via 'value') into "
             "the active table, or demote a grown entry (prefix, "
@@ -187,9 +216,9 @@ def register(registry: Any) -> None:
         ),
         capability=Capability.EXEC_SHELL,
         parameters={
-            "action": "str — toolchain|decode|edit|patch|hexpatch|"
-                      "edits|undo|build|keys|splits|jadx|"
-                      "signatures|send",
+            "action": "str — toolchain|decode|edit|read|patch|"
+                      "hexpatch|edits|undo|build|buildsrc|new|"
+                      "keys|splits|jadx|signatures|send",
             "project": "str — project id/prefix/package",
             "op": "str — sub-operation for edit/splits/keys/"
                   "toolchain/signatures",
@@ -202,10 +231,14 @@ def register(registry: Any) -> None:
             "platform": "str — chat platform (action=send)",
             "chat_id": "str — destination chat (action=send)",
             "target": "str — decoded-project path for edit "
-                      "replace/add/remove",
-            "source": "str — source file for edit replace/add",
-            "name": "str — string name (edit strings)",
-            "value": "str — string value (edit strings)",
+                      "replace/add/remove/write and action=read",
+            "source": "str — source file for edit replace/add; "
+                      "the source project for action=buildsrc "
+                      "(dir | .zip | git URL | .zip URL)",
+            "name": "str — string name (edit strings); project "
+                    "name (action=new)",
+            "value": "str — string value (edit strings); text "
+                     "content (edit write); package (action=new)",
             "locale": "str — values-<locale> for edit strings",
             "label": "str — manifest label",
             "version_name": "str — manifest versionName",
@@ -224,6 +257,16 @@ def register(registry: Any) -> None:
             "part": "str — split part name (splits extract)",
             "spec": "str — device spec JSON (splits installset)",
             "force": "str — true to force decode/jadx/provision",
+            "route": "str — buildsrc route override: manual|"
+                     "gradle (default auto-detect)",
+            "variant": "str — gradle buildsrc variant: "
+                       "debug|release|all (default debug)",
+            "bundle": "str — true: gradle buildsrc also runs "
+                      "bundleRelease (a real .aab)",
+            "r8": "str — true: manual buildsrc uses R8 (mapping "
+                  ".txt produced) instead of d8",
+            "mapping": "str — jadx: ProGuard/R8 mapping.txt path "
+                       "for original-name restoration",
         },
     )
     def apkforge_build(*, action: str = "toolchain", project: str = "",
@@ -240,7 +283,10 @@ def register(registry: Any) -> None:
                        alias: str = "", part: str = "", spec: str = "",
                        force: str = "", prefix: str = "",
                        reason: str = "", artifact: str = "",
-                       platform: str = "", chat_id: str = ""
+                       platform: str = "", chat_id: str = "",
+                       route: str = "", variant: str = "",
+                       bundle: str = "", r8: str = "",
+                       mapping: str = ""
                        ) -> dict[str, Any]:
         act = (action or "toolchain").strip().lower()
         forge = ApkForge(context)
@@ -254,6 +300,9 @@ def register(registry: Any) -> None:
         if act == "toolchain":
             if (op or "status") == "provision":
                 return forge.toolchain_provision(force=forced)
+            if (op or "status") == "provision-srcbuild":
+                return forge.toolchain_provision_srcbuild(
+                    force=forced)
             return forge.toolchain_status()
         if act == "decode":
             return forge.decode(project, force=forced)
@@ -269,6 +318,17 @@ def register(registry: Any) -> None:
                 remove_component=remove_component,
                 name=name, value=value, locale=locale,
                 target=target, source=source)
+        if act == "read":
+            return forge.read_text(project, target)
+        if act == "buildsrc":
+            return forge.buildsrc(
+                source or project, route=route,
+                variant=variant or "debug",
+                bundle=str(bundle).lower() in ("1", "true", "yes"),
+                use_r8=str(r8).lower() in ("1", "true", "yes"),
+                alias=alias)
+        if act == "new":
+            return forge.new_project(name or project, package=value)
         if act == "patch":
             return forge.patch(project, patch)
         if act == "hexpatch":
@@ -295,8 +355,8 @@ def register(registry: Any) -> None:
             return forge.splits(project, op or "list", part=part,
                                 spec=spec, alias=alias)
         if act == "jadx":
-            return forge.jadx(project, force=forced)
+            return forge.jadx(project, force=forced, mapping=mapping)
         return {"error": f"unknown apkforge_build action {act!r} — "
-                         "toolchain|decode|edit|patch|hexpatch|"
-                         "edits|undo|build|keys|splits|jadx|"
-                         "signatures|send"}
+                         "toolchain|decode|edit|read|patch|hexpatch|"
+                         "edits|undo|build|buildsrc|new|keys|splits|"
+                         "jadx|signatures|send"}

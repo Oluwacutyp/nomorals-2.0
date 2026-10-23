@@ -1864,15 +1864,16 @@ def _parser() -> argparse.ArgumentParser:
     a_diff = apk_sub.add_parser("diff", help="component-wise diff of two projects")
     a_diff.add_argument("project")
     a_diff.add_argument("other")
-    a_tc = apk_sub.add_parser("toolchain", help="Java toolchain: status | provision")
+    a_tc = apk_sub.add_parser("toolchain", help="Java toolchain: status | provision | provision-srcbuild")
     a_tc.add_argument("op", nargs="?", default="status",
-                      choices=["status", "provision"])
+                      choices=["status", "provision",
+                               "provision-srcbuild"])
     a_dec = apk_sub.add_parser("decode", help="apktool-decode a project")
     a_dec.add_argument("project")
     a_ed = apk_sub.add_parser("edit", help="journaled edit of the decoded project")
     a_ed.add_argument("project")
     a_ed.add_argument("op", choices=["manifest", "strings", "replace",
-                                     "add", "remove"])
+                                     "add", "remove", "write"])
     a_ed.add_argument("--label", default="")
     a_ed.add_argument("--version-name", default="")
     a_ed.add_argument("--version-code", default="")
@@ -1909,6 +1910,24 @@ def _parser() -> argparse.ArgumentParser:
     a_sp.add_argument("--alias", default="")
     a_jx = apk_sub.add_parser("jadx", help="decompile to Java (reading surface)")
     a_jx.add_argument("project")
+    a_jx.add_argument("--mapping", default="",
+                      help="ProGuard/R8 mapping.txt — restores original class names")
+    a_bs = apk_sub.add_parser("buildsrc", help="build an app from a source project (dir | .zip | git URL) — manual pipeline or gradle route, auto-detected")
+    a_bs.add_argument("source")
+    a_bs.add_argument("--route", default="", choices=["", "manual", "gradle"])
+    a_bs.add_argument("--variant", default="debug",
+                      choices=["debug", "release", "all"])
+    a_bs.add_argument("--bundle", action="store_true",
+                      help="gradle route: also run bundleRelease (real .aab)")
+    a_bs.add_argument("--r8", action="store_true",
+                      help="manual route: R8 shrinking variant (mapping.txt produced)")
+    a_bs.add_argument("--alias", default="")
+    a_nw = apk_sub.add_parser("new", help="scaffold a real, buildable app source project")
+    a_nw.add_argument("name")
+    a_nw.add_argument("--package", default="")
+    a_rd = apk_sub.add_parser("read", help="read one text file (smali above all) from a project's decoded tree")
+    a_rd.add_argument("project")
+    a_rd.add_argument("target")
     a_bi = apk_sub.add_parser("bisect", help="find the version where a dossier property flipped (git-bisect contract over the version series)")
     a_bi.add_argument("series", nargs="+",
                       help="project refs of ONE app (sorted by versionCode)")

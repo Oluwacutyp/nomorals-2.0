@@ -2710,6 +2710,11 @@ class RuntimeGamesMixin:
         /apk hexpatch <project> <patch-json> — native .so byte patch
         /apk artifacts           — Museum census (sendable cards)
         /apk send <artifact> <platform> <chat> — deliver an artifact
+        /apk buildsrc <dir|zip|git-url> [manual|gradle] — build an
+                      app from a source project (route auto-detected)
+        /apk new <name> [package] — scaffold a real buildable app
+        /apk read <project> <path> — read a text file (smali above
+                      all) from the decoded tree
         """
         from ..apkforge import (ApkForge, render_build_card,
                                 render_diff_card, render_dossier_card,
@@ -2754,6 +2759,12 @@ class RuntimeGamesMixin:
                 "/apk artifacts — Museum census",
                 "/apk send <artifact> <platform> <chat> — deliver "
                 "an artifact file",
+                "/apk buildsrc <dir|zip|git-url> [manual|gradle] — "
+                "build an app from source",
+                "/apk new <name> [package] — scaffold a buildable "
+                "app project",
+                "/apk read <project> <path> — read a decoded text "
+                "file (smali above all)",
             ]))
 
         if verb in ("", "help"):
@@ -2995,6 +3006,31 @@ class RuntimeGamesMixin:
                 return res["error"]
             return (f"sent {res['artifact']['title']} → "
                     f"{res['sent']['platform']}:{res['sent']['chat_id']}")
+        if verb == "buildsrc":
+            if len(parts) < 2:
+                return ("usage: /apk buildsrc <dir|zip|git-url> "
+                        "[manual|gradle]")
+            route = parts[2] if len(parts) > 2 and parts[2] in (
+                "manual", "gradle") else ""
+            res = forge.buildsrc(parts[1], route=route)
+            if res.get("error"):
+                return res["error"]
+            return res["card_text"]
+        if verb == "new":
+            if len(parts) < 2:
+                return "usage: /apk new <name> [package]"
+            res = forge.new_project(
+                parts[1], package=parts[2] if len(parts) > 2 else "")
+            if res.get("error"):
+                return res["error"]
+            return res["card_text"]
+        if verb == "read":
+            if len(parts) < 3:
+                return "usage: /apk read <project> <decoded-path>"
+            res = forge.read_text(parts[1], parts[2])
+            if res.get("error"):
+                return res["error"]
+            return res["file"]["text"]
         return f"unknown /apk verb {verb!r}\n{_usage()}"
 
     # ── pump desk: /pump (pump.fun intelligence, signals only) ────────

@@ -15,26 +15,30 @@ these methods (betdesk idiom).
 
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 from typing import Any
 
 from . import intake as intake_mod
 from . import signatures as sig_mod
+from . import srcbuild as srcbuild_mod
 from .build import BuildError, build_project, render_build_card
 from .diff import diff_dossiers, render_diff_card, render_diff_md
 from .edit import (EditError, edit_manifest, edit_strings,
                    ensure_decoded, list_edits, read_string,
-                   resource_add, resource_remove, resource_replace,
-                   undo_edit)
+                   read_text_file, resource_add, resource_remove,
+                   resource_replace, undo_edit, write_text_file)
 from .patch import PatchError, apply_patch
 from .signing import SigningError, ensure_keystore, list_keystores
 from .splits import (SplitsError, extract_split, generate_splits,
                      installset, list_splits, merge_bundle)
-from .toolchain import ToolchainError, probe_capabilities, provision
+from .srcbuild import SrcBuildError, render_srcbuild_card
+from .toolchain import (ToolchainError, probe_capabilities, provision,
+                        provision_srcbuild)
 from .dissect import (dissect_apk, light_identity, render_dossier_card,
                       render_dossier_md)
 from .project import (Project, apkforge_dir, find_project, list_projects,
-                      museum_card, techforge_feed)
+                      museum_card, sha256_file, techforge_feed)
 from .teach import teach_lesson
 
 __all__ = ["ApkForge", "render_status", "render_list", "render_project",
@@ -236,6 +240,22 @@ class ApkForge:
                 "capabilities":
                     probe_capabilities(root=self.root)["capabilities"]}
 
+    def toolchain_provision_srcbuild(
+            self, *, force: bool = False) -> dict[str, Any]:
+        """A4: provision the build-from-source set (platform,
+        cmdline-tools, R8, Gradle) + SDK layout + licenses."""
+        try:
+            report = provision_srcbuild(root=self.root, force=force)
+        except ToolchainError as exc:
+            return {"error": str(exc)}
+        return {"provisioned_now": report["installed"],
+                "already_present": report["present"],
+                "smoke_apktool_build": report["smoke"],
+                "sdk_root": report.get("sdk_root", ""),
+                "sdk_licenses": report.get("sdk_licenses", {}),
+                "capabilities":
+                    probe_capabilities(root=self.root)["capabilities"]}
+
     # ── decode / edit / patch / undo (A2) ────────────────────────
     def _need_project(self, ref: str) -> Project | dict[str, Any]:
         proj = self.resolve(ref)
@@ -279,12 +299,38 @@ class ApkForge:
                                    str(kw.get("source") or ""))
             elif op == "remove":
                 res = resource_remove(proj, str(kw.get("target") or ""))
+            elif op == "write":
+                content = kw.get("value")
+                if content in ("", None) and kw.get("source"):
+                    from pathlib import Path as _P
+
+                    spath = _P(str(kw["source"])).expanduser()
+                    if not spath.exists():
+                        return {"error": f"content source file "
+                                         f"does not exist: {spath}"}
+                    content = spath.read_text(encoding="utf-8")
+                res = write_text_file(proj, str(kw.get("target")
+                                                or ""),
+                                      str(content or ""))
             else:
                 return {"error": f"unknown edit op {op!r} — manifest|"
-                                 "strings|replace|add|remove"}
+                                 "strings|replace|add|remove|write"}
         except (EditError, ToolchainError) as exc:
             return {"error": str(exc)}
         return {"project": self._card(proj), "edit": res}
+
+    def read_text(self, ref: str, target: str) -> dict[str, Any]:
+        """Read one text file (smali above all) from the decoded
+        tree — the editor's read surface (A4)."""
+        proj = self._need_project(ref)
+        if isinstance(proj, dict):
+            return proj
+        try:
+            ensure_decoded(self.root, proj)
+            res = read_text_file(proj, target)
+        except (EditError, ToolchainError) as exc:
+            return {"error": str(exc)}
+        return {"project": self._card(proj), "file": res}
 
     def get_string(self, ref: str, name: str, *,
                    locale: str = "") -> dict[str, Any]:
@@ -389,11 +435,17 @@ class ApkForge:
         return {"error": f"unknown splits op {op!r} — list|extract|"
                          "merge|installset|generate"}
 
-    # ── jadx reading surface (A2) ────────────────────────────────
-    def jadx(self, ref: str, *, force: bool = False) -> dict[str, Any]:
+    # ── jadx reading surface (A2; mapping restoration A4) ────────
+    def jadx(self, ref: str, *, force: bool = False,
+             mapping: str = "") -> dict[str, Any]:
         """Decompile the project's APK to readable Java under
         jadx/ — a reading surface only (jadx output cannot be
-        recompiled; edits happen in the apktool project)."""
+        recompiled; edits happen in the apktool project).
+
+        With ``mapping`` (a ProGuard/R8 mapping.txt, as produced by
+        an R8 build), the mapping is converted to the Tiny v2 form
+        jadx's --mappings-path surface consumes and the decompile
+        comes back with the original class names restored."""
         from .toolchain import run_tool as _run
 
         proj = self._need_project(ref)
@@ -402,16 +454,39 @@ class ApkForge:
         target, _sha = self._dissect_target(proj)
         out = proj.dir / "jadx"
         marker = out / ".source-sha"
-        if out.exists() and marker.exists() and not force and                 marker.read_text(encoding="utf-8").strip() == _sha:
+        map_sha = ""
+        tiny_path: Path | None = None
+        if mapping:
+            mpath = Path(mapping).expanduser()
+            if not mpath.is_absolute():
+                mpath = proj.dir / mpath
+            if not mpath.exists():
+                return {"error": f"mapping file does not exist: "
+                                 f"{mpath}"}
+            from .project import sha256_file as _sha256
+
+            map_sha = _sha256(mpath)
+            tiny_path = proj.dir / "jadx-mapping.tiny"
+            tiny_path.write_text(
+                srcbuild_mod.proguard_to_tiny(
+                    mpath.read_text(encoding="utf-8",
+                                    errors="replace")),
+                encoding="utf-8")
+        cache_key = _sha + (f"|{map_sha}" if map_sha else "")
+        if out.exists() and marker.exists() and not force and \
+                marker.read_text(encoding="utf-8").strip() == cache_key:
             return {"project": self._card(proj), "jadx": str(out),
-                    "cached": True}
+                    "cached": True,
+                    "mapping": str(tiny_path) if tiny_path else ""}
         import shutil as _shutil
 
         _shutil.rmtree(out, ignore_errors=True)
+        args = ["-d", str(out), "--no-res"]
+        if tiny_path is not None:
+            args += ["--mappings-path", str(tiny_path)]
+        args.append(str(target))
         try:
-            res = _run("", "jadx", ["-d", str(out), "--no-res",
-                                    str(target)],
-                       timeout=1800, root=self.root)
+            res = _run("", "jadx", args, timeout=1800, root=self.root)
         except ToolchainError as exc:
             return {"error": f"jadx step failed: {exc}"}
         java_files = list(out.rglob("*.java")) if out.exists() else []
@@ -420,12 +495,162 @@ class ApkForge:
             return {"error": "jadx produced no Java sources: "
                              + (tail[-1][:300] if tail
                                 else f"rc={res['rc']}")}
-        marker.write_text(_sha, encoding="utf-8")
+        marker.write_text(cache_key, encoding="utf-8")
         proj.journal("jadx", f"decompiled {target.name} → "
                              f"{len(java_files)} java files "
-                             "(reading surface only)")
+                             "(reading surface only)"
+                             + (" with R8 mapping name restoration"
+                                if tiny_path else ""))
         return {"project": self._card(proj), "jadx": str(out),
-                "java_files": len(java_files), "cached": False}
+                "java_files": len(java_files), "cached": False,
+                "mapping": str(tiny_path) if tiny_path else ""}
+
+    # ── build from source (A4) ───────────────────────────────────
+    @staticmethod
+    def _slug(text: str) -> str:
+        import re as _re
+
+        slug = _re.sub(r"[^a-z0-9]+", "-",
+                       (text or "source").lower()).strip("-")
+        return slug or "source"
+
+    def _sources_dir(self) -> Path:
+        d = self.root / "sources"
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
+    def _land_source(self, source: str) -> tuple[Path, dict[str, Any]]:
+        """Land a source project into the class workspace:
+        a local dir (copied, content-hashed), a local .zip
+        (extracted, zip-slip guarded), a git URL (cloned), or a
+        .zip URL (downloaded via the shared HTTP organ, then
+        extracted).  Returns (project dir, provenance)."""
+        import hashlib
+        import re as _re
+        import subprocess as _sp
+
+        raw = (source or "").strip()
+        if not raw:
+            raise SrcBuildError("buildsrc needs a source: a local "
+                                "project dir, a .zip, or a git URL")
+        sdir = self._sources_dir()
+        # a previously landed source, referenced by name
+        named = sdir / raw
+        if named.is_dir() and (named / "src").is_dir():
+            return named / "src", {"type": "landed", "ref": raw}
+        if raw.startswith(("http://", "https://")):
+            if raw.split("?")[0].endswith(".zip"):
+                from ...core.http import download
+
+                dl = Path(download(raw, sdir / ".inbox"))
+                digest = sha256_file(dl)
+                slug = self._slug(raw.rsplit("/", 1)[-1])
+                dest = sdir / f"{slug}-{digest[:12]}"
+                self._extract_source_zip(dl, dest)
+                return dest / "src", {"type": "url-zip", "ref": raw,
+                                      "sha256": digest}
+            slug = self._slug(raw.rsplit("/", 1)[-1].removesuffix(".git"))
+            digest = hashlib.sha256(raw.encode()).hexdigest()
+            dest = sdir / f"{slug}-{digest[:12]}"
+            if not (dest / "src").exists():
+                git = shutil.which("git")
+                if not git:
+                    raise SrcBuildError(
+                        "git clone step: no git binary on this host "
+                        f"to clone {raw}")
+                (dest / "src").mkdir(parents=True, exist_ok=True)
+                proc = _sp.run([git, "clone", "--depth", "1", raw,
+                                str(dest / "src")],
+                               capture_output=True, text=True,
+                               timeout=900)
+                if proc.returncode != 0:
+                    raise SrcBuildError(
+                        f"git clone step failed for {raw}: "
+                        f"{(proc.stderr or proc.stdout)[-400:]}")
+            return dest / "src", {"type": "git", "ref": raw}
+        path = Path(raw).expanduser()
+        if path.is_file() and path.suffix.lower() == ".zip":
+            digest = sha256_file(path)
+            dest = sdir / f"{self._slug(path.stem)}-{digest[:12]}"
+            self._extract_source_zip(path, dest)
+            return dest / "src", {"type": "zip", "ref": str(path),
+                                  "sha256": digest}
+        if path.is_dir():
+            if sdir in path.parents or path.parent == sdir:
+                inner = path / "src" if (path / "src").is_dir() \
+                    else path
+                return inner, {"type": "landed", "ref": str(path)}
+            digest = srcbuild_mod.tree_hash(path)
+            dest = sdir / f"{self._slug(path.name)}-{digest[:12]}"
+            if not (dest / "src").exists():
+                ignore = shutil.ignore_patterns(
+                    ".git", ".gradle", "build", "__pycache__")
+                shutil.copytree(path, dest / "src", ignore=ignore)
+            return dest / "src", {"type": "dir", "ref": str(path),
+                                  "sha256": digest}
+        raise SrcBuildError(
+            f"source {raw!r} is not a directory, a .zip, or a URL — "
+            "buildsrc lands source projects, not single files")
+
+    def _extract_source_zip(self, zpath: Path, dest: Path) -> None:
+        if (dest / "src").exists():
+            return
+        import zipfile as _zf
+
+        from .toolchain import _safe_extract_zip
+
+        stage = dest / ".extract"
+        shutil.rmtree(stage, ignore_errors=True)
+        stage.mkdir(parents=True, exist_ok=True)
+        try:
+            with _zf.ZipFile(zpath) as zf:
+                _safe_extract_zip(zf, stage)
+        except ToolchainError as exc:
+            raise SrcBuildError(f"source zip step: {exc}") from exc
+        children = [c for c in stage.iterdir()]
+        inner = children[0] if len(children) == 1 \
+            and children[0].is_dir() else stage
+        shutil.move(str(inner), str(dest / "src"))
+        shutil.rmtree(stage, ignore_errors=True)
+
+    def buildsrc(self, source: str, *, route: str = "",
+                 variant: str = "debug", bundle: bool = False,
+                 use_r8: bool = False,
+                 alias: str = "") -> dict[str, Any]:
+        """Build an app from a source project (dir | zip | git URL)
+        → signed, verified APK (manual pipeline or gradle route,
+        auto-detected) with the build card naming the route."""
+        try:
+            src_dir, provenance = self._land_source(source)
+            card = srcbuild_mod.build_source(
+                self.context, self.root, src_dir, alias=alias,
+                route=route, variant=variant, bundle=bundle,
+                use_r8=use_r8)
+        except (SrcBuildError, SigningError, ToolchainError) as exc:
+            return {"error": str(exc)}
+        card["provenance"] = provenance
+        return {"source": {"dir": str(src_dir),
+                           "provenance": provenance},
+                "build": card,
+                "card_text": render_srcbuild_card(card)}
+
+    def new_project(self, name: str, *,
+                    package: str = "") -> dict[str, Any]:
+        """Scaffold a real, buildable app project into the class
+        sources area (A4): manifest + behavior-bearing
+        MainActivity + string resources, ready for buildsrc."""
+        try:
+            info = srcbuild_mod.scaffold_project(
+                self._sources_dir(), name, package=package)
+        except SrcBuildError as exc:
+            return {"error": str(exc)}
+        return {"project": info,
+                "card_text": (
+                    f"🪓 **new source project** — {info['name']} "
+                    f"({info['package']})\n"
+                    f"dir: {info['dir']}\n"
+                    f"files: {', '.join(info['files'])}\n"
+                    f"build it with buildsrc {info['name']}")}
 
     # ── bisect (A3) ──────────────────────────────────────────────
     def bisect(self, series: Any, check: str) -> dict[str, Any]:

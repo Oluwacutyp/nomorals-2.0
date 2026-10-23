@@ -1,7 +1,7 @@
 """``nm apk`` — ApkForge: intake, dissect, teach, diff (A1) +
 toolchain, decode, edit, patch, undo, build, keys, splits, jadx
 (A2 workbench) + bisect, signatures, hexpatch, artifacts, send
-(A3)."""
+(A3) + buildsrc, new, read (A4 build-from-source)."""
 
 from __future__ import annotations
 
@@ -17,6 +17,7 @@ def _cmd_apk(args: Any, context: Any) -> int:
                                     render_dossier_card, render_list,
                                     render_project,
                                     render_signatures,
+                                    render_srcbuild_card,
                                     render_status, render_toolchain)
 
     forge = ApkForge(context)
@@ -82,7 +83,39 @@ def _cmd_apk(args: Any, context: Any) -> int:
             print(f"already present: {res['already_present']}")
             print(f"smoke build: {res['smoke_apktool_build']}")
             return 0
+        if args.op == "provision-srcbuild":
+            res = forge.toolchain_provision_srcbuild()
+            if res.get("error"):
+                return _fail(res)
+            print(f"installed now: {res['provisioned_now']}")
+            print(f"already present: {res['already_present']}")
+            print(f"sdk root: {res['sdk_root']}")
+            print(f"sdk licenses: {res['sdk_licenses']}")
+            return 0
         print(render_toolchain(forge.toolchain_status()))
+        return 0
+
+    if action == "buildsrc":
+        res = forge.buildsrc(
+            args.source, route=args.route, variant=args.variant,
+            bundle=args.bundle, use_r8=args.r8, alias=args.alias)
+        if res.get("error"):
+            return _fail(res)
+        print(render_srcbuild_card(res["build"]))
+        return 0
+
+    if action == "new":
+        res = forge.new_project(args.name, package=args.package)
+        if res.get("error"):
+            return _fail(res)
+        print(res["card_text"])
+        return 0
+
+    if action == "read":
+        res = forge.read_text(args.project, args.target)
+        if res.get("error"):
+            return _fail(res)
+        print(res["file"]["text"])
         return 0
 
     if action == "decode":
@@ -187,7 +220,7 @@ def _cmd_apk(args: Any, context: Any) -> int:
         return 0
 
     if action == "jadx":
-        res = forge.jadx(args.project)
+        res = forge.jadx(args.project, mapping=args.mapping)
         if res.get("error"):
             return _fail(res)
         print(f"jadx → {res['jadx']} "

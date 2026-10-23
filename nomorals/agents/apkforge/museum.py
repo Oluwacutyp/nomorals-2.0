@@ -75,6 +75,27 @@ def build_cards(project: Project) -> list[dict[str, Any]]:
     return out
 
 
+def source_build_cards(root: Path) -> list[dict[str, Any]]:
+    """Museum cards for A4 build-from-source outputs: each landed
+    source keeps its srcbuild card under build/outputs/, and the
+    card already embeds its museum shape."""
+    out: list[dict[str, Any]] = []
+    sources = root / "sources"
+    if not sources.exists():
+        return out
+    for card_path in sorted(sources.glob(
+            "*/src/build/outputs/srcbuild-card.json")):
+        try:
+            card = json.loads(card_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        mc = card.get("museum_card")
+        if isinstance(mc, dict) and Path(str(mc.get("path") or "")) \
+                .exists():
+            out.append(mc)
+    return out
+
+
 def list_artifacts(root: Path) -> dict[str, Any]:
     """The whole class census: projects, dossiers, builds."""
     artifacts: list[dict[str, Any]] = []
@@ -84,6 +105,7 @@ def list_artifacts(root: Path) -> dict[str, Any]:
         if dc is not None:
             artifacts.append(dc)
         artifacts.extend(build_cards(proj))
+    artifacts.extend(source_build_cards(root))
     by_shelf: dict[str, int] = {}
     for card in artifacts:
         by_shelf[card["shelf"]] = by_shelf.get(card["shelf"], 0) + 1

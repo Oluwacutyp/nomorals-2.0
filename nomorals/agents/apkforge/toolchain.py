@@ -40,14 +40,19 @@ from typing import Any
 __all__ = [
     "ToolchainError",
     "PINS",
+    "SRCBUILD_PINS",
     "androguard_version",
     "apkid_version",
     "tools_dir",
     "tool_paths",
     "run_tool",
     "provision",
+    "provision_srcbuild",
     "probe_capabilities",
     "toolchain_state",
+    "android_jar_path",
+    "assemble_sdk_root",
+    "accept_sdk_licenses",
 ]
 
 # ── pinned artifacts (publisher release channels) ────────────────────
@@ -101,6 +106,51 @@ PINS: dict[str, dict[str, Any]] = {
                 "build-tools_r35_linux.zip"),
         "sha256": "bd3a4966912eb8b30ed0d00b0cda6b6543b949d5ffe00bea54c04c81e1561d88",
         "dir": "build-tools",
+    },
+}
+
+# ── A4 build-from-source pins ────────────────────────────────────────
+# The manual aapt2/javac/d8 pipeline and the Gradle route need three
+# things A2 never fetched: an SDK platform (android.jar), the SDK
+# command-line tools (sdkmanager — license acceptance + SDK layout),
+# a Gradle distribution, and the standalone R8 jar.  Same discipline
+# as the A2 pins: publisher channels only, sha256 verified on every
+# install.  The platform zip's sha256 is anchored to Google's own
+# repository2-1.xml, whose SHA-1 for platform-35_r02.zip
+# (0bb560a90a7a2cbd0dd8348224d518b638fe7949) matched the fetched
+# artifact byte-for-byte at pin time (2026-10-22); the cmdline-tools
+# and R8 sha256s are likewise computed from artifacts whose SHA-1s
+# matched Google's published values (repository XML / Google Maven
+# .sha1 sidecars).  Gradle's sha256 is Gradle's own published
+# checksum for gradle-8.9-bin.zip.
+SRCBUILD_PINS: dict[str, dict[str, Any]] = {
+    "platform-35": {
+        "version": "35_r02", "kind": "zip",
+        "url": ("https://dl.google.com/android/repository/"
+                "platform-35_r02.zip"),
+        "sha256": "0988cacad01b38a18a47bac14a0695f246bc76c1b06c0eeb8eb0dc825ab0c8e0",
+        "dir": "platform-35",
+    },
+    "cmdline-tools": {
+        "version": "12.0", "kind": "zip",
+        "url": ("https://dl.google.com/android/repository/"
+                "commandlinetools-linux-11076708_latest.zip"),
+        "sha256": "2d2d50857e4eb553af5a6dc3ad507a17adf43d115264b1afc116f95c92e5e258",
+        "dir": "cmdline-tools",
+    },
+    "r8": {
+        "version": "8.5.35", "kind": "jar",
+        "url": ("https://dl.google.com/dl/android/maven2/"
+                "com/android/tools/r8/8.5.35/r8-8.5.35.jar"),
+        "sha256": "4733945987ee0a840fafc34080b135259e01678412e07212b23f706334290294",
+        "file": "r8.jar",
+    },
+    "gradle": {
+        "version": "8.9", "kind": "zip",
+        "url": ("https://services.gradle.org/distributions/"
+                "gradle-8.9-bin.zip"),
+        "sha256": "d725d707bfabd4dfdc958c624003b3c80accc03f7037b5122c4b1d0ef15cecab",
+        "dir": "gradle",
     },
 }
 
@@ -175,6 +225,8 @@ def tool_paths(base: str = "", *, root: Any = None) -> dict[str, Any]:
     prov = {
         "java": tdir / "jdk" / "bin" / "java",
         "keytool": tdir / "jdk" / "bin" / "keytool",
+        "javac": tdir / "jdk" / "bin" / "javac",
+        "jar": tdir / "jdk" / "bin" / "jar",
         "apktool": tdir / "apktool.jar",
         "jadx": tdir / "jadx" / "bin" / "jadx",
         "bundletool": tdir / "bundletool.jar",
@@ -182,6 +234,10 @@ def tool_paths(base: str = "", *, root: Any = None) -> dict[str, Any]:
         "zipalign": tdir / "build-tools" / "zipalign",
         "apksigner": tdir / "build-tools" / "apksigner",
         "aapt2": tdir / "build-tools" / "aapt2",
+        "d8": tdir / "build-tools" / "d8",
+        "sdkmanager": tdir / "cmdline-tools" / "bin" / "sdkmanager",
+        "gradle": tdir / "gradle" / "bin" / "gradle",
+        "r8": tdir / "r8.jar",
     }
     out: dict[str, Any] = {}
     for name, ppath in prov.items():
@@ -202,6 +258,17 @@ def _argv_for(paths: dict[str, Any], name: str,
     if not info["path"]:
         raise ToolchainError(f"{name} is not available on this host "
                              "(not on PATH, not provisioned)")
+    if name == "r8":
+        # The Google-Maven r8.jar's manifest names a SwissArmyKnife
+        # main class the artifact does not actually contain; the
+        # real entry point is com.android.tools.r8.R8 on the
+        # classpath (verified by execution against the pin).
+        java = paths["java"]["path"]
+        if not java:
+            raise ToolchainError("r8 needs a java runtime — none "
+                                 "on PATH and no JDK provisioned")
+        return [java, "-cp", info["path"],
+                "com.android.tools.r8.R8", *args]
     if name in ("apktool", "bundletool", "apkeditor"):
         java = paths["java"]["path"]
         if not java:
@@ -228,22 +295,31 @@ def _tool_env(paths: dict[str, Any]) -> dict[str, str]:
 
 def run_tool(base: str, name: str, args: list[str], *,
              timeout: int = 300, extra_env: dict[str, str] | None = None,
-             cwd: str = "", root: Any = None) -> dict[str, Any]:
+             cwd: str = "", root: Any = None,
+             input_text: str = "") -> dict[str, Any]:
     """Run one toolchain binary with a hard timeout + group kill.
 
     Returns {rc, stdout, stderr}.  Raises ToolchainError on timeout;
     a nonzero rc is data, not an exception — callers name the
-    failing step."""
+    failing step.  ``input_text`` feeds the process's stdin (the
+    sdkmanager license-acceptance path); secrets never travel here
+    or in argv."""
     paths = tool_paths(base, root=root)
     argv = _argv_for(paths, name, args)
     env = _tool_env(paths)
     if extra_env:
-        env.update(extra_env)
+        for key, val in extra_env.items():
+            if val is None:
+                env.pop(key, None)
+            else:
+                env[key] = val
     proc = subprocess.Popen(
         argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        stdin=subprocess.PIPE if input_text else None,
         text=True, cwd=cwd or None, env=env, start_new_session=True)
     try:
-        out, err = proc.communicate(timeout=timeout)
+        out, err = proc.communicate(input=input_text or None,
+                                    timeout=timeout)
     except subprocess.TimeoutExpired:
         try:
             os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
@@ -422,7 +498,8 @@ def smoke_test(base: str, *, root: Any = None) -> dict[str, Any]:
         shutil.rmtree(work, ignore_errors=True)
 
 
-def provision(base: str = "", *, force: bool = False, root: Any = None) -> dict[str, Any]:
+def provision(base: str = "", *, force: bool = False, root: Any = None,
+              include_srcbuild: bool = False) -> dict[str, Any]:
     """Provision every missing pinned artifact, verify, probe.
 
     Idempotent: an artifact whose installed marker matches the pin
@@ -430,10 +507,19 @@ def provision(base: str = "", *, force: bool = False, root: Any = None) -> dict[
     is deleted and the provision fails closed, naming the artifact.
     A pre-downloaded artifact cache (``APKFORGE_TOOL_CACHE`` dir,
     files named per the pin table) may seed the downloads — the
-    sha256 check runs either way."""
+    sha256 check runs either way.  ``include_srcbuild`` adds the A4
+    build-from-source pins (platform / cmdline-tools / R8 / Gradle)
+    on top of the A2 set; the A2 set alone stays the default so the
+    original provision contract is unchanged."""
     from ...core.http import download
 
     tdir = tools_dir(base, root=root)
+    # Installing tools changes what the executed probes will say —
+    # drop any cached probe set for this root so a capability read
+    # after provisioning is fresh (A4: the A2 provision runs first
+    # and would otherwise leave the srcbuild tools reading as
+    # "not installed" for the life of the process).
+    _PROBE_CACHE.pop(str(tdir), None)
     dl_dir = tdir / ".downloads"
     dl_dir.mkdir(parents=True, exist_ok=True)
     cache = os.environ.get("APKFORGE_TOOL_CACHE", "").strip()
@@ -451,24 +537,33 @@ def provision(base: str = "", *, force: bool = False, root: Any = None) -> dict[
                 return dest
         return Path(download(url, dest))
 
+    pin_tables: list[dict[str, dict[str, Any]]] = [PINS]
+    if include_srcbuild:
+        pin_tables.append(SRCBUILD_PINS)
+    versions: dict[str, str] = {}
+    for table in pin_tables:
+        for name, pin in table.items():
+            versions[name] = pin["version"]
+
     plan: list[tuple[str, str, str, str, Path, str]] = []
     jdk_url, jdk_sha = _jdk_artifact()
     plan.append(("jdk", jdk_url, jdk_sha, "jdk.tar.gz",
                  tdir / "jdk", "tar.gz"))
-    for name, pin in PINS.items():
-        if name == "jdk":
-            continue
-        dest = tdir / (pin.get("file") or pin["dir"])
-        plan.append((name, pin["url"], pin["sha256"],
-                     pin.get("file") or (name + ".zip"), dest,
-                     pin["kind"]))
+    for table in pin_tables:
+        for name, pin in table.items():
+            if name == "jdk":
+                continue
+            dest = tdir / (pin.get("file") or pin["dir"])
+            plan.append((name, pin["url"], pin["sha256"],
+                         pin.get("file") or (name + ".zip"), dest,
+                         pin["kind"]))
 
     for name, url, sha, fname, dest, kind in plan:
         if not force and dest.exists() and \
                 _installed_sha(dest) == sha:
             report["present"].append(name)
             installed.setdefault(name, {
-                "version": PINS[name]["version"], "sha256": sha,
+                "version": versions[name], "sha256": sha,
                 "source": "provisioned", "path": str(dest)})
             continue
         raw = _obtain(url, fname)
@@ -494,7 +589,7 @@ def provision(base: str = "", *, force: bool = False, root: Any = None) -> dict[
                     except OSError:
                         pass
         _mark_installed(dest, sha)
-        installed[name] = {"version": PINS[name]["version"],
+        installed[name] = {"version": versions[name],
                            "sha256": sha, "source": "provisioned",
                            "path": str(dest)}
         report["installed"].append(name)
@@ -508,11 +603,236 @@ def provision(base: str = "", *, force: bool = False, root: Any = None) -> dict[
     return report
 
 
+def provision_srcbuild(base: str = "", *, force: bool = False,
+                       root: Any = None) -> dict[str, Any]:
+    """Provision the A4 build-from-source set on top of the A2 set:
+    SDK platform 35 (android.jar), cmdline-tools (sdkmanager),
+    standalone R8, Gradle — then assemble the SDK layout and accept
+    the SDK licenses through sdkmanager itself, recording the fact."""
+    report = provision(base, force=force, root=root,
+                       include_srcbuild=True)
+    sdk = assemble_sdk_root(base, root=root)
+    licenses = accept_sdk_licenses(base, root=root)
+    state = toolchain_state(base, root=root)
+    state["sdk_root"] = str(sdk)
+    state["sdk_licenses"] = licenses
+    _save_state(base, state, root=root)
+    report["sdk_root"] = str(sdk)
+    report["sdk_licenses"] = licenses
+    return report
+
+
+# ── SDK layout (A4) ──────────────────────────────────────────────────
+
+def android_jar_path(base: str = "", *, root: Any = None) -> Path | None:
+    """The provisioned platform's android.jar, or None."""
+    jar = tools_dir(base, root=root) / "platform-35" / "android.jar"
+    return jar if jar.exists() else None
+
+
+def _link_or_copy(src: Path, dest: Path) -> None:
+    if dest.is_symlink() or dest.exists():
+        if dest.is_symlink() and Path(os.readlink(dest)) == src:
+            return
+        if dest.is_dir() and not dest.is_symlink():
+            shutil.rmtree(dest)
+        else:
+            dest.unlink()
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        os.symlink(src, dest, target_is_directory=True)
+    except OSError:
+        shutil.copytree(src, dest)
+
+
+def assemble_sdk_root(base: str = "", *, root: Any = None) -> Path:
+    """Assemble the SDK layout Gradle/AGP expects under
+    ``<tools>/sdk``: platforms/android-35, build-tools/35.0.0,
+    cmdline-tools/latest — links to the provisioned artifacts (a
+    copy where symlinks are unavailable).  Idempotent."""
+    tdir = tools_dir(base, root=root)
+    sdk = tdir / "sdk"
+    pieces = [
+        (tdir / "platform-35", sdk / "platforms" / "android-35"),
+        (tdir / "build-tools", sdk / "build-tools" / "35.0.0"),
+        (tdir / "cmdline-tools", sdk / "cmdline-tools" / "latest"),
+    ]
+    for src, dest in pieces:
+        if not src.exists():
+            raise ToolchainError(
+                f"SDK piece missing: {src} — run the srcbuild "
+                "provision first (apkforge toolchain provision "
+                "with the buildsrc set)")
+        _link_or_copy(src, dest)
+    (sdk / "licenses").mkdir(parents=True, exist_ok=True)
+    return sdk
+
+
+# JVM network tools (sdkmanager, Gradle) do not read the process's
+# proxy env vars the way the Python HTTP organ does — and on hosts
+# whose egress proxy answers CONNECT in a way the JDK's tunneling
+# parser rejects, inheriting those vars makes sdkmanager crash
+# before it can even list licenses (observed on the owner's VM:
+# stripped env → licenses accepted; inherited env →
+# NoSuchElementException in HttpURLConnection.doTunneling).  The
+# class's JVM network calls therefore run with the proxy vars
+# removed and direct egress; a host that truly requires a proxy
+# for these tools configures it through the tools' own mechanisms
+# (gradle.properties systemProp.*, sdkmanager --proxy flags).
+PROXY_ENV_VARS = ("http_proxy", "https_proxy", "HTTP_PROXY",
+                  "HTTPS_PROXY", "ALL_PROXY", "all_proxy")
+
+
+def strip_proxy_env() -> dict[str, None]:
+    """extra_env fragment that removes the proxy vars."""
+    return {name: None for name in PROXY_ENV_VARS}
+
+
+def _system_ca_bundle() -> Path | None:
+    for cand in (os.environ.get("SSL_CERT_FILE", ""),
+                 "/etc/ssl/certs/ca-certificates.crt",
+                 "/etc/pki/tls/certs/ca-bundle.crt"):
+        if cand and Path(cand).is_file():
+            return Path(cand)
+    return None
+
+
+def jvm_truststore(base: str = "", *, root: Any = None) -> Path | None:
+    """A JVM truststore = the provisioned JDK's cacerts PLUS the
+    host's system CA bundle, built once per bundle version under
+    tools/.jvm/.  Why: on hosts behind a TLS-intercepting egress
+    proxy (observed on the owner's VM: Google hosts are served
+    with a cert from the sandbox's own CA), curl and Python trust
+    the proxy CA through the system store but a JVM only trusts
+    its own cacerts — so sdkmanager's repository fetch and
+    Gradle's dependency downloads die in certificate validation.
+    None when no system bundle exists (the JDK default then
+    rules, as on a normal host)."""
+    bundle = _system_ca_bundle()
+    if bundle is None:
+        return None
+    home = tools_dir(base, root=root) / ".jvm"
+    home.mkdir(parents=True, exist_ok=True)
+    dest = home / "truststore.jks"
+    marker = home / "truststore.src"
+    stat = bundle.stat()
+    stamp = f"{bundle}:{stat.st_mtime_ns}:{stat.st_size}"
+    if dest.exists() and marker.exists() and \
+            marker.read_text(encoding="utf-8") == stamp:
+        return dest
+    paths = tool_paths(base, root=root)
+    java = paths.get("java", {}).get("path", "")
+    if not java:
+        return None
+    jdk = Path(java).resolve().parent.parent
+    keytool = jdk / "bin" / "keytool"
+    cacerts = jdk / "lib" / "security" / "cacerts"
+    if not keytool.is_file() or not cacerts.is_file():
+        return None
+    build_dir = home / ".truststore-build"
+    shutil.rmtree(build_dir, ignore_errors=True)
+    build_dir.mkdir(parents=True)
+    tmp_store = build_dir / "store.jks"
+    shutil.copy2(cacerts, tmp_store)
+    pems = bundle.read_text(encoding="utf-8",
+                            errors="replace").split(
+                                "-----END CERTIFICATE-----")
+    imported = 0
+    for i, chunk in enumerate(pems):
+        if "-----BEGIN CERTIFICATE-----" not in chunk:
+            continue
+        cert_file = build_dir / f"ca{i}.pem"
+        cert_file.write_text(
+            chunk + "-----END CERTIFICATE-----\n", encoding="utf-8")
+        cp = subprocess.run(
+            [str(keytool), "-importcert", "-noprompt",
+             "-alias", f"sysca{i}", "-file", str(cert_file),
+             "-keystore", str(tmp_store), "-storepass", "changeit"],
+            capture_output=True, text=True, timeout=60)
+        if cp.returncode == 0:
+            imported += 1
+    if imported:
+        shutil.move(str(tmp_store), str(dest))
+        marker.write_text(stamp, encoding="utf-8")
+    shutil.rmtree(build_dir, ignore_errors=True)
+    return dest if imported else None
+
+
+def _sdkmanager_proxy_args() -> list[str]:
+    """sdkmanager proxy flags translated from the process's proxy
+    env vars.  sdkmanager cannot use the JDK's proxy system
+    properties (its repository fetch dies inside the HTTP tunnel
+    setup when they are set) and ignores proxy env vars entirely —
+    its own --proxy/--proxy_host/--proxy_port flags are the only
+    working channel, and without a working fetch it enumerates no
+    licenses at all and writes no license files (AGP then refuses
+    to build: "some licences have not been accepted")."""
+    import urllib.parse
+
+    raw = os.environ.get("https_proxy") or \
+        os.environ.get("http_proxy") or \
+        os.environ.get("HTTPS_PROXY") or \
+        os.environ.get("HTTP_PROXY") or ""
+    if not raw:
+        return []
+    u = urllib.parse.urlparse(raw)
+    if not u.hostname:
+        return []
+    args = ["--proxy=http", f"--proxy_host={u.hostname}"]
+    if u.port:
+        args.append(f"--proxy_port={u.port}")
+    return args
+
+
+def accept_sdk_licenses(base: str = "", *, root: Any = None) -> dict[str, Any]:
+    """Accept SDK licenses through sdkmanager itself (the designed
+    path — no hand-written license hashes).  Records which license
+    files sdkmanager wrote."""
+    sdk = assemble_sdk_root(base, root=root)
+    lic_dir = sdk / "licenses"
+    before = {p.name for p in lic_dir.iterdir()}
+    env = strip_proxy_env()
+    # Two host fixes ride JAVA_TOOL_OPTIONS (the only channel that
+    # reaches sdkmanager's own JVM): the IPv4-stack pin — on
+    # dual-stack-intercepted hosts the repository fetch otherwise
+    # dies with an uncaught NoSuchElementException in
+    # HttpURLConnection.doTunneling and takes the whole licenses
+    # action down — and the merged truststore, without which the
+    # fetch fails certificate validation on TLS-intercepted
+    # hosts and no licenses are enumerated at all.
+    props = ["-Djava.net.preferIPv4Stack=true"]
+    truststore = jvm_truststore(base, root=root)
+    if truststore is not None:
+        props.append(f"-Djavax.net.ssl.trustStore={truststore}")
+        props.append("-Djavax.net.ssl.trustStorePassword=changeit")
+    existing_jto = os.environ.get("JAVA_TOOL_OPTIONS", "")
+    for prop in props:
+        if prop not in existing_jto:
+            existing_jto = (existing_jto + " " + prop).strip()
+    env["JAVA_TOOL_OPTIONS"] = existing_jto
+    res = run_tool(base, "sdkmanager",
+                   [f"--sdk_root={sdk}", "--licenses",
+                    *_sdkmanager_proxy_args()],
+                   timeout=300, root=root,
+                   extra_env=env,
+                   input_text="y\n" * 64)
+    after = sorted(p.name for p in lic_dir.iterdir())
+    if res["rc"] != 0 and not after:
+        tail = (res["stdout"] + res["stderr"]).strip().splitlines()
+        raise ToolchainError(
+            "sdkmanager --licenses failed: "
+            + (tail[-1][:300] if tail else f"rc={res['rc']}"))
+    return {"accepted": after, "newly": sorted(set(after) - before),
+            "via": "sdkmanager --licenses"}
+
+
 # ── capability probe ─────────────────────────────────────────────────
 
 _VERSION_ARGS = {
     "java": ["-version"],
     "keytool": ["-help"],
+    "javac": ["-version"],
+    "jar": ["--version"],
     "apktool": ["--version"],
     "jadx": ["--version"],
     "bundletool": ["version"],
@@ -520,6 +840,10 @@ _VERSION_ARGS = {
     "zipalign": [],
     "apksigner": ["version"],
     "aapt2": ["version"],
+    "d8": ["--version"],
+    "sdkmanager": ["--version"],
+    "gradle": ["--version"],
+    "r8": ["--version"],
 }
 
 _PROBE_CACHE: dict[str, dict[str, Any]] = {}
@@ -570,6 +894,30 @@ def probe_capabilities(base: str = "", *, root: Any = None) -> dict[str, Any]:
                 except ToolchainError as exc:
                     probes[name] = {"ok": False, "version": "",
                                     "error": str(exc)}
+            elif name == "sdkmanager":
+                # Probed the way the class actually calls it: a
+                # bare `sdkmanager --version` fails with "Could not
+                # determine SDK root" because sdkmanager infers its
+                # root from a <sdk>/cmdline-tools/latest layout the
+                # raw tools dir does not have — every real call
+                # passes --sdk_root at the ASSEMBLED layout instead.
+                try:
+                    sdk = assemble_sdk_root(base, root=root)
+                    res = run_tool(
+                        base, name,
+                        [f"--sdk_root={sdk}", "--version"],
+                        timeout=60, root=root,
+                        extra_env=strip_proxy_env())
+                    text = (res["stdout"] + res["stderr"]).strip()
+                    probes[name] = {
+                        "ok": res["rc"] == 0 and bool(text),
+                        "version": text.splitlines()[0][:120]
+                        if text else "",
+                        "error": "" if res["rc"] == 0
+                        else text[:200]}
+                except ToolchainError as exc:
+                    probes[name] = {"ok": False, "version": "",
+                                    "error": str(exc)}
             else:
                 probes[name] = _version_of(base, name, args, root)
         _PROBE_CACHE[cache_key] = probes
@@ -609,6 +957,38 @@ def probe_capabilities(base: str = "", *, root: Any = None) -> dict[str, Any]:
         "install_test": "out of scope — no device install-test lab "
                         "organ (design §5)",
     }
+    # A4 build-from-source rows: aapt2/d8 are first-class probed
+    # tools (executed above); android.jar is a presence + version
+    # fact from the provisioned platform; the two buildsrc routes
+    # are full only when every tool they drive probes green.
+    jar = android_jar_path(base, root=root)
+    srcbuild_prov = ("unavailable — build-from-source toolchain not "
+                     "provisioned on this host (run: apkforge "
+                     "toolchain provision-srcbuild)")
+    caps["aapt2"] = "full" if probes["aapt2"]["ok"] else (
+        not_prov if not provisioned else
+        "unavailable — aapt2 probe failed: "
+        + probes["aapt2"]["error"])
+    caps["d8"] = "full" if probes["d8"]["ok"] else (
+        not_prov if not provisioned else
+        "unavailable — d8 probe failed: " + probes["d8"]["error"])
+    caps["android_jar"] = (
+        f"full — API 35 platform ({jar})" if jar else srcbuild_prov)
+    caps["r8"] = "full" if probes["r8"]["ok"] else srcbuild_prov
+    caps["gradle"] = "full" if probes["gradle"]["ok"] else (
+        srcbuild_prov)
+    manual_ok = (probes["aapt2"]["ok"] and probes["d8"]["ok"]
+                 and probes["javac"]["ok"] and jar is not None)
+    caps["buildsrc_manual"] = "full" if manual_ok else (
+        srcbuild_prov if jar is None else
+        "unavailable — manual pipeline probe failed "
+        "(aapt2/d8/javac; see probes)")
+    gradle_ok = (probes["gradle"]["ok"] and probes["sdkmanager"]["ok"]
+                 and jar is not None and probes["aapt2"]["ok"])
+    caps["buildsrc_gradle"] = "full" if gradle_ok else (
+        srcbuild_prov if jar is None else
+        "unavailable — gradle route probe failed "
+        "(gradle/sdkmanager; see probes)")
     return {
         "host": {
             "platform": platform.platform(),
@@ -636,5 +1016,9 @@ def probe_capabilities(base: str = "", *, root: Any = None) -> dict[str, Any]:
             "on every profile, Termux included; no Java needed",
             "edit/build/sign/splits rows are EXECUTED probes (version "
             "runs + the recorded apktool smoke build), never claims",
+            "A4 rows (aapt2, d8, android_jar, r8, gradle, "
+            "buildsrc_manual, buildsrc_gradle) are likewise executed "
+            "probes over the srcbuild pin set — provision them with "
+            "the toolchain provision-srcbuild op",
         ],
     }

@@ -38,6 +38,8 @@ __all__ = [
     "resource_replace",
     "resource_add",
     "resource_remove",
+    "read_text_file",
+    "write_text_file",
     "apply_edit",
     "undo_edit",
     "list_edits",
@@ -481,3 +483,92 @@ def resource_remove(proj: Project, rel_path: str) -> dict[str, Any]:
 
     return apply_edit(proj, "edit_resource", f"remove {rel}", [rel],
                       mutate)
+
+
+# ── general text-file ops (A4 editor completion) ─────────────────────
+# Resource ops above stay confined to res/ assets/ lib/ by design.
+# The decoded tree's real work files — smali above all, plus the
+# manifest, values XML, apktool.yml — are TEXT, and a real editor
+# reads and writes them directly.  These ops cover any text file in
+# the decoded tree under the same snapshot/journal/undo discipline
+# as every other edit.  Binaries refuse by name: byte surgery on
+# .so files is the hexpatch engine's job, and dex/arsc/images are
+# rebuilt by the toolchain, never hand-edited as bytes here.
+
+_BINARY_EXTS = {
+    ".so", ".dex", ".arsc", ".apk", ".aab", ".jar", ".class", ".zip",
+    ".png", ".jpg", ".jpeg", ".gif", ".webp", ".ico", ".bmp",
+    ".ttf", ".otf", ".woff", ".woff2", ".mp3", ".mp4", ".ogg",
+    ".wav", ".p12", ".jks", ".keystore", ".gz", ".xz", ".bz2",
+}
+
+
+def _guard_text_rel(rel_path: str) -> str:
+    """Confine a text op to the decoded tree and to text files.
+
+    Path escapes refuse by name; binary files refuse by name (by
+    extension, and by a NUL-byte sniff when the file exists)."""
+    rel = rel_path.replace("\\", "/").lstrip("/")
+    parts = [p for p in rel.split("/") if p not in ("", ".")]
+    if any(p == ".." for p in parts):
+        raise EditError(f"text path {rel_path!r} climbs out of the "
+                        "decoded project — refused")
+    if not parts:
+        raise EditError("text op needs a file path inside the "
+                        "decoded project")
+    joined = "/".join(parts)
+    if Path(joined).suffix.lower() in _BINARY_EXTS:
+        raise EditError(
+            f"{joined} is a binary file — text ops refuse it by "
+            "name (native .so byte surgery is the hexpatch op; "
+            "dex/arsc are rebuilt by the toolchain)")
+    return joined
+
+
+def _sniff_text(path: Path, rel: str) -> bytes:
+    data = path.read_bytes()
+    if b"\x00" in data[:8192]:
+        raise EditError(
+            f"{rel} contains NUL bytes — it is binary, not text; "
+            "text ops refuse it by name")
+    return data
+
+
+def read_text_file(proj: Project, rel_path: str) -> dict[str, Any]:
+    """Read one text file from the decoded tree (smali above all)."""
+    rel = _guard_text_rel(rel_path)
+    target = decoded_dir(proj) / rel
+    if not target.exists():
+        raise EditError(f"{rel} does not exist in the decoded project")
+    if not target.is_file():
+        raise EditError(f"{rel} is not a file")
+    data = _sniff_text(target, rel)
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise EditError(f"{rel} is not UTF-8 text ({exc}) — text "
+                        "ops refuse it by name") from exc
+    return {"path": rel, "text": text, "size": len(data),
+            "sha256": sha256_file(target)}
+
+
+def write_text_file(proj: Project, rel_path: str,
+                    content: str) -> dict[str, Any]:
+    """Write one text file in the decoded tree as a journaled,
+    snapshot-reversible edit (op ``edit_text``) — the smali write
+    surface.  Creates the file (and parents) when missing."""
+    rel = _guard_text_rel(rel_path)
+    target = decoded_dir(proj) / rel
+    if target.exists():
+        _sniff_text(target, rel)
+    data = content.encode("utf-8")
+    if b"\x00" in data[:8192]:
+        raise EditError("replacement content contains NUL bytes — "
+                        "not text; write refused")
+
+    def mutate() -> None:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(data)
+
+    return apply_edit(proj, "edit_text", f"write text {rel}",
+                      [rel], mutate)
