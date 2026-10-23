@@ -4,6 +4,10 @@ Wires ``nomorals.media.imggen`` (Devon's own diffusion pipeline) and
 ``nomorals.media.videogen`` (neural LTX/Wan + motion-studio fallback)
 into the spine so the brain reaches them from plain language:
 "generate an image of...", "animate this photo", "make a video of...".
+Also exposes the render ledger those engines write
+(``media.motion_studio._core.ledger_status``) as the read-only
+``motion_ledger_status`` tool — until Pass #98 the ledger's truth was
+reachable only from the ``nm video`` CLI and the /video list handler.
 
 Native-first: the local pipelines run when the hardware allows;
 honest errors (never fake images) when it doesn't. APIs stay as
@@ -200,6 +204,28 @@ def register(registry: Any) -> None:
                           out=str(out / "animated.mp4"))
         return {"path": result.path, "engine": result.engine,
                 "routed": result.routed, "note": result.note}
+
+    @registry.register(
+        "motion_ledger_status",
+        description=("Show the motion-studio render ledger's state: how "
+                     "many renders are recorded in total, how many sit in "
+                     "the live window, how many rotated into the archive, "
+                     "the oldest and newest entries, and the rotation / "
+                     "legacy-migration facts. ('how many studio renders "
+                     "are in the ledger?', 'has anything been archived or "
+                     "rotated out?', 'render history'). Optional recent=N "
+                     "also lists the newest N entries (max 100). "
+                     "Read-only — asking never writes to the ledger."),
+        capability=Capability.FS_READ,
+    )
+    def motion_ledger_status(*, recent: int = 0) -> dict[str, Any]:
+        """The render ledger's whole truth (totals, archive, rotation)."""
+        from ..media.motion_studio._core import ledger_status, read_ledger
+        out: dict[str, Any] = {"ok": True, **ledger_status()}
+        if recent and int(recent) > 0:
+            out["recent"] = read_ledger(
+                limit=max(1, min(100, int(recent))))
+        return out
 
 
 # ── style presets (tool surface; engines stay style-agnostic) ─────────────
