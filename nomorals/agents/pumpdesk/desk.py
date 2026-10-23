@@ -39,9 +39,13 @@ class PumpDesk:
                  store: Optional[PumpStore] = None,
                  notifier: Any = None, rpc: Any = None,
                  registry: Any = None,
-                 attention_search: Any = None):
+                 attention_search: Any = None,
+                 attention_platform: Any = None,
+                 attention_dex: Any = None):
         self.context = context
         self._attention_search = attention_search
+        self._attention_platform = attention_platform
+        self._attention_dex = attention_dex
         self.dir = desk_dir or pumpdesk_dir()
         self.store = store or PumpStore(self.dir)
         if notifier is None and context is not None:
@@ -73,20 +77,24 @@ class PumpDesk:
     @property
     def rpc(self) -> Any:
         if self._rpc is None:
-            from .sources import rpc_endpoint_from_env
-            endpoint, _src = rpc_endpoint_from_env()
+            from .sources import rpc_routes
             reg = self.registry
 
-            def _outcome(ok: bool, latency: float, error_class: str = "",
-                         _endpoint: str = endpoint) -> None:
-                from urllib.parse import urlparse
-                host = urlparse(_endpoint).hostname or ""
-                desc = reg.for_domain(host)
-                if desc is not None:
-                    reg.record_outcome(desc, ok, latency_s=latency,
-                                       error_class=error_class)
+            def _outcome_for(domain: str) -> Any:
+                def _outcome(ok: bool, latency: float,
+                             error_class: str = "") -> None:
+                    desc = reg.for_domain(domain)
+                    if desc is not None:
+                        reg.record_outcome(desc, ok, latency_s=latency,
+                                           error_class=error_class)
+                return _outcome
 
-            self._rpc = chain.SolanaRPC(endpoint, on_outcome=_outcome)
+            clients = [
+                chain.SolanaRPC(route["endpoint"],
+                                on_outcome=_outcome_for(route["domain"]))
+                for route in rpc_routes(reg)
+            ]
+            self._rpc = chain.RoutedRPC(clients)
         return self._rpc
 
     @property
@@ -341,8 +349,19 @@ class PumpDesk:
         search_fn = self._attention_search
         if search_fn is None:
             search_fn = _attention.default_search_fn(self.context)
-        att = _attention.verify_attention(d, search_fn=search_fn,
-                                          store=self.store, now=now)
+        # platform + DexScreener legs: explicit doubles win; the
+        # live defaults bind only on a real runtime context, so
+        # context-free runs (tests, offline CLI) keep the legs as
+        # named gaps instead of reaching for the network.
+        platform_fn = self._attention_platform
+        if platform_fn is None and self.context is not None:
+            platform_fn = _attention.default_platform_fn()
+        dex_fn = self._attention_dex
+        if dex_fn is None and self.context is not None:
+            dex_fn = _attention.default_dex_fn()
+        att = _attention.verify_attention(
+            d, search_fn=search_fn, store=self.store, now=now,
+            platform_fn=platform_fn, dex_fn=dex_fn)
         d["attention"] = att
         self.store.save_dossier(d)
         return att

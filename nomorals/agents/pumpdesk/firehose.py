@@ -40,7 +40,7 @@ from .wsclient import WebSocketClient, WSClosed
 
 __all__ = [
     "PUMPPORTAL_WS", "Prefilter", "frontend_candidate",
-    "fetch_frontend", "base_backoff",
+    "fetch_frontend", "fetch_coin_row", "base_backoff",
     "PumpPortalBackend", "RpcLogBackend", "Firehose",
 ]
 
@@ -106,6 +106,14 @@ def frontend_candidate(row: dict[str, Any]) -> Optional[dict[str, Any]]:
         "name": row.get("name", ""), "symbol": row.get("symbol", ""),
         "uri": row.get("metadata_uri", ""),
         "bonding_curve": row.get("bonding_curve", ""),
+        # the coin row declares the token's socials + platform
+        # comment count — the attention verifier reads both from
+        # the launch ledger (recurrence + comment velocity)
+        "twitter": row.get("twitter", "") or "",
+        "telegram": row.get("telegram", "") or "",
+        "website": row.get("website", "") or "",
+        "reply_count": int(row.get("reply_count") or 0),
+        "created_ts": (float(row.get("created_timestamp") or 0) / 1000.0),
         "source": "frontend-api",
         "curve_state": state.to_dict(),
         "curve_pct_seen": pct,
@@ -123,6 +131,35 @@ def fetch_frontend(http_get: Callable, limit: int = 50,
         raise IOError(f"frontend api answered HTTP {status}")
     rows = json.loads(text)
     return rows if isinstance(rows, list) else []
+
+
+#: Pages of the market-cap list the single-coin lookup scans.
+#: The frontend API has no by-mint GET (verified live: the detail
+#: route 404s), so a coin row is found by scanning the list the
+#: desk already polls — bounded, and a miss is reported as a miss.
+COIN_SCAN_PAGES = 4
+
+
+def fetch_coin_row(http_get: Callable, mint: str,
+                   pages: int = COIN_SCAN_PAGES,
+                   page_size: int = 50) -> Optional[dict[str, Any]]:
+    """The frontend API's current coin row for one mint (reply
+    count, declared socials, creation time), or None when the
+    mint is not in the scanned pages."""
+    for page in range(max(1, int(pages))):
+        url = (f"{FRONTEND_API}/coins?offset={page * int(page_size)}"
+               f"&limit={int(page_size)}&sort=market_cap&order=DESC"
+               f"&includeNsfw=true")
+        status, text = http_get(url, {"User-Agent": "nomorals-pumpdesk"})
+        if status != 200:
+            raise IOError(f"frontend api answered HTTP {status}")
+        rows = json.loads(text)
+        if not isinstance(rows, list) or not rows:
+            return None
+        for row in rows:
+            if isinstance(row, dict) and row.get("mint") == mint:
+                return row
+    return None
 
 
 def _urllib_get(url: str, headers: dict) -> tuple[int, str]:
@@ -216,6 +253,12 @@ class PumpPortalBackend:
                         "bonding_curve": msg.get("bondingCurveKey", ""),
                         "signature": msg.get("signature", ""),
                         "portal_initial_buy": msg.get("initialBuy"),
+                        # declared socials ride the create payload —
+                        # the attention verifier's recurrence leg
+                        # reads them from the launch ledger
+                        "twitter": msg.get("twitter", "") or "",
+                        "telegram": msg.get("telegram", "") or "",
+                        "website": msg.get("website", "") or "",
                         "source": "pumpportal", "ts": time.time(),
                     })
                 elif tx in ("migrate", "migration"):

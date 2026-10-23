@@ -23,6 +23,7 @@ from . import chain
 
 __all__ = [
     "SERIAL_MIN_LAUNCHES", "SERIAL_RUG_RATIO",
+    "HOLDER_DERIVE_MAX_WALLETS",
     "classify_launch_outcome", "build_dev_profile",
     "refresh_dev_profiles", "build_dossier", "render_dossier",
 ]
@@ -30,6 +31,13 @@ __all__ = [
 #: Serial-rugger headline rule (design §8.1, G-BOT blueprint).
 SERIAL_MIN_LAUNCHES = 3
 SERIAL_RUG_RATIO = 0.67
+
+#: Cap on the ledger-derived holder fallback: distinct ledger
+#: wallets whose live balances are read when largest-accounts is
+#: unreachable.  The reads are per-wallet RPC calls; the cap keeps
+#: a dossier build bounded, and the picture reports how many it
+#: checked — coverage is stated, never implied complete.
+HOLDER_DERIVE_MAX_WALLETS = 40
 
 LAMPORTS_PER_SOL = 1_000_000_000
 
@@ -196,6 +204,112 @@ def trade_facts(trades: list[dict[str, Any]], creator: str,
     }
 
 
+# ── holder concentration ──────────────────────────────────────────────
+
+def _route_of(rpc: Any, method: str) -> str:
+    """Which endpoint served a read (RoutedRPC provenance), or
+    the single client's endpoint for a plain SolanaRPC."""
+    served = getattr(rpc, "served_by", None)
+    if isinstance(served, dict) and served.get(method):
+        return str(served[method])
+    return str(getattr(rpc, "endpoint", "") or "")
+
+
+def _holder_picture(store: Any, rpc: Any, mint: str, supply: int,
+                    creator: str = "") -> tuple[Optional[dict], str]:
+    """(holders, gap) — holder concentration by two real routes.
+
+    Route 1: ``getTokenLargestAccounts`` through the desk's routed
+    RPC (a provisioned Helius route first when keyed, then the
+    registry's public routes in health order — chain.RoutedRPC
+    fails over per call, so one endpoint's throttle is no longer
+    the whole story).  Route 2, when route 1 fails on EVERY route
+    or answers empty: a PARTIAL picture derived from the desk's
+    own ledger — the live balances of the wallets the trade ledger
+    has actually seen on this mint (plus its creator), read via
+    getTokenAccountsByOwner, the read that stays up on the free
+    floor when largest-accounts is throttled.  Partial shares are
+    computed against TOTAL supply, so they are lower bounds on the
+    true concentration (unobserved holders can only add), and the
+    picture says so: ``partial`` + how many wallets were checked
+    and what share of supply they account for.  Both routes dead
+    → (None, a gap naming both)."""
+    if not supply:
+        return None, "holder concentration unavailable (supply unknown)"
+    largest_error = ""
+    try:
+        largest = rpc.get_token_largest(mint)
+    except Exception as exc:  # noqa: BLE001 - route 2 exists for this
+        largest, largest_error = [], f"{type(exc).__name__}: {exc}"
+    if largest:
+        amounts = sorted((int(a.get("amount", 0)) for a in largest),
+                         reverse=True)
+        if amounts and amounts[0] > 0:
+            return {
+                "top1_share": round(amounts[0] / supply, 4),
+                "top3_share": round(sum(amounts[:3]) / supply, 4),
+                "top10_share": round(sum(amounts[:10]) / supply, 4),
+                "accounts_seen": len(amounts),
+                "partial": False,
+                "source": "largest-accounts",
+                "route": _route_of(rpc, "get_token_largest"),
+            }, ""
+    # route 2: derive from the desk's own observed wallets
+    by_owner = getattr(rpc, "get_token_accounts_by_owner", None)
+    if by_owner is None:
+        return None, ("holder concentration unavailable "
+                      "(largest-accounts unreachable"
+                      + (f": {largest_error}" if largest_error else "")
+                      + "; this RPC exposes no by-owner read)")
+    wallets: list[str] = []
+    seen: set[str] = set()
+    for t in store.trades(mint):
+        user = t.get("user", "")
+        if user and user not in seen:
+            seen.add(user)
+            wallets.append(user)
+    if creator and creator not in seen:
+        wallets.append(creator)
+    checked = wallets[:HOLDER_DERIVE_MAX_WALLETS]
+    balances: list[int] = []
+    read_error = ""
+    for wallet in checked:
+        try:
+            accounts = by_owner(wallet, mint)
+        except Exception as exc:  # noqa: BLE001
+            read_error = f"{type(exc).__name__}: {exc}"
+            continue
+        bal = sum(int(a.get("amount", 0)) for a in accounts or [])
+        if bal > 0:
+            balances.append(bal)
+    if not balances:
+        detail = "largest-accounts unreachable"
+        if largest_error:
+            detail += f" ({largest_error})"
+        detail += (f"; ledger-derived read found no live balances "
+                   f"across {len(checked)} observed wallet(s)")
+        if read_error:
+            detail += f" (last read error: {read_error})"
+        return None, f"holder concentration unavailable ({detail})"
+    balances.sort(reverse=True)
+    observed = sum(balances)
+    return {
+        "top1_share": round(balances[0] / supply, 4),
+        "top3_share": round(sum(balances[:3]) / supply, 4),
+        "top10_share": round(sum(balances[:10]) / supply, 4),
+        "accounts_seen": len(balances),
+        "partial": True,
+        "source": "ledger-derived",
+        "route": _route_of(rpc, "get_token_accounts_by_owner"),
+        "wallets_checked": len(checked),
+        "wallets_holding": len(balances),
+        "observed_supply_share": round(observed / supply, 4),
+        "note": ("partial picture: shares are lower bounds from "
+                 "the wallets the desk's ledger has observed; "
+                 "unobserved holders are not counted"),
+    }, ""
+
+
 # ── dossier assembly ──────────────────────────────────────────────────
 
 def build_dossier(store: Any, rpc: Any, mint: str,
@@ -285,25 +399,13 @@ def build_dossier(store: Any, rpc: Any, mint: str,
         gaps.append("authority flags unknown")
 
     # holder concentration (top accounts vs total supply)
-    holders = None
-    try:
-        largest = rpc.get_token_largest(mint)
-        supply = (mint_info.supply if mint_info else
-                  (state.token_total_supply if state else 0))
-        if largest and supply:
-            amounts = sorted((int(a.get("amount", 0)) for a in largest),
-                             reverse=True)
-            holders = {
-                "top1_share": round(amounts[0] / supply, 4),
-                "top3_share": round(sum(amounts[:3]) / supply, 4),
-                "top10_share": round(sum(amounts[:10]) / supply, 4),
-                "accounts_seen": len(amounts),
-            }
-    except Exception:  # noqa: BLE001
-        gaps.append("holder concentration unavailable")
+    supply_hint = (mint_info.supply if mint_info else
+                   (state.token_total_supply if state else 0))
+    holders, holder_gap = _holder_picture(
+        store, rpc, mint, supply_hint, dossier["creator"])
     dossier["holders"] = holders
-    if holders is None and "holder concentration unavailable" not in gaps:
-        gaps.append("holder concentration unavailable")
+    if holder_gap:
+        gaps.append(holder_gap)
 
     # dev profile (the desk's memory of this creator)
     creator = dossier["creator"]
@@ -369,9 +471,20 @@ def render_dossier(d: dict[str, Any]) -> str:
                  f"freeze {'LIVE' if a['freeze_authority_live'] else 'revoked'}")
     h = d.get("holders")
     if h:
-        L.append(f"holders: top1 {h['top1_share']:.0%}, "
-                 f"top10 {h['top10_share']:.0%} "
-                 f"({h['accounts_seen']} largest accounts)")
+        if h.get("partial"):
+            L.append(f"holders (partial, ledger-derived): top1 "
+                     f"{h['top1_share']:.0%}, top10 "
+                     f"{h['top10_share']:.0%} of supply across "
+                     f"{h.get('wallets_holding', 0)} holding "
+                     f"wallet(s) of {h.get('wallets_checked', 0)} "
+                     f"observed — lower bounds; observed wallets "
+                     f"account for "
+                     f"{(h.get('observed_supply_share') or 0):.0%} "
+                     f"of supply")
+        else:
+            L.append(f"holders: top1 {h['top1_share']:.0%}, "
+                     f"top10 {h['top10_share']:.0%} "
+                     f"({h['accounts_seen']} largest accounts)")
     dev = d.get("dev") or {}
     if dev.get("serial_rugger"):
         L.append(f"dev: ⚠️ SERIAL RUGGER — {dev.get('launches', 0)} "

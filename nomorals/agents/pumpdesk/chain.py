@@ -48,7 +48,7 @@ __all__ = [
     "BondingCurveState", "parse_bonding_curve",
     "MintInfo", "parse_mint_account",
     "price_quote_per_token", "market_cap_quote", "curve_pct",
-    "SolanaRPC", "RPCError",
+    "SolanaRPC", "RoutedRPC", "RPCError",
 ]
 
 #: pump.fun program (design §1.4/§7.12, verified).
@@ -507,6 +507,43 @@ class SolanaRPC:
                         [mint, {"commitment": "confirmed"}])
         return list((res or {}).get("value") or [])
 
+    def get_token_accounts_by_owner(self, owner: str,
+                                    mint: str = "") -> list[dict[str, Any]]:
+        """Every token account of ``owner`` (optionally filtered to
+        one mint), normalized to {address, owner, mint, amount}
+        with amount in raw units.  jsonParsed is answered by every
+        Solana RPC for both SPL Token and Token-2022 accounts —
+        this is the read that keeps working on the free floor when
+        getTokenLargestAccounts is throttled (observed live:
+        largest 429s while by-owner answers 200)."""
+        filt: dict[str, Any] = {"mint": mint} if mint else \
+            {"programId": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"}
+        res = self.call("getTokenAccountsByOwner",
+                        [owner, filt, {"encoding": "jsonParsed",
+                                       "commitment": "confirmed"}])
+        out: list[dict[str, Any]] = []
+        for row in (res or {}).get("value") or []:
+            info = (((row.get("account") or {}).get("data") or {})
+                    .get("parsed") or {}).get("info") or {}
+            amount = (info.get("tokenAmount") or {}).get("amount")
+            if amount is None:
+                continue
+            out.append({
+                "address": row.get("pubkey", ""),
+                "owner": info.get("owner", owner),
+                "mint": info.get("mint", mint),
+                "amount": int(amount),
+            })
+        return out
+
+    def get_token_supply(self, mint: str) -> Optional[int]:
+        """Total supply in raw units, or None when unreadable."""
+        res = self.call("getTokenSupply",
+                        [mint, {"commitment": "confirmed"}])
+        value = (res or {}).get("value") or {}
+        amount = value.get("amount")
+        return int(amount) if amount is not None else None
+
     def get_signatures(self, address: str, limit: int = 50,
                        before: str = "") -> list[dict[str, Any]]:
         opts: dict[str, Any] = {"limit": int(limit),
@@ -525,3 +562,83 @@ class SolanaRPC:
 
     def get_slot(self) -> int:
         return int(self.call("getSlot", [{"commitment": "confirmed"}]) or 0)
+
+
+class RoutedRPC:
+    """The desk's chain reads, routed over several endpoints.
+
+    The free public RPC throttles per method (getTokenLargestAccounts
+    429s persistently while other reads sail through), and no single
+    public endpoint is a foundation.  RoutedRPC holds an ordered
+    list of SolanaRPC clients — provisioned Helius first when a key
+    exists, then the registry's public RPC sources in health order
+    (see sources.rpc_routes) — and serves each typed read from the
+    first route that answers.  A route RAISING (RPCError: HTTP
+    error, throttle-after-retries, transport failure) fails over to
+    the next; a route answering — including "account does not
+    exist" (None) or an empty list — IS the answer and stops the
+    walk.  Every underlying client reports its own outcomes to the
+    registry, so the health loop grades each route from real calls
+    and the order self-corrects.  When every route fails the LAST
+    error is re-raised: failure stays a named gap upstream, never a
+    silent zero.
+
+    ``served_by`` records which endpoint answered each method last
+    — the provenance the dossier prints on its holder picture."""
+
+    def __init__(self, clients: list[SolanaRPC]):
+        if not clients:
+            raise ValueError("RoutedRPC needs at least one route")
+        self.clients = list(clients)
+        self.served_by: dict[str, str] = {}
+        #: endpoint of the first route (the primary) — duck-type
+        #: parity with SolanaRPC for callers that log it.
+        self.endpoint = self.clients[0].endpoint
+
+    @property
+    def endpoints(self) -> list[str]:
+        return [c.endpoint for c in self.clients]
+
+    def _route(self, method: str, *args: Any, **kwargs: Any) -> Any:
+        last_exc: Optional[Exception] = None
+        for client in self.clients:
+            try:
+                out = getattr(client, method)(*args, **kwargs)
+            except Exception as exc:  # noqa: BLE001 - failover is the job
+                last_exc = exc
+                continue
+            self.served_by[method] = client.endpoint
+            return out
+        assert last_exc is not None
+        raise last_exc
+
+    # ── the SolanaRPC surface the desk consumes ──────────────────
+
+    def get_account(self, pubkey: str) -> Optional[bytes]:
+        return self._route("get_account", pubkey)
+
+    def get_curve(self, mint: str) -> Optional[BondingCurveState]:
+        return self._route("get_curve", mint)
+
+    def get_mint_info(self, mint: str) -> Optional[MintInfo]:
+        return self._route("get_mint_info", mint)
+
+    def get_token_largest(self, mint: str) -> list[dict[str, Any]]:
+        return self._route("get_token_largest", mint)
+
+    def get_token_accounts_by_owner(self, owner: str,
+                                    mint: str = "") -> list[dict[str, Any]]:
+        return self._route("get_token_accounts_by_owner", owner, mint)
+
+    def get_token_supply(self, mint: str) -> Optional[int]:
+        return self._route("get_token_supply", mint)
+
+    def get_signatures(self, address: str, limit: int = 50,
+                       before: str = "") -> list[dict[str, Any]]:
+        return self._route("get_signatures", address, limit, before)
+
+    def get_transaction(self, signature: str) -> Optional[dict[str, Any]]:
+        return self._route("get_transaction", signature)
+
+    def get_slot(self) -> int:
+        return self._route("get_slot")

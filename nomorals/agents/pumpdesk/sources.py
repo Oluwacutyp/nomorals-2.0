@@ -27,7 +27,8 @@ from typing import Any
 __all__ = [
     "MEMCOIN_SEEDS", "ensure_pump_sources", "pump_status",
     "pump_registry_for_context", "ensure_provisioning",
-    "HELIUS_SERVICE", "rpc_endpoint_from_env",
+    "HELIUS_SERVICE", "rpc_endpoint_from_env", "rpc_routes",
+    "PUBLIC_RPC_ENDPOINTS",
 ]
 
 #: (nation, domain, name, auth_needed, notes)
@@ -41,6 +42,16 @@ MEMCOIN_SEEDS: tuple = (
      "The always-free floor: logsSubscribe on the pump program + "
      "account reads. Rate-limited; every keyed RPC tier replaces "
      "it through the same interface."),
+    ("GLOBAL", "solana-rpc.publicnode.com", "Solana RPC (PublicNode)",
+     False,
+     "PublicNode's free public endpoint — a second keyless RPC "
+     "route so holder reads are not hostage to one endpoint's "
+     "per-method throttles. Health-graded like every source; "
+     "stood down when it stops answering."),
+    ("GLOBAL", "solana.drpc.org", "Solana RPC (dRPC public)",
+     False,
+     "dRPC's free public endpoint — a third keyless RPC route in "
+     "the holder-read failover. Health-graded; shed when dead."),
     ("GLOBAL", "frontend-api-v3.pump.fun", "pump.fun frontend API",
      False,
      "Unofficial REST the pump.fun site itself reads: coin lists "
@@ -57,6 +68,8 @@ MEMCOIN_SEEDS: tuple = (
 _SEED_EXTRAS: dict[str, dict[str, Any]] = {
     "public-api.birdeye.so": {"kinds": ("memecoin", "api")},
     "api.mainnet-beta.solana.com": {"kinds": ("memecoin", "api")},
+    "solana-rpc.publicnode.com": {"kinds": ("memecoin", "api")},
+    "solana.drpc.org": {"kinds": ("memecoin", "api")},
 }
 
 
@@ -137,16 +150,70 @@ def pump_status(registry: Any) -> dict[str, Any]:
 
 # ── RPC endpoint selection ────────────────────────────────────────────
 
-def rpc_endpoint_from_env() -> tuple[str, str]:
-    """(endpoint, source) — a provisioned Helius key upgrades the
-    public RPC; absent one, the public floor serves.  Read per call
-    so a freshly provisioned key takes effect with no restart (the
-    provisioning bridge writes the env)."""
+#: Keyless public RPC routes, in seed preference order:
+#: (endpoint, registry domain, human source label).  More than one
+#: route is the point — the public floor throttles PER METHOD
+#: (getTokenLargestAccounts 429s while account reads pass), so a
+#: single endpoint makes whole dossier fields hostages.  Routes
+#: join the memecoin registry kind above and are health-graded
+#: from real outcomes; rpc_routes() orders by that health.
+PUBLIC_RPC_ENDPOINTS: tuple = (
+    ("https://api.mainnet-beta.solana.com",
+     "api.mainnet-beta.solana.com", "solana public RPC"),
+    ("https://solana-rpc.publicnode.com",
+     "solana-rpc.publicnode.com", "PublicNode public RPC"),
+    ("https://solana.drpc.org",
+     "solana.drpc.org", "dRPC public RPC"),
+)
+
+
+def rpc_routes(registry: Any = None) -> list[dict[str, str]]:
+    """The desk's ordered RPC routes: [{endpoint, domain, source}].
+
+    A provisioned Helius key (``HELIUS_API_KEY`` in env — the
+    provisioning bridge writes it when the owner provisions
+    ``/pump provision helius``) is ALWAYS first: it is the tier
+    the owner paid for, without public throttles.  The keyless
+    public routes follow, ordered by the ONE registry's health
+    when a registry is at hand — active sources before stood-
+    down/disabled/dead ones, seed order preserved within a tier
+    (a stable sort), so a route that keeps failing sinks without
+    bespoke failover code.  Read per call: a freshly provisioned
+    key and fresh health both take effect with no restart."""
+    routes: list[dict[str, str]] = []
     key = os.environ.get("HELIUS_API_KEY", "").strip()
     if key:
-        return (f"https://mainnet.helius-rpc.com/?api-key={key}",
-                "helius (provisioned)")
-    return ("https://api.mainnet-beta.solana.com", "solana public RPC")
+        routes.append({
+            "endpoint": f"https://mainnet.helius-rpc.com/?api-key={key}",
+            "domain": "mainnet.helius-rpc.com",
+            "source": "helius (provisioned)"})
+    public = [{"endpoint": ep, "domain": dom, "source": label}
+              for ep, dom, label in PUBLIC_RPC_ENDPOINTS]
+    if registry is not None:
+        def _tier(route: dict[str, str]) -> int:
+            try:
+                desc = registry.for_domain(route["domain"])
+                if desc is not None and not registry.is_active(desc):
+                    return 1
+            except Exception:  # noqa: BLE001 - health is advisory here
+                pass
+            return 0
+        public.sort(key=_tier)
+    routes.extend(public)
+    return routes
+
+
+def rpc_endpoint_from_env() -> tuple[str, str]:
+    """(endpoint, source) — the desk's PRIMARY route: a
+    provisioned Helius key upgrades the public RPC; absent one,
+    the public floor serves.  Read per call so a freshly
+    provisioned key takes effect with no restart (the
+    provisioning bridge writes the env).  Multi-route reads go
+    through rpc_routes() + chain.RoutedRPC; this stays for the
+    single-endpoint consumers (the firehose's log backend)."""
+    routes = rpc_routes()
+    first = routes[0]
+    return (first["endpoint"], first["source"])
 
 
 # ── self-provisioning: the keyed RPC tier ─────────────────────────────

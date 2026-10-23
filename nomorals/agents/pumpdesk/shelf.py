@@ -18,7 +18,11 @@ The shelf follows the house shapes:
 * when the runtime context carries a db, the same record is
   upserted into the shared knowledge graph (``agents/kg.py``) —
   a node for the token, a node for its creator, a ``launched``
-  edge between them — where Devon's recall can find it by name.
+  edge between them, and a node per graded wallet — where
+  Devon's recall can find it by name.  The mirror path is
+  proven end-to-end against a live kg database by the burn-down
+  integration test; in production it stays fail-soft (a dead
+  db never sinks the shelf).
 
 What gets shelved: dossiers that were **called**, that
 **graduated**, or that the gate marked CALL_CANDIDATE, plus
@@ -101,6 +105,34 @@ def _kg_upsert(context: Any, dossier: dict[str, Any],
         return False
 
 
+def _kg_upsert_wallet(context: Any, rec: dict[str, Any]) -> bool:
+    """Mirror one graded wallet record into the shared knowledge
+    graph (same fail-soft contract as the dossier mirror: the
+    shelf is the record; the graph is a retrieval mirror)."""
+    db = getattr(context, "db", None) if context is not None else None
+    if db is None:
+        return False
+    try:
+        from ..kg import KnowledgeGraph
+        kg = KnowledgeGraph(db)
+        kg.upsert_node(
+            rec.get("wallet", ""), type="entity",
+            properties={
+                "kind": "pump-wallet",
+                "verdict": rec.get("verdict", ""),
+                "realized_sol": rec.get("realized_sol"),
+                "realized_recent_sol": rec.get("realized_recent_sol"),
+                "closed_trades": rec.get("closed_trades"),
+                "win_rate": rec.get("win_rate"),
+                "momentum_leads": rec.get("momentum_leads"),
+                "provenance": "pumpdesk wallet graph (FIFO ledger "
+                              "evidence)",
+            })
+        return True
+    except Exception:  # noqa: BLE001 - mirror never sinks the shelf
+        return False
+
+
 def shelve_dossier(store: Any, dossier: dict[str, Any],
                    verdict: Optional[dict[str, Any]] = None,
                    context: Any = None,
@@ -126,14 +158,19 @@ def shelve_dossier(store: Any, dossier: dict[str, Any],
                  body,
                  f"pump desk dossier for {mint}", now)
     item["shelved_at"] = now
-    store.shelve_knowledge(item)
+    # the mirror flag is set BEFORE the append: shelve_knowledge
+    # serializes on write, so a flag set afterwards would live
+    # only on the returned dict and never on the shelf record
     item["kg_mirrored"] = _kg_upsert(context, dossier, verdict)
+    store.shelve_knowledge(item)
     return item
 
 
 def shelve_wallet(store: Any, rec: dict[str, Any],
+                  context: Any = None,
                   now: Optional[float] = None) -> dict[str, Any]:
-    """Shelve one graded wallet record as knowledge."""
+    """Shelve one graded wallet record as knowledge (+ KG mirror
+    when the context carries a db)."""
     now = time.time() if now is None else now
     from .graph import render_wallet
     wallet = rec.get("wallet", "")
@@ -142,6 +179,7 @@ def shelve_wallet(store: Any, rec: dict[str, Any],
                  f"(pump desk graph)",
                  render_wallet(rec), "pump desk wallet graph", now)
     item["shelved_at"] = now
+    item["kg_mirrored"] = _kg_upsert_wallet(context, rec)
     store.shelve_knowledge(item)
     return item
 
@@ -171,7 +209,7 @@ def shelve_notable(store: Any, context: Any = None,
     for wallet, rec in (graph.get("wallets") or {}).items():
         if rec.get("verdict") in ("smart", "losing") or \
                 int(rec.get("momentum_leads", 0)) >= 2:
-            shelve_wallet(store, rec, now=now)
+            shelve_wallet(store, rec, context=context, now=now)
             shelved["wallets"] += 1
     return shelved
 
