@@ -29,11 +29,14 @@ Stored vs published — deliberately different forms:
 
 Builders: hand-built Docs for the high-volume finance jobs
 (``finance_alert`` — the screenshot case — and ``finance_digest``,
-whose payload is a prose ``text`` field), and a generic fallback for
-every other tool: schema-derived from the result itself (humanized
-labels, empty collections hidden, numeric zero counters hidden,
-lists capped via the ``Field.list_limit`` option F3 added to the
-presentation layer), with the summary taken from the tool's own
+whose payload is a prose ``text`` field), for the agency shift
+(``__agency_shift__`` — Formatting F4's autonomy digest: the nested
+cycle/expansion structure rendered once per fact, the triplicated
+``knowledge_items`` collapsed to the freshest count), and a generic
+fallback for every other tool: schema-derived from the result itself
+(humanized labels, empty collections hidden, numeric zero counters
+hidden, lists capped via the ``Field.list_limit`` option F3 added to
+the presentation layer), with the summary taken from the tool's own
 summary-ish field when it wrote one, else composed from the first
 visible facts, else an honest "finished — nothing to report" when
 every field rendered empty.  No summary is ever invented beyond
@@ -193,6 +196,175 @@ def _finance_digest_doc(tool: str, value: Mapping[str, Any], *,
                sections=tuple(sections))
 
 
+# ── __agency_shift__ — the autonomy digest (Formatting F4) ──────────
+
+def _system_universes() -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """The system-name universes the two cycles rotate over.
+
+    Imported lazily from the agency layer (agents L5 → agency L0 is
+    downward; the agency layer itself must never import this L5
+    presentation code).  Guarded: without the names the digest
+    degrades to counts only — it never invents a total.
+    """
+    core: tuple[str, ...] = ()
+    expansion: tuple[str, ...] = ()
+    try:
+        from ..agency.systems import SYSTEM_NAMES
+
+        core = tuple(str(n) for n in SYSTEM_NAMES)
+    except Exception:  # noqa: BLE001 - names are context, not content
+        pass
+    try:
+        from ..agency.expansion import EXPANSION_SYSTEMS
+
+        expansion = tuple(str(n) for n in EXPANSION_SYSTEMS)
+    except Exception:  # noqa: BLE001
+        pass
+    return core, expansion
+
+
+def _name_list(value: Any) -> list[str]:
+    if isinstance(value, (list, tuple)):
+        return [str(x) for x in value if str(x).strip()]
+    return []
+
+
+def _stood_down_names(universe: tuple[str, ...], ran: list[str],
+                      stood_down: int) -> list[str]:
+    """The stood-down systems' names — ONLY when they reconcile.
+
+    ``stood_down`` counts systems with no work at the cycle's final
+    runnable computation.  A system WITH work can still miss its
+    turn (rotation cooldown), so universe − ran is not automatically
+    the stood-down set: the names are listed only when their count
+    equals the reported ``stood_down`` exactly.  Otherwise the count
+    stands alone — the digest never guesses a name.
+    """
+    if not universe or stood_down <= 0:
+        return []
+    missing = [n for n in universe if n not in set(ran)]
+    return missing if len(missing) == stood_down else []
+
+
+def _cycle_section(heading: str, cycle: Mapping[str, Any],
+                   universe: tuple[str, ...]) -> Section:
+    """One rotation cycle as a digest section: counts as rows, the
+    per-system lines (ran / stood down) underneath."""
+    ran = _name_list(cycle.get("ran"))
+    run = _count(cycle.get("systems_run"))
+    total = len(universe)
+    rows = [KV("Systems run", f"{run} of {total}" if total else run),
+            KV("Useful turns", _count(cycle.get("useful_turns"))),
+            KV("Stood down", _count(cycle.get("stood_down")))]
+    preemptions = _count(cycle.get("preemptions"))
+    if preemptions:
+        rows.append(KV("Preemptions", preemptions))
+    lines: list[str] = []
+    if ran:
+        lines.append("Ran: " + " · ".join(ran))
+    down = _stood_down_names(universe, ran,
+                             _count(cycle.get("stood_down")))
+    if down:
+        lines.append("Stood down: " + " · ".join(down))
+    return Section(heading, rows=tuple(rows), lines=tuple(lines))
+
+
+def _agency_shift_doc(tool: str, value: Mapping[str, Any], *,
+                      title: str) -> Doc:
+    """``__agency_shift__`` → ``{ok, shift, expansion}`` where
+    ``shift`` is ``ActiveSystems.work_shift()`` and ``expansion`` is
+    ``ExpansionSystems.run_cycle()`` (or None — the tool swallows an
+    expansion failure into None).
+
+    The raw dump of this value printed ``knowledge_items`` three
+    times (the shift, its nested cycle, and the expansion each carry
+    a copy) and both cycles' counters as bare keys.  The digest
+    renders each fact once: the two cycles as parallel sections with
+    human labels and per-system lines, the fired triggers by name,
+    and the knowledge-base size ONCE — the expansion's count when
+    the expansion ran (it is read last), else the shift's.
+
+    The cycle dicts carry no per-system failure field (tick failures
+    are absorbed inside the agency layer; a machinery failure fails
+    the whole run and publishes through :func:`failure_doc`), so the
+    only in-value degradation is the missing expansion: it is named
+    plainly and carries the warn tone.  A cycle where everything
+    stood down is a quiet shift, not an error.
+    """
+    shift = value.get("shift")
+    cycle = shift.get("cycle") if isinstance(shift, Mapping) else None
+    if not isinstance(shift, Mapping) or not isinstance(cycle, Mapping):
+        return _generic_doc(tool, value, title=title)
+    core_names, expansion_names = _system_universes()
+    expansion = value.get("expansion")
+    expansion_ran = isinstance(expansion, Mapping)
+
+    triggers = _name_list(shift.get("triggers"))
+    fired = _count(shift.get("triggers_fired")) or len(triggers)
+    run = _count(cycle.get("systems_run"))
+    useful = _count(cycle.get("useful_turns"))
+    stood = _count(cycle.get("stood_down"))
+
+    # the knowledge-base size, once: the freshest copy wins
+    knowledge: int | None = None
+    if expansion_ran and "knowledge_items" in expansion:
+        knowledge = _count(expansion.get("knowledge_items"))
+    elif "knowledge_items" in shift:
+        knowledge = _count(shift.get("knowledge_items"))
+
+    sections: list[Section] = [
+        _cycle_section("Cycle", cycle, core_names)]
+    if triggers:
+        sections.append(Section("Triggers", lines=tuple(triggers)))
+    elif fired:
+        sections.append(Section(
+            "Triggers", rows=(KV("Fired", fired),)))
+    if expansion_ran:
+        sections.append(
+            _cycle_section("Expansion", expansion, expansion_names))
+    else:
+        sections.append(Section("Expansion", lines=(
+            "Did not run — the expansion cycle was unavailable "
+            "this shift.",)))
+    if knowledge is not None:
+        sections.append(Section(
+            rows=(KV("Knowledge base", f"{knowledge} items"),)))
+
+    quiet = (run == 0 and useful == 0 and fired == 0
+             and (not expansion_ran
+                  or _count(expansion.get("systems_run")) == 0))
+    if quiet:
+        summary = ("Quiet shift — no triggers fired and every "
+                   "system stood down")
+        if not expansion_ran:
+            summary += "; the expansion cycle did not run"
+        summary += "."
+    else:
+        total = len(core_names)
+        core_part = (f"{run} of {total} systems ran" if total
+                     else f"{_n(run, 'system')} ran")
+        if run and not useful:
+            core_part += " (no useful turns)"
+        elif useful:
+            core_part += f" ({_n(useful, 'useful turn')})"
+        core_part += f", {stood} stood down"
+        parts: list[str] = []
+        if fired:
+            parts.append(f"{_n(fired, 'trigger')} fired")
+        parts.append(core_part)
+        if expansion_ran:
+            e_run = _count(expansion.get("systems_run"))
+            e_total = len(expansion_names)
+            parts.append(f"expansion ran {e_run} of {e_total}"
+                         if e_total else f"expansion ran {e_run}")
+        else:
+            parts.append("expansion did not run")
+        summary = "; ".join(parts) + "."
+    tone = "ok" if expansion_ran else "warn"
+    return Doc(title=title, icon="✅" if expansion_ran else "⚠️",
+               tone=tone, summary=summary, sections=tuple(sections))
+
+
 # ── the generic fallback ─────────────────────────────────────────────
 
 def _derive_summary(tool: str, doc: Doc, prose: list[str]) -> str:
@@ -324,6 +496,7 @@ def _value_doc(tool: str, value: Any, *, title: str) -> Doc:
 _BUILDERS = {
     "finance_alert": _finance_alert_doc,
     "finance_digest": _finance_digest_doc,
+    "__agency_shift__": _agency_shift_doc,
 }
 
 
