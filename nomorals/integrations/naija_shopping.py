@@ -871,7 +871,7 @@ class NaijaShoppingEngine:
         """
         from .naija_deals import NaijaDealHunter, Deal
         deals = [Deal(deal_id=s.product_url, title=s.title, vendor=s.site,
-                      current_price=s.price, original_price=s.price,
+                      current_price=s.price_ngn, original_price=s.price_ngn,
                       discount_percent=0.0, url=s.product_url,
                       deal_score=0.0)
                  for s in snapshots]

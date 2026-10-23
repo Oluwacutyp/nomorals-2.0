@@ -1130,12 +1130,19 @@ def resolve_room_ref(context: Any, ref: str) -> tuple[bytes, str]:
     The vision tool's room-reference reader lives here (the rooms organ
     owns the sandbox) and is injected into tools.vision by the
     composition root — tools (L4) may not import workspace (L5).
+
+    The manager is built exactly the way the room tool builds it —
+    ``RoomManager(root, db=context.db)`` — because rooms are persisted
+    in the database: a db-less manager's ``get()`` returns None for
+    every slug, so no reference could ever resolve.  A context without
+    a db (or an unknown slug) fails honestly with "no such room".
     """
     _, slug, rel = ref.split(":", 2)
 
     settings = getattr(context, "settings", None) if context is not None else None
     workspace = Path(getattr(settings, "workspace_dir", "workspace"))
-    manager = RoomManager(workspace)
+    db = getattr(context, "db", None) if context is not None else None
+    manager = RoomManager(workspace, db=db)
     room = manager.get(slug)
     if room is None:
         raise ToolError(f"room reference {ref!r}: no such room")
