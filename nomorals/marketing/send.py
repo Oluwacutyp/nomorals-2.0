@@ -1271,7 +1271,8 @@ class SendEngine:
                 (address, reason, (detail or "")[:200], time.time()))
             self._db.commit()
             return True
-        except Exception:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001
+            record_failure("send.SendEngine.unsubscribe", e)
             return False
 
     def is_suppressed(self, address: str) -> bool:
@@ -1282,7 +1283,8 @@ class SendEngine:
                 "SELECT 1 FROM send_suppressions WHERE address = ?",
                 ((address or "").strip().lower(),)).fetchone()
             return row is not None
-        except Exception:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001
+            record_failure("send.SendEngine.is_suppressed", e)
             return False
 
     def suppression_count(self) -> int:
@@ -1291,7 +1293,8 @@ class SendEngine:
                 return 0
             row = self._db.execute("SELECT COUNT(*) c FROM send_suppressions").fetchone()
             return int(row["c"]) if row else 0
-        except Exception:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001
+            record_failure("send.SendEngine.suppression_count", e)
             return 0
 
     # ── warmup enforcement ──
@@ -1308,7 +1311,8 @@ class SendEngine:
                 (provider, time.time(), max(10, int(daily_target or 100))))
             self._db.commit()
             return True
-        except Exception:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001
+            record_failure("send.SendEngine.set_warmup", e)
             return False
 
     def warmup_status(self, provider: str) -> dict:
@@ -1331,7 +1335,8 @@ class SendEngine:
             used = int(sent_today["c"]) if sent_today else 0
             return {"provider": row["provider"], "day": day, "cap": cap,
                     "used": used, "remaining": max(0, cap - used)}
-        except Exception:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001
+            record_failure("send.SendEngine.warmup_status", e)
             return {}
 
     def _warmup_ok(self, provider: str) -> bool:
@@ -1340,7 +1345,8 @@ class SendEngine:
             if not st:
                 return True
             return st.get("remaining", 1) > 0
-        except Exception:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001
+            record_failure("send.SendEngine._warmup_ok", e)
             return True
 
     # ── bounces / blocklist ──
@@ -1356,7 +1362,8 @@ class SendEngine:
                     self.blocklist(addr, f"hard bounce ({parsed['code']})")
                     result["blocklisted"].append(addr)
             return result
-        except Exception:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001
+            record_failure("send.SendEngine.process_bounce", e)
             return result
 
     def blocklist(self, address: str, reason: str = "") -> bool:
@@ -1370,7 +1377,8 @@ class SendEngine:
                 (address, (reason or "")[:200], time.time()))
             self._db.commit()
             return True
-        except Exception:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001
+            record_failure("send.SendEngine.blocklist", e)
             return False
 
     def unblocklist(self, address: str) -> bool:
@@ -1381,7 +1389,8 @@ class SendEngine:
                              ((address or "").strip().lower(),))
             self._db.commit()
             return True
-        except Exception:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001
+            record_failure("send.SendEngine.unblocklist", e)
             return False
 
     def is_blocklisted(self, address: str) -> bool:
@@ -1392,7 +1401,8 @@ class SendEngine:
                 "SELECT 1 FROM send_blocklist WHERE address = ?",
                 ((address or "").strip().lower(),)).fetchone()
             return row is not None
-        except Exception:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001
+            record_failure("send.SendEngine.is_blocklisted", e)
             return False
 
     # ── status ──

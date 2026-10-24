@@ -6,6 +6,15 @@ every public function is wrapped and returns a safe default on error.
 rate gate, cost gate, or status/cost write returns its safe default.
 ``send``'s campaigns/variants region shares it too: a failed estimate,
 variant write, A/B report, or campaign funnel returns its empty shape.
+``send``'s suppression/warmup/blocklist region shares it as well: a
+failed unsubscribe, warmup write, or blocklist write returns ``False``,
+and a failed suppression/blocklist read returns ``False`` — the
+fail-open shape, indistinguishable from "not suppressed / not
+blocklisted / no warmup" on a healthy DB. The gates that refuse sends
+(``enqueue``/``process`` consult ``is_suppressed``,
+``is_blocklisted``, and ``_warmup_ok``) fail open on a dead DB, so a
+suppressed or hard-bounced address keeps receiving until the record
+says otherwise.
 That contract is sound for ad-spend safety — but until now the caught
 failures vanished without a trace: a guardrail that silently failed to
 evaluate, or a store method silently returning ``False`` on a dead DB,
