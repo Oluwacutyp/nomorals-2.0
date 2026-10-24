@@ -25,6 +25,7 @@ import time
 from dataclasses import dataclass, field
 
 from . import ImgGenError, TORCH_AVAILABLE, checkpoint_dir
+from .failures import record_failure
 
 if not TORCH_AVAILABLE:  # pragma: no cover - torch missing
     raise ImgGenError(
@@ -289,7 +290,8 @@ def load_checkpoint(path: str, model: nn.Module,
     if optimizer is not None and payload.get("optimizer_state"):
         try:
             optimizer.load_state_dict(payload["optimizer_state"])
-        except Exception:
+        except Exception as e:
+            record_failure("train.load_checkpoint.optimizer_state", e)
             pass  # optimizer shape changed; model weights still valid
     torch.set_rng_state(payload["torch_rng"])
     return payload

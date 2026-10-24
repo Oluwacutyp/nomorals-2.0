@@ -25,6 +25,7 @@ import time
 from dataclasses import dataclass
 
 from . import ImgGenError, TORCH_AVAILABLE, checkpoint_dir
+from .failures import record_failure
 
 __all__ = [
     "Studio",
@@ -40,7 +41,8 @@ def _profile_kind() -> str:
         from ...core.profiles import get_profile_kind
 
         return get_profile_kind()
-    except Exception:
+    except Exception as e:
+        record_failure("studio._profile_kind", e)
         return "laptop"
 
 

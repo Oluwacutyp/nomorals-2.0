@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any
 
 from . import ImgGenError, TORCH_AVAILABLE
+from .failures import record_failure
 
 __all__ = [
     "IMAGE_EXTS",
@@ -75,7 +76,8 @@ def caption_with_devon_vision(path: str, *,
             "Describe this image in one detailed sentence for training "
             "an image generation model. Focus on subject, setting, "
             "colors, lighting, and style."))
-    except Exception:
+    except Exception as e:
+        record_failure("data.caption_with_devon_vision", e)
         return None
     if isinstance(result, dict):
         text = str(result.get("description") or result.get("text") or "")
@@ -137,7 +139,8 @@ def build_dataset_manifest(image_dir: str, out_path: str | None = None,
                 with Image.open(row["image"]) as im:
                     im.verify()
                 valid.append(row)
-            except Exception:
+            except Exception as e:
+                record_failure("data.build_dataset_manifest.verify", e)
                 skipped += 1
     except ImportError:
         valid = rows
