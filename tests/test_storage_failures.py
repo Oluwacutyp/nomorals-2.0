@@ -317,9 +317,15 @@ def test_db_release_thread_connection_records_without_raising():
     assert "db.release_thread_connection" in [f.site for f in recent_failures()]
 
 
-def test_migration_helper_records_and_skips():
+def test_migration_helper_skips_silently_frozen():
+    # FROZEN 2026-10-24: migration functions must never gain record calls.
+    # Pass #105 added record_failure() to already-applied migration
+    # functions; the tamper guard hashes fn ASTs, so EC2 refused to start
+    # ("migration was modified after being applied"). The swallow stays,
+    # the record is gone: driving the helper on a raising DB must not raise
+    # AND must record nothing. migrations.py is a frozen file — enforced by
+    # tests/test_migrations_frozen.py.
     from nomorals.storage import migrations as mg
-    from nomorals.storage import failures as fl2
 
     class _RaisingDB:
         def query(self, *args):
@@ -329,11 +335,17 @@ def test_migration_helper_records_and_skips():
             raise AssertionError("no ALTER should run on a skipped table")
 
     mg._apply_skills_lessons_columns(_RaisingDB())  # must not raise
-    sites = [f.site for f in fl2.recent_failures(10)]
-    assert sites.count("migrations._apply_skills_lessons_columns") == 2
+    assert "migrations._apply_skills_lessons_columns" not in [
+        f.site for f in recent_failures(10)
+    ]
+    assert failure_count() == 0
 
 
 def test_scan_storage_subsystem_clean():
+    # Covers the CONVERTIBLE storage files only. migrations.py is FROZEN
+    # (2026-10-24 EC2 startup refusal — see test_migrations_frozen.py): its
+    # ~21 silent sites are a named, accepted remainder, not a regression,
+    # so it is deliberately NOT in this list.
     from nomorals.tools.error_scan import scan
 
     files = [
@@ -343,7 +355,6 @@ def test_scan_storage_subsystem_clean():
         "nomorals/storage/blob.py",
         "nomorals/storage/db.py",
         "nomorals/storage/fts.py",
-        "nomorals/storage/migrations.py",
         "nomorals/storage/queue.py",
         "nomorals/storage/repository.py",
         "nomorals/storage/router_telemetry.py",
