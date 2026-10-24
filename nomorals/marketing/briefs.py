@@ -28,6 +28,7 @@ import sqlite3
 import time
 import uuid
 from dataclasses import dataclass, field
+from .failures import record_failure
 
 _log = logging.getLogger("nomorals.marketing.briefs")
 
@@ -71,7 +72,8 @@ class ContentBrief:
             q = brief_quality(self)
             lines.append(f"brief quality: {q['score']:.0f}/100 ({q['grade']})")
             return "\n".join(lines)
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("briefs.ContentBrief.summary", exc)
             return "📋 Brief"
 
 
@@ -109,7 +111,8 @@ class ContentScore:
             for s in self.suggestions[:4]:
                 lines.append(f"  • {s}")
             return "\n".join(lines)
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("briefs.ContentScore.format", exc)
             return "📊 draft score unavailable"
 
 
@@ -173,7 +176,8 @@ def _extract_keywords(texts: list[str], topic: str, top_n: int = 12) -> list[str
         ]
         seed = [w for w in topic_words if w not in keywords]
         return (seed + keywords)[:top_n]
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("briefs._extract_keywords", exc)
         return []
 
 
@@ -195,7 +199,8 @@ def _extract_questions(texts: list[str], top_n: int = 6) -> list[str]:
             if len(seen) >= top_n:
                 break
         return seen[:top_n]
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("briefs._extract_questions", exc)
         return []
 
 
@@ -212,7 +217,8 @@ def _extract_angles(texts: list[str], topic: str, top_n: int = 5) -> list[str]:
         if not angles:
             return [f"{topic}: the honest take", f"{topic}: what nobody tells you"]
         return angles[:top_n]
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("briefs._extract_angles", exc)
         return [f"{topic}: the honest take"]
 
 
@@ -228,7 +234,8 @@ def _build_outline(topic: str, keywords: list[str], questions: list[str],
             outline.append(f"Angle: {a[:60]}")
         outline.append("The takeaway")
         return outline[:7]
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("briefs._build_outline", exc)
         return ["The takeaway"]
 
 
@@ -237,7 +244,8 @@ def _bar(frac: float, width: int = 14) -> str:
         frac = max(0.0, min(1.0, float(frac or 0.0)))
         fill = int(round(frac * width))
         return "[" + "█" * fill + "░" * (width - fill) + "]"
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("briefs._bar", exc)
         return ""
 
 
@@ -251,7 +259,8 @@ def letter_grade(score: float) -> str:
             if s >= bound:
                 return grade
         return "F"
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("briefs.letter_grade", exc)
         return "F"
 
 
@@ -266,7 +275,8 @@ def _cluster_questions(questions: list[str]) -> dict:
             key = words[0] if words else "general"
             clusters.setdefault(key, []).append(q)
         return clusters
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("briefs._cluster_questions", exc)
         return {}
 
 
@@ -293,7 +303,8 @@ def brief_quality(brief: ContentBrief) -> dict:
             issues.append("outline is thin — writers need more scaffolding")
         score = round(min(100.0, score), 1)
         return {"score": score, "grade": letter_grade(score), "issues": issues}
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("briefs.brief_quality", exc)
         return {"score": 0.0, "grade": "F", "issues": []}
 
 
@@ -315,7 +326,8 @@ def _term_targets(texts: list[str], keywords: list[str]) -> dict:
                 lo, hi = 1, 3
             bands[kw] = (lo, min(hi, 8))
         return bands
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("briefs._term_targets", exc)
         return {}
 
 
@@ -355,7 +367,8 @@ def _structure_score(text: str, brief: ContentBrief | None) -> float:
         else:
             score += 0.05
         return round(min(1.0, score), 2)
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("briefs._structure_score", exc)
         return 0.0
 
 
@@ -411,7 +424,8 @@ def geo_score(text: str, topic: str = "") -> dict:
         else:
             signals.append("answer the question in the first two sentences")
         return {"score": round(min(100.0, score), 1), "signals": signals}
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("briefs.geo_score", exc)
         return {"score": 0.0, "signals": []}
 
 
@@ -455,10 +469,11 @@ class BriefStore:
                 if "term_bands" not in cols:
                     self._db.execute(
                         "ALTER TABLE briefs ADD COLUMN term_bands TEXT DEFAULT '{}'")
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as exc:  # noqa: BLE001
+                record_failure("briefs.BriefStore.__init__.term_bands", exc)
             self._db.commit()
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("briefs.BriefStore.__init__", exc)
             self._db = None
 
     # ── briefs ──
@@ -482,7 +497,8 @@ class BriefStore:
                         blob = str(r)
                     if blob.strip():
                         texts.append(blob)
-            except Exception:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001
+                record_failure("briefs.BriefStore.build_brief.search", exc)
                 texts = []
             keywords = _extract_keywords(texts, topic)
             questions = _extract_questions(texts)
@@ -508,7 +524,8 @@ class BriefStore:
                     cols = {r["name"] for r in
                             self._db.execute("PRAGMA table_info(briefs)")}
                     has_bands = "term_bands" in cols
-                except Exception:  # noqa: BLE001
+                except Exception as exc:  # noqa: BLE001
+                    record_failure("briefs.BriefStore.build_brief.has_bands", exc)
                     has_bands = False
                 if has_bands:
                     self._db.execute(
@@ -529,7 +546,8 @@ class BriefStore:
                     )
                 self._db.commit()
             return brief
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("briefs.BriefStore.build_brief", exc)
             return None
 
     def _brief_from_row(self, row) -> ContentBrief | None:
@@ -539,7 +557,8 @@ class BriefStore:
             bands: dict = {}
             try:
                 bands = json.loads(row["term_bands"] or "{}")
-            except Exception:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001
+                record_failure("briefs.BriefStore._brief_from_row.term_bands", exc)
                 bands = {}
             return ContentBrief(
                 brief_id=row["brief_id"], topic=row["topic"],
@@ -550,7 +569,8 @@ class BriefStore:
                 term_bands=bands,
                 created_at=row["created_at"] or 0.0,
             )
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("briefs.BriefStore._brief_from_row", exc)
             return None
 
     def get_brief(self, brief_id: str) -> ContentBrief | None:
@@ -562,7 +582,8 @@ class BriefStore:
             if not row:
                 return None
             return self._brief_from_row(row)
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("briefs.BriefStore.get_brief", exc)
             return None
 
     def latest_brief(self, topic: str = "") -> ContentBrief | None:
@@ -581,7 +602,8 @@ class BriefStore:
             if not row:
                 return None
             return self._brief_from_row(row)
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("briefs.BriefStore.latest_brief", exc)
             return None
 
     # ── 2. scoring ──
@@ -629,8 +651,8 @@ class BriefStore:
                 from ...social.voice import virality_score
                 vs = virality_score(text, platform=platform)
                 brand_voice = float(vs.score)
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as exc:  # noqa: BLE001
+                record_failure("briefs.BriefStore.score_draft.virality", exc)
 
             # Structure layer (Surfer): headings, lists, length, outline.
             structure = _structure_score(text, brief)
@@ -674,7 +696,8 @@ class BriefStore:
                 suggestions=suggestions,
                 source=source,
             )
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("briefs.BriefStore.score_draft", exc)
             return ContentScore(suggestions=["scoring unavailable"])
 
     def _calibration(self) -> float | None:
@@ -692,7 +715,8 @@ class BriefStore:
             if not ratios:
                 return None
             return max(0.5, min(1.5, sum(ratios) / len(ratios)))
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("briefs.BriefStore._calibration", exc)
             return None
 
     # ── 3. drafting (brief-gated) ──
@@ -712,7 +736,8 @@ class BriefStore:
                         f"following this outline:\n{outline_txt}\n"
                         f"Must include these terms: "
                         f"{', '.join(brief.keywords[:6])}.")
-                except Exception:  # noqa: BLE001
+                except Exception as exc:  # noqa: BLE001
+                    record_failure("briefs.BriefStore.draft_from_brief.llm", exc)
                     content = ""
             else:
                 content = ""
@@ -734,7 +759,8 @@ class BriefStore:
             )
             self._save_draft(draft)
             return draft
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("briefs.BriefStore.draft_from_brief", exc)
             return None
 
     def _save_draft(self, draft: BriefDraft) -> None:
@@ -751,8 +777,8 @@ class BriefStore:
                  json.dumps(draft.outcome_metrics or {}), draft.created_at),
             )
             self._db.commit()
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:  # noqa: BLE001
+            record_failure("briefs.BriefStore._save_draft", exc)
 
     def get_draft(self, draft_id: str) -> BriefDraft | None:
         try:
@@ -774,7 +800,8 @@ class BriefStore:
                 outcome_metrics=json.loads(row["outcome_metrics"] or "{}"),
                 created_at=row["created_at"] or 0.0,
             )
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("briefs.BriefStore.get_draft", exc)
             return None
 
     # ── 4. pre-publish prediction (Anyword pattern) ──
@@ -795,7 +822,8 @@ class BriefStore:
             brief_bonus = min(6.0, len(brief.keywords if brief else []) / 2.0)
             pred = 0.7 * sc.score + 0.2 * 50.0 + hook_bonus + brief_bonus
             return round(max(0.0, min(100.0, pred)), 1)
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("briefs.BriefStore.predict_performance", exc)
             return 0.0
 
     # ── 5. scheduling (enforced: no brief → refuse) ──
@@ -836,15 +864,15 @@ class BriefStore:
                                       draft.predicted_engagement,
                                   "pipeline": "brief_first"})
                     queue.propose(qd.id)  # → pending_review: asks, never posts
-                except Exception:  # noqa: BLE001
-                    pass
+                except Exception as exc:  # noqa: BLE001
+                    record_failure("briefs.BriefStore.schedule_draft.queue", exc)
             if scheduler is not None:
                 try:
                     from ...social.content_pipeline import schedule_post
                     schedule_post(scheduler, queue, draft_id, when_ts,
                                   platforms=[draft.platform])
-                except Exception:  # noqa: BLE001
-                    pass
+                except Exception as exc:  # noqa: BLE001
+                    record_failure("briefs.BriefStore.schedule_draft.scheduler", exc)
             draft.scheduled_for = when_ts
             self._save_draft(draft)
             return {"ok": True, "scheduled_for": when_ts,
@@ -873,7 +901,8 @@ class BriefStore:
                     (draft_id, draft.score, outcome, time.time()))
                 self._db.commit()
             return True
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("briefs.BriefStore.record_outcome", exc)
             return False
 
     # ── 6b. decay watchdog (Frase Content Guard pattern) ──
@@ -899,15 +928,16 @@ class BriefStore:
                     reasons.append(f"unscheduled for {age_d:.0f}d")
                 try:
                     oc = json.loads(r["outcome_metrics"] or "{}")
-                except Exception:  # noqa: BLE001
+                except Exception as exc:  # noqa: BLE001
+                    record_failure("briefs.BriefStore.stale_drafts.outcome", exc)
                     oc = {}
                 eng = oc.get("engagement_score", oc.get("score"))
                 if r["published_at"] and eng is not None:
                     try:
                         if float(eng) < 30:
                             reasons.append(f"poor outcome ({float(eng):.0f}/100)")
-                    except Exception:  # noqa: BLE001
-                        pass
+                    except Exception as exc:  # noqa: BLE001
+                        record_failure("briefs.BriefStore.stale_drafts.engagement", exc)
                 if reasons:
                     stale.append({
                         "draft_id": r["draft_id"], "topic": r["topic"] or "",
@@ -918,7 +948,8 @@ class BriefStore:
                                        "re-score, then schedule"),
                     })
             return sorted(stale, key=lambda d: -d["age_days"])
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("briefs.BriefStore.stale_drafts", exc)
             return []
 
     # ── 6c. platform variants ──
@@ -958,7 +989,8 @@ class BriefStore:
                 "note": "structural re-packaging — run each through "
                         "/score before scheduling",
             }
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("briefs.BriefStore.platform_variants", exc)
             return {}
 
     # ── 6d. content calendar ──
@@ -974,7 +1006,8 @@ class BriefStore:
                 " ORDER BY scheduled_for ASC LIMIT ?",
                 (time.time(), max(1, int(limit or 10)))).fetchall()
             return [dict(r) for r in rows]
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("briefs.BriefStore.calendar", exc)
             return []
 
     # ── full pipeline entry ──
@@ -1064,7 +1097,8 @@ def control_brief(tail: str, context=None, chat=None, **kwargs) -> str:
             return "couldn't build a brief from that — try a clearer topic."
         return brief.summary() + "\n\nno brief, no draft, no schedule."
 
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("briefs.control_brief", exc)
         return "brief pipeline hiccup — try again."
 
 
@@ -1152,7 +1186,8 @@ def control_content(tail: str, context=None, chat=None, **kwargs) -> str:
             return "\n".join(lines)
 
         return _usage()
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("briefs.control_content", exc)
         return "content pipeline hiccup — try again."
 
 
@@ -1172,5 +1207,6 @@ def _parse_when(text: str) -> float | None:
         if t.startswith("tomorrow"):
             return now + 86400
         return None
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("briefs._parse_when", exc)
         return None
