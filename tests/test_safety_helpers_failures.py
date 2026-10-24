@@ -270,15 +270,17 @@ def test_scan_safety_remainder_is_exactly_the_excluded_sites():
     finally:
         import importlib
         importlib.reload(es)
-    # 22 (Pass #129 remainder) minus exactly the 6 safety conversions.
+    # 22 (Pass #129 remainder) minus exactly the 6 safety conversions
+    # (Pass #130) minus exactly the 8 tail conversions (Pass #131).
     # Line-shift arithmetic: each conversion inserts one record line
     # after its except line, shifting every later line by +1 each.
     # Original lines -> shifted: 642 -> 648, 708 -> 714, 800 -> 806,
-    # 947 -> 953, 1030 -> 1036, 1102 -> 1108, 1707 -> 1713, 1839 -> 1845,
+    # 947 -> 955, 1030 -> 1038, 1102 -> 1110, 1707 -> 1715, 1839 -> 1847,
     # 2534 -> 2540, 2860 -> 2866, 2881 -> 2887, 3006 -> 3012,
-    # 3032 -> 3038, 3041 -> 3047, 3053 -> 3059, 3064 -> 3070.
-    expected = {648, 714, 806, 953, 1036, 1108, 1713, 1845, 2540, 2866,
-                2887, 3012, 3038, 3047, 3059, 3070}
+    # 3032 -> 3044, 3041 -> 3047, 3053 -> 3066, 3064 -> 3070;
+    # Pass #131 then converts 714, 806, 2540, 2866, 2887, 3012, 3047,
+    # 3070, leaving exactly the 8 honest + deliberate sites below.
+    expected = {648, 955, 1038, 1110, 1715, 1847, 3044, 3066}
     assert {f.line for f in report.findings} == expected
     # The one remaining safety-region site is the excluded transport
     # handler (status 0 = designed answer), not a converted site.

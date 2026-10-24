@@ -37,6 +37,21 @@ for the whole text, so systematically crashing redaction looks
 like empty content. A crashed error-body read returns an empty
 body, so a bot-wall page reads as dead instead of bot-blocked.
 
+The same contract covers the registry's tail regions (Pass #131):
+deserialization, the status-text renderer, the Ekiti lexicon, and the
+content-addressed cache — all never-raises, all previously silent
+about the underlying error. A corrupt persisted row dropped a source
+from the registry with no trace; a malformed status section dropped
+the whole status render into "unavailable"; a lexicon crash returned
+the raw query as if nothing were mappable; a cache-root failure
+silently relocated the archive to the temp dir; a cache-read failure
+read as "not cached"; a malformed sidecar timestamp aborted a URL
+lookup that had a valid match later in the scan. Each now records
+while returning exactly the same fallback value. Deliberately
+excluded: the lookup's inner corrupt-sidecar skip — a sidecar whose
+bytes cannot be parsed cannot match any URL, so skipping it changes
+no answer (pinned as behaviour, not silence).
+
 Stdlib only. ``record`` itself never raises — a ledger that can crash
 its callers would defeat the purpose.
 """

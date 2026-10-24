@@ -711,7 +711,8 @@ def _desc_from_dict(data: Any) -> SourceDescriptor | None:
             quality_map=tuple((str(a), str(b)) for a, b
                               in data.get("quality_map") or ()),
             downloadable=bool(data.get("downloadable", True)))
-    except Exception:  # noqa: BLE001 - a corrupt row is skipped, not fatal
+    except Exception as e:  # noqa: BLE001 - a corrupt row is skipped, not fatal
+        record_failure("_desc_from_dict", e)
         return None
 
 
@@ -803,7 +804,8 @@ class LearnedRule:
                 learned_at=float(data.get("learned_at") or 0),
                 last_success_at=float(data.get("last_success_at") or 0),
                 last_failure_at=float(data.get("last_failure_at") or 0))
-        except Exception:  # noqa: BLE001 - a corrupt row is skipped
+        except Exception as e:  # noqa: BLE001 - a corrupt row is skipped
+            record_failure("LearnedRule.from_dict", e)
             return None
 
 
@@ -2537,7 +2539,8 @@ def render_status_text(status: dict[str, Any]) -> str:
                 f"  ✗ {entry.get('domain')} shed "
                 f"({entry.get('reason') or 'failed verification'})")
         return "\n".join(lines)
-    except Exception:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001
+        record_failure("render_status_text", e)
         return "📥 download sources: status unavailable"
 
 
@@ -2863,7 +2866,8 @@ class EkitiLexicon:
                 return self._map[low]
             stripped = _strip_tones(low)
             return self._stripped.get(stripped, w)
-        except Exception:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001
+            record_failure("EkitiLexicon.to_standard", e)
             return word
 
     def normalize_query(self, query: str) -> dict[str, Any]:
@@ -2884,7 +2888,8 @@ class EkitiLexicon:
                     mapped.append((w, std))
             return {"original": q, "search": " ".join(out_words),
                     "mapped": mapped}
-        except Exception:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001
+            record_failure("EkitiLexicon.normalize_query", e)
             return {"original": query or "", "search": query or "",
                     "mapped": []}
 
@@ -3009,7 +3014,8 @@ class ContentAddressedCache:
             else:
                 self.root = Path.home() / ".cache" / "nomorals" / "sources"
             self.root.mkdir(parents=True, exist_ok=True)
-        except Exception:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001
+            record_failure("ContentAddressedCache.__init__", e)
             # tempfile.gettempdir() honours TMPDIR/TEMP/TMP on every OS;
             # a hardcoded "/tmp" is C:\\tmp on Windows (often unwritable)
             # and ignores the user's configured temp dir.
@@ -3044,7 +3050,8 @@ class ContentAddressedCache:
         try:
             blob = self.root / digest[:2] / digest
             return blob.read_bytes() if blob.is_file() else None
-        except Exception:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001
+            record_failure("ContentAddressedCache.load", e)
             return None
 
     def lookup_url(self, url: str, max_age_s: float = 86400.0,
@@ -3067,5 +3074,6 @@ class ContentAddressedCache:
                 if data is not None:
                     return str(meta.get("sha256")), data
             return None
-        except Exception:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001
+            record_failure("ContentAddressedCache.lookup_url", e)
             return None
