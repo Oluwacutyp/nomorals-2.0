@@ -33,6 +33,7 @@ from .transitions import (
 )
 
 _log = get_logger(__name__)
+from .failures import record_failure
 
 WIDTH = 1080
 HEIGHT = 1920
@@ -155,7 +156,8 @@ class RenderReport:
         try:
             num, den = fps_s.split("/")
             fps = float(num) / float(den) if float(den) else 0.0
-        except Exception:  # noqa: BLE001
+        except Exception as e:
+            record_failure("render.self_review:fps", e)
             fps = 0.0
         if self.fps:
             _check("fps", abs(fps - self.fps) < 0.5,
@@ -210,7 +212,8 @@ def _perf_for(profile: str | None) -> dict[str, Any]:
     if not kind:
         try:
             kind = detect_profile().kind
-        except Exception:  # noqa: BLE001 — detection must never break a render
+        except Exception as e:  # detection must never break a render
+            record_failure("render._perf_for", e)
             kind = "pc"
     perf = _PROFILE_PERF.get(kind, _PROFILE_PERF["pc"])
     return {"profile": kind, **perf}
@@ -910,7 +913,8 @@ def render_timeline(timeline: Timeline, *,
             for chunk in iter(lambda: f.read(1 << 20), b""):
                 h.update(chunk)
         report.sha256 = h.hexdigest()
-    except Exception:  # noqa: BLE001 — hash is best-effort
+    except Exception as e:  # hash is best-effort
+        record_failure("render.render_timeline:sha256", e)
         pass
     return {"output": str(out_p), "bytes": out_p.stat().st_size,
             "duration": video_dur, "profile": video["profile"],

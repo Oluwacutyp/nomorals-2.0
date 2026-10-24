@@ -25,6 +25,7 @@ from __future__ import annotations
 from typing import Any
 
 from ...media_edit.videos import MediaEditError
+from .failures import record_failure
 
 __all__ = ["QualityGate", "quality_gate", "auto_fix"]
 
@@ -64,7 +65,8 @@ def _aesthetic_score(measurements: dict[str, Any]) -> float | None:
             if mlp.loaded:
                 scores = mlp.score([list(map(float, f)) for f in feats])
                 return _clamp01(sum(scores) / len(scores)) if scores else None
-        except Exception:  # noqa: BLE001 - model path is best-effort
+        except Exception as e:  # model path is best-effort
+            record_failure("quality_gate._aesthetic_score:learned_model", e)
             pass
         # heuristic fallback over the same 8 features: mean of the
         # audio+motion+faces signals (features 0,1,2) — documented,
@@ -84,7 +86,8 @@ def _aesthetic_score(measurements: dict[str, Any]) -> float | None:
             aesthetic = 0.6 * _clamp01(m.get("exposure", 0.5)) + 0.4 * (
                 1.0 - abs(float(m.get("saturation", 0.45)) - 0.45) * 2.0)
             return _clamp01(aesthetic)
-        except Exception:  # noqa: BLE001
+        except Exception as e:
+            record_failure("quality_gate._aesthetic_score:critique", e)
             return None
     return None
 
@@ -277,12 +280,14 @@ def auto_fix(document: Any, report: dict[str, Any],
             if getattr(layer, "start", None) is not None:
                 try:
                     layer.start = _shifted(layer.start)
-                except (AttributeError, TypeError, ValueError):
+                except (AttributeError, TypeError, ValueError) as e:
+                    record_failure("quality_gate.auto_fix:shift_start", e)
                     pass
             if getattr(layer, "end", None) is not None:
                 try:
                     layer.end = _shifted(layer.end)
-                except (AttributeError, TypeError, ValueError):
+                except (AttributeError, TypeError, ValueError) as e:
+                    record_failure("quality_gate.auto_fix:shift_end", e)
                     pass
             for w in getattr(layer, "words", None) or []:
                 if isinstance(w, dict):

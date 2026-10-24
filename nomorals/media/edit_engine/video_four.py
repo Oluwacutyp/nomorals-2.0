@@ -26,6 +26,7 @@ from typing import Any
 
 from ...media_edit.videos import MediaEditError
 from .timeline import Clip, Effect
+from .failures import record_failure
 
 __all__ = [
     "ASPECTS",
@@ -148,7 +149,8 @@ def auto_broll(transcript: list[dict[str, Any]], index: Any, *,
     for topic in topics:
         try:
             hits = index.query(topic) if hasattr(index, "query") else []
-        except Exception:  # noqa: BLE001 - index miss is not fatal
+        except Exception as e:  # index miss is not fatal
+            record_failure("video_four.auto_broll:index_query", e)
             hits = []
         for hit in (hits or [])[:per_topic]:
             key = str(hit.get("clip_id", "")) + ":" + str(hit.get("start", ""))

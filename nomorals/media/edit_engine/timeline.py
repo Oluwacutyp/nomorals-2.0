@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Any
+from .failures import record_failure
 
 
 #: pipeline/scene effect spellings → canonical effect names.
@@ -226,7 +227,8 @@ class Timeline:
         for c in self.video.clips:
             try:
                 total += c.play_duration()
-            except ValueError:
+            except ValueError as e:
+                record_failure("timeline.duration", e)
                 pass
         return total
 

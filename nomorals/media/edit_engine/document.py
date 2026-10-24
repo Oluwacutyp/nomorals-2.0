@@ -48,6 +48,7 @@ from .audio import AudioLayer, AudioMix
 from .spec import EditSpec
 from .text import TextLayer
 from .timeline import Clip, Effect, Timeline, Track
+from .failures import record_failure
 
 __all__ = [
     "TRACK_KINDS",
@@ -257,7 +258,8 @@ class Document:
             for c in tr.clips:
                 try:
                     total = max(total, c.at + c.play_duration())
-                except ValueError:
+                except ValueError as e:
+                    record_failure("document.duration", e)
                     pass
         return total
 
