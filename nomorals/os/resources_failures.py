@@ -1,4 +1,4 @@
-"""Failure ledger for the host-resource probes.
+"""Failure ledger for the host-resource probes and budget accounting.
 
 ``resources`` is deliberately never-raises in its best-effort paths: a
 platform probe that cannot run, an environment detection that cannot
@@ -9,7 +9,8 @@ caller's budgeting. That contract is sound for a production resource
 manager — but until now the caught failures vanished without a trace.
 A failed detection that silently reported kind="unknown", a malformed
 CPU quota that silently reported "unlimited", a cgroup limit that
-silently fell back to host memory, looked identical to a healthy
+silently fell back to host memory, a failed sizing that silently left
+admission control unguarded, looked identical to a healthy
 probe — now each leaves a trace.
 
 Stdlib only. ``record`` itself never raises — a ledger that can crash

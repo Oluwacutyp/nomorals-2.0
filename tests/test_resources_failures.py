@@ -289,7 +289,8 @@ def test_scan_remainder_is_exactly_the_excluded_probe_sites():
     try:
         report = es.scan([os.path.join(os.path.dirname(res.__file__),
                                        "resources.py")])
-        assert len(report.findings) == 36  # 44 true - 8 converted
+        # 44 true - 8 probe converted (#123) - 8 budgets converted (#125)
+        assert len(report.findings) == 28
         probe = {}
         for f in report.findings:
             fn = _enclosing_function(f.file, f.line)

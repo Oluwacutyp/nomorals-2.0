@@ -891,7 +891,8 @@ class DegradationLadder:
                 # target == level: hold steady, reset the up-streak.
                 self._up_streak = 0
             return self.level
-        except Exception:  # noqa: BLE001 - ladder never raises
+        except Exception as e:  # noqa: BLE001 - ladder never raises
+            record_failure("DegradationLadder.update", e)
             return self.level
 
     def to_dict(self) -> dict[str, Any]:
@@ -990,7 +991,8 @@ class ResourceBudgets:
             )
             self._budgets[name] = b
             return b
-        except Exception:  # noqa: BLE001 - never raises
+        except Exception as e:  # noqa: BLE001 - never raises
+            record_failure("ResourceBudgets.define", e)
             return SubsystemBudget(name=name)
 
     def ensure_defaults(self) -> None:
@@ -1011,8 +1013,8 @@ class ResourceBudgets:
                     max_cpu_pct=min(100.0, eff_cpu * 100.0 * cpu_frac),
                     max_concurrent=conc,
                 )
-        except Exception:  # noqa: BLE001 - never raises
-            pass
+        except Exception as e:  # noqa: BLE001 - never raises
+            record_failure("ResourceBudgets.ensure_defaults", e)
 
     def get(self, name: str) -> Optional[SubsystemBudget]:
         self.ensure_defaults()
@@ -1025,7 +1027,8 @@ class ResourceBudgets:
             self.ensure_defaults()
             eff = self._manager.effective_memory_mb() or 0.0
             return max(eff * self.reserve_pct, self.reserve_min_mb)
-        except Exception:  # noqa: BLE001 - never raises
+        except Exception as e:  # noqa: BLE001 - never raises
+            record_failure("ResourceBudgets.reserve_mb", e)
             return self.reserve_min_mb
 
     def machine_headroom_mb(self) -> Optional[float]:
@@ -1038,7 +1041,8 @@ class ResourceBudgets:
             if avail is None:
                 return None
             return avail - self.reserve_mb()
-        except Exception:  # noqa: BLE001 - never raises
+        except Exception as e:  # noqa: BLE001 - never raises
+            record_failure("ResourceBudgets.machine_headroom_mb", e)
             return None
 
     # -- admission ---------------------------------------------------------
@@ -1095,7 +1099,8 @@ class ResourceBudgets:
             b.used_cpu_pct += max(0.0, cpu_pct)
             b.running += 1
             return True
-        except Exception:  # noqa: BLE001 - never raises
+        except Exception as e:  # noqa: BLE001 - never raises
+            record_failure("ResourceBudgets.acquire", e)
             return False
 
     def release(
@@ -1113,8 +1118,8 @@ class ResourceBudgets:
             b.used_mem_mb = max(0.0, b.used_mem_mb - max(0.0, mem_mb))
             b.used_cpu_pct = max(0.0, b.used_cpu_pct - max(0.0, cpu_pct))
             b.running = max(0, b.running - 1)
-        except Exception:  # noqa: BLE001 - never raises
-            pass
+        except Exception as e:  # noqa: BLE001 - never raises
+            record_failure("ResourceBudgets.release", e)
 
     def snapshot(self) -> dict[str, Any]:
         try:
@@ -1122,7 +1127,8 @@ class ResourceBudgets:
             return {
                 name: b.to_dict() for name, b in sorted(self._budgets.items())
             }
-        except Exception:  # noqa: BLE001 - never raises
+        except Exception as e:  # noqa: BLE001 - never raises
+            record_failure("ResourceBudgets.snapshot", e)
             return {}
 
 
