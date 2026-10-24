@@ -4,7 +4,7 @@ This is how the brain reaches the character bank through the tool loop —
 she casts podcast hosts, room guests, game players, and conversation
 partners herself, in plain language, not via commands.
 
-Actions: list | cast | talk | direct | scene | podcast | arc | create.
+Actions: list | cast | talk | direct | scene | podcast | arc | create | failures.
 """
 from __future__ import annotations
 
@@ -57,11 +57,12 @@ def register(registry: Any) -> None:
             "podcast <topic> [guest names...] (cast + run a podcast episode), "
             "arc <name> (character's growth story), create <name> "
             "<description> (bring a new character to life from a plain-"
-            "words description)."
+            "words description), failures (recent recorded character "
+            "failures — best-effort fallbacks that fired instead of raising)."
         ),
         capability="characters.manage",
         parameters={
-            "action": "str — list|cast|talk|direct|scene|podcast|arc|create",
+            "action": "str — list|cast|talk|direct|scene|podcast|arc|create|failures",
             "target": "str — character name(s), purpose, or topic",
             "text": "str — message, brief, or description",
             "n": "int — how many to cast (default 1)",
@@ -254,6 +255,10 @@ def register(registry: Any) -> None:
                     f"Motive: {c.core_motive or '—'}\n"
                     f"Roles: {', '.join(c.roles) or '—'}")
 
+        if action == "failures":
+            from ..characters.failures import format_failures
+            return format_failures()
+
         return (f"unknown action '{action}'. "
-                "list | cast | talk | direct | scene | podcast | arc | create")
+                "list | cast | talk | direct | scene | podcast | arc | create | failures")
     return characters

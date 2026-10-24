@@ -17,6 +17,7 @@ from .arcs import grow_from_interaction
 from .character import Character
 from .relationships import RelationshipGraph
 from .voice import fingerprint as _voice_fingerprint
+from .failures import record_failure
 
 __all__ = ["process_session", "SessionEvent"]
 
@@ -117,34 +118,34 @@ def process_session(events: list[SessionEvent],
                           if ev.other_id in chars else ev.other_id)
             try:
                 grow_from_interaction(char, other_name, ev.event)
-            except Exception:
-                pass
+            except Exception as e:
+                record_failure("processing.process_session:grow_from_interaction", e)
             char.last_active = time.time()
             processed += 1
         # 5. relationship decay pass (cheap, idempotent)
         try:
             graph.decay_all()
-        except Exception:
-            pass
+        except Exception as e:
+            record_failure("processing.process_session:decay_all", e)
         # 6. voice fingerprint refresh — characters stay in voice
         try:
             _refresh_voice(chars, events)
-        except Exception:
-            pass
+        except Exception as e:
+            record_failure("processing.process_session:_refresh_voice", e)
         # 7. voice drift check — fingerprint exists to be USED
         try:
             drift_flags = _check_drift(chars, events)
-        except Exception:
-            pass
+        except Exception as e:
+            record_failure("processing.process_session:_check_drift", e)
         # 8. reflection — Stanford gold: salient sessions get synthesized
         # into insight, not just logged. This is what keeps characters
         # coherent over months instead of drifting into amnesiacs.
         try:
             reflections = _reflect_session(chars, events, suggest)
-        except Exception:
-            pass
-    except Exception:
-        pass
+        except Exception as e:
+            record_failure("processing.process_session:_reflect_session", e)
+    except Exception as e:
+        record_failure("processing.process_session:get", e)
     return {"processed": processed, "reflections": reflections,
             "drift_flags": drift_flags}
 
@@ -219,8 +220,8 @@ def _refresh_voice(chars: dict[str, Character],
                     char.voice_fingerprint["drift_flag"] = old["drift_flag"]
             else:
                 char.voice_fingerprint = fp.to_dict()
-        except Exception:
-            pass
+        except Exception as e:
+            record_failure("processing._refresh_voice:list", e)
 
 
 def _check_drift(chars: dict[str, Character],
@@ -259,7 +260,8 @@ def _check_drift(chars: dict[str, Character],
                 flags.append(f"{char.name}: {note}")
             else:
                 char.voice_fingerprint.pop("drift_flag", None)
-        except Exception:
+        except Exception as e:
+            record_failure("processing._check_drift:from_dict", e)
             continue
     return flags
 
@@ -288,7 +290,8 @@ def _reflect_session(chars: dict[str, Character],
         try:
             insights = char.reflect(suggest)
             made += len(insights)
-        except Exception:
+        except Exception as e:
+            record_failure("processing._reflect_session:reflect", e)
             continue
     return made
 

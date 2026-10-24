@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from .character import Character, SuggestFn
+from .failures import record_failure
 
 __all__ = ["DialogueTurn", "Dialogue", "converse", "character_initiate",
            "proactive_pulse", "icebreakers"]
@@ -62,8 +63,8 @@ def _brain_say(brain_persona: str, context: str,
             out = (suggest(prompt) or "").strip().strip('"').strip()
             if out:
                 return out[:600]
-        except Exception:
-            pass
+        except Exception as e:
+            record_failure("dialogue._brain_say:strip", e)
     return "[Devon] " + context[:120]
 
 
@@ -117,8 +118,8 @@ def converse(brain_persona: str, char: Character, opener: str,
             [SessionEvent(char.id, BRAIN_ID, kind, salience=0.6,
                           note=dlg.transcript(3))],
             {char.id: char}, graph)
-    except Exception:
-        pass
+    except Exception as e:
+        record_failure("dialogue.converse:RelationshipGraph", e)
     return dlg
 
 
@@ -156,8 +157,8 @@ def icebreakers(char: Character) -> list[str]:
     agenda = ""
     try:
         agenda = char.goal_agenda()
-    except Exception:
-        pass
+    except Exception as e:
+        record_failure("dialogue.icebreakers:goal_agenda", e)
     if agenda:
         out.append(f"an update on: {agenda.split(';')[0].strip()}")
     if char.core_motive:
@@ -183,7 +184,8 @@ def proactive_pulse(char: Character, suggest: SuggestFn | None,
         return None  # talked recently — leave them alone
     try:
         extra = float(char.ocean.get("extraversion", 0.5))
-    except Exception:
+    except Exception as e:
+        record_failure("dialogue.proactive_pulse:float", e)
         extra = 0.5
     trust = _clamp01(char.mood.get("trust", 0.5))
     v = abs(float(char.mood.get("valence", 0.0)))

@@ -14,6 +14,7 @@ from typing import Any, Sequence
 
 from ..core.text import approx_token_count
 from .character import Character
+from .failures import record_failure
 
 __all__ = ["CharacterContextBuilder"]
 
@@ -54,14 +55,15 @@ class CharacterContextBuilder:
         # OCEAN numeric conditioning (Big5-Scaler gold)
         try:
             lines.append(char.ocean_line())
-        except Exception:
-            pass
+        except Exception as e:
+            record_failure("context._identity_block:append", e)
         if char.core_motive:
             lines.append(f"Above all, you want: {char.core_motive}")
         # goals as a live agenda, not a wish list
         try:
             agenda = char.goal_agenda()
-        except Exception:
+        except Exception as e:
+            record_failure("context._identity_block:goal_agenda", e)
             agenda = ""
         if agenda:
             lines.append(f"Right now you're pursuing: {agenda}.")
@@ -110,8 +112,8 @@ class CharacterContextBuilder:
             try:
                 r = float(emoji)
                 lines.append(f"Emoji rate: about {r:.0%} of messages.")
-            except (TypeError, ValueError):
-                pass
+            except (TypeError, ValueError) as e:
+                record_failure("context._expression_block:float", e)
         style = expr.get("style") or expr.get("speech_style")
         if style:
             lines.append(f"Speech style: {style}")
@@ -154,7 +156,8 @@ class CharacterContextBuilder:
                 if d:
                     rel = {"kind": "known",
                            "closeness": float(d.get("warmth", 0.5))}
-            except Exception:
+            except Exception as e:
+                record_failure("context._relationship_block:edge", e)
                 rel = None
         if not rel:
             return ""
@@ -251,5 +254,6 @@ class CharacterContextBuilder:
                 tone += ", though there's real tension between you"
             return (f"{other.name} is here — {kind}, {tone}. "
                     f"Let that history color how you talk to them.")
-        except Exception:
+        except Exception as e:
+            record_failure("context._other_block:edge", e)
             return ""

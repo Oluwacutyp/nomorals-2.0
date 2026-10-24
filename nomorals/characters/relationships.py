@@ -14,6 +14,7 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass, field
 from typing import Any
+from .failures import record_failure
 
 DIMS = ("trust", "warmth", "friction", "respect", "familiarity")
 
@@ -300,6 +301,7 @@ class RelationshipGraph:
             try:
                 e = Edge.from_dict(ed)
                 g.edges[(e.a, e.b)] = e
-            except Exception:
+            except Exception as e:
+                record_failure("relationships.from_dict:from_dict", e)
                 continue
         return g

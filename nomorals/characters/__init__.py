@@ -1,6 +1,10 @@
 """Character agents: persistent entities that converse, collaborate,
 and play games with the brain, the owner, and each other."""
 from .character import Character, derive_ocean, OCEAN_TRAITS
+from .failures import (
+    Failure, record_failure, recent_failures, failure_count,
+    clear_failures, format_failures,
+)
 from .store import CharacterStore, default_character_dir
 from .dialogue import (
     Dialogue, converse, character_initiate,
@@ -43,6 +47,8 @@ from .render import (
 
 __all__ = [
     "Character", "derive_ocean", "OCEAN_TRAITS",
+    "Failure", "record_failure", "recent_failures", "failure_count",
+    "clear_failures", "format_failures",
     "CharacterStore", "default_character_dir",
     "Dialogue", "converse", "character_initiate",
     "proactive_pulse", "icebreakers",

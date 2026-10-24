@@ -10,6 +10,7 @@ from typing import Any
 
 from .character import Character
 from .relationships import RelationshipGraph
+from .failures import record_failure
 
 
 def _trait_fit(char: Character, want: dict[str, float]) -> float:
@@ -248,8 +249,8 @@ def cast_for_audience(chars: list[Character],
         # extraverts play better to a crowd
         try:
             s = min(1.0, s + float(c.ocean.get("extraversion", 0.5)) * 0.1)
-        except Exception:
-            pass
+        except Exception as e:
+            record_failure("casting.appeal:min", e)
         return s, reason
 
     scored = [(c, *appeal(c)) for c in cands]

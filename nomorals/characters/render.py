@@ -13,6 +13,7 @@ from __future__ import annotations
 from typing import Any
 
 from .character import Character
+from .failures import record_failure
 
 __all__ = ["render_card", "render_cast", "render_scene", "render_web",
            "render_arc", "THEMES"]
@@ -87,8 +88,8 @@ def render_card(char: Character, theme: str = "rich") -> str:
     agenda = ""
     try:
         agenda = char.goal_agenda()
-    except Exception:
-        pass
+    except Exception as e:
+        record_failure("render.render_card:goal_agenda", e)
     if agenda:
         lines.append(row("─" * w))
         lines.append(row(f"  🎯 {agenda[:w - 5]}"))
@@ -188,7 +189,8 @@ def render_arc(char: Character, theme: str = "rich") -> str:
     try:
         from .arcs import arc_story
         story = arc_story(char)
-    except Exception:
+    except Exception as e:
+        record_failure("render.render_arc:arc_story", e)
         story = f"{char.name}: no arc yet."
     if theme == "minimal":
         return story.replace("📖 ", "").replace("💭 ", "- ") \

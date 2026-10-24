@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from .character import Character
+from .failures import record_failure
 
 
 def default_character_dir() -> Path:
@@ -39,7 +40,8 @@ class CharacterStore:
             return None
         try:
             return Character.from_dict(json.loads(p.read_text("utf-8")))
-        except Exception:
+        except Exception as e:
+            record_failure("store.get:from_dict", e)
             return None
 
     def get_by_name(self, name: str) -> Character | None:
@@ -58,7 +60,8 @@ class CharacterStore:
                 try:
                     out.append(Character.from_dict(
                         json.loads(p.read_text("utf-8"))))
-                except Exception:
+                except Exception as e:
+                    record_failure("store.all:append", e)
                     continue
         return out
 
@@ -100,7 +103,8 @@ class CharacterStore:
         for d in dicts or []:
             try:
                 c = Character.from_dict(d)
-            except Exception:
+            except Exception as e:
+                record_failure("store.import_all:from_dict", e)
                 continue
             existing = self.get_by_name(c.name)
             if existing and not overwrite:
@@ -109,13 +113,13 @@ class CharacterStore:
             if existing and overwrite:
                 try:
                     self.delete(existing.id)
-                except Exception:
-                    pass
+                except Exception as e:
+                    record_failure("store.import_all:delete", e)
                 stats["overwritten"] += 1
             else:
                 stats["created"] += 1
             try:
                 self.save(c)
-            except Exception:
-                pass
+            except Exception as e:
+                record_failure("store.import_all:save", e)
         return stats

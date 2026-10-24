@@ -10,6 +10,7 @@ import time
 from typing import Any
 
 from .character import Character
+from .failures import record_failure
 
 
 def add_belief(char: Character, text: str,
@@ -125,7 +126,8 @@ def arc_story(char: Character) -> str:
     # goals: the road ahead
     try:
         agenda = char.goal_agenda()
-    except Exception:
+    except Exception as e:
+        record_failure("arcs.arc_story:goal_agenda", e)
         agenda = ""
     if agenda:
         parts.append(f"Where {name} is headed: {agenda}.")

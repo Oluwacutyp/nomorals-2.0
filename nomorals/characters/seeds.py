@@ -13,6 +13,7 @@ from .arcs import add_belief
 from .character import Character
 from .relationships import RelationshipGraph, BRAIN_ID, OWNER_ID
 from .store import CharacterStore
+from .failures import record_failure
 
 
 def _c(name: str, **kw: Any) -> Character:
@@ -323,8 +324,8 @@ def seed_bank(store: CharacterStore | None = None) -> dict[str, Any]:
         try:
             existing = RelationshipGraph.from_dict(
                 json.loads(gpath.read_text("utf-8")))
-        except Exception:
-            pass
+        except Exception as e:
+            record_failure("seeds.seed_bank:from_dict", e)
     fresh = seed_relationships(chars)
     merged = 0
     for key, edge in fresh.edges.items():
@@ -334,7 +335,7 @@ def seed_bank(store: CharacterStore | None = None) -> dict[str, Any]:
     try:
         gpath.write_text(json.dumps(existing.to_dict(), indent=1),
                          encoding="utf-8")
-    except Exception:
-        pass
+    except Exception as e:
+        record_failure("seeds.seed_bank:write_text", e)
     return {"created": created, "skipped": skipped,
             "relationships_merged": merged}

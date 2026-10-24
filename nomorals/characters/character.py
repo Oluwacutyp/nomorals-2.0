@@ -22,6 +22,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from typing import Any, Callable
+from .failures import record_failure
 
 SuggestFn = Callable[[str], str]  # (prompt) -> model text, may return ""
 
@@ -311,7 +312,8 @@ class Character:
                         insights.append(line[:280])
                     if len(insights) >= 3:
                         break
-            except Exception:
+            except Exception as e:
+                record_failure("character.reflect:strip", e)
                 insights = []
         if not insights:
             # model-free reflection: name what keeps coming up. Real, not a stub.
@@ -480,12 +482,13 @@ class Character:
             try:
                 own = self.recall(context, limit=3)
                 mems.extend(m for m in own if m not in mems)
-            except Exception:
-                pass
+            except Exception as e:
+                record_failure("character.speak:recall", e)
             prompt = (CharacterContextBuilder().build(self, memories=mems)
                       + f"\n\nSituation: {context}\n{self.name}:")
-        except Exception:
+        except Exception as e:
             # builder is best-effort; fall back to the simple block
+            record_failure("character.speak:build", e)
             prompt = (self.persona_block() + "\n"
                       + (f"Relevant memories:\n{memories}\n" if memories else "")
                       + f"Situation: {context}\n{self.name}:")
@@ -494,8 +497,8 @@ class Character:
                 out = (suggest(prompt) or "").strip().strip('"').strip()
                 if out:
                     return out[:600]
-            except Exception:
-                pass
+            except Exception as e:
+                record_failure("character.speak:strip", e)
         # fallback: in-character but model-free
         return self._fallback_line(context)
 
@@ -535,7 +538,8 @@ class Character:
         if suggest is not None:
             try:
                 choice = (suggest(prompt) or "").strip().strip('"').strip()
-            except Exception:
+            except Exception as e:
+                record_failure("character.decide:strip", e)
                 choice = ""
         # validate against legal options (fuzzy: substring match)
         if choice:

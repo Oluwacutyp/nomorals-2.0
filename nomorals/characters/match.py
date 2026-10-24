@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .character import Character, SuggestFn
+from .failures import record_failure
 
 CHAR_KEY_PREFIX = "char:"
 BRAIN_KEY = "brain:devon"
@@ -49,7 +50,8 @@ def match_intro(game_name: str, seats: list[AgentSeat],
                     f"{', '.join(x.display for x in seats if x.display != c.name)}. "
                     f"Say ONE cocky line as you take your seat. One sentence.",
                     suggest)
-            except Exception:
+            except Exception as e:
+                record_failure("match.match_intro:speak", e)
                 one = c._fallback_line(f"ready for {game_name}")
             lines.append(f"  {c.name}: \"{one[:140]}\"")
     # rivalry callouts — earned from the graph
@@ -70,7 +72,8 @@ def match_intro(game_name: str, seats: list[AgentSeat],
                             f"⚔️ All eyes on {a.name} vs {b.name}.",
                         ])
                         lines.append("  " + pick)
-                except Exception:
+                except Exception as e:
+                    record_failure("match.match_intro:edge", e)
                     continue
     return lines
 
@@ -117,7 +120,8 @@ def _brain_decide(game_name: str, rules: str, state_text: str,
     if suggest is not None:
         try:
             choice = (suggest(prompt) or "").strip().strip('"').strip()
-        except Exception:
+        except Exception as e:
+            record_failure("match._brain_decide:strip", e)
             choice = ""
     if choice:
         low = choice.lower()
@@ -163,7 +167,8 @@ def run_agent_match(game_name: str, seats: list[AgentSeat],
     try:
         transcript: list[str] = match_intro(
             game.name, seats, suggest, graph=graph, rng=rng)
-    except Exception:
+    except Exception as e:
+        record_failure("match.run_agent_match:match_intro", e)
         transcript = []
     transcript.append(game.setup(room, eng._mind))
     seat_by_key = {s.key: s for s in seats}
@@ -180,8 +185,8 @@ def run_agent_match(game_name: str, seats: list[AgentSeat],
         state_text = ""
         try:
             state_text = game.describe_state(room) or ""
-        except Exception:
-            pass
+        except Exception as e:
+            record_failure("match.run_agent_match:describe_state", e)
         if seat is None or not options:
             # house / unstructured seat: built-in brain
             out = game.ai_turn(room, eng._mind)
@@ -202,8 +207,8 @@ def run_agent_match(game_name: str, seats: list[AgentSeat],
             if store is not None:
                 try:
                     store.save(char)
-                except Exception:
-                    pass
+                except Exception as e:
+                    record_failure("match.run_agent_match:save", e)
         transcript.extend(out or [])
         moves += 1
         room.advance_turn()
@@ -212,7 +217,8 @@ def run_agent_match(game_name: str, seats: list[AgentSeat],
     try:
         w = game.winner(room)
         winner_name = w.name if hasattr(w, "name") else str(w)
-    except Exception:
+    except Exception as e:
+        record_failure("match.run_agent_match:winner", e)
         winner_name = str(winner) if winner else "?"
     transcript.append(f"🏁 winner: {winner_name}")
     return MatchResult(game=game_name, winner=winner_name,
@@ -233,7 +239,8 @@ def character_seat_decider(store: Any, suggest: SuggestFn | None):
         options = game.describe_options(room)
         try:
             state_text = game.describe_state(room) or ""
-        except Exception:
+        except Exception as e:
+            record_failure("match.decider:describe_state", e)
             state_text = ""
         if key.startswith(BRAIN_KEY):
             if not options:
@@ -255,8 +262,8 @@ def character_seat_decider(store: Any, suggest: SuggestFn | None):
                 f"Played {game.name}: I played '{move}'", 0.4)
             try:
                 store.save(char)
-            except Exception:
-                pass
+            except Exception as e:
+                record_failure("match.decider:save", e)
             return out
         return None
     return decider

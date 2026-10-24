@@ -21,6 +21,7 @@ from .casting import chemistry
 from .character import Character, SuggestFn
 from .dialogue import Dialogue, DialogueTurn
 from .relationships import RelationshipGraph
+from .failures import record_failure
 
 
 @dataclass
@@ -99,7 +100,8 @@ class Beat:
             return True
         try:
             return bool(self.precondition(scene, director))
-        except Exception:
+        except Exception as e:
+            record_failure("ensemble.ready:bool", e)
             return False
 
 
@@ -303,7 +305,8 @@ def run_scene(chars: list[Character], title: str, topic: str,
             try:
                 line = _speak_in_scene(char, sc, others, suggest,
                                        graph, rng, steer=steer.strip())
-            except Exception:
+            except Exception as e:
+                record_failure("ensemble.run_scene:_speak_in_scene", e)
                 continue
             sc.add(char.name, line)
             if director is not None:

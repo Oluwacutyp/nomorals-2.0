@@ -21,6 +21,7 @@ import time
 from typing import Any
 
 from ..core.logging_setup import get_logger
+from .failures import record_failure
 
 _log = get_logger(__name__)
 
@@ -104,7 +105,8 @@ class CharacterMemory:
         # Character.recall so both paths rank the same way
         try:
             return self.char.recall(query, limit=limit)
-        except Exception:
+        except Exception as e:
+            record_failure("memory.recall:recall", e)
             return []
 
     # ── consolidate ──────────────────────────────────────────────────
@@ -149,8 +151,8 @@ class CharacterMemory:
                     try:
                         if float(m.get("ts", 0)) > float(old.get("ts", 0)):
                             old["ts"] = m.get("ts")
-                    except (TypeError, ValueError):
-                        pass
+                    except (TypeError, ValueError) as e:
+                        record_failure("memory.consolidate:float", e)
                     stats["merged"] += 1
                 else:
                     seen[key] = m
