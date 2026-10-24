@@ -15,6 +15,13 @@ blocklisted / no warmup" on a healthy DB. The gates that refuse sends
 ``is_blocklisted``, and ``_warmup_ok``) fail open on a dead DB, so a
 suppressed or hard-bounced address keeps receiving until the record
 says otherwise.
+``send``'s templates/providers region shares it as well: a failed
+template save returns ``False`` like an invalid name, a failed
+template/provider list returns ``[]`` like "nothing configured yet",
+and a failed template lookup returns ``None`` like "no such
+template" — on a dead config store the engine looks unconfigured
+rather than broken, and a failed provider registration silently
+leaves the provider unregistered.
 That contract is sound for ad-spend safety — but until now the caught
 failures vanished without a trace: a guardrail that silently failed to
 evaluate, or a store method silently returning ``False`` on a dead DB,

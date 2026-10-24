@@ -697,7 +697,8 @@ class SendEngine:
                 (name, body or "", subject or "", time.time()))
             self._db.commit()
             return True
-        except Exception:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001
+            record_failure("send.SendEngine.save_template", e)
             return False
 
     def list_templates(self) -> list[dict]:
@@ -706,7 +707,8 @@ class SendEngine:
                 return []
             return [dict(r) for r in self._db.execute(
                 "SELECT name, subject, updated_at FROM send_templates ORDER BY name")]
-        except Exception:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001
+            record_failure("send.SendEngine.list_templates", e)
             return []
 
     def get_template(self, name: str) -> dict | None:
@@ -717,7 +719,8 @@ class SendEngine:
                 "SELECT * FROM send_templates WHERE name = ?",
                 ((name or "").strip(),)).fetchone()
             return dict(row) if row else None
-        except Exception:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001
+            record_failure("send.SendEngine.get_template", e)
             return None
 
     # ── providers ──
@@ -749,7 +752,8 @@ class SendEngine:
             elif kind in BUILTIN_PROVIDERS:
                 self._callables[name] = BUILTIN_PROVIDERS[kind]
             return True
-        except Exception:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001
+            record_failure("send.SendEngine.register_provider", e)
             return False
 
     def list_providers(self) -> list[dict]:
@@ -758,7 +762,8 @@ class SendEngine:
                 return []
             return [dict(r) for r in self._db.execute(
                 "SELECT * FROM send_providers ORDER BY name")]
-        except Exception:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001
+            record_failure("send.SendEngine.list_providers", e)
             return []
 
     # ── queue ──
