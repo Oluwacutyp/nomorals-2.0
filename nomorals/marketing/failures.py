@@ -35,6 +35,14 @@ verdict), the ``_dns_txt`` per-resolver fall-throughs (the other
 resolver still answers), and the ``deliverability_check`` DNS
 inner (the resolution failure is itself reported as a check with
 ``ok: False``, lowering the grade).
+``send``'s tail region shares it too: a failed spam-template check
+returned score 0 with verdict ``unknown`` — and the ``/send
+spamcheck`` caller blesses any score under 30 as "clean enough for
+bulk", so an unchecked template went to bulk with a clean bill; a
+failed status read returned its half-built dict, so zero spend and
+no providers read as "nothing spent / nothing configured"; and a
+failed engine singleton quietly retried the same constructor and
+handed back a non-singleton engine with the cause lost.
 That contract is sound for ad-spend safety — but until now the caught
 failures vanished without a trace: a guardrail that silently failed to
 evaluate, or a store method silently returning ``False`` on a dead DB,

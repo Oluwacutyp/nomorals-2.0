@@ -1262,7 +1262,8 @@ class SendEngine:
             if not tpl:
                 return {"score": 0, "verdict": "template not found", "issues": []}
             return spam_score(tpl.get("subject", ""), tpl.get("body", ""))
-        except Exception:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001
+            record_failure("send.SendEngine.spam_check_template", e)
             return {"score": 0, "verdict": "unknown", "issues": []}
 
     # ── suppression (unsubscribe / complaints — distinct from bounces) ──
@@ -1445,7 +1446,8 @@ class SendEngine:
             out["spent_24h_kobo"] = int(row["s"] or 0) if row else 0
             out["providers"] = self.list_providers()
             return out
-        except Exception:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001
+            record_failure("send.SendEngine.status", e)
             return out
 
 
@@ -1456,7 +1458,8 @@ def get_engine(db_path: str = "") -> SendEngine:
         if _ENGINE is None:
             _ENGINE = SendEngine(db_path)
         return _ENGINE
-    except Exception:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001
+        record_failure("send.get_engine", e)
         return SendEngine(db_path)
 
 
