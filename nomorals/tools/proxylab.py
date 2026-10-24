@@ -50,6 +50,7 @@ from ..core.errors import ToolError
 from ..core.logging_setup import get_logger
 from ..core.policy import Capability
 from ..storage.kv import KVStore
+from .proxylab_failures import record_failure
 
 _log = get_logger(__name__)
 
@@ -142,13 +143,13 @@ def detect_profile(context: Any = None) -> str:
                     ).strip().lower()
         if ctx_prof in _PROFILE_WORKERS:
             return ctx_prof
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as e:
+        record_failure("detect_profile:settings", e)
     try:
         if os.environ.get("PREFIX", "").startswith("/data/data/com.termux"):
             return "termux"
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as e:
+        record_failure("detect_profile:termux_env", e)
     return "workstation"
 
 
@@ -364,8 +365,8 @@ def _connect(host: str, port: int, timeout: float) -> socket.socket:
     sock = socket.create_connection((host, port), timeout=timeout)
     try:
         sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-    except OSError:  # noqa: E103 - socket tuning is best-effort
-        pass
+    except OSError as e:  # socket tuning is best-effort
+        record_failure("_connect:sockopt", e)
     return sock
 
 
@@ -838,7 +839,8 @@ class ProxyScraper:
             try:
                 listing = self._fetcher(api)
                 files = json.loads(listing.decode("utf-8", "replace"))
-            except Exception:  # noqa: BLE001
+            except Exception as e:
+                record_failure("ProxyScraper.discover:repo_listing", e)
                 continue
             if not isinstance(files, list):
                 continue
@@ -866,7 +868,8 @@ class ProxyScraper:
             try:
                 raw = self._fetcher(url)
                 text = raw.decode("utf-8", "replace")
-            except Exception:  # noqa: BLE001
+            except Exception as e:
+                record_failure("ProxyScraper.discover:endpoint_fetch", e)
                 continue
             proxies, kind = self._auto_parse(text)
             if len(proxies) < max(1, int(min_proxies)):
@@ -987,7 +990,8 @@ class ProxyTester:
             else:
                 try:
                     candidate = self._direct_get(self.ip_url).strip()
-                except Exception:  # noqa: BLE001
+                except Exception as e:
+                    record_failure("ProxyTester._local_ip", e)
                     candidate = ""
             # same guard as the probe: a rate-limit page is not an IP
             self._local_ip_cache = candidate if _valid_ip(candidate) else ""
@@ -1078,7 +1082,8 @@ class ProxyTester:
         # anonymity: does the site see our real IP / proxy headers?
         try:
             local_ip = self._local_ip()
-        except Exception:  # noqa: BLE001
+        except Exception as e:
+            record_failure("ProxyTester.test_one:local_ip", e)
             local_ip = ""
         if local_ip and proxy.egress_ip == local_ip:
             proxy.anonymity = "transparent"
@@ -1097,7 +1102,8 @@ class ProxyTester:
                                    else "elite")
             else:
                 proxy.anonymity = "unverified"
-        except Exception:  # noqa: BLE001 - anonymity is best-effort
+        except Exception as e:  # anonymity is best-effort
+            record_failure("ProxyTester.test_one:anonymity", e)
             proxy.anonymity = "unverified"
         self._maybe_country(proxy)
         return proxy
@@ -1113,8 +1119,8 @@ class ProxyTester:
             status, _, body = self._probe(proxy, self.country_url, "c")
             if status == 200:
                 proxy.country = str(json.loads(body).get("country") or "")[:2]
-        except Exception:  # noqa: BLE001 - country is cosmetic
-            pass
+        except Exception as e:  # country is cosmetic
+            record_failure("ProxyTester._maybe_country", e)
 
     def test_many(self, proxies: list[Proxy], *,
                   limit: int = 150) -> list[Proxy]:
@@ -1381,7 +1387,8 @@ class DomainAffinityManager:
                 if isinstance(raw, dict):
                     self._data = {str(k): v for k, v in raw.items()
                                   if isinstance(v, dict)}
-        except Exception:  # noqa: BLE001 - corrupt affinity = start clean
+        except Exception as e:  # corrupt affinity = start clean
+            record_failure("DomainAffinityManager._load", e)
             self._data = {}
 
     def _save(self) -> None:
@@ -1389,8 +1396,8 @@ class DomainAffinityManager:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             self.path.write_text(json.dumps(self._data, indent=1),
                                  encoding="utf-8")
-        except OSError:  # noqa: E103 - affinity is best-effort
-            pass
+        except OSError as e:  # affinity is best-effort
+            record_failure("DomainAffinityManager._save", e)
 
     def bind(self, domain: str, proxy_url: str,
              ttl_hours: float | None = None) -> dict[str, Any]:
@@ -1487,7 +1494,8 @@ def empty_pool_guidance(store: "ProxyStore", *, want: str = "") -> str:
         backing_off = sum(1 for p in alive if p.in_backoff)
         candidates = len(store.load_candidates())
         last_test = max((p.tested_at for p in all_known), default=0.0)
-    except Exception:  # noqa: BLE001
+    except Exception as e:
+        record_failure("empty_pool_guidance", e)
         alive, backing_off, candidates, last_test = [], 0, 0, 0.0
     want_s = f" for {want}" if want else ""
     if backing_off and not [p for p in alive if not p.in_backoff]:
@@ -1735,8 +1743,8 @@ class ProxyLab:
         last_refresh = 0.0
         try:
             last_refresh = self.store.working_json.stat().st_mtime
-        except OSError:  # noqa: E103 - never refreshed
-            pass
+        except OSError as e:  # never refreshed
+            record_failure("ProxyLab.health:last_refresh", e)
 
         # rotation + affinity + schedule state (best-effort; the lab
         # dashboard must not die because rotation state is missing)
@@ -1747,8 +1755,8 @@ class ProxyLab:
             rotation = rot.status()
             aff = DomainAffinityManager(self.store.dir / "affinity.json")
             affinity_n = len(aff.bindings())
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as e:
+            record_failure("ProxyLab.health:rotation_affinity", e)
         schedule: dict[str, Any] = {}
         try:
             jobs = _scheduler(self.context).list_jobs(include_disabled=True)
@@ -1758,8 +1766,8 @@ class ProxyLab:
                 schedule = {"active": bool(job.get("enabled")),
                             "spec": job.get("spec", ""),
                             "last_run": job.get("last_run", "")}
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as e:
+            record_failure("ProxyLab.health:schedule", e)
 
         report: dict[str, Any] = {
             "pool": {
@@ -1873,7 +1881,8 @@ def retry_after_delay(headers: dict[str, str] | None,
             dt = dt.replace(tzinfo=_dt.timezone.utc)
         delta = (dt - _dt.datetime.now(_dt.timezone.utc)).total_seconds()
         return max(1.0, min(delta, 3600.0))
-    except Exception:  # noqa: BLE001
+    except Exception as e:
+        record_failure("retry_after_delay:default", e)
         return default
 
 
@@ -1933,7 +1942,8 @@ def _subnet_of(host: str, prefix: int = 24) -> str:
             net = _ip.ip_network(f"{host}/{prefix}", strict=False)
             return str(net)
         return str(_ip.ip_network(f"{host}/64", strict=False))
-    except Exception:  # noqa: BLE001
+    except Exception as e:
+        record_failure("_subnet_of", e)
         return host
 
 
@@ -2076,8 +2086,8 @@ class ProxyRotationManager:
                 merged.setdefault("cooldown", {})
                 merged.setdefault("stats", default["stats"])
                 return merged
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as e:
+            record_failure("ProxyRotationManager._load_state", e)
         return default
 
     def _save_state(self) -> None:
@@ -2164,8 +2174,8 @@ class ProxyRotationManager:
             from .ssh_socks import SshSocksManager
 
             urls.extend(SshSocksManager._live_urls())
-        except Exception:  # noqa: BLE001 - tunnels are optional
-            pass
+        except Exception as e:  # tunnels are optional
+            record_failure("ProxyRotationManager._pool_urls", e)
         seen: dict[str, None] = {}
         for u in urls:
             seen.setdefault(u, None)
