@@ -22,6 +22,19 @@ and a failed template lookup returns ``None`` like "no such
 template" — on a dead config store the engine looks unconfigured
 rather than broken, and a failed provider registration silently
 leaves the provider unregistered.
+``send``'s module helpers share it too: a failed profile import
+degrades every batch decision to "pc", a failed cost-tracker import
+silently disables cost tracking, a failed default-DB path swaps the
+persistent queue for an in-memory one, a failed warmup plan uncaps
+the ramp (``warmup_status`` falls back to the full daily target
+when the plan is empty), and failed spam/grade/DNS helpers return
+their empty shapes — all without a trace until now. The deliberate
+non-conversions in the region stay pinned in the pass #137 pins:
+``parse_dsn`` (unparseable input is the documented "unknown"
+verdict), the ``_dns_txt`` per-resolver fall-throughs (the other
+resolver still answers), and the ``deliverability_check`` DNS
+inner (the resolution failure is itself reported as a check with
+``ok: False``, lowering the grade).
 That contract is sound for ad-spend safety — but until now the caught
 failures vanished without a trace: a guardrail that silently failed to
 evaluate, or a store method silently returning ``False`` on a dead DB,

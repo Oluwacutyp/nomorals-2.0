@@ -45,12 +45,14 @@ _log = get_logger(__name__)
 
 try:
     from ..core.profile import resolve_profile as _resolve_profile
-except Exception:  # noqa: BLE001 — profile is a nicety, not a requirement
+except Exception as e:  # noqa: BLE001 — profile is a nicety, not a requirement
+    record_failure("send.import._resolve_profile", e)
     _resolve_profile = None  # type: ignore[assignment]
 
 try:
     from ..social.whatsapp_cost import CostTracker as _CostTracker
-except Exception:  # noqa: BLE001
+except Exception as e:  # noqa: BLE001
+    record_failure("send.import._CostTracker", e)
     _CostTracker = None  # type: ignore[assignment]
 
 
@@ -60,7 +62,8 @@ def _default_db() -> str:
         d = __import__("os").path.join(home, ".nomorals", "marketing")
         __import__("os").makedirs(d, exist_ok=True)
         return __import__("os").path.join(d, "send_queue.db")
-    except Exception:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001
+        record_failure("send._default_db", e)
         return ":memory:"
 
 
@@ -70,7 +73,8 @@ def _profile_kind(profile: str = "") -> str:
     try:
         if _resolve_profile is not None:
             return (_resolve_profile().kind or "pc").lower()
-    except Exception:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001
+        record_failure("send._profile_kind", e)
         pass
     return "pc"
 
@@ -488,7 +492,8 @@ def spam_score(subject: str, body: str) -> dict:
         verdict = ("likely spam-folder" if score >= 60 else
                    "risky — clean it up" if score >= 30 else "clean")
         return {"score": score, "verdict": verdict, "issues": issues}
-    except Exception:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001
+        record_failure("send.spam_score", e)
         return {"score": 0, "verdict": "unknown", "issues": []}
 
 
@@ -507,7 +512,8 @@ def warmup_plan(daily_target: int, days: int = 21) -> list[dict]:
             cap *= 1.35
         plan[-1]["cap"] = target
         return plan
-    except Exception:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001
+        record_failure("send.warmup_plan", e)
         return []
 
 
@@ -572,7 +578,8 @@ def _dns_txt(name: str, timeout: float = 4.0) -> list[str]:
             except Exception:  # noqa: BLE001
                 continue
         return out
-    except Exception:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001
+        record_failure("send._dns_txt", e)
         return []
 
 
@@ -636,7 +643,8 @@ def deliverability_check(domain: str) -> dict:
         result["grade"] = ("A" if g >= 80 else "B" if g >= 60 else
                            "C" if g >= 40 else "D" if g >= 20 else "F")
         return result
-    except Exception:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001
+        record_failure("send.deliverability_check", e)
         return result
 
 
