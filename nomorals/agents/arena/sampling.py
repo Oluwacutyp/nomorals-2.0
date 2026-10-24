@@ -29,6 +29,7 @@ from . import activity
 from . import scoring
 from . import topics
 from ...storage.kv import KVStore
+from .failures import record_failure
 
 __all__ = [
     "sample_challenge",
@@ -44,7 +45,8 @@ _FALLBACK_KIND = "code"
 def _coverage_boosts(db: Any) -> dict[str, float]:
     try:
         return scoring.coverage_weights(db)
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("sampling._coverage_boosts", exc)
         return {}
 
 
@@ -105,7 +107,8 @@ def _persist_state(db: Any, state: dict[str, Any]) -> bool:
     try:
         KVStore(db).set(STATE_KEY, state)
         return True
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("sampling._persist_state", exc)
         return False
 
 
@@ -116,6 +119,6 @@ def sampling_state(db: Any) -> dict[str, Any]:
     try:
         data = KVStore(db).get(STATE_KEY)
         return data if isinstance(data, dict) else {}
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as exc:  # noqa: BLE001
+        record_failure("sampling.sampling_state", exc)
     return {}

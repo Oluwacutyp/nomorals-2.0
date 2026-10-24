@@ -22,6 +22,7 @@ import time
 from typing import Any
 
 from ...storage.kv import KVStore
+from .failures import record_failure
 
 __all__ = [
     "CATEGORY_KEYWORDS",
@@ -166,7 +167,8 @@ def _ensure_table(db: Any) -> bool:
                 "CREATE INDEX IF NOT EXISTS idx_arena_activity_ts "
                 "ON arena_activity (ts)")
         return True
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("activity._ensure_table", exc)
         return False
 
 
@@ -180,8 +182,8 @@ def record(db: Any, kind: str, detail: str = "") -> None:
                 "INSERT INTO arena_activity (ts, kind, detail) VALUES (?, ?, ?)",
                 (time.time(), str(kind)[:40], str(detail)[:300]),
             )
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as exc:  # noqa: BLE001
+        record_failure("activity.record", exc)
 
 
 def recent_commands(db: Any, limit: int = 200) -> list[str]:
@@ -193,7 +195,8 @@ def recent_commands(db: Any, limit: int = 200) -> list[str]:
             "SELECT detail FROM arena_activity WHERE kind = 'command' "
             "ORDER BY ts DESC LIMIT ?", (max(1, min(int(limit), 2000)),))
         return [str(r.get("detail", "")) for r in rows]
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("activity.recent_commands", exc)
         return []
 
 
@@ -249,8 +252,8 @@ def interest_profile(db: Any = None,
                 cat = str(row.get("category", ""))
                 if cat in scores:
                     scores[cat] += min(float(row.get("n", 0)) * 0.4, 3.0)
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:  # noqa: BLE001
+            record_failure("activity.interest_profile.history", exc)
         # 2. custom topics — explicit owner interest.
         try:
             data = KVStore(db).get("arena.custom_topics")
@@ -258,14 +261,14 @@ def interest_profile(db: Any = None,
                 topics = data.get("topics", [])
                 for t in topics[:50]:
                     _bump(scores, match_category(str(t)), 1.0)
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:  # noqa: BLE001
+            record_failure("activity.interest_profile.custom_topics", exc)
         # 3. command usage — what the owner actually runs.
         try:
             for verb in recent_commands(db, 300):
                 _bump(scores, VERB_CATEGORY.get(verb), 0.15)
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:  # noqa: BLE001
+            record_failure("activity.interest_profile.commands", exc)
 
     # 4. recent searches — strongest topical signal.
     for q in (search_queries or [])[:60]:

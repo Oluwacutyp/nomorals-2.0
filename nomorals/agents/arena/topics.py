@@ -43,6 +43,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ...storage.kv import KVStore
+from .failures import record_failure
 
 __all__ = [
     "CATEGORIES",
@@ -482,8 +483,8 @@ def _used_topics(db: Any) -> set[str]:
         rows = db.query("SELECT topic FROM arena_knowledge")
         for row in rows:
             used.add(str(row.get("topic", "")))
-    except Exception:  # noqa: BLE001 - no table yet on fresh test DBs
-        pass
+    except Exception as exc:  # noqa: BLE001 - no table yet on fresh test DBs
+        record_failure("topics._used_topics", exc)
     return used
 
 
@@ -495,8 +496,8 @@ def _recent_categories(db: Any, n: int = 3) -> list[str]:
         data = KVStore(db).get("arena.recent_categories", default={})
         data = data.get("cats", [])
         return [str(c) for c in data[:n] if str(c)]
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as exc:  # noqa: BLE001
+        record_failure("topics._recent_categories", exc)
     return []
 
 
@@ -507,8 +508,8 @@ def _record_category(db: Any, category: str) -> None:
         cats = [category] + [c for c in _recent_categories(db, 9)
                              if c != category]
         KVStore(db).set("arena.recent_categories", {"cats": cats[:10]})
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as exc:  # noqa: BLE001
+        record_failure("topics._record_category", exc)
 
 
 # ── topic anti-repeat window (persisted, survives restarts) ────────────────
@@ -521,8 +522,8 @@ def anti_repeat_window(db: Any = None,
             data = KVStore(db).get(_ANTI_REPEAT_WINDOW_KEY, default={})
             return max(0, min(int(data.get("window", default)),
                                   10000))
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:  # noqa: BLE001
+            record_failure("topics.anti_repeat_window", exc)
     return max(0, int(default))
 
 
@@ -534,7 +535,8 @@ def set_anti_repeat_window(db: Any, n: int) -> bool:
         KVStore(db).set(_ANTI_REPEAT_WINDOW_KEY,
                         {"window": max(0, int(n))})
         return True
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("topics.set_anti_repeat_window", exc)
         return False
 
 
@@ -548,8 +550,8 @@ def recent_topics(db: Any, n: int | None = None) -> list[str]:
         data = KVStore(db).get(_RECENT_TOPICS_KEY, default={})
         data = data.get("topics", [])
         return [str(t) for t in data[:max(0, int(n))] if str(t)]
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as exc:  # noqa: BLE001
+        record_failure("topics.recent_topics", exc)
     return []
 
 
@@ -560,8 +562,8 @@ def _record_topic(db: Any, topic: str, window: int) -> None:
         topics = [topic] + [t for t in recent_topics(db, window - 1)
                             if t != topic]
         KVStore(db).set(_RECENT_TOPICS_KEY, {"topics": topics[:window]})
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as exc:  # noqa: BLE001
+        record_failure("topics._record_topic", exc)
 
 
 def clear_recent_topics(db: Any) -> int:
@@ -571,8 +573,8 @@ def clear_recent_topics(db: Any) -> int:
     cleared = len(recent_topics(db, 10000))
     try:
         KVStore(db).delete(_RECENT_TOPICS_KEY)
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as exc:  # noqa: BLE001
+        record_failure("topics.clear_recent_topics", exc)
     return cleared
 
 

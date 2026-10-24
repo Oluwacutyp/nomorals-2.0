@@ -28,6 +28,7 @@ import time
 from typing import Any
 
 from ...core.ids import new_short_id
+from .failures import record_failure
 
 _log = logging.getLogger(__name__)
 
@@ -80,7 +81,8 @@ def _ensure_table(db: Any) -> bool:
                 "CREATE INDEX IF NOT EXISTS idx_arena_scores_ts "
                 "ON arena_scores (ts)")
         return True
-    except Exception:  # noqa: BLE001 - fresh/unmigrated DBs
+    except Exception as exc:  # noqa: BLE001 - fresh/unmigrated DBs
+        record_failure("scoring._ensure_table", exc)
         return False
 
 
@@ -134,7 +136,8 @@ def record_score(db: Any, *, topic: str, category: str, kind: str = "code",
                 row,
             )
         return score_id
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("scoring.record_score", exc)
         return ""
 
 
@@ -196,7 +199,8 @@ def category_scores(db: Any) -> dict[str, dict[str, Any]]:
         rows = db.query(
             "SELECT category, research_usefulness, build_compiled, "
             "tests_passed, edit_precision, latency_s FROM arena_scores")
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("scoring.category_scores", exc)
         return {}
     acc: dict[str, dict[str, Any]] = {}
     for row in rows:
@@ -239,7 +243,8 @@ def difficulty_target(db: Any, category: str) -> int:
         info = category_scores(db).get(str(category or "").strip().lower(), {})
         runs = int(info.get("runs", 0) or 0)
         avg = info.get("avg")
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("scoring.difficulty_target", exc)
         return 2
     if avg is None:
         return 2
@@ -267,7 +272,8 @@ def coverage_weights(db: Any) -> dict[str, float]:
             "SELECT category, COUNT(*) AS n FROM arena_scores GROUP BY category")
         counts = {str(r.get("category", "") or "").strip().lower():
                   int(r.get("n", 0) or 0) for r in rows}
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("scoring.coverage_weights", exc)
         return {c: 1.0 for c in cats}
     max_runs = max(counts.values(), default=0)
     if max_runs <= 0:

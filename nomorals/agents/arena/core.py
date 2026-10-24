@@ -45,6 +45,7 @@ from ...core.ids import new_short_id
 from ...storage.kv import KVStore
 from . import activity
 from .topics import sample_topic, surprise_topic
+from .failures import record_failure
 
 __all__ = ["Arena", "run_cycle_safe"]
 
@@ -75,8 +76,8 @@ class Arena:
                     "INSERT INTO arena_stream (ts, kind, payload) VALUES (?, ?, ?)",
                     (time.time(), kind, json.dumps(payload, ensure_ascii=False)),
                 )
-        except Exception:  # noqa: BLE001 - the stream must never break a cycle
-            pass
+        except Exception as exc:  # noqa: BLE001 - the stream must never break a cycle
+            record_failure("core._stream", exc)
 
     def stream(self, limit: int = 20) -> list[dict[str, Any]]:
         if self.db is None:
@@ -86,13 +87,15 @@ class Arena:
                 "SELECT ts, kind, payload FROM arena_stream ORDER BY ts DESC LIMIT ?",
                 (max(1, min(int(limit), 500)),),
             )
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("core.stream.query", exc)
             return []
         out = []
         for row in rows:
             try:
                 payload = json.loads(row.get("payload") or "{}")
-            except Exception:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001
+                record_failure("core.stream.payload", exc)
                 payload = {}
             out.append({"ts": row.get("ts"), "kind": row.get("kind"), "payload": payload})
         return out
@@ -110,7 +113,8 @@ class Arena:
                     sources = row.get("sources") or "[]"
                     try:
                         source_list = json.loads(sources)
-                    except Exception:  # noqa: BLE001
+                    except Exception as exc:  # noqa: BLE001
+                        record_failure("core.export.sources", exc)
                         source_list = []
                     source_line = "\n".join(
                         f"- {s.get('title') or s.get('url')}" for s in source_list[:8]
@@ -129,8 +133,8 @@ class Arena:
                         "source": "arena",
                     }
                     lines.append(json.dumps(record, ensure_ascii=False))
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as exc:  # noqa: BLE001
+                record_failure("core.export.query", exc)
         return "\n".join(lines)
 
     # ── knowledge ────────────────────────────────────────────────────────────
@@ -145,8 +149,8 @@ class Arena:
                            VALUES (?, ?, ?, ?, ?, ?)""",
                         (kid, topic, category, digest, json.dumps(sources, ensure_ascii=False), time.time()),
                     )
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as exc:  # noqa: BLE001
+                record_failure("core._save_knowledge", exc)
         return kid
 
     # ── research ─────────────────────────────────────────────────────────────
@@ -187,7 +191,8 @@ class Arena:
                     Message(role="user", content=f"Topic: {topic}\n\nResearch digest:\n{digest[:4000]}"),
                 ]
             , task_kind="chat")
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("core._build.brain", exc)
             return None
         text = (getattr(response, "text", "") or "").strip()
         if getattr(response, "error", None) or not text:
@@ -234,8 +239,8 @@ class Arena:
                             (build_id, name, record["purpose"], topic,
                              json.dumps(files), str(target), time.time()),
                         )
-                except Exception:  # noqa: BLE001
-                    pass
+                except Exception as exc:  # noqa: BLE001
+                    record_failure("core._build.record", exc)
             self._stream("build", record)
             return record
         except Exception as exc:  # noqa: BLE001
@@ -282,13 +287,15 @@ class Arena:
             return None
         try:
             row = self.db.query_one("SELECT * FROM arena_builds WHERE id = ?", (build_id,))
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("core._get_build.query", exc)
             return None
         if row is None:
             return None
         try:
             row["files"] = json.loads(row.get("files") or "[]")
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("core._get_build.files", exc)
             row["files"] = []
         return row
 
@@ -301,8 +308,8 @@ class Arena:
                     "UPDATE arena_builds SET status = ?, decided_at = ? WHERE id = ?",
                     (status, time.time(), build_id),
                 )
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:  # noqa: BLE001
+            record_failure("core._set_build_status", exc)
 
     def approve(self, build_id: str) -> str:
         row = self._get_build(build_id)
@@ -347,7 +354,8 @@ class Arena:
                 "SELECT * FROM arena_builds WHERE status = ? ORDER BY created_at DESC LIMIT 20",
                 (status,),
             )
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("core.builds", exc)
             return []
 
     def all_builds(self, limit: int = 20) -> list[dict]:
@@ -358,7 +366,8 @@ class Arena:
                 "SELECT * FROM arena_builds ORDER BY created_at DESC LIMIT ?",
                 (max(1, min(int(limit), 100)),),
             )
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("core.all_builds", exc)
             return []
 
     # ── stats ───────────────────────────────────────────────────────────────
@@ -382,8 +391,8 @@ class Arena:
                 out["builds"][status] = int(row.get("n", 0)) if row else 0
             row = self.db.query_one("SELECT MAX(ts) AS ts FROM arena_stream WHERE kind = 'topic'")
             out["last_cycle"] = row.get("ts") if row else None
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:  # noqa: BLE001
+            record_failure("core.stats", exc)
         return out
 
     # ── digests ──────────────────────────────────────────────────────────────
@@ -396,7 +405,8 @@ class Arena:
                 "ORDER BY created_at DESC LIMIT ?",
                 (max(1, min(int(limit), 10)),),
             )
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("core.digests", exc)
             return []
         return [dict(r) for r in rows]
 
@@ -408,15 +418,16 @@ class Arena:
         try:
             data = KVStore(self.db).get("arena.interval_hours", default={})
             return float(data.get("hours", 0.0)) or None
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:  # noqa: BLE001
+            record_failure("core.interval_hours", exc)
         return None
 
     def set_interval(self, hours: float) -> bool:
         hours = max(0.05, min(float(hours), 24.0))
         try:
             KVStore(self.db).set("arena.interval_hours", {"hours": hours})
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("core.set_interval", exc)
             return False
         return True
 
@@ -428,8 +439,8 @@ class Arena:
             data = KVStore(self.db).get("arena.custom_topics", default={})
             data = data.get("topics", [])
             return [str(t) for t in data if str(t).strip()]
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:  # noqa: BLE001
+            record_failure("core.custom_topics", exc)
         return []
 
     def add_topic(self, text: str) -> str:
@@ -442,7 +453,8 @@ class Arena:
         topics.append(text)
         try:
             KVStore(self.db).set("arena.custom_topics", {"topics": topics})
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("core.add_topic", exc)
             return "could not store the topic (db busy?)"
         return f"topic bank now has {len(topics)} custom topic(s). the loop may pick it up."
 
@@ -454,7 +466,8 @@ class Arena:
         try:
             used = {r["topic"] for r in self.db.query(
                 "SELECT topic FROM arena_knowledge")}
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("core._pick_custom_topic", exc)
             used = set()
         free = [t for t in topics if t not in used]
         if not free:
@@ -469,18 +482,19 @@ class Arena:
         try:
             engine = SearchEngine(self.context)
             queries = [str(r.get("query", "")) for r in engine.history(60)]
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:  # noqa: BLE001
+            record_failure("core._interest_profile.history", exc)
         if self.db is not None:
             try:
                 rows = self.db.query("SELECT title FROM agent_goals LIMIT 40")
                 goals = [str(r.get("title", "")) for r in rows]
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as exc:  # noqa: BLE001
+                record_failure("core._interest_profile.goals", exc)
         try:
             return activity.interest_profile(
                 self.db, search_queries=queries, goal_texts=goals)
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("core._interest_profile.profile", exc)
             from .topics import CATEGORIES
 
             return {c: 1.0 for c in CATEGORIES}
@@ -575,8 +589,8 @@ class Arena:
             if notify is not None:
                 try:
                     notify(packet)
-                except Exception:  # noqa: BLE001
-                    pass
+                except Exception as exc:  # noqa: BLE001
+                    record_failure("core.run_cycle.notify", exc)
             elif not notify:
                 result["review"] = packet
         # Score the run on verifiable axes — the adaptive sampler reads
@@ -591,8 +605,8 @@ class Arena:
                                 else 0 if build else None),
                 latency_s=float(result.get("seconds", 0) or 0),
                 notes=verify[:200])
-        except Exception:  # noqa: BLE001 - scoring must never break a cycle
-            pass
+        except Exception as exc:  # noqa: BLE001 - scoring must never break a cycle
+            record_failure("core.run_cycle.scoring", exc)
         return result
 
     @staticmethod
@@ -644,8 +658,8 @@ class Arena:
                           "actionable": True,
                           "subject": (f"arena build {name}" if name
                                       else "arena build")})
-            except Exception:  # noqa: BLE001 - a push must never kill the loop
-                pass
+            except Exception as exc:  # noqa: BLE001 - a push must never kill the loop
+                record_failure("core._choked_review_push.push", exc)
 
         return _wrapped
 
