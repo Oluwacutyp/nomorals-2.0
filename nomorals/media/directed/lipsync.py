@@ -15,6 +15,7 @@ translate-text -> TTS voice -> lip sync -> mux for dubbing.
 """
 
 from __future__ import annotations
+from .failures import record_failure
 
 import os
 import subprocess
@@ -74,7 +75,8 @@ def _has_torch_cuda() -> tuple[bool, bool]:
     try:
         import torch
         return True, torch.cuda.is_available()
-    except Exception:
+    except Exception as e:
+        record_failure("lipsync._has_torch_cuda", e)
         return False, False
 
 
@@ -108,8 +110,8 @@ def latentsync_status() -> dict:
         try:
             import torch
             vram = torch.cuda.get_device_properties(0).total_memory / 1e9
-        except Exception:
-            pass
+        except Exception as e:
+            record_failure("lipsync.latentsync_status", e)
     return {
         "available": bool(ok and vram >= 7.5), "torch": has_torch,
         "cuda": cuda, "vram_gb": round(vram, 1),

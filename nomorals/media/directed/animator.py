@@ -11,6 +11,7 @@ direct_animate() routes: neural when the model is installed, warp fallback.
 """
 
 from __future__ import annotations
+from .failures import record_failure
 
 import os
 import subprocess
@@ -78,7 +79,8 @@ def mimicmotion_status() -> dict:
         import torch  # noqa: F401
         has_torch = True
         cuda = torch.cuda.is_available()
-    except Exception:
+    except Exception as e:
+        record_failure("animator.mimicmotion_status", e)
         has_torch, cuda = False, False
     repo = MIMIC_MODELS_DIR / "repo"
     weights = MIMIC_MODELS_DIR / "MimicMotion_1-1.pth"

@@ -20,6 +20,7 @@ never the ceiling. The only limit is physical plausibility.
 """
 
 from __future__ import annotations
+from .failures import record_failure
 
 import json
 import math
@@ -248,8 +249,8 @@ def _parse_finger_state(m: dict[str, Any]
     if "spread" in m:
         try:
             spread = max(0.2, min(2.5, float(m["spread"])))
-        except (TypeError, ValueError):
-            pass
+        except (TypeError, ValueError) as e:
+            record_failure("motion_score._parse_finger_state", e)
     fm = m.get("fingers")
     if isinstance(fm, dict):
         for fname, flex in fm.items():
@@ -1010,7 +1011,8 @@ def kimodo_status() -> dict[str, Any]:
         cuda = torch.cuda.is_available()
         vram = (torch.cuda.get_device_properties(0).total_memory / 1e9
                 if cuda else 0.0)
-    except Exception:
+    except Exception as e:
+        record_failure("motion_score.kimodo_status", e)
         has_torch, cuda, vram = False, False, 0.0
     ok = bool(has_torch and cuda and vram >= 15.0
               and (models_dir / "Kimodo-SOMA-RP-v1").exists())

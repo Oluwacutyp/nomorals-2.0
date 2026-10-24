@@ -15,6 +15,7 @@ From EXPANSION_MINING.md §3.
 """
 
 from __future__ import annotations
+from .failures import record_failure
 
 from pathlib import Path
 
@@ -102,7 +103,8 @@ def faceswap_status() -> dict:
     try:
         import onnxruntime  # noqa: F401
         ort = True
-    except Exception:
+    except Exception as e:
+        record_failure("ai_edit.faceswap_status", e)
         ort = False
     ok = ort and model.exists()
     return {
@@ -261,7 +263,8 @@ def expression_status() -> dict:
     try:
         import torch  # noqa: F401
         has_torch = True
-    except Exception:
+    except Exception as e:
+        record_failure("ai_edit.expression_status", e)
         has_torch = False
     ok = has_torch and repo.is_dir()
     return {

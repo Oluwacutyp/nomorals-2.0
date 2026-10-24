@@ -19,6 +19,7 @@ From EXPANSION_MINING.md §2.
 """
 
 from __future__ import annotations
+from .failures import record_failure
 
 import importlib.util
 import os
@@ -321,8 +322,8 @@ def extend_background(image: Image.Image, target_w: int, target_h: int,
                 pipe, image, prompt or "seamless extended background",
                 left=left, right=right, top=top, bottom=bottom)[0]
             return out, "neural-outpaint"
-        except Exception:
-            pass
+        except Exception as e:
+            record_failure("filler.extend_background", e)
     # CPU: edge-extrude + seam-band inpaint + pyramid blend
     # (imggen.edit.outpaint_cpu) — content-aware extension, no torch.
     ox, oy = (target_w - w) // 2, (target_h - h) // 2
@@ -365,7 +366,8 @@ def _find_pipeline():
                     return None
                 return SD15StudioAdapter(
                     SD15Pipeline.from_safetensors(entry["path"]))
-            except Exception:
+            except Exception as e:
+                record_failure("filler._find_pipeline", e)
                 return None
     return None
 
