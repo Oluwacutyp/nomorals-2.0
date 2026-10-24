@@ -31,6 +31,7 @@ from .contracts import (
     review_contract,
 )
 from ..core.logging_setup import get_logger
+from .failures import record_failure
 
 __all__ = [
     "DISCLAIMER",
@@ -139,7 +140,8 @@ def _parse_dates(text: str) -> list[tuple[float, str]]:
                 end = min(len(text), m.end() + 60)
                 found.append((ts, text[start:end]))
         return found
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("portfolio._parse_dates", exc)
         return []
 
 
@@ -354,8 +356,8 @@ class ContractPortfolio:
                     from .contracts import _money
                     amounts = _money(doc_text)
                     annual_value = max(amounts) if amounts else 0.0
-                except Exception:  # noqa: BLE001
-                    pass
+                except Exception as exc:  # noqa: BLE001
+                    record_failure("portfolio.ContractPortfolio.add_contract.money", exc)
             contract = Contract(
                 id=cid, name=name[:120], contract_type=review.contract_type,
                 parties=(parties or "").strip()[:200],
@@ -388,7 +390,8 @@ class ContractPortfolio:
         try:
             review = review_contract(doc_text, contract_type)
             ctype = review.contract_type
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("portfolio.ContractPortfolio.add_raw.review", exc)
             return None
         contract = self.add_contract(review, doc_text=doc_text,
                                      name=name or f"{ctype.title()} contract",
@@ -451,15 +454,18 @@ class ContractPortfolio:
     def _row_to_contract(r: Any) -> Contract:
         try:
             auto_renew = bool(r["auto_renew"]) if "auto_renew" in r.keys() else False
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("portfolio.ContractPortfolio._row_to_contract.auto_renew", exc)
             auto_renew = False
         try:
             annual_value = float(r["annual_value"] or 0) if "annual_value" in r.keys() else 0.0
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("portfolio.ContractPortfolio._row_to_contract.annual_value", exc)
             annual_value = 0.0
         try:
             supersedes = r["supersedes"] or "" if "supersedes" in r.keys() else ""
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("portfolio.ContractPortfolio._row_to_contract.supersedes", exc)
             supersedes = ""
         return Contract(
             id=r["id"], name=r["name"], contract_type=r["contract_type"],
@@ -475,7 +481,8 @@ class ContractPortfolio:
             rows = self._db.execute(
                 "SELECT * FROM contracts ORDER BY created_at DESC").fetchall()
             return [self._row_to_contract(r) for r in rows]
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("portfolio.ContractPortfolio.list_contracts", exc)
             return []
 
     def get_contract(self, contract_id: str) -> Contract | None:
@@ -487,7 +494,8 @@ class ContractPortfolio:
             if r is None:
                 return None
             return self._row_to_contract(r)
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("portfolio.ContractPortfolio.get_contract", exc)
             return None
 
     def obligations(self, contract_id: str = "",
@@ -508,7 +516,8 @@ class ContractPortfolio:
                     continue
                 try:
                     confirmed = bool(r["confirmed"]) if "confirmed" in r.keys() else False
-                except Exception:  # noqa: BLE001
+                except Exception as exc:  # noqa: BLE001
+                    record_failure("portfolio.ContractPortfolio.obligations.confirmed", exc)
                     confirmed = False
                 out.append(Obligation(
                     id=r["id"], contract_id=r["contract_id"], kind=r["kind"],
@@ -517,7 +526,8 @@ class ContractPortfolio:
                     done_at=r["done_at"] or 0.0, source=r["source"] or "",
                     confirmed=confirmed))
             return out
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("portfolio.ContractPortfolio.obligations", exc)
             return []
 
     def timeline(self, *, include_done: bool = False) -> list[TimelineEvent]:
@@ -538,7 +548,8 @@ class ContractPortfolio:
                     days_left=days_left, obligation_id=o.id))
             events.sort(key=lambda e: e.due_at)
             return events
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("portfolio.ContractPortfolio.timeline", exc)
             return []
 
     def needs_attention(self, days: float = 60) -> list[tuple[Contract, list[Obligation]]]:
@@ -565,7 +576,8 @@ class ContractPortfolio:
                 out.append((contracts[cid], obls))
             out.sort(key=lambda pair: min(o.due_at for o in pair[1]))
             return out
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("portfolio.ContractPortfolio.needs_attention", exc)
             return []
 
     # — manual obligations —
@@ -584,7 +596,8 @@ class ContractPortfolio:
                 float(due_at), source="manual")
             self._db.commit()
             return oid
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("portfolio.ContractPortfolio.track_obligation", exc)
             return None
 
     def mark_done(self, obligation_id: str) -> bool:
@@ -596,7 +609,8 @@ class ContractPortfolio:
                 (_now(), obligation_id))
             self._db.commit()
             return cur.rowcount > 0
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("portfolio.ContractPortfolio.mark_done", exc)
             return False
 
     # — extraction approval (ContractSafe pattern: accept / correct / skip) —
@@ -611,7 +625,8 @@ class ContractPortfolio:
                 (obligation_id,))
             self._db.commit()
             return cur.rowcount > 0
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("portfolio.ContractPortfolio.confirm_obligation", exc)
             return False
 
     def correct_obligation(self, obligation_id: str,
@@ -634,7 +649,8 @@ class ContractPortfolio:
                 params)
             self._db.commit()
             return cur.rowcount > 0
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("portfolio.ContractPortfolio.correct_obligation", exc)
             return False
 
     def remove_obligation(self, obligation_id: str) -> bool:
@@ -646,7 +662,8 @@ class ContractPortfolio:
                 "DELETE FROM obligations WHERE id = ?", (obligation_id,))
             self._db.commit()
             return cur.rowcount > 0
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("portfolio.ContractPortfolio.remove_obligation", exc)
             return False
 
     def unconfirmed_obligations(self) -> list[Obligation]:
@@ -665,7 +682,8 @@ class ContractPortfolio:
                     description=r["description"] or "",
                     due_at=r["due_at"] or 0.0, source=r["source"] or ""))
             return out
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("portfolio.ContractPortfolio.unconfirmed_obligations", exc)
             return []
 
     # — full-text search (Ironclad natural-language search pattern) —
@@ -705,7 +723,8 @@ class ContractPortfolio:
                 hits.append((self._row_to_contract(r), snippet, score))
             hits.sort(key=lambda h: h[2], reverse=True)
             return [(c, s) for c, s, _ in hits[:max(1, limit)]]
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("portfolio.ContractPortfolio.search_contracts", exc)
             return []
 
     # — renewal pipeline (Ironclad 30/60/90 dashboard) —
@@ -744,7 +763,8 @@ class ContractPortfolio:
             for key in out:
                 out[key].sort(key=lambda pair: pair[1].due_at)
             return out
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("portfolio.ContractPortfolio.renewal_pipeline", exc)
             return out
 
     def pipeline_text(self) -> str:
@@ -793,7 +813,8 @@ class ContractPortfolio:
                 (shift, contract_id))
             self._db.commit()
             return cur.rowcount or 0
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("portfolio.ContractPortfolio.roll_forward", exc)
             return 0
 
     # — portfolio value —
@@ -814,7 +835,8 @@ class ContractPortfolio:
                 "WHERE supersedes IS NOT NULL AND supersedes != '')"
             ).fetchone()[0]
             return float(total or 0.0)
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("portfolio.ContractPortfolio.portfolio_value", exc)
             return 0.0
 
     # — amendments (version chains) —
@@ -850,7 +872,8 @@ class ContractPortfolio:
             self._db.commit()
             contract.supersedes = contract_id
             return contract, review
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("portfolio.ContractPortfolio.amend", exc)
             return None
 
     def history(self, contract_id: str) -> list[Contract]:
@@ -873,7 +896,8 @@ class ContractPortfolio:
                     chain.append(c)
                     known.add(c.id)
             return chain
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("portfolio.ContractPortfolio.history", exc)
             return []
 
     # — SLA monitoring —
@@ -891,7 +915,8 @@ class ContractPortfolio:
                  (target or "").strip()[:120]))
             self._db.commit()
             return True
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("portfolio.ContractPortfolio.track_sla", exc)
             return False
 
     def report_sla_breach(self, contract_id: str, metric: str,
@@ -907,7 +932,8 @@ class ContractPortfolio:
                  (metric or "").strip()[:120]))
             self._db.commit()
             return cur.rowcount > 0
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("portfolio.ContractPortfolio.report_sla_breach", exc)
             return False
 
     def sla_status(self, contract_id: str = "") -> list[SLAStatus]:
@@ -927,7 +953,8 @@ class ContractPortfolio:
                 metric=r["metric"], target=r["target"],
                 breached=bool(r["breached"]), note=r["note"] or "")
                 for r in rows]
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("portfolio.ContractPortfolio.sla_status", exc)
             return []
 
     def sla_breaches(self) -> list[SLAStatus]:
@@ -1033,8 +1060,8 @@ def ensure_schedule(scheduler: Any) -> bool:
             jobs: list[Any] = []
             try:
                 jobs = scheduler.list_jobs()  # type: ignore[attr-defined]
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as exc:  # noqa: BLE001
+                record_failure("portfolio.ensure_schedule._ensure", exc)
             for j in jobs or []:
                 params = getattr(j, "parameters", {}) or {}
                 if getattr(j, "action", "") == PORTFOLIO_CHECK_ACTION:
