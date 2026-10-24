@@ -32,6 +32,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Callable, Sequence
 
+from .render_failures import record_failure
+
 __all__ = [
     "QualityLadder", "QUALITY_LADDER", "PostStep", "FidelityPipeline",
     "pick_best_model", "route", "POST_STEPS",
@@ -87,8 +89,11 @@ def _card_quality(card: Any) -> float:
         if hasattr(card, attr):
             try:
                 return float(getattr(card, attr) or 0.0)
-            except (TypeError, ValueError):
-                pass
+            except (TypeError, ValueError) as e:
+                # Absence is handled by the hasattr check above; a present
+                # attribute that will not convert is a data failure, and
+                # the card silently demotes to the next attr or 0.0.
+                record_failure("fidelity._card_quality", e)
     return 0.0
 
 
@@ -143,7 +148,8 @@ def route(task: str, registry: Any, *, min_quality: float = 0.0) -> dict[str, An
     if hasattr(registry, "select"):
         try:
             card = registry.select(task)
-        except Exception:
+        except Exception as e:
+            record_failure("fidelity.route:broker_select", e)
             card = None
         if card is not None:
             candidates = [card]
@@ -152,7 +158,8 @@ def route(task: str, registry: Any, *, min_quality: float = 0.0) -> dict[str, An
         try:
             candidates = list(registry.cards())
             source = "registry"
-        except Exception:
+        except Exception as e:
+            record_failure("fidelity.route:registry_cards", e)
             candidates = []
     if not candidates and isinstance(registry, (list, tuple)):
         candidates = list(registry)

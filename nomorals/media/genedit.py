@@ -21,6 +21,8 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
+from .render_failures import record_failure
+
 
 @dataclass
 class GenShot:
@@ -52,7 +54,8 @@ def _structure_prompt(prompt: str, backend: str,
         sp = structure(prompt, backend=backend, duration_s=duration_s)
         r = sp.render(backend)
         return r["prompt"], r["negative_prompt"]
-    except Exception:
+    except Exception as e:
+        record_failure("genedit._structure_prompt", e)
         return prompt, ""
 
 
@@ -136,7 +139,8 @@ def video_to_shot(video: str, prompt: str, *, strength: float = 0.6,
     try:
         from .imggen import pipeline as _imgpipe
         has_img2img = hasattr(_imgpipe, "img2img")
-    except Exception:
+    except Exception as e:
+        record_failure("genedit.video_to_shot:imgpipe_import", e)
         _imgpipe = None
         has_img2img = False
 
@@ -153,8 +157,11 @@ def video_to_shot(video: str, prompt: str, *, strength: float = 0.6,
             try:
                 _imgpipe.img2img(str(src), prompt, strength=strength,
                                  out_path=str(dst))
-            except Exception:
-                # honest fallback: copy through unstyled
+            except Exception as e:
+                # Fallback copies the frame through unstyled; the shot
+                # still reports backend="img2img", so the failure is
+                # recorded rather than vanishing into the render.
+                record_failure("genedit.video_to_shot:keyframe_img2img", e)
                 import shutil
                 shutil.copy(str(src), str(dst))
         else:
