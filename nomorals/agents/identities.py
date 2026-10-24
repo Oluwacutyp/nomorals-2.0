@@ -16,14 +16,15 @@ import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from .identities_failures import record_failure
 
 
 def _default_db() -> str:
     d = Path.home() / ".nomorals" / "agents"
     try:
         d.mkdir(parents=True, exist_ok=True)
-    except OSError:
-        pass
+    except OSError as e:
+        record_failure("_default_db", e)
     return str(d / "identities.db")
 
 
@@ -69,7 +70,8 @@ class IdentityStore:
                 )"""
             )
             self._db.commit()
-        except Exception:
+        except Exception as e:
+            record_failure("__init__", e)
             self._db = None
 
     # ── CRUD ──────────────────────────────────────────────────────────
@@ -97,7 +99,8 @@ class IdentityStore:
                 )
                 self._db.commit()
             return ident
-        except Exception:
+        except Exception as e:
+            record_failure("create", e)
             return None
 
     def get(self, identity_id: str) -> AgentIdentity | None:
@@ -109,7 +112,8 @@ class IdentityStore:
                     "SELECT * FROM identities WHERE id = ?", (identity_id,)
                 ).fetchone()
             return self._row_to_identity(row) if row else None
-        except Exception:
+        except Exception as e:
+            record_failure("get", e)
             return None
 
     def list(self) -> list[AgentIdentity]:
@@ -121,7 +125,8 @@ class IdentityStore:
                     "SELECT * FROM identities ORDER BY created_at"
                 ).fetchall()
             return [self._row_to_identity(r) for r in rows]
-        except Exception:
+        except Exception as e:
+            record_failure("list", e)
             return []
 
     def remove(self, identity_id: str) -> bool:
@@ -133,7 +138,8 @@ class IdentityStore:
                     "DELETE FROM identities WHERE id = ?", (identity_id,))
                 self._db.commit()
                 return cur.rowcount > 0
-        except Exception:
+        except Exception as e:
+            record_failure("remove", e)
             return False
 
     @staticmethod
