@@ -1025,7 +1025,8 @@ class SendEngine:
                     "text": (f"this campaign will cost ₦{total/100:,.0f}"
                              f" for {count} recipient{'s' if count != 1 else ''}"
                              f" ({provider or 'default'}, ₦{per/100:,.2f} each)")}
-        except Exception:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001
+            record_failure("send.SendEngine.estimate_campaign", e)
             return {"count": 0, "per_kobo": 0, "total_kobo": 0, "text": ""}
 
     # ── A/B testing ──
@@ -1047,7 +1048,8 @@ class SendEngine:
                  time.time()))
             self._db.commit()
             return True
-        except Exception:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001
+            record_failure("send.SendEngine.save_variant", e)
             return False
 
     def list_variants(self, template: str = "") -> list[dict]:
@@ -1064,7 +1066,8 @@ class SendEngine:
                     "SELECT template, variant_name, subject, created_at"
                     " FROM send_variants ORDER BY template, variant_name").fetchall()
             return [dict(r) for r in rows]
-        except Exception:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001
+            record_failure("send.SendEngine.list_variants", e)
             return []
 
     def get_variant(self, template: str, variant_name: str) -> dict | None:
@@ -1075,7 +1078,8 @@ class SendEngine:
                 "SELECT * FROM send_variants WHERE template = ? AND variant_name = ?",
                 ((template or "").strip(), (variant_name or "").strip())).fetchone()
             return dict(row) if row else None
-        except Exception:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001
+            record_failure("send.SendEngine.get_variant", e)
             return None
 
     def create_ab_campaign(self, name: str, template: str,
@@ -1101,7 +1105,8 @@ class SendEngine:
                     per_variant[variant] = per_variant.get(variant, 0) + 1
             return {"campaign_id": campaign_id, "per_variant": per_variant,
                     "name": name or campaign_id}
-        except Exception:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001
+            record_failure("send.SendEngine.create_ab_campaign", e)
             return {"campaign_id": "", "per_variant": {}}
 
     def ab_report(self, campaign_id: str) -> dict:
@@ -1125,7 +1130,8 @@ class SendEngine:
                 stats["fail_rate"] = round(
                     (stats.get("failed", 0) + stats.get("dead", 0)) / max(1, done), 3)
             return out
-        except Exception:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001
+            record_failure("send.SendEngine.ab_report", e)
             return out
 
     def ab_winner(self, campaign_id: str) -> dict:
@@ -1150,8 +1156,8 @@ class SendEngine:
                             " WHERE q.campaign_id = ? AND l.event = 'engaged'"
                             " GROUP BY q.variant", (campaign_id,)):
                         eng[r["variant"] or "control"] = int(r["c"])
-                except Exception:  # noqa: BLE001
-                    pass
+                except Exception as e:  # noqa: BLE001
+                    record_failure("send.SendEngine.ab_winner.engagement", e)
             if eng:
                 winner = max(eng.items(), key=lambda kv: kv[1])[0]
                 return {"winner": winner, "reason": f"most engagement ({eng[winner]})",
@@ -1162,7 +1168,8 @@ class SendEngine:
             w, stats = ranked[0]
             return {"winner": w, "reason": f"lowest fail rate ({stats['fail_rate']:.1%})",
                     "by": "fail_rate"}
-        except Exception:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001
+            record_failure("send.SendEngine.ab_winner", e)
             return {"winner": "", "reason": "unavailable"}
 
     # ── scheduled campaigns + seeds ──
@@ -1183,7 +1190,8 @@ class SendEngine:
                     queued += 1
             return {"campaign_id": campaign_id, "queued": queued,
                     "send_at": float(send_at or 0.0)}
-        except Exception:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001
+            record_failure("send.SendEngine.schedule_campaign", e)
             return {"campaign_id": "", "queued": 0, "send_at": 0.0}
 
     def send_seed(self, template: str, seeds: list[str],
@@ -1196,7 +1204,8 @@ class SendEngine:
                                  subject="[SEED] test send")
                     for s in seeds]
             return {"seeded": sum(1 for s in sent if s), "of": len(seeds)}
-        except Exception:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001
+            record_failure("send.SendEngine.send_seed", e)
             return {"seeded": 0, "of": 0}
 
     def campaign_report(self, campaign_id: str) -> dict:
@@ -1229,7 +1238,8 @@ class SendEngine:
                 int(r["c"]) * costs.get(r["provider"], 0)
                 for r in rows if r["status"] == "sent")
             return out
-        except Exception:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001
+            record_failure("send.SendEngine.campaign_report", e)
             return out
 
     def spam_check_template(self, name: str) -> dict:

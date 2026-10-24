@@ -4,6 +4,8 @@
 every public function is wrapped and returns a safe default on error.
 ``send``'s queue/delivery pipeline shares the contract: a failed enqueue,
 rate gate, cost gate, or status/cost write returns its safe default.
+``send``'s campaigns/variants region shares it too: a failed estimate,
+variant write, A/B report, or campaign funnel returns its empty shape.
 That contract is sound for ad-spend safety — but until now the caught
 failures vanished without a trace: a guardrail that silently failed to
 evaluate, or a store method silently returning ``False`` on a dead DB,

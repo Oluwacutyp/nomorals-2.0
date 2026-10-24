@@ -14,7 +14,8 @@ ledger); returns and control flow are unchanged.
 Deliberately NOT in scope here: ``process`` (debug-honest,
 ``_log.debug(..., exc_info=True)``), the template/provider methods,
 and the campaign/variant/warmup/suppression/blocklist methods — the
-remainder the scan pin below counts (47 sites).
+remainder the scan pin below counts (36 sites, after #133 converted
+the 11 campaigns/variants sites).
 """
 
 import ast
@@ -221,16 +222,16 @@ def test_all_ten_delivery_sites_record_in_source():
         assert site in found, f"missing record site {site}"
 
 
-def test_scan_send_remainder_is_exactly_47(monkeypatch):
+def test_scan_send_remainder_is_exactly_36(monkeypatch):
     # Suppression-off: noqa comments ignored, so converted sites (which
     # now bind and pass `e` to record_failure) drop out of the findings.
-    # 57 true sites before this pass - 10 converted = 47 remainder:
-    # 3 debug-honest (render_template, __init__, process) + 44 untouched
-    # (module helpers, templates/providers, campaigns/variants, warmup,
+    # 47 true sites before #133 - 11 campaigns/variants converted = 36
+    # remainder: 3 debug-honest (render_template, __init__, process) +
+    # 33 untouched (module helpers, templates/providers, warmup,
     # suppression/blocklist, status, get_engine).
     monkeypatch.setattr(es, "_noqa_suppresses", lambda line, rule: False)
     rep = scan(["nomorals/marketing/send.py"])
-    assert len(rep.findings) == 47
+    assert len(rep.findings) == 36
 
 
 def test_scan_send_flagged_is_clean():
