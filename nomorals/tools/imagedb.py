@@ -68,6 +68,7 @@ from typing import Any
 from ..core.errors import http_status_of
 from ..core.logging_setup import get_logger
 from ..core.http import HttpClient
+from nomorals.tools.imagedb_failures import record_failure
 
 _log = get_logger(__name__)
 
@@ -142,7 +143,8 @@ def jpeg_dimensions(data: bytes) -> tuple[int, int] | None:
                 height = int.from_bytes(data[i + 5:i + 7], "big")
                 width = int.from_bytes(data[i + 7:i + 9], "big")
                 return int(width), int(height)
-            except Exception:  # noqa: BLE001
+            except Exception as e:  # noqa: BLE001
+                record_failure("jpeg_dimensions", e)
                 return None
         if i + 4 > n:
             return None
@@ -240,7 +242,8 @@ def image_exif(path: str | Path) -> dict[str, Any]:
             raw = img.getexif()
             if not raw:
                 return {}
-    except Exception:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001
+        record_failure("image_exif:open", e)
         return {}
 
     tags = {TAGS.get(tag, tag): value for tag, value in raw.items()}
@@ -275,13 +278,13 @@ def image_exif(path: str | Path) -> dict[str, Any]:
     if exposure:
         try:
             out["exposure_time"] = str(exposure)
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as e:  # noqa: BLE001
+            record_failure("image_exif:exposure", e)
     if fnumber:
         try:
             out["f_number"] = float(fnumber)
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as e:  # noqa: BLE001
+            record_failure("image_exif:f_number", e)
     if iso:
         out["iso"] = iso
 
@@ -292,8 +295,8 @@ def image_exif(path: str | Path) -> dict[str, Any]:
             coords = _gps_decimal(gps)
             if coords:
                 out["gps"] = {"lat": coords[0], "lon": coords[1]}
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as e:  # noqa: BLE001
+        record_failure("image_exif:gps", e)
     return out
 
 
@@ -376,7 +379,8 @@ def _index_row(context: Any, digest: str, path: Path, size: int, fmt: str,
                  time.time(), seen_in),
             )
         return row
-    except Exception:  # noqa: BLE001 - indexing must never break a lookup
+    except Exception as e:  # noqa: BLE001 - indexing must never break a lookup
+        record_failure("_index_row", e)
         return None
 
 
@@ -413,8 +417,8 @@ def _lookup_impl(context: Any, ref: str, seen_in: str) -> dict[str, Any]:
                     distance = hamming(phash, other or "")
                     if distance is not None and 0 < distance <= 10:
                         near.append(f"{row['path']} (distance {distance})")
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as e:  # noqa: BLE001
+                record_failure("_lookup_impl:near_dupes", e)
     return {
         "ok": True,
         "ref": ref,
@@ -441,7 +445,8 @@ def _library_rows(context: Any) -> list[dict[str, Any]]:
         return []
     try:
         return list(db.query("SELECT hash, path, size, mime FROM image_index"))
-    except Exception:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001
+        record_failure("_library_rows", e)
         return []
 
 
@@ -521,7 +526,8 @@ def image_stats(context: Any) -> dict[str, Any]:
             _log.debug("skipping bad size value %r: %s", row.get("size"), e)
     try:
         dupe_groups = len(find_dupes(context, threshold=6)["groups"])
-    except Exception:  # noqa: BLE001 - stats must never fail on clustering
+    except Exception as e:  # noqa: BLE001 - stats must never fail on clustering
+        record_failure("image_stats:dupe_groups", e)
         dupe_groups = 0
     return {
         "ok": True,
@@ -592,11 +598,13 @@ def image_registry_for_context(context: Any = None,
         try:
             from ..storage.kv import KVStore
             reg.bind_store(KVStore(db))
-        except Exception:  # noqa: BLE001 - persistence is an
+        except Exception as e:  # noqa: BLE001 - persistence is an
+            record_failure("image_registry_for_context:bind_store", e)
             # enhancement; its absence never sinks a search
             pass
         return reg
-    except Exception:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001
+        record_failure("image_registry_for_context", e)
         return None
 
 
@@ -608,7 +616,8 @@ def _image_engine_desc(reg: Any, engine: str) -> Any:
         if not domain or reg is None:
             return None
         return reg.for_domain(domain)
-    except Exception:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001
+        record_failure("_image_engine_desc", e)
         return None
 
 
@@ -653,7 +662,8 @@ def ordered_image_engines(reg: Any,
         active.sort(key=lambda it: -reg.score(it[1])
                     if it[1] is not None else 0.0)
         return [e for e, _d in active] + [e for e, _d in inactive]
-    except Exception:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001
+        record_failure("ordered_image_engines", e)
         return pool
 
 
@@ -683,8 +693,8 @@ def _record_image_outcome(reg: Any, engine: str, kind: str,
         else:
             reg.record_outcome(desc, False, latency_s=latency_s,
                                error_class=error_class or "site_error")
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as e:  # noqa: BLE001
+        record_failure("_record_image_outcome", e)
 
 
 def _image_error_class(exc: BaseException) -> str:
@@ -744,7 +754,8 @@ def _dedupe_urls(raw: list[bytes], cap: int = 8) -> list[str]:
     for match in raw:
         try:
             url = match.decode("utf-8", "replace")
-        except Exception:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001
+            record_failure("_dedupe_urls", e)
             continue
         if url in seen:
             continue
@@ -820,7 +831,8 @@ def _bot_signalled(body: bytes) -> bool:
         from ..media.source_registry import _BOT_SIGNALS
 
         signals = _BOT_SIGNALS
-    except Exception:  # noqa: BLE001 - vocabulary fallback
+    except Exception as e:  # noqa: BLE001 - vocabulary fallback
+        record_failure("_bot_signalled:vocabulary", e)
         signals = ("captcha", "cloudflare", "just a moment",
                    "verify you are human", "are you a robot",
                    "access denied", "attention required")
