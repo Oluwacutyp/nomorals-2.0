@@ -20,6 +20,7 @@ import time
 from typing import Any, Optional
 
 from . import chain
+from .failures import record_failure
 
 __all__ = [
     "SERIAL_MIN_LAUNCHES", "SERIAL_RUG_RATIO",
@@ -444,7 +445,8 @@ def _pool_exists(rpc: Any, state: chain.BondingCurveState,
         pool = chain.pumpswap_pool_pda(state.creator, mint,
                                        state.quote_mint)
         return rpc.get_account(pool) is not None
-    except Exception:  # noqa: BLE001 - unprovable is not graduated
+    except Exception as exc:  # noqa: BLE001 - unprovable is not graduated
+        record_failure("dossier._pool_exists", exc)
         return False
 
 

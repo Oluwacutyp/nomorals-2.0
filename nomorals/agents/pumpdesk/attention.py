@@ -58,6 +58,7 @@ from __future__ import annotations
 import re
 import time
 from typing import Any, Callable, Optional
+from .failures import record_failure
 
 __all__ = [
     "verify_attention", "default_search_fn", "default_platform_fn",
@@ -105,7 +106,8 @@ def default_search_fn(context: Any) -> Callable:
                     "timestamp": getattr(r, "timestamp", None),
                 })
             return out
-        except Exception:  # noqa: BLE001 - no evidence, honestly
+        except Exception as exc:  # noqa: BLE001 - no evidence, honestly
+            record_failure("attention.default_search_fn._search", exc)
             return []
     return _search
 
@@ -120,7 +122,8 @@ def default_platform_fn(http_get: Callable = None) -> Callable:
         try:
             from .firehose import _urllib_get, fetch_coin_row
             return fetch_coin_row(http_get or _urllib_get, mint)
-        except Exception:  # noqa: BLE001 - no evidence, honestly
+        except Exception as exc:  # noqa: BLE001 - no evidence, honestly
+            record_failure("attention.default_platform_fn._platform", exc)
             return None
     return _platform
 
@@ -135,7 +138,8 @@ def default_dex_fn(http_get: Callable = None) -> Callable:
         try:
             from .outcomes import default_http_get, token_attention
             return token_attention(mint, http_get or default_http_get)
-        except Exception:  # noqa: BLE001 - no evidence, honestly
+        except Exception as exc:  # noqa: BLE001 - no evidence, honestly
+            record_failure("attention.default_dex_fn._dex", exc)
             return None
     return _dex
 
@@ -212,7 +216,8 @@ def verify_attention(dossier: dict[str, Any],
     if store is not None:
         try:
             launch = store.launch(mint)
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("attention.verify_attention.launch", exc)
             launch = None
     row: Optional[dict[str, Any]] = None
     if platform_fn is not None and mint:

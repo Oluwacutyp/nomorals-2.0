@@ -34,6 +34,7 @@ import json
 import os
 import time
 from typing import Any, Optional
+from .failures import record_failure
 
 __all__ = ["pumpdesk_dir", "PumpStore"]
 
@@ -169,8 +170,8 @@ class PumpStore:
                     data = json.load(fh)
                 if isinstance(data, dict):
                     return data
-            except (OSError, ValueError):
-                pass
+            except (OSError, ValueError) as exc:
+                record_failure("store.PumpStore._load_json", exc)
         return {}
 
     def _save_json(self, path: str, data: dict[str, Any]) -> None:

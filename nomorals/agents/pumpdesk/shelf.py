@@ -36,6 +36,7 @@ from __future__ import annotations
 import hashlib
 import time
 from typing import Any, Optional
+from .failures import record_failure
 
 __all__ = [
     "shelve_dossier", "shelve_wallet", "shelve_notable",
@@ -194,7 +195,8 @@ def shelve_notable(store: Any, context: Any = None,
     try:
         from .calls import CallLog
         called = {c.mint for c in CallLog(store.dir).calls()}
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("shelf.shelve_notable.calls", exc)
         called = set()
     shelved = {"dossiers": 0, "wallets": 0}
     for mint, d in store.dossiers().items():

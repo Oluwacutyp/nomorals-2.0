@@ -41,6 +41,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
 from .wsclient import TRANSPORT_DENIED_CLASS, TransportDeniedError
+from .failures import record_failure
 
 __all__ = [
     "PUMP_PROGRAM", "PUMPSWAP_PROGRAM", "SOL_MINT",
@@ -513,8 +514,8 @@ class SolanaRPC:
         if self.on_outcome is not None:
             try:
                 self.on_outcome(ok, time.time() - t0, error_class)
-            except Exception:  # noqa: BLE001 - reporting never sinks a call
-                pass
+            except Exception as exc:  # noqa: BLE001 - reporting never sinks a call
+                record_failure("chain.SolanaRPC._report", exc)
 
     #: bounded retries on HTTP 429 — the free public RPC throttles
     #: bursts (observed live 2026-10-22: getTokenLargestAccounts 429

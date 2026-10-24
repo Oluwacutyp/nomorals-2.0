@@ -24,6 +24,7 @@ from . import graph as _graph, learn as _learn, shelf as _shelf
 from . import outcomes as _outcomes, score as _score, watch as _watch
 from .calls import CallEngine, calibration, render_call
 from .store import PumpStore, pumpdesk_dir
+from .failures import record_failure
 
 __all__ = ["PumpDesk", "render_status", "render_calls"]
 
@@ -52,7 +53,8 @@ class PumpDesk:
             try:
                 from ..notifier import Notifier
                 notifier = Notifier(context)
-            except Exception:  # noqa: BLE001 - delivery is optional kit
+            except Exception as exc:  # noqa: BLE001 - delivery is optional kit
+                record_failure("desk.PumpDesk.__init__.notifier", exc)
                 notifier = None
         self.notifier = notifier
         self.calls = CallEngine(self.dir, notifier=notifier)
@@ -126,8 +128,8 @@ class PumpDesk:
             if desc is not None:
                 self.registry.record_outcome(
                     desc, ok, error_class=error_class)
-        except Exception:  # noqa: BLE001 - recording is advisory
-            pass
+        except Exception as exc:  # noqa: BLE001 - recording is advisory
+            record_failure("desk.PumpDesk._record_source", exc)
 
     def _reset_source_budgets(self) -> None:
         """Fresh per-cycle time budget for every RPC route
@@ -272,8 +274,8 @@ class PumpDesk:
                      "state": s["state"], "reason": s["reason"]}
                     for s in desk_state["sources"]],
             })
-        except Exception:  # noqa: BLE001 - journaling never sinks
-            pass
+        except Exception as exc:  # noqa: BLE001 - journaling never sinks
+            record_failure("desk.PumpDesk._journal_desk_state", exc)
 
     @property
     def firehose(self) -> _firehose.Firehose:
@@ -288,8 +290,8 @@ class PumpDesk:
                 try:
                     self._firehose.watch(
                         mint, chain.bonding_curve_pda(mint))
-                except Exception:  # noqa: BLE001
-                    pass
+                except Exception as exc:  # noqa: BLE001
+                    record_failure("desk.PumpDesk.firehose.watch", exc)
         return self._firehose
 
     # ── intake: the firehose sink ─────────────────────────────────
@@ -318,7 +320,8 @@ class PumpDesk:
                     self.refresh_dossier(mint)
             elif kind == "migration_raw":
                 self._resolve_migration_raw(payload)
-        except Exception:  # noqa: BLE001 - one bad event never kills
+        except Exception as exc:  # noqa: BLE001 - one bad event never kills
+            record_failure("desk.PumpDesk._ingest", exc)
             pass  # the firehose; the drop is visible in desk stats
 
     def _resolve_migration_raw(self, payload: dict[str, Any]) -> None:
@@ -379,7 +382,8 @@ class PumpDesk:
                 slot = int((tx or {}).get("slot") or 0)
                 if slot:
                     self.store.update_launch(mint, slot=slot)
-            except Exception:  # noqa: BLE001 - backfill is best-effort
+            except Exception as exc:  # noqa: BLE001 - backfill is best-effort
+                record_failure("desk.PumpDesk.refresh_dossier.slot", exc)
                 slot = 0
         if slot and not self.store.trades(mint):
             self._backfill_slot_trades(mint, slot)
@@ -408,7 +412,8 @@ class PumpDesk:
         try:
             curve = chain.bonding_curve_pda(mint)
             sigs = self.rpc.get_signatures(curve, limit=100)
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("desk.PumpDesk._backfill_slot_trades.setup", exc)
             return 0
         added = 0
         for row in sigs:
@@ -418,7 +423,8 @@ class PumpDesk:
                 continue
             try:
                 tx = self.rpc.get_transaction(row.get("signature", ""))
-            except Exception:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001
+                record_failure("desk.PumpDesk._backfill_slot_trades.row", exc)
                 continue
             logs = ((tx or {}).get("meta") or {}).get("logMessages") or []
             for ev in chain.decode_log_lines(logs):
@@ -665,8 +671,8 @@ class PumpDesk:
                                  "subject": "pumpdesk stand-down"})
                 reported.append({"domain": "stand-down",
                                  "tier": res.get("tier", "")})
-            except Exception:  # noqa: BLE001 - alerting never sinks
-                pass
+            except Exception as exc:  # noqa: BLE001 - alerting never sinks
+                record_failure("desk.PumpDesk._health_report.standdown", exc)
         elif dead and self.notifier is not None:
             by_domain = {s["domain"]: s for s in st["sources"]}
             for s in dead:
@@ -684,8 +690,8 @@ class PumpDesk:
                                      "subject": s["domain"]})
                     reported.append({"domain": s["domain"],
                                      "tier": res.get("tier", "")})
-                except Exception:  # noqa: BLE001 - alerting never sinks
-                    pass
+                except Exception as exc:  # noqa: BLE001 - alerting never sinks
+                    record_failure("desk.PumpDesk._health_report.feed", exc)
         return {"sources": st["sources"], "dead": dead,
                 "desk_state": desk_state["state"],
                 "alerted": reported}

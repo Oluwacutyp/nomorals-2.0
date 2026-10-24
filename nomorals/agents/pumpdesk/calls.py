@@ -29,6 +29,7 @@ import os
 import time
 from dataclasses import asdict, dataclass, field
 from typing import Any, Optional
+from .failures import record_failure
 
 __all__ = [
     "BASE_RATE_GRADUATION", "TARGET_MULTIPLE", "INVALIDATION_FRACTION",
@@ -277,7 +278,8 @@ class CallEngine:
         if snapshot_fn is not None:
             try:
                 snap = snapshot_fn(c.mint)
-            except Exception:  # noqa: BLE001 - a dead grader is no data
+            except Exception as exc:  # noqa: BLE001 - a dead grader is no data
+                record_failure("calls.CallEngine._grade.snapshot", exc)
                 snap = None
         if snap:
             c.graded_via = "dexscreener"

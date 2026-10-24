@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import os
 from typing import Any
+from .failures import record_failure
 
 __all__ = [
     "MEMCOIN_SEEDS", "ensure_pump_sources", "pump_status",
@@ -103,16 +104,16 @@ def ensure_pump_sources(registry: Any) -> list[dict[str, Any]]:
             registry._by_key[desc.key] = desc
             try:
                 registry._persist()
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as exc:  # noqa: BLE001
+                record_failure("sources.ensure_pump_sources.update", exc)
             out.append({"domain": domain, "updated": True})
             continue
         added = registry.register(desc)
         if added:
             try:
                 registry._persist()
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as exc:  # noqa: BLE001
+                record_failure("sources.ensure_pump_sources.register", exc)
         out.append({"domain": domain, "registered": bool(added)})
     return out
 
@@ -131,8 +132,8 @@ def pump_registry_for_context(context: Any = None,
         if db is not None:
             from ...storage.kv import KVStore
             reg.bind_store(KVStore(db))
-    except Exception:  # noqa: BLE001 - persistence is an enhancement
-        pass
+    except Exception as exc:  # noqa: BLE001 - persistence is an enhancement
+        record_failure("sources.pump_registry_for_context.bind", exc)
     return reg
 
 
