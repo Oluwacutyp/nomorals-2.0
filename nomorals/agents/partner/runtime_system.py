@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 from typing import Any
+from .failures import record_failure
 
 
 class _ConnectorsChatError(Exception):
@@ -154,8 +155,8 @@ class RuntimeSystemMixin:
             ws = Workspace(self.context)
             try:
                 setattr(self.context, "workspace", ws)
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as exc:  # noqa: BLE001
+                record_failure("runtime_system._control_workspace", exc)
         parts = [t for t in (tail or "").split() if t]
         verb = (parts[0].lower() if parts else "status")
         value = parts[1] if len(parts) > 1 else ""
@@ -447,7 +448,8 @@ class RuntimeSystemMixin:
                                                 caption=f"{v['count']} working proxies "
                                                         f"(fastest first)")
                 sent = bool(getattr(result, "ok", False))
-            except Exception:  # noqa: BLE001 - console adapter
+            except Exception as exc:  # noqa: BLE001 - console adapter
+                record_failure("runtime_system._control_proxy", exc)
                 sent = False
             if sent:
                 return (f"🧱 sent the clean file — {v['count']} working proxies "
@@ -856,7 +858,8 @@ class RuntimeSystemMixin:
                     conn = create_connector(cid, vault, http=http)
                     cred = conn._load_credential()
                     mark = f"✅ {cred.username}" if cred else "❌"
-                except Exception:  # noqa: BLE001 - one bad adapter ≠ dead table
+                except Exception as exc:  # noqa: BLE001 - one bad adapter ≠ dead table
+                    record_failure("runtime_system._control_connectors:859", exc)
                     mark = "⚠️"
                 lines.append(f"  {mark:24s} {cid:18s} {info['name']}")
             lines.append("detail: /connectors status <name> · "
@@ -892,7 +895,8 @@ class RuntimeSystemMixin:
         # verb == "connect": the guided flow
         try:
             existing = conn._load_credential()
-        except Exception:  # noqa: BLE001 - treat as not connected
+        except Exception as exc:  # noqa: BLE001 - treat as not connected
+            record_failure("runtime_system._control_connectors:895", exc)
             existing = None
         if existing is not None:
             return (f"{conn.name} is already connected as {existing.username} "
@@ -1060,8 +1064,8 @@ class RuntimeSystemMixin:
                                    if isinstance(t, dict)).strip()
                     if text:
                         return text[:80]
-        except Exception:  # noqa: BLE001 - best effort only
-            pass
+        except Exception as exc:  # noqa: BLE001 - best effort only
+            record_failure("runtime_system._notion_title_of", exc)
         return "(untitled)"
 
     def _notion_resolve_db(self, conn: Any, ref: str) -> str:
@@ -1174,8 +1178,8 @@ class RuntimeSystemMixin:
             if dt.tzinfo is not None:
                 dt = dt.astimezone(_zone(tz_name))
             when = dt.strftime("%a %H:%M")
-        except Exception:  # noqa: BLE001 - keep the raw value
-            pass
+        except Exception as exc:  # noqa: BLE001 - keep the raw value
+            record_failure("runtime_system._gcal_line", exc)
         loc = f" @ {ev['location']}" if ev.get("location") else ""
         return f"{when} — {summary}{loc}"
 
@@ -1344,7 +1348,8 @@ class RuntimeSystemMixin:
         for b in conn.list_boards():
             try:
                 lists = conn.list_lists(b.get("id", ""))
-            except Exception:  # noqa: BLE001 - skip unreadable boards
+            except Exception as exc:  # noqa: BLE001 - skip unreadable boards
+                record_failure("runtime_system._trello_resolve_list", exc)
                 continue
             for li in lists:
                 name = str(li.get("name", ""))

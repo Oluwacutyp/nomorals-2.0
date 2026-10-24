@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 
 from ...wisdom import PracticeError, WisdomKeeper
+from .failures import record_failure
 
 _log = logging.getLogger(__name__)
 
@@ -218,10 +219,11 @@ class RuntimeWisdomMixin:
                 for e in keeper.corpus.list():
                     try:
                         ing.ingest_entry(e)
-                    except Exception:  # noqa: BLE001 - one bad book, not a dead run
+                    except Exception as exc:  # noqa: BLE001 - one bad book, not a dead run
+                        record_failure("runtime_wisdom._bg:221", exc)
                         continue
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as exc:  # noqa: BLE001
+                record_failure("runtime_wisdom._bg:223", exc)
 
         threading.Thread(target=_bg, daemon=True,
                          name="wisdom-seed").start()
@@ -234,7 +236,8 @@ class RuntimeWisdomMixin:
             return "ask me anything — e.g. /wisdom when was the earth created?"
         try:
             st = keeper.status()["corpus"]
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("runtime_wisdom._control_wisdom_ask", exc)
             st = {}
         try:
             ans = keeper.ask(query, top=5)

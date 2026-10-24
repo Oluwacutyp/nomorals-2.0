@@ -1,6 +1,7 @@
 """RuntimeLiveMixin: PartnerRuntime command group (live)."""
 
 from __future__ import annotations
+from .failures import record_failure
 
 
 class RuntimeLiveMixin:
@@ -92,8 +93,8 @@ class RuntimeLiveMixin:
                     "beats: " + ", ".join(st["beats"])
                     + (f" | pins: {', '.join(st['pins'])}"
                        if st["pins"] else ""))
-            except Exception:  # noqa: BLE001 - status extras are best-effort
-                pass
+            except Exception as exc:  # noqa: BLE001 - status extras are best-effort
+                record_failure("runtime_live._control_news", exc)
             return "\n".join(lines)
         if verb == "poll":
             # No notifier on this surface (see the run path's note):
@@ -188,7 +189,8 @@ class RuntimeLiveMixin:
                         return "never"
                     from datetime import datetime
                     return datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M")
-                except Exception:  # noqa: BLE001
+                except Exception as exc:  # noqa: BLE001
+                    record_failure("runtime_live._last_run_text", exc)
                     return "?"
 
             def _status_line(s: str) -> str:
@@ -269,8 +271,8 @@ class RuntimeLiveMixin:
             try:
                 for row in self.context.db.query("SELECT domain, COUNT(*) AS n FROM research_log GROUP BY domain"):
                     counts[str(row.get("domain"))] = int(row.get("n", 0))
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as exc:  # noqa: BLE001
+                record_failure("runtime_live._control_research", exc)
             lines = [f"research feature: on — domains: {', '.join(sorted(DOMAINS))}"]
             lines.append(f"stored digests: {sum(counts.values())}" +
                          (f" ({', '.join(f'{d} {n}' for d, n in sorted(counts.items()))})" if counts else ""))

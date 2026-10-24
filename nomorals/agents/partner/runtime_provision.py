@@ -34,6 +34,7 @@ import time
 from typing import Any
 
 from ...core.logging_setup import get_logger
+from .failures import record_failure
 
 _log = get_logger(__name__)
 
@@ -205,8 +206,8 @@ class RuntimeProvisionMixin:
                     view.finish(result.message)
                 else:
                     view.fail(result.message)
-            except Exception:  # noqa: BLE001 - cosmetic
-                pass
+            except Exception as exc:  # noqa: BLE001 - cosmetic
+                record_failure("runtime_provision._run_provision_drive", exc)
         if result.ok and chat_key:
             retry_out = self._run_pending_provision_retry(
                 chat_key, result.service_id)
@@ -313,7 +314,8 @@ class RuntimeProvisionMixin:
         try:
             if not self._is_operator(message):
                 return ""
-        except Exception:  # noqa: BLE001 - no offer beats a crash
+        except Exception as exc:  # noqa: BLE001 - no offer beats a crash
+            record_failure("runtime_provision._provision_offer_for_missing", exc)
             return ""
         from ...accounts.provisioning import get_provision_service
 
@@ -508,8 +510,8 @@ class RuntimeProvisionMixin:
         if old is not None:
             try:
                 old.detach()
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as exc:  # noqa: BLE001
+                record_failure("runtime_provision._control_browser_watch", exc)
         view = LiveView.attach(
             sessions[name], chat, adapter,
             task_label=f"watching: {name}")

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import time
 from typing import Any, Callable
+from .failures import record_failure
 
 def _key_set(raw: str) -> set[str]:
     from ...social.chat.gateway import parse_chat_keys
@@ -31,8 +32,8 @@ def _direct_approve(context: Any, gateway: Any, proposal_id: str) -> dict[str, A
             "UPDATE proactive_log SET status = ?, acted_at = ? WHERE id = ?",
             (status, time.time(), proposal_id),
         )
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as exc:  # noqa: BLE001
+        record_failure("approvals._direct_approve", exc)
     return {"ok": result.ok, "status": status, "error": result.error}
 
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import threading
 import time
+from .failures import record_failure
 
 class RuntimeSearchMixin:
     """RuntimeSearchMixin for :class:`PartnerRuntime`."""
@@ -25,8 +26,8 @@ class RuntimeSearchMixin:
         try:
             self.gateway.send(chat.platform, chat,
                                f"⏳ {mode} research: {query[:80]}\nthis takes a moment — the report comes right here.")
-        except Exception:  # noqa: BLE001 - progress note is best-effort
-            pass
+        except Exception as exc:  # noqa: BLE001 - progress note is best-effort
+            record_failure("runtime_search._control_search", exc)
         started = time.time()
         try:
             report = SearchEngine(self.context).run(query, mode=mode,
@@ -122,7 +123,8 @@ class RuntimeSearchMixin:
                 b = forge.load(slug)
                 return (f"  {slug} — {b.status} · {b.chapters_written}/{len(b.chapters)} ch · "
                         f"{b.total_words} words")
-            except Exception:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001
+                record_failure("runtime_search._one_line", exc)
                 return f"  {slug}"
 
         try:
@@ -254,8 +256,8 @@ class RuntimeSearchMixin:
                     "research → outline → write → pdf → straight to this chat. "
                     "check progress: /book status " + slug,
                 )
-            except Exception:  # noqa: BLE001 - start note is best-effort
-                pass
+            except Exception as exc:  # noqa: BLE001 - start note is best-effort
+                record_failure("runtime_search._control_book", exc)
 
             def _work() -> None:
                 try:
@@ -431,8 +433,8 @@ class RuntimeSearchMixin:
                                   "📚 ingesting the whole story into "
                                   "its library — resuming where it "
                                   "left off…")
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as exc:  # noqa: BLE001
+                record_failure("runtime_search._control_novel:434", exc)
 
             def _wsync() -> None:
                 try:
@@ -496,8 +498,8 @@ class RuntimeSearchMixin:
                 self.gateway.send(chat.platform, chat,
                                   f"✍️ continuing the story — {n} chapter(s) "
                                   f"in its own voice…")
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as exc:  # noqa: BLE001
+                record_failure("runtime_search._control_novel:499", exc)
 
             def _work() -> None:
                 try:
@@ -545,8 +547,8 @@ class RuntimeSearchMixin:
             try:
                 self.gateway.send(chat.platform, chat,
                                   f"✍️ shaping your {genre} {mode}…")
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as exc:  # noqa: BLE001
+                record_failure("runtime_search._control_novel:548", exc)
 
             def _wstart() -> None:
                 try:

@@ -7,6 +7,7 @@ import re
 import time
 from typing import Any, Callable
 from ...core.text import truncate
+from .failures import record_failure
 
 
 #: natural-language duration: "in the next 2 minutes", "for 1 hour", "next 30s"
@@ -177,7 +178,8 @@ class RuntimeIntelMixin:
                     if isinstance(best.get("output"), dict) else "decoded file")
                 if getattr(res, "ok", False):
                     sent = " (file sent)"
-            except Exception:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001
+                record_failure("runtime_intel._control_decode", exc)
                 sent = f" (saved at {v['saved_to']})"
         return text + sent
 

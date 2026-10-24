@@ -8,6 +8,7 @@ import time
 from ...core.logging_setup import get_logger
 from ...storage.kv import KVStore
 from .approvals import _key_set
+from .failures import record_failure
 _log = get_logger(__name__)
 
 
@@ -35,7 +36,8 @@ class RuntimeMetaMixin:
             return "n/a"
         try:
             snap = snapshot()
-        except Exception:  # noqa: BLE001 - status must never crash a chat
+        except Exception as exc:  # noqa: BLE001 - status must never crash a chat
+            record_failure("runtime_meta._model_status_line", exc)
             return "n/a"
         active = str(snap.get("active") or "?")
         chain = [str(p) for p in (snap.get("chain") or [])]
@@ -181,8 +183,8 @@ class RuntimeMetaMixin:
         self.settings.partner.autonomy_mode = mode
         try:
             KVStore(self.context.db).set("partner.autonomy_mode", {"mode": mode})
-        except Exception:  # noqa: BLE001 - a write failure must not block the switch
-            pass
+        except Exception as exc:  # noqa: BLE001 - a write failure must not block the switch
+            record_failure("runtime_meta._control_mode", exc)
         try:
             from ..autonomy import AutonomyAgent
 
@@ -277,11 +279,13 @@ class RuntimeMetaMixin:
             game was live). Never raises."""
             try:
                 engine = self._game_engine()  # type: ignore[attr-defined]
-            except Exception:  # noqa: BLE001 - no engine, no live game
+            except Exception as exc:  # noqa: BLE001 - no engine, no live game
+                record_failure("runtime_meta._end_live_game:280", exc)
                 return ""
             try:
                 live = engine.live(target)
-            except Exception:  # noqa: BLE001 - a broken lookup is not a game
+            except Exception as exc:  # noqa: BLE001 - a broken lookup is not a game
+                record_failure("runtime_meta._end_live_game:284", exc)
                 return ""
             if live is None:
                 return ""
@@ -834,8 +838,8 @@ class RuntimeMetaMixin:
         try:
             from ...llm.power import invalidate as _invalidate_power
             _invalidate_power(self.context)
-        except Exception:  # noqa: BLE001 - power cache is best-effort
-            pass
+        except Exception as exc:  # noqa: BLE001 - power cache is best-effort
+            record_failure("runtime_meta._control_model", exc)
         _log.info("model switched live: provider=%s chain=%s", provider, chain)
         return f"model switched — now: {self._model_status_line()}"
 
@@ -890,7 +894,8 @@ class RuntimeMetaMixin:
 
         try:
             snap = router.stats_snapshot()
-        except Exception:  # noqa: BLE001 - status must never crash a chat
+        except Exception as exc:  # noqa: BLE001 - status must never crash a chat
+            record_failure("runtime_meta._control_providers:893", exc)
             snap = {}
         health = snap.get("health") or {}
         active = str(snap.get("active") or "")
@@ -921,7 +926,8 @@ class RuntimeMetaMixin:
             if provider is not None:
                 try:
                     model_id = str(provider.model_id or "")
-                except Exception:  # noqa: BLE001
+                except Exception as exc:  # noqa: BLE001
+                    record_failure("runtime_meta._control_providers:924", exc)
                     model_id = ""
             h = health.get(name) or {}
             ok, elapsed, probe_detail = live.get(name, (False, 0.0, ""))

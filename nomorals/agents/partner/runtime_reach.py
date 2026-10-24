@@ -18,6 +18,7 @@ import time
 from typing import Any
 
 from ...core.logging_setup import get_logger
+from .failures import record_failure
 
 _log = get_logger(__name__)
 
@@ -160,7 +161,8 @@ class RuntimeReachMixin:
             for m in msgs[:5]:
                 try:
                     full = prov.read_message(addr, m)
-                except Exception:  # noqa: BLE001 - one bad read skips
+                except Exception as exc:  # noqa: BLE001 - one bad read skips
+                    record_failure("runtime_reach._control_checkmail", exc)
                     continue
                 if full.code:
                     return (f"code: {full.code}\nfrom: {full.sender}\n"

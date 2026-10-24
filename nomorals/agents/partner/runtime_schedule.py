@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import time
 from typing import Any, Callable
+from .failures import record_failure
 
 
 def _notify_row_excerpt(row: Any) -> str:
@@ -29,8 +30,8 @@ def _notify_row_excerpt(row: Any) -> str:
                      if line.strip()), "")
                 if first:
                     return " ".join(first.split())
-    except Exception:  # noqa: BLE001 - the view must never break on a row
-        pass
+    except Exception as exc:  # noqa: BLE001 - the view must never break on a row
+        record_failure("runtime_schedule._notify_row_excerpt", exc)
     return str(row.get("body", "")).replace("\n", " ")[:80]
 
 class RuntimeScheduleMixin:
@@ -427,7 +428,8 @@ class RuntimeScheduleMixin:
                 try:
                     attempts = notifier.delivery_attempts(
                         str(row.get("id") or ""))[:3]
-                except Exception:  # noqa: BLE001 - detail is best-effort
+                except Exception as exc:  # noqa: BLE001 - detail is best-effort
+                    record_failure("runtime_schedule._control_notify", exc)
                     attempts = []
                 for a in attempts:
                     amark = attempt_marks.get(str(a.get("state") or ""), "?")
@@ -520,8 +522,8 @@ class RuntimeScheduleMixin:
                     brief_note = f" (structured: {len(brief.steps)} steps)"
                 elif brief.by == "heuristic":
                     brief_note = " (structured heuristically)"
-            except Exception:  # noqa: BLE001 - structuring must never block the queue
-                pass
+            except Exception as exc:  # noqa: BLE001 - structuring must never block the queue
+                record_failure("runtime_schedule._control_task:523", exc)
             result = agent.add(queued)
             if not result.get("ok"):
                 return f"could not add: {result.get('error')}"
@@ -532,8 +534,8 @@ class RuntimeScheduleMixin:
             chat = self._ref_from_key(chat_key)
             try:
                 self.gateway.send(chat.platform, chat, "⏳ executing directive…")
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as exc:  # noqa: BLE001
+                record_failure("runtime_schedule._control_task:535", exc)
             result = agent.run(did)
             if not result.get("ok"):
                 return f"task: {result.get('error')}"

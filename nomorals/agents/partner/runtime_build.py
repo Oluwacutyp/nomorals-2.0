@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import time
 from ...partner.gating import gate_decision, is_owner_chat, is_restricted
+from .failures import record_failure
 
 class RuntimeBuildMixin:
     """RuntimeBuildMixin for :class:`PartnerRuntime`."""
@@ -32,8 +33,8 @@ class RuntimeBuildMixin:
         try:
             self.gateway.send(chat.platform, chat,
                               f"🐝 swarm: {goal[:80]}\n{workers} worker(s) — this takes a few minutes.")
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:  # noqa: BLE001
+            record_failure("runtime_build._control_swarm", exc)
         started = time.time()
         try:
             result = SwarmAgent(self.context, brain=self.brain, gateway=self.gateway).run(
@@ -55,8 +56,8 @@ class RuntimeBuildMixin:
             self.gateway.send(chat.platform, chat,
                               f"🔬 research swarm: {topic[:80]}\n"
                               f"several angles at once — a minute or two.")
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:  # noqa: BLE001
+            record_failure("runtime_build._control_swarm_research", exc)
         started = time.time()
         try:
             swarm = ResearchSwarm(self.context)
@@ -79,8 +80,8 @@ class RuntimeBuildMixin:
         chat = self._ref_from_key(chat_key)
         try:
             self.gateway.send(chat.platform, chat, f"⏳ coding bot: {task[:70]}\n(draft → run → fix, up to 5 tries)")
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:  # noqa: BLE001
+            record_failure("runtime_build._control_code", exc)
         started = time.time()
         try:
             result = CodingAgent(self.context).run(task, max_iterations=5, timeout=120.0)
@@ -463,7 +464,8 @@ class RuntimeBuildMixin:
                 try:
                     agent = getattr(pipeline, "evolution", None)
                     evo = agent._load(str(evo_id)) if agent is not None else None
-                except Exception:  # noqa: BLE001 — fallback is fine
+                except Exception as exc:  # noqa: BLE001 — fallback is fine
+                    record_failure("runtime_build._control_upgrade", exc)
                     evo = None
             return render_upgrade_diff(proposal, evo_proposal=evo)
 
