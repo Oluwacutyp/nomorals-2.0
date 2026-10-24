@@ -371,16 +371,22 @@ def test_converted_brief_from_row_term_bands_records_and_defaults():
     assert "briefs.BriefStore._brief_from_row.term_bands" in _sites()
 
 
-def test_converted_score_virality_records_and_keeps_neutral_voice():
-    # The lazy `from ...social.voice import virality_score` is beyond
-    # the top-level package, so it always fails: brand_voice stays
-    # 50.0 and the failure is now journaled instead of silent.
+def test_fixed_score_virality_returns_live_score_not_neutral():
+    # Import fix: the lazy `from ..social.voice import virality_score`
+    # now resolves. It was `...social.voice` — beyond the top-level
+    # package — so it always failed and brand_voice stuck at the 50.0
+    # fallback. brand_voice is now the live heuristic score and nothing
+    # is recorded at the virality site.
     from nomorals.marketing.briefs import BriefStore, ContentBrief
+    from nomorals.social.voice import virality_score
     store = BriefStore(":memory:")
     brief = ContentBrief(topic="rent", keywords=["rent"])
-    scored = store.score_draft("Rent in Lagos explained here.", brief)
-    assert scored.brand_voice == 50.0
-    assert "briefs.BriefStore.score_draft.virality" in _sites()
+    text = "Rent in Lagos explained here."
+    scored = store.score_draft(text, brief)
+    assert scored.brand_voice == round(
+        virality_score(text, platform="x").score, 1)
+    assert scored.brand_voice != 50.0
+    assert "briefs.BriefStore.score_draft.virality" not in _sites()
 
 
 def test_converted_save_draft_records_and_never_raises():
@@ -417,8 +423,12 @@ def test_converted_schedule_queue_records_and_still_reports_ok():
 
 
 def test_converted_schedule_scheduler_records_and_still_reports_ok():
-    # Same beyond-top-level import failure as virality: schedule_post
-    # never imports, the scheduler step is skipped, ok stays True.
+    # Import fix: `from ..social.drafts import schedule_post` now resolves
+    # (it was `...social.content_pipeline` — beyond the top-level package,
+    # and content_pipeline never exported the name). With scheduler=object()
+    # and no queue, the step now fails on queue.schedule (None has no
+    # schedule) instead of on the import — still recorded, ok stays True,
+    # and no ImportError is recorded anywhere.
     from nomorals.marketing.briefs import BriefStore
     store = BriefStore(":memory:")
     brief = store.build_brief("lagos rent")
@@ -428,6 +438,7 @@ def test_converted_schedule_scheduler_records_and_still_reports_ok():
                                scheduler=object())
     assert res["ok"] is True
     assert "briefs.BriefStore.schedule_draft.scheduler" in _sites()
+    assert all(f.exc_type != "ImportError" for f in mk.recent_failures())
 
 
 def test_converted_stale_outcome_records_and_returns_empty():

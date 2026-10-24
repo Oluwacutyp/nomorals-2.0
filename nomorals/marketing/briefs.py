@@ -648,7 +648,7 @@ class BriefStore:
             # Brand voice: #44's virality_score (heuristic signals).
             brand_voice = 50.0
             try:
-                from ...social.voice import virality_score
+                from ..social.voice import virality_score
                 vs = virality_score(text, platform=platform)
                 brand_voice = float(vs.score)
             except Exception as exc:  # noqa: BLE001
@@ -868,7 +868,7 @@ class BriefStore:
                     record_failure("briefs.BriefStore.schedule_draft.queue", exc)
             if scheduler is not None:
                 try:
-                    from ...social.content_pipeline import schedule_post
+                    from ..social.drafts import schedule_post
                     schedule_post(scheduler, queue, draft_id, when_ts,
                                   platforms=[draft.platform])
                 except Exception as exc:  # noqa: BLE001
