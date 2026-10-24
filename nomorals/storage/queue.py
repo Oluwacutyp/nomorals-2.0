@@ -24,6 +24,7 @@ from ..core.ids import new_id
 from ..core.logging_setup import get_logger
 from ..core.style import active_theme, header, kv_lines, styled_table
 from .db import Database
+from .failures import record_failure
 
 __all__ = ["Job", "QueueFull", "WorkQueue", "next_cron_fire", "parse_cron"]
 
@@ -91,7 +92,8 @@ class WorkQueue:
         if self._lock_column is None:
             try:
                 cols = {r["name"] for r in self.db.table_info(self.TABLE)}
-            except Exception:  # noqa: BLE001 - table may not exist yet
+            except Exception as e:  # table may not exist yet
+                record_failure('queue.WorkQueue._has_lock_column', e)
                 cols = set()
             self._lock_column = "queueing_lock" in cols
         return self._lock_column

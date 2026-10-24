@@ -25,6 +25,7 @@ from ..core.errors import NotFound, StorageError
 from ..core.logging_setup import get_logger
 from ..core.style import active_theme, header, kv_lines, styled_table
 from .db import Database
+from .failures import record_failure
 
 __all__ = ["BlobInfo", "BlobStore"]
 
@@ -482,8 +483,8 @@ class BlobStore:
                     trash_count += 1
                     try:
                         trash_bytes += path.stat().st_size
-                    except OSError:
-                        pass
+                    except OSError as e:
+                        record_failure('blob.BlobStore.describe', e)
         size = int(row.get("size") or 0)
         stored = int(row.get("stored") or 0)
         return {
@@ -627,8 +628,8 @@ class BlobStore:
             try:
                 if trash in path.resolve().parents:
                     continue
-            except OSError:
-                pass
+            except OSError as e:
+                record_failure('blob.BlobStore.orphans', e)
             name = path.stem if path.suffix == ".gz" else path.name
             if len(name) == 64 and name not in indexed:
                 found.append(str(path))

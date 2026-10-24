@@ -30,6 +30,7 @@ from ..core.ids import new_id
 from ..core.logging_setup import get_logger
 from ..core.style import active_theme, header, kv_lines
 from .db import Database
+from .failures import record_failure
 
 __all__ = ["VectorRecord", "VectorSearchHit", "VectorStore", "cosine", "normalize"]
 
@@ -145,7 +146,8 @@ class VectorStore:
             try:
                 from .. import native as _native
                 self._native = bool(_native.available())
-            except Exception:  # noqa: BLE001 — no extension is not an error
+            except Exception as e:  # no extension is not an error
+                record_failure('vectors.VectorStore.__init__', e)
                 self._native = False
         self._matrix: Any = None
         self._dim_set: frozenset[int] = frozenset()

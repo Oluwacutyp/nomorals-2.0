@@ -6,6 +6,8 @@ from .analytics import AnalyticsBackend, DuckDBAnalytics, SQLiteAnalytics, open_
 from .backup import BackupInfo, BackupManager, RetentionPolicy
 from .blob import BlobInfo, BlobStore
 from .db import AsyncDatabase, Database, Row, transaction
+from .failures import (Failure, clear_failures, failure_count,
+                       format_failures, recent_failures, record_failure)
 from .fts import FTSIndex, SearchHit, build_match_query, escape_fts, near_query, phrase_query
 from .kv import KVStore
 from .queue import Job, QueueFull, WorkQueue, next_cron_fire, parse_cron
@@ -24,6 +26,7 @@ __all__ = [
     "Database",
     "DuckDBAnalytics",
     "FTSIndex",
+    "Failure",
     "Job",
     "KVStore",
     "Migration",
@@ -42,8 +45,11 @@ __all__ = [
     "VectorSearchHit",
     "VectorStore",
     "build_match_query",
+    "clear_failures",
     "cosine",
     "escape_fts",
+    "failure_count",
+    "format_failures",
     "near_query",
     "next_cron_fire",
     "normalize",
@@ -52,5 +58,7 @@ __all__ = [
     "parse_cron",
     "phrase_query",
     "presign_url",
+    "recent_failures",
+    "record_failure",
     "transaction",
 ]

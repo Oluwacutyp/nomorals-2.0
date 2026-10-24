@@ -15,6 +15,7 @@ from typing import Any, Iterable, Mapping, Sequence
 from ..core.errors import NotFound, ValidationError
 from ..core.ids import new_id
 from .db import Database
+from .failures import record_failure
 
 __all__ = ["InsertBuilder", "Query", "Repository"]
 
@@ -515,8 +516,8 @@ class Repository:
             if column in out and isinstance(out[column], str) and out[column]:
                 try:
                     out[column] = json.loads(out[column])
-                except json.JSONDecodeError:  # noqa: E103 - keep raw value when a column isn't valid JSON
-                    pass
+                except json.JSONDecodeError as e:  # keep raw value when a column isn't valid JSON
+                    record_failure('repository.Repository._decode', e)
         return out
 
     # ── bulk helpers ─────────────────────────────────────────────────────────

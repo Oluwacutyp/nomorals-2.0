@@ -32,6 +32,7 @@ from typing import Any, Callable, Iterable, Iterator, Sequence
 from ..core.errors import ConstraintViolation, NotFound, StorageError
 from ..core.logging_setup import get_logger
 from ..core.style import active_theme, header, kv_lines, paint, styled_table
+from .failures import record_failure
 
 __all__ = ["AsyncDatabase", "Database", "Row", "split_sql", "transaction", "open_database"]
 
@@ -529,8 +530,8 @@ class Database:
             if result.strip().lower() != "ok":
                 try:
                     dest_path.unlink()
-                except OSError:  # pragma: no cover - best effort
-                    pass
+                except OSError as e:  # pragma: no cover - best effort
+                    record_failure('db.Database.backup_to', e)
                 raise StorageError(f"backup to {dest_path} failed integrity_check: {result}")
         return dest_path
 
@@ -573,8 +574,8 @@ class Database:
                 health["lag_pages"] = max(
                     0, health["log_pages"] - health["checkpointed_pages"]
                 )
-        except sqlite3.Error:  # pragma: no cover - introspection only
-            pass
+        except sqlite3.Error as e:  # pragma: no cover - introspection only
+            record_failure('db.Database.wal_health', e)
         return health
 
     def checkpoint_maintenance(self) -> dict[str, Any]:
@@ -683,8 +684,8 @@ class Database:
             info["page_count"] = int(self.scalar("PRAGMA page_count", default=0))
             info["freelist_count"] = int(self.scalar("PRAGMA freelist_count", default=0))
             info["page_size"] = int(self.scalar("PRAGMA page_size", default=0))
-        except sqlite3.Error:  # pragma: no cover - introspection only
-            pass
+        except sqlite3.Error as e:  # pragma: no cover - introspection only
+            record_failure('db.Database.stats_snapshot', e)
         if self.path is not None and self.path.exists():
             info["size_bytes"] = self.path.stat().st_size
         with self._stats_lock:
@@ -950,8 +951,8 @@ def release_thread_connection(db: "Database | None") -> None:
     try:
         if db is not None:
             db.release_thread()
-    except Exception:  # noqa: BLE001 - never break thread teardown
-        pass
+    except Exception as e:  # never break thread teardown
+        record_failure('db.release_thread_connection', e)
 
 
 _CORRUPT_MARKERS = (
@@ -1018,8 +1019,8 @@ def open_database(path: str | os.PathLike[str], **kwargs: Any) -> tuple["Databas
     if database is not None:
         try:
             database.close()
-        except Exception:  # noqa: BLE001 - best-effort
-            pass
+        except Exception as e:  # best-effort
+            record_failure('db.open_database', e)
     _log.error(
         "database file %s is corrupt (%s); quarantined %d file(s), starting "
         "fresh. The quarantined copy keeps the old data for forensics.",

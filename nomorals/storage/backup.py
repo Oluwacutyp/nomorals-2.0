@@ -31,6 +31,7 @@ from ..core.errors import StorageError
 from ..core.logging_setup import get_logger
 from ..core.style import active_theme, header, styled_table
 from .db import Database
+from .failures import record_failure
 
 __all__ = ["BackupInfo", "BackupManager", "RetentionPolicy"]
 
@@ -680,8 +681,8 @@ class BackupManager:
                         blob_files += 1
                         try:
                             blob_bytes += path.stat().st_size
-                        except OSError:
-                            pass
+                        except OSError as e:
+                            record_failure('backup.BackupManager.estimate', e)
         return {
             "db_pages": pages,
             "db_raw_bytes": raw_bytes,

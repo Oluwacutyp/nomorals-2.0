@@ -19,6 +19,7 @@ from typing import Any, Iterable, Sequence
 from ..core.logging_setup import get_logger
 from ..core.style import active_theme, header, kv_lines
 from .db import Database
+from .failures import record_failure
 
 __all__ = [
     "FTSIndex",
@@ -325,8 +326,9 @@ class FTSIndex:
                 f"WHERE term LIKE ? ESCAPE '\\' ORDER BY term LIMIT ?",
                 (like_prefix + "%", limit),
             )
-        except Exception:  # noqa: BLE001 - vocab table missing / StorageError
+        except Exception as e:  # vocab table missing / StorageError
             # fts5vocab table not created for this index.
+            record_failure('fts.FTSIndex.suggest', e)
             return []
         return [r["term"] for r in rows]
 

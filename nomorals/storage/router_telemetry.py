@@ -29,6 +29,7 @@ from typing import Any
 
 from ..core.logging_setup import get_logger
 from ..core.style import active_theme, header, kv_lines, styled_table
+from .failures import record_failure
 
 __all__ = [
     "KEY_LAST_PLAN_ERROR",
@@ -179,8 +180,8 @@ def record_timing(db: Any, key: str, seconds: float) -> None:
                 loaded = json.loads(str(row["value"]))
                 if isinstance(loaded, dict):
                     sketch.update(loaded)
-            except (ValueError, TypeError):
-                pass
+            except (ValueError, TypeError) as e:
+                record_failure('router_telemetry.record_timing', e)
         seconds = float(seconds)
         sketch["count"] = int(sketch.get("count") or 0) + 1
         sketch["sum"] = float(sketch.get("sum") or 0.0) + seconds
@@ -244,12 +245,14 @@ def snapshot(db: Any) -> dict[str, Any]:
         if key == KEY_LAST_PLAN_ERROR:
             try:
                 out["last_plan_error"] = json.loads(val)
-            except Exception:  # noqa: BLE001
+            except Exception as e:
+                record_failure('router_telemetry.snapshot', e)
                 out["last_plan_error"] = {"error": val, "route": "", "at": 0}
         elif key == KEY_LAST_REEVALUATION:
             try:
                 out["last_reevaluation"] = json.loads(val)
-            except Exception:  # noqa: BLE001
+            except Exception as e:
+                record_failure('router_telemetry.snapshot#2', e)
                 out["last_reevaluation"] = {
                     "action": val, "reason": "", "goal": "", "at": 0}
         elif key == KEY_MODEL_CONSULTS:
@@ -277,8 +280,8 @@ def snapshot(db: Any) -> dict[str, Any]:
             else:
                 try:
                     out["gauges"][key] = float(val)
-                except (TypeError, ValueError):
-                    pass
+                except (TypeError, ValueError) as e:
+                    record_failure('router_telemetry.snapshot#3', e)
     return out
 
 

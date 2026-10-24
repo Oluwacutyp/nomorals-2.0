@@ -8,6 +8,7 @@ migration at the end of :data:`MIGRATIONS` — never editing an earlier one, whi
 from __future__ import annotations
 
 from .schema import Migration
+from .failures import record_failure
 
 __all__ = ["MIGRATIONS", "latest_version"]
 
@@ -1551,7 +1552,8 @@ def _apply_game_identity_untangle(db: object) -> None:
     def _q1(sql: str, args: tuple = ()):  # type: ignore[no-untyped-def]
         try:
             return db.query_one(sql, args)  # type: ignore[attr-defined]
-        except Exception:
+        except Exception as e:
+            record_failure('migrations._apply_game_identity_untangle._q1', e)
             return None
 
     def _tables() -> set:
@@ -1559,7 +1561,8 @@ def _apply_game_identity_untangle(db: object) -> None:
             rows = db.query(  # type: ignore[attr-defined]
                 "SELECT name FROM sqlite_master WHERE type = 'table'") or []
             return {str(r["name"]) for r in rows}
-        except Exception:
+        except Exception as e:
+            record_failure('migrations._apply_game_identity_untangle._tables', e)
             return set()
 
     have = _tables()
@@ -1576,7 +1579,8 @@ def _apply_game_identity_untangle(db: object) -> None:
     def _num(d: dict, k: str) -> int:
         try:
             return int(d.get(k, 0) or 0)
-        except Exception:
+        except Exception as e:
+            record_failure('migrations._apply_game_identity_untangle._num', e)
             return 0
 
     try:
@@ -1675,7 +1679,8 @@ def _apply_game_phantom_cleanup(db: object) -> None:
             rows = db.query(  # type: ignore[attr-defined]
                 "SELECT name FROM sqlite_master WHERE type = 'table'") or []
             return {str(r["name"]) for r in rows}
-        except Exception:
+        except Exception as e:
+            record_failure('migrations._apply_game_phantom_cleanup._tables', e)
             return set()
 
     if "game_players" not in _tables():
@@ -1778,7 +1783,8 @@ def _apply_game_identity_alias_merge(db: object) -> None:
             rows = ex(
                 "SELECT name FROM sqlite_master WHERE type = 'table'"
             ).fetchall()
-        except Exception:
+        except Exception as e:
+            record_failure('migrations._apply_game_identity_alias_merge.tables', e)
             return set()
         return {str(r[0]) for r in rows}
 
@@ -1808,7 +1814,8 @@ def _apply_game_identity_alias_merge(db: object) -> None:
         try:
             return [str(r[1]) for r in
                     ex(f"PRAGMA table_info({table})").fetchall()]
-        except Exception:
+        except Exception as e:
+            record_failure('migrations._apply_game_identity_alias_merge.cols', e)
             return []
 
     player_col_list = cols("game_players")
@@ -1817,14 +1824,16 @@ def _apply_game_identity_alias_merge(db: object) -> None:
     def q1(sql: str, args: tuple = ()) -> object:
         try:
             rows = ex(sql, args).fetchall()
-        except Exception:
+        except Exception as e:
+            record_failure('migrations._apply_game_identity_alias_merge.q1', e)
             return None
         return rows[0] if rows else None
 
     def qall(sql: str, args: tuple = ()) -> list:
         try:
             return ex(sql, args).fetchall()
-        except Exception:
+        except Exception as e:
+            record_failure('migrations._apply_game_identity_alias_merge.qall', e)
             return []
 
     for alias_key in sorted(alias_keys):
@@ -1862,17 +1871,20 @@ def _apply_game_identity_alias_merge(db: object) -> None:
         def num(key: str) -> int:
             try:
                 return int(a.get(key, 0) or 0) + int(c.get(key, 0) or 0)
-            except Exception:
+            except Exception as e:
+                record_failure('migrations._apply_game_identity_alias_merge.num', e)
                 return 0
 
         def jmerge(key: str) -> str:
             try:
                 da = _json.loads(a.get(key) or "{}")
-            except Exception:
+            except Exception as e:
+                record_failure('migrations._apply_game_identity_alias_merge.jmerge', e)
                 da = {}
             try:
                 dc = _json.loads(c.get(key) or "{}")
-            except Exception:
+            except Exception as e:
+                record_failure('migrations._apply_game_identity_alias_merge.jmerge#2', e)
                 dc = {}
             if not isinstance(da, dict):
                 da = {}
@@ -2188,7 +2200,8 @@ def _apply_skills_lessons_columns(db: object) -> None:
         try:
             have = {r["name"] for r in db.query(
                 f"PRAGMA table_info({table})")}  # type: ignore[attr-defined]
-        except Exception:  # noqa: BLE001 — table missing entirely: skip
+        except Exception as e:  # table missing entirely: skip
+            record_failure('migrations._apply_skills_lessons_columns', e)
             continue
         for column, decl in columns.items():
             if column in have:
@@ -2228,7 +2241,8 @@ def _apply_evolution_outcome_columns(db: object) -> None:
         try:
             have = {r["name"] for r in db.query(
                 f"PRAGMA table_info({table})")}  # type: ignore[attr-defined]
-        except Exception:  # noqa: BLE001 — table missing entirely: skip
+        except Exception as e:  # table missing entirely: skip
+            record_failure('migrations._apply_evolution_outcome_columns', e)
             continue
         for column, decl in columns.items():
             if column in have:
@@ -2265,7 +2279,8 @@ def _apply_proactive_mood_columns(db: object) -> None:
         try:
             have = {r["name"] for r in db.query(
                 f"PRAGMA table_info({table})")}  # type: ignore[attr-defined]
-        except Exception:  # noqa: BLE001 — table missing entirely: skip
+        except Exception as e:  # table missing entirely: skip
+            record_failure('migrations._apply_proactive_mood_columns', e)
             continue
         for column, decl in columns.items():
             if column in have:
@@ -2287,7 +2302,8 @@ def _apply_memory_tags_origin(db: object) -> None:
         try:
             have = {r["name"] for r in db.query(
                 f"PRAGMA table_info({table})")}  # type: ignore[attr-defined]
-        except Exception:  # noqa: BLE001 — table missing entirely: skip
+        except Exception as e:  # table missing entirely: skip
+            record_failure('migrations._apply_memory_tags_origin', e)
             continue
         for column, decl in columns.items():
             if column in have:
@@ -2339,7 +2355,8 @@ def _apply_search_engine_schema(db: object) -> None:
         try:
             have = {r["name"] for r in db.query(
                 f"PRAGMA table_info({table})")}  # type: ignore[attr-defined]
-        except Exception:  # noqa: BLE001 — table missing entirely: skip
+        except Exception as e:  # table missing entirely: skip
+            record_failure('migrations._apply_search_engine_schema', e)
             continue
         for column, decl in columns.items():
             if column in have:
@@ -2374,7 +2391,8 @@ def _apply_skills_table_unify(db: object) -> None:
     }
     try:  # the plain table always exists from migration 25; be paranoid
         have = {r["name"] for r in db.query("PRAGMA table_info(skills)")}  # type: ignore[attr-defined]
-    except Exception:  # noqa: BLE001 - no table at all: create it first
+    except Exception as e:  # no table at all: create it first
+        record_failure('migrations._apply_skills_table_unify', e)
         db.execute(  # type: ignore[attr-defined]
             "CREATE TABLE IF NOT EXISTS skills ("
             "id TEXT PRIMARY KEY, name TEXT NOT NULL DEFAULT '', "
@@ -2394,8 +2412,8 @@ def _apply_skills_table_unify(db: object) -> None:
             vals = tuple(r[k] if k in r.keys() else None for k in keys)
             db.execute(  # type: ignore[attr-defined]
                 f"INSERT OR IGNORE INTO skills ({cols}) VALUES ({marks})", vals)
-    except Exception:  # noqa: BLE001 - no twin table: nothing to carry
-        pass
+    except Exception as e:  # no twin table: nothing to carry
+        record_failure('migrations._apply_skills_table_unify#2', e)
     db.execute("CREATE INDEX IF NOT EXISTS idx_skills_name "  # type: ignore[attr-defined]
                "ON skills(name)")
     db.execute("CREATE INDEX IF NOT EXISTS idx_skills_kind "  # type: ignore[attr-defined]
@@ -2439,7 +2457,8 @@ def _apply_companion_schema(db: object) -> None:
     for table, cols in wanted.items():
         try:
             have = {r["name"] for r in db.query(f"PRAGMA table_info({table})")}  # noqa: UP031
-        except Exception:  # noqa: BLE001 - table absent: nothing to alter
+        except Exception as e:  # table absent: nothing to alter
+            record_failure('migrations._apply_companion_schema', e)
             continue
         for col, ddl in cols.items():
             if col not in have:
@@ -2464,8 +2483,8 @@ def _apply_companion_schema(db: object) -> None:
     try:
         db.execute("CREATE INDEX IF NOT EXISTS idx_game_sessions_chat "
                    "ON game_sessions(chat_key, status)")
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as e:
+        record_failure('migrations._apply_companion_schema#2', e)
 
 
 
@@ -2811,7 +2830,8 @@ def _apply_self_improvement_v2(db: object) -> None:
         try:
             have = {r["name"] for r in db.query(  # type: ignore[attr-defined]
                 f"PRAGMA table_info({table})")}
-        except Exception:  # noqa: BLE001 — table missing entirely: skip
+        except Exception as e:  # table missing entirely: skip
+            record_failure('migrations._apply_self_improvement_v2', e)
             continue
         for column, decl in columns.items():
             if column in have:
@@ -3046,7 +3066,8 @@ def _apply_notifications_doc_and_digest_fold(db: object) -> None:
     try:
         cols = {r["name"] for r in db.query(  # type: ignore[attr-defined]
             "PRAGMA table_info(notifications)")}
-    except Exception:  # noqa: BLE001 — table missing entirely: skip
+    except Exception as e:  # table missing entirely: skip
+        record_failure('migrations._apply_notifications_doc_and_digest_fold', e)
         return
     if not cols:
         return

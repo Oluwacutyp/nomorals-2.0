@@ -29,6 +29,7 @@ from ..core.events import Event, global_bus
 from ..core.ids import ulid_now
 from ..core.logging_setup import get_logger
 from ..core.style import active_theme, header, kv_lines
+from .failures import record_failure
 
 _log = get_logger(__name__)
 
@@ -203,7 +204,8 @@ class ArtifactStore:
             return False
         try:
             data = self.blobs.get_bytes(art.content_hash)
-        except Exception:  # noqa: BLE001 - missing/unreadable blob is a failure
+        except Exception as e:  # missing/unreadable blob is a failure
+            record_failure('artifacts.ArtifactStore.verify', e)
             return False
         return hashlib.sha256(data).hexdigest() == art.content_hash
 
