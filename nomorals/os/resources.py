@@ -568,8 +568,10 @@ def _read_cpu_stat() -> Optional[tuple[int, int, int]]:
                     return total, idle + iowait, steal
                 if not line.startswith("cpu"):
                     break
-    except (OSError, ValueError, IndexError):
+    except OSError:
         pass
+    except (ValueError, IndexError) as e:  # noqa: BLE001 - malformed /proc content is a real failure
+        record_failure("_read_cpu_stat", e)
     return None
 
 
@@ -586,8 +588,10 @@ def _read_swap() -> tuple[Optional[int], Optional[int]]:
                     free = int(line.split()[1])
                 if total is not None and free is not None:
                     break
-    except (OSError, ValueError, IndexError):
+    except OSError:
         pass
+    except (ValueError, IndexError) as e:  # noqa: BLE001 - malformed /proc content is a real failure
+        record_failure("_read_swap", e)
     return total, free
 
 
@@ -604,8 +608,10 @@ def _read_swap_io() -> Optional[tuple[int, int]]:
                     pout = int(line.split()[1])
                 if pin is not None and pout is not None:
                     break
-    except (OSError, ValueError, IndexError):
+    except OSError:
         pass
+    except (ValueError, IndexError) as e:  # noqa: BLE001 - malformed /proc content is a real failure
+        record_failure("_read_swap_io", e)
     if pin is None or pout is None:
         return None
     return pin, pout
@@ -619,8 +625,10 @@ def _self_rss_mb() -> Optional[float]:
             for line in fh:
                 if line.startswith("VmRSS:"):
                     return int(line.split()[1]) / 1024.0
-    except (OSError, ValueError, IndexError):
+    except OSError:
         pass
+    except (ValueError, IndexError) as e:  # noqa: BLE001 - malformed /proc content is a real failure
+        record_failure("_self_rss_mb", e)
     return None
 
 
@@ -1271,8 +1279,10 @@ class ResourceManager:
                         if line.startswith("MemTotal:"):
                             host_mb = int(line.split()[1]) / 1024.0
                             break
-            except (OSError, ValueError, IndexError):
+            except OSError:
                 pass
+            except (ValueError, IndexError) as e:  # noqa: BLE001 - malformed /proc content is a real failure
+                record_failure("ResourceManager.effective_memory_mb.meminfo", e)
             limit_b = cgroup_memory_limit_bytes()
             if host_mb is None:
                 val = (limit_b / (1024.0 * 1024.0)) if limit_b else None

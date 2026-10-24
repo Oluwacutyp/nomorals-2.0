@@ -4,9 +4,12 @@ Scope: the host-probe sub-cluster (lines 236-719 of resources.py) — the
 file's foundation region, whose results every downstream consumer treats
 as fact. Converted: 8 sites. Deliberate exclusions, pinned as behaviour:
 _cgroup_mount's mountinfo OSError (designed fallback to the isdir check)
-and the four /proc readers (OSError = designed absence on non-Linux
-hosts; the malformed-content corner is inseparable in the tuple handler
-without restructuring and is named as a remainder, not buried).
+and the four /proc readers' OSError branch (designed absence on
+non-Linux hosts). The readers' malformed-content branch was named as a
+remainder here because it shared one tuple handler with the OSError
+branch; #136 split those tuples, so the malformed branch now records
+(see test_resources_proc_split_failures.py) while the OSError branch
+stays silent by design.
 """
 
 import ast
@@ -290,10 +293,14 @@ def test_scan_remainder_is_exactly_the_excluded_probe_sites():
         report = es.scan([os.path.join(os.path.dirname(res.__file__),
                                        "resources.py")])
         # 44 true - 8 probe (#123) - 8 budgets (#125) - 9 sampling (#127)
-        # - 11 analysis (#128) = 8. A count snapshot a conversion is
-        # supposed to change, not an architectural invariant: the real
-        # invariant — the probe remainder is exactly the 5 excluded
-        # functions — is asserted below and is untouched.
+        # - 11 analysis (#128) = 8, and #136 leaves the count at 8 by
+        # design: it splits 5 tuple handlers branch by branch, and each
+        # site keeps its silent OSError branch, which still flags. A
+        # count snapshot a conversion is supposed to change, not an
+        # architectural invariant: the real invariant — the probe
+        # remainder is exactly the 5 functions below (now via their
+        # OSError branches only; their malformed branches record per
+        # #136) — is asserted below and is untouched.
         assert len(report.findings) == 8
         probe = {}
         for f in report.findings:

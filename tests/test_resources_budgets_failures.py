@@ -367,15 +367,17 @@ def _enclosing_function(path, line):
 
 SAMPLING_CONVERTED_FUNCTIONS = {
     # Converted by #127; effective_memory_mb and sample remain in the
-    # remainder via their excluded sites (meminfo pass, env fallback),
-    # so they are NOT in this set.
+    # remainder via their excluded sites (meminfo OSError branch, env
+    # fallback), so they are NOT in this set. (#136 split the meminfo
+    # tuple: its malformed branch now records, its OSError branch
+    # still flags — hence effective_memory_mb still appears below.)
     "_is_battery_powered", "effective_cpu_count", "_sample_cpu_deltas",
     "_sample_swap", "_sample_swap_io_rate", "_sample_thermal", "safe",
 }
 SAMPLING_EXCLUDED_FUNCTIONS = {
     # Innermost functions holding #127's excluded sampling sites:
-    # effective_memory_mb (meminfo pass), _sample_network (sysfs pass),
-    # sample (env fallback).
+    # effective_memory_mb (meminfo OSError branch only, since #136),
+    # _sample_network (sysfs pass), sample (env fallback).
     "effective_memory_mb", "_sample_network", "sample",
 }
 ANALYSIS_FUNCTIONS = {
@@ -396,7 +398,9 @@ def test_scan_remainder_is_8_with_no_budget_sampling_or_analysis_sites():
         report = es.scan([os.path.join(os.path.dirname(res.__file__),
                                        "resources.py")])
         # 36 true - 8 budgets (#125) - 9 sampling (#127)
-        # - 11 analysis (#128) = 8.
+        # - 11 analysis (#128) = 8, and #136 leaves the count at 8 by
+        # design: the 5 split sites keep their silent OSError branches,
+        # which still flag; only their malformed branches now record.
         # A count snapshot a conversion is supposed to change, not an
         # architectural invariant: the real invariant — which functions
         # remain — is asserted below and is untouched.

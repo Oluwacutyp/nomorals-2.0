@@ -14,10 +14,12 @@ unknown fallback; a failing alert dispatch silently drops the alert.
 The caller sees a healthy-looking sample throughout.
 
 Deliberate exclusions in this region (all pinned as behaviour):
-- effective_memory_mb's inner /proc/meminfo pass: designed-absence probe
-  (no /proc on the Windows host); the code falls through to the cgroup
-  limit, so a value is still produced — same class as #123's /proc
-  reader exclusions.
+- effective_memory_mb's inner /proc/meminfo OSError branch:
+  designed-absence probe (no /proc on the Windows host); the code
+  falls through to the cgroup limit, so a value is still produced —
+  same class as #123's /proc reader exclusions. (#136 split the
+  tuple: the malformed ValueError/IndexError branch now records;
+  only the OSError branch remains excluded.)
 - _sample_network's sysfs OSError pass: probe fall-through; the socket
   probe still happens and produces the value.
 - sample()'s environment fallback: detect_environment's own guard (#123)
@@ -329,8 +331,11 @@ def test_scan_remainder_is_8_probe_sampling_excluded_only():
     try:
         report = es.scan([os.path.join(os.path.dirname(res.__file__),
                                        "resources.py")])
-        # 19 (#127) - 11 analysis converted (#128) = 8: 5 excluded
-        # probe + 3 excluded sampling (meminfo pass, sysfs pass, env
+        # 19 (#127) - 11 analysis converted (#128) = 8, and #136
+        # leaves the count at 8 by design: the 5 split sites keep
+        # their silent OSError branches, which still flag. Branch
+        # level: 5 partially-converted (4 probe readers + meminfo
+        # inner) + 3 fully-excluded (_cgroup_mount, sysfs pass, env
         # fallback). A count snapshot a conversion is supposed to
         # change, not an architectural invariant: the real invariant —
         # the exact function multiset — is asserted below and is now

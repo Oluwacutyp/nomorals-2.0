@@ -20,7 +20,12 @@ holds for the manager's analysis chain: a trend that silently reported
 prediction set, a pressure score that silently reported "all clear", a
 degradation mapping that silently reported level 0, a dropped alert
 edge, or a dashboard that silently reported "unavailable" looked like
-a measured analysis — now each leaves a trace too.
+a measured analysis — now each leaves a trace too. The same holds for
+the /proc readers at the file's foundation, split branch by branch:
+OSError stays silent by design — /proc absent on a host is not a
+failure, the contract is "None when unavailable" — while malformed
+content on present-but-broken input (ValueError/IndexError) now
+records, so a corrupt /proc line no longer reads as a healthy absence.
 
 Stdlib only. ``record`` itself never raises — a ledger that can crash
 its callers would defeat the purpose.

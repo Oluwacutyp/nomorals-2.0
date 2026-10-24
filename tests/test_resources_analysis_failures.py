@@ -309,9 +309,13 @@ def test_scan_remainder_is_8_excluded_only():
     try:
         report = es.scan([os.path.join(os.path.dirname(res.__file__),
                                        "resources.py")])
-        # 19 (#127) - 11 analysis converted (#128) = 8: 5 excluded
-        # probe + 3 excluded sampling. resources.py is now closed: no
-        # converted region remains, only the prior exclusions.
+        # 19 (#127) - 11 analysis converted (#128) = 8, and #136
+        # leaves the count at 8 by design: the 5 split sites keep
+        # their silent OSError branches, which still flag. Branch
+        # level: 5 partially-converted (4 probe readers + meminfo
+        # inner) + 3 fully-excluded (_cgroup_mount, _sample_network,
+        # sample). resources.py is now closed: no converted region
+        # remains, only the prior exclusions (partial or full).
         assert len(report.findings) == 8
         from collections import Counter
         fns = Counter(_enclosing_function(f.file, f.line)
