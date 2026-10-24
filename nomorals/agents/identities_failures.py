@@ -21,6 +21,7 @@ import threading
 import time
 from collections import deque
 from dataclasses import dataclass
+from nomorals.core import failure_store as _failure_store
 
 __all__ = ["Failure", "record_failure", "recent_failures",
            "failure_count", "clear_failures", "format_failures"]
@@ -44,6 +45,26 @@ _ledger: deque[Failure] = deque(maxlen=_MAX_FAILURES)
 _lock = threading.Lock()
 _total = 0
 
+_store = _failure_store.Store('agents.identities')
+_loaded = False
+
+
+def _ensure_loaded() -> None:
+    """Load persisted entries once per process. Caller must hold ``_lock``.
+
+    Runs on first access only: the ring is empty at that point (every
+    path through this module loads first), so no duplication is
+    possible. ``clear_failures`` sets ``_loaded`` without loading.
+    """
+    global _loaded, _total
+    if _loaded:
+        return
+    _loaded = True
+    entries, total = _store.load()
+    for row in entries:
+        _ledger.append(Failure(ts=row["ts"], site=row["site"],
+                               exc_type=row["exc_type"], message=row["message"]))
+    _total = max(_total, total, len(_ledger))
 
 def record_failure(site: str, exc: BaseException) -> None:
     """Append ``exc`` to the ledger under ``site``. Never raises."""
@@ -55,13 +76,18 @@ def record_failure(site: str, exc: BaseException) -> None:
                     exc_type=type(exc).__name__, message=message)
     global _total
     with _lock:
+        _ensure_loaded()
         _ledger.append(entry)
         _total += 1
+        _store.save(
+            [{"ts": f.ts, "site": f.site, "exc_type": f.exc_type,
+              "message": f.message} for f in _ledger], _total)
 
 
 def recent_failures(limit: int = 20) -> list[Failure]:
     """Newest-first slice of the ledger (oldest drops off at the cap)."""
     with _lock:
+        _ensure_loaded()
         items = list(_ledger)
     return items[::-1][:max(0, limit)]
 
@@ -69,15 +95,18 @@ def recent_failures(limit: int = 20) -> list[Failure]:
 def failure_count() -> int:
     """Total failures ever recorded (ledger length is capped; this is not)."""
     with _lock:
+        _ensure_loaded()
         return _total
 
 
 def clear_failures() -> None:
     """Empty the ledger and reset the counter. Tests only."""
-    global _total
+    global _total, _loaded
     with _lock:
         _ledger.clear()
         _total = 0
+        _loaded = True
+        _store.clear()
 
 
 def format_failures(limit: int = 20) -> str:
