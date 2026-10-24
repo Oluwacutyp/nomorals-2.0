@@ -123,6 +123,18 @@ class FakeTab:
         self.closed = True
 
 
+async def _chat_fake_mint(self, *, provider="guerrilla", username=None):
+    """Stand-in for the creator's temp-mail mint (the seam the
+    accounts suite patches the same way): a generated persona's real
+    disposable address, no network."""
+    from nomorals.accounts.creator import CreatedAccount
+
+    return CreatedAccount(service="email_tempmail",
+                          username=username or "genuser", password="",
+                          email="gen.persona@mailinator.com",
+                          status="created")
+
+
 class _FakeAdapter(ChatAdapter):
     def __init__(self, name: str) -> None:
         super().__init__(media_dir="/tmp/nm-test-media")
@@ -302,6 +314,46 @@ class ProvisionChatTests(unittest.TestCase):
             message=_inbound("telegram-personal", "/provision"))
         self.assertIn("huggingface", out)
         self.assertIn("not provisioned", out)
+
+    def test_provision_odds_api_spelling_reaches_the_drive(self):
+        # Owner's screenshot regression (2026-10-23): "/provision
+        # odds_api" hard-failed with "I don't know how to provision"
+        # — only the exact hyphenated key worked. The underscored
+        # spelling must resolve and DRIVE.
+        self._setup("telegram-personal")
+        from nomorals.accounts.creator import AccountCreator
+        with mock.patch.object(AccountCreator, "create_email_account",
+                               _chat_fake_mint):
+            out = self.runtime.handle_control(
+                "/provision odds_api", f"telegram-personal:{OWNER_ID}",
+                message=_inbound("telegram-personal",
+                                 "/provision odds_api"))
+        self.assertNotIn("I don't know how to provision", out)
+        self.assertIn("The Odds API", out)
+        # the drive reached creation: with no owner identity recorded
+        # in this fresh runtime vault, a self-generated persona was
+        # resolved for the service (owner's rule — the pick Devon
+        # shows, never a dead-end)
+        from nomorals.accounts.identity_bank import IdentityBank
+        vault = self.runtime._provision_vault()
+        personas = IdentityBank(db=vault.db, vault=vault).list(
+            "the-odds-api")
+        self.assertEqual(len(personas), 1)
+
+    def test_provision_desk_drives_both_desk_services(self):
+        # Owner's screenshot regression (2026-10-23): "/provision
+        # desk" hard-failed. The bundle word drives BOTH desk
+        # services and reports per-service outcomes.
+        self._setup("telegram-personal")
+        from nomorals.accounts.creator import AccountCreator
+        with mock.patch.object(AccountCreator, "create_email_account",
+                               _chat_fake_mint):
+            out = self.runtime.handle_control(
+                "/provision desk", f"telegram-personal:{OWNER_ID}",
+                message=_inbound("telegram-personal", "/provision desk"))
+        self.assertNotIn("I don't know how to provision", out)
+        self.assertIn("── The Odds API ──", out)
+        self.assertIn("── football-data.org ──", out)
 
     def test_provision_never_runs_on_gated_surface(self):
         self._setup("telegram-bot")

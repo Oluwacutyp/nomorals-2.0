@@ -405,6 +405,7 @@ def ensure_provisioning() -> list[str]:
         signup_url="https://the-odds-api.com/#get-access",
         validator="odds_api_key",
         flow="odds_api_key_v1",
+        signup_flow="form_signup_v1",
     ))
     register_provision_service(ProvisionService(
         id=FOOTBALL_DATA_SERVICE,
@@ -417,5 +418,13 @@ def ensure_provisioning() -> list[str]:
         signup_url="https://www.football-data.org/client/register",
         validator="football_data_key",
         flow="football_data_key_v1",
+        signup_flow="form_signup_v1",
     ))
+    # ``/provision desk`` — the desk word drives both keyed services
+    # in turn (owner's usage, 2026-10-23: the bare word hard-failed
+    # before the bundle existed).
+    from ...accounts.provisioning import register_provision_bundle
+
+    register_provision_bundle(
+        "desk", (ODDS_API_SERVICE, FOOTBALL_DATA_SERVICE))
     return [ODDS_API_SERVICE, FOOTBALL_DATA_SERVICE]

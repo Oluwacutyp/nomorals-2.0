@@ -552,10 +552,9 @@ class AccountCreator:
             CheckpointKind.IDENTITY,
             title=f"Identity needed for {service} account",
             instructions=(
-                f"Creating a {service} account needs YOUR real identity — "
-                "Devon never invents fake ones. Reply with your name and "
-                "email (e.g. via `creator.set_owner_identity(name, email)` "
-                "or when resuming this checkpoint), then resume."
+                f"Creating a {service} account needs a name and "
+                "email and none is recorded. Reply with your name "
+                "and email and I'll continue."
             ),
             service=service,
             resume_state={
@@ -667,10 +666,11 @@ class AccountCreator:
             CheckpointKind.CAPTCHA,
             title=f"CAPTCHA needs a human hand ({service or 'signup'})",
             instructions=(
-                f"The automated solver could not clear this one ({reason}).\n"
-                f"1. Open {page_url or 'the signup page'} in your browser\n"
-                "2. Complete the CAPTCHA challenge yourself\n"
-                "3. Resume — the flow continues from here"
+                f"The automated solver could not clear this one "
+                f"({reason}). The one step only you can do: "
+                f"complete the CAPTCHA at "
+                f"{page_url or 'the signup page'} — then tell me, "
+                "and the flow continues from here."
             ),
             service=service,
             resume_state=state,
@@ -1439,41 +1439,40 @@ class AccountCreator:
                 "kind": CheckpointKind.CAPTCHA,
                 "title": "Create GitHub account {username}",
                 "instructions": (
-                    "GitHub signup hit a CAPTCHA the automated solver "
-                    "could not clear, so create it yourself:\n"
-                    "1. Go to https://github.com/signup\n"
-                    "2. Use email: {email}\n"
-                    "3. Create a password you choose (a strong one was "
-                    "generated for the vault: keep it or pick your own)\n"
-                    "4. Pick username: {username} (or your own)\n"
-                    "5. Solve the CAPTCHA and click the email verification link\n"
-                    "6. Tell me the final username/email — I'll store the "
-                    "credentials in the vault"
+                    "the one step only you can do: create the GitHub "
+                    "account as {username} with email {email} at "
+                    "https://github.com/signup, solving its CAPTCHA "
+                    "and email verification as you go (a strong "
+                    "password was generated for the vault — use it, "
+                    "or pick your own). Tell me the final username "
+                    "when it's created — I'll store the credentials "
+                    "in the vault and continue."
                 ),
             },
             "gmail": {
                 "kind": CheckpointKind.PHONE_2FA,
                 "title": "Create Gmail account {username}",
                 "instructions": (
-                    "Gmail requires phone verification:\n"
-                    "1. Go to https://accounts.google.com/signup\n"
-                    "2. Use your name and a username like {username}\n"
-                    "3. Provide YOUR phone number for the verification code\n"
-                    "   (or ask me: `/trial sms` grabs a free temp number and\n"
-                    "   `/trial sms code` watches its inbox for the code)\n"
-                    "4. Tell me the final address — I'll store it in the vault"
+                    "the one step only you can do: complete Gmail's "
+                    "phone verification for {username} at "
+                    "https://accounts.google.com/signup — give it a "
+                    "number that can receive the code (or ask me: "
+                    "`/trial sms` grabs a temp number and "
+                    "`/trial sms code` watches its inbox for it). "
+                    "Tell me the final address when it's created — "
+                    "I'll store it in the vault and continue."
                 ),
             },
             "twitter": {
                 "kind": CheckpointKind.EMAIL_VERIFY,
                 "title": "Create X/Twitter account {username}",
                 "instructions": (
-                    "X requires email/phone verification:\n"
-                    "1. Go to https://twitter.com/i/flow/signup\n"
-                    "2. Use email: {email}\n"
-                    "3. Pick username: {username} (or your own)\n"
-                    "4. Complete the verification step\n"
-                    "5. Tell me the final handle — I'll store the credentials"
+                    "the one step only you can do: complete X's "
+                    "email/phone verification for {username} "
+                    "<{email}> at https://twitter.com/i/flow/signup. "
+                    "Tell me the final handle when it's created — "
+                    "I'll store the credentials in the vault and "
+                    "continue."
                 ),
             },
         }
@@ -1481,12 +1480,12 @@ class AccountCreator:
             "kind": CheckpointKind.MANUAL_STEP,
             "title": "Create {service} account {username}",
             "instructions": (
-                "Create the account yourself:\n"
-                "1. Go to {service}'s signup page\n"
-                "2. Use email: {email}\n"
-                "3. Pick username: {username} (or your own)\n"
-                "4. Complete any verification step\n"
-                "5. Tell me the final username — I'll store the credentials"
+                "the one step only you can do: create the {service} "
+                "account as {username} with email {email} at "
+                "{service}'s signup page, completing any verification "
+                "step it asks for. Tell me the final username when "
+                "it's created — I'll store the credentials in the "
+                "vault and continue."
             ),
         })
 

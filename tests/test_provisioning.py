@@ -304,9 +304,19 @@ class DriveTests(unittest.TestCase):
         self.assertEqual(self.vault.list_all(service="huggingface"), [])
 
     def test_creation_without_owner_identity_uses_generated(self):
-        """Owner's rule (2026-10-20): no recorded identity is NOT a
-        dead-end — creation proceeds on the service's self-generated
-        IdentityBank persona, and the result says so plainly."""
+        """Owner's rule (2026-10-20, re-confirmed 2026-10-23): no
+        recorded identity is NOT a dead-end — a recorded owner
+        identity stays preferred, but creation proceeds on the
+        service's self-generated IdentityBank persona when none is
+        recorded, and the result says so plainly.
+
+        PREMISE CORRECTION (2026-10-23 fix): this test used to end at
+        the creator's CREATION_CHECKPOINT — the pause-as-first-
+        response the owner flagged. HF registers a signup flow, so
+        the driver now DRIVES the signup itself and completes
+        end-to-end; the creator-checkpoint behaviour is pinned on
+        flow-less services instead (see
+        test_generated_creation_resume_provisions_and_discloses)."""
         from nomorals.accounts.identity_bank import IdentityBank
 
         mints: list = []
@@ -314,11 +324,11 @@ class DriveTests(unittest.TestCase):
         with mock.patch.object(AccountCreator, "create_email_account",
                                _fake_email_mint(mints)):
             result = driver.provision("hf")
-        # creation proceeded to the human-step checkpoint (the real
-        # creator's accounts-policy pause) — not NEEDS_OWNER_IDENTITY
-        self.assertEqual(result.outcome,
-                         ProvisionOutcome.CREATION_CHECKPOINT,
+        # the signup was DRIVEN, not paused: provisioned, no checkpoint
+        self.assertEqual(result.outcome, ProvisionOutcome.PROVISIONED,
                          result.message)
+        self.assertTrue(result.account_created, result.message)
+        self.assertIsNone(result.checkpoint)
         # the mint went through the trial flow's provider seam, once
         self.assertEqual(mints, ["tempmail"])
         # exactly one persona exists for the service, carrying the
@@ -328,65 +338,105 @@ class DriveTests(unittest.TestCase):
         self.assertEqual(len(personas), 1)
         persona = personas[0]
         self.assertEqual(persona.email, GEN_EMAIL)
-        # transparency: the message names the generated identity
-        self.assertIn("self-generated", result.message)
+        # the message names the account as a plain fact — name and
+        # address, no provenance lecture (PREMISE CORRECTION
+        # 2026-10-23 purge: asserting the "self-generated" narration
+        # pinned the boilerplate the owner ordered off the system)
+        self.assertNotIn("self-generated", result.message)
+        self.assertIn(f"Account: {persona.name} <{GEN_EMAIL}>.",
+                      result.message)
         self.assertIn(persona.name, result.message)
         self.assertIn(GEN_EMAIL, result.message)
-        # ...and the creation was set up with that identity's address
-        self.assertIn(GEN_EMAIL, result.checkpoint["instructions"])
         # ...and the audit trail records the generated identity
         self.assertTrue(any(
             r.get("step") == "create" and r.get("identity") == "generated"
             for r in driver.audit_trail), driver.audit_trail)
 
+    def _register_flowless_service(self, svc_id="flowless"):
+        """A registered service with NO signup flow — the creator's
+        human-checkpoint path is its creation route (the fallback the
+        2026-10-23 fix keeps for services whose signup Devon cannot
+        drive). Registered per-test and cleaned up after."""
+        svc = register_provision_service(ProvisionService(
+            id=svc_id, display="Flowless", vault_service=svc_id,
+            env_keys=("FLOWLESS_KEY",),
+            login_url="https://flowless.example/login",
+            token_url="https://flowless.example/keys",
+            validator="flowless_ok", flow="flowless_flow"))
+        provisioning._PAGE_FLOWS["flowless_flow"] = (
+            lambda tab, s, **kw: "flowless-secret-value")
+        provisioning._VALIDATORS["flowless_ok"] = (
+            lambda token, http_get: provisioning.ValidationResult(
+                "ok", "fine"))
+        self.addCleanup(PROVISION_REGISTRY.pop, svc_id, None)
+        self.addCleanup(provisioning._PAGE_FLOWS.pop,
+                        "flowless_flow", None)
+        self.addCleanup(provisioning._VALIDATORS.pop,
+                        "flowless_ok", None)
+        return svc
+
     def test_generated_creation_resume_provisions_and_discloses(self):
         """Checkpoint → owner finishes the human step → the drive
         provisions, and the final summary STILL discloses that the
-        account was created with a generated identity."""
+        account was created with a generated identity.
+
+        PREMISE CORRECTION (2026-10-23 fix): this ran on HF, whose
+        signup the driver now drives itself (no checkpoint at all —
+        see test_creation_without_owner_identity_uses_generated).
+        The checkpoint→resume path still exists for services with NO
+        registered signup flow, so it is pinned here on one."""
+        self._register_flowless_service()
         mints: list = []
         driver = _driver(self.vault)
         with mock.patch.object(AccountCreator, "create_email_account",
                                _fake_email_mint(mints)):
-            first = driver.provision("hf")
+            first = driver.provision("flowless")
         self.assertEqual(first.outcome,
                          ProvisionOutcome.CREATION_CHECKPOINT)
-        # while paused, a re-run reports the same checkpoint WITH the
-        # generated-identity disclosure (from the creation marker)
-        second = driver.provision("hf")
+        # while paused, a re-run reports the same checkpoint WITH
+        # the plain-fact account line (from the creation marker) —
+        # no provenance lecture (2026-10-23 purge)
+        second = driver.provision("flowless")
         self.assertEqual(second.outcome,
                          ProvisionOutcome.CREATION_CHECKPOINT)
         self.assertEqual(second.checkpoint["id"], first.checkpoint["id"])
-        self.assertIn("self-generated", second.message)
+        self.assertNotIn("self-generated", second.message)
+        self.assertIn(GEN_EMAIL, second.message)
         # owner completes the human step → credentials land in the vault
         creator = AccountCreator(self.vault, db=self.vault.db)
         finalized = creator.resume_checkpoint(first.checkpoint["id"])
         # the account was finalized under the generated address
         self.assertEqual(finalized.email, GEN_EMAIL)
         with _NoSleep():
-            third = driver.provision("hf")
+            third = driver.provision("flowless")
         self.assertEqual(third.outcome, ProvisionOutcome.PROVISIONED,
                          third.message)
         self.assertTrue(third.account_created, third.message)
         self.assertIn("created a new account", third.message)
-        self.assertIn("self-generated", third.message)
+        self.assertNotIn("self-generated", third.message)
         self.assertIn(GEN_EMAIL, third.message)
 
     def test_generated_persona_reused_across_attempts(self):
         """A cancelled creation retried later reuses the SAME bank
-        persona and the SAME minted address — no re-mint, ever."""
+        persona and the SAME minted address — no re-mint, ever.
+
+        PREMISE CORRECTION (2026-10-23 fix): pinned on a flow-less
+        service — on a signup-flow service (HF) the first attempt
+        now completes instead of checkpointing."""
         from nomorals.accounts.identity_bank import IdentityBank
 
+        self._register_flowless_service()
         mints: list = []
         driver = _driver(self.vault)
         with mock.patch.object(AccountCreator, "create_email_account",
                                _fake_email_mint(mints)):
-            first = driver.provision("hf")
+            first = driver.provision("flowless")
             self.assertEqual(first.outcome,
                              ProvisionOutcome.CREATION_CHECKPOINT)
             # owner abandons the human step; creation starts over
             creator = AccountCreator(self.vault, db=self.vault.db)
             creator.cancel_checkpoint(first.checkpoint["id"])
-            second = driver.provision("hf")
+            second = driver.provision("flowless")
         self.assertEqual(second.outcome,
                          ProvisionOutcome.CREATION_CHECKPOINT,
                          second.message)
@@ -395,7 +445,7 @@ class DriveTests(unittest.TestCase):
         self.assertIn(GEN_EMAIL, second.checkpoint["instructions"])
         # still exactly one persona, and the address was minted once
         personas = IdentityBank(db=self.vault.db, vault=self.vault).list(
-            "huggingface")
+            "flowless")
         self.assertEqual(len(personas), 1)
         self.assertEqual(mints, ["tempmail"])
 
@@ -427,7 +477,13 @@ class DriveTests(unittest.TestCase):
 
     def test_generated_identity_sync_completion_full_drive(self):
         """A creator that completes synchronously drives straight to
-        a provisioned key, with the generated identity disclosed."""
+        a provisioned key, with the generated identity disclosed.
+
+        PREMISE CORRECTION (2026-10-23 fix): the sync creator is the
+        FALLBACK for services with no registered signup flow (on HF
+        the driver now attempts the browser signup first), so this
+        runs on a flow-less service."""
+        self._register_flowless_service()
         captured: dict = {}
 
         class _SyncCreator:
@@ -452,7 +508,7 @@ class DriveTests(unittest.TestCase):
                     service, username, "gen-password-123",
                     credential_type="password",
                     metadata={
-                        "login_url": "https://huggingface.co/login"})
+                        "login_url": "https://flowless.example/login"})
                 return CreatedAccount(
                     service=service, username=username,
                     password="gen-password-123",
@@ -463,7 +519,7 @@ class DriveTests(unittest.TestCase):
             self.vault,
             creator_factory=lambda vault, db=None, captcha_solver=None: fake)
         with _NoSleep():
-            result = driver.provision("hf")
+            result = driver.provision("flowless")
         self.assertEqual(result.outcome, ProvisionOutcome.PROVISIONED,
                          result.message)
         self.assertTrue(result.account_created)
@@ -474,17 +530,55 @@ class DriveTests(unittest.TestCase):
         self.assertEqual(captured["create_kwargs"]["username"],
                          captured["mint_username"])
         self.assertTrue(captured["create_kwargs"]["password"])
-        # disclosure in the final summary + audit
-        self.assertIn("self-generated", result.message)
+        # plain-fact account line in the final summary + audit
+        # (2026-10-23 purge: no "self-generated" narration)
+        self.assertNotIn("self-generated", result.message)
         self.assertIn(GEN_EMAIL, result.message)
         self.assertTrue(any(r.get("identity") == "generated"
                             for r in driver.audit_trail))
 
-    def test_creation_checkpoint_then_resume_provisions(self):
+    def test_creation_with_owner_identity_drives_signup(self):
+        """Recorded owner identity + a signup-flow service: the
+        driver drives the signup itself and completes in ONE call —
+        no human-step checkpoint — and the reply states the identity
+        used (owner identity on record, name only)."""
+        from nomorals.accounts.identity_bank import IdentityBank
+
         creator = AccountCreator(self.vault, db=self.vault.db)
         creator.set_owner_identity("Owner", "owner@example.com")
         driver = _driver(self.vault)
-        first = driver.provision("hf")
+        with _NoSleep():
+            result = driver.provision("hf")
+        self.assertEqual(result.outcome, ProvisionOutcome.PROVISIONED,
+                         result.message)
+        self.assertTrue(result.account_created, result.message)
+        self.assertIsNone(result.checkpoint)
+        self.assertIn("created a new account", result.message)
+        self.assertIn("Account: Owner.", result.message)
+        self.assertNotIn("self-generated", result.message)
+        # no persona was minted: the recorded identity was preferred
+        self.assertEqual(
+            IdentityBank(db=self.vault.db, vault=self.vault).list(
+                "huggingface"), [])
+        self.assertTrue(any(
+            r.get("step") == "create" and r.get("identity") == "owner"
+            for r in driver.audit_trail), driver.audit_trail)
+        self.assertFalse(any(
+            r.get("identity") == "generated" for r in driver.audit_trail))
+
+    def test_creation_checkpoint_then_resume_provisions(self):
+        """The creator-fallback path (service with NO signup flow):
+        checkpoint on the recorded owner identity → owner finishes
+        the human step → the drive provisions.
+
+        PREMISE CORRECTION (2026-10-23 fix): this ran on HF, whose
+        signup the driver now drives itself (pinned end-to-end by
+        test_creation_with_owner_identity_drives_signup)."""
+        self._register_flowless_service()
+        creator = AccountCreator(self.vault, db=self.vault.db)
+        creator.set_owner_identity("Owner", "owner@example.com")
+        driver = _driver(self.vault)
+        first = driver.provision("flowless")
         self.assertEqual(first.outcome,
                          ProvisionOutcome.CREATION_CHECKPOINT, first.message)
         self.assertIsNotNone(first.checkpoint)
@@ -500,19 +594,22 @@ class DriveTests(unittest.TestCase):
             r.get("identity") == "generated" for r in driver.audit_trail))
         # still pending: a second call reports the SAME checkpoint,
         # never a duplicate creation
-        second = driver.provision("hf")
+        second = driver.provision("flowless")
         self.assertEqual(second.outcome,
                          ProvisionOutcome.CREATION_CHECKPOINT)
         self.assertEqual(second.checkpoint["id"], first.checkpoint["id"])
         # owner completes the human step → credentials land in the vault
         creator.resume_checkpoint(first.checkpoint["id"])
         with _NoSleep():
-            third = driver.provision("hf")
+            third = driver.provision("flowless")
         self.assertEqual(third.outcome, ProvisionOutcome.PROVISIONED,
                          third.message)
         self.assertTrue(third.account_created, third.message)
         self.assertIn("created a new account", third.message)
         self.assertNotIn("self-generated", third.message)
+        # ...and the final summary states the account as a plain
+        # fact (2026-10-23 purge: no identity narration)
+        self.assertIn("Account: Owner.", third.message)
 
     def test_validation_rejected_keeps_nothing(self):
         self._seed_login()

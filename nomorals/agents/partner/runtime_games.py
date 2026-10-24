@@ -2648,7 +2648,21 @@ class RuntimeGamesMixin:
             ids = ensure_provisioning()
             arg = parts[1].strip() if len(parts) > 1 else ""
             if arg:
-                from ...accounts.provisioning import get_provision_service
+                from ...accounts.provisioning import (
+                    get_provision_bundle,
+                    get_provision_service,
+                )
+                bundle = get_provision_bundle(arg)
+                if bundle and all(s.id in ids for s in bundle):
+                    # The bundle word ("desk" itself): drive each
+                    # desk service in turn, per-service outcomes —
+                    # the same behaviour as /provision desk.
+                    sections = []
+                    for svc in bundle:
+                        sections.append(f"── {svc.display} ──")
+                        sections.append(self._run_provision_drive(
+                            svc.id, chat_key=chat_key))
+                    return "\n".join(sections)
                 svc = get_provision_service(arg)
                 if svc is None or svc.id not in ids:
                     return (f"{arg!r} is not a desk API service — the "

@@ -663,10 +663,9 @@ class SignupDriver:
                 f"{self.verify_timeout_s:.0f}s — the address may be "
                 f"blocked",
                 page_url=url,
-                needed=f"check the disposable inbox for "
-                       f"{email_account.email} manually; if the email is "
-                       f"there, forward me the link/code and I'll finish "
-                       f"the signup.")
+                needed=f"if a verification email for "
+                       f"{email_account.email} lands late, forward me "
+                       f"the link/code and I'll finish the signup.")
 
         self.attempts.transition(attempt.id, SignupStage.VERIFIED)
         account = self.creator.finalize_account(
@@ -1262,15 +1261,17 @@ class SignupDriver:
                     "nothing to automate. Wait for their decision, then "
                     "tell me the outcome to finalize or abandon the attempt.")
         if wall is WallKind.REAL_ID:
-            return ("the site demands a government ID / document upload. I "
-                    "never fabricate identity documents — complete this "
-                    "step yourself if you want the account, then resume.")
+            return ("the site demands a government ID / document upload — "
+                    "the one step only you can do: complete that check "
+                    "at the site if you want the account, then tell me "
+                    "and I'll finalize the attempt.")
         if wall is WallKind.AGE_GATE:
             return ("the site's age gate blocked the disposable persona. "
                     "Confirm you want to continue with your own details, "
                     "or abandon this attempt.")
-        return (f"open {page_url or 'the signup page'} and complete the "
-                f"step yourself, then resume the checkpoint to continue.")
+        return (f"the one step only you can do: complete the step at "
+                f"{page_url or 'the signup page'} — then tell me, and "
+                "I'll continue from the checkpoint.")
 
     def _notify(self, title: str, body: str, attempt_id: str) -> None:
         if self.notify is None:

@@ -91,7 +91,14 @@ class TrialResumeTests(unittest.TestCase):
         creator.set_owner_identity("Owner", "o@example.com")
         out = self.flow.resume(cp.id)
         self.assertIn("identity recorded", out)
-        self.assertIn("/trial assist github", out)
+        # PREMISE CORRECTION (2026-10-23 purge): this pinned the
+        # hand-off text "Re-run the signup to continue: /trial assist
+        # github" — the owner ordered run-it-again hand-offs off the
+        # system. With the identity on record, resume now re-drives
+        # the signup itself, like the captcha/wall branches.
+        self.assertIn("Re-driving the signup automatically", out)
+        self.assertNotIn("Re-run the signup", out)
+        self.assertNotIn("/trial assist github", out)
 
 
 if __name__ == "__main__":

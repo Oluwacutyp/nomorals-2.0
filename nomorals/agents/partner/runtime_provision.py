@@ -225,10 +225,22 @@ class RuntimeProvisionMixin:
         from ...accounts.provisioning import (
             get_provision_service,
             provisioned_status,
+            resolve_provision_services,
         )
 
         if message is not None and not self._is_operator(message):
             return "that one's just for the owner."
+        # The desk's services register from the agents layer; ensure
+        # them here too (idempotent) so /provision desk and
+        # /provision odds_api resolve even on a runtime whose
+        # startup bridge was skipped.
+        try:
+            from ..betdesk.sources import ensure_provisioning
+
+            ensure_provisioning()
+        except Exception:  # noqa: BLE001 - registration best-effort
+            _log.debug("desk provisioning registration skipped",
+                       exc_info=True)
         text = (tail or "").strip()
         if not text or text.lower() in ("list", "status"):
             try:
@@ -266,15 +278,25 @@ class RuntimeProvisionMixin:
                 return (f"no provisioning registry entry for {parts[1]!r}.")
             return self._arm_login_intake(chat_key, svc, parts[2])
 
-        svc = get_provision_service(parts[0])
-        if svc is None:
+        targets = resolve_provision_services(parts[0])
+        if not targets:
             from ...accounts.provisioning import PROVISION_REGISTRY
 
             known = ", ".join(sorted(PROVISION_REGISTRY)) or "none"
             return (f"I don't know how to provision {parts[0]!r} — "
                     f"registered services: {known}.")
-        return self._run_provision_drive(svc.id, chat_key=chat_key,
-                                         message=message)
+        if len(targets) == 1:
+            return self._run_provision_drive(targets[0].id,
+                                             chat_key=chat_key,
+                                             message=message)
+        # A bundle word (e.g. "desk"): drive each member in turn and
+        # report per-service outcomes — never one blob verdict.
+        sections: list[str] = []
+        for svc in targets:
+            sections.append(f"── {svc.display} ──")
+            sections.append(self._run_provision_drive(
+                svc.id, chat_key=chat_key, message=message))
+        return "\n".join(sections)
 
     # ── the missing-credential offer + pending retry ─────────────────
 

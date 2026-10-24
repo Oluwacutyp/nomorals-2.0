@@ -659,10 +659,15 @@ class TrialFlow:
                     f"Re-driving the signup automatically:\n{retry}"
                 )
             if flow == "need_identity":
+                if not service:
+                    return "✅ identity recorded."
+                # Identity is on record now — re-drive the signup
+                # automatically, like the captcha/wall branches above,
+                # instead of handing the owner the command to re-run.
+                retry = self.assist(service, chat_key=chat_key)
                 return (
-                    "✅ identity recorded. Re-run the signup to continue:\n"
-                    f"  /trial assist {service}" if service else
-                    "✅ identity recorded.")
+                    "✅ identity recorded.\n\n"
+                    f"Re-driving the signup automatically:\n{retry}")
             return f"✅ checkpoint resolved: {result.title}"
         return f"✅ resumed {checkpoint_id}"
 

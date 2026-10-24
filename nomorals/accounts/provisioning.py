@@ -76,9 +76,12 @@ __all__ = [
     "ValidationResult",
     "bridge_vault_credentials",
     "classify_missing_credential",
+    "get_provision_bundle",
     "get_provision_service",
     "provisioned_status",
+    "register_provision_bundle",
     "register_provision_service",
+    "resolve_provision_services",
     "validate_service_token",
 ]
 
@@ -137,6 +140,12 @@ class ProvisionService:
     validator: str = ""
     #: page-flow id (see ``_PAGE_FLOWS``).
     flow: str = ""
+    #: signup-flow id (see ``_SIGNUP_FLOWS``) — the automated
+    #: account-creation drive for this service's signup page. "" =
+    #: no NAMED flow: a service with a ``signup_url`` is still
+    #: driven (the generic form flow); only a service with neither
+    #: a flow nor a URL reaches the creator's checkpoint path.
+    signup_flow: str = ""
     licenses: tuple[LicenseStep, ...] = ()
     #: env var that, when set, names an account the owner is KNOWN to
     #: already hold at this service (so creation is never attempted —
@@ -159,17 +168,67 @@ def register_provision_service(service: ProvisionService) -> ProvisionService:
     return service
 
 
+def _normalize_service_key(raw: str) -> str:
+    """Canonical service-key form: lowercase, with underscores,
+    spaces and hyphens all equivalent (collapsed to single hyphens).
+
+    ``odds_api``, ``Odds API``, ``odds-api`` and ``the_odds_api`` are
+    the same word to the owner, so they are the same key here — an
+    exact-string gate on the registry id was a defect (owner-flagged
+    2026-10-23: ``/provision odds_api`` hard-failed while
+    ``/provision odds-api`` worked)."""
+    key = re.sub(r"[\s_]+", "-", (raw or "").strip().lower())
+    return re.sub(r"-{2,}", "-", key).strip("-")
+
+
 def get_provision_service(id_or_alias: str) -> ProvisionService | None:
-    """Resolve a registry id or alias, case-insensitively."""
-    key = (id_or_alias or "").strip().lower()
+    """Resolve a registry id or alias, forgivingly: case, underscores,
+    hyphens and spaces are all equivalent (see
+    :func:`_normalize_service_key`)."""
+    key = _normalize_service_key(id_or_alias)
     if not key:
         return None
-    if key in PROVISION_REGISTRY:
-        return PROVISION_REGISTRY[key]
     for svc in PROVISION_REGISTRY.values():
-        if key in (a.lower() for a in svc.aliases):
+        if key == _normalize_service_key(svc.id):
+            return svc
+        if key in (_normalize_service_key(a) for a in svc.aliases):
             return svc
     return None
+
+
+#: Named bundles: one chat word → several services driven in turn
+#: (e.g. ``desk`` = the betting desk's keyed APIs). Bundles are
+#: registered by the layer that owns the grouping (the desk
+#: registers ``desk``); this module only keeps the book.
+PROVISION_BUNDLES: dict[str, tuple[str, ...]] = {}
+
+
+def register_provision_bundle(name: str,
+                              member_ids: tuple[str, ...]) -> None:
+    """Register (or replace) a bundle: a word that provisions
+    several services in turn."""
+    PROVISION_BUNDLES[_normalize_service_key(name)] = tuple(member_ids)
+
+
+def get_provision_bundle(id_or_alias: str) -> list[ProvisionService] | None:
+    """Resolve a bundle word to its member services, or None."""
+    members = PROVISION_BUNDLES.get(_normalize_service_key(id_or_alias))
+    if not members:
+        return None
+    resolved = [svc for svc in
+                (get_provision_service(m) for m in members)
+                if svc is not None]
+    return resolved or None
+
+
+def resolve_provision_services(id_or_alias: str) -> list[ProvisionService]:
+    """Everything a provision request names: the bundle's members
+    when the word is a bundle, else the single service, else []."""
+    bundle = get_provision_bundle(id_or_alias)
+    if bundle:
+        return bundle
+    svc = get_provision_service(id_or_alias)
+    return [svc] if svc is not None else []
 
 
 register_provision_service(ProvisionService(
@@ -184,6 +243,7 @@ register_provision_service(ProvisionService(
     scopes=("read",),
     validator="hf_whoami",
     flow="hf_token_v1",
+    signup_flow="form_signup_v1",
     licenses=(LicenseStep(
         url="https://huggingface.co/black-forest-labs/FLUX.1-Kontext-dev",
         subject="black-forest-labs/FLUX.1-Kontext-dev",
@@ -551,6 +611,264 @@ _PAGE_FLOWS: dict[str, Callable[..., str]] = {
 }
 
 
+# ── signup flows (automated account creation) ────────────────────────
+
+
+class SignupBlocked(Exception):
+    """The automated signup hit a wall only the owner can clear.
+
+    Carries the checkpoint shape the driver reports: a ``kind``, a
+    one-line ``title``, and ``action`` — the ONE smallest step the
+    owner takes (never a chore list). ``submitted`` says whether the
+    form had already been submitted when the wall hit (the account
+    may exist server-side, so the driver vaults the credentials it
+    used and says the login is saved)."""
+
+    def __init__(self, kind: str, title: str, action: str, *,
+                 submitted: bool = False, detail: str = "") -> None:
+        super().__init__(f"{title}: {action}")
+        self.kind = kind
+        self.title = title
+        self.action = action
+        self.submitted = submitted
+        self.detail = detail
+
+
+class SignupAccountExists(Exception):
+    """The signup page says an account already exists for the owner's
+    email — creation must not be retried (one account per service);
+    the right path is the login handoff."""
+
+
+@dataclass
+class SignupFlowResult:
+    """Outcome of an automated signup attempt.
+
+    ``created`` — the account exists and the credentials are usable
+    now. ``verification_pending`` — the form was submitted and the
+    service sent its verification to the signup inbox (the owner's
+    real inbox under a recorded identity — the one step Devon cannot
+    do for him; the minted disposable inbox under a generated
+    identity, which Devon can read). The credentials are vaulted and
+    the drive continues on the next run."""
+
+    status: str  # "created" | "verification_pending"
+    detail: str = ""
+
+
+def _fill_first(tab: Any, candidates: tuple[str, ...], value: str, *,
+                step: str, required: bool) -> str:
+    """Fill the first field on the page matching one of ``candidates``.
+
+    Returns the field name used ("" when an optional field is simply
+    absent — forms differ; absence of an optional field is not a
+    failure). A required field with no match raises FlowStepError at
+    the named step: that exact step is what the page does not offer."""
+    for candidate in candidates:
+        try:
+            tab.fill(candidate, value)
+            return candidate
+        except Exception:  # noqa: BLE001 - try the next candidate
+            continue
+    if required:
+        raise FlowStepError(
+            step, f"no field matching {candidates!r} on the signup page")
+    return ""
+
+
+#: post-submit page-text markers, checked in this order after walls.
+_SIGNUP_EXISTS_MARKERS = (
+    "already exists", "already registered", "already in use",
+    "already taken", "an account with this email",
+    "account already exists",
+)
+_SIGNUP_VERIFY_MARKERS = (
+    "check your email", "check your inbox", "verification email",
+    "confirm your email", "verify your email", "email sent",
+    "sent you an email", "we've sent", "we have sent",
+    "activate your account", "click the link in",
+)
+_SIGNUP_SUCCESS_MARKERS = (
+    "welcome", "account created", "account is ready",
+    "successfully registered", "registration successful",
+    "registration complete", "signup complete", "sign-up complete",
+    "your account has been created", "you are logged in",
+    "you are now logged in",
+)
+
+
+def _solve_or_block(tab: Any, service: ProvisionService, *,
+                    captcha_solver: Callable[[dict[str, Any]],
+                                             dict[str, Any]] | None,
+                    submitted: bool) -> None:
+    """Clear detected CAPTCHAs through the solver; raise SignupBlocked
+    (a single owner action) when the solver is absent or fails."""
+    for ch in _detect_captchas(tab):
+        kind = ch.get("kind", "captcha")
+        if captcha_solver is None:
+            raise SignupBlocked(
+                "captcha",
+                f"CAPTCHA ({kind}) on the {service.display} signup page",
+                "one step: beat the CAPTCHA in the drive's live "
+                "browser view (attached to this chat) — tell me when "
+                "it's done and I'll refill and resubmit the form.",
+                submitted=submitted)
+        result = captcha_solver(ch)
+        if not result.get("ok"):
+            raise SignupBlocked(
+                "captcha",
+                f"CAPTCHA ({kind}) on the {service.display} signup page",
+                "one step: beat the CAPTCHA in the drive's live "
+                "browser view (attached to this chat) — tell me when "
+                "it's done and I'll refill and resubmit the form.",
+                submitted=submitted,
+                detail=str(result.get("detail", "")))
+
+
+def _wall_block(service: ProvisionService, kind: Any,
+                evidence: str) -> SignupBlocked:
+    """Map a classified post-submit wall to its single owner action."""
+    from .signup_driver import WallKind
+
+    page = service.signup_url or service.login_url
+    if kind is WallKind.SMS_PHONE:
+        return SignupBlocked(
+            "phone_2fa", f"{service.display} insists on phone "
+            "verification before creating the account",
+            "one step: tell me a number that can receive the code "
+            "(a virtual number is fine), or finish the phone step "
+            "in the drive's live browser view — then tell me, and "
+            "I'll take the signup from there.",
+            detail=evidence)
+    if kind is WallKind.MANUAL_REVIEW:
+        return SignupBlocked(
+            "manual_step", f"{service.display} took the signup into "
+            "manual review",
+            "one step: watch your inbox for their decision — once "
+            "approved, tell me and I'll log in and fetch the key "
+            "(your login is already saved).",
+            submitted=True, detail=evidence)
+    if kind is WallKind.REAL_ID:
+        return SignupBlocked(
+            "manual_step", f"{service.display} demands ID "
+            "verification to open the account",
+            f"one step: complete the ID check at {page} — tell me "
+            "when it's done and I'll take it from there.",
+            detail=evidence)
+    if kind is WallKind.AGE_GATE:
+        return SignupBlocked(
+            "manual_step", f"{service.display} age-gates this signup",
+            f"one step: confirm the account-holder details at "
+            f"{page} — tell me when it's done and I'll take it "
+            "from there.",
+            detail=evidence)
+    if kind is WallKind.RATE_LIMIT:
+        return SignupBlocked(
+            "manual_step", f"{service.display} rate-limited the "
+            "signup attempt",
+            "one step: wait a while — then tell me and I'll retry "
+            "the signup; nothing else is needed from you.",
+            detail=evidence)
+    return SignupBlocked(
+        "captcha", f"CAPTCHA on the {service.display} signup page",
+        "one step: beat the CAPTCHA in the drive's live browser "
+        "view (attached to this chat) — tell me when it's done "
+        "and I'll refill and resubmit the form.",
+        detail=evidence)
+
+
+def form_signup_flow(tab: Any, service: ProvisionService, *,
+                     name: str, email: str, username: str,
+                     password: str,
+                     captcha_solver: Callable[[dict[str, Any]],
+                                              dict[str, Any]] | None = None,
+                     ) -> SignupFlowResult:
+    """Drive a standard web signup form on the resolved identity
+    (the recorded owner identity, or the service's self-generated
+    persona when none is recorded).
+
+    Navigates to the service's signup page, clears CAPTCHAs through
+    the solver, fills the form (email always; username, name and
+    password where the form offers them — candidate field names, the
+    ``hf_token_flow`` discipline), submits, and classifies the
+    outcome page. Every mismatch fails BY STEP NAME (FlowStepError),
+    every genuine wall raises SignupBlocked with the single owner
+    action, and an "account already exists" answer raises
+    SignupAccountExists — nothing is ever silently "successful"."""
+    from .signup_driver import WallKind, classify_wall
+
+    if not service.signup_url:
+        raise FlowStepError(
+            "open_signup_page",
+            f"no signup URL registered for {service.display}")
+    tab.navigate(service.signup_url)
+    _solve_or_block(tab, service, captcha_solver=captcha_solver,
+                    submitted=False)
+    _fill_first(tab, ("email", "user_email", "signup_email",
+                      "your-email", "mail", "user[email]"),
+                email, step="fill_email", required=True)
+    _fill_first(tab, ("username", "user_name", "handle", "login"),
+                username, step="fill_username", required=False)
+    if name:
+        _fill_first(tab, ("name", "full_name", "fullname",
+                          "display_name", "first_name"),
+                    name, step="fill_name", required=False)
+    _fill_first(tab, ("password", "user_password", "passwd", "pass"),
+                password, step="fill_password", required=False)
+    _fill_first(tab, ("password_confirmation", "password_confirm",
+                      "confirm_password", "password2",
+                      "repeat_password"),
+                password, step="fill_password_confirm", required=False)
+    try:
+        _click_text(tab, "Sign Up", "Sign up", "Create account",
+                    "Create Account", "Get Access", "Register", "Join",
+                    "Continue", "Submit")
+    except FlowStepError:
+        try:
+            tab.submit("")
+        except Exception as exc:  # noqa: BLE001
+            raise FlowStepError(
+                "submit_signup",
+                "no submit control matched and form submit failed"
+            ) from exc
+    _solve_or_block(tab, service, captcha_solver=captcha_solver,
+                    submitted=True)
+    text = _tab_text(tab, max_chars=40000).lower()
+    wall, evidence = classify_wall(page_text=text)
+    if wall is WallKind.CAPTCHA:
+        _solve_or_block(tab, service, captcha_solver=captcha_solver,
+                        submitted=True)
+        text = _tab_text(tab, max_chars=40000).lower()
+        wall, evidence = classify_wall(page_text=text)
+    if wall is not WallKind.NONE and wall is not WallKind.CAPTCHA:
+        raise _wall_block(service, wall, evidence)
+    if any(m in text for m in _SIGNUP_EXISTS_MARKERS):
+        raise SignupAccountExists(
+            f"{service.display} says an account already exists for "
+            f"{email}")
+    if any(m in text for m in _SIGNUP_VERIFY_MARKERS):
+        return SignupFlowResult(
+            "verification_pending",
+            "the service sent its verification to the signup inbox")
+    if any(m in text for m in _SIGNUP_SUCCESS_MARKERS):
+        return SignupFlowResult("created", "signup submitted cleanly")
+    raise FlowStepError(
+        "confirm_signup",
+        "after submitting, the page matched no known outcome (no "
+        "verification prompt, no success signal, no wall) — the "
+        "post-submit step of this signup does not match the page, "
+        "so it is the step that cannot be automated as-is")
+
+
+#: Signup-flow implementations by registry signup-flow id. A flow
+#: takes the tab, the service entry, and the resolved identity fields
+#: (name/email/username/password + captcha_solver) and returns a
+#: SignupFlowResult; the password is a secret everywhere.
+_SIGNUP_FLOWS: dict[str, Callable[..., SignupFlowResult]] = {
+    "form_signup_v1": form_signup_flow,
+}
+
+
 def _run_coro(coro: Any) -> Any:
     """Run a coroutine from sync code (the accounts creator is async;
     the chat runtime is not)."""
@@ -709,8 +1027,9 @@ class ProvisionDriver:
         if self._login_cred(svc) is not None:
             return self._drive_with_login(svc, account_created=False)
 
-        # 3. A creation is already paused for this service (human step
-        #    pending) → report the checkpoint, never re-create.
+        # 3. A creation is already stopped for this service (one
+        #    owner-only step pending) → report the checkpoint,
+        #    never re-create.
         pending = self._pending_creation(svc)
         if pending is not None:
             self._audit("create", svc.id, "checkpoint_pending",
@@ -718,10 +1037,10 @@ class ProvisionDriver:
             note = self._created_marker_note(svc)
             return ProvisionResult(
                 ProvisionOutcome.CREATION_CHECKPOINT, svc.id,
-                f"account creation for {svc.display} is paused at a "
-                f"human step ({pending.get('kind', 'checkpoint')}): "
-                f"{pending.get('title', '')} — finish it, then run "
-                f"/provision {svc.id} again and I'll pick up from there."
+                f"creating your {svc.display} account stopped at "
+                f"one step only you can do: "
+                f"{pending.get('title', '')}. "
+                f"{pending.get('instructions', '')}"
                 + (f"\n{note}" if note else ""),
                 checkpoint=pending)
 
@@ -816,21 +1135,178 @@ class ProvisionDriver:
     @staticmethod
     def _generated_note(svc: ProvisionService, name: str,
                         email: str) -> str:
-        """The plain disclosure used in results/audit whenever a
-        self-generated identity carried a creation (transparency:
-        the owner always hears when Devon did NOT use their recorded
-        identity, and as whom)."""
-        return (
-            f"Identity: self-generated — no owner identity is recorded, "
-            f"so this account is being created as {name} <{email}> "
-            f"(a disposable persona from the vault identity bank, "
-            f"reused for {svc.display} on retries; a recorded owner "
-            f"identity stays preferred whenever one is set).")
+        """The plain fact recorded with a creation that ran on a
+        generated identity: which account it is. No provenance
+        narration — the identity BEHAVIOUR (recorded owner identity
+        preferred when set, a generated persona otherwise, its
+        absence never blocking) is the owner's rule and needs no
+        lecture in the result."""
+        return f"Account: {name} <{email}>."
+
+    # -- automated signup attempt ----------------------------------------
+
+    @staticmethod
+    def _owner_identity_note(name: str) -> str:
+        """The plain fact appended to creation results that ran on
+        the recorded owner identity: which account it is. Name
+        only — never a credential value."""
+        return f"Account: {name}." if name else ""
+
+    @staticmethod
+    def _username_from_email(email: str) -> str:
+        """A username seed derived from the resolved identity's email
+        local part, for signup forms that ask for a username the
+        identity doesn't carry one for."""
+        local = (email or "").split("@", 1)[0].strip().lower()
+        local = re.sub(r"[^a-z0-9._-]", "", local)
+        return local or "owner"
+
+    def _store_pending_account(self, svc: ProvisionService, *,
+                               username: str, password: str,
+                               email: str, note: str) -> None:
+        """Vault a just-submitted signup's credentials + the creation
+        marker, so the next /provision run picks the drive up at the
+        login step (and reports the account as created by Devon)."""
+        from ..storage.kv import KVStore
+
+        self.vault.store(
+            svc.vault_service, username, password,
+            credential_type="account",
+            tags=["account", "signup-pending"],
+            metadata={"email": email, "source": "provision_driver",
+                      "signup_submitted_at": time.time()})
+        try:
+            KVStore(self.vault.db).set(
+                _CREATED_MARKER_PREFIX + svc.id,
+                {"checkpoint_id": "", "email": email,
+                 "created_at": time.time(), "creation_note": note})
+        except Exception:  # noqa: BLE001 - marker is bookkeeping
+            _log.debug("created-marker write failed", exc_info=True)
+
+    def _attempt_signup(self, svc: ProvisionService, creator: Any, *,
+                        name: str, email: str, username: str,
+                        password: str, note: str, identity_kind: str,
+                        ) -> ProvisionResult | None:
+        """Attempt the automated signup on the identity the caller
+        resolved (recorded owner identity preferred; self-generated
+        persona otherwise — the resolution itself is unchanged).
+
+        The drive is the default, not the exception: a service with
+        a named signup flow uses it, and a service carrying only a
+        signup URL is driven with the generic form flow — Devon
+        drives the signup herself either way. Returns None only when
+        the service has neither a flow nor a URL (the caller then
+        falls back to the creator's checkpoint path); otherwise the
+        attempt's outcome — created, a verification-pending or wall
+        checkpoint carrying ONE smallest owner action, an
+        already-exists handoff, or a loud page-changed failure
+        naming the exact step that does not match the page."""
+        flow_id = svc.signup_flow or (
+            "form_signup_v1" if svc.signup_url else "")
+        flow = _SIGNUP_FLOWS.get(flow_id)
+        if flow is None:
+            return None
+        tab = self.open_tab(svc.vault_service)
+        try:
+            result = flow(tab, svc, name=name, email=email,
+                          username=username, password=password,
+                          captcha_solver=self.captcha_solver)
+        except SignupAccountExists:
+            self._audit("create", svc.id, "signup_account_exists",
+                        identity=identity_kind, username=username)
+            return ProvisionResult(
+                ProvisionOutcome.NEEDS_OWNER_LOGIN, svc.id,
+                f"{svc.display} says an account already exists for "
+                "the signup email — I won't create a duplicate. Hand "
+                f"me that login and I'll fetch the key: /provision "
+                f"login {svc.id} {username} (your next message is "
+                "the password, kept out of history and logs)."
+                + (f"\n{note}" if note else ""),
+                username=username)
+        except SignupBlocked as blocked:
+            if blocked.submitted:
+                self._store_pending_account(
+                    svc, username=username, password=password,
+                    email=email, note=note)
+            self._audit("create", svc.id, "signup_blocked",
+                        kind=blocked.kind, identity=identity_kind,
+                        detail=blocked.detail[:200])
+            drove = ("I filled and submitted the signup myself"
+                     if blocked.submitted else
+                     "I was driving the signup form myself")
+            return ProvisionResult(
+                ProvisionOutcome.CREATION_CHECKPOINT, svc.id,
+                f"creating your {svc.display} account — {drove}, and "
+                f"it stopped at exactly one step only you can do: "
+                f"{blocked.title}. {blocked.action}"
+                + (f"\n{note}" if note else ""),
+                checkpoint={"id": "", "kind": blocked.kind,
+                            "title": blocked.title,
+                            "instructions": blocked.action})
+        except FlowStepError as exc:
+            self._audit("create", svc.id, "signup_page_changed",
+                        flow_step=exc.step, detail=exc.detail[:200])
+            return ProvisionResult(
+                ProvisionOutcome.PAGE_CHANGED, svc.id,
+                f"the {svc.display} signup page didn't match the "
+                f"automated drive at step {exc.step!r}: {exc.detail} "
+                "— nothing was created; that step is the one that "
+                "cannot be automated against the page as it stands, "
+                "and the signup flow needs updating for it.",
+                step=f"signup:{exc.step}")
+        finally:
+            try:
+                tab.close()
+            except Exception:  # noqa: BLE001 - teardown best-effort
+                pass
+        if result.status == "created":
+            creator.finalize_account(
+                svc.vault_service, username, password, email=email,
+                verification_note="automated signup driven by the "
+                                  "provision driver")
+            self._audit("create", svc.id, "created",
+                        username=username, identity=identity_kind)
+            return self._drive_with_login(svc, account_created=True,
+                                          creation_note=note)
+        # verification_pending: the service sent its verification to
+        # the signup inbox. The credentials are already vaulted; the
+        # next run picks the drive up at the login step.
+        self._store_pending_account(
+            svc, username=username, password=password, email=email,
+            note=note)
+        self._audit("create", svc.id, "signup_verification_pending",
+                    username=username, identity=identity_kind)
+        if identity_kind == "owner":
+            action = (
+                f"click the verification link {svc.display} just "
+                "emailed to you — your login is already saved; tell "
+                "me once you've clicked and I'll fetch the key. If "
+                "that page had you set a password yourself, hand it "
+                f"over with /provision login {svc.id} {username} "
+                "instead.")
+            lead = (f"I filled and submitted the signup myself as "
+                    f"{name}; the one step only you can do: ")
+        else:
+            action = (
+                "no step for you: the verification email went to "
+                f"the inbox {email} — one I minted for this signup "
+                "and can read. The login is saved; I'll finish the "
+                "verification and fetch the key from there.")
+            lead = ("I filled and submitted the signup myself; it "
+                    "stopped at the service's email verification: ")
+        return ProvisionResult(
+            ProvisionOutcome.CREATION_CHECKPOINT, svc.id,
+            f"creating your {svc.display} account — {lead}{action}"
+            + (f"\n{note}" if note else ""),
+            checkpoint={"id": "", "kind": "email_verify",
+                        "title": f"Verify your {svc.display} email",
+                        "instructions": action})
 
     def _create_then_drive(self, svc: ProvisionService) -> ProvisionResult:
         from .creator import (
             AccountCheckpointPending,
             AccountExistsError,
+            generate_password,
         )
         from ..storage.kv import KVStore
 
@@ -842,6 +1318,11 @@ class ProvisionDriver:
             # 1. A recorded owner identity stays PREFERRED — unchanged.
             email = identity["email"]
             create_kwargs["email"] = email
+            signup_name = str(identity.get("name") or "").strip()
+            signup_username = self._username_from_email(email)
+            signup_password = generate_password()
+            creation_note = self._owner_identity_note(signup_name)
+            identity_kind = "owner"
             self._audit("create", svc.id, "begin", email=email,
                         identity="owner")
         else:
@@ -852,22 +1333,38 @@ class ProvisionDriver:
             if not email:
                 return ProvisionResult(
                     ProvisionOutcome.IDENTITY_MINT_FAILED, svc.id,
-                    f"creating a {svc.display} account with a "
-                    f"self-generated identity stalled: minting its "
-                    f"disposable email address failed ({mint_failure}) "
-                    "— nothing was created and no address was invented. "
-                    "This is a temp-mail problem, not an identity "
-                    f"problem; run /provision {svc.id} again and the "
-                    "same persona will be reused.")
+                    f"creating your {svc.display} account stalled: "
+                    f"minting its signup email address failed "
+                    f"({mint_failure}) — nothing was created and no "
+                    "address was invented. This is a temp-mail "
+                    "problem; the same identity will be reused on "
+                    "the next attempt.")
             create_kwargs["email"] = email
             if persona.username_variants:
                 create_kwargs["username"] = persona.username_variants[0]
             if persona.password:
                 create_kwargs["password"] = persona.password
+            signup_name = persona.name
+            signup_username = (create_kwargs.get("username")
+                               or self._username_from_email(email))
+            signup_password = create_kwargs.get("password") or ""
+            if not signup_password:
+                signup_password = generate_password()
             creation_note = self._generated_note(svc, persona.name, email)
+            identity_kind = "generated"
             self._audit("create", svc.id, "begin", email=email,
                         identity="generated", persona_id=persona.id,
                         persona_name=persona.name)
+        # Devon drives the signup herself wherever a signup flow is
+        # registered — on whichever identity was resolved above.
+        # Only services without one fall through to the creator's
+        # human-checkpoint path below.
+        attempted = self._attempt_signup(
+            svc, creator, name=signup_name, email=email,
+            username=signup_username, password=signup_password,
+            note=creation_note, identity_kind=identity_kind)
+        if attempted is not None:
+            return attempted
         try:
             created = _run_coro(creator.create_account(
                 svc.vault_service, **create_kwargs))
@@ -890,11 +1387,9 @@ class ProvisionDriver:
                         checkpoint=cp.id, kind=cp.kind.value)
             return ProvisionResult(
                 ProvisionOutcome.CREATION_CHECKPOINT, svc.id,
-                f"creating your {svc.display} account paused at a human "
-                f"step ({cp.kind.value}): {cp.title}\n{cp.instructions}\n"
-                "When it's done, run "
-                f"/provision {svc.id} again — the credentials will be in "
-                "the vault and I'll fetch the key from there."
+                f"creating your {svc.display} account — it stopped "
+                f"at one step only you can do: {cp.title}. "
+                f"{cp.instructions}"
                 + (f"\n{creation_note}" if creation_note else ""),
                 checkpoint={"id": cp.id, "kind": cp.kind.value,
                             "title": cp.title,
@@ -962,10 +1457,11 @@ class ProvisionDriver:
                         detail=str(exc)[:200])
             return ProvisionResult(
                 ProvisionOutcome.VERIFICATION_BLOCKED, svc.id,
-                f"the {svc.display} login hit a verification wall the "
-                f"solver could not clear: {exc} — that's a human step; "
-                "clear it and run "
-                f"/provision {svc.id} again.",
+                f"the {svc.display} login hit a verification wall "
+                f"the solver could not clear: {exc}. One step only "
+                "you can do: clear that verification in the drive's "
+                "live view — tell me when it's done and I'll take "
+                "it from there.",
                 username=username, step="login")
         except LoginFailed as exc:
             self._audit("login", svc.id, "failed", detail=str(exc)[:200])
@@ -1026,15 +1522,15 @@ class ProvisionDriver:
                 f"the {svc.display} key I just created failed validation "
                 f"({validation.detail}) — I did not keep it. It may need "
                 "a minute to activate, or the account may lack access; "
-                f"run /provision {svc.id} again to retry.",
+                "tell me to retry and I'll run it again.",
                 username=username, step="validate")
         if validation.status != "ok":
             return ProvisionResult(
                 ProvisionOutcome.VALIDATION_INCONCLUSIVE, svc.id,
                 f"I created a {svc.display} key but could not validate "
                 f"it ({validation.detail}) — I did not store an "
-                "unproven key. Check connectivity and run "
-                f"/provision {svc.id} again.",
+                "unproven key. Check connectivity, then tell me to "
+                "retry and I'll run it again.",
                 username=username, step="validate")
 
         warnings: list[str] = []
