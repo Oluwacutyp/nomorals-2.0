@@ -39,6 +39,7 @@ import uuid
 from dataclasses import dataclass, field
 
 from ..core.logging_setup import get_logger
+from .failures import record_failure
 
 _log = get_logger(__name__)
 
@@ -798,7 +799,8 @@ class SendEngine:
                  float(send_at or 0.0)))
             self._db.commit()
             return send_id
-        except Exception:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001
+            record_failure("send.SendEngine.enqueue", e)
             return ""
 
     def queue_depth(self, status: str = "queued") -> int:
@@ -809,7 +811,8 @@ class SendEngine:
                 "SELECT COUNT(*) c FROM send_queue WHERE status = ?",
                 (status,)).fetchone()
             return int(row["c"]) if row else 0
-        except Exception:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001
+            record_failure("send.SendEngine.queue_depth", e)
             return 0
 
     # ── rate limiting ──
@@ -825,7 +828,8 @@ class SendEngine:
                 " WHERE provider = ? AND event = 'sent' AND at >= ?",
                 (provider, cutoff)).fetchone()
             return int(row["c"]) < max(1, limit)
-        except Exception:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001
+            record_failure("send.SendEngine._rate_ok", e)
             return True
 
     # ── processing ──
@@ -890,7 +894,8 @@ class SendEngine:
             vars_ = {}
             try:
                 vars_ = json.loads(row["vars"] or "{}")
-            except Exception:  # noqa: BLE001
+            except Exception as e:  # noqa: BLE001
+                record_failure("send.SendEngine._attempt.vars", e)
                 vars_ = {}
             body = render_template(tpl["body"], vars_)
             subject = row["subject"] or render_template(tpl["subject"], vars_)
@@ -930,7 +935,8 @@ class SendEngine:
             self._log(row["send_id"], row["provider"], "retry",
                       f"attempt {attempts}: {error[:120]}")
             return "deferred"
-        except Exception:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001
+            record_failure("send.SendEngine._retry_or_dead", e)
             return "deferred"
 
     def _set_status(self, send_id: str, status: str, error: str = "",
@@ -948,7 +954,8 @@ class SendEngine:
                     " attempts = ? WHERE send_id = ?",
                     (status, error[:300], attempts, send_id))
             self._db.commit()
-        except Exception:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001
+            record_failure("send.SendEngine._set_status", e)
             pass
 
     def _log(self, send_id: str, provider: str, event: str,
@@ -959,7 +966,8 @@ class SendEngine:
                 " VALUES (?, ?, ?, ?, ?)",
                 (send_id, provider, event, detail[:300], time.time()))
             self._db.commit()
-        except Exception:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001
+            record_failure("send.SendEngine._log", e)
             pass
 
     # ── cost routing (#68) ──
@@ -974,7 +982,8 @@ class SendEngine:
                 return True
             may_send, _spent, _budget = self._tracker.check_budget("marketing")
             return bool(may_send)
-        except Exception:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001
+            record_failure("send.SendEngine._cost_ok", e)
             return True
 
     def _record_cost(self, prov: sqlite3.Row) -> None:
@@ -992,9 +1001,11 @@ class SendEngine:
                 try:
                     self._tracker.track("campaign", cat, client="marketing",
                                         purpose=f"send:{prov['name']}")
-                except Exception:  # noqa: BLE001
+                except Exception as e:  # noqa: BLE001
+                    record_failure("send.SendEngine._record_cost.tracker", e)
                     pass
-        except Exception:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001
+            record_failure("send.SendEngine._record_cost", e)
             pass
 
     def estimate_campaign(self, count: int, provider: str = "") -> dict:
