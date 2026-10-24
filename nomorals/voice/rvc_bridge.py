@@ -33,6 +33,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from ..core.logging_setup import get_logger
+from .failures import record_failure
 
 _log = get_logger(__name__)
 
@@ -80,8 +81,8 @@ def detect_rvc() -> dict[str, Any]:
         import importlib.util
         if importlib.util.find_spec("rvc_python") is not None:
             return {"ok": True, "method": "python", "detail": "rvc_python"}
-    except Exception:
-        pass
+    except Exception as e:
+        record_failure('rvc_bridge.detect_rvc:83', e)
     return {
         "ok": False, "method": "",
         "detail": ("RVC not installed. Install RVC-Project/Retrieval-based-"

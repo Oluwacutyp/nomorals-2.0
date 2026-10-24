@@ -32,6 +32,7 @@ from typing import Any, Optional
 
 from ..core.logging_setup import get_logger
 from . import rvc_bridge
+from .failures import record_failure
 
 _log = get_logger(__name__)
 
@@ -102,8 +103,8 @@ def parse_melody(text: str) -> list[Note]:
                     k, v = kv.split("=", 1)
                     try:
                         mods[k.strip().lower()] = float(v)
-                    except ValueError:
-                        pass
+                    except ValueError as e:
+                        record_failure('singing.parse_melody:105', e)
         try:
             dur = float(dur_s)
         except ValueError:
@@ -352,8 +353,8 @@ class DiffSingerBackend:
                 if os.path.isdir(p) and os.path.exists(
                         os.path.join(p, "dsdict.yaml")):
                     return p
-        except OSError:
-            pass
+        except OSError as e:
+            record_failure('singing.DiffSingerBackend._default_bank:355', e)
         return ""
 
     def _load_sessions(self):

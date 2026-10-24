@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import math
 from array import array
+from .failures import record_failure
 
 __all__ = [
     "remove_dc",
@@ -75,8 +76,8 @@ def deess(samples: array, sample_rate: int,
         out.append(int(max(-32768, min(32767, s * deess._g))))
     try:
         del deess._g  # noqa: SLF001 — reset for next call
-    except AttributeError:
-        pass
+    except AttributeError as e:
+        record_failure('mastering.deess:78', e)
     return out
 
 

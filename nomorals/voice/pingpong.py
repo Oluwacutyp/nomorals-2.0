@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from ..core.logging_setup import get_logger
+from .failures import record_failure
 
 _log = get_logger(__name__)
 
@@ -93,8 +94,8 @@ def cache_transcript(meta: Any, path: str, text: str) -> None:
         by_path[str(path or "")] = clean
         if not meta.get("voice_transcript"):
             meta["voice_transcript"] = clean
-    except Exception:  # noqa: BLE001 - meta bookkeeping never breaks chat
-        pass
+    except Exception as e: # meta bookkeeping never breaks chat
+        record_failure('pingpong.cache_transcript:96', e)
 
 
 def _record_stt_reason(message: Any, reason: str) -> None:
@@ -110,8 +111,8 @@ def _record_stt_reason(message: Any, reason: str) -> None:
                 meta["stt_failure_reason"] = reason
             else:
                 meta.pop("stt_failure_reason", None)
-    except Exception:  # noqa: BLE001 - meta bookkeeping never breaks chat
-        pass
+    except Exception as e: # meta bookkeeping never breaks chat
+        record_failure('pingpong._record_stt_reason:113', e)
 
 
 def transcribe_voice_media_with_reason(
@@ -163,8 +164,8 @@ def transcribe_voice_media_with_reason(
                     try:
                         if isinstance(_meta2, dict):
                             _meta2.pop("voice_untranscribed_reason", None)
-                    except Exception:  # noqa: BLE001 - meta bookkeeping never breaks chat
-                        pass
+                    except Exception as e: # meta bookkeeping never breaks chat
+                        record_failure('pingpong.transcribe_voice_media_with_reason:166', e)
                     return text, ""
                 reason = "empty transcript"
             else:
@@ -206,7 +207,8 @@ def _private_voice_reply(context: Any, text: str) -> str:
         result = tts.speak(text, voice_name="devon")
         path = result.get("path", "")
         return path if path and Path(path).is_file() else ""
-    except Exception:  # noqa: BLE001 - private voice is a bonus, never a failure
+    except Exception as e: # private voice is a bonus, never a failure
+        record_failure('pingpong._private_voice_reply:209', e)
         return ""
 
 
@@ -221,8 +223,8 @@ def synthesize_voice_reply(context: Any, text: str,
         if progress_cb is not None:
             try:
                 progress_cb(stage)
-            except Exception:  # noqa: BLE001 - progress never breaks
-                pass
+            except Exception as e: # progress never breaks
+                record_failure('pingpong.synthesize_voice_reply._progress:224', e)
 
     text = (text or "").strip()
     if not text:
@@ -245,7 +247,8 @@ def synthesize_voice_reply(context: Any, text: str,
         settings = getattr(context, "settings", None)
         voice = (getattr(getattr(settings, "audio", None), "tts_voice", "")
                  or "en-NG-EzinneNeural")
-    except Exception:  # noqa: BLE001
+    except Exception as e:
+        record_failure('pingpong.synthesize_voice_reply:248', e)
         voice = "en-NG-EzinneNeural"
     out = context.tools.call("speak", text=text, voice=voice)
     if not out.ok:
@@ -271,8 +274,8 @@ def voice_note_info(ogg_path: str) -> dict[str, Any]:
         return info
     try:
         info["size_kb"] = round(p.stat().st_size / 1024, 1)
-    except OSError:
-        pass
+    except OSError as e:
+        record_failure('pingpong.voice_note_info:274', e)
     info["duration_s"] = round(ogg_duration(str(p)), 1)
     return info
 
@@ -286,7 +289,8 @@ def ogg_duration(ogg_path: str) -> float:
              "-of", "default=noprint_wrappers=1:nokey=1", ogg_path],
             capture_output=True, timeout=10)
         return max(0.0, float((proc.stdout or b"").decode().strip() or 0))
-    except Exception:  # noqa: BLE001
+    except Exception as e:
+        record_failure('pingpong.ogg_duration:289', e)
         return 0.0
 
 

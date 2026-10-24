@@ -82,6 +82,7 @@ from typing import Any, List, Optional
 
 from .director import CANONICAL_BURSTS
 from ..core.text import safe_filename
+from .failures import record_failure
 
 _log = logging.getLogger(__name__)
 
@@ -310,8 +311,8 @@ class VoiceLibrary:
             if profile.reference_audio_path and \
                     os.path.exists(profile.reference_audio_path):
                 os.remove(profile.reference_audio_path)
-        except OSError:  # noqa: E103 - reference file already gone; index save below is the source of truth
-            pass
+        except OSError as e: # reference file already gone; index save below is the source of truth
+            record_failure('tts.VoiceLibrary.remove:313', e)
         self._save_index()
         return True
 
@@ -413,8 +414,8 @@ def voice_print(path: str) -> dict[str, Any]:
 
         with _wave.open(path, "rb") as _wf:
             true_sr = int(_wf.getframerate() or 0)
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as _voice_exc:
+        record_failure('tts.voice_print:416', _voice_exc)
     try:
         from ..audio.fingerprint import read_mono
         samples, sr = read_mono(path, target_sr=11025, max_seconds=60.0)
@@ -541,7 +542,8 @@ def voice_print_distance(a: dict[str, Any],
               float(fb.get("zcr", 0) or 0) * 10.0,
               float(fb.get("rms_db", -60) or -60) / 60.0]
         return math.sqrt(sum((x - y) ** 2 for x, y in zip(va, vb)))
-    except Exception:  # noqa: BLE001
+    except Exception as e:
+        record_failure('tts.voice_print_distance:544', e)
         return float("inf")
 
 
@@ -653,8 +655,8 @@ class TagProcessor:
                         nl_tags.append(f"pace:{d.pace}")
                     if nl_tags:
                         active_tags = nl_tags
-                except Exception:
-                    pass  # NL parse is best-effort
+                except Exception as e:
+                    record_failure('tts.TagProcessor.parse:656', e)
             else:
                 tag_name = full_tag.strip("[]").split(":")[0]
                 pause_ms = None
@@ -894,7 +896,8 @@ def _split_sentences(text: str) -> list[str]:
             return parts
         stripped = (text or "").strip()
         return [stripped] if stripped else []
-    except Exception:  # noqa: BLE001 - regex on hostile input
+    except Exception as e: # regex on hostile input
+        record_failure('tts._split_sentences:897', e)
         stripped = (text or "").strip()
         return [stripped] if stripped else []
 
@@ -1445,8 +1448,8 @@ class ChatterboxBackend:
 
             if isinstance(out, torch.Tensor):
                 out = out.detach().cpu().float().numpy()
-        except ImportError:  # noqa: S110 - torch optional; skip tensor conversion
-            pass
+        except ImportError as e: # torch optional; skip tensor conversion
+            record_failure('tts.ChatterboxBackend._as_floats:1448', e)
         try:
             import numpy as np
 
@@ -2051,8 +2054,8 @@ class SystemTTSBackend:
         finally:
             try:
                 os.remove(out)
-            except OSError:
-                pass
+            except OSError as e:
+                record_failure('tts.SystemTTSBackend._via_espeak:2054', e)
         if not blob:
             raise RuntimeError(
                 "system TTS (espeak) produced no audio — "
@@ -2369,8 +2372,8 @@ class ZonosBackend:
                 for k, v in data.items():
                     if k in vec:
                         vec[k] = max(0.0, min(1.0, float(v)))
-            except (ValueError, TypeError):
-                pass
+            except (ValueError, TypeError) as e:
+                record_failure('tts.ZonosBackend._extract_emotion._merge:2372', e)
             return " "
 
         clean = cls._EMO_TAG_RE.sub(_merge, text)
@@ -2408,8 +2411,8 @@ class ZonosBackend:
                     speaking_rate=15.0 * speed, **{
                         k: v for k, v in cond_args.items()
                         if k != "speaking_rate"})
-            except TypeError:
-                pass
+            except TypeError as e:
+                record_failure('tts.ZonosBackend.synthesize:2411', e)
         conditioning = self.model.prepare_conditioning(cond_dict)
         codes = self.model.generate(conditioning)
         wavs = self.model.autoencoder.decode(codes).cpu()
@@ -2905,7 +2908,8 @@ class UniversalTTS:
                 getattr(backend, "name", "") or "auto", "natural",
                 native_tags=native).tag(text)
             return tagged
-        except Exception:  # noqa: BLE001 - auto-tagging never breaks synthesis
+        except Exception as e: # auto-tagging never breaks synthesis
+            record_failure('tts.UniversalTTS._apply_auto_tags:2908', e)
             return text
 
     def speak(self, tagged_text: str, voice_name: Optional[str] = None,
@@ -2948,8 +2952,8 @@ class UniversalTTS:
             try:
                 from ..core.error_system import heartbeat
                 heartbeat("voice", False)
-            except Exception:  # noqa: BLE001 - telemetry never breaks synthesis
-                pass
+            except Exception as e: # telemetry never breaks synthesis
+                record_failure('tts.UniversalTTS.speak:2951', e)
             raise
 
     def _speak_impl(self, tagged_text: str, voice_name: Optional[str] = None,
@@ -3001,15 +3005,15 @@ class UniversalTTS:
                 try:
                     from ..core.error_system import heartbeat
                     heartbeat("voice", True)
-                except Exception:  # noqa: BLE001
-                    pass
+                except Exception as e:
+                    record_failure('tts.UniversalTTS._speak_impl:3004', e)
                 return {
                     "path": path, "bytes": written,
                     "sample_rate": sr, "backend": backend.name,
                     "segments": len(segments), "cached": True,
                 }
-        except Exception:
-            pass  # cache is best-effort, never breaks synthesis
+        except Exception as e:
+            record_failure('tts.UniversalTTS._speak_impl:3011', e)
 
         final_text, instruct, pause_points = self._render_for_backend(
             backend, segments)
@@ -3062,8 +3066,8 @@ class UniversalTTS:
                         rate_mult=params["rate_mult"],
                         energy=params["energy"],
                         breathiness=breath)
-            except Exception:
-                pass  # DSP is best-effort
+            except Exception as e:
+                record_failure('tts.UniversalTTS._speak_impl:3065', e)
 
         # Store in cache
         try:
@@ -3074,8 +3078,8 @@ class UniversalTTS:
                                 "h", [int(max(-32768, min(32767, v * 32767)))
                                       for v in audio]))
                 self._seg_cache.put(cache_key, to_cache, sample_rate)
-        except Exception:
-            pass
+        except Exception as e:
+            record_failure('tts.UniversalTTS._speak_impl:3077', e)
 
         path = out_path or os.path.join(
             self.voices.storage_dir, "..",
@@ -3085,8 +3089,8 @@ class UniversalTTS:
         try:
             from ..core.error_system import heartbeat
             heartbeat("voice", True)
-        except Exception:  # noqa: BLE001 - telemetry never breaks synthesis
-            pass
+        except Exception as e: # telemetry never breaks synthesis
+            record_failure('tts.UniversalTTS._speak_impl:3088', e)
         return {
             "path": path,
             "bytes": written,

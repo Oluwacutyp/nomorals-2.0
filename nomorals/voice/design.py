@@ -19,6 +19,7 @@ import re
 from array import array
 from dataclasses import dataclass, field
 from typing import Any, Optional
+from .failures import record_failure
 
 _log = logging.getLogger("nomorals.voice.design")
 
@@ -259,8 +260,8 @@ def design_voice(name: str, description: str, *,
         prof = cat.library.get(base.profile or base.name)
         ref_path = (getattr(prof, "sample_path", "") or
                     getattr(prof, "path", "") or "")
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as e:
+        record_failure('design.design_voice:262', e)
     if not ref_path or not os.path.exists(ref_path):
         return {"ok": False,
                 "reason": (f"base voice {base.name!r} has no reference audio "
@@ -281,8 +282,8 @@ def design_voice(name: str, description: str, *,
     try:
         voice.tags = tuple(set(voice.tags) | {"designed"})
         cat._save()
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as e:
+        record_failure('design.design_voice:284', e)
     return {"ok": True, "voice": voice.name, "from": base.name,
             "design": design.to_dict(),
             "note": ("DSP-shaped from a real voice — honest shaping, "
@@ -312,7 +313,8 @@ def morph_voices(name: str, voice_a: str, voice_b: str, *,
             prof = cat.library.get(v.profile or v.name)
             return (getattr(prof, "sample_path", "") or
                     getattr(prof, "path", "") or "")
-        except Exception:  # noqa: BLE001
+        except Exception as e:
+            record_failure('design.morph_voices._ref:315', e)
             return ""
 
     ra, rb = _ref(va), _ref(vb)
@@ -372,7 +374,8 @@ def blend_voices(name: str, blends: list[tuple[str, float]], *,
             prof = cat.library.get(v.profile or v.name)
             return (getattr(prof, "sample_path", "") or
                     getattr(prof, "path", "") or "")
-        except Exception:  # noqa: BLE001
+        except Exception as e:
+            record_failure('design.blend_voices._ref:375', e)
             return ""
 
     f0s: list[tuple[str, float, float]] = []  # (name, f0, weight)

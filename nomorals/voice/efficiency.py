@@ -13,6 +13,7 @@ import os
 import time
 from collections import OrderedDict
 from array import array
+from .failures import record_failure
 
 
 def _cache_dir() -> str:
@@ -72,8 +73,8 @@ class SegmentCache:
                 if age > self.ttl_s:
                     try:
                         os.remove(path)
-                    except OSError:
-                        pass
+                    except OSError as e:
+                        record_failure('efficiency.SegmentCache.get:75', e)
                     self.misses += 1
                     return None
             try:
@@ -89,8 +90,8 @@ class SegmentCache:
                     self._mem.popitem(last=False)
                 self.hits += 1
                 return samples, sr
-            except Exception:
-                pass
+            except Exception as e:
+                record_failure('efficiency.SegmentCache.get:92', e)
         self.misses += 1
         return None
 
@@ -108,8 +109,8 @@ class SegmentCache:
                 f.setsampwidth(2)
                 f.setframerate(sample_rate)
                 f.writeframes(struct.pack(f"<{len(samples)}h", *samples))
-        except Exception:
-            pass
+        except Exception as e:
+            record_failure('efficiency.SegmentCache.put:111', e)
 
     def stats(self) -> dict:
         total = self.hits + self.misses
@@ -135,8 +136,8 @@ class SegmentCache:
             del self._mem[k]
             try:
                 os.remove(self._disk_path(k))
-            except OSError:
-                pass
+            except OSError as e:
+                record_failure('efficiency.SegmentCache.invalidate:138', e)
         return len(doomed)
 
     def clear(self) -> dict[str, int]:
@@ -150,10 +151,10 @@ class SegmentCache:
                     try:
                         os.remove(os.path.join(self.dir, entry))
                         disk += 1
-                    except OSError:
-                        pass
-        except OSError:
-            pass
+                    except OSError as e:
+                        record_failure('efficiency.SegmentCache.clear:153', e)
+        except OSError as e:
+            record_failure('efficiency.SegmentCache.clear:155', e)
         return {"mem_cleared": mem, "disk_cleared": disk}
 
     def warm(self, entries: list[tuple[str, "array", int]]) -> int:
@@ -177,10 +178,10 @@ class SegmentCache:
                     try:
                         disk_bytes += os.path.getsize(
                             os.path.join(self.dir, entry))
-                    except OSError:
-                        pass
-        except OSError:
-            pass
+                    except OSError as e:
+                        record_failure('efficiency.SegmentCache.size_report:180', e)
+        except OSError as e:
+            record_failure('efficiency.SegmentCache.size_report:182', e)
         return {
             "mem_entries": len(self._mem),
             "disk_files": disk_files,
@@ -205,15 +206,16 @@ class LatencyTable:
         try:
             with open(self.path) as f:
                 self.table = json.load(f)
-        except Exception:
+        except Exception as e:
+            record_failure('efficiency.LatencyTable._load:208', e)
             self.table = {}
 
     def _save(self) -> None:
         try:
             with open(self.path, "w") as f:
                 json.dump(self.table, f)
-        except Exception:
-            pass
+        except Exception as e:
+            record_failure('efficiency.LatencyTable._save:215', e)
 
     def record(self, backend: str, ttfc_ms: float,
                realtime_factor: float = 0.0) -> None:

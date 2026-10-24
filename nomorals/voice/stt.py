@@ -45,6 +45,7 @@ import logging
 import os
 import sys
 from typing import Any, Callable, Optional
+from .failures import record_failure
 
 _log = logging.getLogger(__name__)
 
@@ -545,8 +546,8 @@ class StreamingSTT:
             try:
                 if path:
                     os.remove(path)
-            except OSError:
-                pass
+            except OSError as e:
+                record_failure('stt.StreamingSTT._transcribe_window:548', e)
 
     def flush(self) -> dict[str, Any]:
         """Transcribe the remainder. Returns {"text", "partial": False}."""

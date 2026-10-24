@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import time
 from typing import Any, Callable
+from .failures import record_failure
 
 __all__ = [
     "ASK_TEXT",
@@ -82,8 +83,8 @@ def ask_buttons() -> list[list[tuple[str, str]]]:
         kb = adaptive_buttons_for(output_kind="music-ask")
         if kb:
             return kb
-    except Exception:  # noqa: BLE001 - the ask must never go out buttonless
-        pass
+    except Exception as e: # the ask must never go out buttonless
+        record_failure('music_note.ask_buttons:85', e)
     return [[("🔍 Find this music", FIND_CALLBACK),
              ("🎵 Create a song", CREATE_CALLBACK)]]
 
@@ -125,7 +126,8 @@ def detect_music(
         score = float(getattr(a, "music_score", 0.0) or 0.0)
         seconds = float(getattr(a, "seconds", 0.0) or 0.0)
         silence = float(getattr(a, "silence_ratio", 0.0) or 0.0)
-    except Exception:  # noqa: BLE001 - detection failure means "not music"
+    except Exception as e: # detection failure means "not music"
+        record_failure('music_note.detect_music:128', e)
         return out
     out["score"] = score
     out["seconds"] = seconds

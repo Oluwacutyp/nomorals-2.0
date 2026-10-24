@@ -53,6 +53,7 @@ from typing import Any, Callable, Protocol
 
 from ..core.ids import new_short_id
 from ..core.logging_setup import get_logger
+from .failures import record_failure
 
 __all__ = [
     "NoAudioDevice",
@@ -259,8 +260,8 @@ class SileroVAD:
                 try:
                     import numpy as _np2
                     feed[name] = _np2.array([16000], dtype=_np2.int64)
-                except ImportError:
-                    pass
+                except ImportError as e:
+                    record_failure('session.SileroVAD._frame_prob:262', e)
             elif "state" in lname:
                 if self._state is None:
                     try:
@@ -268,20 +269,21 @@ class SileroVAD:
                         # (2, 1, 128) — the v4/v5 recurrent state
                         self._state = _np3.zeros((2, 1, 128),
                                                  dtype=_np3.float32)
-                    except ImportError:
-                        pass
+                    except ImportError as e:
+                        record_failure('session.SileroVAD._frame_prob:271', e)
                 feed[name] = self._state
         try:
             out = self.session.run(None, feed)
-        except Exception:
+        except Exception as e:
+            record_failure('session.SileroVAD._frame_prob:276', e)
             return 0.0
         # first output is the speech probability; a state output may
         # follow — keep it for the next frame.
         prob = 0.0
         try:
             prob = float(out[0].reshape(-1)[0])
-        except Exception:
-            pass
+        except Exception as e:
+            record_failure('session.SileroVAD._frame_prob:283', e)
         for o, meta in zip(out, self.session.get_outputs()):
             if "state" in meta.name.lower():
                 self._state = o
@@ -432,8 +434,8 @@ class _SounddeviceMic:
                 status: Any) -> None:
             try:
                 self._queue.put_nowait(bytes(indata))
-            except queue.Full:  # noqa: E103 - audio callback must never block; drop the chunk
-                pass
+            except queue.Full as e: # audio callback must never block; drop the chunk
+                record_failure('session._SounddeviceMic.__init__._cb:435', e)
 
         self._stream = _sd.InputStream(
             samplerate=SAMPLE_RATE, channels=CHANNELS, dtype="int16",
@@ -450,8 +452,8 @@ class _SounddeviceMic:
         try:
             self._stream.stop()
             self._stream.close()
-        except Exception:  # noqa: BLE001 - best effort
-            pass
+        except Exception as e: # best effort
+            record_failure('session._SounddeviceMic.close:453', e)
 
 
 class _SounddeviceSpeaker:
@@ -502,8 +504,8 @@ class _SounddeviceSpeaker:
             event.set()
             try:
                 self._sd.stop()
-            except Exception:  # noqa: BLE001 - best effort
-                pass
+            except Exception as e: # best effort
+                record_failure('session._SounddeviceSpeaker.stop:505', e)
 
     def close(self) -> None:
         pass
@@ -554,7 +556,8 @@ class MicCapture:
         while not self._stop.is_set():
             try:
                 chunk = self._mic.read_chunk()
-            except Exception:  # noqa: BLE001 - a dying mic ends the stream
+            except Exception as e: # a dying mic ends the stream
+                record_failure('session.MicCapture._run:557', e)
                 chunk = None
             if chunk is None:
                 self._ended = True
@@ -744,7 +747,8 @@ class ConsentStore:
                 import json
 
                 self._data = json.loads(self.path.read_text())
-        except Exception:  # noqa: BLE001 - corrupt consent file ≠ consent
+        except Exception as e: # corrupt consent file ≠ consent
+            record_failure('session.ConsentStore.__init__:747', e)
             self._data = {}
 
     def consented(self, device_id: str) -> bool:
@@ -791,8 +795,8 @@ class StatsStore:
 
                 loaded = json.loads(self.path.read_text())
                 self._data.update(loaded)
-        except Exception:  # noqa: BLE001 - stats must never break a session
-            pass
+        except Exception as e: # stats must never break a session
+            record_failure('session.StatsStore.__init__:794', e)
 
     def record_session(self, report: "SessionReport") -> None:
         import json
@@ -1050,8 +1054,8 @@ class VoiceSession:
             return False
         try:
             self.speaker.stop(token)
-        except Exception:  # noqa: BLE001 - stop is best-effort
-            pass
+        except Exception as e: # stop is best-effort
+            record_failure('session.VoiceSession.interrupt:1053', e)
         self._external_stop = True
         return True
 
@@ -1168,18 +1172,18 @@ class VoiceSession:
             self._set_state("ended")
             try:
                 capture.stop()
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as e:
+                record_failure('session.VoiceSession.run:1171', e)
             self._capture = None
             try:
                 mic.close()
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as e:
+                record_failure('session.VoiceSession.run:1176', e)
             if self.speaker is not None:
                 try:
                     self.speaker.close()
-                except Exception:  # noqa: BLE001
-                    pass
+                except Exception as e:
+                    record_failure('session.VoiceSession.run:1181', e)
             self.stats.record_session(report)
         return report
 
@@ -1361,8 +1365,8 @@ class VoiceSession:
         if not self.keep_audio:
             try:
                 Path(wav_path).unlink(missing_ok=True)
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as e:
+                record_failure('session.VoiceSession._discard_utterance:1364', e)
 
     def purge_audio(self) -> int:
         """Delete retained raw audio (plain and encrypted). Returns files removed."""
@@ -1373,8 +1377,8 @@ class VoiceSession:
                     try:
                         f.unlink()
                         removed += 1
-                    except Exception:  # noqa: BLE001
-                        pass
+                    except Exception as e:
+                        record_failure('session.VoiceSession.purge_audio:1376', e)
         return removed
 
 

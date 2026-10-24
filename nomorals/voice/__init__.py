@@ -77,6 +77,14 @@ from .director import (
     supported_backends,
 )
 from .efficiency import RESOURCE_BUDGETS, SegmentCache
+from .failures import (
+    Failure,
+    clear_failures,
+    failure_count,
+    format_failures,
+    recent_failures,
+    record_failure,
+)
 from .fetch import (
     fetch_chatterbox_model,
     fetch_kitten_model,
@@ -159,6 +167,7 @@ __all__ = [
     "AmbienceScene",
     "Direction",
     "EnergyVAD",
+    "Failure",
     "Note",
     "SegmentCache",
     "SessionReport",
@@ -177,6 +186,7 @@ __all__ = [
     "available_stt_backends",
     "blend_voices",
     "check_liveness_response",
+    "clear_failures",
     "convert_accent",
     "decide",
     "default_catalogue",
@@ -189,6 +199,7 @@ __all__ = [
     "direct",
     "estimate_duration",
     "export_midi",
+    "failure_count",
     "fetch_chatterbox_model",
     "fetch_kitten_model",
     "fetch_kokoro_model",
@@ -196,6 +207,7 @@ __all__ = [
     "fetch_spark_model",
     "fetch_zonos_model",
     "format_confirmation",
+    "format_failures",
     "format_transcript",
     "generate_ambience",
     "handle_voice_money",
@@ -216,6 +228,8 @@ __all__ = [
     "parse_melody",
     "parse_voice_money",
     "probe_reference_audio",
+    "recent_failures",
+    "record_failure",
     "register_owner_voice",
     "render_bark",
     "render_chatterbox",

@@ -35,6 +35,7 @@ from ..finance.ledger import (
     format_naira,
     parse_amount,
 )
+from .failures import record_failure
 
 _log = get_logger("nomorals.voice.money")
 
@@ -431,7 +432,8 @@ def _reply(language: str, key: str, **kw: Any) -> str:
     template = bank.get(key, _REPLIES["en"][key])
     try:
         return template.format(**kw)
-    except Exception:  # noqa: BLE001 - a bad template must not kill the reply
+    except Exception as e: # a bad template must not kill the reply
+        record_failure('money._reply:434', e)
         return template
 
 
@@ -674,7 +676,8 @@ def handle_voice_money(transcript: str, context: Any) -> str:
         _log.exception("handle_voice_money failed")
         try:
             lang = parse_voice_money(transcript).language
-        except Exception:  # noqa: BLE001
+        except Exception as e:
+            record_failure('money.handle_voice_money:677', e)
             lang = "en"
         return _reply(lang, "error")
 
@@ -688,7 +691,8 @@ def voice_money_precheck(transcript: str, context: Any) -> str | None:
     """
     try:
         intent = parse_voice_money(transcript)
-    except Exception:  # noqa: BLE001
+    except Exception as e:
+        record_failure('money.voice_money_precheck:691', e)
         return None
     if intent.kind == "unknown" or intent.confidence < 0.5:
         return None

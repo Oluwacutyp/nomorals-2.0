@@ -26,6 +26,7 @@ from array import array
 from typing import Any, Optional
 
 from ..core.logging_setup import get_logger
+from .failures import record_failure
 
 _log = get_logger(__name__)
 
@@ -179,8 +180,8 @@ class LongFormSynthesizer:
             if progress_cb is not None:
                 try:
                     progress_cb(i + 1, total, chunk[:80])
-                except Exception:  # noqa: BLE001 - progress never breaks
-                    pass
+                except Exception as e: # progress never breaks
+                    record_failure('longform.LongFormSynthesizer.synthesize:182', e)
             samples, sr = self._render_chunk(chunk)
             problem = _is_degenerate(samples, sr)
             if problem:

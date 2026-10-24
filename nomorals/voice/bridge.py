@@ -39,6 +39,7 @@ from ..core.logging_setup import get_logger
 from ..integrations.voice_integration import VoiceIntegration
 from ..social.chat.base import ChatRef
 from ..social.chat.whatsapp import WhatsAppAdapter
+from .failures import record_failure
 
 __all__ = ["VoiceBridge"]
 
@@ -146,8 +147,8 @@ class VoiceBridge:
         for p in {audio_path, send_path}:
             try:
                 Path(p).unlink(missing_ok=True)
-            except Exception:  # noqa: E103 - cleanup is best-effort
-                pass
+            except Exception as e: # cleanup is best-effort
+                record_failure('bridge.VoiceBridge._cleanup:149', e)
 
     async def send_voice_whatsapp(
         self,
