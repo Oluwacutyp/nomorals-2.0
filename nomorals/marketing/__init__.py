@@ -18,6 +18,10 @@ from .briefs import (
     BriefStore, ContentBrief, ContentScore, BriefDraft, control_brief, control_content,
     letter_grade, brief_quality, geo_score,
 )
+from .failures import (
+    Failure, record_failure, recent_failures, failure_count,
+    clear_failures, format_failures,
+)
 from .guardrails import (
     GuardrailStore, Rule, FiredAction, control_guardrails, evaluate,
     execute_override, parse_rule, RULE_PRESETS, add_preset, preview,
@@ -43,6 +47,8 @@ __all__ = [
     "GuardrailStore", "Rule", "FiredAction", "control_guardrails", "evaluate",
     "execute_override", "parse_rule", "RULE_PRESETS", "add_preset", "preview",
     "record_metrics", "fatigue_signal", "format_naira", "parse_naira_kobo",
+    "Failure", "record_failure", "recent_failures", "failure_count",
+    "clear_failures", "format_failures",
     "CompetitorStore", "CompetitorReport", "Post", "Pillar",
     "control_competitor", "aeo_compare",
     "analyze_pillars", "analyze_cadence", "analyze_engagement",

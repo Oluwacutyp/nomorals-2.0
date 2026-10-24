@@ -34,6 +34,8 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
+from .failures import record_failure
+
 
 # ── constants ─────────────────────────────────────────────────────────────
 
@@ -92,7 +94,8 @@ class FiredAction:
 def _expand(path: str) -> str:
     try:
         return path.replace("~", __import__("os").path.expanduser("~"))
-    except Exception:
+    except Exception as e:
+        record_failure("guardrails._expand", e)
         return path
 
 
@@ -108,7 +111,8 @@ def parse_naira_kobo(text: str) -> int | None:
         elif t.endswith("m"):
             mult, t = 1_000_000, t[:-1]
         return int(round(float(t) * mult * 100))
-    except Exception:
+    except Exception as e:
+        record_failure("guardrails.parse_naira_kobo", e)
         return None
 
 
@@ -122,7 +126,8 @@ def format_naira(kobo: float) -> str:
             s = f"{n/1000:.1f}".rstrip("0").rstrip(".")
             return f"₦{s}k"
         return f"₦{n:,.0f}"
-    except Exception:
+    except Exception as e:
+        record_failure("guardrails.format_naira", e)
         return "₦?"
 
 
@@ -145,7 +150,8 @@ class GuardrailStore:
             self._db = sqlite3.connect(path, check_same_thread=False)
             self._db.row_factory = sqlite3.Row
             self._init()
-        except Exception:
+        except Exception as e:
+            record_failure("guardrails.GuardrailStore.__init__", e)
             self._db = None
 
     def _init(self) -> None:
@@ -176,8 +182,8 @@ class GuardrailStore:
             if "min_spend_kobo" not in cols:
                 self._db.execute("ALTER TABLE rules ADD COLUMN min_spend_kobo INTEGER DEFAULT 0")
             self._db.commit()
-        except Exception:
-            pass
+        except Exception as e:
+            record_failure("guardrails.GuardrailStore._init", e)
         # Metric snapshots for creative-fatigue detection.
         try:
             self._db.execute(
@@ -187,8 +193,8 @@ class GuardrailStore:
                 "CREATE INDEX IF NOT EXISTS idx_mh_adset_ts ON "
                 "metric_history(adset_id, ts)")
             self._db.commit()
-        except Exception:
-            pass
+        except Exception as e:
+            record_failure("guardrails.GuardrailStore._init", e)
 
     # — rules —
     def add_rule(self, rule: Rule) -> Rule | None:
@@ -221,7 +227,8 @@ class GuardrailStore:
                      rule.last_fired_at, 1 if rule.active else 0, rule.created_at))
             self._db.commit()
             return rule
-        except Exception:
+        except Exception as e:
+            record_failure("guardrails.GuardrailStore.add_rule", e)
             return None
 
     def get_rule(self, rule_id: str) -> Rule | None:
@@ -231,7 +238,8 @@ class GuardrailStore:
             row = self._db.execute("SELECT * FROM rules WHERE rule_id = ?",
                                    (rule_id,)).fetchone()
             return _row_to_rule(row) if row else None
-        except Exception:
+        except Exception as e:
+            record_failure("guardrails.GuardrailStore.get_rule", e)
             return None
 
     def list_rules(self, active_only: bool = False) -> list[Rule]:
@@ -240,7 +248,8 @@ class GuardrailStore:
                 return []
             q = "SELECT * FROM rules" + (" WHERE active = 1" if active_only else "") + " ORDER BY created_at"
             return [_row_to_rule(r) for r in self._db.execute(q).fetchall()]
-        except Exception:
+        except Exception as e:
+            record_failure("guardrails.GuardrailStore.list_rules", e)
             return []
 
     def set_active(self, rule_id: str, active: bool) -> bool:
@@ -251,7 +260,8 @@ class GuardrailStore:
                                    (1 if active else 0, rule_id))
             self._db.commit()
             return cur.rowcount > 0
-        except Exception:
+        except Exception as e:
+            record_failure("guardrails.GuardrailStore.set_active", e)
             return False
 
     def remove_rule(self, rule_id: str) -> bool:
@@ -261,7 +271,8 @@ class GuardrailStore:
             cur = self._db.execute("DELETE FROM rules WHERE rule_id = ?", (rule_id,))
             self._db.commit()
             return cur.rowcount > 0
-        except Exception:
+        except Exception as e:
+            record_failure("guardrails.GuardrailStore.remove_rule", e)
             return False
 
     def update_streak(self, rule_id: str, streak: int) -> bool:
@@ -272,7 +283,8 @@ class GuardrailStore:
                             (streak, rule_id))
             self._db.commit()
             return True
-        except Exception:
+        except Exception as e:
+            record_failure("guardrails.GuardrailStore.update_streak", e)
             return False
 
     def mark_fired(self, rule_id: str, label: str) -> bool:
@@ -284,7 +296,8 @@ class GuardrailStore:
                 (_now(), label, rule_id))
             self._db.commit()
             return True
-        except Exception:
+        except Exception as e:
+            record_failure("guardrails.GuardrailStore.mark_fired", e)
             return False
 
     # — audit —
@@ -300,7 +313,8 @@ class GuardrailStore:
                  1 if fired.override else 0))
             self._db.commit()
             return True
-        except Exception:
+        except Exception as e:
+            record_failure("guardrails.GuardrailStore.log_audit", e)
             return False
 
     def audit_log(self, limit: int = 20) -> list[dict[str, Any]]:
@@ -310,7 +324,8 @@ class GuardrailStore:
             rows = self._db.execute(
                 "SELECT * FROM audit ORDER BY ts DESC LIMIT ?", (limit,)).fetchall()
             return [dict(r) for r in rows]
-        except Exception:
+        except Exception as e:
+            record_failure("guardrails.GuardrailStore.audit_log", e)
             return []
 
 
@@ -318,7 +333,8 @@ def _col(row: sqlite3.Row, name: str) -> str:
     """Column value with graceful fallback for pre-migration DBs."""
     try:
         return row[name] or ""
-    except Exception:
+    except Exception as e:
+        record_failure("guardrails._col", e)
         return ""
 
 
@@ -330,16 +346,17 @@ def _row_to_rule(row: sqlite3.Row) -> Rule:
         min_spend = 0
         try:
             conditions = list(_json.loads(row["conditions_json"] or "[]"))
-        except Exception:
+        except Exception as e:
+            record_failure("guardrails._row_to_rule", e)
             conditions = []
         try:
             cond_op = (row["cond_op"] or "and").lower()
-        except Exception:
-            pass
+        except Exception as e:
+            record_failure("guardrails._row_to_rule", e)
         try:
             min_spend = int(row["min_spend_kobo"] or 0)
-        except Exception:
-            pass
+        except Exception as e:
+            record_failure("guardrails._row_to_rule", e)
         return Rule(
             rule_id=row["rule_id"], label=row["label"] or "",
             adset_id=row["adset_id"] or "", platform=row["platform"] or "",
@@ -357,7 +374,8 @@ def _row_to_rule(row: sqlite3.Row) -> Rule:
             created_at=float(row["created_at"] or 0),
             conditions=conditions, cond_op=cond_op,
             min_spend_kobo=min_spend)
-    except Exception:
+    except Exception as e:
+        record_failure("guardrails._row_to_rule", e)
         return Rule()
 
 
@@ -396,11 +414,13 @@ def _parse_condition(text: str) -> dict | None:
         else:
             try:
                 threshold = float(raw_thr.replace(",", ""))
-            except Exception:
+            except Exception as e:
+                record_failure("guardrails._parse_condition", e)
                 return None
         return {"metric": metric, "op": op, "threshold": threshold,
                 "threshold_raw": raw_thr}
-    except Exception:
+    except Exception as e:
+        record_failure("guardrails._parse_condition", e)
         return None
 
 
@@ -483,7 +503,8 @@ def parse_rule(text: str) -> Rule | None:
             days=days, action=action, action_param=action_param,
             action_text=action_text, conditions=conditions, cond_op=cond_op,
             min_spend_kobo=min_spend_kobo)
-    except Exception:
+    except Exception as e:
+        record_failure("guardrails.parse_rule", e)
         return None
 
 
@@ -498,7 +519,8 @@ def _condition_holds(value: float, op: str, threshold: float) -> bool:
         if op == "<=":
             return value <= threshold
         return False
-    except Exception:
+    except Exception as e:
+        record_failure("guardrails._condition_holds", e)
         return False
 
 
@@ -558,7 +580,8 @@ def add_preset(store: GuardrailStore, name: str, adset_id: str,
         if rule is None:
             return None
         return store.add_rule(rule)
-    except Exception:
+    except Exception as e:
+        record_failure("guardrails.add_preset", e)
         return None
 
 
@@ -582,7 +605,8 @@ def record_metrics(store: GuardrailStore, adset_id: str,
                           (_now() - 60 * 86400.0,))
         store._db.commit()
         return True
-    except Exception:
+    except Exception as e:
+        record_failure("guardrails.record_metrics", e)
         return False
 
 
@@ -607,7 +631,8 @@ def fatigue_signal(store: GuardrailStore, adset_id: str,
                 m = _json.loads(r["metrics_json"] or "{}")
                 pts.append((float(m.get("ctr", 0) or 0),
                             float(m.get("frequency", 0) or 0)))
-            except Exception:
+            except Exception as e:
+                record_failure("guardrails.fatigue_signal", e)
                 continue
         if len(pts) < 4:
             return out
@@ -630,7 +655,8 @@ def fatigue_signal(store: GuardrailStore, adset_id: str,
         else:
             out["reason"] = "no fatigue signal"
         return out
-    except Exception:
+    except Exception as e:
+        record_failure("guardrails.fatigue_signal", e)
         return out
 
 
@@ -663,7 +689,8 @@ def preview(store: GuardrailStore,
                     v = metrics.get(cond.get("metric", ""))
                     try:
                         v = float(v) if v is not None else None
-                    except Exception:
+                    except Exception as e:
+                        record_failure("guardrails.preview", e)
                         v = None
                     holds = (v is not None and _condition_holds(
                         v, cond.get("op", ">"), float(cond.get("threshold", 0))))
@@ -689,10 +716,11 @@ def preview(store: GuardrailStore,
                     info["would_fire"] = True
                     info["reason"] = f"WOULD FIRE: {rule.action} — " + f" {rule.cond_op} ".join(bits)
                 out.append(info)
-            except Exception:  # noqa: BLE001
+            except Exception as e:
+                record_failure(f"guardrails.preview:{rule.rule_id}", e)
                 continue
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as e:
+        record_failure("guardrails.preview", e)
     return out
 
 MetricsFn = Callable[[str], dict[str, Any] | None]   # adset_id → metrics
@@ -726,10 +754,11 @@ def evaluate(store: GuardrailStore, metrics_fn: MetricsFn | None = None,
                 if fa is not None:
                     fired.append(fa)
                     store.log_audit(fa)
-            except Exception:  # noqa: BLE001 - one bad rule never kills the pass
+            except Exception as e:  # one bad rule never kills the pass
+                record_failure(f"guardrails.evaluate:{rule.rule_id}", e)
                 continue
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as e:
+        record_failure("guardrails.evaluate", e)
     return fired
 
 
@@ -740,7 +769,8 @@ def _fmt_cond(cond: dict) -> str:
         if metric in _MONEY_METRICS:
             return format_naira(thr)
         return str(thr).rstrip("0").rstrip(".")
-    except Exception:
+    except Exception as e:
+        record_failure("guardrails._fmt_cond", e)
         return "?"
 
 
@@ -749,7 +779,8 @@ def _fmt_cond_value(cond: dict, value: float) -> str:
         if cond.get("metric") in _MONEY_METRICS:
             return format_naira(value)
         return f"{value:.2f}"
-    except Exception:
+    except Exception as e:
+        record_failure("guardrails._fmt_cond_value", e)
         return "?"
 
 
@@ -760,7 +791,8 @@ def _conditions_of(rule: Rule) -> list[dict]:
             return [c for c in rule.conditions if isinstance(c, dict) and c.get("metric")]
         return [{"metric": rule.metric, "op": rule.op,
                  "threshold": rule.threshold, "threshold_raw": rule.threshold_raw}]
-    except Exception:
+    except Exception as e:
+        record_failure("guardrails._conditions_of", e)
         return []
 
 
@@ -776,7 +808,8 @@ def _evaluate_rule(store: GuardrailStore, rule: Rule,
         if rule.min_spend_kobo:
             try:
                 spend_now = float(metrics.get("spend", 0) or 0)
-            except Exception:
+            except Exception as e:
+                record_failure("guardrails._evaluate_rule", e)
                 spend_now = 0
             need = rule.min_spend_kobo / (100.0 if rule.min_spend_kobo > 1000 else 1.0)
             # metrics spend may be kobo or naira — accept either scale.
@@ -792,7 +825,8 @@ def _evaluate_rule(store: GuardrailStore, rule: Rule,
                 continue
             try:
                 value = float(value)
-            except Exception:
+            except Exception as e:
+                record_failure("guardrails._evaluate_rule", e)
                 results.append((cond, None, False))
                 continue
             results.append((cond, value,
@@ -855,7 +889,8 @@ def _evaluate_rule(store: GuardrailStore, rule: Rule,
                 budget = metrics.get("daily_budget")
                 try:
                     budget = float(budget) if budget is not None else 0
-                except Exception:
+                except Exception as e:
+                    record_failure("guardrails._evaluate_rule", e)
                     budget = 0
                 delta = int(round(budget * rule.action_param / 100.0)) if budget > 0 else int(rule.max_delta_kobo or 0)
                 if delta <= 0:
@@ -895,7 +930,8 @@ def _evaluate_rule(store: GuardrailStore, rule: Rule,
         store.mark_fired(rule.rule_id, label)
         return FiredAction(rule.rule_id, rule.adset_id, rule.action, detail,
                            executed, ts=now)
-    except Exception:  # noqa: BLE001
+    except Exception as e:
+        record_failure("guardrails._evaluate_rule", e)
         return None
 
 
@@ -975,7 +1011,8 @@ def ensure_schedule(scheduler: Any) -> bool:
             jobs = []
             try:
                 jobs = scheduler.list_jobs()  # type: ignore[attr-defined]
-            except Exception:  # noqa: BLE001
+            except Exception as e:
+                record_failure("guardrails.ensure_schedule._ensure", e)
                 jobs = []
             ids = {getattr(j, "task_id", getattr(j, "id", "")) for j in (jobs or [])}
             if "guardrails_daily" not in ids:
@@ -991,7 +1028,8 @@ def ensure_schedule(scheduler: Any) -> bool:
             loop.create_task(_ensure())
             return True
         return bool(asyncio.run(_ensure()))
-    except Exception:  # noqa: BLE001
+    except Exception as e:
+        record_failure("guardrails.ensure_schedule", e)
         return False
 
 
@@ -1017,7 +1055,8 @@ def format_rule(rule: Rule) -> str:
         lbl = f" — {rule.label}" if rule.label else ""
         return (f"• `{rule.rule_id}` {act} if {cond_txt}{when} "
                 f"on `{rule.adset_id}`{ms}{streak}{state}{lbl}")
-    except Exception:
+    except Exception as e:
+        record_failure("guardrails.format_rule", e)
         return "• (rule)"
 
 
@@ -1027,7 +1066,8 @@ def format_fired(fa: FiredAction) -> str:
         tag = " [override]" if fa.override else ""
         why = f" — {fa.reason}" if fa.reason and not fa.ok else ""
         return f"{icon} {fa.action} on `{fa.adset_id}`{tag}: {fa.detail}{why}"
-    except Exception:
+    except Exception as e:
+        record_failure("guardrails.format_fired", e)
         return "• (action)"
 
 
@@ -1049,6 +1089,7 @@ def _usage() -> str:
             "  /guardrails stop <rule_id> — disable a rule\n"
             "  /guardrails remove <rule_id>\n"
             "  /guardrails audit — recent fired/blocked actions\n"
+            "  /guardrails failures — recent recorded failures\n"
             "spend actions need an active adspend mandate (/mandate issue adspend).")
 
 
@@ -1138,7 +1179,8 @@ def control_guardrails(tail: str, context=None, chat=None, **kwargs: Any) -> str
             if len(body) > 2:
                 try:
                     pct = float(body[2].rstrip("%"))
-                except Exception:
+                except Exception as e:
+                    record_failure("guardrails.control_guardrails", e)
                     pct = 0.0
             fa = execute_override(store, adset_id, action, pct)
             icon = "✅" if fa.ok else "⛔"
@@ -1169,6 +1211,11 @@ def control_guardrails(tail: str, context=None, chat=None, **kwargs: Any) -> str
                 lines.append(f"{icon} {ts} {r.get('action')} on `{r.get('adset_id')}`{tag}")
             return "🛡️ guardrail audit:\n" + "\n".join(lines)
 
+        if low.startswith("failures"):
+            from .failures import format_failures
+            return format_failures()
+
         return _usage()
-    except Exception:  # noqa: BLE001
+    except Exception as e:
+        record_failure("guardrails.control_guardrails", e)
         return "guardrails hit a snag — try again."

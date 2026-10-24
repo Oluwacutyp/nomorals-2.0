@@ -31,6 +31,8 @@ from collections import Counter
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
+from .failures import record_failure
+
 
 # ── constants ─────────────────────────────────────────────────────────────
 
@@ -148,7 +150,8 @@ class CompetitorReport:
                                            for p in quiet[:2]))
             lines.append("public data only — no account access used.")
             return "\n".join(lines)
-        except Exception:
+        except Exception as e:
+            record_failure("competitor.CompetitorReport.format", e)
             return "couldn't format that competitor report."
 
 
@@ -163,7 +166,8 @@ def _terms(text: str) -> list[str]:
 def _engagement_of(p: Post) -> float:
     try:
         return float(p.likes or 0) + float(p.comments or 0) * 3 + float(p.shares or 0) * 2
-    except Exception:
+    except Exception as e:
+        record_failure("competitor._engagement_of", e)
         return 0.0
 
 
@@ -218,7 +222,8 @@ def analyze_pillars(posts: list[Post], top_n: int = 5) -> list[Pillar]:
                                   share=1.0, sample_terms=[],
                                   avg_engagement=round(avg_all, 1)))
         return pillars
-    except Exception:
+    except Exception as e:
+        record_failure("competitor.analyze_pillars", e)
         return []
 
 
@@ -243,7 +248,8 @@ def analyze_cadence(posts: list[Post]) -> Cadence:
             by_format={k: v / weeks for k, v in by_format.items()},
             window_days=window_days,
             total_posts=len(posts))
-    except Exception:
+    except Exception as e:
+        record_failure("competitor.analyze_cadence", e)
         return Cadence()
 
 
@@ -279,7 +285,8 @@ def analyze_engagement(posts: list[Post]) -> Engagement:
         return Engagement(avg_likes=avg_likes, avg_comments=avg_comments,
                           avg_shares=avg_shares, trend=trend,
                           trend_pct=trend_pct)
-    except Exception:
+    except Exception as e:
+        record_failure("competitor.analyze_engagement", e)
         return Engagement()
 
 
@@ -291,7 +298,8 @@ def top_posts(posts: list[Post], n: int = 5) -> list[Post]:
         ranked = sorted((p for p in (posts or []) if p),
                         key=_engagement_of, reverse=True)
         return ranked[:max(1, int(n or 5))]
-    except Exception:
+    except Exception as e:
+        record_failure("competitor.top_posts", e)
         return []
 
 
@@ -306,7 +314,8 @@ def viral_posts(posts: list[Post], multiple: float = 3.0) -> list[Post]:
             return []
         return [p for p in posts
                 if _engagement_of(p) >= mean * max(1.5, float(multiple or 3.0))]
-    except Exception:
+    except Exception as e:
+        record_failure("competitor.viral_posts", e)
         return []
 
 
@@ -342,7 +351,8 @@ def best_times(posts: list[Post]) -> dict:
         out["best_hour"] = by_hour[0][0] if by_hour else None
         out["best_weekday"] = names[by_day[0][0]] if by_day else None
         return out
-    except Exception:
+    except Exception as e:
+        record_failure("competitor.best_times", e)
         return out
 
 
@@ -365,7 +375,8 @@ def analyze_hashtags(posts: list[Post], n: int = 10) -> list[dict]:
         return [{"tag": "#" + tag, "posts": len(v),
                  "avg_eng": round(sum(v) / len(v), 1)}
                 for tag, v in ranked[:max(1, int(n or 10))]]
-    except Exception:
+    except Exception as e:
+        record_failure("competitor.analyze_hashtags", e)
         return []
 
 
@@ -412,7 +423,8 @@ def key_insights(report: CompetitorReport) -> str:
             lines.append("engagement is rising — their current mix is working; "
                          "mirror the pillars, not the posts.")
         return "\n".join(lines)
-    except Exception:
+    except Exception as e:
+        record_failure("competitor.key_insights", e)
         return "couldn't build key insights."
 
 
@@ -448,7 +460,8 @@ def benchmark(own_posts: list[Post], rival_posts: list[Post],
         elif b["n"]:
             lines.append("verdict: no own posts to compare — feed yours in to benchmark.")
         return "\n".join(lines)
-    except Exception:
+    except Exception as e:
+        record_failure("competitor.benchmark", e)
         return "couldn't build that benchmark."
 
 
@@ -468,7 +481,8 @@ def content_gaps(report: CompetitorReport,
                              "why": (f"they earn {p.avg_engagement:.0f} eng/post "
                                      f"on '{p.name}' and you cover none of it")})
         return sorted(gaps, key=lambda g: -g["their_avg_eng"])
-    except Exception:
+    except Exception as e:
+        record_failure("competitor.content_gaps", e)
         return []
 
 
@@ -490,7 +504,8 @@ def to_briefs(report: CompetitorReport, n: int = 3) -> list[dict]:
                 "why": f"proven demand in your niche — {p.share:.0%} of their output",
             })
         return briefs
-    except Exception:
+    except Exception as e:
+        record_failure("competitor.to_briefs", e)
         return []
 
 
@@ -527,7 +542,8 @@ class CompetitorStore:
                        posts_per_week REAL, video_per_week REAL,
                        avg_likes REAL, avg_comments REAL, avg_shares REAL)""")
             self._db.commit()
-        except Exception:
+        except Exception as e:
+            record_failure("competitor.CompetitorStore.__init__", e)
             self._db = None
 
     # -- tracking ------------------------------------------------------
@@ -546,7 +562,8 @@ class CompetitorStore:
                 (account, platform, time.time()))
             self._db.commit()
             return True
-        except Exception:
+        except Exception as e:
+            record_failure("competitor.CompetitorStore.track", e)
             return False
 
     def untrack(self, account: str, platform: str = "") -> bool:
@@ -563,7 +580,8 @@ class CompetitorStore:
                     "DELETE FROM tracked WHERE account=?", (account,))
             self._db.commit()
             return cur.rowcount > 0
-        except Exception:
+        except Exception as e:
+            record_failure("competitor.CompetitorStore.untrack", e)
             return False
 
     def list_tracked(self) -> list[dict[str, Any]]:
@@ -573,7 +591,8 @@ class CompetitorStore:
             return [dict(r) for r in self._db.execute(
                 "SELECT account, platform, added_at FROM tracked "
                 "ORDER BY added_at")]
-        except Exception:
+        except Exception as e:
+            record_failure("competitor.CompetitorStore.list_tracked", e)
             return []
 
     # -- analysis --------------------------------------------------------
@@ -592,7 +611,8 @@ class CompetitorStore:
                     posts = [p for p in (scrape_fn(account, platform) or [])
                              if isinstance(p, Post)]
                     source = "injected"
-                except Exception:
+                except Exception as e:
+                    record_failure("competitor.CompetitorStore.analyze", e)
                     posts = []
             report = CompetitorReport(
                 report_id="cmp_" + uuid.uuid4().hex[:8],
@@ -605,7 +625,8 @@ class CompetitorStore:
                 source=source)
             self._snapshot(report)
             return report
-        except Exception:
+        except Exception as e:
+            record_failure("competitor.CompetitorStore.analyze", e)
             return CompetitorReport(account=account or "",
                                     platform=platform or "")
 
@@ -622,8 +643,8 @@ class CompetitorStore:
                  c.posts_per_week, c.by_format.get("video", 0.0),
                  e.avg_likes, e.avg_comments, e.avg_shares))
             self._db.commit()
-        except Exception:
-            pass
+        except Exception as e:
+            record_failure("competitor.CompetitorStore._snapshot", e)
 
     # -- digests -----------------------------------------------------------
 
@@ -669,7 +690,8 @@ class CompetitorStore:
                 bits.append(f"engagement delta: {pct:+.0f}%")
             return ("📊 competitor digest — " + who + "\n"
                     + "\n".join("• " + b for b in bits))
-        except Exception:
+        except Exception as e:
+            record_failure("competitor.CompetitorStore.digest", e)
             return "couldn't build that digest."
 
 
@@ -697,7 +719,8 @@ def aeo_compare(brand: str, competitor: str,
                 f"({own.confirmed_pairs}/{own.total_pairs} vs "
                 f"{theirs.confirmed_pairs}/{theirs.total_pairs} pairs)\n"
                 f"verdict: {verdict}.")
-    except Exception:
+    except Exception as e:
+        record_failure("competitor.aeo_compare", e)
         return "couldn't run that AEO comparison."
 
 
@@ -712,6 +735,7 @@ def _usage() -> str:
             "/competitor besttime <account> [platform] — best posting hours/days\n"
             "/competitor gaps <account> <your keywords…> — pillars they own that you don't\n"
             "/competitor digest [account] — latest window vs previous\n"
+            "/competitor failures — recent recorded failures\n"
             "/competitor list — tracked accounts\n"
             "/competitor untrack <account> — stop tracking\n"
             "/competitor vs <competitor> <your-brand> — AEO share-of-answer face-off\n"
@@ -796,7 +820,8 @@ def control_competitor(tail: str, context=None, chat=None,
                              (scrape_fn(account.strip().lstrip("@").lower(),
                                         platform.strip().lower()) or [])
                              if isinstance(p, Post)]
-                except Exception:
+                except Exception as e:
+                    record_failure("competitor.control_competitor._posts_for", e)
                     posts = []
             return posts, account, platform
 
@@ -895,6 +920,11 @@ def control_competitor(tail: str, context=None, chat=None,
             lines.append("feed the best into the content pipeline as briefs.")
             return "\n".join(lines)
 
+        if low.startswith("failures"):
+            from .failures import format_failures
+            return format_failures()
+
         return "didn't catch that.\n" + _usage()
-    except Exception:
+    except Exception as e:
+        record_failure("competitor.control_competitor", e)
         return "competitor intel hit a snag — try again."
