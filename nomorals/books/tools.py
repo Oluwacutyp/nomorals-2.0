@@ -1577,3 +1577,235 @@ def register(registry: Any) -> None:
                 "fetched": len(dl["chapters"]),
                 "failed": dl["failed"],
                 "words": sum(len(t.split()) for t in dl["chapter_texts"])}
+
+    # ── museum + library, next level ────────────────────────────────
+    @registry.register(
+        "library_ingest_url",
+        description=(
+            "Ingest a web document into the library as a book: fetch, "
+            "extract (same parsers as file ingest), split into chapters, "
+            "index every passage, record a URL source. Same record shape "
+            "as library_ingest — the book is searchable and readable the "
+            "same way. Use when the owner points at a page or document URL."
+        ),
+        capability=Capability.NET_OUT,
+        parameters={
+            "url": "str — http(s) URL of the document",
+            "title": "str (optional) — else from the document",
+            "author": "str (optional)",
+        },
+    )
+    def library_ingest_url(url: str, *, title: str = "",
+                           author: str = "") -> dict[str, Any]:
+        return _library().ingest_url(url, title=title,
+                                     author=author).to_dict()
+
+    @registry.register(
+        "library_ingest_feed",
+        description=(
+            "Ingest an RSS/Atom feed into the library as one book: feed "
+            "items become chapters, item links kept in chapter meta. "
+            "Re-ingesting upserts — unseen items append, seen items are "
+            "never duplicated. Use for blogs, news feeds, and journals "
+            "the owner wants the system to keep reading."
+        ),
+        capability=Capability.NET_OUT,
+        parameters={
+            "url": "str — http(s) URL of the RSS/Atom feed",
+            "title": "str (optional) — else the feed title",
+            "max_items": "int (optional, 100) — items per ingest",
+        },
+    )
+    def library_ingest_feed(url: str, *, title: str = "",
+                            max_items: int = 100) -> dict[str, Any]:
+        return _library().ingest_feed(url, title=title,
+                                      max_items=max_items).to_dict()
+
+    @registry.register(
+        "library_sources",
+        description=(
+            "Library sources as living seeds, not a static list. status "
+            "lists every source with health; check probes every active "
+            "URL/feed source (3 consecutive failures = dead); shed "
+            "archives dead sources and their digests (passages stay, "
+            "excluded from hybrid search by default); discover proposes "
+            "candidate URLs found inside ingested content."
+        ),
+        capability=Capability.NET_OUT,
+        parameters={
+            "action": "str — status | check | shed | discover",
+            "source_id": "str (optional, for discover) — one source",
+            "limit": "int (optional, 50) — discover cap",
+        },
+    )
+    def library_sources(action: str = "status", *, source_id: str = "",
+                        limit: int = 50) -> dict[str, Any]:
+        lib = _library()
+        act = (action or "").strip().lower()
+        if act == "status":
+            return {"sources": lib.list_sources()}
+        if act == "check":
+            return lib.check_sources()
+        if act == "shed":
+            return lib.shed_dead()
+        if act == "discover":
+            return {"candidates": lib.discover(source_id, limit=limit)}
+        raise ValueError(
+            f"unknown sources action {action!r} — status | check | shed | discover")
+
+    @registry.register(
+        "library_digest",
+        description=(
+            "Structured revisable digest records: the brain's digested "
+            "knowledge, not raw text. create digests a source's claim "
+            "(confidence 0-1, optional scope) with contradiction flags; "
+            "revise appends a revision (old versions stay readable); "
+            "list shows digests (scoped queries see their scope plus "
+            "global); show reads one; flags lists its contradictions. "
+            "A record is never silently overwritten."
+        ),
+        capability=Capability.FS_READ,
+        parameters={
+            "action": "str — create | revise | list | show | flags",
+            "source_id": "str (for create) — the source",
+            "claim": "str (for create/revise) — the claim text",
+            "confidence": "float (optional) — create default 0.5",
+            "scope": "str (optional) — e.g. character:zara",
+            "record_id": "str (for revise/show/flags)",
+            "note": "str (optional, for revise) — why it changed",
+            "status": "str (optional, for list) — active | archived | ''",
+        },
+    )
+    def library_digest(action: str, *, source_id: str = "",
+                       claim: str = "", confidence: Any = None,
+                       scope: str = "", record_id: str = "",
+                       note: str = "", status: str = "active",
+                       ) -> dict[str, Any]:
+        lib = _library()
+        act = (action or "").strip().lower()
+        if act == "create":
+            if not source_id or not claim.strip():
+                raise ValueError("digest create needs source_id and claim")
+            return lib.create_digest(
+                source_id, claim,
+                confidence=0.5 if confidence is None else confidence,
+                scope=scope)
+        if act == "revise":
+            if not record_id:
+                raise ValueError("digest revise needs record_id")
+            return lib.revise_digest(
+                record_id,
+                claim=claim.strip() or None,
+                confidence=confidence, note=note)
+        if act == "list":
+            return {"digests": lib.list_digests(scope=scope,
+                                                status=status)}
+        if act == "show":
+            if not record_id:
+                raise ValueError("digest show needs record_id")
+            return lib.get_digest(record_id)
+        if act == "flags":
+            if not record_id:
+                raise ValueError("digest flags needs record_id")
+            return {"flags": lib.digest_flags(record_id)}
+        raise ValueError(
+            f"unknown digest action {action!r} — create | revise | list | show | flags")
+
+    @registry.register(
+        "library_hybrid_search",
+        description=(
+            "Hybrid retrieval over the library: FTS5/BM25 keyword plus "
+            "the memory system's vector lane, fused by reciprocal rank "
+            "fusion and weighted by source health and digest confidence. "
+            "Returns passages and digest records together, with the rank "
+            "breakdown per hit. Scope narrows digests only (passages are "
+            "shared deep text)."
+        ),
+        capability=Capability.FS_READ,
+        parameters={
+            "query": "str — the search words",
+            "top": "int (optional, 8)",
+            "scope": "str (optional) — digest scope filter",
+            "include_archived": "bool (optional, False)",
+        },
+    )
+    def library_hybrid_search(query: str, *, top: int = 8, scope: str = "",
+                              include_archived: bool = False,
+                              ) -> dict[str, Any]:
+        return _library().search_hybrid(query, top=top, scope=scope,
+                                        include_archived=include_archived)
+
+    @registry.register(
+        "library_learn_ingest",
+        description=(
+            "Bridge: a character's graded journal becomes Library "
+            "digests (claim = the graded line, scope = character:<id>). "
+            "Re-running ingests only new grades (dedupe by journal "
+            "entry id). Use to make what a character learned searchable "
+            "and revisable alongside everything else the system knows."
+        ),
+        capability=Capability.FS_READ,
+        parameters={
+            "char_id": "str — the character id",
+            "min_grade": "float (optional, 0.0) — pass -1.0 for all",
+        },
+    )
+    def library_learn_ingest(char_id: str, *,
+                             min_grade: float = 0.0) -> dict[str, Any]:
+        return _library().ingest_learn_journal(char_id,
+                                               min_grade=min_grade)
+
+    @registry.register(
+        "library_vectors",
+        description=(
+            "The library's vector lane: status reports backend, "
+            "embedder, pinned dimensions, counts, and unvectorized "
+            "digests; backfill embeds every passage and digest that "
+            "lacks a vector (books ingested before the lane existed). "
+            "Embeddings are hashing by default (zero cost, offline); a "
+            "failed embed never fails an ingest — backfill repairs it."
+        ),
+        capability=Capability.FS_READ,
+        parameters={
+            "action": "str — status | backfill",
+            "max_items": "int (optional, 0 = all) — backfill cap",
+        },
+    )
+    def library_vectors(action: str = "status", *,
+                        max_items: int = 0) -> dict[str, Any]:
+        lib = _library()
+        act = (action or "").strip().lower()
+        if act == "status":
+            return lib.vector_status()
+        if act == "backfill":
+            return lib.backfill_vectors(max_items=max_items)
+        raise ValueError(
+            f"unknown vectors action {action!r} — status | backfill")
+
+    @registry.register(
+        "museum_census",
+        description=(
+            "The Museum: one browsable census over every system — "
+            "ApkForge builds, library books/digests/sources, characters' "
+            "learned state — as cards (id/title/kind/shelf/path/hash/ "
+            "size/provenance/tags/sendable). Non-file exhibits are "
+            "exhibit-only, never sendable. A failing shelf reports a "
+            "named error and never kills the other shelves."
+        ),
+        capability=Capability.FS_READ,
+        parameters={
+            "apk_root": "str (optional) — ApkForge root, else resolved",
+        },
+    )
+    def museum_census(apk_root: str = "") -> dict[str, Any]:
+        from ..agents.apkforge.project import apkforge_dir
+        from ..characters.learn import LearnStore
+        from ..characters.store import CharacterStore
+        from ..museum import Museum
+
+        root = apk_root.strip() or str(apkforge_dir(context))
+        museum = Museum(apk_root=root, library=_library(),
+                        char_store=CharacterStore(),
+                        learn_store=LearnStore())
+        res = museum.census()
+        return {**res, "card_text": museum.render(res)}

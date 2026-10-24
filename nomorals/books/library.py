@@ -29,16 +29,24 @@ collections/shelves, tags, and star ratings — all in the same SQLite db.
 """
 from __future__ import annotations
 
+import html as _html
 import json
 import math
 import re
 import sqlite3
 import time
+import urllib.error
+import urllib.request
+import xml.etree.ElementTree as ET
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
-__all__ = ["Library", "LibraryError", "IngestResult", "SearchHit"]
+from ..core.ids import new_id
+
+__all__ = ["Library", "LibraryError", "IngestResult", "SearchHit",
+           "HybridHit", "Digest"]
 
 _WORD = re.compile(r"[A-Za-z0-9']+")
 
@@ -47,6 +55,39 @@ _WORD = re.compile(r"[A-Za-z0-9']+")
 _TEXT_EXTS = (".txt", ".md", ".markdown", ".text")
 _DOC_EXTS = (".pdf", ".epub", ".docx", ".html", ".htm")
 _INGEST_EXTS = _TEXT_EXTS + _DOC_EXTS
+
+# ── museum + library next-level constants ─────────────────────────────
+# URL fetch: bounded read so a hostile or broken server cannot grow
+# memory without limit; the 200-char minimum and max_chars truncation
+# still apply after extraction, exactly as for files.
+_FETCH_MAX_BYTES = 20_000_000
+_FETCH_TIMEOUT = 30.0
+_FETCH_UA = "DevonLibrary/1.0 (+library ingest)"
+# Embedding text is truncated per chapter: the hashing embedder is
+# length-free, but native/router endpoints have context limits.
+_EMBED_CHARS = 4000
+# Reciprocal rank fusion constant (standard k=60).
+_RRF_K = 60.0
+# Health: consecutive failed checks before a source is dead.
+_HEALTH_FAIL_THRESHOLD = 3
+# Feed dedupe memory: seen item links per feed source, oldest pruned.
+_FEED_SEEN_CAP = 1000
+# Vector lane: one owner_type in the shared embeddings table; owner_id
+# encodes the kind so passages and digests share one namespace.
+_VECTOR_OWNER = "library"
+# The embeddings table DDL is byte-identical to
+# nomorals/storage/migrations.py (the memory system's table) so the
+# real VectorStore works against library.db unchanged. This creates
+# the table in the LIBRARY file only; migrations.py is never touched.
+_EMBEDDINGS_DDL = (
+    "CREATE TABLE IF NOT EXISTS embeddings ("
+    " id TEXT PRIMARY KEY, owner_type TEXT NOT NULL,"
+    " owner_id TEXT NOT NULL, model TEXT NOT NULL,"
+    " dim INTEGER NOT NULL, norm REAL NOT NULL DEFAULT 0,"
+    " vector BLOB NOT NULL, created_at REAL NOT NULL)"
+)
+_URL_RE = re.compile(r"https?://[^\s<>\"')\]]+")
+_TAG_RE = re.compile(r"<[^>]+>")
 
 
 class LibraryError(ValueError):
@@ -64,6 +105,7 @@ class IngestResult:
     seconds: float
     strategy: str
     note: str = ""
+    source_id: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -71,7 +113,7 @@ class IngestResult:
             "chapters": self.chapters, "words": self.words,
             "source_file": self.source_file,
             "seconds": round(self.seconds, 2), "strategy": self.strategy,
-            "note": self.note,
+            "note": self.note, "source_id": self.source_id,
         }
 
 
@@ -99,6 +141,65 @@ class SearchHit:
             "author": self.author,
             "chapter_number": self.chapter_number,
             "ingested_at": self.ingested_at,
+        }
+
+
+@dataclass
+class Digest:
+    """A structured, revisable knowledge record — the brain's digest of
+    a source, not raw text. Revisions live in `digest_revisions`; this
+    row is always the current version."""
+
+    record_id: str
+    source_id: str
+    claim: str
+    confidence: float
+    scope: str = ""
+    status: str = "active"
+    created_at: float = 0.0
+    updated_at: float = 0.0
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "record_id": self.record_id, "source_id": self.source_id,
+            "claim": self.claim, "confidence": round(self.confidence, 4),
+            "scope": self.scope, "status": self.status,
+            "created_at": self.created_at, "updated_at": self.updated_at,
+        }
+
+
+@dataclass
+class HybridHit:
+    """One fused retrieval hit: a passage or a digest, with the rank
+    breakdown that produced its score (reciprocal rank fusion over the
+    keyword-passage, keyword-digest, and vector lanes)."""
+
+    kind: str  # "passage" | "digest"
+    text: str
+    score: float
+    title: str = ""
+    slug: str = ""
+    chapter: str = ""
+    chapter_number: int = 0
+    record_id: str = ""
+    confidence: float | None = None
+    health: str = "unknown"
+    source_id: str = ""
+    scope: str = ""
+    keyword_rank: int | None = None
+    vector_rank: int | None = None
+    lanes: tuple[str, ...] = ()
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "kind": self.kind, "text": self.text,
+            "score": round(self.score, 4), "title": self.title,
+            "slug": self.slug, "chapter": self.chapter,
+            "chapter_number": self.chapter_number,
+            "record_id": self.record_id, "confidence": self.confidence,
+            "health": self.health, "source_id": self.source_id,
+            "scope": self.scope, "keyword_rank": self.keyword_rank,
+            "vector_rank": self.vector_rank, "lanes": list(self.lanes),
         }
 
 
@@ -204,13 +305,191 @@ def split_chapters(text: str) -> tuple[list[tuple[str, str]], str]:
     return [c for c in chapters if c[1]], "chunks"
 
 
+# ── url / feed fetching + discovery helpers ─────────────────────────
+
+def _default_fetch(url: str, timeout: float = _FETCH_TIMEOUT,
+                   ) -> tuple[bytes, str, str]:
+    """Fetch a URL: (body bytes, content-type, final URL after redirects).
+
+    Stdlib urllib, the repo's established fetch shape. Bounded read:
+    bodies past _FETCH_MAX_BYTES raise LibraryError instead of growing
+    memory. Network errors surface as LibraryError (never raw URLError
+    — the caller decides whether a source is failing or dead)."""
+    req = urllib.request.Request(url, headers={"User-Agent": _FETCH_UA})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            ctype = (resp.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+            body = resp.read(_FETCH_MAX_BYTES + 1)
+            final = resp.geturl()
+    except urllib.error.HTTPError as exc:
+        raise LibraryError(f"fetch {url} failed: HTTP {exc.code}") from exc
+    except urllib.error.URLError as exc:
+        raise LibraryError(f"fetch {url} failed: {exc.reason}") from exc
+    except (OSError, ValueError) as exc:
+        raise LibraryError(f"fetch {url} failed: {exc}") from exc
+    if len(body) > _FETCH_MAX_BYTES:
+        raise LibraryError(f"fetch {url} exceeded {_FETCH_MAX_BYTES} bytes")
+    return body, ctype, final
+
+
+def _default_probe(url: str, timeout: float = 15.0) -> int:
+    """Liveness probe for health checks: GET, read ≤4KB, return status.
+
+    A HEAD would be lighter but lies on servers that reject it; a
+    small GET proves the document is actually servable."""
+    req = urllib.request.Request(url, headers={"User-Agent": _FETCH_UA})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            resp.read(4096)
+            return int(resp.status)
+    except urllib.error.HTTPError as exc:
+        return int(exc.code)
+    except (urllib.error.URLError, OSError, ValueError) as exc:
+        raise LibraryError(f"probe {url} failed: {exc}") from exc
+
+
+def _strip_html_fragment(text: str) -> str:
+    """Best-effort text from an HTML fragment (feed descriptions).
+
+    Full documents go through the documents engine; fragments get this
+    small stripper (tags out, entities decoded, whitespace collapsed).
+    It never raises on malformed input."""
+    try:
+        out = _TAG_RE.sub(" ", text or "")
+        out = _html.unescape(out)
+        return re.sub(r"\s+", " ", out).strip()
+    except Exception:  # noqa: BLE001 — fragment stripping never fails ingest
+        return (text or "").strip()
+
+
+def _bytes_to_text(data: bytes, ctype: str, url: str) -> tuple[str, str, str]:
+    """Extract (text, title, author) from fetched bytes.
+
+    HTML/pdf/epub/docx go through the documents engine (same parsers
+    as file ingest); plain text decodes directly. Returns "" title /
+    author when the document carries none — the caller guesses."""
+    if ctype in ("text/plain", "text/markdown", "text/csv", "") or \
+            not ctype.startswith(("text/html", "application/pdf",
+                                  "application/epub", "application/"
+                                  "vnd.openxmlformats")):
+        # Unknown types fall through to the parsers too when they look
+        # like documents; plain text is the fast path.
+        if ctype.startswith("text/") or ctype == "":
+            try:
+                return data.decode("utf-8", errors="replace"), "", ""
+            except Exception:  # noqa: BLE001 — decode fallback below
+                pass
+    from ..documents.model import full_text
+    from ..documents.parsers import parse_bytes
+
+    try:
+        doc = parse_bytes(data, filename=url, mime=ctype)
+    except Exception as exc:  # noqa: BLE001 - wrap, don't leak
+        raise LibraryError(f"could not extract text from {url}: {exc}") from exc
+    return full_text(doc), (doc.title or ""), (doc.author or "")
+
+
+def _feed_local(tag: str) -> str:
+    """Element tag without its namespace: '{http://...}item' -> 'item'."""
+    return tag.rsplit("}", 1)[-1] if isinstance(tag, str) else ""
+
+
+def _feed_children(elem: Any, name: str) -> list[Any]:
+    return [c for c in list(elem) if _feed_local(c.tag) == name]
+
+
+def _feed_first_text(elem: Any, names: tuple[str, ...]) -> str:
+    for name in names:
+        for child in _feed_children(elem, name):
+            text = (child.text or "").strip()
+            if text:
+                return text
+    return ""
+
+
+def _parse_feed(data: bytes) -> tuple[str, list[dict[str, str]]]:
+    """Parse RSS 2.0 / Atom with stdlib ElementTree (no feedparser on
+    this box, and stdlib covers both formats). Returns (feed title,
+    items) with items as {title, body, link} and HTML stripped from
+    bodies. Raises LibraryError on unparseable XML or zero usable
+    items."""
+    try:
+        root = ET.fromstring(data)
+    except ET.ParseError as exc:
+        raise LibraryError(f"feed XML did not parse: {exc}") from exc
+    feed_title = ""
+    if _feed_local(root.tag) == "feed":  # Atom
+        feed_title = _feed_first_text(root, ("title",))
+        entries = _feed_children(root, "entry")
+    else:  # RSS: rss/channel/item (or a bare channel)
+        channels = _feed_children(root, "channel")
+        for ch in channels:
+            feed_title = _feed_first_text(ch, ("title",))
+            if feed_title:
+                break
+        entries = []
+        for ch in channels or [root]:
+            entries.extend(_feed_children(ch, "item"))
+    items: list[dict[str, str]] = []
+    for entry in entries:
+        title = _feed_first_text(entry, ("title",))
+        body = ""
+        # content:encoded is namespaced content; localname match finds it.
+        for child in list(entry):
+            if _feed_local(child.tag) == "encoded" and (child.text or "").strip():
+                body = child.text or ""
+                break
+        if not body:
+            body = _feed_first_text(entry, ("description", "summary",
+                                            "content"))
+        link = ""
+        for child in _feed_children(entry, "link"):
+            href = (child.get("href") or "").strip()
+            text = (child.text or "").strip()
+            if href:
+                link = href
+                break
+            if text.startswith("http"):
+                link = text
+                break
+        items.append({
+            "title": _strip_html_fragment(title),
+            "body": _strip_html_fragment(body),
+            "link": link,
+        })
+    items = [i for i in items if i["title"] or i["body"]]
+    if not items:
+        raise LibraryError("feed contained no usable items")
+    return feed_title, items
+
+
+def _extract_urls(text: str) -> list[str]:
+    """Bare URLs in text, trailing punctuation stripped, fragment cut.
+
+    Used by discovery: links inside ingested content become candidate
+    sources. Order-preserving, deduplicated."""
+    out: list[str] = []
+    seen: set[str] = set()
+    for m in _URL_RE.finditer(text or ""):
+        url = m.group(0).rstrip(".,;:!?\"'])").strip()
+        url = url.split("#", 1)[0]
+        if url and url not in seen:
+            seen.add(url)
+            out.append(url)
+    return out
+
+
 # ── the library ─────────────────────────────────────────────────────────
 
 class Library:
     """Owns ``workspace/library/``: ingest, search, read, list, drop."""
 
-    def __init__(self, context: Any) -> None:
+    def __init__(self, context: Any, embedder: Any = None) -> None:
         self.context = context
+        # Embedder is lazy: None means "build the hashing default on
+        # first vector use" — no import-time I/O, no network, no cost.
+        # Callers may inject a native/router Embedder instead.
+        self.embedder = embedder
 
     # ── paths ─────────────────────────────────────────────────────────
     def root(self) -> Path:
@@ -292,6 +571,45 @@ class Library:
         con.execute(
             "CREATE TABLE IF NOT EXISTS book_series ("
             " slug TEXT PRIMARY KEY, series TEXT, series_index REAL)")
+        # ── next-level: sources, digests, vectors ─────────────────────
+        # Sources are records, not files: every ingest (file included)
+        # creates one, so URL/feed/file share one provenance shape.
+        con.execute(
+            "CREATE TABLE IF NOT EXISTS sources ("
+            " source_id TEXT PRIMARY KEY, kind TEXT, origin TEXT,"
+            " title TEXT, status TEXT, health TEXT, failures INTEGER,"
+            " fetched_at REAL, last_checked REAL, last_error TEXT,"
+            " created_at REAL, meta TEXT)")
+        # Structured revisable records: the current version lives here,
+        # every earlier version in digest_revisions (append-only).
+        con.execute(
+            "CREATE TABLE IF NOT EXISTS digests ("
+            " record_id TEXT PRIMARY KEY, source_id TEXT, claim TEXT,"
+            " confidence REAL, scope TEXT, status TEXT,"
+            " created_at REAL, updated_at REAL)")
+        con.execute(
+            "CREATE TABLE IF NOT EXISTS digest_revisions ("
+            " id INTEGER PRIMARY KEY AUTOINCREMENT, record_id TEXT,"
+            " claim TEXT, confidence REAL, note TEXT, revised_by TEXT,"
+            " revised_at REAL)")
+        # Derived state: recomputed on create/revise, never history.
+        con.execute(
+            "CREATE TABLE IF NOT EXISTS digest_flags ("
+            " id INTEGER PRIMARY KEY AUTOINCREMENT, record_id TEXT,"
+            " other_id TEXT, strategy TEXT, confidence REAL, note TEXT,"
+            " created_at REAL)")
+        # The memory system's embeddings table, in the library file, so
+        # the real VectorStore works here unchanged (see _EMBEDDINGS_DDL).
+        con.execute(_EMBEDDINGS_DDL)
+        con.execute(
+            "CREATE INDEX IF NOT EXISTS idx_embeddings_owner"
+            " ON embeddings(owner_type, owner_id)")
+        # Books gain their source link idempotently: old library.db
+        # files get the column on next open, existing rows keep NULL
+        # (unknown source — health factor 1.0, never excluded).
+        cols = {r[1] for r in con.execute("PRAGMA table_info(books)")}
+        if "source_id" not in cols:
+            con.execute("ALTER TABLE books ADD COLUMN source_id TEXT")
         row = con.execute(
             "SELECT value FROM meta WHERE key = 'fts5'").fetchone()
         if row is None:
@@ -311,10 +629,19 @@ class Library:
             con.commit()
             row = con.execute(
                 "SELECT value FROM meta WHERE key = 'fts5'").fetchone()
+        if row[0] == "1":
+            # Digest keyword lane mirrors the passages lane: FTS5 when
+            # the runtime has it, Python token overlap otherwise.
+            con.execute(
+                "CREATE VIRTUAL TABLE IF NOT EXISTS digest_fts USING fts5("
+                "record_id UNINDEXED, claim)")
+            con.commit()
         return con, row[0] == "1"
 
     def _reindex_all(self, con: sqlite3.Connection,
                      fts5: bool) -> None:
+        """Rebuild the whole passages index from every book.json.
+        Repair utility only — ingest/drop use `_index_book` now."""
         con.execute("DELETE FROM passages")
         rows: list[tuple[str, str, str, int, str]] = []
         for book_json in self.root().glob("*/book.json"):
@@ -337,6 +664,118 @@ class Library:
                 "INSERT INTO passages(book_slug, book_title, chapter, "
                 "number, text) VALUES (?,?,?,?,?)", rows)
         con.commit()
+
+    def _index_book(self, con: sqlite3.Connection, fts5: bool,
+                    slug: str) -> None:
+        """Index ONE book's chapters: delete that slug's passages,
+        insert fresh from its book.json. The ingest/drop paths use
+        this now — `_reindex_all`'s whole-index rebuild was a scaling
+        wall the moment sources arrived as a stream. `_reindex_all`
+        stays as a repair utility."""
+        con.execute("DELETE FROM passages WHERE book_slug = ?", (slug,))
+        book_json = self.book_dir(slug) / "book.json"
+        try:
+            meta = json.loads(book_json.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            con.commit()
+            return
+        title = meta.get("title", "")
+        rows: list[tuple[str, str, str, int, str]] = []
+        for ch in meta.get("chapters", []):
+            num = int(ch.get("number", 0))
+            body_file = book_json.parent / "chapters" / f"{num:03d}.md"
+            try:
+                body = body_file.read_text(encoding="utf-8")
+            except OSError:
+                continue
+            rows.append((slug, title, ch.get("title", ""), num, body))
+        if rows:
+            con.executemany(
+                "INSERT INTO passages(book_slug, book_title, chapter, "
+                "number, text) VALUES (?,?,?,?,?)", rows)
+        con.commit()
+
+    def _persist_book(self, *, slug: str, title: str, author: str,
+                      chapters: list[tuple[str, str]], strategy: str,
+                      original_bytes: bytes, original_name: str,
+                      source: dict[str, Any], source_file: str,
+                      started: float,
+                      chapter_extra: list[dict[str, Any]] | None = None,
+                      ) -> IngestResult:
+        """Shared write tail for file/URL/feed ingest: chapter files +
+        original + book.json + incremental index + books row + source
+        row + chapter vectors (best-effort). One shape for all kinds."""
+        dest = self.book_dir(slug)
+        chapters_dir = dest / "chapters"
+        chapters_dir.mkdir(parents=True, exist_ok=True)
+        (dest / original_name).write_bytes(original_bytes)
+
+        total_words = 0
+        meta_chapters = []
+        for i, (name, body) in enumerate(chapters, 1):
+            (chapters_dir / f"{i:03d}.md").write_text(
+                f"# {name}\n\n{body}\n", encoding="utf-8")
+            words = len(body.split())
+            total_words += words
+            entry: dict[str, Any] = {"number": i, "title": name,
+                                     "words": words}
+            if chapter_extra and i - 1 < len(chapter_extra):
+                entry.update({k: v for k, v in chapter_extra[i - 1].items()
+                              if v})
+            meta_chapters.append(entry)
+
+        now = time.time()
+        meta = {
+            "slug": slug, "title": title, "author": author,
+            "source_file": original_name, "strategy": strategy,
+            "chapters": meta_chapters, "total_words": total_words,
+            "ingested_at": now, "source_id": source["source_id"],
+        }
+        (dest / "book.json").write_text(
+            json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
+
+        con, fts5 = self._connect()
+        try:
+            self._index_book(con, fts5, slug)
+            con.execute(
+                "INSERT OR REPLACE INTO books(slug,title,author,"
+                "source_file,chapters,words,strategy,ingested_at,"
+                "source_id) VALUES (?,?,?,?,?,?,?,?,?)",
+                (slug, title, author, original_name, len(chapters),
+                 total_words, strategy, now, source["source_id"]))
+            con.execute(
+                "INSERT OR REPLACE INTO sources(source_id,kind,origin,"
+                "title,status,health,failures,fetched_at,last_checked,"
+                "last_error,created_at,meta) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                (source["source_id"], source.get("kind", "file"),
+                 source.get("origin", ""), source.get("title", title),
+                 source.get("status", "active"),
+                 source.get("health", "unknown"),
+                 int(source.get("failures", 0)),
+                 source.get("fetched_at", now),
+                 source.get("last_checked", 0.0),
+                 source.get("last_error", ""),
+                 source.get("created_at", now),
+                 json.dumps(source.get("meta") or {})))
+            con.commit()
+        finally:
+            con.close()
+
+        note = ""
+        vec_error = self._embed_book_vectors(slug, chapters)
+        if vec_error:
+            # Vectors are the retrieval accelerator, not the ingest:
+            # a failed embed never fails the ingest, but it is said
+            # out loud (note) and repaired by backfill_vectors().
+            note = f"vectors skipped: {vec_error}"
+
+        return IngestResult(
+            slug=slug, title=title, author=author,
+            chapters=len(chapters), words=total_words,
+            source_file=source_file, seconds=time.perf_counter() - started,
+            strategy=strategy, note=note,
+            source_id=source["source_id"],
+        )
 
     # ── ingest ────────────────────────────────────────────────────────
     def ingest(self, path: str | Path, *, title: str = "",
@@ -381,45 +820,17 @@ class Library:
             book_author = self._guess_author(raw, book_title, p)
         slug = self._slug(book_title, p.stem)
 
-        dest = self.book_dir(slug)
-        chapters_dir = dest / "chapters"
-        chapters_dir.mkdir(parents=True, exist_ok=True)
-        (dest / p.name).write_bytes(p.read_bytes())  # keep the original
-
-        total_words = 0
-        meta_chapters = []
-        for i, (name, body) in enumerate(chapters, 1):
-            (chapters_dir / f"{i:03d}.md").write_text(
-                f"# {name}\n\n{body}\n", encoding="utf-8")
-            words = len(body.split())
-            total_words += words
-            meta_chapters.append({"number": i, "title": name, "words": words})
-
-        meta = {
-            "slug": slug, "title": book_title, "author": book_author,
-            "source_file": p.name, "strategy": strategy,
-            "chapters": meta_chapters, "total_words": total_words,
-            "ingested_at": time.time(),
+        source = {
+            "source_id": new_id(), "kind": "file", "origin": str(p),
+            "title": book_title, "status": "active", "health": "unknown",
+            "failures": 0, "fetched_at": time.time(), "last_checked": 0.0,
+            "last_error": "", "created_at": time.time(), "meta": {},
         }
-        (dest / "book.json").write_text(
-            json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
-
-        # rebuild the whole index (books are few; chapters are the rows)
-        con, fts5 = self._connect()
-        self._reindex_all(con, fts5)
-        con.execute(
-            "INSERT OR REPLACE INTO books(slug,title,author,source_file,"
-            "chapters,words,strategy,ingested_at) VALUES (?,?,?,?,?,?,?,?)",
-            (slug, book_title, book_author, p.name, len(chapters),
-             total_words, strategy, time.time()))
-        con.commit()
-        con.close()
-
-        return IngestResult(
+        return self._persist_book(
             slug=slug, title=book_title, author=book_author,
-            chapters=len(chapters), words=total_words,
-            source_file=str(p), seconds=time.perf_counter() - started,
-            strategy=strategy,
+            chapters=chapters, strategy=strategy,
+            original_bytes=p.read_bytes(), original_name=p.name,
+            source=source, source_file=str(p), started=started,
         )
 
     @staticmethod
@@ -684,6 +1095,18 @@ class Library:
         dest = self.book_dir(slug)
         if not dest.exists():
             raise LibraryError(f"no book {slug!r} in the library")
+        # Chapter numbers first: vector cleanup needs them, and the
+        # dir is gone afterwards. A vector-cleanup failure never fails
+        # the drop — stale vectors resolve to nothing in hybrid search
+        # and backfill never resurrects them (no chapters, no rows).
+        vec_note = ""
+        try:
+            meta = json.loads((dest / "book.json").read_text(encoding="utf-8"))
+            numbers = [int(c.get("number", 0))
+                       for c in meta.get("chapters", [])]
+            self._delete_book_vectors(slug, numbers)
+        except Exception as exc:  # noqa: BLE001 — drop proceeds regardless
+            vec_note = f"vectors stale: {exc}"
         for f in dest.iterdir():
             if f.is_dir():
                 for c in f.iterdir():
@@ -693,7 +1116,7 @@ class Library:
                 f.unlink()
         dest.rmdir()
         con, fts5 = self._connect()
-        self._reindex_all(con, fts5)
+        con.execute("DELETE FROM passages WHERE book_slug = ?", (slug,))
         con.execute("DELETE FROM books WHERE slug = ?", (slug,))
         # drop the reading state too — no orphaned progress/bookmarks/notes
         for table in ("reading_progress", "bookmarks", "annotations",
@@ -701,7 +1124,1221 @@ class Library:
             con.execute(f"DELETE FROM {table} WHERE slug = ?", (slug,))
         con.commit()
         con.close()
-        return {"dropped": slug}
+        # Digests are knowledge, not the book: dropping a book never
+        # deletes digests made from it (shed_dead archives them when
+        # the SOURCE dies — a different, explicit act).
+        out: dict[str, Any] = {"dropped": slug}
+        if vec_note:
+            out["vectors"] = vec_note
+        return out
+
+    # ── url / feed ingest ─────────────────────────────────────────────
+    def _source_for_origin(self, con: sqlite3.Connection, kind: str,
+                           origin: str) -> dict[str, Any] | None:
+        row = con.execute(
+            "SELECT source_id, kind, origin, title, status, health,"
+            " failures, fetched_at, last_checked, last_error,"
+            " created_at, meta FROM sources WHERE kind = ? AND origin = ?",
+            (kind, origin)).fetchone()
+        if row is None:
+            return None
+        d = {
+            "source_id": row[0], "kind": row[1], "origin": row[2],
+            "title": row[3], "status": row[4], "health": row[5],
+            "failures": row[6], "fetched_at": row[7],
+            "last_checked": row[8], "last_error": row[9],
+            "created_at": row[10],
+        }
+        try:
+            d["meta"] = json.loads(row[11] or "{}")
+        except ValueError:
+            d["meta"] = {}
+        return d
+
+    def ingest_url(self, url: str, *, title: str = "", author: str = "",
+                   fetcher: Any = None, max_chars: int = 4_000_000,
+                   ) -> IngestResult:
+        """Ingest a URL as a book: fetch, extract, split, index — the
+        same record shape as file ingest (book dir, chapters, passages,
+        source row). Fetch happens FIRST: a failed fetch leaves no
+        partial book and no source row. Re-ingesting the same URL
+        updates its existing source row and book (same slug when the
+        title matches; a changed title lands a new slug, the old book
+        stays — same as re-ingesting a renamed file)."""
+        started = time.perf_counter()
+        url = (url or "").strip()
+        if not url.startswith(("http://", "https://")):
+            raise LibraryError(f"ingest_url needs an http(s) URL, got {url!r}")
+        fetch = fetcher or _default_fetch
+        try:
+            data, ctype = fetch(url, _FETCH_TIMEOUT)[:2]
+        except LibraryError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - wrap, don't leak
+            raise LibraryError(f"fetch {url} failed: {exc}") from exc
+        raw, doc_title, doc_author = _bytes_to_text(data, ctype, url)
+        if len(raw) > max_chars:
+            raw = raw[:max_chars]
+        if len(raw.strip()) < 200:
+            raise LibraryError("fetched document is too small to be a book")
+        chapters, strategy = split_chapters(raw)
+        if not chapters:
+            raise LibraryError("could not cut the fetched document into chapters")
+        book_title = title.strip() or doc_title.strip()
+        stem = url.rstrip("/").rsplit("/", 1)[-1].split("?", 1)[0] or "page"
+        if not book_title:
+            book_title = self._guess_title(raw, Path(stem))
+        book_author = author.strip() or doc_author.strip()
+        if not book_author:
+            book_author = self._guess_author(raw, book_title, Path(stem))
+        slug = self._slug(book_title, stem)
+        ctype_name = {"text/html": "source.html", "application/pdf": "source.pdf",
+                      "application/epub+zip": "source.epub",
+                      "application/vnd.openxmlformats-officedocument."
+                      "wordprocessingml.document": "source.docx"}.get(ctype, "source.txt")
+        con, _ = self._connect()
+        try:
+            existing = self._source_for_origin(con, "url", url)
+        finally:
+            con.close()
+        now = time.time()
+        source = {
+            "source_id": existing["source_id"] if existing else new_id(),
+            "kind": "url", "origin": url, "title": book_title,
+            "status": "active", "health": "ok", "failures": 0,
+            "fetched_at": now,
+            "last_checked": existing["last_checked"] if existing else 0.0,
+            "last_error": "",
+            "created_at": existing["created_at"] if existing else now,
+            "meta": existing["meta"] if existing else {},
+        }
+        return self._persist_book(
+            slug=slug, title=book_title, author=book_author,
+            chapters=chapters, strategy=strategy,
+            original_bytes=data, original_name=ctype_name,
+            source=source, source_file=url, started=started,
+        )
+
+    def _read_book_chapters(self, slug: str,
+                            ) -> tuple[list[tuple[str, str]],
+                                       list[dict[str, Any]]]:
+        """Reconstruct (chapters, extras) from an existing book's files
+        — the feed-upsert path needs the old chapters to append to."""
+        book_json = self.book_dir(slug) / "book.json"
+        meta = json.loads(book_json.read_text(encoding="utf-8"))
+        chapters: list[tuple[str, str]] = []
+        extras: list[dict[str, Any]] = []
+        for ch in meta.get("chapters", []):
+            num = int(ch.get("number", 0))
+            path = book_json.parent / "chapters" / f"{num:03d}.md"
+            text = path.read_text(encoding="utf-8") if path.exists() else ""
+            # Files are "# {title}\n\n{body}\n" — strip one header line.
+            lines = text.split("\n", 1)
+            body = lines[1].lstrip("\n") if len(lines) > 1 and \
+                lines[0].startswith("# ") else text
+            chapters.append((ch.get("title", ""), body.rstrip("\n")))
+            extras.append({"link": ch.get("link", "")} if ch.get("link") else {})
+        return chapters, extras
+
+    def ingest_feed(self, url: str, *, title: str = "",
+                    fetcher: Any = None, max_items: int = 100,
+                    ) -> IngestResult:
+        """Ingest an RSS/Atom feed as one book: items become chapters
+        (item title = chapter title, item link in chapter meta).
+        Re-ingesting upserts: unseen items append as new chapters,
+        seen items are never duplicated (dedupe by link, else title).
+        The feed's source row carries the seen set in its meta."""
+        started = time.perf_counter()
+        url = (url or "").strip()
+        if not url.startswith(("http://", "https://")):
+            raise LibraryError(f"ingest_feed needs an http(s) URL, got {url!r}")
+        fetch = fetcher or _default_fetch
+        try:
+            data = fetch(url, _FETCH_TIMEOUT)[0]
+        except LibraryError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - wrap, don't leak
+            raise LibraryError(f"fetch {url} failed: {exc}") from exc
+        feed_title, items = _parse_feed(data)
+        items = items[:max(1, max_items)]
+        con, _ = self._connect()
+        try:
+            existing = self._source_for_origin(con, "feed", url)
+        finally:
+            con.close()
+        now = time.time()
+        book_title = title.strip() or feed_title.strip()
+        slug = ""
+        old_chapters: list[tuple[str, str]] = []
+        old_extras: list[dict[str, Any]] = []
+        seen: list[str] = []
+        if existing:
+            seen = list((existing.get("meta") or {}).get("seen") or [])
+            book_slug = (existing.get("meta") or {}).get("book_slug", "")
+            old_meta = None
+            if book_slug:
+                try:
+                    old_meta = json.loads(
+                        (self.book_dir(book_slug) / "book.json")
+                        .read_text(encoding="utf-8"))
+                except (OSError, ValueError):
+                    old_meta = None
+            if old_meta is not None:
+                slug = old_meta.get("slug", "")
+                old_chapters, old_extras = self._read_book_chapters(slug)
+        if not book_title:
+            bodies = "\n\n".join(i["body"] for i in items)
+            book_title = self._guess_title(bodies, Path("feed"))
+        if not slug:
+            stem = re.sub(r"[^A-Za-z0-9]+", "-",
+                          url.split("://", 1)[-1].split("?", 1)[0]
+                          .split("#", 1)[0]).strip("-")[:60] or "feed"
+            slug = self._slug(book_title, stem)
+        seen_set = set(seen)
+        new_chapters: list[tuple[str, str]] = []
+        new_extras: list[dict[str, Any]] = []
+        for item in items:
+            key = item["link"] or item["title"]
+            if key and key in seen_set:
+                continue
+            new_chapters.append((item["title"] or "Untitled",
+                                 item["body"] or item["title"]))
+            new_extras.append({"link": item["link"]} if item["link"] else {})
+            if key:
+                seen.append(key)
+        chapters = old_chapters + new_chapters
+        extras = old_extras + new_extras
+        if not chapters:
+            raise LibraryError("feed yielded no chapters to ingest")
+        seen = seen[-_FEED_SEEN_CAP:]
+        source = {
+            "source_id": existing["source_id"] if existing else new_id(),
+            "kind": "feed", "origin": url, "title": book_title,
+            "status": "active", "health": "ok", "failures": 0,
+            "fetched_at": now,
+            "last_checked": existing["last_checked"] if existing else 0.0,
+            "last_error": "",
+            "created_at": existing["created_at"] if existing else now,
+            "meta": {"seen": seen, "book_slug": slug},
+        }
+        res = self._persist_book(
+            slug=slug, title=book_title, author="",
+            chapters=chapters, strategy="feed",
+            original_bytes=data, original_name="source.xml",
+            source=source, source_file=url, started=started,
+            chapter_extra=extras,
+        )
+        if old_chapters and new_chapters:
+            res.note = (f"upsert: {len(new_chapters)} new items, "
+                        f"{len(chapters)} chapters total")
+        return res
+
+    # ── sources as seeds ──────────────────────────────────────────────
+    def list_sources(self, status: str = "", kind: str = "",
+                     ) -> list[dict[str, Any]]:
+        con, _ = self._connect()
+        try:
+            sql = ("SELECT source_id, kind, origin, title, status, health,"
+                   " failures, fetched_at, last_checked, last_error,"
+                   " created_at, meta FROM sources")
+            conds: list[str] = []
+            params: list[Any] = []
+            if status:
+                conds.append("status = ?")
+                params.append(status)
+            if kind:
+                conds.append("kind = ?")
+                params.append(kind)
+            if conds:
+                sql += " WHERE " + " AND ".join(conds)
+            sql += " ORDER BY created_at DESC"
+            out = []
+            for row in con.execute(sql, params).fetchall():
+                try:
+                    meta = json.loads(row[11] or "{}")
+                except ValueError:
+                    meta = {}
+                out.append({
+                    "source_id": row[0], "kind": row[1], "origin": row[2],
+                    "title": row[3], "status": row[4], "health": row[5],
+                    "failures": row[6], "fetched_at": row[7],
+                    "last_checked": row[8], "last_error": row[9],
+                    "created_at": row[10], "meta": meta,
+                })
+            return out
+        finally:
+            con.close()
+
+    def check_sources(self, *, fetcher: Any = None) -> dict[str, Any]:
+        """Health-check every active URL/feed source: liveness probe,
+        failures counted, health ok → failing → dead at 3 consecutive
+        failures. One source's failure never aborts the run (recorded
+        and continued). File/learn sources have no URL to check and
+        are skipped, never marked failing for it."""
+        probe = fetcher or _default_probe
+        con, _ = self._connect()
+        try:
+            rows = con.execute(
+                "SELECT source_id, origin, failures FROM sources"
+                " WHERE status = 'active' AND kind IN ('url', 'feed')"
+                " ORDER BY origin").fetchall()
+        finally:
+            con.close()
+        ok = failing = dead = 0
+        details: list[dict[str, Any]] = []
+        for source_id, origin, failures in rows:
+            now = time.time()
+            try:
+                status = probe(origin, 15.0)
+                if status >= 400:
+                    raise LibraryError(f"HTTP {status}")
+                health, new_failures, err = "ok", 0, ""
+                ok += 1
+            except Exception as exc:  # noqa: BLE001 — recorded, not raised
+                new_failures = int(failures or 0) + 1
+                health = "dead" if new_failures >= _HEALTH_FAIL_THRESHOLD \
+                    else "failing"
+                err = str(exc)[:300]
+                if health == "dead":
+                    dead += 1
+                else:
+                    failing += 1
+            con, _ = self._connect()
+            try:
+                con.execute(
+                    "UPDATE sources SET health = ?, failures = ?,"
+                    " last_checked = ?, last_error = ? WHERE source_id = ?",
+                    (health, new_failures, now, err, source_id))
+                con.commit()
+            finally:
+                con.close()
+            details.append({"source_id": source_id, "origin": origin,
+                            "health": health, "failures": new_failures,
+                            "error": err})
+        return {"checked": len(rows), "ok": ok, "failing": failing,
+                "dead": dead, "details": details}
+
+    def shed_dead(self) -> dict[str, Any]:
+        """Archive dead sources and their digests. Archive ≠ erase:
+        passages stay (hybrid search excludes archived by default and
+        includes them with include_archived=True), digests stay
+        readable with status archived. Shedding is explicit — a dead
+        health flag alone never archives anything."""
+        con, _ = self._connect()
+        try:
+            dead = [r[0] for r in con.execute(
+                "SELECT source_id FROM sources WHERE health = 'dead'"
+                " AND status = 'active'").fetchall()]
+            archived_digests = 0
+            for source_id in dead:
+                con.execute(
+                    "UPDATE sources SET status = 'archived'"
+                    " WHERE source_id = ?", (source_id,))
+                cur = con.execute(
+                    "UPDATE digests SET status = 'archived'"
+                    " WHERE source_id = ? AND status = 'active'",
+                    (source_id,))
+                archived_digests += cur.rowcount
+            con.commit()
+        finally:
+            con.close()
+        return {"archived_sources": dead,
+                "archived_digests": archived_digests}
+
+    def discover(self, source_id: str = "", *, limit: int = 50,
+                 ) -> list[dict[str, str]]:
+        """Candidate sources found inside ingested content: bare URLs
+        in chapter text plus feed item links from chapter meta.
+        Excludes the source's own origin and every already-known
+        origin — discovery proposes, the owner (or a caller) disposes
+        by ingesting the good ones. Honest limit: links lost by
+        HTML→text extraction are not recoverable from chapter text."""
+        con, _ = self._connect()
+        try:
+            if source_id:
+                row = con.execute(
+                    "SELECT source_id FROM sources WHERE source_id = ?",
+                    (source_id,)).fetchone()
+                if row is None:
+                    raise LibraryError(f"unknown source {source_id!r}")
+                slugs = [r[0] for r in con.execute(
+                    "SELECT slug FROM books WHERE source_id = ?",
+                    (source_id,)).fetchall()]
+            else:
+                slugs = [r[0] for r in con.execute(
+                    "SELECT slug FROM books").fetchall()]
+            known = {r[0] for r in con.execute(
+                "SELECT origin FROM sources").fetchall()}
+            out: list[dict[str, str]] = []
+            seen: set[str] = set()
+            for slug in slugs:
+                for (text,) in con.execute(
+                        "SELECT text FROM passages WHERE book_slug = ?",
+                        (slug,)).fetchall():
+                    for url in _extract_urls(text):
+                        if url not in known and url not in seen:
+                            seen.add(url)
+                            out.append({"url": url, "found_in": slug})
+                            if len(out) >= limit:
+                                return out
+                try:
+                    meta = json.loads(
+                        (self.book_dir(slug) / "book.json").read_text(
+                            encoding="utf-8"))
+                except (OSError, ValueError):
+                    continue
+                for ch in meta.get("chapters", []):
+                    link = (ch.get("link") or "").strip()
+                    if link and link not in known and link not in seen:
+                        seen.add(link)
+                        out.append({"url": link, "found_in": slug})
+                        if len(out) >= limit:
+                            return out
+            return out
+        finally:
+            con.close()
+
+    # ── structured revisable records (digests) ────────────────────────
+    def _contradiction_scan(self, con: sqlite3.Connection,
+                            record_id: str, claim: str, scope: str,
+                            ) -> list[dict[str, Any]]:
+        """Flag contradictions of this digest against other ACTIVE
+        digests in the same scope plus global-scope records (the memory
+        scope rule: a scoped view sees its scope + global, never
+        another scope). Adapter objects satisfy detect_against — but
+        note the trap: `_eligible` drops records whose kind is not
+        FACT/PREFERENCE, silently. Digests are FACT-kind, always.
+
+        Flags are DERIVED state: old flags for this record are replaced
+        (the revisions table is the history, flags are the current
+        verdict). Rule strategies only — no llm_fn, so no model call.
+        A missing flag is not proof of agreement: the strategies fire
+        on negation flips (≥2 shared 4+ letter topic words), value
+        changes, and preference antonym swaps — short or subtly-worded
+        disagreements pass undetected, honestly."""
+        from types import SimpleNamespace
+
+        from ..memory.base import MemoryKind
+        from ..memory.contradictions import detect_against
+
+        rows = con.execute(
+            "SELECT record_id, claim FROM digests WHERE status = 'active'"
+            " AND record_id != ? AND (scope = ? OR scope = '')",
+            (record_id, scope)).fetchall()
+        new = SimpleNamespace(id=record_id, content=claim,
+                              kind=MemoryKind.FACT, metadata={})
+        cands = [SimpleNamespace(id=r[0], content=r[1],
+                                 kind=MemoryKind.FACT, metadata={})
+                 for r in rows]
+        found = detect_against(new, cands)
+        con.execute("DELETE FROM digest_flags WHERE record_id = ?",
+                    (record_id,))
+        now = time.time()
+        for c in found:
+            con.execute(
+                "INSERT INTO digest_flags(record_id, other_id, strategy,"
+                " confidence, note, created_at) VALUES (?,?,?,?,?,?)",
+                (record_id, c.older_id, c.strategy, c.confidence,
+                 c.note, now))
+        return [c.to_dict() for c in found]
+
+    def create_digest(self, source_id: str, claim: str, *,
+                      confidence: float = 0.5, scope: str = "",
+                      check_contradictions: bool = True,
+                      ) -> dict[str, Any]:
+        """Digest a source into a structured record: claim + confidence
+        + scope, revision 1 appended, contradiction flags computed, and
+        (best-effort) a vector for hybrid retrieval. Fail-fast on bad
+        input — an empty claim, an out-of-range confidence, or an
+        unknown source is a LibraryError, never a silent clamp or a
+        dangling record."""
+        claim = (claim or "").strip()
+        if not claim:
+            raise LibraryError("digest claim is required")
+        try:
+            conf = float(confidence)
+        except (TypeError, ValueError):
+            raise LibraryError("digest confidence must be a number") from None
+        if not 0.0 <= conf <= 1.0:
+            raise LibraryError("digest confidence must be in [0, 1]")
+        scope = (scope or "").strip()
+        con, _ = self._connect()
+        try:
+            row = con.execute(
+                "SELECT source_id FROM sources WHERE source_id = ?",
+                (source_id,)).fetchone()
+            if row is None:
+                raise LibraryError(f"unknown source {source_id!r}")
+            record_id = new_id()
+            now = time.time()
+            con.execute(
+                "INSERT INTO digests(record_id, source_id, claim,"
+                " confidence, scope, status, created_at, updated_at)"
+                " VALUES (?,?,?,?,?,?,?,?)",
+                (record_id, source_id, claim, conf, scope, "active",
+                 now, now))
+            con.execute(
+                "INSERT INTO digest_revisions(record_id, claim,"
+                " confidence, note, revised_by, revised_at)"
+                " VALUES (?,?,?,?,?,?)",
+                (record_id, claim, conf, "created", "owner", now))
+            try:
+                con.execute(
+                    "INSERT INTO digest_fts(record_id, claim)"
+                    " VALUES (?,?)", (record_id, claim))
+            except sqlite3.OperationalError:
+                pass  # non-FTS5 db: no digest_fts table, overlap fallback
+            flags = self._contradiction_scan(con, record_id, claim, scope) \
+                if check_contradictions else []
+            con.commit()
+        finally:
+            con.close()
+        vec_error = self._embed_items([(f"digest:{record_id}", claim)])
+        out = self.get_digest(record_id)
+        out["flags"] = flags
+        if vec_error:
+            out["vector_error"] = vec_error
+        return out
+
+    def revise_digest(self, record_id: str, *, claim: str | None = None,
+                      confidence: float | None = None, note: str = "",
+                      revised_by: str = "owner") -> dict[str, Any]:
+        """Revise a digest: the revision is APPENDED, the current row
+        updated, contradictions re-scanned, vector replaced. The old
+        version stays readable via digest_revisions() — a record is
+        never silently overwritten. No-arg revise is a LibraryError."""
+        if claim is None and confidence is None:
+            raise LibraryError("revise needs a new claim or confidence")
+        con, _ = self._connect()
+        try:
+            row = con.execute(
+                "SELECT claim, confidence, scope FROM digests"
+                " WHERE record_id = ?", (record_id,)).fetchone()
+            if row is None:
+                raise LibraryError(f"unknown digest {record_id!r}")
+            new_claim = row[0] if claim is None else claim.strip()
+            if not new_claim:
+                raise LibraryError("digest claim is required")
+            new_conf = row[1] if confidence is None else float(confidence)
+            if not 0.0 <= new_conf <= 1.0:
+                raise LibraryError("digest confidence must be in [0, 1]")
+            now = time.time()
+            con.execute(
+                "INSERT INTO digest_revisions(record_id, claim,"
+                " confidence, note, revised_by, revised_at)"
+                " VALUES (?,?,?,?,?,?)",
+                (record_id, new_claim, new_conf, note or "",
+                 revised_by or "owner", now))
+            con.execute(
+                "UPDATE digests SET claim = ?, confidence = ?,"
+                " updated_at = ? WHERE record_id = ?",
+                (new_claim, new_conf, now, record_id))
+            try:
+                rows = con.execute(
+                    "SELECT rowid FROM digest_fts WHERE record_id = ?",
+                    (record_id,)).fetchall()
+                for (rid,) in rows:
+                    con.execute("DELETE FROM digest_fts WHERE rowid = ?",
+                                (rid,))
+                con.execute(
+                    "INSERT INTO digest_fts(record_id, claim)"
+                    " VALUES (?,?)", (record_id, new_claim))
+            except sqlite3.OperationalError:
+                pass  # non-FTS5 db
+            flags = self._contradiction_scan(con, record_id, new_claim,
+                                             row[2] or "")
+            con.commit()
+        finally:
+            con.close()
+        vec_error = self._replace_digest_vector(record_id, new_claim)
+        out = self.get_digest(record_id)
+        out["flags"] = flags
+        if vec_error:
+            out["vector_error"] = vec_error
+        return out
+
+    def get_digest(self, record_id: str) -> dict[str, Any]:
+        con, _ = self._connect()
+        try:
+            row = con.execute(
+                "SELECT record_id, source_id, claim, confidence, scope,"
+                " status, created_at, updated_at FROM digests"
+                " WHERE record_id = ?", (record_id,)).fetchone()
+        finally:
+            con.close()
+        if row is None:
+            raise LibraryError(f"unknown digest {record_id!r}")
+        return {"record_id": row[0], "source_id": row[1], "claim": row[2],
+                "confidence": row[3], "scope": row[4], "status": row[5],
+                "created_at": row[6], "updated_at": row[7]}
+
+    def list_digests(self, source_id: str = "", scope: str = "",
+                     status: str = "active") -> list[dict[str, Any]]:
+        con, _ = self._connect()
+        try:
+            sql = ("SELECT record_id, source_id, claim, confidence, scope,"
+                   " status, created_at, updated_at FROM digests")
+            conds: list[str] = []
+            params: list[Any] = []
+            if source_id:
+                conds.append("source_id = ?")
+                params.append(source_id)
+            if scope:
+                conds.append("(scope = ? OR scope = '')")
+                params.append(scope)
+            if status:
+                conds.append("status = ?")
+                params.append(status)
+            if conds:
+                sql += " WHERE " + " AND ".join(conds)
+            sql += " ORDER BY updated_at DESC"
+            return [{
+                "record_id": r[0], "source_id": r[1], "claim": r[2],
+                "confidence": r[3], "scope": r[4], "status": r[5],
+                "created_at": r[6], "updated_at": r[7],
+            } for r in con.execute(sql, params).fetchall()]
+        finally:
+            con.close()
+
+    def digest_revisions(self, record_id: str) -> list[dict[str, Any]]:
+        self.get_digest(record_id)  # fail fast on unknown ids
+        con, _ = self._connect()
+        try:
+            return [{
+                "id": r[0], "claim": r[1], "confidence": r[2],
+                "note": r[3], "revised_by": r[4], "revised_at": r[5],
+            } for r in con.execute(
+                "SELECT id, claim, confidence, note, revised_by,"
+                " revised_at FROM digest_revisions WHERE record_id = ?"
+                " ORDER BY id", (record_id,)).fetchall()]
+        finally:
+            con.close()
+
+    def digest_flags(self, record_id: str) -> list[dict[str, Any]]:
+        self.get_digest(record_id)  # fail fast on unknown ids
+        con, _ = self._connect()
+        try:
+            return [{
+                "id": r[0], "other_id": r[1], "strategy": r[2],
+                "confidence": r[3], "note": r[4], "created_at": r[5],
+            } for r in con.execute(
+                "SELECT id, other_id, strategy, confidence, note,"
+                " created_at FROM digest_flags WHERE record_id = ?"
+                " ORDER BY confidence DESC", (record_id,)).fetchall()]
+        finally:
+            con.close()
+
+    def ingest_learn_journal(self, char_id: str, *,
+                             data_dir: str | Path | None = None,
+                             min_grade: float = 0.0) -> dict[str, Any]:
+        """Bridge: a character's graded journal becomes Library digests
+        (character taste as structured records — the learn loop and the
+        Library compound). Claim = the graded line, confidence =
+        (grade+1)/2, scope = character:{char_id}. Dedupe by journal
+        entry id in the source meta, so re-running ingests only new
+        grades. learn.py is NOT modified — public interfaces only
+        (LearnStore + export_training_data). min_grade is caller-set
+        (default 0.0 = non-negative grades only); pass -1.0 for all."""
+        from ..characters.learn import LearnStore
+
+        store = LearnStore(data_dir)
+        rows = store.export_training_data(char_id)
+        origin = f"character:{char_id}"
+        con, _ = self._connect()
+        try:
+            existing = self._source_for_origin(con, "learn", origin)
+        finally:
+            con.close()
+        now = time.time()
+        source = {
+            "source_id": existing["source_id"] if existing else new_id(),
+            "kind": "learn", "origin": origin, "title": f"learned: {char_id}",
+            "status": "active", "health": "unknown", "failures": 0,
+            "fetched_at": now,
+            "last_checked": existing["last_checked"] if existing else 0.0,
+            "last_error": "",
+            "created_at": existing["created_at"] if existing else now,
+            "meta": dict(existing["meta"]) if existing else {},
+        }
+        seen = set((source["meta"] or {}).get("entries") or [])
+        # The source row must exist BEFORE the first digest: create_digest
+        # validates its source, and the meta update at the end only
+        # refreshes the seen set.
+        con, _ = self._connect()
+        try:
+            con.execute(
+                "INSERT OR REPLACE INTO sources(source_id,kind,origin,"
+                "title,status,health,failures,fetched_at,last_checked,"
+                "last_error,created_at,meta) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                (source["source_id"], "learn", origin, source["title"],
+                 "active", "unknown", 0, now,
+                 source["last_checked"], "", source["created_at"],
+                 json.dumps(source["meta"])))
+            con.commit()
+        finally:
+            con.close()
+        ingested = skipped = 0
+        for row in rows:
+            entry_id = row.get("entry_id", "")
+            line = (row.get("line") or "").strip()
+            try:
+                label = float(row.get("label"))
+            except (TypeError, ValueError):
+                skipped += 1
+                continue
+            if entry_id in seen or not line or label < min_grade:
+                skipped += 1
+                continue
+            self.create_digest(
+                source["source_id"], line,
+                confidence=(label + 1.0) / 2.0,
+                scope=f"character:{char_id}")
+            seen.add(entry_id)
+            ingested += 1
+        source["meta"]["entries"] = sorted(seen)[-5000:]
+        con, _ = self._connect()
+        try:
+            con.execute(
+                "INSERT OR REPLACE INTO sources(source_id,kind,origin,"
+                "title,status,health,failures,fetched_at,last_checked,"
+                "last_error,created_at,meta) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                (source["source_id"], "learn", origin, source["title"],
+                 "active", "unknown", 0, now,
+                 source["last_checked"], "", source["created_at"],
+                 json.dumps(source["meta"])))
+            con.commit()
+        finally:
+            con.close()
+        return {"ingested": ingested, "skipped": skipped,
+                "source_id": source["source_id"],
+                "scope": f"character:{char_id}"}
+
+    # ── vector lane (the memory system's store, in the library file) ─
+    def _get_embedder(self) -> Any:
+        if self.embedder is None:
+            from ..memory.embeddings import Embedder
+
+            # Hashing default: deterministic, zero deps, zero cost,
+            # never raises. Native/router embedders are caller-injected
+            # and degrade to hashing inside Embedder itself.
+            self.embedder = Embedder(provider="hashing", dimensions=512)
+        return self.embedder
+
+    @contextmanager
+    def _vector_backend(self) -> Iterator[Any]:
+        """The memory system's vector lane against library.db: the real
+        VectorStore + select_vector_backend(auto) — sqlite-vec →
+        usearch → legacy — with owner_type 'library'. Database(wal=
+        False) leaves the file's journal mode untouched, and the
+        Database is closed on exit (no held connections, no WAL
+        sidecars). Never import-time: all three imports are lazy."""
+        from ..memory.vector_backends import select_vector_backend
+        from ..storage.db import Database
+        from ..storage.vectors import VectorStore
+
+        db = Database(self.db_path(), wal=False)
+        try:
+            store = VectorStore(db)
+            backend = select_vector_backend(
+                db, preference="auto", owner_type=_VECTOR_OWNER,
+                vectors=store)
+            yield backend
+        finally:
+            db.close()
+
+    def _pinned_dims(self) -> int | None:
+        con, _ = self._connect()
+        try:
+            row = con.execute(
+                "SELECT value FROM meta WHERE key = 'vector_dims'"
+                ).fetchone()
+            return int(row[0]) if row else None
+        finally:
+            con.close()
+
+    def _check_pin_dims(self, dims: int, *, for_write: bool) -> str:
+        """Pin the vector dimensionality at first WRITE (later writers
+        with different dims fail fast with a clear error — the store
+        itself raises on mixed dims at search, this is earlier and
+        clearer). Reads never pin and never raise: a mismatch on the
+        read path degrades the vector lane instead."""
+        con, _ = self._connect()
+        try:
+            row = con.execute(
+                "SELECT value FROM meta WHERE key = 'vector_dims'"
+                ).fetchone()
+            if row is None:
+                if for_write:
+                    con.execute(
+                        "INSERT INTO meta(key, value) VALUES"
+                        " ('vector_dims', ?)", (str(dims),))
+                    con.commit()
+                return ""
+            if int(row[0]) != dims:
+                return (f"embedder dimensions {dims} do not match pinned"
+                        f" vector dimensions {row[0]}")
+            return ""
+        finally:
+            con.close()
+
+    def _embed_items(self, items: list[tuple[str, str]]) -> str:
+        """Embed (owner_id, text) pairs into the vector lane. Returns
+        "" on success or an error string — embedding never fails the
+        caller (ingest/digest succeed; the vector is repaired by
+        backfill_vectors)."""
+        if not items:
+            return ""
+        try:
+            embedder = self._get_embedder()
+            err = self._check_pin_dims(embedder.dimensions, for_write=True)
+            if err:
+                return err
+            texts = [text[:_EMBED_CHARS] for _oid, text in items]
+            vectors = embedder.embed_many(texts)
+            with self._vector_backend() as backend:
+                backend.put_many([(v, oid)
+                                  for v, (oid, _t) in zip(vectors, items)])
+            return ""
+        except Exception as exc:  # noqa: BLE001 — best-effort lane
+            return str(exc)[:300]
+
+    def _replace_digest_vector(self, record_id: str, claim: str) -> str:
+        """Replace a digest's vector: compute first, then delete +
+        put, so a failed embed leaves the old vector alone only when
+        the embed itself failed — when the embed succeeds the old
+        vector is replaced, never duplicated (VectorStore.put always
+        inserts a new row; delete_owner is the only update)."""
+        try:
+            embedder = self._get_embedder()
+            err = self._check_pin_dims(embedder.dimensions, for_write=True)
+            if err:
+                return err
+            vector = embedder.embed(claim[:_EMBED_CHARS])
+            with self._vector_backend() as backend:
+                backend.delete_owner(f"digest:{record_id}")
+                backend.put(vector, f"digest:{record_id}")
+            return ""
+        except Exception as exc:  # noqa: BLE001 — best-effort lane
+            return str(exc)[:300]
+
+    def _embed_book_vectors(self, slug: str,
+                            chapters: list[tuple[str, str]]) -> str:
+        """Embed a book's chapters. Stale vectors for the slug are
+        cleared first (re-ingest may shrink chapters — a vector for a
+        chapter that no longer exists must not haunt search)."""
+        if not chapters:
+            return ""
+        try:
+            embedder = self._get_embedder()
+            err = self._check_pin_dims(embedder.dimensions, for_write=True)
+            if err:
+                return err
+            from ..storage.db import Database
+
+            db = Database(self.db_path(), wal=False)
+            try:
+                stale = [r["owner_id"] for r in db.query(
+                    "SELECT owner_id FROM embeddings WHERE owner_type = ?"
+                    " AND owner_id LIKE ?",
+                    (_VECTOR_OWNER, f"passage:{slug}:%"))]
+            finally:
+                db.close()
+            items = [(f"passage:{slug}:{i}", body)
+                     for i, (_name, body) in enumerate(chapters, 1)]
+            texts = [body[:_EMBED_CHARS] for _oid, body in items]
+            vectors = embedder.embed_many(texts)
+            with self._vector_backend() as backend:
+                for oid in stale:
+                    backend.delete_owner(oid)
+                backend.put_many([(v, oid)
+                                  for v, (oid, _t) in zip(vectors, items)])
+            return ""
+        except Exception as exc:  # noqa: BLE001 — best-effort lane
+            return str(exc)[:300]
+
+    def _delete_vectors(self, owner_ids: list[str]) -> None:
+        if not owner_ids:
+            return
+        with self._vector_backend() as backend:
+            for oid in owner_ids:
+                backend.delete_owner(oid)
+
+    def _delete_book_vectors(self, slug: str, numbers: list[int]) -> None:
+        self._delete_vectors([f"passage:{slug}:{n}" for n in numbers])
+
+    def vector_status(self) -> dict[str, Any]:
+        """The vector lane, reported honestly: backend, embedder,
+        pinned dims, counts, fallbacks, unvectorized digests. A failed
+        backend reports 'unavailable' with the reason — never a fake
+        count, never a raise out of a status call."""
+        embedder = self._get_embedder()
+        stats = getattr(embedder, "stats", {}) or {}
+        out: dict[str, Any] = {
+            "embedder_provider": getattr(embedder, "provider", "?"),
+            "embedder_dims": getattr(embedder, "dimensions", 0),
+            "pinned_dims": self._pinned_dims(),
+            "fallbacks": stats.get("fallbacks", 0),
+        }
+        try:
+            with self._vector_backend() as backend:
+                out["backend"] = getattr(backend, "name", "?")
+                out["vector_count"] = backend.count()
+        except Exception as exc:  # noqa: BLE001 — status never raises
+            out["backend"] = "unavailable"
+            out["backend_error"] = str(exc)[:300]
+            out["vector_count"] = 0
+        try:
+            from ..storage.db import Database
+
+            db = Database(self.db_path(), wal=False)
+            try:
+                vectored = {r["owner_id"] for r in db.query(
+                    "SELECT owner_id FROM embeddings WHERE owner_type = ?"
+                    " AND owner_id LIKE 'digest:%'", (_VECTOR_OWNER,))}
+            finally:
+                db.close()
+        except Exception:  # noqa: BLE001 — status never raises
+            vectored = set()
+        con, _ = self._connect()
+        try:
+            active = [r[0] for r in con.execute(
+                "SELECT record_id FROM digests"
+                " WHERE status = 'active'").fetchall()]
+        finally:
+            con.close()
+        out["unvectorized_digests"] = len(
+            [d for d in active if f"digest:{d}" not in vectored])
+        return out
+
+    def backfill_vectors(self, *, max_items: int = 0) -> dict[str, Any]:
+        """Embed every passage + active digest lacking a vector (books
+        ingested before the lane existed, digests whose embed failed).
+        Digests first (small, high-value), then passages. max_items=0
+        means all; otherwise a hard cap on items processed. Errors are
+        collected per batch, never raised — backfill is a repair path."""
+        try:
+            from ..storage.db import Database
+
+            db = Database(self.db_path(), wal=False)
+            try:
+                existing = {r["owner_id"] for r in db.query(
+                    "SELECT owner_id FROM embeddings WHERE owner_type = ?",
+                    (_VECTOR_OWNER,))}
+            finally:
+                db.close()
+        except Exception:  # noqa: BLE001 — no table yet means none exist
+            existing = set()
+        missing_digests: list[tuple[str, str]] = []
+        for d in self.list_digests(status=""):
+            if d["status"] != "active":
+                continue
+            if f"digest:{d['record_id']}" not in existing:
+                missing_digests.append((f"digest:{d['record_id']}",
+                                        d["claim"]))
+        missing_passages: list[tuple[str, str]] = []
+        for book_json in sorted(self.root().glob("*/book.json")):
+            slug = book_json.parent.name
+            try:
+                meta = json.loads(book_json.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            for ch in meta.get("chapters", []):
+                num = int(ch.get("number", 0))
+                oid = f"passage:{slug}:{num}"
+                if oid in existing:
+                    continue
+                path = book_json.parent / "chapters" / f"{num:03d}.md"
+                try:
+                    text = path.read_text(encoding="utf-8")
+                except OSError:
+                    continue
+                lines = text.split("\n", 1)
+                body = lines[1].lstrip("\n") if len(lines) > 1 and \
+                    lines[0].startswith("# ") else text
+                missing_passages.append((oid, body))
+        errors: list[str] = []
+        done_d = done_p = 0
+        budget = max_items if max_items and max_items > 0 else None
+        for batch_start in range(0, len(missing_digests), 50):
+            if budget is not None and done_d + done_p >= budget:
+                break
+            batch = missing_digests[batch_start:batch_start + 50]
+            if budget is not None:
+                batch = batch[:budget - done_d - done_p]
+            err = self._embed_items(batch)
+            if err:
+                errors.append(err)
+            else:
+                done_d += len(batch)
+        for batch_start in range(0, len(missing_passages), 50):
+            if budget is not None and done_d + done_p >= budget:
+                break
+            batch = missing_passages[batch_start:batch_start + 50]
+            if budget is not None:
+                batch = batch[:budget - done_d - done_p]
+            err = self._embed_items(batch)
+            if err:
+                errors.append(err)
+            else:
+                done_p += len(batch)
+        return {"passages": done_p, "digests": done_d, "errors": errors}
+
+    # ── hybrid retrieval ──────────────────────────────────────────────
+    def _search_digests_keyword(self, query: str, *, scope: str,
+                                include_archived: bool, limit: int,
+                                ) -> list[dict[str, Any]]:
+        """Keyword lane over digests: FTS5 MATCH when available, else
+        Python token overlap. Scope rule: a scoped query sees its
+        scope PLUS global records, never another scope's."""
+        con, fts5 = self._connect()
+        try:
+            ids: list[str] = []
+            if fts5:
+                try:
+                    fts_q = self._sanitize_fts(query)
+                except LibraryError:
+                    return []
+                try:
+                    rows = con.execute(
+                        "SELECT record_id FROM digest_fts"
+                        " WHERE digest_fts MATCH ? LIMIT ?",
+                        (fts_q, limit * 4)).fetchall()
+                except sqlite3.OperationalError:
+                    rows = []  # table predates this build; overlap below
+                ids = [r[0] for r in rows]
+            if not ids and not fts5:
+                qtok = {w.lower() for w in _WORD.findall(query)
+                        if len(w) >= 2}
+                scored: list[tuple[int, str]] = []
+                for rid, claim in con.execute(
+                        "SELECT record_id, claim FROM digests").fetchall():
+                    ctok = {w.lower() for w in _WORD.findall(claim or "")}
+                    ov = len(qtok & ctok)
+                    if ov:
+                        scored.append((ov, rid))
+                scored.sort(key=lambda x: -x[0])
+                ids = [rid for _ov, rid in scored[:limit * 4]]
+            out = []
+            for rid in ids:
+                row = con.execute(
+                    "SELECT record_id, source_id, claim, confidence,"
+                    " scope, status FROM digests WHERE record_id = ?",
+                    (rid,)).fetchone()
+                if row is None:
+                    continue
+                if not include_archived and row[5] != "active":
+                    continue
+                if scope and row[4] not in (scope, ""):
+                    continue
+                out.append({
+                    "record_id": row[0], "source_id": row[1],
+                    "claim": row[2], "confidence": row[3],
+                    "scope": row[4], "status": row[5],
+                })
+                if len(out) >= limit:
+                    break
+            return out
+        finally:
+            con.close()
+
+    def _passage_text_for(self, slug: str, number: int, query: str,
+                          ) -> str:
+        """Context window for a passage the keyword lane did not
+        return (vector-only hit): chapter file → window around the
+        query words. Empty on any failure — a vector hit without
+        resolvable text is skipped, never faked."""
+        try:
+            meta = json.loads(
+                (self.book_dir(slug) / "book.json").read_text(
+                    encoding="utf-8"))
+            ch = next((c for c in meta.get("chapters", [])
+                       if int(c.get("number", 0)) == number), None)
+            if ch is None:
+                return ""
+            path = self.book_dir(slug) / "chapters" / f"{number:03d}.md"
+            text = path.read_text(encoding="utf-8")
+            return self._context_window(text, query)
+        except (OSError, ValueError):
+            return ""
+
+    def search_hybrid(self, query: str, *, top: int = 8, scope: str = "",
+                      include_archived: bool = False,
+                      vector_top: int = 20) -> dict[str, Any]:
+        """Hybrid retrieval: FTS5/BM25 keyword + the memory system's
+        vector lane, fused by reciprocal rank fusion (k=60) over three
+        lanes — keyword-passages, keyword-digests, vector — because
+        FTS5 negative scores and BM25 positive scores must never be
+        mixed arithmetically; ranks are scale-free. Final score = RRF
+        × source-health factor × (0.5 + 0.5×confidence for digests).
+        Scope narrows DIGESTS only (passages are shared deep text).
+        A failed vector lane degrades (named in lanes.degraded) and
+        keyword hits still serve."""
+        query = (query or "").strip()
+        if not query:
+            return {"hits": [], "lanes": {"keyword_passages": 0,
+                                          "keyword_digests": 0,
+                                          "vector": 0, "degraded": []}}
+        # Source health map for exclusion + weighting.
+        con, _ = self._connect()
+        try:
+            books_map = {r[0]: r[1] for r in con.execute(
+                "SELECT slug, source_id FROM books").fetchall()}
+            sources_map = {r[0]: {"status": r[1], "health": r[2]}
+                           for r in con.execute(
+                               "SELECT source_id, status, health"
+                               " FROM sources").fetchall()}
+        finally:
+            con.close()
+
+        def health_of(source_id: str | None) -> tuple[str, float, bool]:
+            """(health label, factor, excluded-by-default)."""
+            if not source_id or source_id not in sources_map:
+                return "unknown", 1.0, False
+            s = sources_map[source_id]
+            if s["status"] == "archived" or s["health"] == "dead":
+                return s["health"], 0.0, True
+            if s["health"] == "failing":
+                return "failing", 0.7, False
+            return s["health"] or "unknown", 1.0, False
+
+        kw_n = max(top * 3, vector_top)
+        kw_passages = self.search(query, top=kw_n)
+        kw_digests = self._search_digests_keyword(
+            query, scope=scope, include_archived=include_archived,
+            limit=kw_n)
+        kw_pass_rank: dict[tuple[str, int], int] = {}
+        for rank, hit in enumerate(kw_passages):
+            kw_pass_rank[(hit.book_slug, hit.chapter_number)] = rank
+        kw_dig_rank: dict[str, int] = {}
+        for rank, d in enumerate(kw_digests):
+            kw_dig_rank[d["record_id"]] = rank
+
+        # Vector lane: best-effort, never fatal to search.
+        vec_rank: dict[str, int] = {}
+        degraded: list[str] = []
+        try:
+            embedder = self._get_embedder()
+            dim_err = self._check_pin_dims(embedder.dimensions,
+                                           for_write=False)
+            if dim_err:
+                degraded.append(dim_err)
+            else:
+                vector = embedder.embed(query)
+                with self._vector_backend() as backend:
+                    for rank, hit in enumerate(backend.search(
+                            vector, limit=vector_top)):
+                        vec_rank[hit.owner_id] = rank
+        except Exception as exc:  # noqa: BLE001 — degraded, not fatal
+            degraded.append(f"vector lane unavailable: {str(exc)[:200]}")
+
+        def rrf(rank: int | None) -> float:
+            return 1.0 / (_RRF_K + rank) if rank is not None else 0.0
+
+        hits: list[HybridHit] = []
+        for hit in kw_passages:
+            health, factor, excluded = health_of(
+                books_map.get(hit.book_slug))
+            if excluded and not include_archived:
+                continue
+            key = (hit.book_slug, hit.chapter_number)
+            lanes = ["keyword"]
+            if f"passage:{hit.book_slug}:{hit.chapter_number}" in vec_rank:
+                lanes.append("vector")
+            score = (rrf(kw_pass_rank[key])
+                     + rrf(vec_rank.get(
+                         f"passage:{hit.book_slug}:{hit.chapter_number}"))) \
+                * factor
+            hits.append(HybridHit(
+                kind="passage", text=hit.passage, score=score,
+                title=hit.title, slug=hit.book_slug,
+                chapter=hit.chapter, chapter_number=hit.chapter_number,
+                health=health, source_id=books_map.get(hit.book_slug, ""),
+                keyword_rank=kw_pass_rank[key],
+                vector_rank=vec_rank.get(
+                    f"passage:{hit.book_slug}:{hit.chapter_number}"),
+                lanes=tuple(lanes)))
+        for d in kw_digests:
+            health, factor, excluded = health_of(d["source_id"])
+            if excluded and not include_archived:
+                continue
+            lanes = ["keyword"]
+            if f"digest:{d['record_id']}" in vec_rank:
+                lanes.append("vector")
+            score = (rrf(kw_dig_rank[d["record_id"]])
+                     + rrf(vec_rank.get(f"digest:{d['record_id']}"))) \
+                * factor * (0.5 + 0.5 * float(d["confidence"] or 0.0))
+            hits.append(HybridHit(
+                kind="digest", text=d["claim"], score=score,
+                record_id=d["record_id"], confidence=d["confidence"],
+                health=health, source_id=d["source_id"],
+                scope=d["scope"],
+                keyword_rank=kw_dig_rank[d["record_id"]],
+                vector_rank=vec_rank.get(f"digest:{d['record_id']}"),
+                lanes=tuple(lanes)))
+        for owner_id, rank in vec_rank.items():
+            if owner_id.startswith("passage:"):
+                parts = owner_id.split(":")
+                if len(parts) != 3:
+                    continue
+                slug, num_s = parts[1], parts[2]
+                try:
+                    num = int(num_s)
+                except ValueError:
+                    continue
+                if (slug, num) in kw_pass_rank:
+                    continue  # already emitted above
+                health, factor, excluded = health_of(books_map.get(slug))
+                if excluded and not include_archived:
+                    continue
+                text = self._passage_text_for(slug, num, query)
+                if not text:
+                    continue  # dropped book's stale vector: skip, not fake
+                meta = None
+                try:
+                    meta = json.loads(
+                        (self.book_dir(slug) / "book.json").read_text(
+                            encoding="utf-8"))
+                except (OSError, ValueError):
+                    continue
+                ch = next((c for c in meta.get("chapters", [])
+                           if int(c.get("number", 0)) == num), None)
+                hits.append(HybridHit(
+                    kind="passage", text=text, score=rrf(rank) * factor,
+                    title=meta.get("title", ""), slug=slug,
+                    chapter=ch.get("title", "") if ch else "",
+                    chapter_number=num, health=health,
+                    source_id=books_map.get(slug, ""),
+                    vector_rank=rank, lanes=("vector",)))
+            elif owner_id.startswith("digest:"):
+                record_id = owner_id.split(":", 1)[1]
+                if record_id in kw_dig_rank:
+                    continue
+                try:
+                    d = self.get_digest(record_id)
+                except LibraryError:
+                    continue
+                if not include_archived and d["status"] != "active":
+                    continue
+                if scope and d["scope"] not in (scope, ""):
+                    continue
+                health, factor, excluded = health_of(d["source_id"])
+                if excluded and not include_archived:
+                    continue
+                hits.append(HybridHit(
+                    kind="digest", text=d["claim"],
+                    score=rrf(rank) * factor
+                    * (0.5 + 0.5 * float(d["confidence"] or 0.0)),
+                    record_id=record_id, confidence=d["confidence"],
+                    health=health, source_id=d["source_id"],
+                    scope=d["scope"], vector_rank=rank,
+                    lanes=("vector",)))
+        hits.sort(key=lambda h: -h.score)
+        return {
+            "hits": [h.to_dict() for h in hits[:top]],
+            "lanes": {"keyword_passages": len(kw_pass_rank),
+                      "keyword_digests": len(kw_dig_rank),
+                      "vector": len(vec_rank), "degraded": degraded},
+        }
 
     # ── reading progress ──────────────────────────────────────────────
     def set_progress(self, slug: str, chapter: int, offset_chars: int = 0) -> dict[str, Any]:
