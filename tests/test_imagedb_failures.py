@@ -442,7 +442,7 @@ def test_scrape_engines_handler_is_debug_honest():
     raise AssertionError("no _scrape_engines handler found")
 
 
-def test_scan_remainder_is_exactly_exclusions_plus_debug():
+def test_scan_remainder_is_exactly_exclusions():
     from nomorals.tools import error_scan as es
 
     path = imagedb.__file__
@@ -463,8 +463,10 @@ def test_scan_remainder_is_exactly_exclusions_plus_debug():
                 fn = line.strip().split("(")[0].replace("def ", "")
                 break
         funcs[fn] = funcs.get(fn, 0) + 1
+    # #140: _scrape_engines is debug-honest (exc_info=True) and is now
+    # recognized by the scanner, so it no longer counts.
     assert funcs == {"dhash": 1, "_gps_decimal": 1, "image_colors": 1,
-                     "_scrape_one": 1, "_scrape_engines": 1}, funcs
+                     "_scrape_one": 1}, funcs
     # Ledger file itself carries no findings.
     try:
         es._noqa_suppresses = lambda line, rule: False

@@ -280,7 +280,10 @@ def test_scan_safety_remainder_is_exactly_the_excluded_sites():
     # 3032 -> 3044, 3041 -> 3047, 3053 -> 3066, 3064 -> 3070;
     # Pass #131 then converts 714, 806, 2540, 2866, 2887, 3012, 3047,
     # 3070, leaving exactly the 8 honest + deliberate sites below.
-    expected = {648, 955, 1038, 1110, 1715, 1847, 3044, 3066}
+    # #140: the scanner now recognizes exc_info=True logging, so the
+    # 4 debug-honest lines (955, 1038, 1847, 3044) no longer count,
+    # leaving exactly the 4 deliberate sites below.
+    expected = {648, 1110, 1715, 3066}
     assert {f.line for f in report.findings} == expected
     # The one remaining safety-region site is the excluded transport
     # handler (status 0 = designed answer), not a converted site.

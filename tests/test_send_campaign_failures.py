@@ -14,10 +14,11 @@ from #100 — no new ledger); returns and control flow are unchanged.
 
 Deliberately NOT in scope here: the template/provider methods, the
 warmup/suppression/blocklist methods, and the module helpers — the
-remainder the scan pin below counts (7 sites after #134 converted
+remainder the scan pin below counts (4 sites after #134 converted
 the 10 warmup/suppression/blocklist sites, #135 the 5
-templates/providers sites, #137 the 8 module-helper sites, and
-#138 the 3 tail sites, and #139 the 3 __init__ sites).
+templates/providers sites, #137 the 8 module-helper sites,
+#138 the 3 tail sites, #139 the 3 __init__ sites, and #140
+recognizes the 3 debug-honest sites via exc_info=True).
 """
 
 import ast
@@ -273,7 +274,7 @@ def test_all_eleven_campaign_sites_record_in_source():
         assert site in found, f"missing record site {site}"
 
 
-def test_scan_send_remainder_is_exactly_7(monkeypatch):
+def test_scan_send_remainder_is_exactly_4(monkeypatch):
     # Suppression-off: noqa comments ignored, so converted sites (which
     # now bind and pass `e` to record_failure) drop out of the findings.
     # 10 remainder after #138 - 3 __init__ converts in #139
@@ -282,9 +283,12 @@ def test_scan_send_remainder_is_exactly_7(monkeypatch):
     # socket-continue, _dns_txt parse-continue, deliverability_check
     # inner) + 0 untouched sites: send.py is closed except for
     # pinned judgments.
+    # #140: the scanner now recognizes exc_info=True logging, so the
+    # 3 debug-honest sites no longer count: 7 - 3 = 4 remainder =
+    # 4 pinned exclusions + 0 untouched + 0 debug-honest-counted.
     monkeypatch.setattr(es, "_noqa_suppresses", lambda line, rule: False)
     rep = scan(["nomorals/marketing/send.py"])
-    assert len(rep.findings) == 7
+    assert len(rep.findings) == 4
 
 
 def test_scan_send_flagged_is_clean():

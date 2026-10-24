@@ -15,8 +15,9 @@ ledger); returns and control flow are unchanged.
 Deliberately NOT in scope here: the module helpers (12), the
 ``__init__`` silent sites (3), ``spam_check_template``,
 ``status``, and ``get_engine`` — the remainder the scan pin below
-counts (7 sites: 10 after #138 minus the 3 __init__ sites
-converted in #139).
+counts (4 sites: 10 after #138 minus the 3 __init__ sites
+converted in #139 minus the 3 debug-honest sites recognized
+in #140).
 
 Each site's explicit-absence path is handled before the DB work
 (``self._db is None`` / empty name returns the same fallback), so
@@ -172,7 +173,7 @@ def test_list_providers_benign_path_records_nothing():
     assert _sites() == []
 
 
-def test_scan_send_remainder_is_exactly_7(monkeypatch):
+def test_scan_send_remainder_is_exactly_4(monkeypatch):
     # Suppression-off: noqa comments ignored, so converted sites (which
     # now bind and pass `e` to record_failure) drop out of the findings.
     # 10 remainder after #138 - 3 __init__ converts in #139
@@ -181,9 +182,12 @@ def test_scan_send_remainder_is_exactly_7(monkeypatch):
     # socket-continue, _dns_txt parse-continue, deliverability_check
     # inner) + 0 untouched sites: send.py is closed except for
     # pinned judgments.
+    # #140: the scanner now recognizes exc_info=True logging, so the
+    # 3 debug-honest sites no longer count: 7 - 3 = 4 remainder =
+    # 4 pinned exclusions + 0 untouched + 0 debug-honest-counted.
     monkeypatch.setattr(es, "_noqa_suppresses", lambda line, rule: False)
     rep = scan(["nomorals/marketing/send.py"])
-    assert len(rep.findings) == 7
+    assert len(rep.findings) == 4
 
 
 def test_scan_send_flagged_is_clean():

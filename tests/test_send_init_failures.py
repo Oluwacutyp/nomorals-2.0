@@ -245,7 +245,7 @@ def _enclosing_func(line):
     return best
 
 
-def test_scan_send_remainder_is_exactly_7(monkeypatch):
+def test_scan_send_remainder_is_exactly_4(monkeypatch):
     # Suppression-off: noqa comments ignored, so converted sites (which
     # now bind and pass `e` to record_failure) drop out of the findings.
     # 10 remainder after #138 - 3 __init__ converts in #139
@@ -254,13 +254,15 @@ def test_scan_send_remainder_is_exactly_7(monkeypatch):
     # socket-continue, _dns_txt parse-continue, deliverability_check
     # inner) + 0 untouched sites: the send.py estate is now closed
     # except for pinned judgments.
+    # #140: the scanner now recognizes exc_info=True logging, so the
+    # 3 debug-honest sites no longer count: 7 - 3 = 4 remainder =
+    # 4 pinned exclusions + 0 untouched + 0 debug-honest-counted.
     monkeypatch.setattr(es, "_noqa_suppresses", lambda line, rule: False)
     rep = scan(["nomorals/marketing/send.py"])
-    assert len(rep.findings) == 7
+    assert len(rep.findings) == 4
     funcs = sorted(_enclosing_func(f.line) for f in rep.findings)
-    assert funcs == sorted(["render_template", "parse_dsn", "_dns_txt",
-                            "_dns_txt", "deliverability_check", "__init__",
-                            "process"])
+    assert funcs == sorted(["parse_dsn", "_dns_txt",
+                            "_dns_txt", "deliverability_check"])
 
 
 def test_scan_send_flagged_is_clean():

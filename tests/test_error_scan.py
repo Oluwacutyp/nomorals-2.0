@@ -87,6 +87,60 @@ class TestErrorScan(unittest.TestCase):
         """)
         self.assertEqual(rules(f), [])
 
+    def test_broad_except_debug_exc_info_true_unbound_is_clean(self):
+        # Debug-honest shape: the handler never binds the exception, but
+        # the traceback is preserved in the log via exc_info=True.
+        f = run_scan("""
+            try:
+                x()
+            except Exception:
+                _log.debug("failed", exc_info=True)
+        """)
+        self.assertEqual(rules(f), [])
+
+    def test_broad_except_debug_exc_info_true_bound_without_name_is_clean(self):
+        # Bound handler that never references the bound name: only the
+        # exc_info=True keyword proves the exception is visible.
+        f = run_scan("""
+            try:
+                x()
+            except Exception as e:
+                _log.debug("failed", exc_info=True)
+        """)
+        self.assertEqual(rules(f), [])
+
+    def test_broad_except_debug_exc_info_true_nested_in_if_is_clean(self):
+        # Keywords are walked always, never gated on the bound name or
+        # on the statement shape around the call.
+        f = run_scan("""
+            try:
+                x()
+            except Exception:
+                if verbose:
+                    _log.debug("failed", exc_info=True)
+        """)
+        self.assertEqual(rules(f), [])
+
+    def test_broad_except_debug_without_exc_info_still_warning(self):
+        # Plain logging without exc_info is NOT widened: the traceback
+        # is not preserved, so the exception value is still ignored.
+        f = run_scan("""
+            try:
+                x()
+            except Exception:
+                _log.debug("failed")
+        """)
+        self.assertIn("E104", rules(f))
+
+    def test_broad_except_debug_exc_info_false_still_warning(self):
+        f = run_scan("""
+            try:
+                x()
+            except Exception:
+                _log.debug("failed", exc_info=False)
+        """)
+        self.assertIn("E104", rules(f))
+
     def test_narrow_except_ignoring_value_is_clean(self):
         # specific catches are deliberate; the scanner only polices broad ones
         f = run_scan("""

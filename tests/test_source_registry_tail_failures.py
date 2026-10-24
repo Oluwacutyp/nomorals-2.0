@@ -224,10 +224,10 @@ def test_cache_lookup_corrupt_sidecar_skip_is_behaviour_not_silence(
     assert recent_failures() == []
 
 
-# ── scan pin: file remainder is exactly the honest + deliberate sites ─
+# ── scan pin: file remainder is exactly the deliberate sites ─
 
 
-def test_scan_tail_remainder_is_exactly_eight():
+def test_scan_tail_remainder_is_exactly_four():
     from nomorals.tools import error_scan as es
 
     path = sr_mod.__file__
@@ -259,16 +259,14 @@ def test_scan_tail_remainder_is_exactly_eight():
     # 1108 -> 1110, 1713 -> 1715, 1845 -> 1847, 3038 -> 3044,
     # 3059 -> 3066. Converted lines (714, 806, 2540, 2866, 2887, 3012,
     # 3047, 3070) are gone.
-    expected = {648, 955, 1038, 1110, 1715, 1847, 3044, 3066}
+    # #140: minus exactly the 4 debug-honest sites the scanner now
+    # recognizes via exc_info=True (955, 1038, 1847, 3044).
+    expected = {648, 1110, 1715, 3066}
     assert {f.line for f in report.findings} == expected
     owners = {owner_of.get(line) for line in expected}
     assert owners == {
         (None, "_default_health_fetch"),  # #130 deliberate: status 0
-        ("SourceRegistry", "_persist"),  # debug-honest
-        ("SourceRegistry", "_load_persisted"),  # debug-honest
         ("SourceRegistry", "_host_of"),  # #121 deliberate: "" is the answer
         ("SourceRegistry", "_verify_one"),  # #121 deliberate: root probe
-        ("SourceRegistry", "verify_health"),  # debug-honest
-        ("ContentAddressedCache", "store"),  # debug-honest
         ("ContentAddressedCache", "lookup_url"),  # inner skip: behaviour
     }

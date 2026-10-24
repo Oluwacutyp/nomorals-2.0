@@ -380,7 +380,7 @@ def test_del_teardown_never_raises():
     eng.__del__()  # shutdown raises AttributeError (no _wake) — swallowed
 
 
-def test_scan_remainder_is_debug_honest_plus_del():
+def test_scan_remainder_is_del_only():
     import pathlib
 
     from nomorals.tools import error_scan as es
@@ -410,13 +410,10 @@ def test_scan_remainder_is_debug_honest_plus_del():
                 best = (s, name)
         return best[1] if best else "?"
 
+    # #140: the scanner now recognizes exc_info=True logging, so the
+    # 45 debug-honest sites no longer count; only the __del__
+    # exclusion remains.
     expected = {
-        "_scheduler_worker": 1, "_drain_dm_feed": 1, "_drain_dm_feed_safe": 1,
-        "_sweep_timeouts": 2, "_maybe_prune_history": 1, "_emit": 1,
-        "_persist_inner": 1, "_delete_room_row": 1, "start": 4,
-        "_mirror_player": 4, "_move_inner": 1, "_finish_inner": 19,
-        "_settle_won": 1, "_settle_coins": 1, "rematch": 1,
-        "_grant_victory_loot": 2, "grant": 1, "_award_achievements": 2,
         "__del__": 1,
     }
     found = {}
@@ -430,4 +427,4 @@ def test_scan_remainder_is_debug_honest_plus_del():
         else:
             assert "exc_info=True" in body, f"{name}:{f.line} not debug-honest"
     assert found == expected, found
-    assert sum(found.values()) == 46
+    assert sum(found.values()) == 1

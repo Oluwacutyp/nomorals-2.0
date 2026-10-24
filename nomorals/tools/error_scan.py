@@ -7,6 +7,8 @@
 * E103 swallowed exception — the ``except`` body is just ``pass``.
 * E104 ignored exception — a broad ``except`` that never touches the
   exception value (no logging, no classify, no re-raise, no record).
+  A logging call with ``exc_info=True`` counts as logging even when
+  the handler never binds or names the exception value.
 * E105 ``except`` tuple that redundantly includes ``Exception``
   alongside specific types.
 * E106 ``except KeyboardInterrupt`` — almost always wrong; let it
@@ -132,6 +134,18 @@ def _body_uses_exception(body: list[ast.stmt], exc_name: str | None) -> bool:
             if fname in {"classify", "error", "warning", "exception", "critical",
                          "mark_failed", "record", "report"}:
                 return True
+            # A call carrying exc_info=True preserves the traceback in
+            # the log, so the handler is honest even when it never binds
+            # or names the exception value (the debug-honest shape:
+            # ``_log.debug(..., exc_info=True)``). Keywords are walked
+            # ALWAYS — bound or unbound handler, any nesting — never
+            # gated on the bound name: gating on it hid every unbound
+            # debug-honest site. Plain logging WITHOUT exc_info is not
+            # widened here: it still flags.
+            for kw in stmt.keywords:
+                if (kw.arg == "exc_info" and isinstance(kw.value, ast.Constant)
+                        and kw.value.value is True):
+                    return True
     return False
 
 

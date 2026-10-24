@@ -238,7 +238,7 @@ def test_args_digest_fallback_digest_identical(monkeypatch):
 
 # ── scan pins ───────────────────────────────────────────────────────
 
-def test_scan_remainder_is_exactly_debug_plus_exclusions():
+def test_scan_remainder_is_exactly_exclusions():
     from nomorals.tools import error_scan as es
 
     path = reg_mod.__file__
@@ -259,9 +259,10 @@ def test_scan_remainder_is_exactly_debug_plus_exclusions():
                         func_of[h.lineno] = node.name
     found = sorted((f.rule, func_of.get(f.line)) for f in report.findings
                    if f.line in func_of)
+    # #140: sanitize_tool_description and _emit_tool_call are
+    # debug-honest (exc_info=True, asserted below) and are now
+    # recognized by the scanner, so they no longer count.
     assert found == sorted([
-        ("E104", "sanitize_tool_description"),
-        ("E104", "_emit_tool_call"),
         ("E104", "_args_digest"),
         ("E104", "_args_digest"),
     ])

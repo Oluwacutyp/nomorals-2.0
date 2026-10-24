@@ -341,7 +341,7 @@ def test_verify_one_bad_template_probes_root_without_record():
 # ── scan pin: class remainder is exactly the honest + deliberate sites ─
 
 
-def test_scan_class_remainder_is_honest_and_deliberate_only():
+def test_scan_class_remainder_is_deliberate_only():
     from nomorals.tools import error_scan as es
     path = sr_mod.__file__
     es._noqa_suppresses = lambda line, rule: False
@@ -363,11 +363,10 @@ def test_scan_class_remainder_is_honest_and_deliberate_only():
                                 method_of[h.lineno] = m.name
     class_findings = [(f.rule, method_of.get(f.line))
                       for f in report.findings if f.line in method_of]
-    # 3 debug-honest (exc_info=True traceback in the body) + 2 deliberate.
+    # #140: the 3 debug-honest methods (_persist, _load_persisted,
+    # verify_health) are now recognized by the scanner via exc_info=True
+    # (asserted below), so they no longer count; 2 deliberate remain.
     assert sorted(class_findings) == sorted([
-        ("E104", "_persist"),
-        ("E104", "_load_persisted"),
-        ("E104", "verify_health"),
         ("E104", "_host_of"),
         ("E104", "_verify_one"),
     ])

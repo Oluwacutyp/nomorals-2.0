@@ -300,7 +300,7 @@ def test_add_vocal_track_cap_mib_failure_records(tmp_path, monkeypatch):
 # --- scan pin ------------------------------------------------------------
 
 
-def test_scan_remainder_is_exactly_the_eight_debug_honest_sites(monkeypatch):
+def test_scan_remainder_is_empty_debug_honest_recognized(monkeypatch):
     from nomorals.tools import error_scan as es
 
     monkeypatch.setattr(es, "_noqa_suppresses",
@@ -308,37 +308,9 @@ def test_scan_remainder_is_exactly_the_eight_debug_honest_sites(monkeypatch):
     path = Path(vocal_lite.__file__)
     report = es.scan([str(path)])
     findings = [f for f in report.findings if f.file == str(path)]
-    assert {f.rule for f in findings} == {"E104"}
-    tree = ast.parse(path.read_text(encoding="utf-8"))
-
-    def enclosing(lineno):
-        best = None
-        for node in ast.walk(tree):
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                if node.lineno <= lineno <= (node.end_lineno or lineno):
-                    if best is None or node.lineno >= best.lineno:
-                        best = node
-        return best
-
-    fns = {}
-    for f in findings:
-        fn = enclosing(f.line)
-        fns[fn.name] = fn
-    assert set(fns) == {
-        "hook_lyrics", "section_regions", "chorus_regions", "_tile_vocal",
-        "_render_hum_tone", "_write_mono_wav", "mix_hum_track",
-        "_mix_sung_track",
-    }
-    # Each remainder site is honest, not silent: its handler logs with
-    # exc_info=True (the scanner's "uses" set lacks `debug`, so these
-    # flag in suppression-off mode despite being honest).
-    for f in findings:
-        fn = fns[enclosing(f.line).name]
-        handler = next(
-            n for n in ast.walk(fn)
-            if isinstance(n, ast.ExceptHandler) and n.lineno == f.line)
-        segment = ast.get_source_segment(path.read_text(encoding="utf-8"),
-                                         handler)
-        assert "exc_info=True" in segment
-    # And none of the 12 converted sites remains in either mode.
-    assert len(findings) == 8
+    # #140: the scanner now recognizes exc_info=True logging, so all 8
+    # debug-honest sites (hook_lyrics, section_regions, chorus_regions,
+    # _tile_vocal, _render_hum_tone, _write_mono_wav, mix_hum_track,
+    # _mix_sung_track) no longer count, and none of the 12 converted
+    # sites remains either: the remainder is empty.
+    assert findings == []
