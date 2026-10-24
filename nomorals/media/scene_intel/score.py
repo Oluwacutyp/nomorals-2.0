@@ -21,6 +21,8 @@ import tempfile
 from dataclasses import dataclass, field
 from typing import Any
 
+from .failures import record_failure
+
 
 @dataclass
 class ScoredSegment:
@@ -73,13 +75,14 @@ def _audio_energy_curve(src: str, sr: int = 22050) -> list[float]:
         # dB relative to peak, clipped to [-60, 0], normalized 0-1
         return [max(0.0, 1.0 + (20 * math.log10(v / peak + 1e-9)) / 60.0)
                 for v in curve]
-    except Exception:
+    except Exception as e:
+        record_failure("score._audio_energy_curve", e)
         return []
     finally:
         try:
             os.unlink(wav)
-        except OSError:
-            pass
+        except OSError as e:
+            record_failure("score._audio_energy_curve:cleanup", e)
 
 
 def _motion_curve(src: str, sample_fps: float = 2.0) -> list[float]:
@@ -153,11 +156,13 @@ def _dialogue_curve(src: str) -> list[float]:
     """Words-per-minute density via Whisper. Empty when STT unavailable."""
     try:
         from ...voice.stt import transcribe  # type: ignore
-    except Exception:
+    except Exception as e:
+        record_failure("score._dialogue_curve:import", e)
         return []
     try:
         result = transcribe(str(src))
-    except Exception:
+    except Exception as e:
+        record_failure("score._dialogue_curve:transcribe", e)
         return []
     segments = result.get("segments", []) if isinstance(result, dict) else []
     if not segments:
@@ -298,7 +303,8 @@ def excitement_events(src: str, *, min_rise_db: float = 4.0,
             out.append(ExcitementEvent(peak_s=peak, start=s, end=e,
                                        peak_db=rise, energy_area=area))
         return out
-    except Exception:
+    except Exception as e:
+        record_failure("score.excitement_events", e)
         return []
 
 
@@ -404,7 +410,8 @@ def score_segments(src: str, segments: list[tuple[float, float]],
             wp = default_weights_path()
             if _os.path.exists(wp):
                 mlp = HighlightMLP(wp)
-        except Exception:
+        except Exception as e:
+            record_failure("score.score_segments:learned_model", e)
             mlp = None
 
     # Per-second signal curves across the film
@@ -441,7 +448,8 @@ def score_segments(src: str, segments: list[tuple[float, float]],
             feats = extract_features(src)
             if feats:
                 learned_curve = mlp.score(feats)
-        except Exception:
+        except Exception as e:
+            record_failure("score.score_segments:learned_features", e)
             learned_curve = None
 
     for i, (s, e) in enumerate(segments):

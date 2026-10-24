@@ -11,6 +11,8 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 
+from .failures import record_failure
+
 
 @dataclass
 class Segment:
@@ -38,7 +40,8 @@ def _pyscenedetect_segments(src: str, min_length: float = 1.0) -> list[tuple[flo
         return None
     try:
         cuts = detect(src, AdaptiveDetector())
-    except Exception:
+    except Exception as e:
+        record_failure("segment._pyscenedetect_segments", e)
         return None
     bounds: list[tuple[float, float]] = []
     for i, (start, end) in enumerate(cuts):
