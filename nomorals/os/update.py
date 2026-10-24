@@ -26,6 +26,17 @@ marker is written and applied by the next boot (see
 the database — and the report carries a deferral note, never a rollback
 failure.
 
+A deferred restore is not immortal.  The marker records its provenance
+(the run that wrote it and the version that run targeted), and a later
+SUCCESSFUL update supersedes it: that update migrated and
+health-checked the live database, adopting it as the base, so applying
+the old snapshot afterwards would regress live data to serve a
+rollback nobody is running anymore.  The successful run clears a
+marker it did not write and says so in its report; recovery
+independently discards a marker the journal shows superseded —
+silently, because booting on the live database is the correct state,
+not an incident.
+
 The owner's own uncommitted changes are never silently destroyed: before
 pulling, the update fetches and refuses up front when a locally modified
 file collides with the incoming change set; disjoint local edits are left
@@ -400,6 +411,12 @@ class UpdateManager:
         #: rollback and the commit the pull landed on.
         self._tx_from_sha = ""
         self._tx_to_sha = ""
+        #: True when THIS run's rollback wrote the pending-restore
+        #: marker. A successful run clears a stale marker it did not
+        #: write; its own marker is never cleared (a run that rolled
+        #: back never reaches the success path, and this flag keeps
+        #: that true by construction).
+        self._tx_wrote_pending_restore = False
 
     # ── public ─────────────────────────────────────────────────────────────
 
@@ -453,6 +470,7 @@ class UpdateManager:
         previous_sha = self._git_sha() if pull else ""
         self._tx_from_sha = previous_sha
         self._tx_to_sha = ""
+        self._tx_wrote_pending_restore = False
         report.from_sha = previous_sha
 
         # Step 0.25: quarantine truth. An update may only quarantine a
@@ -635,6 +653,36 @@ class UpdateManager:
         # outcome (see _run_advisory).
         self._run_advisory(report, run_id=run_id)
 
+        # This run just migrated and health-checked the LIVE database
+        # and adopted it as the base — so a pending-restore marker an
+        # EARLIER failed update left behind is now stale: applying it
+        # at a later boot would regress the live database to that
+        # update's pre-update snapshot to serve a rollback this update
+        # superseded (the 2026-10-23 EC2 sequence: update A deferred
+        # its restore, Devon ran for hours, update B succeeded, and
+        # B's boot tried to apply A's restore and paged a failure
+        # whose premise — rolled-back code — no longer existed).
+        # Clear the stale marker and say so. A marker THIS run wrote
+        # is untouched (see _clear_stale_pending_restore).
+        cleared = self._clear_stale_pending_restore()
+        if cleared is not None:
+            who = (cleared.get("target_sha") or cleared.get("run_id")
+                   or cleared.get("snapshot") or "an earlier update")
+            report.record(
+                "pending_restore", True,
+                f"cleared stale deferred database restore from "
+                f"superseded update {str(who)[:12]} — this update "
+                "migrated and health-checked the live database, so "
+                "the deferred snapshot restore no longer applies")
+            self._journal({"run_id": run_id,
+                           "event": "pending_restore_cleared",
+                           "ts": time.time(),
+                           "cleared_snapshot": cleared.get("snapshot", ""),
+                           "cleared_run_id": cleared.get("run_id", ""),
+                           "cleared_target_sha":
+                               cleared.get("target_sha", ""),
+                           "cleared_from_sha": cleared.get("from_sha", "")})
+
         report.ok = True
         report.seconds = time.time() - started
         self._journal({"run_id": run_id, "event": "complete",
@@ -720,7 +768,13 @@ class UpdateManager:
             pending_receipt = {
                 "recovered": True, "action": "pending_restore_failed",
                 "error": pending["error"],
-                "snapshot": pending.get("snapshot", ""), "run_id": ""}
+                "snapshot": pending.get("snapshot", ""), "run_id": "",
+                # The facts the failure notice must state honestly:
+                # which update the marker belongs to, which version is
+                # actually running, and how the two pair up.
+                "update_sha": pending.get("update_sha", ""),
+                "running_sha": pending.get("running_sha", ""),
+                "state_note": pending.get("state_note", "")}
         runs = self._journal_runs()
         if not runs:
             return pending_receipt or {"recovered": False,
@@ -729,11 +783,15 @@ class UpdateManager:
         events = last["events"]
         # "pending_restore_applied" is journaled under a synthetic
         # "boot" run by apply_pending_restore — a complete record in
-        # itself, never an interrupted update to recover.
+        # itself, never an interrupted update to recover. The stale-
+        # discard entry ("pending_restore_discarded_stale") is the
+        # same shape: the marker is gone, the boot is clean, and the
+        # discard must not surface as an "aborted" recovery.
         terminal = next((e for e in events
                          if e.get("event") in ("complete", "rolled_back",
                                                "aborted", "crash_recovery",
-                                               "pending_restore_applied")),
+                                               "pending_restore_applied",
+                                               "pending_restore_discarded_stale")),
                         None)
         if terminal is not None:
             return pending_receipt or {
@@ -756,7 +814,8 @@ class UpdateManager:
             "recovered": True, "run_id": last["run_id"],
             "last_steps": steps, "snapshot": snap_id,
         }
-        if pending.get("applied") or pending.get("error"):
+        if pending.get("applied") or pending.get("error") \
+                or pending.get("discarded_stale"):
             receipt["pending_restore"] = pending
         if snap_id and dangerous:
             try:
@@ -789,16 +848,25 @@ class UpdateManager:
         return receipt
 
     # ── deferred database restore ──────────────────────────────────────
-    def _write_pending_restore(self, snapshot_id: str, reason: str) -> None:
+    def _write_pending_restore(self, snapshot_id: str, reason: str, *,
+                               run_id: str = "", target_sha: str = "",
+                               from_sha: str = "") -> None:
         """Record a database restore deferred to the next boot.
 
         Written by :meth:`_rollback` when the live database cannot be
         swapped from inside the process holding it open.  The marker
-        is the whole contract: snapshot id + why; applying it is
-        :meth:`apply_pending_restore`'s job.
+        is the whole contract: the snapshot to restore, why it was
+        deferred, and its PROVENANCE — the run that wrote it, the
+        version that run targeted, and the version it started from.
+        Provenance is what lets a later successful update (and boot
+        recovery) recognise this marker as superseded instead of
+        applying a restore that no longer belongs to the install's
+        history.
         """
+        self._tx_wrote_pending_restore = True
         payload = {"snapshot": snapshot_id, "reason": reason,
-                   "ts": time.time()}
+                   "ts": time.time(), "run_id": run_id,
+                   "target_sha": target_sha, "from_sha": from_sha}
         try:
             self.pending_restore_path.parent.mkdir(parents=True,
                                                    exist_ok=True)
@@ -808,31 +876,184 @@ class UpdateManager:
             _log.error("could not write pending-restore marker at %s",
                        self.pending_restore_path, exc_info=True)
 
+    def _read_pending_restore(self) -> dict[str, Any] | None:
+        """The pending-restore marker payload — None when no marker
+        file exists, an empty dict when the file exists but is
+        malformed (such a marker can never be applied, but its
+        presence still matters to the successful-update cleanup)."""
+        try:
+            raw = self.pending_restore_path.read_text(encoding="utf-8")
+        except OSError:
+            return None
+        try:
+            payload = json.loads(raw)
+        except ValueError:
+            return {}
+        return payload if isinstance(payload, dict) else {}
+
+    def _clear_stale_pending_restore(self) -> dict[str, Any] | None:
+        """Remove a pending-restore marker this run superseded.
+
+        Called only from the success path of :meth:`_run`: the run
+        migrated and health-checked the live database, so a deferred
+        restore left by an earlier failed update no longer applies.
+        Returns the cleared marker's provenance for the report and
+        the journal, or None when there was nothing to clear — no
+        marker, or the marker is THIS run's own (written by this
+        run's rollback; such a run never reaches the success path,
+        and the flag keeps that true by construction even if a check
+        wrote one as a side effect).
+        """
+        if self._tx_wrote_pending_restore:
+            return None
+        payload = self._read_pending_restore()
+        if payload is None:
+            return None
+        try:
+            self.pending_restore_path.unlink()
+        except OSError:  # noqa: BLE001 — a marker we cannot remove
+            # stays for recovery's provenance check to discard; the
+            # update itself has already succeeded.
+            _log.warning("could not remove stale pending-restore "
+                         "marker at %s", self.pending_restore_path,
+                         exc_info=True)
+            return None
+        return {"snapshot": str(payload.get("snapshot", "")),
+                "run_id": str(payload.get("run_id", "")),
+                "target_sha": str(payload.get("target_sha", "")),
+                "from_sha": str(payload.get("from_sha", ""))}
+
+    def _pending_restore_superseded_by(
+            self, payload: dict[str, Any]) -> str:
+        """SHA (or run id) of a later successful update that makes
+        this pending-restore marker stale, or "" when it is current.
+
+        The journal is the evidence: a run that COMPLETED the full
+        transaction after the marker was written migrated and
+        health-checked the live database, adopting it as the base —
+        the deferred restore's whole premise (revert the database to
+        pair with the rolled-back code) is gone.  A no-op completion
+        (``noop``) proves nothing about the database and never
+        supersedes.  The marker's own run never completes (it rolled
+        back), so its run id is excluded by construction as well as
+        by the explicit check.
+        """
+        try:
+            marker_ts = float(payload.get("ts") or 0)
+        except (TypeError, ValueError):
+            marker_ts = 0.0
+        marker_run = str(payload.get("run_id") or "")
+        for run in self._journal_runs():
+            if marker_run and run["run_id"] == marker_run:
+                continue
+            for event in run["events"]:
+                if event.get("event") != "complete" \
+                        or event.get("noop"):
+                    continue
+                try:
+                    event_ts = float(event.get("ts") or 0)
+                except (TypeError, ValueError):
+                    event_ts = 0.0
+                if event_ts >= marker_ts:
+                    return str(event.get("sha") or "") or run["run_id"]
+        return ""
+
+    def _pending_restore_state_note(self, payload: dict[str, Any]) -> str:
+        """Describe the ACTUAL code/database state for a marker.
+
+        The boot failure notice quotes this verbatim, so it is built
+        only from facts: which update the deferred restore belongs
+        to, which version is running now, and whether that running
+        code is the rolled-back version the restore was meant to
+        pair with.  "Rolled-back code" is asserted only when the
+        running HEAD is the marker update's own pre-update version.
+        """
+        target = str(payload.get("target_sha") or "")
+        from_sha = str(payload.get("from_sha") or "")
+        running = self._git_sha()
+        parts: list[str] = []
+        if target:
+            parts.append("the deferred restore belongs to the failed "
+                         f"update that targeted {target[:12]}")
+        elif payload.get("run_id"):
+            parts.append("the deferred restore belongs to failed "
+                         f"update run {str(payload['run_id'])[:12]}")
+        if running:
+            if from_sha and running == from_sha:
+                parts.append(
+                    f"the running code is {running[:12]} — the "
+                    "rolled-back pre-update version — while the "
+                    "database is still the post-update one")
+            else:
+                parts.append(
+                    f"the running code is {running[:12]}, which is "
+                    "NOT the rolled-back version, and the database "
+                    "in use is the unrestored live database")
+        return "; ".join(parts)
+
     def apply_pending_restore(self) -> dict[str, Any]:
         """Apply a deferred database restore, if one is pending.
 
         Called at boot via :meth:`recover_interrupted` — before the
         runtime serves on the database, which is the only moment the
         swap is guaranteed not to fight the running process for the
-        file.  No marker → nothing to do.  A restore that still cannot
-        run keeps its marker (the next boot retries) and reports why.
+        file.  No marker → nothing to do.  A STALE marker — one a
+        later successful update superseded — is discarded, never
+        applied: the successful run is expected to clear it itself,
+        but a marker that survived (written by an older build, or its
+        clearing failed) must not regress the live database at boot.
+        A current marker whose restore still cannot run keeps the
+        marker (the next boot retries) and reports why, with the
+        actual code/database state attached.
         """
         try:
             payload = json.loads(
                 self.pending_restore_path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             return {"applied": False, "reason": "no pending restore"}
+        if not isinstance(payload, dict):
+            payload = {}
         snap_id = str(payload.get("snapshot", ""))
         if not snap_id:
             return {"applied": False,
                     "reason": "pending-restore marker names no snapshot"}
+        superseded_by = self._pending_restore_superseded_by(payload)
+        if superseded_by:
+            try:
+                self.pending_restore_path.unlink()
+            except OSError:  # noqa: BLE001 — the discard stands
+                _log.debug("could not remove stale pending-restore "
+                           "marker", exc_info=True)
+            self._journal({"run_id": "boot",
+                           "event": "pending_restore_discarded_stale",
+                           "ts": time.time(), "snapshot": snap_id,
+                           "marker_run_id":
+                               str(payload.get("run_id", "")),
+                           "marker_target_sha":
+                               str(payload.get("target_sha", "")),
+                           "superseded_by": superseded_by})
+            _log.warning(
+                "discarded stale deferred database restore (snapshot "
+                "%s, from the update that targeted %s): superseded "
+                "by successful update %s — booting on the live "
+                "database", snap_id,
+                str(payload.get("target_sha", ""))[:12] or "?",
+                superseded_by[:12])
+            return {"applied": False, "discarded_stale": True,
+                    "snapshot": snap_id, "superseded_by": superseded_by}
         try:
             self.snapshots.restore(snap_id, force=True)
         except Exception as exc:  # noqa: BLE001 — reported, marker kept
             detail = f"{type(exc).__name__}: {exc}"
             _log.error("pending database restore of %s failed: %s",
                        snap_id, detail)
-            return {"applied": False, "snapshot": snap_id, "error": detail}
+            return {"applied": False, "snapshot": snap_id,
+                    "error": detail,
+                    "update_sha": str(payload.get("target_sha", "")),
+                    "from_sha": str(payload.get("from_sha", "")),
+                    "running_sha": self._git_sha(),
+                    "state_note":
+                        self._pending_restore_state_note(payload)}
         try:
             self.pending_restore_path.unlink()
         except OSError:  # noqa: BLE001 — applied is what matters
@@ -1152,8 +1373,10 @@ class UpdateManager:
                 # opens, and the code-tree restore below — the half
                 # that must not wait — still runs now.
                 reason = f"{type(exc).__name__}: {exc}"
-                self._write_pending_restore(report.pre_update_snapshot,
-                                            reason)
+                self._write_pending_restore(
+                    report.pre_update_snapshot, reason, run_id=run_id,
+                    target_sha=quarantine_sha or self._tx_to_sha,
+                    from_sha=self._tx_from_sha)
                 report.db_restore_deferred = reason
                 report.record(
                     "rollback_db", True,

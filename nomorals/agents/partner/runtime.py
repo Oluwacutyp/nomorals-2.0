@@ -100,15 +100,27 @@ def _update_recovery_notice(receipt: dict) -> tuple[str, str]:
             "from that update.",
         )
     if action == "pending_restore_failed":
+        # The receipt carries the ACTUAL state (which update the
+        # deferred restore belongs to, which version is running, and
+        # whether that code is the rolled-back version) — state it,
+        # never assert a pairing the facts don't support. The static
+        # fallback covers receipts from older builds that carry no
+        # state note.
+        state = str(receipt.get("state_note") or "")
+        if state:
+            state_line = f"Actual state: {state}. "
+        else:
+            state_line = ("Devon is booting on the post-update "
+                          "database paired with rolled-back code. ")
         return (
             "deferred database restore FAILED at startup",
             "A failed self-update deferred its database restore to "
             "this startup because the database was locked while Devon "
             f"ran, and the restore still could not be applied "
-            f"({receipt.get('error') or 'unknown error'}). Devon is "
-            "booting on the post-update database paired with "
-            "rolled-back code — check the install before trusting "
-            "it; a manual snapshot restore may be needed.",
+            f"({receipt.get('error') or 'unknown error'}). "
+            f"{state_line}"
+            "Check the install before trusting it; a manual "
+            "snapshot restore may be needed.",
         )
     # aborted (and any future close-out action): died before the
     # dangerous steps, so nothing was changed and nothing restored.
