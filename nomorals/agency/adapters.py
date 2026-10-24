@@ -26,6 +26,7 @@ from .domains import (
     advance_lead, classify_weather_item, cluster_news, evaluate_deal,
     score_gig,
 )
+from .failures import record_failure
 
 __all__ = [
     "AgencyAuthority", "DealsAdapter", "WeatherAdapter", "NewsAdapter",
@@ -310,7 +311,8 @@ class DealsAdapter:
             return []
         try:
             return self._as_dicts(self.hunter.check_alerts())
-        except Exception:  # noqa: BLE001 - hunter failure = no alerts
+        except Exception as exc:  # noqa: BLE001 - hunter failure = no alerts
+            record_failure("DealsAdapter.check_alerts", exc)
             return []
 
     def search(self, query: str) -> list[dict[str, Any]]:
@@ -318,7 +320,8 @@ class DealsAdapter:
             return []
         try:
             return self._as_dicts(self.hunter.search(query))
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("DealsAdapter.search", exc)
             return []
 
     def price_detail(self, product: str) -> dict[str, Any]:
@@ -327,7 +330,8 @@ class DealsAdapter:
         try:
             out = self.hunter.price_detail(product)
             return dict(out) if isinstance(out, dict) else {}
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("DealsAdapter.price_detail", exc)
             return {}
 
     def price_history(self, product: str) -> dict[str, Any]:
@@ -336,7 +340,8 @@ class DealsAdapter:
         try:
             out = self.hunter.price_history(product)
             return dict(out) if isinstance(out, dict) else {}
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("DealsAdapter.price_history", exc)
             return {}
 
     def check_need(self, need: dict[str, Any]) -> dict[str, Any]:
@@ -355,20 +360,20 @@ class DealsAdapter:
                 observed.update(detail)
                 vendor = str(detail.get("vendor", "") or "")
                 url = str(detail.get("url", "") or "")
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as exc:  # noqa: BLE001
+                record_failure("DealsAdapter.check_need.detail", exc)
             try:
                 hist = self.price_history(product)
                 if hist:
                     observed["historical_low"] = hist.get(
                         "lowest_price", need.get("historical_low"))
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as exc:  # noqa: BLE001
+                record_failure("DealsAdapter.check_need.history", exc)
         elif self.price_check is not None:
             try:
                 observed.update(dict(self.price_check(need) or {}))
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as exc:  # noqa: BLE001
+                record_failure("DealsAdapter.check_need.price_check", exc)
         price = float(observed.get("price", observed.get("current_price", 0) or 0))
         landed = price + float(need.get("shipping", 0) or 0) \
             + float(need.get("fees", 0) or 0)
@@ -483,7 +488,8 @@ class WeatherAdapter:
         if self._places_provider is not None:
             try:
                 provided = self._places_provider()
-            except Exception:  # noqa: BLE001 - provider failure = no places
+            except Exception as exc:  # noqa: BLE001 - provider failure = no places
+                record_failure("WeatherAdapter.places.provider", exc)
                 provided = None
             if provided:
                 return _as_place_list(provided)
@@ -503,7 +509,8 @@ class WeatherAdapter:
             organ = self._organ()
             fc = organ.forecast(place) or {}
             now = organ.now(place) or {}
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("WeatherAdapter.snapshot", exc)
             return {"place": place, "days": [], "alerts": []}
         alerts: list[dict[str, Any]] = []
         for line in (now.get("alerts") or []):
@@ -521,7 +528,8 @@ class WeatherAdapter:
     def forecast(self, place: str, days: int = 3) -> dict[str, Any]:
         try:
             return dict(self._organ().forecast(place, days=days) or {})
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("WeatherAdapter.forecast", exc)
             return {"ok": False, "place": place}
 
 
@@ -546,7 +554,8 @@ class NewsAdapter:
             return []
         try:
             items = organ.recent(limit=limit) or []
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("NewsAdapter.recent", exc)
             return []
         return [dict(i) if isinstance(i, dict) else {"title": str(i)}
                 for i in items]
@@ -560,7 +569,8 @@ class NewsAdapter:
         try:
             out = organ.run()
             return dict(out) if isinstance(out, dict) else {}
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("NewsAdapter.fetch_digest", exc)
             return {}
 
     def clusters(self, limit: int = 15) -> list[dict[str, Any]]:
@@ -584,8 +594,8 @@ def _iter_relationships(relationships: Any) -> list[Any]:
             return list(store.values())
         if isinstance(relationships, (list, tuple)):
             return list(relationships)
-    except Exception:  # noqa: BLE001 - tracker failure = no relationships
-        pass
+    except Exception as exc:  # noqa: BLE001 - tracker failure = no relationships
+        record_failure("_iter_relationships", exc)
     return []
 
 
@@ -621,14 +631,14 @@ def default_social_inbox(*, manager: Any | None = None,
                 last_out = float(getattr(rel, "last_outbound", 0) or 0)
                 if last_in > last_out:
                     unanswered += 1
-        except Exception:  # noqa: BLE001 - never raises
-            pass
+        except Exception as exc:  # noqa: BLE001 - never raises
+            record_failure("default_social_inbox.unanswered", exc)
         try:
             due = getattr(relationships, "due_for_reconnect", None)
             if callable(due):
                 milestones += len(due() or [])
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:  # noqa: BLE001
+            record_failure("default_social_inbox.milestones", exc)
         promised = 0
         queue = draft_queue
         if queue is None and manager is not None:
@@ -637,8 +647,8 @@ def default_social_inbox(*, manager: Any | None = None,
         try:
             if queue is not None and callable(getattr(queue, "pending", None)):
                 promised += len(queue.pending() or [])
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:  # noqa: BLE001
+            record_failure("default_social_inbox.promised", exc)
         if manager is not None:
             try:
                 triage = getattr(manager, "triage_log", None)
@@ -647,8 +657,8 @@ def default_social_inbox(*, manager: Any | None = None,
                     digest = triage.digest() or {}
                     needs = digest.get("needs_attention") or []
                     unanswered += len(needs)
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as exc:  # noqa: BLE001
+                record_failure("default_social_inbox.triage", exc)
         stop_signal = False
         cadence_ok = True
         if gateway is not None:
@@ -658,8 +668,8 @@ def default_social_inbox(*, manager: Any | None = None,
                 if cadence is not None:
                     cadence_ok = bool(cadence() if callable(cadence)
                                       else cadence)
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as exc:  # noqa: BLE001
+                record_failure("default_social_inbox.gateway", exc)
         return {"unanswered": unanswered, "promised_replies": promised,
                 "milestones": milestones, "stop_signal": stop_signal,
                 "cadence_ok": cadence_ok}
@@ -705,7 +715,8 @@ class SocialAdapter:
         try:
             out = self.inbox()
             return dict(out) if isinstance(out, dict) else {}
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("SocialAdapter.backlog", exc)
             return {"unanswered": 0, "promised_replies": 0,
                     "milestones": 0, "stop_signal": False,
                     "cadence_ok": True}
@@ -715,7 +726,8 @@ class SocialAdapter:
             return []
         try:
             due = self.manager.due() or []
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("SocialAdapter.due_posts", exc)
             return []
         out = []
         for item in due:
@@ -734,7 +746,8 @@ class SocialAdapter:
             return []
         try:
             results = self.manager.run_due() or []
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("SocialAdapter.publish_due", exc)
             return []
         out = []
         for r in results:
@@ -786,7 +799,8 @@ class LeadsAdapter:
             return []
         try:
             leads = self.store.list_leads() or []
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("LeadsAdapter.live_leads", exc)
             return []
         return [self._lead_dict(l) for l in leads
                 if self._lead_dict(l).get("status") != "dead"]
@@ -808,7 +822,8 @@ class LeadsAdapter:
             return False
         try:
             return bool(self.store.set_lead_status(lead_id, store_status))
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("LeadsAdapter.set_store_status", exc)
             return False
 
     def advance(self, lead: dict[str, Any], nxt: str) -> dict[str, Any]:
@@ -934,7 +949,8 @@ class GigsAdapter:
             return []
         try:
             return [self._opp_dict(o) for o in (self.hunter.scan() or [])]
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("GigsAdapter.scan", exc)
             return []
 
     def score(self, opp: dict[str, Any]) -> dict[str, Any]:
@@ -944,7 +960,8 @@ class GigsAdapter:
             try:
                 payout = float(self.payout_extractor(
                     opp.get("payout_text", "") or "") or 0.0)
-            except Exception:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001
+                record_failure("GigsAdapter.score.payout", exc)
                 payout = 0.0
         return score_gig(advertised_payout=payout, win_probability=float(
             opp.get("win_probability", 0.3) or 0.3),
@@ -1031,7 +1048,8 @@ class GigsAdapter:
             return []
         try:
             apps = self.applier.follow_ups_due() or []
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("GigsAdapter.follow_ups_due", exc)
             return []
         return [self._opp_dict(a) for a in apps]
 
@@ -1116,8 +1134,8 @@ class PlannerAdapter:
         try:
             if graph in self._graphs:
                 self._graphs.remove(graph)
-        except Exception:  # noqa: BLE001 - consumption is best-effort
-            pass
+        except Exception as exc:  # noqa: BLE001 - consumption is best-effort
+            record_failure("PlannerAdapter.execute_graph.consume", exc)
         to_dict = getattr(result, "to_dict", None)
         return dict(to_dict()) if callable(to_dict) else {
             "completed": list(getattr(result, "completed", [])),
