@@ -85,6 +85,7 @@ from typing import Any
 
 from ..core.logging_setup import get_logger
 from .cookies import BOT_COOKIE_HELP, is_bot_detection_error
+from .downloader_failures import record_failure
 
 _log = get_logger(__name__)
 
@@ -324,8 +325,8 @@ def detect_profile() -> str:
     try:
         if (os.cpu_count() or 0) >= 8:
             return "workstation"
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as e:
+        record_failure("detect_profile", e)
     return "laptop"
 
 
@@ -348,7 +349,8 @@ def _mask_proxy(proxy_url: str) -> str:
     try:
         p = urllib.parse.urlparse(proxy_url)
         return f"{p.scheme}://{p.hostname}:{p.port}"
-    except Exception:  # noqa: BLE001
+    except Exception as e:
+        record_failure("_mask_proxy", e)
         return "(proxy)"
 
 
@@ -390,7 +392,8 @@ def is_short_link(url: str) -> bool:
                 return parsed.path.startswith("/t/")
             return True
         return False
-    except Exception:  # noqa: BLE001
+    except Exception as e:
+        record_failure("is_short_link", e)
         return False
 
 
@@ -411,7 +414,8 @@ def expand_short_url(url: str) -> str:
             if final and final != url:
                 return final
         return url
-    except Exception:  # noqa: BLE001
+    except Exception as e:
+        record_failure("expand_short_url", e)
         return url
 
 
@@ -453,7 +457,8 @@ def _embedded_media_urls(markup: str) -> list[str]:
     for block in _LD_JSON_RE.finditer(markup):
         try:
             data = json.loads(block.group(1))
-        except Exception:  # noqa: BLE001 - a broken block is skipped
+        except Exception as e:  # a broken block is skipped
+            record_failure("_embedded_media_urls", e)
             continue
         stack = [data]
         while stack:
@@ -562,9 +567,9 @@ class MediaDownloader:
             if db is not None:
                 from ..storage.kv import KVStore
                 reg.bind_store(KVStore(db))
-        except Exception:  # noqa: BLE001 - persistence is an
+        except Exception as e:  # persistence is an
             # enhancement; its absence never sinks a download
-            pass
+            record_failure("source_registry", e)
         self._source_registry_cache = reg
         return reg
 
@@ -594,8 +599,8 @@ class MediaDownloader:
             if desc is not None:
                 reg.record_outcome(desc, ok, latency_s=latency_s,
                                    error_class=error_class)
-        except Exception:  # noqa: BLE001 - bookkeeping never breaks downloads
-            pass
+        except Exception as e:  # bookkeeping never breaks downloads
+            record_failure("_record_download_outcome", e)
 
     def _intake_candidate(self, url: str, *, via: str) -> None:
         """Discovery intake: a host encountered on the real path that
@@ -605,8 +610,8 @@ class MediaDownloader:
             reg = self.source_registry()
             if reg.for_url(url) is None:
                 reg.note_candidate(url, via=via)
-        except Exception:  # noqa: BLE001 - intake never breaks downloads
-            pass
+        except Exception as e:  # intake never breaks downloads
+            record_failure("_intake_candidate", e)
 
     # ── rule learning (Pass #87) ──────────────────────────────────
 
@@ -623,7 +628,8 @@ class MediaDownloader:
         before when there is nothing learned."""
         try:
             return self.source_registry().learned_for_url(url)
-        except Exception:  # noqa: BLE001 - learning never gates downloads
+        except Exception as e:  # learning never gates downloads
+            record_failure("_learned_for", e)
             return None
 
     def _note_rule_failure(self, desc: Any) -> None:
@@ -631,8 +637,8 @@ class MediaDownloader:
         registry degrades / retires it on the #86 thresholds)."""
         try:
             self.source_registry().note_rule_failure(desc)
-        except Exception:  # noqa: BLE001 - bookkeeping never breaks downloads
-            pass
+        except Exception as e:  # bookkeeping never breaks downloads
+            record_failure("_note_rule_failure", e)
 
     def _learn_from_success(self, report: DownloadReport,
                             format_facts: dict[str, str] | None) -> None:
@@ -671,8 +677,8 @@ class MediaDownloader:
                 if winner.stage in ("direct", "proxy") else "",
                 format_spec=facts.get("format_spec", "")
                 if winner.stage in ("direct", "proxy") else "")
-        except Exception:  # noqa: BLE001 - bookkeeping never breaks downloads
-            pass
+        except Exception as e:  # bookkeeping never breaks downloads
+            record_failure("_learn_from_success", e)
 
     def _attempt_stage(self, stage: str, report: DownloadReport,
                        url: str, target_dir: Path, audio_only: bool,
@@ -704,7 +710,8 @@ class MediaDownloader:
         before — descriptors advise, they never gate by absence)."""
         try:
             return self._extractor_registry().best_for(url)
-        except Exception:  # noqa: BLE001
+        except Exception as e:
+            record_failure("_descriptor_for", e)
             return None
 
     def _cf_cookie_store(self) -> Any:
@@ -723,8 +730,9 @@ class MediaDownloader:
                     default_cf_cookie_store)
                 self._cookie_store = default_cf_cookie_store(
                     self.context, actor="downloader-cloudflare")
-            except Exception:  # noqa: BLE001 - store is an
+            except Exception as e:  # store is an
                 # enhancement; its absence never sinks a download
+                record_failure("_cf_cookie_store", e)
                 self._cookie_store = None
         return self._cookie_store
 
@@ -762,8 +770,8 @@ class MediaDownloader:
                         size_bytes=report.size_bytes,
                         source=winner or report.extractor or "downloader",
                         dest=report.path)
-        except Exception:  # noqa: BLE001 - bookkeeping never breaks downloads
-            pass
+        except Exception as e:  # bookkeeping never breaks downloads
+            record_failure("_succeed", e)
         return self._finish(report, started)
 
     # ── public API ────────────────────────────────────────────────────
@@ -802,8 +810,8 @@ class MediaDownloader:
                 report.hint = ("free disk space or choose another "
                                "destination folder")
                 return self._finish(report, started)
-        except Exception:  # noqa: BLE001 - preflight never breaks the chain
-            pass
+        except Exception as e:  # preflight never breaks the chain
+            record_failure("download.preflight", e)
         # Stage zero: a short link expands to the page it MEANS before
         # any extractor sees it.  Failure to expand is a note in the
         # report — the chain continues with the original URL.
@@ -855,7 +863,8 @@ class MediaDownloader:
                 mapped = ""
                 try:
                     mapped = descriptor.format_for(format_spec)
-                except Exception:  # noqa: BLE001
+                except Exception as e:
+                    record_failure("download.mapped", e)
                     mapped = ""
                 if mapped and mapped != format_spec:
                     _log.info("download format label %r → %r via "
@@ -1087,7 +1096,8 @@ class MediaDownloader:
         if callable(resolve):
             try:
                 return str(resolve("data/browser/sessions"))
-            except Exception:  # noqa: BLE001 - persistence is optional
+            except Exception as e:  # persistence is optional
+                record_failure("_session_dir", e)
                 return ""
         return ""
 
@@ -1098,7 +1108,8 @@ class MediaDownloader:
         try:
             from .cookies import cookies_file_for
             return cookies_file_for(url, self._session_dir()) or ""
-        except Exception:  # noqa: BLE001 - cookies are an enhancement
+        except Exception as e:  # cookies are an enhancement
+            record_failure("_cookies_file", e)
             return ""
 
     # ── stage 2: proxy lab ────────────────────────────────────────────
@@ -1243,8 +1254,8 @@ class MediaDownloader:
             _path, size = landed
             try:
                 pool.record_success(pid, latency_ms=lat * 1000)
-            except Exception:  # noqa: BLE001 — bookkeeping only
-                pass
+            except Exception as e:  # bookkeeping only
+                record_failure("_stage_proxy.bookkeeping", e)
             report.stages.append(StageLog(
                 stage="proxy", url=url, proxy=masked, latency_s=lat,
                 size_bytes=size, ok=True,
@@ -1298,7 +1309,8 @@ class MediaDownloader:
 
         try:
             meta = session.extract(kind="meta") or {}
-        except Exception:  # noqa: BLE001
+        except Exception as e:
+            record_failure("_media_candidates.meta", e)
             meta = {}
         og = (meta.get("og") or {}) if isinstance(meta, dict) else {}
         for key in ("og:video", "og:video:url", "og:video:secure_url",
@@ -1309,7 +1321,8 @@ class MediaDownloader:
         try:
             raw_html = (session.html(max_chars=2_000_000) or {}).get("html",
                                                                     "")
-        except Exception:  # noqa: BLE001
+        except Exception as e:
+            record_failure("_media_candidates.raw_html", e)
             raw_html = ""
         for m in _SRC_TAG_RE.finditer(raw_html or ""):
             add(m.group(1))
@@ -1320,7 +1333,8 @@ class MediaDownloader:
             add(media_url)
         try:
             links = (session.links(max_links=200) or {}).get("links", [])
-        except Exception:  # noqa: BLE001
+        except Exception as e:
+            record_failure("_media_candidates.links", e)
             links = []
         for link in links or []:
             href = str((link or {}).get("url") or "")
@@ -1497,8 +1511,8 @@ class MediaDownloader:
         try:
             from ..core.jobs import report_progress
             report_progress(f"browser: fetching {media_url[:80]}")
-        except Exception:  # noqa: BLE001 - progress is best-effort
-            pass
+        except Exception as e:  # progress is best-effort
+            record_failure("_fetch_candidate.progress", e)
         t0 = time.perf_counter()
         try:
             got = fetch(media_url, dest)
@@ -1527,8 +1541,8 @@ class MediaDownloader:
                             f"HTTP {status}")
             try:
                 dest.unlink(missing_ok=True)
-            except OSError:
-                pass
+            except OSError as e:
+                record_failure("_fetch_candidate.unlink", e)
             return False
         if ctype and not (ctype.startswith(("audio/", "video/",
                                             "application/octet-stream"))
@@ -1541,8 +1555,8 @@ class MediaDownloader:
                 note="candidate was a page, not a file"))
             try:
                 dest.unlink(missing_ok=True)
-            except OSError:
-                pass
+            except OSError as e:
+                record_failure("_fetch_candidate.unlink#2", e)
             return False
         # Byte-level landing truth: an absent Content-Type (or a
         # generic octet-stream) proves nothing about what landed.
@@ -1571,8 +1585,8 @@ class MediaDownloader:
                             FailureKind.NO_MEDIA_FOUND, why)
             try:
                 dest.unlink(missing_ok=True)
-            except OSError:
-                pass
+            except OSError as e:
+                record_failure("_fetch_candidate.unlink#3", e)
             return False
         report.stages.append(StageLog(
             stage="browser", url=media_url, latency_s=lat,
@@ -1667,7 +1681,8 @@ class MediaDownloader:
             d = safe_path(self.context, "media")
             d.mkdir(parents=True, exist_ok=True)
             return Path(str(d))
-        except Exception:  # noqa: BLE001
+        except Exception as e:
+            record_failure("_dest_dir", e)
             fallback = Path.home() / "workspace" / "media"
             fallback.mkdir(parents=True, exist_ok=True)
             return fallback
@@ -1706,8 +1721,8 @@ class MediaDownloader:
             try:
                 from ..core.jobs import report_progress
                 report_progress(f"{stage}: {message}")
-            except Exception:  # noqa: BLE001 - progress is best-effort
-                pass
+            except Exception as e:  # progress is best-effort
+                record_failure("_cb", e)
         return _cb
 
     @staticmethod
@@ -1764,7 +1779,8 @@ def _sha256_of(path: Path) -> str:
             for chunk in iter(lambda: fh.read(1024 * 1024), b""):
                 digest.update(chunk)
         return digest.hexdigest()
-    except Exception:  # noqa: BLE001
+    except Exception as e:
+        record_failure("_sha256_of", e)
         return ""
 
 
