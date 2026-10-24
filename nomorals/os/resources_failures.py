@@ -11,7 +11,10 @@ A failed detection that silently reported kind="unknown", a malformed
 CPU quota that silently reported "unlimited", a cgroup limit that
 silently fell back to host memory, a failed sizing that silently left
 admission control unguarded, looked identical to a healthy
-probe — now each leaves a trace.
+probe — now each leaves a trace. The same holds for the manager's
+sampling chain: a failed sample that silently reported "no swap",
+"no thermal data", or a host CPU count in place of the cgroup quota
+looked like a measured sample — now each leaves a trace too.
 
 Stdlib only. ``record`` itself never raises — a ledger that can crash
 its callers would defeat the purpose.

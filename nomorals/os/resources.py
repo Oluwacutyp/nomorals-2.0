@@ -1251,7 +1251,8 @@ class ResourceManager:
             caps = getattr(plat, "capabilities", None)
             wake = bool(getattr(caps, "wake_lock", False)) if caps else False
             return name in {"termux", "android", "mobile"} or wake
-        except Exception:  # noqa: BLE001 - platform detection must not break us
+        except Exception as e:  # noqa: BLE001 - platform detection must not break us
+            record_failure("ResourceManager._is_battery_powered", e)
             return False
 
     # -- effective resources (cgroup-aware) --------------------------------
@@ -1281,7 +1282,8 @@ class ResourceManager:
                 val = host_mb
             self._eff_cache["mem"] = (now, val)
             return val
-        except Exception:  # noqa: BLE001 - never raises
+        except Exception as e:  # noqa: BLE001 - never raises
+            record_failure("ResourceManager.effective_memory_mb", e)
             return None
 
     def effective_cpu_count(self) -> Optional[float]:
@@ -1296,7 +1298,8 @@ class ResourceManager:
             val = min(quota, host) if quota else host
             self._eff_cache["cpu"] = (now, val)
             return val
-        except Exception:  # noqa: BLE001 - never raises
+        except Exception as e:  # noqa: BLE001 - never raises
+            record_failure("ResourceManager.effective_cpu_count", e)
             return None
 
     # -- samplers (each defensive; never raises) ---------------------------
@@ -1330,7 +1333,8 @@ class ResourceManager:
             util = max(0.0, min(100.0, (dt - (idle - pidle)) / dt * 100.0))
             st = max(0.0, min(100.0, (steal - psteal) / dt * 100.0))
             return util, st
-        except Exception:  # noqa: BLE001 - never raises
+        except Exception as e:  # noqa: BLE001 - never raises
+            record_failure("ResourceManager._sample_cpu_deltas", e)
             return None, None
 
     def _sample_mem(self) -> tuple[Optional[float], Optional[float],
@@ -1364,7 +1368,8 @@ class ResourceManager:
                 return None
             used = max(0, total - (free or 0))
             return max(0.0, min(100.0, used / total * 100.0))
-        except Exception:  # noqa: BLE001 - never raises
+        except Exception as e:  # noqa: BLE001 - never raises
+            record_failure("ResourceManager._sample_swap", e)
             return None
 
     def _sample_swap_io_rate(self) -> Optional[float]:
@@ -1381,7 +1386,8 @@ class ResourceManager:
             if dt <= 0:
                 return None
             return max(0.0, ((cur[0] - ppin) + (cur[1] - ppout)) / dt)
-        except Exception:  # noqa: BLE001 - never raises
+        except Exception as e:  # noqa: BLE001 - never raises
+            record_failure("ResourceManager._sample_swap_io_rate", e)
             return None
 
     def _sample_disk(self) -> tuple[Optional[float], Optional[float]]:
@@ -1401,7 +1407,8 @@ class ResourceManager:
     def _sample_thermal(self) -> tuple[Optional[str], Optional[float]]:
         try:
             temps = _thermal_zone_temps()
-        except Exception:  # noqa: BLE001 - thermal probe is best-effort
+        except Exception as e:  # noqa: BLE001 - thermal probe is best-effort
+            record_failure("ResourceManager._sample_thermal", e)
             return None, None
         if not temps:
             return None, None
@@ -1439,7 +1446,8 @@ class ResourceManager:
         def safe(fn, fallback):
             try:
                 return fn()
-            except Exception:  # noqa: BLE001 - sampler failed -> fallback
+            except Exception as e:  # noqa: BLE001 - sampler failed -> fallback
+                record_failure(f"ResourceManager.sample.safe.{getattr(fn, '__name__', 'unknown')}", e)
                 return fallback
 
         mem_pct, mem_avail_mb, mem_total_mb = safe(self._sample_mem,
@@ -1484,7 +1492,8 @@ class ResourceManager:
         if self._alerts:
             try:
                 self._eval_alerts(s, self.pressure(s))
-            except Exception:  # noqa: BLE001 — alerts never break sampling
+            except Exception as e:  # noqa: BLE001 — alerts never break sampling
+                record_failure("ResourceManager.sample.alerts", e)
                 pass
         return s
 

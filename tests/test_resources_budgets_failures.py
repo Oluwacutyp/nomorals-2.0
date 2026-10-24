@@ -365,7 +365,22 @@ def _enclosing_function(path, line):
     return best.name if best else None
 
 
-def test_scan_remainder_is_28_with_no_budget_sites():
+SAMPLING_CONVERTED_FUNCTIONS = {
+    # Converted by #127; effective_memory_mb and sample remain in the
+    # remainder via their excluded sites (meminfo pass, env fallback),
+    # so they are NOT in this set.
+    "_is_battery_powered", "effective_cpu_count", "_sample_cpu_deltas",
+    "_sample_swap", "_sample_swap_io_rate", "_sample_thermal", "safe",
+}
+SAMPLING_EXCLUDED_FUNCTIONS = {
+    # Innermost functions holding #127's excluded sampling sites:
+    # effective_memory_mb (meminfo pass), _sample_network (sysfs pass),
+    # sample (env fallback).
+    "effective_memory_mb", "_sample_network", "sample",
+}
+
+
+def test_scan_remainder_is_19_with_no_budget_or_sampling_sites():
     from nomorals.tools import error_scan as es
 
     original = es._noqa_suppresses
@@ -373,10 +388,16 @@ def test_scan_remainder_is_28_with_no_budget_sites():
     try:
         report = es.scan([os.path.join(os.path.dirname(res.__file__),
                                        "resources.py")])
-        assert len(report.findings) == 28  # 36 true - 8 converted
+        # 36 true - 8 budgets (#125) - 9 sampling (#127) = 19.
+        # A count snapshot a conversion is supposed to change, not an
+        # architectural invariant: the real invariant — which functions
+        # remain — is asserted below and is untouched.
+        assert len(report.findings) == 19
         fns = {_enclosing_function(f.file, f.line) for f in report.findings}
         assert not (fns & BUDGET_FUNCTIONS)
+        assert not (fns & SAMPLING_CONVERTED_FUNCTIONS)
         assert EXCLUDED_PROBE_FUNCTIONS <= fns
+        assert SAMPLING_EXCLUDED_FUNCTIONS <= fns
     finally:
         es._noqa_suppresses = original
 
