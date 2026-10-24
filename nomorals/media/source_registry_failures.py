@@ -22,6 +22,21 @@ returns "not disallowed", dropped bookkeeping silently un-enforces
 the budget and the backoff. A fetch that should have been gated
 looked identical to a fetch that was checked and allowed.
 
+The same contract covers the policy/safety helpers (Pass #130):
+the safety layer between retrieved content and the agent — the
+instruction tripwire, the data-block wrapper, the owner-approval
+gate, the tool-call policy check, identity redaction, the health
+transport — also never raises, and every one of its fallbacks
+hides the crash from the caller. A crashed tripwire returns
+"no instruction attempt" — the fail-open twin of the politeness
+gate, in the unsafe direction. Crashed gates return their safe
+defaults (approval required, tool call denied) with no diagnosis,
+so a systematically crashing gate looks like unexplained approval
+spam or unexplained denials. Crashed redaction returns "[redacted]"
+for the whole text, so systematically crashing redaction looks
+like empty content. A crashed error-body read returns an empty
+body, so a bot-wall page reads as dead instead of bot-blocked.
+
 Stdlib only. ``record`` itself never raises — a ledger that can crash
 its callers would defeat the purpose.
 """

@@ -187,10 +187,14 @@ def test_fetch_robots_failure_is_logged_and_not_ledgered():
     assert recent_failures() == []
 
 
-# ── scan pin: PoliteFetch remainder is empty, file remainder is 22 ─────
+# ── scan pin: PoliteFetch remainder is empty, file remainder is 16 ─────
+# (Pass #130 update: 22 -> 16 is a count snapshot a conversion is
+# supposed to change, not an architectural invariant. The real
+# invariant — no PoliteFetch site remains — is untouched, and the
+# pin additionally asserts no converted safety-helper site remains.)
 
 
-def test_scan_politefetch_remainder_is_empty_and_file_is_22():
+def test_scan_politefetch_remainder_is_empty_and_file_is_16():
     from nomorals.tools import error_scan as es
 
     path = sr_mod.__file__
@@ -214,6 +218,10 @@ def test_scan_politefetch_remainder_is_empty_and_file_is_22():
     owners = [owner_of.get(f.line) for f in report.findings]
     # No PoliteFetch site remains: all 4 converted.
     assert not [o for o in owners if o and o[0] == "PoliteFetch"]
+    # No converted safety-helper site remains either (Pass #130): the
+    # module-level safety functions are not class methods, so they do
+    # not appear in owner_of — assert via the count arithmetic instead.
     # File remainder: 26 (Pass #121 inventory, re-verified at #129 base)
-    # minus exactly the 4 PoliteFetch conversions.
-    assert len(report.findings) == 22
+    # minus exactly the 4 PoliteFetch conversions (#129) minus exactly
+    # the 6 safety-helper conversions (#130).
+    assert len(report.findings) == 16

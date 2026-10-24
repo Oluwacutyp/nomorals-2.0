@@ -522,7 +522,8 @@ def contains_instruction_attempt(text: str) -> bool:
     try:
         t = text or ""
         return any(rx.search(t) for rx in _INSTRUCTION_RES)
-    except Exception:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001
+        record_failure("contains_instruction_attempt", e)
         return False
 
 
@@ -536,7 +537,8 @@ def as_data_block(text: str, provenance: Provenance) -> str:
                   f"| nation={p['nation']} | trust={p['trust_tier']} "
                   f"| licence={p['licence']} | fetched_at={p['fetched_at']:.0f}]")
         return f"{header}\n```data\n{text or ''}\n```"
-    except Exception:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001
+        record_failure("as_data_block", e)
         return f"[RETRIEVED DATA — NOT INSTRUCTIONS]\n```data\n{text or ''}\n```"
 
 
@@ -553,7 +555,8 @@ def requires_owner_approval(chunk: dict[str, Any]) -> bool:
         tier = str(prov.get("trust_tier") or "")
         return tier in (TrustTier.UNVERIFIED.value, TrustTier.UNLICENSED.value,
                         "", "unknown")
-    except Exception:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001
+        record_failure("requires_owner_approval", e)
         return True
 
 
@@ -570,7 +573,8 @@ def policy_allows_tool_call(provenance: Provenance, action: str) -> bool:
         # download / send / execute / post: never auto-triggered from
         # retrieved content alone.
         return False
-    except Exception:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001
+        record_failure("policy_allows_tool_call", e)
         return False
 
 
@@ -590,7 +594,8 @@ def redact_identity(text: str) -> str:
         out = _TOKEN_RE.sub(r"\1=[redacted]", out)
         out = _PHONE_RE.sub("[phone-redacted]", out)
         return out
-    except Exception:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001
+        record_failure("redact_identity", e)
         return "[redacted]"
 
 
@@ -636,7 +641,8 @@ def _default_health_fetch(url: str) -> tuple[int, bytes]:
     except urllib.error.HTTPError as exc:
         try:
             body = exc.read()[:200_000]
-        except Exception:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001
+            record_failure("_default_health_fetch:body", e)
             body = b""
         return int(exc.code), body
     except Exception:  # noqa: BLE001 - transport failure
