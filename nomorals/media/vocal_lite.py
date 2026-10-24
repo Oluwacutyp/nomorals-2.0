@@ -31,6 +31,8 @@ from array import array
 from pathlib import Path
 from typing import Any
 
+from .vocal_lite_failures import record_failure
+
 _log = logging.getLogger(__name__)
 
 
@@ -84,7 +86,8 @@ def _profile_kind() -> str:
     try:
         from ..core.profile import detect_profile
         return str(detect_profile().kind).lower()
-    except Exception:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001
+        record_failure("vocal_lite._profile_kind", e)
         return ""
 
 
@@ -115,7 +118,8 @@ def song_duration_beats(song: Any) -> float:
         total_bars = sum(int(getattr(s, "bars", 0) or 0)
                          for s in (getattr(song, "sections", None) or []))
         return float(total_bars * _BEATS_PER_BAR)
-    except Exception:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001
+        record_failure("vocal_lite.song_duration_beats", e)
         return 0.0
 
 
@@ -172,7 +176,8 @@ def _phrases(events: Any, gap_beats: float = 1.0) -> list[list[Any]]:
             try:
                 s = float(getattr(e, "start", 0))
                 d = float(getattr(e, "duration", 0.5))
-            except Exception:  # noqa: BLE001
+            except Exception as e:  # noqa: BLE001
+                record_failure("vocal_lite._phrases:event", e)
                 continue
             if cur and s - prev_end > gap_beats:
                 phrases.append(cur)
@@ -182,7 +187,8 @@ def _phrases(events: Any, gap_beats: float = 1.0) -> list[list[Any]]:
         if cur:
             phrases.append(cur)
         return phrases
-    except Exception:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001
+        record_failure("vocal_lite._phrases", e)
         return []
 
 
@@ -194,7 +200,8 @@ def _phrase_median_midi(phrase: list[Any]) -> float:
         if not notes:
             return 0.0
         return float(notes[len(notes) // 2])
-    except Exception:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001
+        record_failure("vocal_lite._phrase_median_midi", e)
         return 0.0
 
 
@@ -208,7 +215,8 @@ def _tts_line_f0_midi(wav_path: str) -> float:
             return 0.0
         import math
         return 69.0 + 12.0 * math.log2(f0 / 440.0)
-    except Exception:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001
+        record_failure("vocal_lite._tts_line_f0_midi", e)
         return 0.0
 
 
@@ -282,7 +290,8 @@ def _resample_linear(samples: array, src_sr: int, dst_sr: int) -> array:
             frac = pos - lo
             out[i] = samples[lo] * (1.0 - frac) + samples[hi] * frac
         return out
-    except Exception:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001
+        record_failure("vocal_lite._resample_linear", e)
         return array("d", samples)
 
 
@@ -464,7 +473,8 @@ def render_sung_vocal(song: Any, workdir: str, melody_events: Any,
                                  for l in (getattr(s, "lyrics", None) or [])
                                  if str(l).strip()]
                         break
-            except Exception:  # noqa: BLE001
+            except Exception as e:  # noqa: BLE001
+                record_failure("vocal_lite.render_sung_vocal:section_lines", e)
                 lines = []
             if not lines:
                 continue
@@ -500,7 +510,8 @@ def render_sung_vocal(song: Any, workdir: str, melody_events: Any,
                 try:
                     phrase_start_b = float(
                         getattr(phrase[0], "start", start_b))
-                except Exception:  # noqa: BLE001
+                except Exception as e:  # noqa: BLE001
+                    record_failure("vocal_lite.render_sung_vocal:phrase_start", e)
                     phrase_start_b = start_b
                 start_n = int(phrase_start_b * beat_s * sr)
                 if start_n >= total_n:
@@ -591,7 +602,8 @@ def _event_in_chorus(event: Any, regions: list[tuple[float, float]]) -> bool:
     try:
         s = float(getattr(event, "start", -1))
         return any(rs <= s < re_ for rs, re_ in regions)
-    except Exception:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001
+        record_failure("vocal_lite._event_in_chorus", e)
         return False
 
 
@@ -628,7 +640,8 @@ def render_hummed_vocal(song: Any, workdir: str, melody_events: Any,
                 start_b = float(getattr(e, "start", 0))
                 dur_b = float(getattr(e, "duration", 0.5))
                 vel = int(getattr(e, "velocity", 96))
-            except Exception:  # noqa: BLE001
+            except Exception as e:  # noqa: BLE001
+                record_failure("vocal_lite.render_hummed_vocal:event", e)
                 continue
             if dur_b <= 0 or not 0 < note < 128:
                 continue
@@ -810,7 +823,8 @@ def add_vocal_track(song: Any, bed_path: str, workdir: str,
                 try:
                     from . import caps
                     cap_mib = caps.MAX_AUDIO_WRITE_BYTES // (1024 * 1024)
-                except Exception:  # noqa: BLE001
+                except Exception as e:  # noqa: BLE001
+                    record_failure("vocal_lite.add_vocal_track:cap_mib", e)
                     pass
                 return {"ok": False,
                         "reason": "vocal mix refused: output would exceed "
