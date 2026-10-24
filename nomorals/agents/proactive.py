@@ -41,6 +41,7 @@ from typing import Any, Optional
 
 from ..core.logging_setup import get_logger
 from ..memory.manager import MemoryManager
+from .proactive_failures import record_failure
 
 __all__ = [
     "ProactiveEngine",
@@ -222,8 +223,8 @@ class ProactiveEngine:
                 try:
                     s.metadata["identity_id"] = ident.id
                     s.metadata["identity_label"] = ident.label()
-                except Exception:
-                    pass
+                except Exception as e:
+                    record_failure("get_suggestions.identity_tag", e)
 
         return filtered[:limit]
 
@@ -234,15 +235,16 @@ class ProactiveEngine:
         try:
             self._identity = identity
             return True
-        except Exception:
+        except Exception as e:
+            record_failure("set_identity", e)
             return False
 
     def clear_identity(self) -> None:
         """Back to Devon herself. Never raises."""
         try:
             self._identity = None
-        except Exception:
-            pass
+        except Exception as e:
+            record_failure("clear_identity", e)
 
     @property
     def acting_as(self) -> Any:
@@ -255,7 +257,8 @@ class ProactiveEngine:
             if self._identity is not None:
                 return self._identity.signature()
             return "Devon"
-        except Exception:
+        except Exception as e:
+            record_failure("identity_signature", e)
             return "Devon"
     
     async def record_action(
@@ -819,8 +822,8 @@ class RelationshipCadence:
                     name = line[4:].split("**")[0].strip()
                     if name:
                         names.append(name)
-        except OSError:
-            pass
+        except OSError as e:
+            record_failure("_index_order", e)
         except Exception as exc:  # noqa: BLE001 — malformed index, ignore
             _log.debug("people INDEX.md unreadable: %s", exc)
         return names
@@ -979,8 +982,8 @@ class RelationshipCadence:
                     if _slugify(cand.stem) == want:
                         path = cand
                         break
-            except OSError:
-                pass
+            except OSError as e:
+                record_failure("record_contact.glob", e)
         if path.exists():
             try:
                 text = path.read_text(encoding="utf-8")
@@ -1005,8 +1008,8 @@ class RelationshipCadence:
         try:
             if path.exists() and path.read_text(encoding="utf-8") == new_text:
                 return path
-        except OSError:
-            pass
+        except OSError as e:
+            record_failure("record_contact.idempotency_read", e)
         path.write_text(new_text, encoding="utf-8")
         _log.info("recorded contact with %s", name)
         return path
