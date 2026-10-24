@@ -22,6 +22,7 @@ from typing import Any
 
 from ..core.ids import new_id
 from ..core.logging_setup import get_logger
+from .failures import record_failure
 
 _log = get_logger(__name__)
 
@@ -46,7 +47,8 @@ def resolve_gateway(context: Any) -> Any | None:
         extras = getattr(context, "extras", None)
         if isinstance(extras, dict):
             return extras.get("gateway")
-    except Exception:  # noqa: BLE001 - gateway resolution is best-effort
+    except Exception as exc:  # noqa: BLE001 - gateway resolution is best-effort
+        record_failure("notifier.resolve_gateway", exc)
         pass
     return None
 
@@ -202,7 +204,8 @@ def _in_quiet_hours_now(context: Any, now: float | None = None) -> bool:
         from datetime import datetime
         tz = ZoneInfo(str(tzname)) if tzname else None
         hour = datetime.now(tz).hour if tz else datetime.now().hour
-    except Exception:  # noqa: BLE001 - tz data missing -> wall clock
+    except Exception as exc:  # noqa: BLE001 - tz data missing -> wall clock
+        record_failure("notifier._in_quiet_hours_now.tz", exc)
         from datetime import datetime
         hour = (datetime.fromtimestamp(now).hour if now
                 else datetime.now().hour)
@@ -502,7 +505,8 @@ class Notifier:
                 (kind, title, cutoff, STATE_DIGEST, STATE_LOGGED),
             )
             return row is not None
-        except Exception:  # noqa: BLE001 - dedupe is best-effort
+        except Exception as exc:  # noqa: BLE001 - dedupe is best-effort
+            record_failure("notifier._is_duplicate", exc)
             return False
 
     @staticmethod
@@ -571,7 +575,8 @@ class Notifier:
                                     "created_at) VALUES (?, ?, ?, ?, ?, ?)",
                                     (nid, kind, title, body, delivered, time.time()),
                                 )
-                        except Exception:  # noqa: BLE001
+                        except Exception as exc:  # noqa: BLE001
+                            record_failure("notifier._store.terminal", exc)
                             pass
         return {"id": nid, "kind": kind, "title": title,
                 "delivered": bool(delivered),
@@ -638,7 +643,8 @@ class Notifier:
                                            payload=_ometa,
                                            text=body or "")
                 buttons = _kb if _kb else []
-        except Exception:  # noqa: BLE001 - buttons never break delivery
+        except Exception as exc:  # noqa: BLE001 - buttons never break delivery
+            record_failure("notifier._deliver.buttons", exc)
             buttons = []
 
         if doc is not None:
@@ -650,7 +656,8 @@ class Notifier:
                 _doc_rows = actions_rows(doc)
                 if _doc_rows:
                     buttons = _doc_rows
-            except Exception:  # noqa: BLE001 - buttons never break delivery
+            except Exception as exc:  # noqa: BLE001 - buttons never break delivery
+                record_failure("notifier._deliver.doc_buttons", exc)
                 pass
         #: per-platform Doc renders, computed once per _deliver pass
         _doc_renders: dict[str, Any] = {}
@@ -681,7 +688,8 @@ class Notifier:
                         _fh.write(doc.overflow_text)
                     _overflow = {"path": _path,
                                  "chars": len(doc.overflow_text)}
-            except Exception:  # noqa: BLE001 - inline overflow remains
+            except Exception as exc:  # noqa: BLE001 - inline overflow remains
+                record_failure("notifier._deliver.overflow", exc)
                 _overflow = None
 
         outcome = DeliveryOutcome()
@@ -817,7 +825,8 @@ class Notifier:
         if _overflow is not None:
             try:
                 os.unlink(_overflow["path"])
-            except OSError:
+            except OSError as exc:
+                record_failure("notifier._deliver.unlink", exc)
                 pass
         return outcome
 
@@ -959,7 +968,8 @@ class Notifier:
                 "WHERE notification_id = ? ORDER BY attempted_at ASC",
                 (notification_id,),
             )
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("notifier.delivery_attempts", exc)
             return []
 
     def termux_fallback_available(self) -> bool:
@@ -980,7 +990,8 @@ class Notifier:
             if _termux_notify_bin is None:
                 _termux_notify_bin = shutil.which("termux-notification") or False
             return bool(_termux_notify_bin)
-        except Exception:  # noqa: BLE001 - probing must never raise
+        except Exception as exc:  # noqa: BLE001 - probing must never raise
+            record_failure("notifier.termux_fallback_available", exc)
             return False
 
     def _termux_fallback(self, title: str, body: str) -> bool:
@@ -1033,7 +1044,8 @@ class Notifier:
                     "SELECT * FROM notifications ORDER BY created_at DESC LIMIT ?", (limit,)
                 )
             return rows
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("notifier.recent", exc)
             return []
 
     def pending(self) -> list[dict[str, Any]]:
@@ -1060,7 +1072,8 @@ class Notifier:
                     "SELECT * FROM notifications WHERE delivered = 0 "
                     "ORDER BY created_at ASC LIMIT 20"
                 )
-            except Exception:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001
+                record_failure("notifier.pending.fallback", exc)
                 return []
 
     def digest_pending(self, limit: int = 20) -> list[dict[str, Any]]:
@@ -1075,7 +1088,8 @@ class Notifier:
                 "ORDER BY created_at DESC LIMIT ?",
                 (STATE_DIGEST, max(1, int(limit))),
             )
-        except Exception:  # noqa: BLE001 - pre-policy DBs have no rows
+        except Exception as exc:  # noqa: BLE001 - pre-policy DBs have no rows
+            record_failure("notifier.digest_pending", exc)
             return []
 
     def digest_unfolded(self, limit: int = 20) -> list[dict[str, Any]]:
@@ -1097,7 +1111,8 @@ class Notifier:
                 "ORDER BY created_at ASC LIMIT ?",
                 (STATE_DIGEST, max(1, int(limit))),
             )
-        except Exception:  # noqa: BLE001 - pre-F7 DBs have no fold column
+        except Exception as exc:  # noqa: BLE001 - pre-F7 DBs have no fold column
+            record_failure("notifier.digest_unfolded", exc)
             return []
 
     def mark_digest_folded(self, ids: Any) -> int:
@@ -1122,7 +1137,8 @@ class Notifier:
                         (time.time(), nid, STATE_DIGEST))
                     marked += int(getattr(cur, "rowcount", 0) or 0)
             return marked
-        except Exception:  # noqa: BLE001 - pre-F7 DBs have no fold column
+        except Exception as exc:  # noqa: BLE001 - pre-F7 DBs have no fold column
+            record_failure("notifier.mark_digest_folded", exc)
             return 0
 
     def alert_journal(self, limit: int = 50, kind: str = "",
@@ -1140,7 +1156,8 @@ class Notifier:
 
             return AlertPolicy.journal(self.db, limit=limit, kind=kind,
                                        subject=subject)
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("notifier.alert_journal", exc)
             return []
 
     def dead_letters(self, limit: int = 10) -> list[dict[str, Any]]:
@@ -1157,7 +1174,8 @@ class Notifier:
                 "AND delivery_state = ? ORDER BY created_at DESC LIMIT ?",
                 (STATE_DEAD, max(1, int(limit))),
             )
-        except Exception:  # noqa: BLE001 - pre-migration: no delivery_state
+        except Exception as exc:  # noqa: BLE001 - pre-migration: no delivery_state
+            record_failure("notifier.dead_letters", exc)
             return []
 
     def queue_depth(self) -> dict[str, int]:
@@ -1180,7 +1198,8 @@ class Notifier:
                     out["held"] += n
                 elif state == STATE_DEAD:
                     out["dead"] += n
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("notifier.queue_depth", exc)
             pass
         return out
 
@@ -1208,7 +1227,8 @@ class Notifier:
                 return [r for r in self.pending()
                         if (r.get("delivery_state") or "") in
                         (*RETRYABLE_STATES, STATE_HELD_QUIET)][:max(1, int(limit))]
-            except Exception:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001
+                record_failure("notifier._due_redeliveries.fallback", exc)
                 return []
 
     def _redeliver_row(self, row: dict[str, Any], now: float,
@@ -1237,7 +1257,8 @@ class Notifier:
                     from ..social.chat.present import doc_from_json
 
                     doc = doc_from_json(row.get("doc_json"))
-                except Exception:  # noqa: BLE001 - fall back to string
+                except Exception as exc:  # noqa: BLE001 - fall back to string
+                    record_failure("notifier._redeliver_row.doc", exc)
                     doc = None
             outcome = self._deliver(row["kind"], row.get("title", ""),
                                     row.get("body", ""), doc=doc)
@@ -1290,7 +1311,8 @@ class Notifier:
                             "delivery_state = ? WHERE id = ?",
                             (STATE_SENT, row["id"]),
                         )
-            except Exception:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001
+                record_failure("notifier._redeliver_row.state", exc)
                 pass
         return bool(reached)
 
@@ -1447,7 +1469,8 @@ class Notifier:
                     out["sent" if row.get("delivered") else "pending"] = int(
                         row.get("n") or 0)
                 return out
-            except Exception:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001
+                record_failure("notifier.delivery_counts.fallback", exc)
                 return {}
 
 
