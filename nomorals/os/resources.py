@@ -101,6 +101,8 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
+from nomorals.os.resources_failures import record_failure
+
 __all__ = [
     "ResourceSample",
     "ResourceManager",
@@ -302,7 +304,8 @@ def _detect_environment() -> EnvironmentInfo:
             if _plat.system() == "Android":
                 kind = "android"
                 signals["platform"] = "platform.system() == Android"
-        except Exception:  # noqa: BLE001 - platform probe is best-effort
+        except Exception as e:  # noqa: BLE001 - platform probe is best-effort
+            record_failure("_detect_environment.platform", e)
             pass
 
     if kind == "unknown":
@@ -325,7 +328,8 @@ def detect_environment(*, refresh: bool = False) -> EnvironmentInfo:
     if _cached_environment is None or refresh:
         try:
             _cached_environment = _detect_environment()
-        except Exception:  # noqa: BLE001 - detection must not break callers
+        except Exception as e:  # noqa: BLE001 - detection must not break callers
+            record_failure("detect_environment", e)
             _cached_environment = EnvironmentInfo(
                 kind="unknown", virtualized=False, containerized=False,
                 signals={}, detail="detection failed",
@@ -371,7 +375,8 @@ def _parse_psi_line(line: str) -> dict[str, float]:
             k, v = token.split("=", 1)
             try:
                 vals[k] = float(v)
-            except (ValueError, TypeError):
+            except (ValueError, TypeError) as e:
+                record_failure("_parse_psi_line", e)
                 pass
     return vals
 
@@ -403,7 +408,8 @@ def sample_psi() -> Optional[dict[str, PressureStall]]:
                 full_avg300=full.get("avg300"),
             )
         return out or None
-    except Exception:  # noqa: BLE001 - PSI probe is best-effort
+    except Exception as e:  # noqa: BLE001 - PSI probe is best-effort
+        record_failure("sample_psi", e)
         return None
 
 
@@ -498,7 +504,8 @@ def cgroup_memory_limit_bytes() -> Optional[int]:
                 best = val if best is None else min(best, val)
                 break
         return best
-    except Exception:  # noqa: BLE001 - best-effort probe
+    except Exception as e:  # noqa: BLE001 - best-effort probe
+        record_failure("cgroup_memory_limit_bytes", e)
         return None
 
 
@@ -520,7 +527,8 @@ def cgroup_cpu_quota_cores() -> Optional[float]:
                         period = float(parts[1]) if len(parts) > 1 else 100000.0
                         if period > 0 and quota > 0:
                             return max(0.1, quota / period)
-                    except (ValueError, TypeError, IndexError):
+                    except (ValueError, TypeError, IndexError) as e:
+                        record_failure("cgroup_cpu_quota_cores.cpu_max", e)
                         pass
                 break
             quota = _read_float(os.path.join(d, "cpu/cpu.cfs_quota_us"))
@@ -536,7 +544,8 @@ def cgroup_cpu_quota_cores() -> Optional[float]:
             if quota is not None:
                 break
         return None
-    except Exception:  # noqa: BLE001 - best-effort probe
+    except Exception as e:  # noqa: BLE001 - best-effort probe
+        record_failure("cgroup_cpu_quota_cores", e)
         return None
 
 
@@ -694,7 +703,8 @@ def _battery_detail() -> dict[str, Any]:
                 if c_full is not None and v:
                     detail["energy_full_wh"] = c_full / 1e6 * (v / 1e6)
             return detail
-    except Exception:  # noqa: BLE001 - battery probe is best-effort
+    except Exception as e:  # noqa: BLE001 - battery probe is best-effort
+        record_failure("_battery_detail", e)
         pass
     return detail
 
