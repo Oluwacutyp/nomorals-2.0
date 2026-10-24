@@ -19,6 +19,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from typing import Any, Callable
+from .failures import record_failure
 
 # ── module-level defaults ──────────────────────────────────────────────────
 
@@ -34,7 +35,8 @@ def _default_db() -> str:
         p = Path.home() / ".nomorals" / "social" / "leads.db"
         p.parent.mkdir(parents=True, exist_ok=True)
         return str(p)
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("leads.default_db", exc)
         return ":memory:"
 
 
@@ -155,7 +157,8 @@ class LeadStore:
                     PRIMARY KEY (trigger_id, key))"""
             )
             self._db.commit()
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("leads.store_init", exc)
             self._db = None
 
     # — triggers —
@@ -178,7 +181,8 @@ class LeadStore:
             )
             self._db.commit()
             return self.get_trigger(tid)
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("leads.add_trigger", exc)
             return None
 
     def get_trigger(self, trigger_id: str) -> CommentTrigger | None:
@@ -189,7 +193,8 @@ class LeadStore:
                 "SELECT * FROM lead_triggers WHERE trigger_id = ?", (trigger_id,)
             ).fetchone()
             return self._row_trigger(row) if row else None
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("leads.get_trigger", exc)
             return None
 
     def list_triggers(self, platform: str = "") -> list[CommentTrigger]:
@@ -204,7 +209,8 @@ class LeadStore:
                 rows = self._db.execute(
                     "SELECT * FROM lead_triggers ORDER BY created_at DESC").fetchall()
             return [self._row_trigger(r) for r in rows]
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("leads.list_triggers", exc)
             return []
 
     def stop_trigger(self, trigger_id: str) -> bool:
@@ -215,7 +221,8 @@ class LeadStore:
                 "UPDATE lead_triggers SET active = 0 WHERE trigger_id = ?", (trigger_id,))
             self._db.commit()
             return cur.rowcount > 0
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("leads.stop_trigger", exc)
             return False
 
     def match_triggers(self, platform: str, post_id: str, text: str) -> list[CommentTrigger]:
@@ -228,7 +235,8 @@ class LeadStore:
                 ((platform or "").strip().lower(), (post_id or "").strip())).fetchall()
             upper = (text or "").upper()
             return [self._row_trigger(r) for r in rows if r["keyword"] and r["keyword"] in upper]
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("leads.match_triggers", exc)
             return []
 
     # — comment log (for explicit-override "DM everyone who commented") —
@@ -242,7 +250,8 @@ class LeadStore:
                  (ev.text or "")[:500], time.time()))
             self._db.commit()
             return True
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("leads.log_comment", exc)
             return False
 
     def commenters(self, post_id: str, platform: str = "") -> list[dict]:
@@ -259,7 +268,8 @@ class LeadStore:
                     "SELECT DISTINCT commenter, contact FROM lead_comments WHERE post_id = ?",
                     (post_id,)).fetchall()
             return [{"commenter": r["commenter"], "contact": r["contact"]} for r in rows]
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("leads.commenters", exc)
             return []
 
     def already_dmed(self, platform: str, post_id: str, commenter: str,
@@ -272,7 +282,8 @@ class LeadStore:
                 "AND commenter = ? AND trigger_id = ?",
                 (platform, post_id, commenter, trigger_id)).fetchone()
             return row is not None
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("leads.already_dmed", exc)
             return False
 
     def mark_dmed(self, platform: str, post_id: str, commenter: str, trigger_id: str) -> None:
@@ -283,8 +294,8 @@ class LeadStore:
                 "INSERT OR IGNORE INTO comment_seen VALUES (?,?,?,?,?)",
                 (platform, post_id, commenter, trigger_id, time.time()))
             self._db.commit()
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:  # noqa: BLE001
+            record_failure("leads.mark_dmed", exc)
 
     # — leads / CRM —
     def capture_lead(self, name: str, platform: str, contact: str,
@@ -302,7 +313,8 @@ class LeadStore:
                  max(0, int(expected_value_kobo or 0)), time.time()))
             self._db.commit()
             return self.get_lead(lid)
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("leads.capture_lead", exc)
             return None
 
     def get_lead(self, lead_id: str) -> Lead | None:
@@ -312,7 +324,8 @@ class LeadStore:
             row = self._db.execute(
                 "SELECT * FROM leads WHERE lead_id = ?", (lead_id,)).fetchone()
             return self._row_lead(row) if row else None
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("leads.get_lead", exc)
             return None
 
     def list_leads(self, status: str = "") -> list[Lead]:
@@ -327,7 +340,8 @@ class LeadStore:
                 rows = self._db.execute(
                     "SELECT * FROM leads ORDER BY created_at DESC").fetchall()
             return [self._row_lead(r) for r in rows]
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("leads.list_leads", exc)
             return []
 
     def set_lead_status(self, lead_id: str, status: str) -> bool:
@@ -339,7 +353,8 @@ class LeadStore:
                 ((status or "").strip().lower(), lead_id))
             self._db.commit()
             return cur.rowcount > 0
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("leads.set_lead_status", exc)
             return False
 
     # — rows —
@@ -363,7 +378,8 @@ class LeadStore:
                 (trigger_id, key, value or ""))
             self._db.commit()
             return True
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("leads.set_trigger_meta", exc)
             return False
 
     def get_trigger_meta(self, trigger_id: str, key: str) -> str:
@@ -374,7 +390,8 @@ class LeadStore:
                 "SELECT value FROM trigger_meta WHERE trigger_id = ? AND key = ?",
                 (trigger_id, key)).fetchone()
             return str(row["value"] or "") if row else ""
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("leads.get_trigger_meta", exc)
             return ""
 
     def set_public_reply(self, trigger_id: str, template: str) -> bool:
@@ -432,7 +449,8 @@ class LeadStore:
                 "qualifier": trig.qualifier,
                 "public_reply": bool(trig.public_reply),
             }
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("leads.funnel_stats", exc)
             return {}
 
     @staticmethod
@@ -465,7 +483,8 @@ def render_dm(template: str, lead: Lead, extra: dict | None = None) -> str:
         for k, v in vars_.items():
             text = text.replace("{" + k + "}", str(v))
         return text
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("leads.render_dm", exc)
         return template or ""
 
 
@@ -522,13 +541,15 @@ def handle_comment(store: LeadStore, ev: CommentEvent, *,
                         ok = False
                         cost_note = (f" (₦{cost/100:,.0f} WhatsApp marketing message not "
                                      "worth it — expected value too low)")
-                except Exception:  # noqa: BLE001
+                except Exception as exc:  # noqa: BLE001
+                    record_failure("leads.handle_comment.cost_gate", exc)
                     pass
             sent = False
             if ok and dm_sender is not None:
                 try:
                     sent = bool(dm_sender(ev.platform, lead.contact, body))
-                except Exception:  # noqa: BLE001
+                except Exception as exc:  # noqa: BLE001
+                    record_failure("leads.handle_comment.dm_sender", exc)
                     sent = False
             elif ok and dm_sender is None:
                 sent = True  # dry-run: flow resolved, no sender configured
@@ -542,7 +563,8 @@ def handle_comment(store: LeadStore, ev: CommentEvent, *,
                             lead.contact, "__lead_followup__",
                             {"name": lead.name, "interest": lead.interest},
                             "whatsapp" if ev.platform == "whatsapp" else "smtp")
-                    except Exception:  # noqa: BLE001
+                    except Exception as exc:  # noqa: BLE001
+                        record_failure("leads.handle_comment.followup", exc)
                         pass
             # The public reply rides back to the caller (the adapter posts
             # it as a comment reply): "Sent — check your DMs" both fixes
@@ -567,7 +589,8 @@ def handle_comment(store: LeadStore, ev: CommentEvent, *,
                     "{name}", lead.name or "there")
             results.append(result)
         return results
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("leads.handle_comment", exc)
         return results
 
 
@@ -612,13 +635,15 @@ def dm_everyone(store: LeadStore, post_id: str, *,
                     from .whatsapp_cost import worth_it
                     ok = worth_it(lead.expected_value_kobo,
                                   _whatsapp_cost_kobo(is_marketing=True))
-                except Exception:  # noqa: BLE001
+                except Exception as exc:  # noqa: BLE001
+                    record_failure("leads.dm_everyone.cost_gate", exc)
                     ok = True  # explicit command: cost gate warns, does not veto
             sent = True
             if dm_sender is not None:
                 try:
                     sent = bool(dm_sender(ev.platform, lead.contact, body))
-                except Exception:  # noqa: BLE001
+                except Exception as exc:  # noqa: BLE001
+                    record_failure("leads.dm_everyone.dm_sender", exc)
                     sent = False
             if sent:
                 store.set_lead_status(lead.lead_id, "dmed")
@@ -628,7 +653,8 @@ def dm_everyone(store: LeadStore, post_id: str, *,
             out["details"].append({"contact": lead.contact, "dmed": sent,
                                   "cost_ok": ok})
         return out
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("leads.dm_everyone", exc)
         return out
 
 
@@ -646,7 +672,8 @@ def mark_lead_magnet(store: LeadStore, trigger_id: str, recycle: bool = True) ->
             "INSERT OR REPLACE INTO lead_magnets VALUES (?, ?)", (trigger_id, time.time()))
         store._db.commit()
         return True
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("leads.mark_lead_magnet", exc)
         return False
 
 
@@ -657,7 +684,8 @@ def is_lead_magnet(store: LeadStore, trigger_id: str) -> bool:
         row = store._db.execute(
             "SELECT 1 FROM lead_magnets WHERE trigger_id = ?", (trigger_id,)).fetchone()
         return row is not None
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("leads.is_lead_magnet", exc)
         return False
 
 
@@ -767,5 +795,6 @@ def control_leads(tail: str, context=None, chat=None, **kwargs) -> str:
                     "DM sender goes here when a platform adapter is attached (dry-run OK).")
 
         return _usage()
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("leads.control_leads", exc)
         return "leads hiccup — try again."
