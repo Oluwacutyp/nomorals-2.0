@@ -673,7 +673,8 @@ class SendEngine:
         try:
             if _CostTracker is not None:
                 self._tracker = _CostTracker()
-        except Exception:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001
+            record_failure("send.SendEngine.__init__.tracker", e)
             self._tracker = None
         # sweep migration: campaign tracking columns on older queue tables
         try:
@@ -683,11 +684,16 @@ class SendEngine:
                     try:
                         self._db.execute(
                             f"ALTER TABLE send_queue ADD COLUMN {_col} {_ddl}")
-                    except Exception:  # noqa: BLE001 — already there
-                        pass
+                    except Exception as e:  # noqa: BLE001
+                        # Duplicate column is the probe answer (column
+                        # already migrated); any other ALTER failure
+                        # is a real failure and records.
+                        if "duplicate column" not in str(e):
+                            record_failure(
+                                "send.SendEngine.__init__.sweep_column", e)
                 self._db.commit()
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as e:  # noqa: BLE001
+            record_failure("send.SendEngine.__init__.sweep", e)
 
     # ── templates ──
 

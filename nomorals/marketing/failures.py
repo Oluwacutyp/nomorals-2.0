@@ -43,6 +43,16 @@ failed status read returned its half-built dict, so zero spend and
 no providers read as "nothing spent / nothing configured"; and a
 failed engine singleton quietly retried the same constructor and
 handed back a non-singleton engine with the cause lost.
+``send``'s engine-construction region shares it too: a failed
+cost-tracker build left the engine untracked with no trace (the
+same silently-disabled shape as the failed cost-tracker import),
+and a failed sweep migration — a column ALTER that was not the
+routine duplicate-column answer, or a commit that never landed —
+left the engine running on a half-migrated queue table with no
+trace. The duplicate-column answer itself stays quiet: it is the
+migration's idempotency mechanism, firing on every restart of an
+already-migrated database, and recording it would spam the ledger
+with routine startups.
 That contract is sound for ad-spend safety — but until now the caught
 failures vanished without a trace: a guardrail that silently failed to
 evaluate, or a store method silently returning ``False`` on a dead DB,

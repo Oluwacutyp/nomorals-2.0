@@ -28,9 +28,10 @@ failure is visible instead of vanishing.
 
 Deliberately NOT in scope here: the template/provider methods, the
 module helpers, ``spam_check_template``, ``status``, and
-``get_engine`` — the remainder the scan pin below counts (10 sites,
+``get_engine`` — the remainder the scan pin below counts (7 sites,
 after #135 converted the 5 templates/providers sites,
-#137 the 8 module-helper sites, and #138 the 3 tail sites).
+#137 the 8 module-helper sites, #138 the 3 tail sites, and
+#139 the 3 __init__ sites).
 """
 
 import ast
@@ -257,17 +258,18 @@ def test_all_ten_hygiene_sites_record_in_source():
         assert site in found, f"missing record site {site}"
 
 
-def test_scan_send_remainder_is_exactly_10(monkeypatch):
+def test_scan_send_remainder_is_exactly_7(monkeypatch):
     # Suppression-off: noqa comments ignored, so converted sites (which
     # now bind and pass `e` to record_failure) drop out of the findings.
-    # 13 remainder after #137 - 3 tail converts in #138
-    # = 10 remainder: 3 debug-honest (render_template, __init__,
-    # process) + 4 pinned exclusions (parse_dsn, _dns_txt
+    # 10 remainder after #138 - 3 __init__ converts in #139
+    # = 7 remainder: 3 debug-honest (render_template, __init__ DB
+    # handler, process) + 4 pinned exclusions (parse_dsn, _dns_txt
     # socket-continue, _dns_txt parse-continue, deliverability_check
-    # inner) + 3 untouched __init__-silent sites (the #139 candidate).
+    # inner) + 0 untouched sites: send.py is closed except for
+    # pinned judgments.
     monkeypatch.setattr(es, "_noqa_suppresses", lambda line, rule: False)
     rep = scan(["nomorals/marketing/send.py"])
-    assert len(rep.findings) == 10
+    assert len(rep.findings) == 7
 
 
 def test_scan_send_flagged_is_clean():
