@@ -31,6 +31,7 @@ from dataclasses import asdict, dataclass, field
 from typing import Any, Optional
 
 from ..core.logging_setup import get_logger
+from .failures import record_failure
 
 _log = get_logger(__name__)
 
@@ -92,7 +93,8 @@ def _is_termux() -> bool:
         import sys
         prefix = (getattr(sys, "prefix", "") or "").lower()
         return "termux" in prefix or "com.termux" in os.environ.get("HOME", "")
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("graph._is_termux", exc)
         return False
 
 
@@ -181,7 +183,8 @@ class WorldGraph:
                 "SELECT * FROM graph_nodes WHERE node_id = ?",
                 (node_id,)).fetchone()
             return self._row_to_node(row) if row else None
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("graph.get", exc)
             return None
 
     def list_nodes(self, type: str = "") -> list[GraphNode]:
@@ -196,7 +199,8 @@ class WorldGraph:
                 rows = self._db.execute(
                     "SELECT * FROM graph_nodes ORDER BY type, label").fetchall()
             return [self._row_to_node(r) for r in rows]
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("graph.list_nodes", exc)
             return []
 
     def remove_node(self, node_id: str) -> bool:
@@ -210,7 +214,8 @@ class WorldGraph:
                                    (node_id,))
             self._db.commit()
             return cur.rowcount > 0
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("graph.remove_node", exc)
             return False
 
     # ── edges ─────────────────────────────────────────────────────────
@@ -233,7 +238,8 @@ class WorldGraph:
                 (from_id, to_id, type, time.time()))
             self._db.commit()
             return True
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("graph.add_edge", exc)
             return False
 
     def edges(self, node_id: str = "") -> list[GraphEdge]:
@@ -249,7 +255,8 @@ class WorldGraph:
             return [GraphEdge(from_id=r["from_id"], to_id=r["to_id"],
                               type=r["type"], created_at=r["created_at"] or 0.0)
                     for r in rows]
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("graph.edges", exc)
             return []
 
     # ── queries ───────────────────────────────────────────────────────
@@ -264,7 +271,8 @@ class WorldGraph:
                 if n:
                     out.append(n)
             return sorted(out, key=lambda n: n.label)
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("graph.dependents", exc)
             return []
 
     def dependencies(self, node_id: str) -> list[GraphNode]:
@@ -274,7 +282,8 @@ class WorldGraph:
                    if e.from_id == node_id and e.type == "depends_on"}
             out = [self.get(i) for i in ids]
             return sorted([n for n in out if n], key=lambda n: n.label)
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("graph.dependencies", exc)
             return []
 
     def what_breaks_if(self, node_id: str) -> dict[str, Any]:
@@ -291,7 +300,8 @@ class WorldGraph:
                 "affected": [{"id": n.node_id, "type": n.type, "label": n.label}
                              for n in affected],
             }
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("graph.what_breaks_if", exc)
             return {"ok": False, "reason": "query failed"}
 
     def critical_path(self) -> list[GraphNode]:
@@ -333,7 +343,8 @@ class WorldGraph:
                     best_path = p
             by_id = {n.node_id: n for n in nodes}
             return [by_id[i] for i in best_path if i in by_id]
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("graph.critical_path", exc)
             return []
 
     # ── disruption ────────────────────────────────────────────────────
@@ -358,7 +369,8 @@ class WorldGraph:
                         affected.add(nxt)
                         frontier.append(nxt)
             return affected
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("graph._propagate", exc)
             return set(seeds)
 
     def mark_disrupted(self, node_id: str,
@@ -404,8 +416,8 @@ class WorldGraph:
                     continue
                 adj.setdefault(e.from_id, set()).add(e.to_id)
                 adj.setdefault(e.to_id, set()).add(e.from_id)
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:  # noqa: BLE001
+            record_failure("graph._undirected_adj", exc)
         return adj
 
     def _directed_adj(self) -> dict[str, set[str]]:
@@ -418,8 +430,8 @@ class WorldGraph:
                     adj.setdefault(e.to_id, set()).add(e.from_id)
                 elif e.type == "blocks":
                     adj.setdefault(e.from_id, set()).add(e.to_id)
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:  # noqa: BLE001
+            record_failure("graph._directed_adj", exc)
         return adj
 
     def weak_links(self, limit: int = 8) -> list[dict[str, Any]]:
@@ -571,7 +583,8 @@ class WorldGraph:
             ids.reverse()
             by_id = {n.node_id: n for n in self.list_nodes()}
             return [by_id[i] for i in ids if i in by_id]
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("graph.path_between", exc)
             return []
 
     def neighborhood(self, node_id: str, depth: int = 2) -> list[GraphNode]:
@@ -593,7 +606,8 @@ class WorldGraph:
             by_id = {n.node_id: n for n in self.list_nodes()}
             return sorted((by_id[i] for i in seen if i in by_id),
                           key=lambda n: n.label)
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("graph.neighborhood", exc)
             return []
 
     def schedule_waves(self) -> list[list[GraphNode]]:
@@ -724,7 +738,8 @@ class WorldGraph:
             if len(nodes) > 60:
                 lines.append("    %% …node cap reached")
             return "\n".join(lines)
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("graph.to_mermaid", exc)
             return "graph LR\n    %% unavailable"
 
     def clear_disruption(self, node_id: str) -> bool:
@@ -737,14 +752,16 @@ class WorldGraph:
                 (time.time(), node_id))
             self._db.commit()
             return cur.rowcount > 0
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("graph.clear_disruption", exc)
             return False
 
     def disrupted(self) -> list[GraphNode]:
         """All currently disrupted nodes."""
         try:
             return [n for n in self.list_nodes() if n.disrupted]
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("graph.disrupted", exc)
             return []
 
     # ── projection (read-only from memory/scheduler) ──────────────────
@@ -945,7 +962,8 @@ class WorldGraph:
                 try:
                     from ..memory.manager import MemoryManager
                     mgr = MemoryManager()
-                except Exception:  # noqa: BLE001
+                except Exception as exc:  # noqa: BLE001
+                    record_failure("graph.sync_from_memory.import", exc)
                     return 0
             recall = getattr(mgr, "recall", None)
             if not callable(recall):
@@ -959,7 +977,8 @@ class WorldGraph:
                     node = self._record_to_node(rec)
                     if node:
                         count += 1
-                except Exception:  # noqa: BLE001
+                except Exception as exc:  # noqa: BLE001
+                    record_failure("graph.sync_from_memory.record", exc)
                     continue
             return count
         except Exception:  # noqa: BLE001
@@ -1000,11 +1019,12 @@ class WorldGraph:
             if created:
                 try:
                     attrs["memory_created"] = float(created)
-                except (TypeError, ValueError):
-                    pass
+                except (TypeError, ValueError) as exc:
+                    record_failure("graph._record_to_node.memory_created", exc)
             return self.add_node(ntype, label, attrs,
                                  external_ref=f"memory:{rec_id}" if rec_id else "")
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("graph._record_to_node.outer", exc)
             return None
 
     def sync_from_tasks(self, tasks: list[dict[str, Any]] | None) -> int:
@@ -1027,7 +1047,8 @@ class WorldGraph:
                 if node:
                     count += 1
             return count
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("graph.sync_from_tasks", exc)
             return 0
 
     # ── helpers ───────────────────────────────────────────────────────
@@ -1053,7 +1074,8 @@ class WorldGraph:
             dis = [n for n in nodes if n.disrupted]
             return (f"🌐 world graph: {len(nodes)} nodes, {len(edges)} edges"
                     + (f", ⚠️ {len(dis)} disrupted" if dis else ""))
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("graph.summary", exc)
             return "🌐 world graph: unavailable"
 
 
@@ -1094,7 +1116,8 @@ def disruption_alerts(graph: WorldGraph,
                         + ".")
                     break
         return alerts
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("graph.disruption_alerts", exc)
         return []
 
 
