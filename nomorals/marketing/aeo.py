@@ -31,6 +31,8 @@ from dataclasses import dataclass, field
 
 from ..core.logging_setup import get_logger
 
+from .failures import record_failure
+
 _log = get_logger(__name__)
 
 # ── engines ──────────────────────────────────────────────────────────────────
@@ -135,7 +137,8 @@ class VisibilityReport:
             own = len(self.confirmed) or len([m for m in self.mentions])
             total = own + sum(int(v or 0) for v in (self.competitor_hits or {}).values())
             return (own / total) if total else 0.0
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("aeo.VisibilityReport.share_of_voice", exc)
             return 0.0
 
     @property
@@ -148,7 +151,8 @@ class VisibilityReport:
                 key = (m.positioning or "mentioned").lower()
                 out[key] = out.get(key, 0) + 1
             return out
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("aeo.VisibilityReport.consideration", exc)
             return {}
 
     @property
@@ -159,7 +163,8 @@ class VisibilityReport:
                 s = m.sentiment or 0.0
                 out["positive" if s > 0.2 else "negative" if s < -0.2 else "neutral"] += 1
             return out
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("aeo.VisibilityReport.sentiment_breakdown", exc)
             return {}
 
     def format(self) -> str:
@@ -212,7 +217,8 @@ class VisibilityReport:
                     lines.append(f"  – {g[:90]}")
             lines.append("zero-click reality: ~60% of searches never click — being cited IS the ranking.")
             return "\n".join(lines)
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("aeo.VisibilityReport.format", exc)
             return f"AEO report for {self.brand} (format failed)."
 
 
@@ -250,7 +256,8 @@ def parse_citations(text: str) -> list[str]:
             if dom.count(".") >= 1 and not dom.endswith((".png", ".jpg", ".css")):
                 _add(dom)
         return out
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("aeo.parse_citations", exc)
         return []
 
 
@@ -279,7 +286,8 @@ def find_mentions(text: str, brand: str, engine: str, prompt: str) -> list[Menti
                     positioning=classify_positioning(sent),
                 ))
         return out
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("aeo.find_mentions", exc)
         return []
 
 
@@ -319,7 +327,8 @@ def classify_positioning(context: str) -> str:
         if _COMPARED_RE.search(text):
             return "compared"
         return "mentioned"
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("aeo.classify_positioning", exc)
         return "mentioned"
 
 
@@ -334,7 +343,8 @@ def sentiment_score(context: str) -> float:
         if not pos and not neg:
             return 0.0
         return round((pos - neg) / (pos + neg), 2)
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("aeo.sentiment_score", exc)
         return 0.0
 
 
@@ -409,7 +419,8 @@ def citation_quality(mentions: list[Mention], brand_domain: str = "") -> dict:
                 else:
                     out["third_party"] += 1
         return out
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("aeo.citation_quality", exc)
         return out
 
 
@@ -429,7 +440,8 @@ def sparkline(values: list[float]) -> str:
             return _SPARK[3] * len(vals)
         return "".join(
             _SPARK[min(7, int((v - lo) / (hi - lo) * 7))] for v in vals)
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("aeo.sparkline", exc)
         return ""
 
 
@@ -438,7 +450,8 @@ def _gauge(frac: float, width: int = 12) -> str:
         frac = max(0.0, min(1.0, float(frac or 0.0)))
         fill = int(round(frac * width))
         return "[" + "█" * fill + "░" * (width - fill) + "]"
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("aeo._gauge", exc)
         return ""
 
 
@@ -479,7 +492,8 @@ def site_readiness_check(url_or_domain: str, timeout: int = 10) -> dict:
                     headers={"User-Agent": "Devon-AEO-Check/1.0"})
                 with urllib.request.urlopen(req, timeout=timeout) as r:
                     return r.status, r.read(20000).decode("utf-8", "replace")
-            except Exception:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001
+                record_failure("aeo.site_readiness_check._fetch", exc)
                 return 0, ""
 
         checks: list[dict] = []
@@ -543,7 +557,8 @@ def site_readiness_check(url_or_domain: str, timeout: int = 10) -> dict:
         result["grade"] = ("A" if g >= 80 else "B" if g >= 60 else
                            "C" if g >= 40 else "D" if g >= 20 else "F")
         return result
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("aeo.site_readiness_check", exc)
         return result
 
 
@@ -650,7 +665,8 @@ def cross_check(mention: Mention, verifier: str, verifier_caller) -> bool:
             mention.confirmed = True
             mention.confirming_engine = verifier
         return ok
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("aeo.cross_check", exc)
         return False
 
 
@@ -661,7 +677,8 @@ def _default_db() -> str:
         base = os.path.expanduser("~/.nomorals/marketing")
         os.makedirs(base, exist_ok=True)
         return os.path.join(base, "aeo.db")
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("aeo._default_db", exc)
         return ":memory:"
 
 
@@ -686,7 +703,8 @@ class AEOTracker:
             except Exception:  # noqa: BLE001
                 pass
             self._db.commit()
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("aeo.AEOTracker.__init__", exc)
             self._db = None
 
     # -- core --
@@ -721,7 +739,8 @@ class AEOTracker:
                 for engine in engines:
                     try:
                         text = caller(engine, prompt) or ""
-                    except Exception:  # noqa: BLE001
+                    except Exception as exc:  # noqa: BLE001
+                        record_failure("aeo.AEOTracker.track_visibility.caller", exc)
                         text = ""
                     resp = EngineResponse(engine=engine, prompt=prompt, text=text, ok=bool(text))
                     report.responses.append(resp)
@@ -732,8 +751,8 @@ class AEOTracker:
                         verifier = next((e for e in engines if e != engine), engine)
                         try:
                             cross_check(mention, verifier, caller)
-                        except Exception:  # noqa: BLE001
-                            pass
+                        except Exception as exc:  # noqa: BLE001
+                            record_failure("aeo.AEOTracker.track_visibility.cross_check", exc)
                         report.mentions.append(mention)
             # Share of voice: count rival mentions across the same responses.
             if rivals:
@@ -769,8 +788,8 @@ class AEOTracker:
                  report.total_pairs, len(report.confirmed_pairs),
                  _json.dumps(list(report.gaps or [])), report.created_at))
             self._db.commit()
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:  # noqa: BLE001
+            record_failure("aeo.AEOTracker._record", exc)
 
     def get(self, report_id: str) -> VisibilityReport | None:
         """Full stored report (gaps rebuilt; mentions are session-local). Never raises."""
@@ -786,12 +805,14 @@ class AEOTracker:
             gaps: list[str] = []
             try:
                 gaps = list(_json.loads(row["gaps_json"] or "[]"))
-            except Exception:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001
+                record_failure("aeo.AEOTracker.get.gaps", exc)
                 gaps = []
             return VisibilityReport(
                 report_id=row["report_id"], brand=row["brand"], gaps=gaps,
                 prompts=[], engines=[], created_at=row["created_at"])
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("aeo.AEOTracker.get", exc)
             return None
 
     def latest(self, brand: str = "") -> VisibilityReport | None:
@@ -811,7 +832,8 @@ class AEOTracker:
             if not row:
                 return None
             return self.get(row["report_id"])
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("aeo.AEOTracker.latest", exc)
             return None
 
     def history(self, brand: str = "", limit: int = 12) -> list[dict]:
@@ -827,7 +849,8 @@ class AEOTracker:
             q += " ORDER BY created_at DESC LIMIT ?"
             args.append(max(1, int(limit or 12)))
             return [dict(r) for r in self._db.execute(q, args).fetchall()]
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("aeo.AEOTracker.history", exc)
             return []
 
     def trend_report(self, brand: str = "") -> str:
@@ -856,7 +879,8 @@ class AEOTracker:
             else:
                 lines.append("verdict: flat — push new answer-first content to move it.")
             return "\n".join(lines)
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("aeo.AEOTracker.trend_report", exc)
             return "couldn't build that trend report."
 
     # -- briefs --
@@ -880,7 +904,8 @@ class AEOTracker:
                             f"and produce no confirmed citation. Own the answer."),
                 })
             return briefs
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("aeo.AEOTracker.content_briefs", exc)
             return []
 
 
@@ -891,7 +916,8 @@ def estimate_cost(n_prompts: int, n_engines: int) -> tuple[float, float]:
         low = n * 0.02
         high = n * 0.07
         return (round(low, 2), round(high, 2))
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("aeo.estimate_cost", exc)
         return (0.0, 0.0)
 
 
@@ -916,8 +942,8 @@ def ensure_weekly(scheduler) -> bool:
                 jobs = []
                 try:
                     jobs = scheduler.list_jobs()  # type: ignore[attr-defined]
-                except Exception:  # noqa: BLE001
-                    pass
+                except Exception as exc:  # noqa: BLE001
+                    record_failure("aeo.ensure_weekly._ensure.list_jobs", exc)
                 for j in jobs or []:
                     if getattr(j, "action", "") == AEO_WEEKLY_ACTION:
                         return True
@@ -928,7 +954,8 @@ def ensure_weekly(scheduler) -> bool:
                     parameters={},
                 )
                 return True
-            except Exception:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001
+                record_failure("aeo.ensure_weekly._ensure", exc)
                 return False
 
         try:
