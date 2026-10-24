@@ -26,6 +26,7 @@ from ...core.ids import new_short_id
 from ...core.logging_setup import get_logger
 from ...storage.kv import KVStore
 from .vault import TrialVault
+from .failures import record_failure
 
 _log = get_logger(__name__)
 
@@ -240,7 +241,8 @@ class TrialFlow:
                 {"platform": platform.strip().lower(),
                  "plan": text, "saved_at": time.time()},
             )
-        except Exception:  # noqa: BLE001 - stash is best-effort
+        except Exception as exc:  # noqa: BLE001 - stash is best-effort
+            record_failure("flow._stash_plan", exc)
             _log.debug("trial plan stash failed for %s", platform)
 
     def _load_plan(self, platform: str) -> dict[str, Any]:
@@ -250,8 +252,8 @@ class TrialFlow:
             data = KVStore(self.db).get(
                 f"{_PLAN_KV_PREFIX}{platform.strip().lower()}")
             return data if isinstance(data, dict) else {}
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:  # noqa: BLE001
+            record_failure("flow._load_plan", exc)
         return {}
 
     @staticmethod
@@ -437,7 +439,8 @@ class TrialFlow:
         trial_error = False
         try:
             entry = self.vault.get(key)
-        except Exception:  # noqa: BLE001 - indeterminate, not absent
+        except Exception as exc:  # noqa: BLE001 - indeterminate, not absent
+            record_failure("flow._existing_account.trial_vault", exc)
             trial_error = True
             entry = None
         if entry is not None:
@@ -454,7 +457,8 @@ class TrialFlow:
                 return ("found",
                         ("accounts",
                          str(getattr(cred, "username", "?") or "?")))
-        except Exception:  # noqa: BLE001 - indeterminate, not absent
+        except Exception as exc:  # noqa: BLE001 - indeterminate, not absent
+            record_failure("flow._existing_account.personal_vault", exc)
             _log.debug("trial existing-account check failed for %s", key)
             return ("unknown", None)
         if trial_error:
@@ -645,8 +649,8 @@ class TrialFlow:
                         prev = SignupAttemptStore(self.db).get(attempt_id)
                         persona_id = prev.persona_id
                         service = service or prev.service
-                    except Exception:  # noqa: BLE001
-                        pass
+                    except Exception as exc:  # noqa: BLE001
+                        record_failure("flow.resume.prev_attempt", exc)
                 retry = self._launch_assist(
                     service or "unknown", chat_key=chat_key,
                     identity={"name": "(disposable persona)",
@@ -840,7 +844,8 @@ class TrialFlow:
             return
         try:
             self.db.executescript(_ASSIST_RUNS_DDL)
-        except Exception:  # noqa: BLE001 - table is best-effort
+        except Exception as exc:  # noqa: BLE001 - table is best-effort
+            record_failure("flow._ensure_assist_runs_table", exc)
             _log.debug("trial assist runs table unavailable")
 
     def _set_assist_run_state(self, run_id: str, state: str,
@@ -873,7 +878,8 @@ class TrialFlow:
                  str(run.get("state", "")),
                  str(run.get("note", ""))[:2000], time.time()),
             )
-        except Exception:  # noqa: BLE001 - persistence is best-effort
+        except Exception as exc:  # noqa: BLE001 - persistence is best-effort
+            record_failure("flow._persist_assist_run", exc)
             _log.debug("trial assist run persist failed for %s", run_id)
 
     def _load_assist_runs(self) -> None:
@@ -884,7 +890,8 @@ class TrialFlow:
             rows = self.db.query(
                 "SELECT run_id, platform, chat_key, started, state, note"
                 " FROM trial_assist_runs ORDER BY started")
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("flow._load_assist_runs.query", exc)
             return
         cutoff = time.time() - _ASSIST_RUN_TTL
         terminal = ", ".join(f"'{s}'"
@@ -907,7 +914,8 @@ class TrialFlow:
                 f" AND state IN ({terminal})",
                 (cutoff,),
             )
-        except Exception:  # noqa: BLE001 - pruning is best-effort
+        except Exception as exc:  # noqa: BLE001 - pruning is best-effort
+            record_failure("flow._load_assist_runs.prune", exc)
             _log.debug("trial assist run prune failed")
 
     def _maybe_recover_assist_runs(self) -> None:
@@ -961,7 +969,8 @@ class TrialFlow:
                 "SELECT run_id, platform, chat_key, started"
                 " FROM trial_assist_runs WHERE state NOT IN"
                 f" ({terminal}) ORDER BY started")
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("flow.recover_interrupted_runs.query", exc)
             return recovered
         notifier = None
         for row in rows or []:
@@ -980,7 +989,8 @@ class TrialFlow:
                     " note=?, updated_at=? WHERE run_id=?",
                     (note, time.time(), rid),
                 )
-            except Exception:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001
+                record_failure("flow.recover_interrupted_runs.interrupt_mark", exc)
                 _log.debug("trial run interrupt-mark failed for %s", rid)
             recovered.append({"run_id": rid, "platform": platform})
             try:
@@ -1044,11 +1054,13 @@ class TrialFlow:
             return []
         try:
             from ...accounts.signup_driver import SignupAttemptStore
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("flow._signup_attempt_lines.import", exc)
             return []
         try:
             attempts = SignupAttemptStore(self.db).list(limit=10)
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("flow._signup_attempt_lines.list", exc)
             return []
         if not attempts:
             return []
@@ -1079,7 +1091,8 @@ class TrialFlow:
             return
         try:
             self.db.executescript(_SMS_WATCHES_DDL)
-        except Exception:  # noqa: BLE001 - table is best-effort
+        except Exception as exc:  # noqa: BLE001 - table is best-effort
+            record_failure("flow._ensure_sms_watches_table", exc)
             _log.debug("trial sms watches table unavailable")
 
     def _register_sms_watch(self, watch_id: str, info: dict[str, Any],
@@ -1137,7 +1150,8 @@ class TrialFlow:
                  str(watch.get("code", "")),
                  str(watch.get("note", ""))[:2000], time.time()),
             )
-        except Exception:  # noqa: BLE001 - persistence is best-effort
+        except Exception as exc:  # noqa: BLE001 - persistence is best-effort
+            record_failure("flow._persist_sms_watch", exc)
             _log.debug("trial sms watch persist failed for %s", watch_id)
 
     def _load_sms_watches(self) -> None:
@@ -1149,7 +1163,8 @@ class TrialFlow:
                 "SELECT watch_id, number, number_info, chat_key, started,"
                 " deadline, timeout, state, code, note"
                 " FROM trial_sms_watches ORDER BY started")
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("flow._load_sms_watches.query", exc)
             return
         cutoff = time.time() - _SMS_WATCH_TTL
         terminal = ", ".join(f"'{s}'"
@@ -1161,7 +1176,8 @@ class TrialFlow:
                     continue
                 try:
                     info = json.loads(row.get("number_info") or "{}")
-                except Exception:  # noqa: BLE001 - corrupt row, keep going
+                except Exception as exc:  # noqa: BLE001 - corrupt row, keep going
+                    record_failure("flow._load_sms_watches.number_info", exc)
                     info = {}
                 self._sms_watches[wid] = {
                     "number": str(row.get("number") or ""),
@@ -1180,7 +1196,8 @@ class TrialFlow:
                 f" AND state IN ({terminal})",
                 (cutoff,),
             )
-        except Exception:  # noqa: BLE001 - pruning is best-effort
+        except Exception as exc:  # noqa: BLE001 - pruning is best-effort
+            record_failure("flow._load_sms_watches.prune", exc)
             _log.debug("trial sms watch prune failed")
 
     def _maybe_recover_sms_watches(self) -> None:
@@ -1233,7 +1250,8 @@ class TrialFlow:
                 "SELECT watch_id, number, number_info, chat_key, started,"
                 " deadline, timeout FROM trial_sms_watches"
                 " WHERE state='watching' ORDER BY started")
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("flow.recover_interrupted_watches.query", exc)
             return recovered
         now = time.time()
         notifier = None
@@ -1261,7 +1279,8 @@ class TrialFlow:
                     " updated_at=? WHERE watch_id=?",
                     (state, code, note[:2000], time.time(), watch_id),
                 )
-            except Exception:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001
+                record_failure("flow.recover_interrupted_watches.finish", exc)
                 _log.debug("trial sms watch close failed for %s", watch_id)
 
         def _report_watch_recovery(
@@ -1322,7 +1341,8 @@ class TrialFlow:
             chat_key = str(row.get("chat_key") or "")
             try:
                 info = json.loads(row.get("number_info") or "{}")
-            except Exception:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001
+                record_failure("flow.recover_interrupted_watches.number_info", exc)
                 info = {}
             if not isinstance(info, dict):
                 info = {}
@@ -1352,7 +1372,8 @@ class TrialFlow:
                     " WHERE watch_id=?",
                     (note[:2000], time.time(), wid),
                 )
-            except Exception:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001
+                record_failure("flow.recover_interrupted_watches.resume_mark", exc)
                 _log.debug("trial sms watch resume-mark failed: %s", wid)
             recovered.append({"watch_id": wid, "state": "watching",
                               "note": note})
@@ -1467,7 +1488,8 @@ class TrialFlow:
             with open(home / _TRIAL_AUDIT_LOG, "a",
                        encoding="utf-8") as fh:
                 fh.write(json.dumps(row) + "\n")
-        except Exception:  # noqa: BLE001 - audit never breaks the action
+        except Exception as exc:  # noqa: BLE001 - audit never breaks the action
+            record_failure("flow._audit", exc)
             _log.debug("trial action audit write failed")
 
     def _notify_owner(self, title: str, body: str, chat_key: str = "",
@@ -1632,7 +1654,8 @@ class TrialFlow:
             return
         try:
             KVStore(self.db).set(TEMP_SMS_KV_KEY, info)
-        except Exception:  # noqa: BLE001 - stash is best-effort
+        except Exception as exc:  # noqa: BLE001 - stash is best-effort
+            record_failure("flow._stash_temp_number", exc)
             _log.debug("temp number stash failed")
 
     def _load_temp_number(self) -> dict[str, Any]:
@@ -1641,8 +1664,8 @@ class TrialFlow:
         try:
             data = KVStore(self.db).get(TEMP_SMS_KV_KEY)
             return data if isinstance(data, dict) else {}
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:  # noqa: BLE001
+            record_failure("flow._load_temp_number", exc)
         return {}
 
     # ── disposable email inbox ───────────────────────────────────────────
@@ -1718,7 +1741,8 @@ class TrialFlow:
             if not data:
                 return {}
             return data
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("flow._owner_identity", exc)
             return {}
 
     def _generate_disposable_identity(
@@ -1757,7 +1781,8 @@ class TrialFlow:
         if self.db is not None:
             try:
                 vault = self._personal_vault()
-            except Exception:  # noqa: BLE001 - fall back to table backend
+            except Exception as exc:  # noqa: BLE001 - fall back to table backend
+                record_failure("flow._identity_bank", exc)
                 vault = None
         return IdentityBank(db=self.db, vault=vault)
 
@@ -1904,7 +1929,8 @@ class TrialFlow:
         try:
             result = gateway.send(plat, ChatRef(platform=plat, chat_id=cid), text)
             return bool(getattr(result, "ok", False))
-        except Exception:  # noqa: BLE001 - delivery is best-effort
+        except Exception as exc:  # noqa: BLE001 - delivery is best-effort
+            record_failure("flow._send", exc)
             return False
 
     # ── listing / removal ────────────────────────────────────────────────────
@@ -1945,13 +1971,15 @@ class TrialFlow:
                     continue
                 try:
                     row = json.loads(line)
-                except Exception:  # noqa: BLE001 - skip corrupt lines
+                except Exception as exc:  # noqa: BLE001 - skip corrupt lines
+                    record_failure("flow.audit_log.line", exc)
                     continue
                 if isinstance(row, dict) and (
                         not platform
                         or str(row.get("platform") or "") == platform.lower()):
                     rows.append(row)
-        except Exception:  # noqa: BLE001 - best-effort read
+        except Exception as exc:  # noqa: BLE001 - best-effort read
+            record_failure("flow.audit_log.read", exc)
             return "could not read the trial audit log."
         rows.sort(key=lambda r: r.get("ts", 0), reverse=True)
         rows = rows[:max(1, limit)]
@@ -1972,7 +2000,8 @@ class TrialFlow:
         """Vault-level access rows (store/get/delete/list) for the audit."""
         try:
             rows = self.vault.audit_trail(platform, limit=limit)
-        except Exception:  # noqa: BLE001 - best-effort
+        except Exception as exc:  # noqa: BLE001 - best-effort
+            record_failure("flow._vault_audit_lines", exc)
             return []
         if not rows:
             return []

@@ -22,6 +22,7 @@ import os
 import secrets
 import time
 from pathlib import Path
+from .failures import record_failure
 
 __all__ = ["TrialVault"]
 
@@ -116,7 +117,8 @@ class TrialVault:
         try:
             raw = json.loads(self.data_path.read_text("utf-8"))
             return raw if isinstance(raw, dict) else {}
-        except Exception:  # noqa: BLE001 - corrupt file → start fresh, keep old
+        except Exception as exc:  # noqa: BLE001 - corrupt file → start fresh, keep old
+            record_failure("vault._read_all", exc)
             self.data_path.rename(self.data_path.with_suffix(".corrupt"))
             return {}
 
@@ -140,8 +142,8 @@ class TrialVault:
             with open(self.home / _AUDIT_LOG_NAME, "a",
                        encoding="utf-8") as fh:
                 fh.write(json.dumps(row) + "\n")
-        except Exception:  # noqa: BLE001 - audit never breaks the action
-            pass
+        except Exception as exc:  # noqa: BLE001 - audit never breaks the action
+            record_failure("vault._audit", exc)
 
     def audit_trail(self, platform: str = "",
                     limit: int = 50) -> list[dict]:
@@ -157,12 +159,14 @@ class TrialVault:
                     continue
                 try:
                     row = json.loads(line)
-                except Exception:  # noqa: BLE001 - skip corrupt lines
+                except Exception as exc:  # noqa: BLE001 - skip corrupt lines
+                    record_failure("vault.audit_trail.line", exc)
                     continue
                 if isinstance(row, dict) and (
                         not platform or row.get("platform") == platform):
                     rows.append(row)
-        except Exception:  # noqa: BLE001 - best-effort read
+        except Exception as exc:  # noqa: BLE001 - best-effort read
+            record_failure("vault.audit_trail.read", exc)
             return []
         rows.sort(key=lambda r: r.get("ts", 0), reverse=True)
         return rows[:limit]
@@ -205,7 +209,8 @@ class TrialVault:
             return None
         try:
             secret = _open(self._master(), bytes.fromhex(entry["secret"])).decode("utf-8")
-        except Exception:  # noqa: BLE001 - report, don't crash
+        except Exception as exc:  # noqa: BLE001 - report, don't crash
+            record_failure("vault.get", exc)
             self._audit("get", platform, ok=False)
             return {**entry, "secret": None, "unreadable": True,
                     **self._age_fields(entry)}
