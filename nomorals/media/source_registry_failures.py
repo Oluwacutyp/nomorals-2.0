@@ -14,6 +14,14 @@ success rates the ordering learns from. The degradation was honest in
 return-value shape but silent about the underlying error — now it
 leaves a trace.
 
+The same contract covers ``PoliteFetch`` (Pass #129): the per-host
+politeness gate — backoff, rate budget, robots.txt — also never
+raises, and every one of its fallbacks leans toward allowing the
+fetch: a crashed gate returns "allowed", a crashed robots check
+returns "not disallowed", dropped bookkeeping silently un-enforces
+the budget and the backoff. A fetch that should have been gated
+looked identical to a fetch that was checked and allowed.
+
 Stdlib only. ``record`` itself never raises — a ledger that can crash
 its callers would defeat the purpose.
 """

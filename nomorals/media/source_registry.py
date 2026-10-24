@@ -2919,13 +2919,15 @@ class PoliteFetch:
                 if self._disallowed(host, url, now):
                     return False, 0.0, "robots.txt disallows this path"
             return True, 0.0, ""
-        except Exception:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001
+            record_failure("PoliteFetch.allowed", e)
             return True, 0.0, ""
 
     def note_request(self, desc: SourceDescriptor, now: float = 0.0) -> None:
         try:
             self._last_hit[(desc.domain or "").lower()] = now or time.time()
-        except Exception:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001
+            record_failure("PoliteFetch.note_request", e)
             pass
 
     def note_response(self, desc: SourceDescriptor, status: int,
@@ -2940,7 +2942,8 @@ class PoliteFetch:
                 self._backoff_until[host] = now + delay
             elif 200 <= status < 400:
                 self._backoff_until.pop(host, None)
-        except Exception:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001
+            record_failure("PoliteFetch.note_response", e)
             pass
 
     def _disallowed(self, host: str, url: str, now: float) -> bool:
@@ -2953,7 +2956,8 @@ class PoliteFetch:
                 disallows = cached[1]
             path = urllib.parse.urlparse(url).path or "/"
             return any(path.startswith(d) for d in disallows if d)
-        except Exception:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001
+            record_failure("PoliteFetch._disallowed", e)
             return False
 
     @staticmethod
