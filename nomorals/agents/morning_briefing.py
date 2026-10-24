@@ -32,6 +32,7 @@ from typing import Any
 from ..core.ids import new_id
 from ..core.logging_setup import get_logger
 from ..social.chat.present import SIGNPOSTS
+from .morning_briefing_failures import record_failure
 
 _log = get_logger(__name__)
 
@@ -189,8 +190,8 @@ def _prefs(context: Any) -> dict[str, Any]:
         if sidecar.is_file():
             import json as _json
             out.update(_json.loads(sidecar.read_text(encoding="utf-8")))
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as exc:  # noqa: BLE001
+        record_failure("morning_briefing._prefs.sidecar", exc)
     return out
 
 
@@ -206,8 +207,8 @@ def _save_prefs(context: Any, prefs: dict[str, Any]) -> None:
         sidecar = (Path(context.settings.workspace_dir)
                    / "briefing_prefs.json")
         sidecar.write_text(_json.dumps(prefs, indent=2), encoding="utf-8")
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as exc:  # noqa: BLE001
+        record_failure("morning_briefing._save_prefs.write", exc)
 
 
 def _owner_tz(context: Any) -> str:
@@ -297,7 +298,8 @@ class CoinGeckoMarketProvider:
         for sym in symbols:
             try:
                 q = self.quote(sym, market=market)
-            except Exception:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001
+                record_failure("morning_briefing.CoinGeckoMarketProvider.overnight_movers.quote", exc)
                 q = None
             if q:
                 quotes.append(q)
@@ -345,13 +347,15 @@ class OvernightAlertsProvider(_Provider):
             return None
         try:
             held = store.held_alerts()
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("morning_briefing.OvernightAlertsProvider.collect.held_alerts", exc)
             return None
         # repo-kind alerts belong to the repos section — don't double-claim
         try:
             repo_ids = {w.id for w in store.list()
                         if (w.kind or "") == "repo"}
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("morning_briefing.OvernightAlertsProvider.collect.repo_ids", exc)
             repo_ids = set()
         fresh = [a for a in held
                  if float(a.get("created_at") or 0) >= since
@@ -377,8 +381,8 @@ class OvernightAlertsProvider(_Provider):
         # mark consumed — the briefing owns these now
         try:
             store.mark_digested([i["id"] for i in items if i.get("id")])
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:  # noqa: BLE001
+            record_failure("morning_briefing.OvernightAlertsProvider.collect.mark_digested", exc)
         return BriefingSection(
             name=self.name, title=self.title, priority=self.priority,
             source="watchers",
@@ -428,8 +432,8 @@ class CalendarProvider(_Provider):
             try:
                 evs = cal.list_events() if hasattr(cal, "list_events") else []
                 return list(evs or [])[:10]
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as exc:  # noqa: BLE001
+                record_failure("morning_briefing.CalendarProvider._today.list_events", exc)
         return []
 
 
@@ -441,7 +445,8 @@ def _people_dir(ctx: Any) -> Any:
         return override
     try:
         override = _prefs(ctx).get("people_dir")
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("morning_briefing._people_dir.prefs", exc)
         override = None
     if override:
         return override
@@ -542,7 +547,8 @@ class MarketsProvider(_Provider):
         for sym in symbols[:10]:
             try:
                 q = prov.quote(sym)
-            except Exception:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001
+                record_failure("morning_briefing.MarketsProvider.collect.quote", exc)
                 q = None
             if q:
                 items.append({"id": f"mkt-{sym}", "title": sym,
@@ -571,14 +577,16 @@ class RepoProvider(_Provider):
             return None
         try:
             held = store.held_alerts()
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("morning_briefing.RepoProvider.collect.held_alerts", exc)
             return None
         # repo-kind alerts: match watcher kind via the store's listing
         try:
             watchers = store.list()
             repo_ids = {w.id for w in watchers
                         if (w.kind or "") == "repo"}
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("morning_briefing.RepoProvider.collect.repo_ids", exc)
             repo_ids = set()
         fresh = [a for a in held
                  if float(a.get("created_at") or 0) >= since
@@ -597,8 +605,8 @@ class RepoProvider(_Provider):
                     "watcher_id": wid})
         try:
             store.mark_digested([i["id"] for i in items if i.get("id")])
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:  # noqa: BLE001
+            record_failure("morning_briefing.RepoProvider.collect.mark_digested", exc)
         return BriefingSection(
             name=self.name, title=self.title, priority=self.priority,
             source="watchers:repo",
@@ -625,7 +633,8 @@ class NewsProvider(_Provider):
             from .news import NewsAgent, publisher_of
             agent = NewsAgent(ctx)
             items = agent.undelivered()
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("morning_briefing.NewsProvider.collect.agent", exc)
             return None
         if topics:
             lowered = [t.lower() for t in topics]
@@ -734,8 +743,8 @@ class DevonSelfProvider(_Provider):
                     lines.append(
                         f"• 👁 {active} watcher(s) active, "
                         f"{held} held for digest")
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:  # noqa: BLE001
+            record_failure("morning_briefing.DevonSelfProvider.collect.watcher_stats", exc)
 
         # scheduler health: failed jobs since last briefing (only)
         try:
@@ -750,8 +759,8 @@ class DevonSelfProvider(_Provider):
                 items.append({"id": f"job-{j.get('id')}",
                               "title": j.get("name", ""),
                               "body": str(j.get("last_error") or "")[:200]})
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:  # noqa: BLE001
+            record_failure("morning_briefing.DevonSelfProvider.collect.scheduler", exc)
 
         if not lines:
             return None
@@ -829,12 +838,14 @@ class ResearchProvider(_Provider):
         except TypeError:
             _log.debug("research provider: ctx-taking ctor rejected, "
                        "trying no-arg")
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("morning_briefing.ResearchProvider._open_queue.ctx_ctor", exc)
             _log.debug("research provider: queue construction failed")
             return None
         try:
             return UpgradeQueue()
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("morning_briefing.ResearchProvider._open_queue.noarg_ctor", exc)
             _log.debug("research provider: no-arg queue construction failed")
             return None
 
@@ -845,7 +856,8 @@ class ResearchProvider(_Provider):
         for status in self._DECIDED_STATUSES:
             try:
                 rows = list(queue.list(status=status, limit=50) or [])
-            except Exception:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001
+                record_failure("morning_briefing.ResearchProvider._recently_decided.list", exc)
                 continue
             fresh = []
             for r in rows:
@@ -1267,57 +1279,57 @@ class BriefingComposer:
             # weather slots between calendar and markets; USA after news.
             self.providers.insert(2, WeatherProvider())
             self.providers.append(USASituationsProvider())
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:  # noqa: BLE001
+            record_failure("morning_briefing.BriefingComposer.__init__.weather_import", exc)
         # Research (upgrade-queue) provider: local class, but constructed
         # defensively anyway — a broken research section never sinks the
         # briefing (collect() itself also swallows everything).
         try:
             self.providers.append(ResearchProvider())
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:  # noqa: BLE001
+            record_failure("morning_briefing.BriefingComposer.__init__.research", exc)
         # From-your-past (spaced repetition, build-map #40): local class,
         # constructed defensively — no due cards → provider returns None.
         try:
             self.providers.append(FromYourPastProvider())
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:  # noqa: BLE001
+            record_failure("morning_briefing.BriefingComposer.__init__.from_past", exc)
         # Real talk (M2): the shared talk builder over the Teachings
         # ledger — local class, constructed defensively like research;
         # no grounded material → provider returns None.
         try:
             self.providers.append(RealTalkProvider())
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:  # noqa: BLE001
+            record_failure("morning_briefing.BriefingComposer.__init__.realtalk", exc)
         # Paid tasks (weekly OpportunityHunter layer): local class,
         # constructed defensively like real talk — no fresh weekly
         # shortlist in state → provider returns None.
         try:
             self.providers.append(PaidTasksProvider())
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:  # noqa: BLE001
+            record_failure("morning_briefing.BriefingComposer.__init__.paid_tasks", exc)
         # Alert digest (Pass 7's DIGEST tier folded in, F7): local
         # class, constructed defensively like paid tasks — an empty
         # unfolded digest queue → provider returns None.
         try:
             self.providers.append(AlertDigestProvider())
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:  # noqa: BLE001
+            record_failure("morning_briefing.BriefingComposer.__init__.alert_digest", exc)
         # Readiness (health coaching, build-map #53): lazy import to avoid
         # an import cycle (coach.py imports BriefingSection from here).
         # No health data or readiness not low → provider returns None.
         try:
             from ..health.coach import ReadinessBriefingProvider
             self.providers.append(ReadinessBriefingProvider())
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:  # noqa: BLE001
+            record_failure("morning_briefing.BriefingComposer.__init__.readiness_import", exc)
         # Mood patterns (build-map #55): lazy import, same cycle story.
         # No strong patterns → provider returns None.
         try:
             from ..health.patterns import PatternsBriefingProvider
             self.providers.append(PatternsBriefingProvider())
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:  # noqa: BLE001
+            record_failure("morning_briefing.BriefingComposer.__init__.patterns_import", exc)
 
     def register(self, provider: _Provider) -> None:
         self.providers.append(provider)
@@ -1399,7 +1411,8 @@ class _EngagementStore:
             row = self.db.query_one(
                 "SELECT views, followups, pinned FROM briefing_engagement "
                 "WHERE section=?", (section,))
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("morning_briefing._EngagementStore.get.query", exc)
             row = None
         if row:
             return {"views": row["views"] or 0,
@@ -1420,8 +1433,8 @@ class _EngagementStore:
                 "pinned) VALUES (?,?,?,?) ON CONFLICT(section) DO UPDATE "
                 "SET pinned=excluded.pinned",
                 (section, 0, 0, 1 if pinned else 0))
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:  # noqa: BLE001
+            record_failure("morning_briefing._EngagementStore.set_pinned.execute", exc)
 
     def _bump(self, section: str, col: str) -> None:
         # first touch inserts a 1 in the bumped column (no conflict yet,
@@ -1435,8 +1448,8 @@ class _EngagementStore:
                 "ON CONFLICT(section) DO UPDATE SET "
                 f"{col}=briefing_engagement.{col}+1",
                 (section, init["views"], init["followups"]))
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:  # noqa: BLE001
+            record_failure("morning_briefing._EngagementStore._bump.execute", exc)
 
 
 def _engagement_store(ctx: Any) -> _EngagementStore | None:
@@ -1474,7 +1487,8 @@ def latest_briefing(ctx: Any, date: str = "") -> dict[str, Any] | None:
         else:
             row = db.query_one(
                 "SELECT * FROM briefings ORDER BY generated_at DESC LIMIT 1")
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("morning_briefing.latest_briefing.query", exc)
         return None
     if not row:
         return None
@@ -1544,8 +1558,8 @@ def ensure_briefing_job(context: Any) -> dict[str, Any]:
     for j in have:  # stale time → replace
         try:
             sched.remove(j["id"])
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:  # noqa: BLE001
+            record_failure("morning_briefing.ensure_briefing_job.remove_stale", exc)
     job = sched.add(BRIEFING_JOB_NAME, f"daily {want}", "tool",
                     {"tool": "briefing", "args": {"action": "run"}})
     _log.info("scheduled briefing job: %s (daily %s)", BRIEFING_JOB_NAME,
@@ -1660,8 +1674,8 @@ def _deliver_fallback(context: Any, date: str, reason: str,
     try:
         notifier = Notifier(context)
         notifier.publish("briefing", title, body, force=True)
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as exc:  # noqa: BLE001
+        record_failure("morning_briefing._deliver_fallback.publish", exc)
     _log.error("briefing total failure: %s", reason[:300])
     return {"ok": False, "date": date, "fallback": True, "reason": reason[:160],
             "delivered": True, "late": late}
@@ -1701,12 +1715,14 @@ def proactive_status(context: Any, limit: int = 10) -> dict[str, Any]:
     try:
         recent = notifier.delivery_summary(
             limit, kinds=("briefing", "watcher"))
-    except Exception:  # noqa: BLE001 — status must not raise
+    except Exception as exc:  # noqa: BLE001 — status must not raise
+        record_failure("morning_briefing.proactive_status.delivery_summary", exc)
         recent = []
     try:
         counts = notifier.delivery_counts(
             24.0, kinds=("briefing", "watcher"))
-    except Exception:  # noqa: BLE001 — status must not raise
+    except Exception as exc:  # noqa: BLE001 — status must not raise
+        record_failure("morning_briefing.proactive_status.delivery_counts", exc)
         counts = {}
 
     # health: say what is degraded, out loud, instead of silently not
@@ -1724,7 +1740,8 @@ def proactive_status(context: Any, limit: int = 10) -> dict[str, Any]:
     else:
         try:
             gstatus = gateway.status() or {}
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("morning_briefing.proactive_status.gateway_status", exc)
             gstatus = {}
         for key in owner_chats.split(","):
             plat, _, cid = key.strip().partition(":")
@@ -1739,7 +1756,8 @@ def proactive_status(context: Any, limit: int = 10) -> dict[str, Any]:
     try:
         from .notifier import _in_quiet_hours_now
         health["in_quiet_hours"] = bool(_in_quiet_hours_now(context))
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("morning_briefing.proactive_status.quiet_hours", exc)
         health["in_quiet_hours"] = False
     health["ok"] = not health["degraded"]
     return {"settings": settings, "recent": recent, "counts": counts,
