@@ -45,7 +45,7 @@ from .learn import (
     attach, detach, get_handle,
     score_candidates, extract_features,
     DEFAULT_WEIGHTS, MAX_ENTRIES, SESSION_GRADES,
-    GRADE_SOURCES, FEATURES,
+    GRADE_SOURCES, FEATURES, DECIDE_OUTCOMES,
 )
 from .render import (
     render_card, render_cast, render_scene, render_web, render_arc,
@@ -82,5 +82,5 @@ __all__ = [
     "attach", "detach", "get_handle",
     "score_candidates", "extract_features",
     "DEFAULT_WEIGHTS", "MAX_ENTRIES", "SESSION_GRADES",
-    "GRADE_SOURCES", "FEATURES",
+    "GRADE_SOURCES", "FEATURES", "DECIDE_OUTCOMES",
 ]

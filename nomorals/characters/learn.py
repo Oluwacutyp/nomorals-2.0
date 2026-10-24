@@ -51,7 +51,7 @@ __all__ = [
     "attach", "detach", "get_handle",
     "score_candidates", "extract_features",
     "DEFAULT_WEIGHTS", "MAX_ENTRIES", "SESSION_GRADES",
-    "GRADE_SOURCES", "FEATURES",
+    "GRADE_SOURCES", "FEATURES", "DECIDE_OUTCOMES",
 ]
 
 # ── constants ──────────────────────────────────────────────────────────
@@ -84,6 +84,13 @@ SESSION_GRADES = {
     "lost_game": -0.1, "argument": -0.5, "insulted": -0.5,
     "betrayed": -1.0,
 }
+
+# Decide-move outcome -> scalar grade. CATEGORICAL, not a quality
+# judgment: a fixed-option move either won, lost, or drew the game.
+# The scalar is kept so decide grades share the uniform ledger
+# (grades list, source-weighted mean, stats); the per-option truth
+# lives in decide_stats counters, not in this number.
+DECIDE_OUTCOMES = {"won": 1.0, "lost": -1.0, "draw": 0.0}
 
 _WORD_RE = re.compile(r"[a-z']+")
 
@@ -241,6 +248,10 @@ def _empty_doc(char_id: str) -> dict[str, Any]:
                   "n_graded_positive": 0},
         "trait_offsets": {}, "seed_persona": {},
         "stats": {"graded": 0, "mean_grade": None},
+        # decide_stats: {game: {option: {"n", "won", "lost", "draw"}}}.
+        # Added by decide() journaling; absent in older docs (defaulted
+        # in doc()) — version stays 1, no migration, no breakage.
+        "decide_stats": {},
     }
 
 
@@ -298,6 +309,7 @@ class LearnStore:
                         d.setdefault("seed_persona", {})
                         d.setdefault("stats", {"graded": 0,
                                                "mean_grade": None})
+                        d.setdefault("decide_stats", {})
                         d.setdefault("entries", [])
                         d.setdefault("total", len(d["entries"]))
                     else:
@@ -396,7 +408,13 @@ class LearnStore:
         lr * grade * feature (chosen line's features); prefs track
         positive-grade line shapes; persona moves ONLY under the
         handle's opt-in flag (see LearnHandle) — the store itself
-        never touches persona."""
+        never touches persona. Decide entries NEVER adjust: options
+        are not lines, they carry no voice features, and running
+        _sent_stats on a decide entry's empty line would drag prefs
+        toward zero — corrupting learned taste. Decide grades live
+        in decide_stats counters (see LearnHandle.grade_decide)."""
+        if entry.get("kind") == "decide":
+            return
         lr = _SOURCE_LR[source]
         weights = d.setdefault("weights", dict(DEFAULT_WEIGHTS))
         cands = entry.get("candidates") or []
@@ -449,28 +467,50 @@ class LearnStore:
                     f"({int(prefs.get('n_graded_positive', 0))}/"
                     f"{PREFS_MIN_POSITIVE} positive grades)")
             if graded:
-                top = sorted(graded, key=lambda e: -e["grade"])[:3]
-                bot = sorted(graded, key=lambda e: e["grade"])[:3]
-                lines.append("  top lines:")
-                lines.extend(f"    + {e['line'][:80]}" for e in top)
-                lines.append("  bottom lines:")
-                lines.extend(f"    − {e['line'][:80]}" for e in bot)
+                # decide entries are moves, not lines: they never
+                # appear in the line listings (their line is "").
+                line_graded = [e for e in graded
+                               if e.get("kind") != "decide"]
+                if line_graded:
+                    top = sorted(line_graded, key=lambda e: -e["grade"])[:3]
+                    bot = sorted(line_graded, key=lambda e: e["grade"])[:3]
+                    lines.append("  top lines:")
+                    lines.extend(f"    + {e['line'][:80]}" for e in top)
+                    lines.append("  bottom lines:")
+                    lines.extend(f"    − {e['line'][:80]}" for e in bot)
             offs = d.get("trait_offsets") or {}
             moved = {k: v for k, v in offs.items() if v}
             if moved:
                 lines.append("  persona offsets: " + ", ".join(
                     f"{k} {v:+.2f}" for k, v in sorted(moved.items())))
+            decide = [e for e in entries if e.get("kind") == "decide"]
+            if decide:
+                dgraded = [e for e in decide
+                           if e.get("grade") is not None]
+                lines.append(f"  decide moves: {len(decide)} journaled, "
+                             f"{len(dgraded)} graded")
+                for game in sorted((d.get("decide_stats") or {})):
+                    for opt in sorted(d["decide_stats"][game]):
+                        c = d["decide_stats"][game][opt]
+                        lines.append(f"    decide {game}: {opt} "
+                                     f"{int(c.get('won', 0))}/"
+                                     f"{int(c.get('n', 0))} won")
             return "\n".join(lines)
 
     def export_training_data(self, char_id: str) -> list[dict[str, Any]]:
         """Graded rows as (features, label) — the future batch-fit
         input. Only entries with a grade; ungraded rows are not
-        training data, they're waiting data."""
+        training data, they're waiting data. Decide entries are
+        skipped: they carry no feature vectors, and their learning
+        signal is the decide_stats counters, not (features, label)
+        rows — emitting empty-feature rows would be fake data."""
         with self._lock:
             d = self.doc(char_id)
             rows = []
             for e in d.get("entries") or []:
                 if e.get("grade") is None:
+                    continue
+                if e.get("kind") == "decide":
                     continue
                 cands = e.get("candidates") or []
                 chosen = cands[e.get("chosen", 0)] if cands else None
@@ -499,6 +539,9 @@ class LearnHandle:
         self.store = store or LearnStore()
         self.adjust_persona = adjust_persona
         self._pending: list[str] = []
+        # Decide-move ids, KEPT SEPARATE from _pending: session grades
+        # (converse outcomes) must never land on game moves.
+        self._pending_decide: list[str] = []
 
     @property
     def char_id(self) -> str:
@@ -554,6 +597,42 @@ class LearnHandle:
         except Exception as e:
             # Journaling is a side effect: record, never raise into speak().
             record_failure("learn.journal_line", e)
+            return ""
+
+    def journal_decide(self, game: str, options: list[str],
+                       chosen: int, *, state: str = "") -> str:
+        """Journal one decide() move: the fixed options offered, the
+        index chosen, the game, and the state at decision time.
+
+        Record-before-outcome, like journal_line: the outcome is
+        unknown here and arrives later via grade_decide (match end
+        or a manual hook). No candidates field — options are not
+        lines and carry no voice features (storing fake vectors
+        would poison the line scorer's fit input). No rules — rules
+        are static per game. Best-effort: returns "" on failure,
+        never raises into decide()."""
+        try:
+            opts = [str(o) for o in (options or [])]
+            if not opts:
+                return ""
+            chosen = max(0, min(int(chosen), len(opts) - 1))
+            entry = {
+                "ts": time.time(), "kind": "decide",
+                "game": str(game or ""),
+                "options": opts, "chosen": chosen,
+                "line": "",
+                "context": (state or "")[:200],
+                "grade": None, "grades": [],
+                "outcome": None,
+            }
+            entry_id = self.store.journal(self.char_id, entry)
+            self._pending_decide.append(entry_id)
+            if len(self._pending_decide) > PENDING_CAP:
+                self._pending_decide = self._pending_decide[-PENDING_CAP:]
+            return entry_id
+        except Exception as e:
+            # Journaling is a side effect: record, never raise.
+            record_failure("learn.journal_decide", e)
             return ""
 
     def grade(self, entry_id: str, value: float, source: str = "owner",
@@ -624,6 +703,54 @@ class LearnHandle:
             except Exception as e:
                 record_failure("learn.grade_session", e)
         return out
+
+    def drain_decide_ids(self) -> list[str]:
+        """Decide entry ids journaled since the last drain, cleared
+        on drain. Mirrors drain_session_ids for the match-end hook:
+        run_agent_match drains these and grades them once the
+        winner is known."""
+        ids, self._pending_decide = self._pending_decide, []
+        return ids
+
+    def grade_decide(self, entry_id: str, outcome: str,
+                     source: str = "system", note: str = "") -> dict[str, Any]:
+        """Grade a decide move by its game outcome. Fail-fast on bad
+        input (unknown entry, bad outcome, bad source) — the grading
+        path is interactive and must say so, never silently clamp.
+
+        The scalar lands in the uniform ledger via store.grade, and
+        the categorical outcome lands in entry["outcome"] plus the
+        per-game/per-option decide_stats counters. Weights and prefs
+        do NOT move (LearnStore._adjust skips decide entries), and
+        no persona nudge fires — match outcomes must not rewrite
+        identity, even on an adjust_persona handle."""
+        if outcome not in DECIDE_OUTCOMES:
+            raise ValueError(
+                f"outcome must be one of {sorted(DECIDE_OUTCOMES)}")
+        # Kind check BEFORE grading: a line graded through this path
+        # must fail with no side effect, not a ledger entry behind
+        # the error. (A missing entry still fails inside store.grade
+        # with its own "no journal entry" error.)
+        d = self.store.doc(self.char_id)
+        existing = next((e for e in d.get("entries") or []
+                         if e.get("id") == entry_id), None)
+        if existing is not None and existing.get("kind") != "decide":
+            raise ValueError(
+                f"entry {entry_id!r} is not a decide move")
+        entry = self.store.grade(self.char_id, entry_id,
+                                 DECIDE_OUTCOMES[outcome], source, note)
+        entry["outcome"] = outcome
+        opts = entry.get("options") or []
+        chosen = entry.get("chosen", 0)
+        opt = opts[chosen] if 0 <= chosen < len(opts) else ""
+        stats = d.setdefault("decide_stats", {})
+        game_stats = stats.setdefault(entry.get("game", ""), {})
+        counters = game_stats.setdefault(
+            opt, {"n": 0, "won": 0, "lost": 0, "draw": 0})
+        counters["n"] = int(counters.get("n", 0)) + 1
+        counters[outcome] = int(counters.get(outcome, 0)) + 1
+        self.store.save(self.char_id)
+        return entry
 
     def report(self) -> str:
         return self.store.report(self.char_id)

@@ -131,6 +131,62 @@ def _brain_decide(game_name: str, rules: str, state_text: str,
     return rng.choice(options) if options else ""
 
 
+def _grade_match_decides(seats: list[AgentSeat], winner_obj: Any,
+                         game_name: str) -> None:
+    """Grade character seats' journaled decide moves from the match
+    outcome. The winner OBJECT decides, never the winner NAME:
+    Player keys are exact (``char:{id}`` / ``brain:devon``), names
+    are not (two seats can share one).
+
+    - winner Player with a ``char:`` key → that seat won, the other
+      character seats lost; ``brain:devon`` key → every character
+      seat lost; string ``"draw"`` → every character seat drew.
+    - anything else (None, keyless object, non-draw string, a
+      ``char:`` key with no matching seat) → SKIP grading entirely.
+      Entries stay ungraded; never fake a grade from an ambiguous
+      winner. Grading failure per character is recorded, never
+      raised — it must not eat the MatchResult."""
+    from .learn import get_handle
+
+    chars = [s.character for s in seats
+             if s.kind == "character" and s.character is not None]
+    if not chars:
+        return
+    if isinstance(winner_obj, str):
+        if winner_obj != "draw":
+            return
+        outcomes = {id(c): "draw" for c in chars}
+    else:
+        key = getattr(winner_obj, "key", None)
+        if not key:
+            return
+        if key == BRAIN_KEY:
+            outcomes = {id(c): "lost" for c in chars}
+        elif key.startswith(CHAR_KEY_PREFIX):
+            won_id = key[len(CHAR_KEY_PREFIX):]
+            won = [c for c in chars if c.id == won_id]
+            if len(won) != 1:
+                return
+            outcomes = {id(c): ("won" if c is won[0] else "lost")
+                        for c in chars}
+        else:
+            return
+    for c in chars:
+        try:
+            handle = get_handle(c)
+            if handle is None:
+                continue
+            for eid in handle.drain_decide_ids():
+                try:
+                    handle.grade_decide(
+                        eid, outcomes[id(c)], source="system",
+                        note=f"match:{game_name}:{outcomes[id(c)]}")
+                except Exception as e:
+                    record_failure("match.run_agent_match:grade_decide", e)
+        except Exception as e:
+            record_failure("match.run_agent_match:grade_decide", e)
+
+
 def run_agent_match(game_name: str, seats: list[AgentSeat],
                     suggest: SuggestFn | None,
                     seed: int | None = None,
@@ -214,13 +270,18 @@ def run_agent_match(game_name: str, seats: list[AgentSeat],
         room.advance_turn()
 
     winner = eng.winner(room) if hasattr(eng, "winner") else None
+    winner_obj: Any = None
     try:
         w = game.winner(room)
+        winner_obj = w
         winner_name = w.name if hasattr(w, "name") else str(w)
     except Exception as e:
         record_failure("match.run_agent_match:winner", e)
         winner_name = str(winner) if winner else "?"
     transcript.append(f"🏁 winner: {winner_name}")
+    # decide journaling: grade the match's moves from the outcome
+    # (never from the name — see _grade_match_decides).
+    _grade_match_decides(seats, winner_obj, game_name)
     return MatchResult(game=game_name, winner=winner_name,
                        transcript=transcript, moves=moves,
                        duration_s=time.time() - t0)

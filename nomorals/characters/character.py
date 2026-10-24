@@ -589,7 +589,15 @@ class Character:
                options: list[str], suggest: SuggestFn | None,
                rng: Any = None) -> str:
         """Pick a move in character. Returns one of ``options`` (or the
-        closest match); falls back to a deterministic pick."""
+        closest match); falls back to a deterministic pick.
+
+        When a learn handle is attached (see ``learn.attach``), the
+        move is journaled (options offered, index chosen, game,
+        state) — best-effort, never changes the returned move.
+        Outcomes attach later via ``grade_decide`` (match end or a
+        manual hook); decide moves never move voice weights or
+        prefs. No handle attached → zero behavior change.
+        """
         self.last_active = time.time()
         opts = "\n".join(f"- {o}" for o in options)
         prompt = (self.persona_block()
@@ -605,14 +613,27 @@ class Character:
                 record_failure("character.decide:strip", e)
                 choice = ""
         # validate against legal options (fuzzy: substring match)
+        picked = ""
         if choice:
             low = choice.lower()
             for o in options:
                 if o.lower() == low or o.lower() in low or low in o.lower():
-                    return o
-        # deterministic fallback
-        r = rng or random.Random()
-        return r.choice(options) if options else ""
+                    picked = o
+                    break
+        if not picked:
+            # deterministic fallback
+            r = rng or random.Random()
+            picked = r.choice(options) if options else ""
+        # learn loop: journal best-effort, never eat the move
+        try:
+            learn = getattr(self, "_learn", None)
+            if learn is not None and options and picked:
+                learn.journal_decide(game_name, options,
+                                     options.index(picked),
+                                     state=state_text)
+        except Exception as e:
+            record_failure("character.decide:learn", e)
+        return picked
 
     # ── serialization ────────────────────────────────────────────────
     def to_dict(self) -> dict[str, Any]:
