@@ -290,7 +290,11 @@ def test_scan_remainder_is_exactly_the_excluded_probe_sites():
         report = es.scan([os.path.join(os.path.dirname(res.__file__),
                                        "resources.py")])
         # 44 true - 8 probe (#123) - 8 budgets (#125) - 9 sampling (#127)
-        assert len(report.findings) == 19
+        # - 11 analysis (#128) = 8. A count snapshot a conversion is
+        # supposed to change, not an architectural invariant: the real
+        # invariant — the probe remainder is exactly the 5 excluded
+        # functions — is asserted below and is untouched.
+        assert len(report.findings) == 8
         probe = {}
         for f in report.findings:
             fn = _enclosing_function(f.file, f.line)

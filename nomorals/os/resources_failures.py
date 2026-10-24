@@ -14,7 +14,13 @@ admission control unguarded, looked identical to a healthy
 probe — now each leaves a trace. The same holds for the manager's
 sampling chain: a failed sample that silently reported "no swap",
 "no thermal data", or a host CPU count in place of the cgroup quota
-looked like a measured sample — now each leaves a trace too.
+looked like a measured sample — now each leaves a trace too. The same
+holds for the manager's analysis chain: a trend that silently reported
+"insufficient data", a forecast that silently returned an empty
+prediction set, a pressure score that silently reported "all clear", a
+degradation mapping that silently reported level 0, a dropped alert
+edge, or a dashboard that silently reported "unavailable" looked like
+a measured analysis — now each leaves a trace too.
 
 Stdlib only. ``record`` itself never raises — a ledger that can crash
 its callers would defeat the purpose.

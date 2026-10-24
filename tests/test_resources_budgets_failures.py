@@ -378,9 +378,16 @@ SAMPLING_EXCLUDED_FUNCTIONS = {
     # sample (env fallback).
     "effective_memory_mb", "_sample_network", "sample",
 }
+ANALYSIS_FUNCTIONS = {
+    # Converted by #128; closing the analysis region leaves resources.py
+    # with exactly the 8 excluded sites (5 probe + 3 sampling).
+    "_record", "history", "trend", "forecast", "battery_forecast",
+    "composite_pressure", "pressure", "_degradation_target",
+    "_eval_alerts", "render", "summary_line",
+}
 
 
-def test_scan_remainder_is_19_with_no_budget_or_sampling_sites():
+def test_scan_remainder_is_8_with_no_budget_sampling_or_analysis_sites():
     from nomorals.tools import error_scan as es
 
     original = es._noqa_suppresses
@@ -388,14 +395,16 @@ def test_scan_remainder_is_19_with_no_budget_or_sampling_sites():
     try:
         report = es.scan([os.path.join(os.path.dirname(res.__file__),
                                        "resources.py")])
-        # 36 true - 8 budgets (#125) - 9 sampling (#127) = 19.
+        # 36 true - 8 budgets (#125) - 9 sampling (#127)
+        # - 11 analysis (#128) = 8.
         # A count snapshot a conversion is supposed to change, not an
         # architectural invariant: the real invariant — which functions
         # remain — is asserted below and is untouched.
-        assert len(report.findings) == 19
+        assert len(report.findings) == 8
         fns = {_enclosing_function(f.file, f.line) for f in report.findings}
         assert not (fns & BUDGET_FUNCTIONS)
         assert not (fns & SAMPLING_CONVERTED_FUNCTIONS)
+        assert not (fns & ANALYSIS_FUNCTIONS)
         assert EXCLUDED_PROBE_FUNCTIONS <= fns
         assert SAMPLING_EXCLUDED_FUNCTIONS <= fns
     finally:

@@ -1514,14 +1514,16 @@ class ResourceManager:
                 "battery": s.battery_percent,
                 "battery_status": s.battery_status,
             })
-        except Exception:  # noqa: BLE001 - history must not break sampling
+        except Exception as e:  # noqa: BLE001 - history must not break sampling
+            record_failure("ResourceManager._record", e)
             pass
 
     def history(self) -> list[dict[str, Any]]:
         """Copy of the rolling sample history (oldest first)."""
         try:
             return [dict(row) for row in self._history]
-        except Exception:  # noqa: BLE001 - never raises
+        except Exception as e:  # noqa: BLE001 - never raises
+            record_failure("ResourceManager.history", e)
             return []
 
     # -- trend + forecast (predictive, not just reactive) ------------------
@@ -1548,7 +1550,8 @@ class ResourceManager:
             if not den:
                 return 0.0
             return num / den
-        except Exception:  # noqa: BLE001 - never raises
+        except Exception as e:  # noqa: BLE001 - never raises
+            record_failure("ResourceManager.trend", e)
             return None
 
     def forecast(self, horizon_s: float = 300.0,
@@ -1591,7 +1594,8 @@ class ResourceManager:
                 else:
                     out["minutes_to_critical"][key] = None
             return out
-        except Exception:  # noqa: BLE001 - never raises
+        except Exception as e:  # noqa: BLE001 - never raises
+            record_failure("ResourceManager.forecast", e)
             return out
 
     def battery_forecast(self) -> dict[str, Any]:
@@ -1626,7 +1630,8 @@ class ResourceManager:
                 out["time_to_empty_min"] = round(
                     last["battery"] / rate * 60.0, 1)
             return out
-        except Exception:  # noqa: BLE001 - never raises
+        except Exception as e:  # noqa: BLE001 - never raises
+            record_failure("ResourceManager.battery_forecast", e)
             return out
 
     # -- composite pressure -------------------------------------------------
@@ -1669,7 +1674,8 @@ class ResourceManager:
             score = (0.55 * psi_mem + 0.20 * swap_sat
                      + 0.15 * mem_u + 0.10 * swap_io_p)
             return max(0.0, min(1.0, score))
-        except Exception:  # noqa: BLE001 - never raises
+        except Exception as e:  # noqa: BLE001 - never raises
+            record_failure("ResourceManager.composite_pressure", e)
             return 0.0
 
     def pressure(self, sample: Optional[ResourceSample] = None) -> dict[str, float]:
@@ -1698,7 +1704,8 @@ class ResourceManager:
             }
             parts["overall"] = max(parts.values()) if parts else 0.0
             return parts
-        except Exception:  # noqa: BLE001 - pressure must never raise
+        except Exception as e:  # noqa: BLE001 - pressure must never raise
+            record_failure("ResourceManager.pressure", e)
             return {"cpu": 0.0, "cpu_util": 0.0, "mem": 0.0, "disk": 0.0,
                     "battery": 0.0, "thermal": 0.0, "steal": 0.0,
                     "psi_mem": 0.0, "composite_mem": 0.0, "overall": 0.0}
@@ -1755,7 +1762,8 @@ class ResourceManager:
                 critical = True
 
             return target, critical
-        except Exception:  # noqa: BLE001 - never raises
+        except Exception as e:  # noqa: BLE001 - never raises
+            record_failure("ResourceManager._degradation_target", e)
             return 0, False
 
     def consult(
@@ -2046,7 +2054,8 @@ class ResourceManager:
                                  "threshold": alert["threshold"],
                                  "firing": firing,
                                  "above": alert["above"]})
-                except Exception:  # noqa: BLE001 — alerts never break sampling
+                except Exception as e:  # noqa: BLE001 — alerts never break sampling
+                    record_failure("ResourceManager._eval_alerts", e)
                     pass
 
     # -- presentation ------------------------------------------------------
@@ -2073,7 +2082,8 @@ class ResourceManager:
             sample = sample or self.sample()
             pressures = (pressures if pressures is not None
                          else self.pressure(sample))
-        except Exception:  # noqa: BLE001 — render degrades, never raises
+        except Exception as e:  # noqa: BLE001 — render degrades, never raises
+            record_failure("ResourceManager.render", e)
             return "resources — unavailable"
         g = self._gauge
         lines = ["resources"]
@@ -2131,7 +2141,8 @@ class ResourceManager:
             return (f"cpu {cpu:.0f}% · mem {(pressures.get('mem') or 0) * 100:.0f}%"
                     f" · disk {(pressures.get('disk') or 0) * 100:.0f}%"
                     f" · {state}")
-        except Exception:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001
+            record_failure("ResourceManager.summary_line", e)
             return "resources n/a"
 
 

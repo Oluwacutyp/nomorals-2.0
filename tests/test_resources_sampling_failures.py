@@ -321,7 +321,7 @@ def _enclosing_function(path, line):
     return best.name if best else None
 
 
-def test_scan_remainder_is_19_probe_sampling_analysis():
+def test_scan_remainder_is_8_probe_sampling_excluded_only():
     from nomorals.tools import error_scan as es
 
     original = es._noqa_suppresses
@@ -329,9 +329,13 @@ def test_scan_remainder_is_19_probe_sampling_analysis():
     try:
         report = es.scan([os.path.join(os.path.dirname(res.__file__),
                                        "resources.py")])
-        # 28 (#125) - 9 converted = 19: 5 excluded probe + 3 excluded
-        # sampling (meminfo pass, sysfs pass, env fallback) + 11 analysis.
-        assert len(report.findings) == 19
+        # 19 (#127) - 11 analysis converted (#128) = 8: 5 excluded
+        # probe + 3 excluded sampling (meminfo pass, sysfs pass, env
+        # fallback). A count snapshot a conversion is supposed to
+        # change, not an architectural invariant: the real invariant —
+        # the exact function multiset — is asserted below and is now
+        # stricter (no converted analysis function remains).
+        assert len(report.findings) == 8
         from collections import Counter
         fns = Counter(_enclosing_function(f.file, f.line)
                       for f in report.findings)
@@ -339,13 +343,8 @@ def test_scan_remainder_is_19_probe_sampling_analysis():
             # excluded probe region (#123)
             "_cgroup_mount": 1, "_read_cpu_stat": 1, "_read_swap": 1,
             "_read_swap_io": 1, "_self_rss_mb": 1,
-            # excluded sampling sites (this pass)
+            # excluded sampling sites (#127)
             "effective_memory_mb": 1, "_sample_network": 1, "sample": 1,
-            # analysis region (later pass)
-            "_record": 1, "history": 1, "trend": 1, "forecast": 1,
-            "battery_forecast": 1, "composite_pressure": 1, "pressure": 1,
-            "_degradation_target": 1, "_eval_alerts": 1, "render": 1,
-            "summary_line": 1,
         })
     finally:
         es._noqa_suppresses = original
