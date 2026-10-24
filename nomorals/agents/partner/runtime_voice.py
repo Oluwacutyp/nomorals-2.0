@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 from typing import Any, Callable
 from ...core.logging_setup import get_logger
+from .failures import record_failure
 _log = get_logger(__name__)
 
 
@@ -119,8 +120,8 @@ class RuntimeVoiceMixin:
             if getattr(result, "ok", False):
                 return (f"🔊 spoken ({info.get('engine')}, {info.get('bytes', 0) // 1024} KB, "
                         f"{info.get('seconds')}s){note}")
-        except Exception:  # noqa: BLE001 - console and other adapters
-            pass
+        except Exception as e:
+            record_failure("runtime_voice.RuntimeVoiceMixin._control_tts", e)
         return f"🔊 spoken ({info.get('engine')}) — saved at {info.get('path')}{note}"
 
     def _send_tts_voice_note(self, chat: Any, audio_path: str):
@@ -200,8 +201,8 @@ class RuntimeVoiceMixin:
                                             caption="🎤")
             if getattr(result, "ok", False):
                 return f"🎤 sung ({info.get('notes', '?')} notes)"
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as e:
+            record_failure("runtime_voice.RuntimeVoiceMixin._control_sing", e)
         return f"🎤 sung — saved at {info.get('path')}"
 
     def _control_say(self, tail: str, *, chat_key: str) -> str:
@@ -243,8 +244,8 @@ class RuntimeVoiceMixin:
             if getattr(result, "ok", False):
                 post = ", ".join(info.get("post", []))
                 return f"🔊 said ({post or info.get('tier', '?')})"
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as e:
+            record_failure("runtime_voice.RuntimeVoiceMixin._control_say", e)
         return f"🔊 said — saved at {info.get('path')}"
 
     # ── vision: /look (screen reader) ────────────────────────────────────────
@@ -316,12 +317,14 @@ class RuntimeVoiceMixin:
                     # so it's readable and searchable in chat.
                     delivery = send_voice_note(adapter, ref, path,
                                                caption=text[:1024])
-            except Exception:  # noqa: BLE001 - report the file, don't crash
+            except Exception as e:  # noqa: don't crash
+                record_failure("runtime_voice.RuntimeVoiceMixin._deliver_voice_note", e)
                 delivery = None
             if delivery is not None and delivery.ok and len(text) > 1024:
                 try:
                     gateway.send(ref.platform, ref, text)
-                except Exception:  # noqa: BLE001 - transcript is a bonus
+                except Exception as e:
+                    record_failure("runtime_voice.RuntimeVoiceMixin._deliver_voice_note:324", e)
                     _log.debug("voice-note transcript send failed",
                                exc_info=True)
         if not size_kb and os.path.exists(path):
@@ -341,8 +344,8 @@ class RuntimeVoiceMixin:
                     return (f"🎙️ said it ({backend}, {size_kb} KB) — "
                             f"⚠️ DEGRADED: sent as file instead, not a "
                             f"voice note ({delivery.reason})")
-            except Exception:  # noqa: BLE001 - fall through to ready line
-                pass
+            except Exception as e:
+                record_failure("runtime_voice.RuntimeVoiceMixin._deliver_voice_note:344", e)
         return (f"🎙️ voice note ready ({backend}, {size_kb} KB): {path}")
 
     # ── voice catalogue: /voice (Telegram / WhatsApp / console) ─────────────
@@ -466,7 +469,8 @@ class RuntimeVoiceMixin:
                 outcome = self.context.tools.call("transcribe", path=path)
                 if outcome.ok and outcome.value:
                     transcript = outcome.value.get("text", "") or ""
-            except Exception:  # noqa: BLE001 - transcript is a bonus
+            except Exception as e:
+                record_failure("runtime_voice.RuntimeVoiceMixin._control_voice", e)
                 transcript = ""
             try:
                 voice = cat.clone(name, path, transcript=transcript,
@@ -485,8 +489,8 @@ class RuntimeVoiceMixin:
                     warns = [w for w in vp.get("warnings", [])][:2]
                     if warns:
                         verdict += f" — {'; '.join(warns)}"
-            except Exception:  # noqa: BLE001 - verdict is a bonus
-                pass
+            except Exception as e:
+                record_failure("runtime_voice.RuntimeVoiceMixin._control_voice:488", e)
             return (f"🎙️ cloned '{voice.name}' from your voice note{note}"
                     f"{verdict}\n"
                     f"say something: /voice say hello there")
@@ -687,7 +691,8 @@ class RuntimeVoiceMixin:
             outcome = self.context.tools.call("transcribe", path=path)
             if outcome.ok and outcome.value:
                 transcript = outcome.value.get("text", "") or ""
-        except Exception:  # noqa: BLE001 - transcript is a bonus
+        except Exception as e:
+            record_failure("runtime_voice.RuntimeVoiceMixin._control_clonevoice", e)
             transcript = ""
         try:
             voice = cat.clone(name, path, transcript=transcript,
@@ -737,8 +742,8 @@ class RuntimeVoiceMixin:
             outcome = self.context.tools.call("transcribe", path=audio_path)
             if outcome.ok and outcome.value:
                 transcript = outcome.value.get("text", "") or ""
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as e:
+            record_failure("runtime_voice.RuntimeVoiceMixin._finish_voice_clone", e)
         try:
             voice = cat.clone(name, audio_path, transcript=transcript,
                               description="cloned by owner via /voice clone")
@@ -765,7 +770,8 @@ class RuntimeVoiceMixin:
                 lines.append("   `system` — the OS voice, always available")
             else:
                 lines.append("\n🖥️ system — not detected")
-        except Exception:  # noqa: BLE001
+        except Exception as e:
+            record_failure("runtime_voice.RuntimeVoiceMixin._control_voices", e)
             lines.append("\n🖥️ system — detection failed")
 
         # 2. Piper downloaded voices (.onnx files on disk)
@@ -778,8 +784,8 @@ class RuntimeVoiceMixin:
                         if (entry.endswith(".onnx")
                                 and not entry.endswith(".onnx.json")):
                             piper_voices.append(entry[:-5])  # strip .onnx
-                except OSError:
-                    pass
+                except OSError as e:
+                    record_failure("runtime_voice.RuntimeVoiceMixin._control_voices:781", e)
             if piper_voices:
                 lines.append(f"\n🔊 piper ({len(piper_voices)} downloaded):")
                 for v in piper_voices[:12]:
@@ -790,7 +796,8 @@ class RuntimeVoiceMixin:
                 lines.append("\n🔊 piper — no voices downloaded")
                 lines.append("   fetch one: `nm voice fetch --backend piper "
                              "--voice en_US-lessac-medium`")
-        except Exception:  # noqa: BLE001
+        except Exception as e:
+            record_failure("runtime_voice.RuntimeVoiceMixin._control_voices:793", e)
             lines.append("\n🔊 piper — unavailable")
 
         # 3. Voice catalogue (clones, presets, per-chat voices)
@@ -829,8 +836,8 @@ class RuntimeVoiceMixin:
             if others:
                 lines.append(f"\n⚙️ other backends: {', '.join(others)}")
                 lines.append("   (via `/voice backend <name> <backend>`)")
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as e:
+            record_failure("runtime_voice.RuntimeVoiceMixin._control_voices:832", e)
 
         lines.append("\nswitch: `/voice use <name>` · speak: `/voice say <text>`")
         return "\n".join(lines)

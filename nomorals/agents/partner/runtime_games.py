@@ -7,6 +7,7 @@ from typing import Any, Callable
 from ...llm.brain import brain_for
 from ...core.logging_setup import get_logger
 from ...social.chat.base import ChatKind, ChatMessage, ChatRef
+from .failures import record_failure
 _log = get_logger(__name__)
 
 
@@ -54,8 +55,8 @@ def _charagent_graph(store: Any) -> Any:
     if p.exists():
         try:
             g = RelationshipGraph.from_dict(json.loads(p.read_text("utf-8")))
-        except Exception:
-            pass
+        except Exception as e:
+            record_failure("runtime_games._charagent_graph", e)
     return g
 
 
@@ -65,8 +66,8 @@ def _charagent_save_graph(store: Any, graph: Any) -> None:
     try:
         (store.dir / "_relationships.json").write_text(
             json.dumps(graph.to_dict(), indent=1), encoding="utf-8")
-    except Exception:
-        pass
+    except Exception as e:
+        record_failure("runtime_games._charagent_save_graph", e)
 
 
 class RuntimeGamesMixin:
@@ -386,8 +387,8 @@ class RuntimeGamesMixin:
                                               mastery_line)
                 diff_line += " · " + mastery_line(
                     verb, get_one_game_stats(engine.db, player.key, verb))
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as e:
+                record_failure("runtime_games.RuntimeGamesMixin._control_game", e)
             body = "\n".join(msgs) or engine.describe(room)
             return f"{diff_line}\n{body}"
         if verb == "delete":
@@ -418,7 +419,8 @@ class RuntimeGamesMixin:
             try:
                 from ...games.progression import level_for_xp
                 lvl = level_for_xp(prof.xp)
-            except Exception:  # noqa: BLE001
+            except Exception as e:
+                record_failure("runtime_games.RuntimeGamesMixin._control_game:421", e)
                 lvl = 1
             return (
                 f"⚠️ delete your game profile?\n"
@@ -754,8 +756,8 @@ class RuntimeGamesMixin:
                     if TitleStore(engine.db).unlock(player.key,
                                                     "cutyps_heir"):
                         title_note = " 👑 title unlocked: Cutyp's Heir!"
-                except Exception:  # noqa: BLE001
-                    pass
+                except Exception as e:
+                    record_failure("runtime_games.RuntimeGamesMixin._control_skills", e)
             up = (" ⬆️ upgradeable — /skill upgrade later"
                   if max_tier(defn) > 1 else "")
             use = ("cast it in the arena with "
@@ -876,8 +878,8 @@ class RuntimeGamesMixin:
                 gs = GearStore(engine.db)
                 loadout = gs.loadout(player.key)
                 gear_bonus = gear_stat_bonuses(loadout)
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as e:
+                record_failure("runtime_games.RuntimeGamesMixin._control_stats", e)
             lines.append(f"📊 {player.name}'s attributes")
             lines.append(describe_stats(stats, gear_bonus))
             lines.append("spend: /stats <strength|stamina|mana|intelligence> "
@@ -1114,8 +1116,8 @@ class RuntimeGamesMixin:
                 chat_key,
                 f"🎁 {giver.name} sent you a gift: {what}!\n"
                 f"check /game balance or /inventory.")
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as e:
+            record_failure("runtime_games.RuntimeGamesMixin._notify_gift", e)
 
     def _control_daily(self, *, player: Any = None) -> str:
         """The daily hunt: /daily shows today's double-XP status."""
@@ -1178,8 +1180,8 @@ class RuntimeGamesMixin:
             game = engine.games.get(relay_room.game_name)
             if game is not None:
                 return bool(game.is_move_text(t))
-        except Exception:  # noqa: BLE001 - never break chat on a lookup
-            pass
+        except Exception as e:
+            record_failure("runtime_games.RuntimeGamesMixin._is_relay_move", e)
         return True
 
     def _route_game_move(self, chat_key: str, text: str, *,
@@ -1613,8 +1615,8 @@ class RuntimeGamesMixin:
                     k, v = b.split("=", 1)
                     try:
                         persona[k.strip()] = max(0.0, min(1.0, float(v)))
-                    except ValueError:
-                        pass
+                    except ValueError as _partner_exc:
+                        record_failure("runtime_games.RuntimeGamesMixin._control_charagent", _partner_exc)
             c = Character(name=name, persona=persona)
             store.save(c)
             return (f"🎭 {name} is alive. Talk to them:\n"
@@ -1745,8 +1747,8 @@ class RuntimeGamesMixin:
                 register_with_engine(
                     engine, CharacterStore(),
                     suggest=self._game_suggest())
-            except Exception:
-                pass
+            except Exception as e:
+                record_failure("runtime_games.RuntimeGamesMixin._game_engine", e)
             self._game_engine_obj = engine
         return engine
 
@@ -1819,7 +1821,8 @@ class RuntimeGamesMixin:
             try:
                 relay = self._game_engine().relay
                 room = relay.get_relay_for_virtual(chat_key)
-            except Exception:  # noqa: BLE001
+            except Exception as e:
+                record_failure("runtime_games.RuntimeGamesMixin._game_send", e)
                 room = None
             if room is not None:
                 for other in (room.chat_a, room.chat_b):
@@ -1895,7 +1898,8 @@ class RuntimeGamesMixin:
         if is_placeholder_name(player.name):
             try:
                 prof = self._game_engine().store.get_for(player)
-            except Exception:  # noqa: BLE001
+            except Exception as e:
+                record_failure("runtime_games.RuntimeGamesMixin._game_player", e)
                 prof = None
             if (prof is not None and prof.name
                     and not is_placeholder_name(prof.name)):
@@ -1909,7 +1913,8 @@ class RuntimeGamesMixin:
 
         try:
             ref = ChatRef.parse(chat_key)
-        except Exception:  # noqa: BLE001
+        except Exception as e:
+            record_failure("runtime_games.RuntimeGamesMixin._game_player_for_key", e)
             ref = ChatRef(platform="local", chat_id="console")
         return Player.from_sender(ref.platform, ref.chat_id, ref.chat_id[:40])
 
@@ -2106,14 +2111,14 @@ class RuntimeGamesMixin:
             def _notify(text: str) -> None:
                 try:
                     self.gateway.send(chat.platform, chat, text)
-                except Exception:  # noqa: BLE001
-                    pass
+                except Exception as e:
+                    record_failure("runtime_games.RuntimeGamesMixin._notify", e)
 
             try:
                 self.gateway.send(chat.platform, chat,
                                   f"⏳ arena cycle starting{': ' + topic[:60] if topic else ''}…")
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as _partner_exc:
+                record_failure("runtime_games.RuntimeGamesMixin._control_arena", _partner_exc)
             result = arena.run_cycle(topic=topic, notify=_notify)
             if not result.get("ok"):
                 return f"arena cycle failed: {result.get('error')}"
@@ -2129,7 +2134,8 @@ class RuntimeGamesMixin:
                 return category_table(tail.strip().lower()[:40])
             try:
                 profile = arena.interest_profile()
-            except Exception:  # noqa: BLE001
+            except Exception as _partner_exc:
+                record_failure("runtime_games.RuntimeGamesMixin._control_arena:2132", _partner_exc)
                 profile = None
             return topics_table(profile=profile, db=self.context.db)
         if verb == "surprise":
@@ -2143,8 +2149,8 @@ class RuntimeGamesMixin:
             def _notify2(text: str) -> None:
                 try:
                     self.gateway.send(chat.platform, chat, text)
-                except Exception:  # noqa: BLE001
-                    pass
+                except Exception as e:
+                    record_failure("runtime_games.RuntimeGamesMixin._notify2", e)
 
             result = arena.run_cycle(notify=_notify2, surprise=True, seed=seed)
             if not result.get("ok"):
@@ -2275,7 +2281,8 @@ class RuntimeGamesMixin:
 
             try:
                 profile = arena.interest_profile()
-            except Exception:  # noqa: BLE001
+            except Exception as _partner_exc:
+                record_failure("runtime_games.RuntimeGamesMixin._control_arena:2278", _partner_exc)
                 profile = None
             # db=None: a dry run — sample_challenge never touches the
             # database then, so no anti-repeat state is written and the
@@ -2303,7 +2310,8 @@ class RuntimeGamesMixin:
         try:
             row = self.context.db.query_one("SELECT COUNT(*) AS n FROM arena_knowledge")
             return int(row.get("n", 0)) if row else 0
-        except Exception:  # noqa: BLE001
+        except Exception as e:
+            record_failure("runtime_games.RuntimeGamesMixin._arena_knowledge_count", e)
             return 0
 
     #: cooldown between idle-triggered research cycles (seconds)
@@ -2323,8 +2331,8 @@ class RuntimeGamesMixin:
         def _notify(text: str) -> None:
             try:
                 self.gateway.send(chat.platform, chat, text)
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as e:
+                record_failure("runtime_games.RuntimeGamesMixin._notify:2326", e)
 
         def _bg():
             try:
@@ -2463,15 +2471,15 @@ class RuntimeGamesMixin:
                 if t == "--seed" and i + 1 < len(toks):
                     try:
                         seed = int(toks[i + 1])
-                    except ValueError:  # noqa: E103 - unparseable --seed keeps default 7
-                        pass
+                    except ValueError as e:  # noqa: E103 - unparseable --seed keeps default 7
+                        record_failure("runtime_games.RuntimeGamesMixin._control_bet", e)
                     i += 2
                     continue
                 if t.startswith("--seed="):
                     try:
                         seed = int(t.split("=", 1)[1])
-                    except ValueError:  # noqa: E103 - unparseable --seed keeps default 7
-                        pass
+                    except ValueError as e:  # noqa: E103 - unparseable --seed keeps default 7
+                        record_failure("runtime_games.RuntimeGamesMixin._control_bet:2473", e)
                 elif t.isdigit():
                     n = int(t)
                 i += 1
@@ -2493,8 +2501,8 @@ class RuntimeGamesMixin:
             if "--league" in toks:
                 try:
                     league = toks[toks.index("--league") + 1]
-                except IndexError:  # noqa: E103 - missing --league value keeps default GEN
-                    pass
+                except IndexError as e:  # noqa: E103 - missing --league value keeps default GEN
+                    record_failure("runtime_games.RuntimeGamesMixin._control_bet:2496", e)
             store.record(Fixture(home=home, away=away, league=league,
                                  home_goals=hg, away_goals=ag))
             elo_h = store.analyst.elo.rating(home)
@@ -2575,7 +2583,8 @@ class RuntimeGamesMixin:
 
         try:
             vault = self._provision_vault()
-        except Exception:  # noqa: BLE001 - a locked vault degrades
+        except Exception as e:
+            record_failure("runtime_games.RuntimeGamesMixin._control_desk", e)
             vault = None  # status to env-only key state, never a crash
         desk = BettingDesk(getattr(self, "context", None), vault=vault)
         parts = (tail or "").strip().split(None, 1)

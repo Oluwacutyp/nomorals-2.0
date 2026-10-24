@@ -41,6 +41,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Sequence
 
 from ...core.jobs import shared_registry
+from .failures import record_failure
 
 _log = logging.getLogger(__name__)
 
@@ -148,7 +149,8 @@ def _call_signature(call: "ToolCall") -> str:
     """Stable hash of (tool name, canonical args) for stall detection."""
     try:
         canon = json.dumps(call.args, sort_keys=True, default=str)
-    except Exception:
+    except Exception as e:
+        record_failure("tool_loop._call_signature", e)
         canon = str(call.args)
     return hashlib.sha256(f"{call.name}\n{canon}".encode()).hexdigest()[:16]
 
@@ -384,7 +386,8 @@ class ToolCallingLoop:
                 fut = rec.get("_future")
                 try:
                     finished = bool(fut is not None and fut.done())
-                except Exception:  # noqa: BLE001 - a dead future is not done
+                except Exception as e:
+                    record_failure("tool_loop.ToolCallingLoop.reconcile_unknown", e)
                     finished = False
                 if not finished:
                     continue
@@ -440,7 +443,8 @@ class ToolCallingLoop:
             self.on_event(ToolLoopEvent(
                 kind=kind, iteration=iteration, tool_name=tool_name,
                 detail=detail))
-        except Exception:  # noqa: BLE001 — telemetry never breaks the loop
+        except Exception as e:
+            record_failure("tool_loop.ToolCallingLoop._emit", e)
             _log.debug("tool loop event hook failed", exc_info=True)
 
     def _tool_listing(
@@ -459,8 +463,8 @@ class ToolCallingLoop:
                 query, capabilities=capabilities, limit=40)
             if ranked.strip():
                 return ranked
-        except (AttributeError, TypeError):
-            pass
+        except (AttributeError, TypeError) as e:
+            record_failure("tool_loop.ToolCallingLoop._tool_listing", e)
         try:
             listing = self.registry.prompt_listing(capabilities=capabilities)
         except TypeError:
@@ -502,14 +506,14 @@ class ToolCallingLoop:
         spec = None
         try:
             spec = self.registry.get(call.name)
-        except Exception:
-            pass
+        except Exception as e:
+            record_failure("tool_loop.ToolCallingLoop._invoke", e)
         if spec is None:
             names = []
             try:
                 names = self.registry.names()
-            except Exception:
-                pass
+            except Exception as e:
+                record_failure("tool_loop.ToolCallingLoop._invoke:511", e)
             hint = ""
             # Honest, useful: suggest the closest name when it's a near-miss.
             close = difflib.get_close_matches(call.name, names, n=1, cutoff=0.7)
@@ -524,8 +528,8 @@ class ToolCallingLoop:
         if ctx is not None and loop_ctx:
             try:
                 setattr(ctx, "loop_ctx", dict(loop_ctx))
-            except Exception:
-                pass
+            except Exception as e:
+                record_failure("tool_loop.ToolCallingLoop._invoke:527", e)
 
         # Social gate: code-enforced, not prompt-only. For non-owner actors,
         # social-adjacent tools go through the grant check BEFORE the
@@ -563,14 +567,15 @@ class ToolCallingLoop:
                             if adapter is not None:
                                 group_role = resolve_group_role(
                                     platform, adapter, chat_key, sender_id)
-                        except Exception:
-                            pass  # fail closed → member
+                        except Exception as e:
+                            record_failure("tool_loop.ToolCallingLoop._invoke:566", e) # fail closed → member
                 grant = grant_for(is_owner=False, chat_kind=chat_kind,
                                   group_role=group_role)
                 allowed, reason = check_tool_call(call.name, grant=grant)
                 if not allowed:
                     return f"[denied] {reason}"
-            except Exception:  # noqa: BLE001 — gate failure = deny
+            except Exception as e:
+                record_failure("tool_loop.ToolCallingLoop._invoke:573", e)
                 return "[denied] social gate unavailable"
 
         def _run() -> Any:
@@ -613,7 +618,8 @@ class ToolCallingLoop:
         try:
             from ...core.correlation import current_correlation
             run_id = current_correlation().get("run_id", "") or ""
-        except Exception:  # noqa: BLE001 - labels are best-effort
+        except Exception as e:
+            record_failure("tool_loop.ToolCallingLoop._job_labels", e)
             run_id = ""
         return {"owner": "loop", "run_id": run_id}
 
@@ -691,7 +697,8 @@ class ToolCallingLoop:
             return True
         try:
             spec = self.registry.get(name)
-        except Exception:  # noqa: BLE001 - unknown tool = not isolated
+        except Exception as e:
+            record_failure("tool_loop.ToolCallingLoop._is_isolated", e)
             return False
         metadata = getattr(spec, "metadata", None) or {}
         return bool(metadata.get("process_isolated"))
@@ -805,8 +812,8 @@ class ToolCallingLoop:
                 return
             report_weakness(db, "tool_failure", tool_name,
                             {"error": str(error)[:300], "ts": _t.time()})
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as e:
+            record_failure("tool_loop.ToolCallingLoop._note_tool_weakness", e)
 
     @staticmethod
     def _render_value(value: Any, _depth: int = 0) -> str:
@@ -842,7 +849,8 @@ class ToolCallingLoop:
             try:
                 text = json.dumps(value, indent=1, default=str,
                                   ensure_ascii=False)
-            except Exception:
+            except Exception as e:
+                record_failure("tool_loop.ToolCallingLoop._render_value", e)
                 return ToolCallingLoop._render_value(
                     str(value), _depth + 1)
             if len(text) <= _OBSERVATION_LIMIT:
@@ -874,7 +882,8 @@ class ToolCallingLoop:
             return "\n".join(items) + tail
         try:
             return ToolCallingLoop._render_value(str(value), _depth + 1)
-        except Exception:
+        except Exception as e:
+            record_failure("tool_loop.ToolCallingLoop._render_value:877", e)
             return "(unprintable result)"
 
     @staticmethod

@@ -7,6 +7,7 @@ import re
 from typing import Any
 
 from ...search.adaptive import adaptive_result_limit
+from .failures import record_failure
 
 
 def _looks_like_path_or_url(ref: str) -> bool:
@@ -70,8 +71,8 @@ class RuntimeMediaMixin:
         try:
             path = save_draft(draft)
             self._set_active_draft(chat_key, path)
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as e:
+            record_failure("runtime_media.RuntimeMediaMixin._control_music_draft", e)
         nb = render_notebook(draft)
         # chat gets the notebook; keep it readable, not the whole wall
         lines = nb.splitlines()
@@ -125,8 +126,8 @@ class RuntimeMediaMixin:
                 self.gateway.send_file(
                     "telegram", chat_key, out_path,
                     caption=f"🎵 {res.get('draft_title', '')} — performed from draft")
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as e:
+                record_failure("runtime_media.RuntimeMediaMixin._control_music_perform", e)
         return f"{res.get('note', '')}\n{out_path}"
 
     def _control_music_freestyle(self, tail: str, chat_key: str = "") -> str:
@@ -141,8 +142,8 @@ class RuntimeMediaMixin:
             if words[i].lower() == "bars" and i + 1 < len(words):
                 try:
                     n_bars = max(1, min(32, int(words[i + 1])))
-                except ValueError:
-                    pass
+                except ValueError as e:
+                    record_failure("runtime_media.RuntimeMediaMixin._control_music_freestyle", e)
                 i += 2
             else:
                 seed_words.append(words[i])
@@ -193,7 +194,8 @@ class RuntimeMediaMixin:
                     res.audio_path,
                     caption=f"🎹 {res.title} — AI bed (vocals come next)")
                 text += "\nsent the bed to this chat."
-            except Exception:  # noqa: BLE001
+            except Exception as e:
+                record_failure("runtime_media.RuntimeMediaMixin._control_music_bed", e)
                 text += f"\naudio: {res.audio_path}"
         else:
             text += f"\naudio: {res.audio_path or '(render failed)'}"
@@ -243,7 +245,8 @@ class RuntimeMediaMixin:
                     res.master_path,
                     caption=f"🎵 {res.title} — AI instrumental + {vocal_txt}")
                 text += "\nsent the master to this chat."
-            except Exception:  # noqa: BLE001
+            except Exception as e:
+                record_failure("runtime_media.RuntimeMediaMixin._control_music_full", e)
                 text += f"\nmaster: {res.master_path}"
         else:
             text += f"\nmaster: {res.master_path or '(render failed)'}"
@@ -364,8 +367,8 @@ class RuntimeMediaMixin:
                         song.audio_path,
                         caption=f"🎵 {song.title} — listen")
                     sent.append("audio")
-            except Exception:  # noqa: BLE001 - text fallback below
-                pass
+            except Exception as e:
+                record_failure("runtime_media.RuntimeMediaMixin._control_music", e)
             try:
                 if song.score_pdf_path:
                     self.gateway.send_file(
@@ -373,8 +376,8 @@ class RuntimeMediaMixin:
                         song.score_pdf_path,
                         caption=f"🎼 {song.title} — score (chords + lyrics)")
                     sent.append("score")
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as e:
+                record_failure("runtime_media.RuntimeMediaMixin._control_music:376", e)
             if sent:
                 # The sent line must reflect whether vocals are in
                 # the audio — never imply a full song when the vocal
@@ -480,8 +483,8 @@ class RuntimeMediaMixin:
         # same wiring so Spotify/SoundCloud work from the DM too.
         try:
             wire_streaming_adapters(self.context)
-        except Exception:  # noqa: BLE001 - wiring is best-effort
-            pass
+        except Exception as e:
+            record_failure("runtime_media.RuntimeMediaMixin._control_play", e)
 
         tail = (tail or "").strip()
         # Registry play path: /play registry <query> [--source <id>] —
@@ -576,7 +579,8 @@ class RuntimeMediaMixin:
                         candidates = SourceResolver(
                             self.context).search_candidates(
                                 rest, limit=PICK_LIMIT)
-                    except Exception:  # noqa: BLE001
+                    except Exception as e:
+                        record_failure("runtime_media.RuntimeMediaMixin._control_play:579", e)
                         candidates = []
                     if candidates:
                         token = PickCache.store(
@@ -596,8 +600,8 @@ class RuntimeMediaMixin:
                     from ...media.source_registry import EkitiLexicon
                     search_q = EkitiLexicon().normalize_query(
                         search_q)["search"] or search_q
-                except Exception:  # noqa: BLE001 — lexicon is advisory
-                    pass
+                except Exception as e:
+                    record_failure("runtime_media.RuntimeMediaMixin._control_play:599", e)
                 resolution = SourceResolver(self.context).resolve(search_q)
                 if not resolution.ok:
                     # Step 6: never a dead end — tried + why + hint via
@@ -610,7 +614,8 @@ class RuntimeMediaMixin:
                         # appending resolution.hint again would print the
                         # hint body twice.
                         hint = ""
-                    except Exception:  # noqa: BLE001
+                    except Exception as e:
+                        record_failure("runtime_media.RuntimeMediaMixin._control_play:613", e)
                         detail = ("tried: "
                                   + ("; ".join(resolution.attempts)
                                      or "no strategies"))
@@ -651,7 +656,8 @@ class RuntimeMediaMixin:
                         cands, detailed = SourceResolver(
                             self.context).search_candidates_detailed(
                                 search_q)
-                    except Exception:  # noqa: BLE001
+                    except Exception as e:
+                        record_failure("runtime_media.RuntimeMediaMixin._control_play:654", e)
                         cands, detailed = [], []
                     fallbacks = [
                         {"kind": c.kind, "path": c.path_or_url,
@@ -818,8 +824,8 @@ class RuntimeMediaMixin:
             if st.get("status") == "playing":
                 out += f"\n▶ playing “{st.get('current', '')}”"
                 PickCache.consume(token)
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as e:
+            record_failure("runtime_media.RuntimeMediaMixin._play_pick", e)
         return out
 
     def _play_pick_hook(self, message: ChatMessage) -> str | None:
@@ -1021,7 +1027,8 @@ class RuntimeMediaMixin:
                 if delta:
                     return delta
             return full_text
-        except Exception:  # noqa: BLE001
+        except Exception as e:
+            record_failure("runtime_media.RuntimeMediaMixin._play_job_delta_text", e)
             return full_text
 
     def _play_download_bg(self, chat: Any, chat_key: str,
@@ -1065,8 +1072,8 @@ class RuntimeMediaMixin:
                           "second copy. "
                           f"Send /download cancel {snap.get('id')} "
                           "to stop it.")
-        except Exception:  # noqa: BLE001 - guard must never block a dl
-            pass
+        except Exception as e:
+            record_failure("runtime_media.RuntimeMediaMixin._play_download_bg", e)
 
         # The worker body needs its own job id (for the durable
         # record) before submit() returns it — a one-cell holder the
@@ -1085,8 +1092,8 @@ class RuntimeMediaMixin:
             if sent and on_sent is not None:
                 try:
                     on_sent()
-                except Exception:  # noqa: BLE001 - bookkeeping only
-                    pass
+                except Exception as e:
+                    record_failure("runtime_media.RuntimeMediaMixin._body", e)
             final = self._play_job_delta_text(out_prefix, text)
             late = False
             job_now = current_job()
@@ -1102,7 +1109,8 @@ class RuntimeMediaMixin:
                 try:
                     self.gateway.send(chat.platform, chat, final)
                     delivered = True
-                except Exception:  # noqa: BLE001 - harvest retries
+                except Exception as e:
+                    record_failure("runtime_media.RuntimeMediaMixin._body:1105", e)
                     delivered = False
             self._play_dl_mark_finished(holder)
             return {"ok": True, "delivered": delivered,
@@ -1115,7 +1123,8 @@ class RuntimeMediaMixin:
                 labels={"owner": self._PLAY_DL_JOB_OWNER,
                         "chat": chat_key or "",
                         "title": (title or "")[:80]})
-        except Exception:  # noqa: BLE001 - registry down: degrade to sync
+        except Exception as e:
+            record_failure("runtime_media.RuntimeMediaMixin._play_download_bg:1118", e)
             text, _sent = produce()
             return text
         holder["job_id"] = job.id
@@ -1158,7 +1167,8 @@ class RuntimeMediaMixin:
                 "boot_id TEXT NOT NULL DEFAULT '', status TEXT NOT "
                 "NULL DEFAULT 'running', created_at REAL NOT NULL "
                 "DEFAULT 0)")
-        except Exception:  # noqa: BLE001 - bookkeeping never breaks dl
+        except Exception as e:
+            record_failure("runtime_media.RuntimeMediaMixin._play_dl_db", e)
             return None
         return db
 
@@ -1182,8 +1192,8 @@ class RuntimeMediaMixin:
                 "DELETE FROM play_download_jobs WHERE status != "
                 "'running' AND created_at < ?",
                 (time.time() - 7 * 24 * 3600,))
-        except Exception:  # noqa: BLE001 - bookkeeping never breaks dl
-            pass
+        except Exception as e:
+            record_failure("runtime_media.RuntimeMediaMixin._play_dl_record_start", e)
 
     def _play_dl_record_finish(self, job_id: str) -> None:
         db = self._play_dl_db()
@@ -1193,8 +1203,8 @@ class RuntimeMediaMixin:
             db.execute(
                 "UPDATE play_download_jobs SET status = 'done' "
                 "WHERE job_id = ? AND status = 'running'", (job_id,))
-        except Exception:  # noqa: BLE001 - bookkeeping never breaks dl
-            pass
+        except Exception as e:
+            record_failure("runtime_media.RuntimeMediaMixin._play_dl_record_finish", e)
 
     def _play_dl_mark_finished(self, holder: dict[str, str]) -> None:
         """Record the body's job as finished in the durable ledger.
@@ -1273,7 +1283,8 @@ class RuntimeMediaMixin:
             jobs = shared_registry().collect_ready(
                 labels={"owner": self._PLAY_DL_JOB_OWNER,
                         "chat": chat_key or ""})
-        except Exception:  # noqa: BLE001 - harvest never breaks chat
+        except Exception as e:
+            record_failure("runtime_media.RuntimeMediaMixin._harvest_play_downloads", e)
             return
         target = f"{chat.platform}:{chat.chat_id}"
         for job in jobs:
@@ -1308,7 +1319,8 @@ class RuntimeMediaMixin:
                                 f"“{title}” finished, but its report "
                                 "never reached this chat.")
                     self.gateway.send(chat.platform, target, text)
-            except Exception:  # noqa: BLE001 - one job never blocks rest
+            except Exception as e:
+                record_failure("runtime_media.RuntimeMediaMixin._harvest_play_downloads:1311", e)
                 continue
         # Restart losses: rows still "running" under a previous boot
         # id belong to a process that died mid-download.  Say so —
@@ -1321,7 +1333,8 @@ class RuntimeMediaMixin:
                     "WHERE chat_key = ? AND status = 'running' "
                     "AND boot_id != ?",
                     (chat_key or "", self._play_dl_boot_id()))
-            except Exception:  # noqa: BLE001 - sweep never breaks chat
+            except Exception as e:
+                record_failure("runtime_media.RuntimeMediaMixin._harvest_play_downloads:1324", e)
                 rows = []
             for row in rows or []:
                 lost_title = str(row.get("title") or "download")
@@ -1336,7 +1349,8 @@ class RuntimeMediaMixin:
                         "UPDATE play_download_jobs SET status = "
                         "'lost-reported' WHERE job_id = ?",
                         (row.get("job_id"),))
-                except Exception:  # noqa: BLE001 - one row never blocks
+                except Exception as e:
+                    record_failure("runtime_media.RuntimeMediaMixin._harvest_play_downloads:1339", e)
                     continue
 
     def _play_send_in_chat(self, engine: Any, item: dict[str, Any],
@@ -1418,7 +1432,8 @@ class RuntimeMediaMixin:
                     if isinstance(idx, int):
                         found = idx
             return found
-        except Exception:  # noqa: BLE001 - queue hygiene never breaks chat
+        except Exception as e:
+            record_failure("runtime_media.RuntimeMediaMixin._queued_index_of", e)
             return None
 
     @classmethod
@@ -1428,8 +1443,8 @@ class RuntimeMediaMixin:
             idx = cls._queued_index_of(engine, item)
             if idx is not None:
                 engine.remove(idx)
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as e:
+            record_failure("runtime_media.RuntimeMediaMixin._drop_matching_queued", e)
 
     @staticmethod
     def _delivery_path(path: str, title: str, artist: str) -> str:
@@ -1475,8 +1490,9 @@ class RuntimeMediaMixin:
 
                 shutil.copyfile(path, target)
             return target
-        except Exception:  # noqa: BLE001 - identity staging never
+        except Exception as e:
             # breaks a delivery that would otherwise succeed
+            record_failure("runtime_media.RuntimeMediaMixin._delivery_path", e)
             return path
 
     @classmethod
@@ -1493,8 +1509,8 @@ class RuntimeMediaMixin:
                 str(new_item.get("title", "") or new_item.get("path", "")),
                 artist=str(new_item.get("artist", "") or ""),
                 duration=float(new_item.get("duration", 0.0) or 0.0))
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as e:
+            record_failure("runtime_media.RuntimeMediaMixin._replace_queued_with", e)
 
     # Candidate kind -> search-attempt name, for merging download
     # outcomes into the tried-list.
@@ -1533,7 +1549,8 @@ class RuntimeMediaMixin:
                        if isinstance(a, str)
                        and a.split(" — ", 1)[0].strip() not in names]
             return missing + merged
-        except Exception:  # noqa: BLE001 - audit trail is best-effort
+        except Exception as e:
+            record_failure("runtime_media.RuntimeMediaMixin._merge_search_attempts", e)
             return list(detailed_attempts or []) or \
                 list(resolution_attempts or [])
 
@@ -1558,7 +1575,8 @@ class RuntimeMediaMixin:
                 if name not in seen:
                     merged.append(f"{name} — {outcome}")
             return merged
-        except Exception:  # noqa: BLE001
+        except Exception as e:
+            record_failure("runtime_media.RuntimeMediaMixin._format_tried_list", e)
             return list(search_attempts or [])
 
     def _play_send_with_fallthrough(
@@ -1775,7 +1793,8 @@ class RuntimeMediaMixin:
                 chat_key = str(getattr(chat, "key", "") or "")
                 if not chat_key:
                     chat_key = f"{chat.platform}:{chat.chat_id}"
-            except Exception:  # noqa: BLE001
+            except Exception as e:
+                record_failure("runtime_media.RuntimeMediaMixin._play_picklist_offer", e)
                 chat_key = ""
             token = PickCache.store(cands, chat_key) if chat_key else ""
             if not token:
@@ -1803,8 +1822,9 @@ class RuntimeMediaMixin:
                 lines.append(BOT_COOKIE_SHORT_HELP)
             lines.append(format_picklist(cands, query, token))
             return "\n".join(lines)
-        except Exception:  # noqa: BLE001 - the offer never breaks
+        except Exception as e:
             # the honest failure report the caller still has
+            record_failure("runtime_media.RuntimeMediaMixin._play_picklist_offer:1806", e)
             return ""
 
     @staticmethod
@@ -1909,8 +1929,8 @@ class RuntimeMediaMixin:
                 self.gateway.send_file(
                     chat.platform, f"{chat.platform}:{chat.chat_id}",
                     show["path"], caption="📻 Devon FM — full show")
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as e:
+                record_failure("runtime_media.RuntimeMediaMixin._control_dj", e)
         return text
 
     def _control_produce(self, tail: str, chat_key: str = "") -> str:
@@ -1942,8 +1962,8 @@ class RuntimeMediaMixin:
                     self.gateway.send_file(
                         chat.platform, f"{chat.platform}:{chat.chat_id}",
                         res["path"], caption=f"🎛 {res['title']} (original)")
-                except Exception:  # noqa: BLE001
-                    pass
+                except Exception as e:
+                    record_failure("runtime_media.RuntimeMediaMixin._deliver", e)
             return text
 
         try:
@@ -2141,7 +2161,8 @@ class RuntimeMediaMixin:
         if vault is not None:
             try:
                 audd = create_connector("audd", vault)
-            except Exception:
+            except Exception as e:
+                record_failure("runtime_media.RuntimeMediaMixin._sham_identify", e)
                 audd = None
         if audd is None:
             if vault_locked:
@@ -2216,8 +2237,8 @@ class RuntimeMediaMixin:
                     path = download(file_id, "sham.ogg")
                     if path:
                         return path
-        except Exception:  # noqa: BLE001 - best-effort
-            pass
+        except Exception as e:
+            record_failure("runtime_media.RuntimeMediaMixin._sham_find_audio", e)
         return ""
 
     def _control_musicnote(self, tail: str, chat_key: str = "") -> str:
@@ -2295,8 +2316,8 @@ class RuntimeMediaMixin:
                     if len(parts) > 1 and parts[1].lower() in (
                             "major", "minor"):
                         prof.mode = parts[1].lower()
-        except Exception:  # noqa: BLE001 - seed is a bonus, not the path
-            pass
+        except Exception as e:  # noqa: not the path
+            record_failure("runtime_media.RuntimeMediaMixin._musicnote_produce", e)
         try:
             producer = Producer(self.context)
             res = producer.produce_from_profile(
@@ -2310,15 +2331,15 @@ class RuntimeMediaMixin:
                     store = load_taste(getattr(self, "context", None))
                     store.record_production(ref_profile, source="musicnote",
                                             ref=seed_note)
-                except Exception:  # noqa: BLE001 - taste is a bonus
-                    pass
+                except Exception as e:
+                    record_failure("runtime_media.RuntimeMediaMixin._musicnote_produce:2313", e)
             try:
                 if res.get("path"):
                     from ...audio.fingerprint import index_own
                     index_own(res["path"], title=str(res.get("title", "")),
                               artist="Devon")
-            except Exception:  # noqa: BLE001 - indexing is a bonus
-                pass
+            except Exception as e:
+                record_failure("runtime_media.RuntimeMediaMixin._musicnote_produce:2320", e)
             lines = [f"🎛 produced from your voice note: {res['title']} — "
                      f"{res['bpm']:g} BPM, {res['key']} {res['mode']}"]
             lines.append(res["notes"])
@@ -2329,8 +2350,8 @@ class RuntimeMediaMixin:
                     self.gateway.send_file(
                         chat.platform, f"{chat.platform}:{chat.chat_id}",
                         res["path"], caption=f"🎛 {res['title']} (original)")
-                except Exception:  # noqa: BLE001
-                    pass
+                except Exception as e:
+                    record_failure("runtime_media.RuntimeMediaMixin._musicnote_produce:2332", e)
             return text
         except Exception as exc:  # noqa: BLE001 - never raises
             return f"couldn't produce: {exc}"
@@ -2395,7 +2416,8 @@ class RuntimeMediaMixin:
                     from ...audio.fingerprint import index_own
                     index_own(res["path"], title=str(res.get("title", "")),
                               artist="Devon")
-            except Exception:  # noqa: BLE001 - indexing is a bonus
+            except Exception as e:
+                record_failure("runtime_media.RuntimeMediaMixin._produce_hook", e)
                 _log.debug("produce fingerprint index failed",
                            exc_info=True)
             lines = [f"🎛 produced: {res['title']} — {res['bpm']:g} BPM, "
@@ -2408,8 +2430,8 @@ class RuntimeMediaMixin:
                     self.gateway.send_file(
                         chat.platform, f"{chat.platform}:{chat.chat_id}",
                         res["path"], caption=f"🎛 {res['title']} (original)")
-                except Exception:  # noqa: BLE001
-                    pass
+                except Exception as e:
+                    record_failure("runtime_media.RuntimeMediaMixin._produce_hook:2411", e)
             return "\n".join(lines)
         except Exception as exc:  # noqa: BLE001
             _log.exception("produce hook failed")
@@ -2777,8 +2799,8 @@ class RuntimeMediaMixin:
                     out_path,
                     caption=f"🎬 captioned ({style} style)")
                 return f"🎬 captioned video sent ({style} style)."
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as e:
+                record_failure("runtime_media.RuntimeMediaMixin._control_caption", e)
         return f"🎬 captioned ({style}): {out_path or '(render failed)'}"
 
     _VISION_SUBCOMMANDS = (
@@ -3242,8 +3264,8 @@ class RuntimeMediaMixin:
                     if b == "--scale" and i + 1 < len(bits):
                         try:
                             scale = float(bits[i + 1])
-                        except ValueError:
-                            pass
+                        except ValueError as _partner_exc:
+                            record_failure("runtime_media.RuntimeMediaMixin._control_imggen", _partner_exc)
                         path = " ".join(
                             bits[:i] + bits[i + 2:]).strip()
                         break
@@ -3743,8 +3765,8 @@ def _resolve_play_title(context: Any, title: str) -> str:
                         best = (score, os.path.join(dirpath, fn))
             if best is not None:
                 return best[1]
-    except Exception:  # noqa: BLE001 - scan is best-effort
-        pass
+    except Exception as e:
+        record_failure("runtime_media._resolve_play_title", e)
     # 2. Spotify search — only when OAuth is actually linked; a locked
     # vault or dead token just skips to the next source.
     try:
@@ -3759,8 +3781,8 @@ def _resolve_play_title(context: Any, title: str) -> str:
                           f"spotify:track:{top.get('id', '')}")
                 if uri and uri != "spotify:track:":
                     return uri
-    except Exception:  # noqa: BLE001 - search is best-effort
-        pass
+    except Exception as e:
+        record_failure("runtime_media._resolve_play_title:3762", e)
     # 3. SoundCloud search (keyless, auto client_id)
     try:
         from ...connectors import create_connector
@@ -3773,16 +3795,16 @@ def _resolve_play_title(context: Any, title: str) -> str:
             url = (t.get("permalink_url") or t.get("url") or "").strip()
             if url:
                 return url
-    except Exception:  # noqa: BLE001 - search is best-effort
-        pass
+    except Exception as e:
+        record_failure("runtime_media._resolve_play_title:3776", e)
     # 4. YouTube search (keyless via yt-dlp; skipped when not installed)
     try:
         from ...media.playback import PlaybackEngine
         video_id = PlaybackEngine._youtube_search_id(query)
         if video_id:
             return PlaybackEngine._youtube_watch_url(video_id)
-    except Exception:  # noqa: BLE001 - search is best-effort
-        pass
+    except Exception as e:
+        record_failure("runtime_media._resolve_play_title:3784", e)
     # 5. give up honestly — the player reports the failure
     return query
 

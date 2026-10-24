@@ -43,6 +43,7 @@ from .runtime_intel import RuntimeIntelMixin
 from .runtime_search import RuntimeSearchMixin
 from .runtime_wisdom import RuntimeWisdomMixin
 from .runtime_reach import RuntimeReachMixin
+from .failures import failure_count, recent_failures, record_failure
 _log = get_logger(__name__)
 
 
@@ -154,6 +155,22 @@ _PUBLIC_BOT_NOT_AVAILABLE = (
 )
 
 
+def _partner_failures_status(limit: int = 5) -> dict[str, Any]:
+    """Ledger snapshot for :meth:`PartnerRuntime.status`.
+
+    Total ever recorded plus the newest entries (site, type, message).
+    The ledger's accessors only lock and read, so this never raises.
+    """
+    return {
+        "total": failure_count(),
+        "recent": [
+            {"site": f.site, "exc_type": f.exc_type,
+             "message": f.message}
+            for f in recent_failures(limit)
+        ],
+    }
+
+
 class PartnerRuntime(
     RuntimeLiveMixin,
     RuntimeMetaMixin,
@@ -225,8 +242,8 @@ class PartnerRuntime(
         if session_bridge is not None:
             try:
                 context.extras["session_bridge"] = session_bridge
-            except Exception:  # noqa: BLE001 - extras is best-effort
-                pass
+            except Exception as e:
+                record_failure("runtime.PartnerRuntime.__init__", e)
         partner_cfg = self.settings.partner
 
         # Profile-aware: the chat pool follows the runtime tune (phone →
@@ -326,8 +343,8 @@ class PartnerRuntime(
             _bind_social_gateway(self.gateway)
             from ...tools.whatsapp import set_gateway as _bind_wa_gateway
             _bind_wa_gateway(self.gateway)
-        except Exception:  # noqa: BLE001 — social tools fail closed anyway
-            pass
+        except Exception as e:
+            record_failure("runtime.PartnerRuntime.__init__:329", e)
 
         # Console-only commands (dashboard, status, jobs, …) for the local
         # terminal adapter. Wired here — not just in run_chat_bot.py — so
@@ -355,7 +372,8 @@ class PartnerRuntime(
             local = None
             try:
                 local = self.gateway.adapters.get("local")
-            except Exception:  # noqa: BLE001 - gateway internals are best-effort
+            except Exception as e:
+                record_failure("runtime.PartnerRuntime._wire_console_commands", e)
                 local = None
             if local is None:
                 return
@@ -364,7 +382,8 @@ class PartnerRuntime(
             if getattr(local, "command_hook", None) is not None:
                 return
             local.command_hook = ConsoleCommands(self.console_snapshot).handle
-        except Exception:  # noqa: BLE001 - console commands are optional
+        except Exception as e:
+            record_failure("runtime.PartnerRuntime._wire_console_commands:367", e)
             _log.debug("console commands unavailable", exc_info=True)
 
     def console_snapshot(self) -> dict:
@@ -390,14 +409,15 @@ class PartnerRuntime(
                     "received": info.get("received", "—"),
                     "sent": info.get("sent", "—"),
                 }
-        except Exception:  # noqa: BLE001 - dashboard is best-effort
-            pass
+        except Exception as e:
+            record_failure("runtime.PartnerRuntime.console_snapshot", e)
         snap["adapters"] = adapters
         # ── traffic ──
         try:
             with self._stats_lock:
                 snap["traffic"] = dict(self.stats)
-        except Exception:  # noqa: BLE001
+        except Exception as e:
+            record_failure("runtime.PartnerRuntime.console_snapshot:400", e)
             snap["traffic"] = dict(getattr(self, "stats", {}))
         # ── scheduler ──
         try:
@@ -417,13 +437,15 @@ class PartnerRuntime(
                         }
                     )
             snap["scheduler"] = {"running": running, "jobs": jobs}
-        except Exception:  # noqa: BLE001
+        except Exception as e:
+            record_failure("runtime.PartnerRuntime.console_snapshot:420", e)
             snap["scheduler"] = {}
         # ── games ──
         try:
             row = self.context.db.query_one("SELECT COUNT(*) AS n FROM game_players")
             players = (row or {}).get("n", "—")
-        except Exception:  # noqa: BLE001
+        except Exception as e:
+            record_failure("runtime.PartnerRuntime.console_snapshot:426", e)
             players = "—"
         snap["games"] = {"players": players}
         # ── brain (LLM router health) ──
@@ -435,7 +457,8 @@ class PartnerRuntime(
                 snap["llm"] = router.stats_snapshot()
             else:
                 snap["llm"] = {}
-        except Exception:  # noqa: BLE001
+        except Exception as e:
+            record_failure("runtime.PartnerRuntime.console_snapshot:438", e)
             snap["llm"] = {}
         # ── theme ──
         snap["theme"] = os.environ.get("NM_CONSOLE_THEME", "ocean")
@@ -443,12 +466,12 @@ class PartnerRuntime(
         extras: dict = {}
         try:
             extras["autonomy"] = "on" if getattr(self, "_autonomy", None) else "off"
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as e:
+            record_failure("runtime.PartnerRuntime.console_snapshot:446", e)
         try:
             extras["arena"] = "on" if getattr(self, "_arena", None) else "off"
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as e:
+            record_failure("runtime.PartnerRuntime.console_snapshot:450", e)
         snap["extras"] = extras
         return snap
 
@@ -669,7 +692,8 @@ class PartnerRuntime(
         try:
             from ...voice import music_note as _music_note
             from ...voice.pingpong import has_voice_media as _has_voice
-        except Exception:  # noqa: BLE001 - detection is a bonus, never fatal
+        except Exception as e:  # noqa: never fatal
+            record_failure("runtime.PartnerRuntime._handle_music_voice_note", e)
             return False
         try:
             if not _has_voice(message):
@@ -716,10 +740,11 @@ class PartnerRuntime(
                 message.meta.pop("stt_failure_reason", None)
                 message.meta.pop("voice_untranscribed_reason", None)
                 message.text = _music_note.music_context_text(heard)
-            except Exception:  # noqa: BLE001 - meta bookkeeping never breaks chat
-                pass
+            except Exception as e:
+                record_failure("runtime.PartnerRuntime._handle_music_voice_note:719", e)
             return False
-        except Exception:  # noqa: BLE001 - detection failure means "not music"
+        except Exception as e:
+            record_failure("runtime.PartnerRuntime._handle_music_voice_note:722", e)
             _log.debug("music voice-note detection failed", exc_info=True)
             return False
 
@@ -743,7 +768,8 @@ class PartnerRuntime(
             message_id = str(getattr(message, "message_id", "") or "")
             if chat_key and message_id:
                 scope = f"chat:{chat_key}:{message_id}"
-        except Exception:  # noqa: BLE001 - scoping never breaks chat
+        except Exception as e:
+            record_failure("runtime.PartnerRuntime._process", e)
             scope = ""
         if scope:
             with idempotency_scope(scope):
@@ -759,8 +785,8 @@ class PartnerRuntime(
         # thread; this only handles outcomes the job never posted.
         try:
             self._harvest_play_downloads(message.chat.key, message.chat)
-        except Exception:  # noqa: BLE001 - harvest never breaks chat
-            pass
+        except Exception as e:
+            record_failure("runtime.PartnerRuntime._process_inner", e)
         # One-time login intake (armed by /provision login): the
         # owner's next message IS a password. Consumed here — before
         # the autonomy interest recorder and before the brain — so the
@@ -783,8 +809,8 @@ class PartnerRuntime(
                 record_activity(_adb)
                 if message.text:
                     record_interests(_adb, message.text)
-        except Exception:  # noqa: BLE001 - autonomy hooks never break chat
-            pass
+        except Exception as e:
+            record_failure("runtime.PartnerRuntime._process_inner:786", e)
         # Pending voice-clone naming: /voice clone with no name holds the
         # audio and asks; the next short text message in that chat is the
         # name. Checked before anything else so it can't be misread as chat.
@@ -804,8 +830,8 @@ class PartnerRuntime(
                             self._typing_for(message.chat, reply)
                             self.gateway.send(message.chat.platform,
                                               message.chat, reply)
-                        except Exception:  # noqa: BLE001
-                            pass
+                        except Exception as e:
+                            record_failure("runtime.PartnerRuntime._process_inner:807", e)
                         return
                     del pending[message.chat.key]  # expired
         # Live DJ room sensing: if DJ Vrede is performing in this chat,
@@ -817,8 +843,8 @@ class PartnerRuntime(
                 from ...media.dj_live import notify_live_message
                 notify_live_message(message.chat.key,
                                     message.text, message.sender)
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as e:
+                record_failure("runtime.PartnerRuntime._process_inner:820", e)
         # SMS fallback surface (build-map #19): SMS can't carry media into
         # the brain. Answer honestly instead of letting her hallucinate
         # about a picture she never received.
@@ -1107,8 +1133,8 @@ class PartnerRuntime(
                         self.gateway.send(
                             message.chat.platform, message.chat,
                             _chat_modes_disabled_reply("games"))
-                    except Exception:  # noqa: BLE001
-                        pass
+                    except Exception as e:
+                        record_failure("runtime.PartnerRuntime._process_inner:1110", e)
                     return
                 # Stacking never includes games (interactive, stateful):
                 # a stack starting with a game is rejected explicitly
@@ -1123,8 +1149,8 @@ class PartnerRuntime(
                             message.chat.platform, message.chat,
                             "stacks can't include games — send one game "
                             "command per message. Nothing ran.")
-                    except Exception:  # noqa: BLE001
-                        pass
+                    except Exception as e:
+                        record_failure("runtime.PartnerRuntime._process_inner:1126", e)
                     return
                 # Capability grant, stated explicitly: games are social,
                 # so any caller may run them (caller_may_run returns True
@@ -1139,8 +1165,8 @@ class PartnerRuntime(
                     try:
                         self.gateway.send(message.chat.platform, message.chat,
                                           "that one's just for the owner.")
-                    except Exception:  # noqa: BLE001
-                        pass
+                    except Exception as e:
+                        record_failure("runtime.PartnerRuntime._process_inner:1142", e)
                     return
                 self._bump("controls")
                 _log.info("game command %r from %s in %s (any-chat dispatch)",
@@ -1291,7 +1317,8 @@ class PartnerRuntime(
 
                 send_reply = check_explicit_send(message.text,
                                                  context=self.context)
-            except Exception:  # noqa: BLE001 - never eat the chat
+            except Exception as e:
+                record_failure("runtime.PartnerRuntime._process_inner:1294", e)
                 send_reply = None
             if send_reply is not None:
                 try:
@@ -1315,8 +1342,8 @@ class PartnerRuntime(
 
                     verb = message.text.strip().split()[0].lstrip("/").lower()
                     _arena_activity.record(self.context.db, "command", verb)
-                except Exception:  # noqa: BLE001
-                    pass
+                except Exception as e:
+                    record_failure("runtime.PartnerRuntime._process_inner:1318", e)
                 try:
                     reply = self.handle_control(message.text, message.chat.key,
                                                 message=message)
@@ -1328,7 +1355,8 @@ class PartnerRuntime(
                         _log.info("error diagnosis for /%s: %s",
                                   command.kind, _diag["summary"])
                         _why = _diag["summary"]
-                    except Exception:  # noqa: BLE001 - diagnosis never breaks the reply
+                    except Exception as e:
+                        record_failure("runtime.PartnerRuntime._process_inner:1331", e)
                         _why = f"{type(exc).__name__}: {exc}"
                     reply = (f"/{command.kind} blew up on my end: {_why} — "
                              f"/help {command.kind} shows the right usage")
@@ -1635,7 +1663,8 @@ class PartnerRuntime(
         if es is not None:
             try:
                 ladder = es.ladders.get("voice")
-            except Exception:  # noqa: BLE001 - ladder is best-effort
+            except Exception as e:
+                record_failure("runtime.PartnerRuntime._synthesize_voice_part", e)
                 ladder = None
         if ladder is None:
             return synthesize_voice_reply(self.context, text)
@@ -1679,8 +1708,8 @@ class PartnerRuntime(
                         secs = max(1.0, min(60.0, ogg_duration(ogg_path)))
                         self.gateway.typing(message.chat.platform, message.chat,
                                             seconds=secs, action="recording")
-                    except Exception:  # noqa: BLE001 - cosmetic
-                        pass
+                    except Exception as e:
+                        record_failure("runtime.PartnerRuntime._send_voice_reply", e)
                 adapter = self.gateway._adapter_for(message.chat.platform)
                 if adapter is None or self.gateway.dry_run:
                     return sent_any
@@ -1755,8 +1784,8 @@ class PartnerRuntime(
                         message.chat.key, "voice")):
                 if self._send_voice_reply(message, parts):
                     return
-        except Exception:  # noqa: BLE001 - voice mode is best-effort
-            pass
+        except Exception as e:
+            record_failure("runtime.PartnerRuntime._send_reply", e)
         partner_cfg = self.settings.partner
         values = self.brain.mood.current().values
         # Typing indicator on every kind of chat, per part: each chunk of a
@@ -1897,7 +1926,8 @@ class PartnerRuntime(
                 if self._resource_advisor is not None:
                     try:
                         _resources = self._resource_advisor()
-                    except Exception:  # noqa: BLE001 - ungated scheduling then
+                    except Exception as e:
+                        record_failure("runtime.PartnerRuntime.start", e)
                         _log.debug("no resource advisor for scheduler",
                                    exc_info=True)
                 self._scheduler = Scheduler(
@@ -2146,8 +2176,8 @@ class PartnerRuntime(
                         from ...storage.db import Database
                         _adb = Database(ws_dir)
                         note_activity(_adb)
-                    except Exception:  # noqa: BLE001
-                        pass
+                    except Exception as e:
+                        record_failure("runtime.PartnerRuntime.start:2149", e)
                 except Exception as exc:  # noqa: BLE001 - optional
                     _log.warning("autonomy nervous system not started: %s",
                                  exc)
@@ -2229,7 +2259,8 @@ class PartnerRuntime(
 
                                 hours = CognitiveLoop(self.context) \
                                     .effective_interval()
-                            except Exception:  # noqa: BLE001
+                            except Exception as e:
+                                record_failure("runtime.PartnerRuntime.start:2232", e)
                                 _auto = getattr(self.settings, "autonomy", None)
                                 hours = max(0.25, float(getattr(
                                     _auto, "interval_hours", 6.0) or 6.0))
@@ -2531,7 +2562,8 @@ class PartnerRuntime(
         for status in sorted(MissionStatus.TERMINAL):
             try:
                 rows = store.list(status=status, limit=50)
-            except Exception:  # noqa: BLE001 - one bad read must not kill the sweep
+            except Exception as _partner_exc:
+                record_failure("runtime.PartnerRuntime._resume_interrupted_missions", _partner_exc)
                 continue
             for mission in rows:
                 state = mission.state or {}
@@ -2665,8 +2697,8 @@ class PartnerRuntime(
                 continue
             try:
                 self.gateway.send(plat, ChatRef(platform=plat, chat_id=cid), text)
-            except Exception:  # noqa: BLE001 - best-effort delivery
-                pass
+            except Exception as e:
+                record_failure("runtime.PartnerRuntime._arena_notify", e)
 
     def _tick_beacon(self, force: bool = False) -> None:
         """Write the status beacon on cadence (wave 94).  Never raises."""
@@ -2680,7 +2712,8 @@ class PartnerRuntime(
             from ..beacon import build_beacon_state, write_status
 
             write_status(self.settings.home, build_beacon_state(self))
-        except Exception:  # noqa: BLE001 - beacon must never take the bot down
+        except Exception as e:
+            record_failure("runtime.PartnerRuntime._tick_beacon", e)
             _log.debug("status beacon write failed", exc_info=True)
 
     def run(self, *, duration: float | None = None) -> None:
@@ -2705,8 +2738,8 @@ class PartnerRuntime(
                 while not self._stopped.is_set():
                     self._tick_beacon()
                     time.sleep(0.5)
-        except KeyboardInterrupt:  # noqa: E103, E106 - interrupt ends the beacon loop; finally stops it
-            pass
+        except KeyboardInterrupt as e:  # noqa: E103, E106 - interrupt ends the beacon loop; finally stops it
+            record_failure("runtime.PartnerRuntime.run", e)
         finally:
             self.stop()
 
@@ -2715,34 +2748,34 @@ class PartnerRuntime(
         if getattr(self, "_arena", None) is not None:
             try:
                 self._arena.stop_loop()
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as e:
+                record_failure("runtime.PartnerRuntime.stop", e)
         if getattr(self, "_research", None) is not None:
             try:
                 self._research.stop_loop()
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as e:
+                record_failure("runtime.PartnerRuntime.stop:2723", e)
         if self._autonomy is not None:
             try:
                 self._autonomy.stop()
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as e:
+                record_failure("runtime.PartnerRuntime.stop:2728", e)
         if getattr(self, "_scheduler", None) is not None:
             try:
                 self._scheduler.stop()
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as e:
+                record_failure("runtime.PartnerRuntime.stop:2733", e)
         if getattr(self, "_trigger_engine", None) is not None:
             try:
                 self._trigger_engine.stop()
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as e:
+                record_failure("runtime.PartnerRuntime.stop:2738", e)
         engine = getattr(self, "_game_engine_obj", None)
         if engine is not None:
             try:
                 engine.shutdown()
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as e:
+                record_failure("runtime.PartnerRuntime.stop:2744", e)
         self.gateway.stop()
         # Drain (bounded) BEFORE the pool shuts down and the context's DB
         # closes: an in-flight pump writing after db.close() raises
@@ -2757,8 +2790,8 @@ class PartnerRuntime(
             state = build_beacon_state(self)
             state["stopped"] = True
             write_status(self.settings.home, state)
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as e:
+            record_failure("runtime.PartnerRuntime.stop:2760", e)
         _log.info("partner runtime stopped: %s", self._stats_snapshot())
 
     def status(self) -> dict[str, Any]:
@@ -2793,6 +2826,10 @@ class PartnerRuntime(
                 if self.brain.lexicon is not None
                 else {"available": False, "enabled": False, "module": "partner"}
             ),
+            # Partner failure ledger: best-effort fallbacks that fired
+            # instead of raising. Additive key; absent when the ledger
+            # module is unavailable (never breaks status).
+            "failures": _partner_failures_status(),
             # Wave D: how many interactive replies hit the reply budget and
             # fell back instead of stalling the chat.
             "reply_timeouts": self.brain.responder.reply_timeouts,
@@ -2809,7 +2846,8 @@ class PartnerRuntime(
                 "degraded": es.ladders.degraded_subsystems(),
                 "ladders": es.ladders.status_all(),
             }
-        except Exception:  # noqa: BLE001 - status must never break
+        except Exception as e:
+            record_failure("runtime.PartnerRuntime._degradation_status", e)
             return {"wired": True, "degraded": [], "ladders": {}}
 
     def say(self, chat_key: str, text: str, *, reply_to: str = "") -> Any:
@@ -2843,8 +2881,8 @@ class PartnerRuntime(
             persisted = str(data.get("mode") or "")
             if persisted in {"off", "suggest", "auto"}:
                 self.settings.partner.autonomy_mode = persisted
-        except Exception:  # noqa: BLE001 - a stale kv row must not break boot
-            pass
+        except Exception as e:
+            record_failure("runtime.PartnerRuntime._apply_persisted_mode", e)
 
     # ── control commands (live steering) ─────────────────────────────────────
     def _is_operator(self, message: ChatMessage) -> bool:
@@ -2929,7 +2967,8 @@ class PartnerRuntime(
             return f"couldn't start the watch: {exc}"
         try:
             alert = watcher.check(w)
-        except Exception:  # noqa: BLE001
+        except Exception as e:
+            record_failure("runtime.PartnerRuntime._track_hook", e)
             alert = None
         msg = f"👀 watching {w.route} on {w.departure_date} (id {w.id})."
         if alert is not None:
@@ -2949,7 +2988,8 @@ class PartnerRuntime(
             from ...travel.itinerary import (
                 ItineraryBuilder, confirmation_hook, added_message,
             )
-        except Exception:  # noqa: BLE001
+        except Exception as e:
+            record_failure("runtime.PartnerRuntime._trip_hook", e)
             return None
         if not confirmation_hook(text):
             return None
@@ -3002,7 +3042,8 @@ class PartnerRuntime(
                     res.master_path,
                     caption=f"🎵 {res.title} — AI instrumental + {vocal_txt}")
                 text += "\nsent the master to this chat."
-            except Exception:  # noqa: BLE001
+            except Exception as e:
+                record_failure("runtime.PartnerRuntime._music_full_hook", e)
                 text += f"\nmaster: {res.master_path}"
         return text
 
@@ -3096,7 +3137,8 @@ class PartnerRuntime(
             player = None
             try:
                 player = self._game_player(message)
-            except Exception:  # noqa: BLE001
+            except Exception as e:
+                record_failure("runtime.PartnerRuntime._progression_gate", e)
                 player = None
             if player is None:
                 # No resolvable player (e.g. console call without a sender):
@@ -3109,7 +3151,8 @@ class PartnerRuntime(
                 player_key = player.key
             db = getattr(self.context, "db", None)
             return locked_reply(kind, db, player_key)
-        except Exception:  # noqa: BLE001
+        except Exception as e:
+            record_failure("runtime.PartnerRuntime._progression_gate:3112", e)
             return None
 
     def _build_adapter(self, name: str) -> Any:
@@ -3676,8 +3719,8 @@ class PartnerRuntime(
                 current -= 1
             try:
                 rel.save(self.context.db)
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as e:
+                record_failure("runtime.PartnerRuntime.handle_control", e)
             return f"stage: {rel.stage}"
 
         if kind == "power":
@@ -4623,7 +4666,8 @@ class PartnerRuntime(
     def _base_rate_limit(self) -> int:
         try:
             return int(self.settings.chat.max_per_hour)
-        except Exception:  # noqa: BLE001
+        except Exception as e:
+            record_failure("runtime.PartnerRuntime._base_rate_limit", e)
             return 60
 
     @staticmethod
@@ -4666,7 +4710,8 @@ class PartnerRuntime(
                     text, minimum=1.5, cap=cap, rng=self.brain.presence_rng,
                 ),
             )
-        except Exception:  # noqa: BLE001
+        except Exception as e:
+            record_failure("runtime.PartnerRuntime._typing_for", e)
             _log.debug("typing indicator failed (cosmetic)", exc_info=True)
 
     def _typing_keepalive(self, chat: ChatRef, stop: threading.Event) -> None:
@@ -4788,8 +4833,8 @@ class PartnerRuntime(
         """Best-effort chat notification (background book pipeline)."""
         try:
             self.gateway.send(chat.platform, chat, text)
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as e:
+            record_failure("runtime.PartnerRuntime._notify", e)
 
     def start_platform(self, name: str) -> dict[str, Any]:
         return self.gateway.start_one(name.strip().lower(), self.on_message)
@@ -4821,15 +4866,16 @@ class PartnerRuntime(
             modes = AgentModes(
                 proposal_sink=self._file_initiative_proposal,
                 requires_approval=self._initiative_requires_approval)
-        except Exception:  # noqa: BLE001 - a mode engine never breaks chat
+        except Exception as e:
+            record_failure("runtime.PartnerRuntime.agent_modes", e)
             from ..modes import AgentModes
 
             modes = AgentModes()
         self.__dict__["_agent_modes"] = modes
         try:
             self.context.extras["agent_modes"] = modes
-        except Exception:  # noqa: BLE001 - extras are best-effort
-            pass
+        except Exception as e:
+            record_failure("runtime.PartnerRuntime.agent_modes:4831", e)
         return modes
 
     def _initiative_requires_approval(self, spec: dict[str, Any],
@@ -4846,7 +4892,8 @@ class PartnerRuntime(
                         or getattr(self.context, "settings", None))
             mode = getattr(getattr(settings, "partner", None),
                            "autonomy_mode", "auto")
-        except Exception:  # noqa: BLE001 - unreadable policy = auto
+        except Exception as e:
+            record_failure("runtime.PartnerRuntime._initiative_requires_approval", e)
             mode = "auto"
         return str(mode or "auto").strip().lower() == "suggest"
 
@@ -4867,8 +4914,8 @@ class PartnerRuntime(
         try:
             ref = ChatRef.parse(chat_key)
             platform, chat_id = ref.platform, ref.chat_id
-        except Exception:  # noqa: BLE001 - unparseable chat key: local fallback
-            pass
+        except Exception as e:
+            record_failure("runtime.PartnerRuntime._file_initiative_proposal", e)
         content = str(spec.get("proposal")
                       or f"autonomous initiative: {initiative.label}")
         reason = f"autonomous initiative from {initiative.source}"
@@ -4903,8 +4950,8 @@ class PartnerRuntime(
                 r = dict(row)
                 r["queue"] = "upgrade"
                 rows.append(r)
-        except Exception:  # noqa: BLE001 — upgrade table may not exist yet
-            pass
+        except Exception as e:
+            record_failure("runtime.PartnerRuntime.proposals", e)
         for row in self.context.db.query(
             "SELECT * FROM proactive_log WHERE status = ? ORDER BY decided_at DESC LIMIT 50",
             (status,),
@@ -4932,8 +4979,8 @@ class PartnerRuntime(
                 return {"ok": True,
                         "status": done.get("status", "implemented"),
                         "proposal": done}
-        except Exception:  # noqa: BLE001 — fall through to proactive path
-            pass
+        except Exception as e:
+            record_failure("runtime.PartnerRuntime.approve", e)
         # Initiatives (kind="initiative") live in proactive_log but are
         # ACTIONS, not messages — approving one RUNS the action via the
         # modes engine.  This routes BEFORE the autonomy/direct paths,
@@ -4958,13 +5005,13 @@ class PartnerRuntime(
                         "UPDATE proactive_log SET status = ?, acted_at = ? "
                         "WHERE id = ?",
                         (status, time.time(), proposal_id))
-                except Exception:  # noqa: BLE001
-                    pass
+                except Exception as e:
+                    record_failure("runtime.PartnerRuntime.approve:4961", e)
                 return {"ok": init.status == "done", "status": status,
                         "error": init.error or None,
                         "initiative": init.to_dict()}
-        except Exception:  # noqa: BLE001 — fall through to proactive path
-            pass
+        except Exception as e:
+            record_failure("runtime.PartnerRuntime.approve:4966", e)
         if self._autonomy is not None:
             return self._autonomy.approve(proposal_id)
         return _direct_approve(self.context, self.gateway, proposal_id)
@@ -4990,8 +5037,8 @@ class PartnerRuntime(
                 return {"ok": True,
                         "status": denied.get("status", "denied"),
                         "proposal": denied}
-        except Exception:  # noqa: BLE001 — fall through to proactive path
-            pass
+        except Exception as e:
+            record_failure("runtime.PartnerRuntime.deny", e)
         # Initiatives: denying one discards its action (never runs it)
         # and clears the row — including rows orphaned by a restart.
         try:
@@ -5000,18 +5047,18 @@ class PartnerRuntime(
             if row is not None and row.get("kind") == "initiative":
                 try:
                     self.agent_modes.deny_proposal(proposal_id)
-                except KeyError:
-                    pass  # orphaned by a restart: still clear the row
+                except KeyError as e:
+                    record_failure("runtime.PartnerRuntime.deny:5003", e) # orphaned by a restart: still clear the row
                 try:
                     self.context.db.execute(
                         "UPDATE proactive_log SET status = 'denied', "
                         "acted_at = ? WHERE id = ?",
                         (time.time(), proposal_id))
-                except Exception:  # noqa: BLE001
-                    pass
+                except Exception as e:
+                    record_failure("runtime.PartnerRuntime.deny:5010", e)
                 return {"ok": True, "status": "denied"}
-        except Exception:  # noqa: BLE001 — fall through to proactive path
-            pass
+        except Exception as e:
+            record_failure("runtime.PartnerRuntime.deny:5013", e)
         if self._autonomy is not None:
             return self._autonomy.deny(proposal_id)
         return _direct_deny(self.context, proposal_id)

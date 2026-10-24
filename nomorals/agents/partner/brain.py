@@ -24,6 +24,7 @@ from ...partner.responder import PartnerResponder, detect_signals
 from ...social.chat.base import ChatKind, ChatMessage, ChatRef
 from .outcome import PresenceOutcome
 from .approvals import _key_set
+from .failures import record_failure
 _log = get_logger(__name__)
 
 
@@ -40,7 +41,8 @@ def _style_overrides_for(chat_key: str) -> dict[str, Any]:
         from ...partner.style_overrides import get_overrides
 
         return get_overrides(chat_key or "")
-    except Exception:  # noqa: BLE001 - style overrides never break chat
+    except Exception as e:
+        record_failure("brain._style_overrides_for", e)
         return {}
 
 
@@ -199,8 +201,8 @@ class PartnerBrain:
                         meta = getattr(message, "meta", None)
                         if isinstance(meta, dict):
                             meta["stt_failure_reason"] = reason
-                    except Exception:  # noqa: BLE001 - meta bookkeeping never breaks chat
-                        pass
+                    except Exception as e:
+                        record_failure("brain.PartnerBrain._media_notes", e)
                     # NEVER the bare "audio: <name>" fallback here: that
                     # bare file reference is what made the model guess
                     # the attachment was a music clip and reply "what's
@@ -230,8 +232,8 @@ class PartnerBrain:
                     meta.pop("voice_untranscribed_reason", None)
                 elif first_reason:
                     meta["voice_untranscribed_reason"] = first_reason
-        except Exception:  # noqa: BLE001 - meta bookkeeping never breaks chat
-            pass
+        except Exception as e:
+            record_failure("brain.PartnerBrain._media_notes:233", e)
         return notes
 
     def _spoken_command(self, message: ChatMessage) -> str:
@@ -268,15 +270,15 @@ class PartnerBrain:
                     if isinstance(meta, dict):
                         meta.pop("stt_failure_reason", None)
                         meta.pop("voice_untranscribed_reason", None)
-                except Exception:  # noqa: BLE001 - meta bookkeeping never breaks chat
-                    pass
+                except Exception as e:
+                    record_failure("brain.PartnerBrain._spoken_command", e)
             if text.startswith("/"):
                 try:
                     meta = getattr(message, "meta", None)
                     if isinstance(meta, dict):
                         meta.pop("stt_failure_reason", None)
-                except Exception:  # noqa: BLE001 - meta bookkeeping never breaks chat
-                    pass
+                except Exception as e:
+                    record_failure("brain.PartnerBrain._spoken_command:278", e)
                 return text
             if not note:
                 reason = getattr(self, "_last_stt_failure_reason", "")
@@ -285,8 +287,8 @@ class PartnerBrain:
                         meta = getattr(message, "meta", None)
                         if isinstance(meta, dict):
                             meta["stt_failure_reason"] = reason
-                    except Exception:  # noqa: BLE001 - meta bookkeeping never breaks chat
-                        pass
+                    except Exception as e:
+                        record_failure("brain.PartnerBrain._spoken_command:288", e)
         return ""
 
     def _transcribe_media_note(self, media: Any) -> str:
@@ -439,8 +441,8 @@ class PartnerBrain:
                     return True
                 if (r.get("role") or "") == "assistant":
                     return True
-        except Exception:  # noqa: BLE001 - the guard must never eat chat
-            pass
+        except Exception as e:
+            record_failure("brain.PartnerBrain._already_addressed", e)
         return False
 
     def _refresh_profile_async(self, chat_key: str) -> None:
@@ -516,7 +518,8 @@ class PartnerBrain:
                     Capability.SOCIAL_PLAY,
                     Capability.FS_READ,
                 )
-            except Exception:
+            except Exception as e:
+                record_failure("brain.PartnerBrain.generate_with_tools", e)
                 capabilities = None
         loop_ctx = {
             "platform": getattr(chat, "platform", ""),
@@ -582,7 +585,8 @@ class PartnerBrain:
                              key=lambda h: int(h.get("consecutive_failures") or 0))
                 self._last_error = f"{latest.get('name', '?')}: " \
                     f"{latest.get('last_error', '')}"[:200]
-        except Exception:  # noqa: BLE001 - beacon bookkeeping never raises
+        except Exception as e:
+            record_failure("brain.PartnerBrain._note_reply", e)
             self._last_error = "all providers failed"
 
     def _log_training_pair(self, chat: ChatRef, user_text: str, reply: str, model: str, label: str) -> None:
@@ -658,8 +662,8 @@ class PartnerBrain:
             self.mood.resolve_fight(repaired=True, repaired_by="partner")
             try:
                 self.relationship.record_fight(reason, repaired=True, repaired_by="partner")
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as _partner_exc:
+                record_failure("brain.PartnerBrain.handle_message", _partner_exc)
 
         # 3b. Presence: a real person is sometimes busy. A low-stakes message
         #     may be read and left; a substantive one may be answered minutes
@@ -759,7 +763,8 @@ class PartnerBrain:
                 from ..memory.proactive import surface as _proactive_surface
                 proactive_lines = _proactive_surface(
                     message.text, self.context.memory, origin=_origin)
-            except Exception:  # noqa: BLE001 - proactive is a bonus, never load-bearing
+            except Exception as e:  # noqa: never load-bearing
+                record_failure("brain.PartnerBrain._generate_and_persist", e)
                 proactive_lines = []
         # Per-adapter partner context (two-bot split): the adapter stamps
         # ``meta["partner_context"]`` on every inbound message — True on
@@ -796,8 +801,8 @@ class PartnerBrain:
                 get_profile(self.context.db, chat.key))
             if profile_lines:
                 background_lines = list(background_lines) + profile_lines
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as e:
+            record_failure("brain.PartnerBrain._generate_and_persist:799", e)
 
         # Generate. History excludes the row of the message being
         # answered (persisted above for crash safety): both generation
@@ -976,8 +981,8 @@ class PartnerBrain:
                 )
             for chat_id, msgs in list(by_chat.items())[:2]:
                 lines.extend(msgs[-2:])
-        except Exception:  # noqa: BLE001 - continuity is a niceness, never fatal
-            pass
+        except Exception as e:  # noqa: never fatal
+            record_failure("brain.PartnerBrain._continuity_lines", e)
         try:
             loops = KVStore(db).get("partner.open_loops", default=[])
             fresh = [
@@ -990,8 +995,8 @@ class PartnerBrain:
                     text = str(loop.get("text", "")).strip()
                     if text:
                         lines.append(f"open thread from {platform}: {text[:90]}")
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as e:
+            record_failure("brain.PartnerBrain._continuity_lines:993", e)
         return lines[-5:]
 
     def _reasoning_digest(self, text: str) -> str:
@@ -1028,7 +1033,8 @@ class PartnerBrain:
             return (f"[my working reasoning on this, verify it before "
                     f"answering] {steps or 'straight chain of steps'} → "
                     f"working answer: {result.answer[:300]}")
-        except Exception:  # noqa: BLE001 — never let a bad pass kill the reply
+        except Exception as e:
+            record_failure("brain.PartnerBrain._reasoning_digest", e)
             _log.debug("partner reasoning pass failed", exc_info=True)
             return ""
 
@@ -1085,7 +1091,8 @@ class PartnerBrain:
             allowed = {s.strip() for s in
                        (self.settings.partner.owner_sender_ids or "").split(",")
                        if s.strip()}
-        except Exception:  # noqa: BLE001
+        except Exception as e:
+            record_failure("brain.PartnerBrain._is_owner_sender", e)
             return False
         return sid in allowed
 
@@ -1108,7 +1115,8 @@ class PartnerBrain:
         try:
             data = KVStore(db).get(f"curated.{chat_key}", default={})
             last = float(data.get("ts", 0.0))
-        except Exception:  # noqa: BLE001
+        except Exception as e:
+            record_failure("brain.PartnerBrain._maybe_curate", e)
             last = 0.0
         count = int(db.scalar(
             "SELECT COUNT(*) FROM messages WHERE conversation_id = ? AND role = 'user' "
@@ -1119,8 +1127,8 @@ class PartnerBrain:
             return
         try:
             KVStore(db).set(f"curated.{chat_key}", {"ts": time.time()})
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as e:
+            record_failure("brain.PartnerBrain._maybe_curate:1122", e)
         if self.curator_hook is not None:
             try:
                 self.curator_hook(chat_key)
@@ -1189,8 +1197,8 @@ class PartnerBrain:
             if subject == "user" and predicate and object_:
                 try:
                     self.relationship.note_user_fact(predicate, object_)
-                except Exception:  # noqa: BLE001
-                    pass
+                except Exception as e:
+                    record_failure("brain.PartnerBrain.curate", e)
             if predicate and object_:
                 try:
                     db.execute(
@@ -1205,13 +1213,13 @@ class PartnerBrain:
             try:
                 self.relationship.add_milestone(milestone.strip()[:200], kind="moment")
                 self.mood.note_event("milestone", intensity=0.6)
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as e:
+                record_failure("brain.PartnerBrain.curate:1208", e)
         written["open_loops"] = self._merge_open_loops(data.get("open_loops"), chat_key)
         try:
             self.relationship.save(db)
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as e:
+            record_failure("brain.PartnerBrain.curate:1213", e)
         return written
 
     def _merge_open_loops(self, new_loops: Any, chat_key: str) -> list[str]:
@@ -1223,7 +1231,8 @@ class PartnerBrain:
         db = self.context.db
         try:
             existing = KVStore(db).get("partner.open_loops", default=[])
-        except Exception:  # noqa: BLE001
+        except Exception as e:
+            record_failure("brain.PartnerBrain._merge_open_loops", e)
             existing = []
         if not isinstance(existing, list):
             existing = []

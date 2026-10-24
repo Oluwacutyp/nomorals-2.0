@@ -144,6 +144,11 @@ class RuntimeMetaMixin:
                 f"({degradation['ladders'][name]['rung_name']})"
                 for name in degradation["degraded"])
             lines.append(f"degradation: {rungs}")
+        # Partner failure ledger: surfaced ONLY when best-effort
+        # fallbacks have actually fired — silence when healthy.
+        from .failures import failure_count, format_failures
+        if failure_count():
+            lines.append(format_failures(limit=5))
         return "\n".join(lines)
 
     def _control_mood(self, arg: str) -> str:

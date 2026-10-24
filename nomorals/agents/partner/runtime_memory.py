@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import time
+from .failures import record_failure
 
 class RuntimeMemoryMixin:
     """RuntimeMemoryMixin for :class:`PartnerRuntime`."""
@@ -163,8 +164,8 @@ class RuntimeMemoryMixin:
                               rest.strip(), sess.expected_answer,
                               topic=sess.topic)
                     out += "\n\n📝 noted in your mistake notebook for review."
-                except Exception:  # noqa: BLE001
-                    pass
+                except Exception as e:
+                    record_failure("runtime_memory.RuntimeMemoryMixin._control_tutor", e)
             if turn.done:
                 out += "\n\n🎓 you've got this one — nice work."
             return out
@@ -267,8 +268,8 @@ class RuntimeMemoryMixin:
                         caption="🎙️ Ekiti reference — shadow this")
                     if getattr(sent, "ok", False):
                         return f"🎙️ reference audio sent ({result.get('backend', '?')})"
-                except Exception:  # noqa: BLE001
-                    pass
+                except Exception as e:
+                    record_failure("runtime_memory.RuntimeMemoryMixin._control_ekiti", e)
                 return f"🎙️ reference audio saved at {path}"
             if verb == "check":
                 try:
@@ -796,7 +797,8 @@ class RuntimeMemoryMixin:
         devices: list[dict] = []
         try:
             aliases = load_aliases(memory)
-        except Exception:  # noqa: BLE001
+        except Exception as _partner_exc:
+            record_failure("runtime_memory.RuntimeMemoryMixin._control_routine", _partner_exc)
             aliases = {}
         draft = build_routine(rest, devices=devices, aliases=aliases,
                               memory=memory)
@@ -830,8 +832,8 @@ class RuntimeMemoryMixin:
             if len(parts) > 2:
                 try:
                     hours = float(parts[2])
-                except ValueError:
-                    pass
+                except ValueError as e:
+                    record_failure("runtime_memory.RuntimeMemoryMixin._control_home", e)
             import time as _t
             return twin.what_changed(_t.time() - hours * 3600)
         if rest in ("unusual?", "unusual", "anomalies"):
@@ -967,8 +969,8 @@ class RuntimeMemoryMixin:
         alert = None
         try:
             alert = watcher.check(w)
-        except Exception:  # noqa: BLE001 - first check is best-effort
-            pass
+        except Exception as e:
+            record_failure("runtime_memory.RuntimeMemoryMixin._control_track", e)
         msg = (f"👀 watching {w.route} on {w.departure_date}")
         if w.target_kobo:
             msg += f" — I'll ping you under {format_naira(w.target_kobo)}"
@@ -1062,7 +1064,8 @@ class RuntimeMemoryMixin:
         """
         try:
             return getattr(self, "_gcal_instance", None)
-        except Exception:  # noqa: BLE001
+        except Exception as e:
+            record_failure("runtime_memory.RuntimeMemoryMixin._resolve_gcal", e)
             return None
 
     def _control_mandate(self, tail: str, *, chat_key: str = "") -> str:
