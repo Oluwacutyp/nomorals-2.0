@@ -29,6 +29,7 @@ from dataclasses import dataclass, field
 from math import sqrt
 
 from ..core.logging_setup import get_logger
+from .failures import record_failure
 
 _log = get_logger(__name__)
 
@@ -120,7 +121,8 @@ class DealBreaker:
                         and hi is not None
                         and float(lo) <= float(actual) <= float(hi))
             return True
-        except Exception:  # noqa: BLE001 — a bad predicate never blocks
+        except Exception as exc:  # noqa: BLE001 — a bad predicate never blocks
+            record_failure("questionnaire.passes", exc)
             return True
 
 
@@ -192,7 +194,8 @@ class Questionnaire:
                 out.append(self.add_question(qid, text, attr,
                                              section=section))
             return [q for q in out if q.question_id]
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("questionnaire.ensure_starters", exc)
             return []
 
     def add_question(self, question_id: str, text: str,
@@ -212,13 +215,15 @@ class Questionnaire:
             return self.get(question_id) or Question(question_id=question_id,
                                                      text=text,
                                                      attribute=attribute)
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("questionnaire.add_question", exc)
             return Question()
 
     def _row_to_question(self, r) -> Question:
         try:
             acceptable = json.loads(r["acceptable"] or "[]")
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("questionnaire.row_acceptable", exc)
             acceptable = []
         try:
             section = r["section"] or ""
@@ -239,7 +244,8 @@ class Questionnaire:
                 "SELECT * FROM answers WHERE owner = ? AND question_id = ?",
                 (self.owner, question_id)).fetchone()
             return self._row_to_question(r) if r else None
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("questionnaire.get", exc)
             return None
 
     def answer(self, question_id: str, importance: int,
@@ -261,7 +267,8 @@ class Questionnaire:
                  question_id))
             self._db.commit()
             return cur.rowcount > 0
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("questionnaire.answer", exc)
             return False
 
     def set_acceptable(self, question_id: str,
@@ -282,7 +289,8 @@ class Questionnaire:
                 (json.dumps(clean), time.time(), self.owner, question_id))
             self._db.commit()
             return cur.rowcount > 0
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("questionnaire.set_acceptable", exc)
             return False
 
     def unanswered(self, section: str = "") -> list[Question]:
@@ -301,7 +309,8 @@ class Questionnaire:
                     """SELECT * FROM answers WHERE owner = ? AND importance = 0
                        ORDER BY question_id""", (self.owner,)).fetchall()
             return [self._row_to_question(r) for r in rows]
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("questionnaire.unanswered", exc)
             return []
 
     def answered(self) -> list[Question]:
@@ -313,7 +322,8 @@ class Questionnaire:
                 """SELECT * FROM answers WHERE owner = ? AND importance > 0
                    ORDER BY updated_at DESC""", (self.owner,)).fetchall()
             return [self._row_to_question(r) for r in rows]
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("questionnaire.answered", exc)
             return []
 
     def weights(self) -> dict[str, float]:
@@ -331,7 +341,8 @@ class Questionnaire:
                 if attr:
                     out[attr] = out.get(attr, 0.0) + float(r["importance"] or 0)
             return out
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("questionnaire.weights", exc)
             return {}
 
     def okcupid_weights(self) -> dict[str, int]:
@@ -350,7 +361,8 @@ class Questionnaire:
                     w = IMPORTANCE_WEIGHTS.get(int(r["importance"] or 1), 1)
                     out[attr] = max(out.get(attr, 0), w)
             return out
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("questionnaire.okcupid_weights", exc)
             return {}
 
     # ── deal-breakers ───────────────────────────────────────────
@@ -372,7 +384,8 @@ class Questionnaire:
                  json.dumps(value, default=str)))
             self._db.commit()
             return True
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("questionnaire.set_dealbreaker", exc)
             return False
 
     def remove_dealbreaker(self, name: str) -> bool:
@@ -384,7 +397,8 @@ class Questionnaire:
                 (self.owner, name))
             self._db.commit()
             return cur.rowcount > 0
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("questionnaire.remove_dealbreaker", exc)
             return False
 
     def dealbreakers(self) -> list[DealBreaker]:
@@ -398,14 +412,16 @@ class Questionnaire:
             for r in rows:
                 try:
                     value = json.loads(r["value"] or "null")
-                except Exception:  # noqa: BLE001
+                except Exception as exc:  # noqa: BLE001
+                    record_failure("questionnaire.dealbreakers_value", exc)
                     value = None
                 out.append(DealBreaker(name=r["name"] or "",
                                        attribute=r["attribute"] or "",
                                        predicate=r["predicate"] or "eq",
                                        value=value))
             return out
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("questionnaire.dealbreakers", exc)
             return []
 
     def boundary_questions(self) -> list[Question]:
@@ -418,7 +434,8 @@ class Questionnaire:
                    WHERE owner = ? AND section = 'boundaries'
                    ORDER BY question_id""", (self.owner,)).fetchall()
             return [self._row_to_question(r) for r in rows]
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("questionnaire.boundary_questions", exc)
             return []
 
     # ── two-sided rankings (for stable matching) ──────────────────
@@ -441,7 +458,8 @@ class Questionnaire:
                 (self.owner, who, side, json.dumps(clean), time.time()))
             self._db.commit()
             return True
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("questionnaire.set_ranking", exc)
             return False
 
     def rankings(self, side: str) -> dict[str, list[str]]:
@@ -456,11 +474,13 @@ class Questionnaire:
             for r in rows:
                 try:
                     lst = json.loads(r["ranking"] or "[]")
-                except Exception:  # noqa: BLE001
+                except Exception as exc:  # noqa: BLE001
+                    record_failure("questionnaire.rankings_list", exc)
                     lst = []
                 out[r["who"]] = [x for x in lst if isinstance(x, str)]
             return out
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("questionnaire.rankings", exc)
             return {}
 
     # ── capacities (for Hospital–Resident matching) ───────────────
@@ -477,7 +497,8 @@ class Questionnaire:
                 (self.owner, reviewer, capacity))
             self._db.commit()
             return True
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("questionnaire.set_capacity", exc)
             return False
 
     def capacities(self) -> dict[str, int]:
@@ -488,7 +509,8 @@ class Questionnaire:
                 "SELECT reviewer, capacity FROM capacities WHERE owner = ?",
                 (self.owner,)).fetchall()
             return {r["reviewer"]: int(r["capacity"] or 1) for r in rows}
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("questionnaire.capacities", exc)
             return {}
 
     # ── scoring ─────────────────────────────────────────────────
@@ -502,7 +524,8 @@ class Questionnaire:
             return [c for c in (candidates or [])
                     if all(b.passes((c or {}).get("attributes") or {})
                            for b in breakers)]
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("questionnaire.filter_dealbreakers", exc)
             return list(candidates or [])
 
     def match_breakdown(self, candidate_attrs: dict) -> list[dict]:
@@ -544,7 +567,8 @@ class Questionnaire:
                             "weight": weight, "matched": matched,
                             "detail": detail})
             return out
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("questionnaire.match_breakdown", exc)
             return out
 
     def satisfaction(self, candidate_attrs: dict) -> float:
@@ -561,7 +585,8 @@ class Questionnaire:
                 return 0.5
             got = sum(r["weight"] for r in rows if r["matched"])
             return max(0.0, min(1.0, got / total))
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("questionnaire.satisfaction", exc)
             return 0.5
 
     def score(self, candidate: dict) -> float:
@@ -588,7 +613,8 @@ class Questionnaire:
                     match = max(0.0, min(1.0, float(val)))
                 got += importance * match
             return max(0.0, min(1.0, got / total))
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("questionnaire.score", exc)
             return 0.5
 
     def match_percent(self, other: "Questionnaire") -> float:
