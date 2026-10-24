@@ -49,6 +49,7 @@ from typing import Any, Callable
 
 from ..core.logging_setup import get_logger
 from .source_registry import DEFAULT_REGISTRY, Licence, SourceRegistry
+from .download_kit_failures import record_failure
 
 _log = get_logger(__name__)
 
@@ -88,7 +89,8 @@ class ExtractorDescriptor:
         try:
             return any(re.search(p, url or "", re.I)
                        for p in self.url_patterns)
-        except Exception:  # noqa: BLE001
+        except Exception as e:
+            record_failure("matches", e)
             return False
 
     def format_for(self, quality: str) -> str:
@@ -98,7 +100,8 @@ class ExtractorDescriptor:
                 if label.lower() == (quality or "").lower():
                     return fmt
             return ""
-        except Exception:  # noqa: BLE001
+        except Exception as e:
+            record_failure("format_for", e)
             return ""
 
 
@@ -151,7 +154,8 @@ def descriptors_for_registry(registry: SourceRegistry) -> list[ExtractorDescript
             if callable(eff_rule):
                 try:
                     rule = eff_rule(src) or ""
-                except Exception:  # noqa: BLE001 - view degrades to seed facts
+                except Exception as e:  # view degrades to seed facts
+                    record_failure("descriptors_for_registry:effective_rule", e)
                     rule = src.extraction_rule
             if not rule:
                 continue
@@ -160,7 +164,8 @@ def descriptors_for_registry(registry: SourceRegistry) -> list[ExtractorDescript
                 if callable(eff_qmap):
                     try:
                         qmap = eff_qmap(src) or ()
-                    except Exception:  # noqa: BLE001
+                    except Exception as e:
+                        record_failure("descriptors_for_registry:effective_qmap", e)
                         qmap = src.quality_map
             out.append(ExtractorDescriptor(
                 name=(src.name or src.domain).lower().replace(" ", ""),
@@ -171,8 +176,8 @@ def descriptors_for_registry(registry: SourceRegistry) -> list[ExtractorDescript
                 licence=src.licence,
                 notes=src.notes,
                 downloadable=src.downloadable))
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as e:
+        record_failure("descriptors_for_registry", e)
     return out + _structural_fallbacks()
 
 
@@ -205,13 +210,14 @@ class ExtractorRegistry:
                 generic = [d for d in self._descs if d.name == "ytdlp-generic"]
                 rest = [d for d in self._descs if d.name != "ytdlp-generic"]
                 self._descs = rest + [desc] + generic
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as e:
+            record_failure("ExtractorRegistry.register", e)
 
     def for_url(self, url: str) -> list[ExtractorDescriptor]:
         try:
             return [d for d in self._descs if d.matches(url or "")]
-        except Exception:  # noqa: BLE001
+        except Exception as e:
+            record_failure("ExtractorRegistry.for_url", e)
             return []
 
     def best_for(self, url: str) -> ExtractorDescriptor | None:
@@ -251,7 +257,8 @@ def is_cloudflare_challenge(text: str) -> bool:
     try:
         low = (text or "").lower()
         return any(m in low for m in _CF_MARKERS)
-    except Exception:  # noqa: BLE001
+    except Exception as e:
+        record_failure("is_cloudflare_challenge", e)
         return False
 
 
@@ -306,7 +313,8 @@ class CloudflareStateMachine:
             if sig == "cookie_expired":
                 return self._move(CloudflareState.COOKIE_EXPIRED)
             return self.state
-        except Exception:  # noqa: BLE001
+        except Exception as e:
+            record_failure("CloudflareStateMachine.feed", e)
             return self.state
 
     def ask_owner(self) -> str:
@@ -321,7 +329,8 @@ class CloudflareStateMachine:
                     "`cf_clearance` cookie value (from your own browser, "
                     "your own session) and I'll store it in the vault with "
                     "an expiry — I won't ask again for this download.")
-        except Exception:  # noqa: BLE001
+        except Exception as e:
+            record_failure("CloudflareStateMachine.ask_owner", e)
             return ""
 
 
@@ -343,7 +352,8 @@ def store_owner_cookie(store: Any, domain: str, cookie_value: str,
                   {"value": cookie_value, "expires_at": time.time() + ttl_s,
                    "domain": domain.lower()})
         return True
-    except Exception:  # noqa: BLE001
+    except Exception as e:
+        record_failure("store_owner_cookie", e)
         return False
 
 
@@ -358,7 +368,8 @@ def get_or_request_cookie(store: Any, domain: str,
         entry = None
         try:
             entry = store.get(f"{_COOKIE_NS}:{domain.lower()}")
-        except Exception:  # noqa: BLE001
+        except Exception as e:
+            record_failure("get_or_request_cookie:vault_read", e)
             entry = None
         if isinstance(entry, dict) and entry.get("value"):
             if float(entry.get("expires_at") or 0) > now:
@@ -370,7 +381,8 @@ def get_or_request_cookie(store: Any, domain: str,
             f"no Cloudflare cookie stored for {domain} — paste a fresh "
             "cf_clearance value from your own browser (your own session), "
             "and I'll store it in the vault with an expiry.")
-    except Exception:  # noqa: BLE001
+    except Exception as e:
+        record_failure("get_or_request_cookie", e)
         return "ask", "paste a fresh cf_clearance cookie value."
 
 
@@ -488,7 +500,8 @@ class ResumeDownloader:
             if meta_p.is_file():
                 try:
                     saved = json.loads(meta_p.read_text(encoding="utf-8"))
-                except Exception:  # noqa: BLE001
+                except Exception as e:
+                    record_failure("ResumeDownloader.download:meta_read", e)
                     saved = {}
             validators_changed = bool(partial) and bool(saved) and (
                 saved.get("etag") != validators["etag"]
@@ -519,8 +532,8 @@ class ResumeDownloader:
                 try:
                     dest_p.write_bytes(partial)
                     meta_p.write_text(json.dumps(validators), encoding="utf-8")
-                except OSError:
-                    pass
+                except OSError as e:
+                    record_failure("ResumeDownloader.download:partial_save", e)
                 return ResumeReport(error=f"fetch failed: {exc}",
                                     validators=validators,
                                     size_bytes=len(partial))
@@ -528,8 +541,8 @@ class ResumeDownloader:
             dest_p.write_bytes(data)
             try:
                 meta_p.unlink(missing_ok=True)
-            except OSError:
-                pass
+            except OSError as e:
+                record_failure("ResumeDownloader.download:meta_unlink", e)
             digest = hashlib.sha256(data).hexdigest()
             return ResumeReport(ok=True, path=str(dest_p),
                                 size_bytes=len(data),
@@ -555,9 +568,10 @@ class IntegrityLedger:
                 self.path = (Path.home() / ".cache" / "nomorals"
                              / "integrity-ledger.jsonl")
             self.path.parent.mkdir(parents=True, exist_ok=True)
-        except Exception:  # noqa: BLE001
+        except Exception as e:
             # tempfile.gettempdir() honours TMPDIR/TEMP/TMP on every OS;
             # a hardcoded "/tmp" is C:\\tmp on Windows (often unwritable).
+            record_failure("IntegrityLedger.__init__", e)
             self.path = Path(tempfile.gettempdir()) / "nomorals-integrity-ledger.jsonl"
 
     def append(self, *, url: str, sha256: str, size_bytes: int,
@@ -568,7 +582,8 @@ class IntegrityLedger:
             with open(self.path, "a", encoding="utf-8") as f:
                 f.write(json.dumps(row) + "\n")
             return True
-        except Exception:  # noqa: BLE001
+        except Exception as e:
+            record_failure("IntegrityLedger.append", e)
             return False
 
     def verify(self, dest: str | Path, *, url: str = "") -> tuple[bool, str]:
@@ -584,7 +599,8 @@ class IntegrityLedger:
                 for line in self.path.read_text(encoding="utf-8").splitlines():
                     try:
                         rows.append(json.loads(line))
-                    except Exception:  # noqa: BLE001
+                    except Exception as e:
+                        record_failure("IntegrityLedger.verify:bad_line", e)
                         continue
             except OSError:
                 return False, "no ledger entries"
