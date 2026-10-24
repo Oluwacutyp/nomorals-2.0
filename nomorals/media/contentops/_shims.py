@@ -57,6 +57,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ...core.logging_setup import get_logger
+from .failures import record_failure
 
 _log = get_logger(__name__)
 
@@ -125,8 +126,8 @@ def detect_beats(audio_path: str) -> list[float]:
     finally:
         try:
             os.unlink(tmp.name)
-        except OSError:
-            pass
+        except OSError as e:
+            record_failure("_shims.detect_beats", e)
     if not raw:
         return []
     import array
@@ -343,7 +344,8 @@ class _ShimVoiceSpec:
     def resolve(self, catalogue: Any) -> str:
         try:
             names = set(getattr(catalogue, "voices", {}) or {})
-        except Exception:
+        except Exception as e:
+            record_failure("_shims.resolve", e)
             names = set()
         for c in self.candidates():
             if c in names:

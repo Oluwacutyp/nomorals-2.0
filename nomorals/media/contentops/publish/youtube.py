@@ -56,6 +56,7 @@ from ....connectors.youtube import (
 from ....core.logging_setup import get_logger
 from . import PLATFORM_LIMITS, adapt_description, adapt_title
 from .ledger import PublishLedger
+from ..failures import record_failure
 
 __all__ = ["YouTubePublisher", "QUOTA_COSTS"]
 
@@ -163,8 +164,8 @@ class YouTubePublisher(YouTubeConnector):
         try:
             session_uri = str(resp.headers.get("Location", "")
                               or resp.headers.get("location", ""))
-        except Exception:  # noqa: BLE001 - headers may be a plain dict
-            pass
+        except Exception as e:  # headers may be a plain dict
+            record_failure("publish.youtube.start_resumable_session", e)
         if not session_uri:
             raise YouTubeError(
                 "youtube returned no resumable session URI (no Location "
@@ -199,7 +200,8 @@ class YouTubePublisher(YouTubeConnector):
         if resp.status == 308:
             try:
                 headers = resp.headers or {}
-            except Exception:  # noqa: BLE001 - defensive
+            except Exception as e:  # defensive
+                record_failure("publish.youtube.query_upload_offset", e)
                 headers = {}
             kept = str(headers.get("Range", "") or headers.get("range", ""))
             match = _RANGE_RE.search(kept)

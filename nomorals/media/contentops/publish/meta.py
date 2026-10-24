@@ -48,6 +48,7 @@ from ....connectors.instagram import API_BASE, InstagramConnector
 from ....core.logging_setup import get_logger
 from . import CapabilityUnavailable, adapt_description
 from .ledger import PublishLedger
+from ..failures import record_failure
 
 __all__ = ["MetaPublisher"]
 
@@ -336,7 +337,8 @@ class MetaPublisher(InstagramConnector):
             )
         try:
             body = resp.json()
-        except Exception:  # noqa: BLE001
+        except Exception as e:
+            record_failure("publish.meta.publish_facebook_video", e)
             body = {}
         if not resp.ok or not isinstance(body, dict) or not body.get("id"):
             detail = ""

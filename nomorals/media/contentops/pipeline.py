@@ -41,6 +41,7 @@ from typing import Any, Callable
 
 from ...core.logging_setup import get_logger
 from . import _shims
+from .failures import record_failure
 
 _log = get_logger(__name__)
 
@@ -154,8 +155,8 @@ class RunResult:
             self.decision_trail.append({
                 "at": datetime.now(timezone.utc).isoformat(),
                 "decision": str(decision), "reason": str(reason)})
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as e:
+            record_failure("pipeline.trail", e)
 
     def review_text(self) -> str:
         """God-tier post-render review summary."""
@@ -1135,7 +1136,8 @@ class ShortPipeline:
         if spec is not None:
             try:
                 resolved = spec.resolve(self.tts)
-            except Exception:  # noqa: BLE001 — resolve never raises, but
+            except Exception as e:  # resolve never raises, but
+                record_failure("pipeline._voice_candidates", e)
                 resolved = ""  # a foreign spec might
             if resolved:
                 return [resolved]
@@ -1143,8 +1145,8 @@ class ShortPipeline:
             if callable(fn):
                 try:
                     cands.extend(str(c) for c in fn() if c)
-                except Exception:  # noqa: BLE001
-                    pass
+                except Exception as e:
+                    record_failure("pipeline._voice_candidates#2", e)
             for attr in ("preferred_voice", "fallback_voice"):
                 v = getattr(spec, attr, "") or ""
                 if v and v not in cands:
@@ -1255,7 +1257,8 @@ class ShortPipeline:
         if niche is None:
             try:
                 niche = self._get_niche(getattr(job, "niche", ""))
-            except Exception:  # noqa: BLE001 — never break a render
+            except Exception as e:  # never break a render
+                record_failure("pipeline._resolve_style", e)
                 niche = None
         default = (getattr(niche, "default_style", "") or "").strip()
         return default or "phonk"

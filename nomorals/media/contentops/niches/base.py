@@ -24,6 +24,7 @@ import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any, Sequence
+from ..failures import record_failure
 
 
 # ── plan primitives ──────────────────────────────────────────────────────
@@ -61,7 +62,8 @@ class VoiceSpec:
         """Return the voice name to actually use. Never raises."""
         try:
             names = set(getattr(catalogue, "voices", {}) or {})
-        except Exception:
+        except Exception as e:
+            record_failure("niches.base.resolve", e)
             names = set()
         for name in self.candidates():
             if name in names:
@@ -196,7 +198,8 @@ class NichePlugin(ABC):
         prompt = self.script_prompt(topic)
         try:
             resp = brain.complete(prompt)
-        except Exception as exc:  # noqa: BLE001 — honest failure, not a raise
+        except Exception as exc:  # honest failure, not a raise
+            record_failure("niches.base.generate_script", exc)
             return ScriptResult(text="", word_count=0, est_seconds=0.0,
                                 topic=topic, niche=self.name)
         text = (getattr(resp, "text", "") or "").strip()

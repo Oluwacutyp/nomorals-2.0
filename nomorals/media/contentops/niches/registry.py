@@ -7,6 +7,7 @@ import inspect
 import re
 
 from .base import NichePlugin
+from ..failures import record_failure
 
 _REGISTRY: dict[str, NichePlugin] = {}
 _BOOTSTRAPPED = False
@@ -106,15 +107,16 @@ def _bootstrap() -> None:
     for mod in _SHIPPED_MODULES:
         try:
             module = importlib.import_module(f"{__package__}.{mod}")
-        except Exception:
+        except Exception as e:
+            record_failure("niches.registry._bootstrap", e)
             continue
         for _, obj in inspect.getmembers(module, inspect.isclass):
             if (issubclass(obj, NichePlugin) and obj is not NichePlugin
                     and obj.__module__ == module.__name__):
                 try:
                     register(obj())
-                except NicheError:
-                    pass
+                except NicheError as e:
+                    record_failure("niches.registry._bootstrap#2", e)
     _BOOTSTRAPPED = True
 
 
@@ -148,8 +150,8 @@ def get_niche(name: str) -> NichePlugin:
     _bootstrap()
     try:
         return _REGISTRY[name]
-    except KeyError:
-        pass
+    except KeyError as e:
+        record_failure("niches.registry.get_niche", e)
     try:
         from .._shims import get_niche as _shim_get_niche
         return _shim_get_niche(name)

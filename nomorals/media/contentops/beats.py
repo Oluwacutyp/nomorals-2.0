@@ -24,6 +24,7 @@ import wave
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from .failures import record_failure
 
 try:
     import numpy as np
@@ -82,8 +83,8 @@ def _decode_mono(path: str | os.PathLike[str], sr: int = _SR) -> np.ndarray:
     finally:
         try:
             os.unlink(tmp)
-        except OSError:
-            pass
+        except OSError as e:
+            record_failure("beats._decode_mono", e)
 
 
 def beats_available() -> dict[str, Any]:
