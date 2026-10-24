@@ -50,6 +50,7 @@ from __future__ import annotations
 
 import re
 from typing import Any
+from .failures import record_failure
 
 __all__ = [
     "BETTING_SEEDS", "ensure_betting_sources", "betting_status",
@@ -144,7 +145,8 @@ def ensure_betting_sources(registry: Any) -> list[dict[str, Any]]:
             registry._by_key[desc.key] = desc
             try:
                 registry._persist()
-            except Exception:  # noqa: BLE001 - persistence is best-effort
+            except Exception as e:  # persistence is best-effort
+                record_failure("sources.ensure_betting_sources.persist_update", e)
                 pass
             out.append({"domain": domain, "updated": True})
             continue
@@ -152,7 +154,8 @@ def ensure_betting_sources(registry: Any) -> list[dict[str, Any]]:
         if added:
             try:
                 registry._persist()
-            except Exception:  # noqa: BLE001 - persistence is best-effort
+            except Exception as e:  # persistence is best-effort
+                record_failure("sources.ensure_betting_sources.persist_register", e)
                 pass
         out.append({"domain": domain, "registered": bool(added)})
     return out
@@ -179,7 +182,8 @@ def betting_registry_for_context(context: Any = None,
         if db is not None:
             from ...storage.kv import KVStore
             reg.bind_store(KVStore(db))
-    except Exception:  # noqa: BLE001 - persistence is an enhancement;
+    except Exception as e:  # persistence is an enhancement;
+        record_failure("sources.betting_registry_for_context", e)
         pass  # its absence never sinks the desk
     return reg
 

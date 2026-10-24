@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import csv
 import io
+from .failures import record_failure
 import json
 import os
 import time
@@ -277,7 +278,8 @@ def _record(registry: Any, spec: ProviderSpec, ok: bool, detail: str,
             registry.record_rate_limited(desc)
         else:
             registry.record_outcome(desc, False, error_class="fetch")
-    except Exception:  # noqa: BLE001 - registry trouble never breaks collection
+    except Exception as e:  # registry trouble never breaks collection
+        record_failure("collectors._record", e)
         pass
 
 
@@ -299,7 +301,8 @@ def _record_domain(registry: Any, domain: str, ok: bool,
             registry.record_rate_limited(desc)
         else:
             registry.record_outcome(desc, False, error_class="fetch")
-    except Exception:  # noqa: BLE001
+    except Exception as e:
+        record_failure("collectors._record_domain", e)
         pass
 
 

@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from .failures import record_failure
 import os
 import time
 from typing import Any
@@ -186,7 +187,8 @@ class SessionBookCollector:
         try:
             os.makedirs(self.done_dir, exist_ok=True)
             os.replace(path, os.path.join(self.done_dir, name))
-        except OSError:
+        except OSError as e:
+            record_failure("books._move_done", e)
             pass
 
     # ── the book view ───────────────────────────────────────────────

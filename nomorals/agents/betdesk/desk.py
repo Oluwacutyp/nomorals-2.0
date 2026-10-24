@@ -35,6 +35,7 @@ from .books import SessionBookCollector
 from .collectors import SEED_PROVIDERS, collect_all
 from .crash import CrashStore, betdesk_dir
 from .signals import SignalEngine
+from .failures import record_failure
 
 __all__ = ["BettingDesk", "render_status", "render_library",
            "render_collect"]
@@ -62,7 +63,8 @@ class BettingDesk:
             try:
                 from ..notifier import Notifier
                 notifier = Notifier(context)
-            except Exception:  # noqa: BLE001 - delivery is optional kit
+            except Exception as e:  # delivery is optional kit
+                record_failure("desk.__init__.notifier", e)
                 notifier = None
         self.signals = SignalEngine(self.dir, notifier=notifier)
         self.vault = vault
@@ -93,7 +95,8 @@ class BettingDesk:
                     data = json.load(fh)
                 if isinstance(data, dict):
                     return data
-            except (OSError, ValueError):
+            except (OSError, ValueError) as e:
+                record_failure("desk.library", e)
                 pass
         return {}
 
@@ -248,7 +251,8 @@ class BettingDesk:
         try:
             from ..sports_bet import BetStore
             sports_fixtures: Optional[int] = len(BetStore().fixtures())
-        except Exception:  # noqa: BLE001 - the count is a status extra
+        except Exception as e:  # the count is a status extra
+            record_failure("desk.status.sports_fixtures", e)
             sports_fixtures = None
         return {
             "rounds_total": self.store.count(),
@@ -312,7 +316,8 @@ def _provisioning_view(vault: Any = None) -> list[dict[str, Any]]:
                     row["validation"] = str(meta.get("validation", ""))
                     row["provisioned_at"] = float(
                         meta.get("provisioned_at", 0.0) or 0.0)
-            except Exception:  # noqa: BLE001 - vault trouble degrades
+            except Exception as e:  # vault trouble degrades
+                record_failure("desk._provisioning_view", e)
                 pass  # the view to env-only; it never sinks status
         out.append(row)
     return out
