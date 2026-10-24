@@ -36,6 +36,7 @@ import time
 from pathlib import Path
 from typing import Any
 from ..llm.brain import brain_for
+from .failures import record_failure
 
 _log = logging.getLogger(__name__)
 
@@ -75,7 +76,8 @@ def _prefs(context: Any) -> dict[str, Any]:
                    / "pulse_prefs.json")
         if sidecar.is_file():
             out.update(json.loads(sidecar.read_text(encoding="utf-8")))
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("morning_pulse._prefs.sidecar", exc)
         pass
     return out
 
@@ -103,7 +105,8 @@ def _marker_path(context: Any) -> Path | None:
         if not ws:
             return None
         return Path(ws) / "pulse_last_run.json"
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("morning_pulse._marker_path", exc)
         return None
 
 
@@ -113,7 +116,8 @@ def _read_marker(context: Any) -> dict[str, Any]:
         if p is not None and p.is_file():
             data = json.loads(p.read_text(encoding="utf-8"))
             return data if isinstance(data, dict) else {}
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("morning_pulse._read_marker", exc)
         pass
     return {}
 
@@ -150,7 +154,8 @@ def _pulse_due_today(context: Any) -> float:
         hh, mm = (pulse_time(context).split(":") + ["0"])[:2]
         return datetime.now(tz).replace(hour=int(hh), minute=int(mm),
                                         second=0, microsecond=0).timestamp()
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("morning_pulse._pulse_due_today", exc)
         return 0.0
 
 
@@ -224,7 +229,8 @@ def ensure_pulse_job(context: Any) -> dict[str, Any]:
     try:
         have = [j for j in sched.list_jobs()
                 if j.get("name") == PULSE_JOB_NAME]
-    except Exception:  # noqa: BLE001 — scheduler table may not exist yet
+    except Exception as exc:  # noqa: BLE001 — scheduler table may not exist yet
+        record_failure("morning_pulse.ensure_pulse_job.list_jobs", exc)
         have = []
     if have:
         job0 = have[0]
@@ -236,7 +242,8 @@ def ensure_pulse_job(context: Any) -> dict[str, Any]:
     for j in have:  # stale time or policies → replace
         try:
             sched.remove(j["id"])
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("morning_pulse.ensure_pulse_job.remove", exc)
             pass
     job = sched.add(PULSE_JOB_NAME, f"daily {want}", "tool",
                     {"tool": "pulse", "args": {"action": "run"}},
@@ -663,7 +670,8 @@ def _deliver_audio(context: Any, audio_path: str) -> bool:
         raw = getattr(partner, "owner_chats", "") or ""
         try:
             status = gateway.status() or {}
-        except Exception:  # noqa: BLE001 - a broken status() must not kill delivery
+        except Exception as exc:  # noqa: BLE001 - a broken status() must not kill delivery
+            record_failure("morning_pulse._deliver_audio.status", exc)
             status = {}
         registry_lookup = getattr(gateway, "platforms_for_chat_id", None)
         try:
@@ -715,7 +723,8 @@ def _deliver_audio(context: Any, audio_path: str) -> bool:
                         "morning-pulse: audio reached %s:%s as a "
                         "file, not a voice note — voice transport: %s",
                         plat, cid, delivery.reason)
-            except Exception:  # noqa: BLE001 — one dead channel skips
+            except Exception as exc:  # noqa: BLE001 — one dead channel skips
+                record_failure("morning_pulse._deliver_audio.channel", exc)
                 continue
         _log.info("morning-pulse: audio reached %d channel(s)", reached)
         return reached > 0
@@ -801,7 +810,8 @@ def register(registry: Any) -> None:
             sched = Scheduler(context)
             try:
                 jobs = {j.get("name"): j for j in sched.list_jobs()}
-            except Exception:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001
+                record_failure("morning_pulse.register.list_jobs", exc)
                 jobs = {}
             out: dict[str, Any] = {}
             for s, spec in BRIEFING_SLOTS.items():
@@ -937,7 +947,8 @@ def _slot_prefs(context: Any, slot: str) -> dict[str, Any]:
                 v = data.get(f"{slot}_voice")
                 if v is not None:
                     out["voice"] = bool(v)
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("morning_pulse._slot_prefs", exc)
         pass
     return out
 
@@ -965,7 +976,8 @@ def _slot_marker_path(context: Any, slot: str) -> Path | None:
             return None
         spec = BRIEFING_SLOTS.get(slot, BRIEFING_SLOTS["morning"])
         return Path(ws) / spec["marker"]
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("morning_pulse._slot_marker_path", exc)
         return None
 
 
@@ -975,7 +987,8 @@ def _read_slot_marker(context: Any, slot: str) -> dict[str, Any]:
         if p is not None and p.is_file():
             data = json.loads(p.read_text(encoding="utf-8"))
             return data if isinstance(data, dict) else {}
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("morning_pulse._read_slot_marker", exc)
         pass
     return {}
 
@@ -1015,7 +1028,8 @@ def _seen_path(context: Any) -> Path | None:
     try:
         ws = getattr(getattr(context, "settings", None), "workspace_dir", "")
         return Path(ws) / "pulse_seen.json" if ws else None
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("morning_pulse._seen_path", exc)
         return None
 
 
@@ -1185,7 +1199,8 @@ def _deliver_stories(context: Any, slot: str,
         from .notifier import Notifier
 
         notifier = Notifier(context)
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("morning_pulse._deliver_stories.notifier", exc)
         return []
     segments = _pack_story_segments(items)
     total = len(segments)
@@ -1221,7 +1236,8 @@ def _afternoon_markets(context: Any) -> tuple[str, list[str]]:
         for sym in AFTERNOON_SYMBOLS:
             try:
                 q = quote(sym)
-            except Exception:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001
+                record_failure("morning_pulse._afternoon_markets.quote", exc)
                 continue
             if not q or q.get("price") is None:
                 continue
@@ -1237,7 +1253,8 @@ def _afternoon_markets(context: Any) -> tuple[str, list[str]]:
                 ps = str(price)
             lines.append(f"• {sym}: {ps}{chg_s}")
             keys.append(f"mkt-{sym}")
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("morning_pulse._afternoon_markets.outer", exc)
         pass
     return "\n".join(lines), keys
 
@@ -1259,7 +1276,8 @@ def _fresh_news_items(context: Any) -> list[dict[str, Any]]:
         _migrate_seen_store(context, agent)
         report = agent.poll()
         return agent.undelivered() if report.get("ok") else []
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("morning_pulse._fresh_news_items.poll", exc)
         return []
 
 
@@ -1297,10 +1315,12 @@ def _today_remainder(context: Any) -> str:
                     hh, mm = spec.split()[1].split(":")[:2]
                     if (int(hh), int(mm)) > (now.hour, now.minute):
                         lines.append(f"• {name} — {hh}:{mm}")
-                except Exception:  # noqa: BLE001
+                except Exception as exc:  # noqa: BLE001
+                    record_failure("morning_pulse._today_remainder.spec", exc)
                     continue
         return "\n".join(lines[:8])
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("morning_pulse._today_remainder.outer", exc)
         return ""
 
 
@@ -1375,7 +1395,8 @@ def _day_wrap(context: Any) -> str:
             for s in sums[:3]:
                 lines.append(f"• [{sys}] {s}")
         return "\n".join(lines[:12])
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("morning_pulse._day_wrap", exc)
         return ""
 
 
@@ -1395,10 +1416,12 @@ def _tomorrow_preview(context: Any) -> str:
                 try:
                     hhmm = spec.split()[1][:5]
                     lines.append(f"• {name} — {hhmm}")
-                except Exception:  # noqa: BLE001
+                except Exception as exc:  # noqa: BLE001
+                    record_failure("morning_pulse._tomorrow_preview.spec", exc)
                     continue
         return "\n".join(lines[:8])
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("morning_pulse._tomorrow_preview.outer", exc)
         return ""
 
 
@@ -1411,7 +1434,8 @@ def _pending_items(context: Any) -> str:
             "SELECT id FROM proactive_log WHERE status = 'pending' LIMIT 5")
         for r in rows or []:
             lines.append(f"• proposal {r['id']} awaiting decision")
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("morning_pulse._pending_items.proposals", exc)
         pass
     # finance alerts armed
     try:
@@ -1420,7 +1444,8 @@ def _pending_items(context: Any) -> str:
         alerts = store.list_enabled() if hasattr(store, "list_enabled") else []
         if alerts:
             lines.append(f"• {len(alerts)} price alert(s) armed")
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("morning_pulse._pending_items.alerts", exc)
         pass
     return "\n".join(lines)
 
@@ -1590,7 +1615,8 @@ def _slot_due_today(context: Any, slot: str) -> float:
         hh, mm = (str(prefs.get("time") or "12:00").split(":") + ["0"])[:2]
         return datetime.now(tz).replace(hour=int(hh), minute=int(mm),
                                         second=0, microsecond=0).timestamp()
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("morning_pulse._slot_due_today", exc)
         return 0.0
 
 
@@ -1609,7 +1635,8 @@ def ensure_slot_job(context: Any, slot: str = "morning") -> dict[str, Any]:
             for j in sched.list_jobs():
                 if j.get("name") == spec["job_name"]:
                     sched.remove(j["id"])
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("morning_pulse.ensure_slot_job.disable_remove", exc)
             pass
         return {"name": spec["job_name"], "disabled": True}
     if slot == "morning":
@@ -1621,7 +1648,8 @@ def ensure_slot_job(context: Any, slot: str = "morning") -> dict[str, Any]:
     try:
         have = [j for j in sched.list_jobs()
                 if j.get("name") == spec["job_name"]]
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("morning_pulse.ensure_slot_job.list_jobs", exc)
         have = []
     if have:
         job0 = have[0]
@@ -1632,7 +1660,8 @@ def ensure_slot_job(context: Any, slot: str = "morning") -> dict[str, Any]:
     for j in have:
         try:
             sched.remove(j["id"])
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("morning_pulse.ensure_slot_job.remove", exc)
             pass
     job = sched.add(spec["job_name"], f"daily {want}", "tool",
                     {"tool": "pulse",
