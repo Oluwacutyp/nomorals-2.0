@@ -28,6 +28,7 @@ from .ai import GameMind
 from .economy import GameEconomy, ShopItem
 from .games.base import GAME_COMMANDS, MultiGame, Room, parse_command
 from .players import AI_PLAYER, Leaderboard, Player, PlayerStore
+from .engine_failures import record_failure
 
 
 def render_game_over_card(game_name: str, players: list[Player],
@@ -61,8 +62,8 @@ def render_game_over_card(game_name: str, players: list[Player],
                     prof = store.get_for(p)
                     bits.append(f"{prof.coins}c")
                     bits.append(f"lvl {getattr(prof, 'level', 1)}")
-                except Exception:  # noqa: BLE001
-                    pass
+                except Exception as e:  # noqa: BLE001
+                    record_failure("render_game_over_card:store_coins", e)
             if db is not None:
                 try:
                     from .matchmaking import get_glicko
@@ -71,12 +72,13 @@ def render_game_over_card(game_name: str, players: list[Player],
                         from .matchmaking import rank_tier_emoji
                         bits.append(f"{rank_tier_emoji(g['ordinal'])}"
                                     f"{g['tier']} {int(g['ordinal'])}")
-                except Exception:  # noqa: BLE001
-                    pass
+                except Exception as e:  # noqa: BLE001
+                    record_failure("render_game_over_card:glicko", e)
             lines.append(" · ".join(bits))
         lines.append("↩️ /game rematch — run it back")
         return "\n".join(lines)
-    except Exception:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001
+        record_failure("render_game_over_card:outer", e)
         return ""
 
 __all__ = ["GameEngine", "SendFn"]
@@ -255,7 +257,8 @@ class GameEngine:
             if room.kind == "group":
                 try:
                     cast = gm.ensure_cast(game.name)
-                except Exception:  # noqa: BLE001
+                except Exception as e:  # noqa: BLE001
+                    record_failure("_drain_dm_feed:ensure_cast", e)
                     cast = None
             line = gm.announce(game.name, feed, cast=cast)
             if line:
@@ -455,7 +458,8 @@ class GameEngine:
                 "SELECT * FROM game_rooms WHERE chat_key = ? AND status = 'active' "
                 "ORDER BY updated_at DESC LIMIT 1", (chat_key,)
             )
-        except Exception:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001
+            record_failure("_load_live:db_query", e)
             return None
         if row is None:
             return None
@@ -546,7 +550,8 @@ class GameEngine:
                 from .mastery import get_one_game_stats, mastery_tier
                 mastery_idx = mastery_tier(
                     name, get_one_game_stats(self.db, host.key, name))[1]
-            except Exception:  # noqa: BLE001
+            except Exception as e:  # noqa: BLE001
+                record_failure("start:mastery", e)
                 mastery_idx = 0
             room.state = game.new_state(
                 game.rng(room),
@@ -640,7 +645,8 @@ class GameEngine:
         try:
             room.state.setdefault("inventory", {})[key] = dict(
                 self.store.get_for(player).items)
-        except Exception:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001
+            record_failure("_mirror_player:inventory", e)
             room.state.setdefault("inventory", {}).setdefault(key, {})
         try:
             from .gear import GEAR_CATALOG, effective_stats
@@ -665,7 +671,8 @@ class GameEngine:
                     worn.setdefault(defn.slot, entry)
             room.state.setdefault("loadout", {})[key] = worn
             room.state.setdefault("gear_closet", {})[key] = owned
-        except Exception:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001
+            record_failure("_mirror_player:gear", e)
             room.state.setdefault("loadout", {}).setdefault(key, {})
             room.state.setdefault("gear_closet", {}).setdefault(key, [])
         # persistent progression: level + arena stat bonus per human,
@@ -708,8 +715,8 @@ class GameEngine:
                 prof = self.store.get_for(player)
                 _, stats = store.grant_level_points(
                     key, level_for_xp(prof.xp))
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as e:  # noqa: BLE001
+                record_failure("_mirror_player:level_points", e)
             room.state.setdefault("rpg_stats", {})[key] = stats.to_dict()
         except Exception:  # noqa: BLE001
             _log.debug("rpg stats mirror failed", exc_info=True)
@@ -963,8 +970,8 @@ class GameEngine:
                     if game.is_move_text(text):
                         return [f"waiting on {cur.name} — your move goes in after "
                                 "theirs. (/pass /status /help)"]
-                except Exception:  # noqa: BLE001 - a bad hook never breaks chat
-                    pass
+                except Exception as e:  # noqa: BLE001 - a bad hook never breaks chat
+                    record_failure("_move_inner:is_move_text", e)
                 return []
             return []
         out: list[str] = []
@@ -1168,7 +1175,8 @@ class GameEngine:
         if game is not None:
             try:
                 msgs.append(game.final_message(room, self._mind))
-            except Exception:  # noqa: BLE001
+            except Exception as e:  # noqa: BLE001
+                record_failure("_finish_inner:final_message", e)
                 msgs.append("game over.")
             # fairness reveal: the server seed is published now that the
             # game is over, with the recipe to re-derive every draw.
@@ -1222,12 +1230,14 @@ class GameEngine:
                     card_scores[p.key] = score
                     try:
                         difficulty = game.difficulty(room)
-                    except Exception:  # noqa: BLE001
+                    except Exception as e:  # noqa: BLE001
+                        record_failure("_finish_inner:difficulty", e)
                         difficulty = "normal"
                     try:
                         pre = self.store.get_for(p)
                         streak_after = pre.streak + 1 if won is True else pre.streak
-                    except Exception:  # noqa: BLE001
+                    except Exception as e:  # noqa: BLE001
+                        record_failure("_finish_inner:streak", e)
                         streak_after = 1 if won is True else 0
                     coins, coin_why = self._settle_coins(
                         game, room, p, won, score, difficulty,
@@ -1562,7 +1572,8 @@ class GameEngine:
         # record_outcome runs before this)
         try:
             prof = self.store.get_for(player)
-        except Exception:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001
+            record_failure("_award_achievements:profile", e)
             prof = None
 
         if prof is not None:
@@ -1609,8 +1620,8 @@ class GameEngine:
                             and GEAR_CATALOG[i.slug].grade == "myth"
                             for i in worn.values()):
                         grant("arena_myth_set")
-                except Exception:  # noqa: BLE001
-                    pass
+                except Exception as e:  # noqa: BLE001
+                    record_failure("_award_achievements:myth_set", e)
                 if room.state.get("crit_kill_by") == "you":
                     grant("arena_crit_kill")
                 rank = room.state.get("house_rank")
@@ -1670,8 +1681,8 @@ class GameEngine:
                         player.key, {})
                     if not loadout:
                         grant("arena_no_gear")
-                except Exception:  # noqa: BLE001
-                    pass
+                except Exception as e:  # noqa: BLE001
+                    record_failure("_award_achievements:no_gear", e)
                 # underdog: track wins as the weaker fighter (persistent)
                 if you_pow > 0 and foe_pow >= you_pow * 1.1:
                     try:
@@ -1729,8 +1740,8 @@ class GameEngine:
                     "ON CONFLICT(player_key, counter) DO UPDATE SET "
                     "value = 0",
                     (player.key, "loss_streak"))
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as e:  # noqa: BLE001
+                record_failure("_award_achievements:loss_streak_reset", e)
                 if prof is not None:
                     if prof.streak >= 5:
                         grant("arena_streak_5")
@@ -1745,8 +1756,8 @@ class GameEngine:
                     try:
                         if int(prof.wins) >= 100:
                             grant("arena_100_wins")
-                    except Exception:  # noqa: BLE001
-                        pass
+                    except Exception as e:  # noqa: BLE001
+                        record_failure("_award_achievements:wins_100", e)
             # witnessing a forbidden technique counts win or lose
             if room.state.get("enemy_skill_cast"):
                 grant("arena_forbidden")
@@ -2000,8 +2011,8 @@ class GameEngine:
                 extra = game.describe_state(room)
                 if extra:
                     lines.append(extra)
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as e:  # noqa: BLE001
+                record_failure("describe:state", e)
         cur = room.current
         if cur is not None and not cur.is_ai and room.status == "active":
             lines.append(f"turn: {cur.name}")
