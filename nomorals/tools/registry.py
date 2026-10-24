@@ -9,6 +9,7 @@ which is the minimum bar for leaving an autonomous system running unattended.
 from __future__ import annotations
 
 from .typed_encoding import _decode_typed, _encode_typed
+from .registry_failures import record_failure
 
 import contextvars
 import fnmatch
@@ -994,7 +995,8 @@ class ToolRegistry:
 
                 fingerprint = failure_fingerprint(
                     "tool", detail[:500], "", tool)
-            except Exception:  # noqa: BLE001 — attribution is a bonus
+            except Exception as e:  # noqa: BLE001 — attribution is a bonus
+                record_failure("ToolRegistry._record_failure_ledger:fingerprint", e)
                 fingerprint = ""
             db.execute(
                 "INSERT INTO failures (id, source, summary, error, family, "
@@ -1003,8 +1005,8 @@ class ToolRegistry:
                  f"{tool} failed {message}"[:500], detail[:500],
                  self._failure_family(detail or message), "", time.time(),
                  fingerprint, tool))
-        except Exception:  # noqa: BLE001 — the ledger never sinks the result
-            pass
+        except Exception as e:  # noqa: BLE001 — the ledger never sinks the result
+            record_failure("ToolRegistry._record_failure_ledger:insert", e)
         finally:
             self._recording = False
 
@@ -1014,7 +1016,8 @@ class ToolRegistry:
             from ..core.errors import categorize
 
             return categorize(text)
-        except Exception:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001
+            record_failure("ToolRegistry._failure_family", e)
             return "tool"
 
     def _bump_stats(self, **deltas: float) -> None:
@@ -1053,7 +1056,8 @@ class ToolRegistry:
                 " PRIMARY KEY (tool, key))")
             self._idempotency_db_ready = True
             return True
-        except Exception:  # noqa: BLE001 - durability is best-effort
+        except Exception as e:  # noqa: BLE001 - durability is best-effort
+            record_failure("ToolRegistry._idempotency_table", e)
             return False
 
     def _idempotency_load(self, name: str, key: str) -> _IdempotencyRecord | None:
@@ -1068,14 +1072,16 @@ class ToolRegistry:
             row = db.query_one(
                 "SELECT * FROM idempotency_records WHERE tool = ? AND key = ?",
                 (name, key))
-        except Exception:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001
+            record_failure("ToolRegistry._idempotency_load:query", e)
             return None
         if not row:
             return None
         try:
             outcome: Outcome[Any] = Ok(
                 _decode_typed(json.loads(row["outcome_json"])))
-        except Exception:  # noqa: BLE001 - a corrupt row is a miss
+        except Exception as e:  # noqa: BLE001 - a corrupt row is a miss
+            record_failure("ToolRegistry._idempotency_load:decode", e)
             return None
         rec = _IdempotencyRecord(
             tool=name, key=key, actor=str(row["actor"]),
@@ -1104,8 +1110,8 @@ class ToolRegistry:
                      rec.tool_version,
                      json.dumps(_encode_typed(rec.outcome.value)),
                      rec.created_at))
-            except Exception:  # noqa: BLE001 - durability is best-effort
-                pass
+            except Exception as e:  # noqa: BLE001 - durability is best-effort
+                record_failure("ToolRegistry._idempotency_store", e)
 
     def _idempotency_replay(
         self, name: str, key: str, actor: str, digest: str,
@@ -1361,7 +1367,8 @@ class ToolRegistry:
                 biometric=(biometric_available, request_biometric),
                 args_digest=args_digest,
             )
-        except Exception:  # noqa: BLE001 - approval must never raise
+        except Exception as e:  # noqa: BLE001 - approval must never raise
+            record_failure("ToolRegistry.request_approval", e)
             return None
 
     # ── auditing ─────────────────────────────────────────────────────────────
