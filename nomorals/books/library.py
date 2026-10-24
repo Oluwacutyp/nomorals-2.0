@@ -44,6 +44,7 @@ from pathlib import Path
 from typing import Any, Iterator
 
 from ..core.ids import new_id
+from .failures import record_failure
 
 __all__ = ["Library", "LibraryError", "IngestResult", "SearchHit",
            "HybridHit", "Digest"]
@@ -358,7 +359,8 @@ def _strip_html_fragment(text: str) -> str:
         out = _TAG_RE.sub(" ", text or "")
         out = _html.unescape(out)
         return re.sub(r"\s+", " ", out).strip()
-    except Exception:  # noqa: BLE001 — fragment stripping never fails ingest
+    except Exception as exc:  # noqa: BLE001 — fragment stripping never fails ingest
+        record_failure("library._strip_html_fragment", exc)
         return (text or "").strip()
 
 
@@ -377,7 +379,8 @@ def _bytes_to_text(data: bytes, ctype: str, url: str) -> tuple[str, str, str]:
         if ctype.startswith("text/") or ctype == "":
             try:
                 return data.decode("utf-8", errors="replace"), "", ""
-            except Exception:  # noqa: BLE001 — decode fallback below
+            except Exception as exc:  # noqa: BLE001 — decode fallback below
+                record_failure("library._bytes_to_text", exc)
                 pass
     from ..documents.model import full_text
     from ..documents.parsers import parse_bytes
@@ -1586,8 +1589,8 @@ class Library:
                 con.execute(
                     "INSERT INTO digest_fts(record_id, claim)"
                     " VALUES (?,?)", (record_id, claim))
-            except sqlite3.OperationalError:
-                pass  # non-FTS5 db: no digest_fts table, overlap fallback
+            except sqlite3.OperationalError as exc:  # non-FTS5 db: no digest_fts table, overlap fallback
+                record_failure("library.Library.create_digest.fts_insert", exc)
             flags = self._contradiction_scan(con, record_id, claim, scope) \
                 if check_contradictions else []
             con.commit()
@@ -1643,8 +1646,8 @@ class Library:
                 con.execute(
                     "INSERT INTO digest_fts(record_id, claim)"
                     " VALUES (?,?)", (record_id, new_claim))
-            except sqlite3.OperationalError:
-                pass  # non-FTS5 db
+            except sqlite3.OperationalError as exc:  # non-FTS5 db
+                record_failure("library.Library.revise_digest.fts_replace", exc)
             flags = self._contradiction_scan(con, record_id, new_claim,
                                              row[2] or "")
             con.commit()
@@ -1997,7 +2000,8 @@ class Library:
                     " AND owner_id LIKE 'digest:%'", (_VECTOR_OWNER,))}
             finally:
                 db.close()
-        except Exception:  # noqa: BLE001 — status never raises
+        except Exception as exc:  # noqa: BLE001 — status never raises
+            record_failure("library.Library.vector_status.vectored", exc)
             vectored = set()
         con, _ = self._connect()
         try:
@@ -2026,7 +2030,8 @@ class Library:
                     (_VECTOR_OWNER,))}
             finally:
                 db.close()
-        except Exception:  # noqa: BLE001 — no table yet means none exist
+        except Exception as exc:  # noqa: BLE001 — no table yet means none exist
+            record_failure("library.Library.backfill_vectors.existing", exc)
             existing = set()
         missing_digests: list[tuple[str, str]] = []
         for d in self.list_digests(status=""):

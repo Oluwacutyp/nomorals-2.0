@@ -21,6 +21,8 @@ import json
 from pathlib import Path
 from typing import Any, Callable
 
+from .museum_failures import record_failure
+
 __all__ = ["Museum", "museum_card", "apkforge_exhibitor",
            "library_exhibitor", "characters_exhibitor"]
 
@@ -66,8 +68,8 @@ def _dir_size(path: Path) -> int:
                     total += f.stat().st_size
                 except OSError:
                     continue
-    except OSError:
-        pass
+    except OSError as exc:
+        record_failure("museum._dir_size", exc)
     return total
 
 
@@ -102,8 +104,8 @@ def library_exhibitor(library: Any) -> list[dict[str, Any]]:
             candidate = book_dir / (meta.get("source_file") or "")
             if candidate.is_file():
                 original = candidate
-        except (OSError, ValueError):
-            pass
+        except (OSError, ValueError) as exc:
+            record_failure("museum.library_exhibitor.book_meta", exc)
         cards.append(museum_card(
             id=f"library-book:{slug}",
             title=f"{book['title']} ({book['chapters']} chapters)",
@@ -170,7 +172,8 @@ def characters_exhibitor(char_store: Any, learn_store: Any,
     for char in char_store.all():
         try:
             doc = learn_store.doc(char.id)
-        except Exception:  # noqa: BLE001 — one bad doc never kills census
+        except Exception as exc:  # noqa: BLE001 — one bad doc never kills census
+            record_failure("museum.characters_exhibitor.learn_doc", exc)
             continue
         entries = doc.get("entries") or []
         if not entries and not (doc.get("stats") or {}).get("graded"):
