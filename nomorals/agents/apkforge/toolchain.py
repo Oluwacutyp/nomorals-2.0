@@ -23,6 +23,7 @@ unavailable rather than pretending an op will run elsewhere.
 """
 
 from __future__ import annotations
+from .failures import record_failure
 
 import json
 import os
@@ -169,7 +170,8 @@ def androguard_version() -> str | None:
         import androguard
 
         return str(getattr(androguard, "__version__", "unknown"))
-    except Exception:  # noqa: BLE001 — absence is a reportable fact
+    except Exception as e:  # absence is a reportable fact
+        record_failure("toolchain.androguard_version", e)
         return None
 
 
@@ -178,7 +180,8 @@ def apkid_version() -> str | None:
         import importlib.metadata
 
         return importlib.metadata.version("apkid")
-    except Exception:  # noqa: BLE001
+    except Exception as e:
+        record_failure("toolchain.apkid_version", e)
         return None
 
 
@@ -586,8 +589,8 @@ def provision(base: str = "", *, force: bool = False, root: Any = None,
                                       or exe.parent.name == "bin"):
                     try:
                         exe.chmod(exe.stat().st_mode | 0o111)
-                    except OSError:
-                        pass
+                    except OSError as e:
+                        record_failure("toolchain.provision", e)
         _mark_installed(dest, sha)
         installed[name] = {"version": versions[name],
                            "sha256": sha, "source": "provisioned",

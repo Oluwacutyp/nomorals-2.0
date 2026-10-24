@@ -32,6 +32,7 @@ silent fallbacks — a project that does not fit a route says why.
 """
 
 from __future__ import annotations
+from .failures import record_failure
 
 import hashlib
 import json
@@ -132,8 +133,8 @@ def _manifest_info(src: Path) -> dict[str, Any]:
         if sdk_el is not None and sdk_el.get(_A + attr):
             try:
                 return int(sdk_el.get(_A + attr))  # type: ignore[arg-type]
-            except ValueError:
-                pass
+            except ValueError as e:
+                record_failure("srcbuild._manifest_info._sdk", e)
         return default
     app_el = root_el.find("application")
     main_activity = ""
@@ -554,8 +555,8 @@ def _ensure_gradle_properties(root: Path,
                 fh.write(line + "\n")
     try:
         props.chmod(0o600)
-    except OSError:
-        pass
+    except OSError as e:
+        record_failure("srcbuild._ensure_gradle_properties", e)
 
 
 def _run_gradle(root: Path, src: Path, tasks: list[str],
@@ -569,8 +570,8 @@ def _run_gradle(root: Path, src: Path, tasks: list[str],
     if wrapper.exists():
         try:
             wrapper.chmod(wrapper.stat().st_mode | 0o111)
-        except OSError:
-            pass
+        except OSError as e:
+            record_failure("srcbuild._run_gradle", e)
         argv = [str(wrapper), *tasks, "--console=plain"]
         label = "gradlew " + " ".join(tasks)
     else:

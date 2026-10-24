@@ -41,6 +41,7 @@ instead of re-dissecting versions it already judged.
 """
 
 from __future__ import annotations
+from .failures import record_failure
 
 import hashlib
 import json
@@ -531,8 +532,8 @@ def load_session(root: Path, series_ids: list[str],
             state.setdefault("skip_details", {})
             state["resumed"] = True
             return state
-        except (OSError, json.JSONDecodeError):
-            pass
+        except (OSError, json.JSONDecodeError) as e:
+            record_failure("bisect.load_session", e)
     state = {"key": key, "series": list(series_ids), "spec": spec,
              "verdicts": {}, "skip_details": {}, "result": None,
              "created_at": time.time(),

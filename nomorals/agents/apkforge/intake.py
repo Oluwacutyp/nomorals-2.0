@@ -10,6 +10,7 @@ bundletool work, and the inventory says so honestly).
 """
 
 from __future__ import annotations
+from .failures import record_failure
 
 import json
 import os
@@ -185,8 +186,8 @@ def land_url(root: Path, url: str) -> tuple[Project, bool]:
     finally:
         try:
             Path(dest).unlink(missing_ok=True)
-        except OSError:
-            pass
+        except OSError as e:
+            record_failure("intake.land_url", e)
 
 
 def inventory_json(project: Project) -> str:

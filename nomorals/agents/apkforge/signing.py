@@ -17,6 +17,7 @@ Hard rules, enforced by construction:
 """
 
 from __future__ import annotations
+from .failures import record_failure
 
 import base64
 import contextlib
@@ -151,8 +152,8 @@ def ensure_keystore(context: Any, base_root: Path, alias: str = "",
         return {"alias": alias, "debug": bool(record.get("debug")),
                 "cert_sha256": record.get("cert_sha256", ""),
                 "created": False}
-    except Exception:  # noqa: BLE001 — absence routes to generation
-        pass
+    except Exception as e:  # absence routes to generation
+        record_failure("signing.ensure_keystore", e)
     if not create:
         raise SigningError(f"no keystore under alias {alias!r} in "
                            "the vault")
@@ -216,8 +217,8 @@ def materialize_keystore(context: Any, base_root: Path,
             if f.is_file():
                 try:
                     f.write_bytes(os.urandom(f.stat().st_size))
-                except OSError:
-                    pass
+                except OSError as e:
+                    record_failure("signing.materialize_keystore", e)
         shutil.rmtree(tmp, ignore_errors=True)
 
 

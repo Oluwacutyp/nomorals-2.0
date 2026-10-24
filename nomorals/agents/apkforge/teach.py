@@ -20,6 +20,7 @@ is a structured side-by-side extract of the same pair.
 """
 
 from __future__ import annotations
+from .failures import record_failure
 
 import re
 from pathlib import Path
@@ -300,7 +301,8 @@ def teach_lesson(context: Any, dossier: dict[str, Any],
                     "topic": topic or "overview"}
         return {"text": text, "source": "brain",
                 "topic": topic or "overview"}
-    except Exception:  # noqa: BLE001 — no brain == factual lesson
+    except Exception as e:  # no brain == factual lesson
+        record_failure("teach.teach_lesson", e)
         return {"text": fallback, "source": "dossier",
                 "topic": topic or "overview"}
 
@@ -626,5 +628,6 @@ def teach_code_lesson(context: Any, *, class_name: str,
             return {**base, "text": fallback,
                     "source": "side-by-side"}
         return {**base, "text": text, "source": "brain"}
-    except Exception:  # noqa: BLE001 — no brain == side-by-side
+    except Exception as e:  # no brain == side-by-side
+        record_failure("teach.teach_code_lesson", e)
         return {**base, "text": fallback, "source": "side-by-side"}

@@ -11,6 +11,7 @@ it *does* at runtime — and says so on its face.
 """
 
 from __future__ import annotations
+from .failures import record_failure
 
 import hashlib
 import re
@@ -34,8 +35,8 @@ try:  # androguard logs verbosely via loguru; scope-silence its logger
     from loguru import logger as _loguru
 
     _loguru.disable("androguard")
-except Exception:  # noqa: BLE001
-    pass
+except Exception as e:
+    record_failure("dissect.loguru_import", e)
 
 _NS = "{http://schemas.android.com/apk/res/android}"
 _CLASS_NAMES_CAP = 20000
@@ -87,7 +88,8 @@ def androguard_available() -> bool:
         import androguard  # noqa: F401
 
         return True
-    except Exception:  # noqa: BLE001
+    except Exception as e:
+        record_failure("dissect.androguard_available", e)
         return False
 
 
@@ -136,8 +138,8 @@ def light_identity(path: str | Path) -> dict[str, Any]:
         certs = a.get_certificates()
         if certs:
             out["cert_sha256"] = _sha256_bytes(certs[0].dump())
-    except Exception:  # noqa: BLE001 — light means tolerant
-        pass
+    except Exception as e:  # light means tolerant
+        record_failure("dissect.light_identity", e)
     return out
 
 
@@ -165,7 +167,8 @@ def _components_from_dom(a: Any, package: str) -> tuple[dict, dict]:
     app_flags: dict[str, Any] = {}
     try:
         root = a.get_android_manifest_xml()
-    except Exception:  # noqa: BLE001 — fall back to androguard lists
+    except Exception as e:  # fall back to androguard lists
+        record_failure("dissect._components_from_dom", e)
         return components, app_flags
     if root is None:
         return components, app_flags
@@ -312,12 +315,14 @@ def _dex_census(a: Any,
     names = []
     try:
         names = list(a.get_dex_names())
-    except Exception:  # noqa: BLE001
+    except Exception as e:
+        record_failure("dissect._dex_census", e)
         names = []
     blobs = []
     try:
         blobs = list(a.get_all_dex())
-    except Exception:  # noqa: BLE001
+    except Exception as e:
+        record_failure("dissect._dex_census#2", e)
         blobs = []
     for idx, blob in enumerate(blobs):
         name = names[idx] if idx < len(names) else f"classes{'' if idx == 0 else idx + 1}.dex"
@@ -336,13 +341,14 @@ def _dex_census(a: Any,
                 sup = cdef.get_superclassname()
                 if sup:
                     ref_types.add(str(sup))
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as e:
+                record_failure("dissect._dex_census#3", e)
             methods: list[str] = []
             fields: list[str] = []
             try:
                 cdata = cdef.get_class_data()
-            except Exception:  # noqa: BLE001
+            except Exception as e:
+                record_failure("dissect._dex_census#4", e)
                 cdata = None
             if cdata is not None:
                 for m in (list(cdata.get_direct_methods())
@@ -356,7 +362,8 @@ def _dex_census(a: Any,
             class_hashes[cname] = _sha256_bytes(material.encode("utf-8"))
         try:
             mids = list(d.get_methods())
-        except Exception:  # noqa: BLE001
+        except Exception as e:
+            record_failure("dissect._dex_census#5", e)
             mids = []
         d_methods = len(mids)
         total_methods += d_methods
@@ -366,14 +373,16 @@ def _dex_census(a: Any,
             for f in fids:
                 try:
                     ref_types.add(str(f.get_class_name()))
-                except Exception:  # noqa: BLE001
+                except Exception as e:
+                    record_failure("dissect._dex_census#6", e)
                     continue
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as e:
+            record_failure("dissect._dex_census#7", e)
         for m in mids:
             try:
                 cls = str(m.get_class_name())
-            except Exception:  # noqa: BLE001
+            except Exception as e:
+                record_failure("dissect._dex_census#8", e)
                 continue
             ref_types.add(cls)
             if cls.startswith(("Landroid/", "Ljava/", "Ljavax/",
@@ -382,8 +391,8 @@ def _dex_census(a: Any,
                 api_methods.setdefault(cls, set()).add(str(m.get_name()))
         try:
             all_strings.extend(str(s) for s in d.get_strings())
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as e:
+            record_failure("dissect._dex_census#9", e)
         per_dex.append({"name": name, "classes": d_classes,
                         "methods": d_methods,
                         "sha256": _sha256_bytes(blob)})
@@ -701,7 +710,8 @@ def dissect_apk(path: str | Path, *, include_apkid: bool = True,
                 "not_after": str(cert.not_valid_after),
                 "self_signed": cert.subject == cert.issuer,
             })
-        except Exception:  # noqa: BLE001 — a cert we cannot read is skipped
+        except Exception as e:  # a cert we cannot read is skipped
+            record_failure("dissect.dissect_apk", e)
             continue
     signing = {
         "signed": bool(a.is_signed()),
@@ -716,7 +726,8 @@ def dissect_apk(path: str | Path, *, include_apkid: bool = True,
     details: dict[str, Any] = {}
     try:
         details = a.get_details_permissions() or {}
-    except Exception:  # noqa: BLE001
+    except Exception as e:
+        record_failure("dissect.dissect_apk#2", e)
         details = {}
     permissions: list[dict[str, Any]] = []
     for perm in sorted(set(a.get_permissions() or [])):
@@ -743,7 +754,8 @@ def dissect_apk(path: str | Path, *, include_apkid: bool = True,
     declared: list[str] = []
     try:
         declared = sorted(set(a.get_declared_permissions() or []))
-    except Exception:  # noqa: BLE001
+    except Exception as e:
+        record_failure("dissect.dissect_apk#3", e)
         declared = []
 
     components, app_flags = _components_from_dom(a, identity["package"])
@@ -793,7 +805,8 @@ def dissect_apk(path: str | Path, *, include_apkid: bool = True,
                 continue
             try:
                 parsed = elf_info(zf.read(row["path"]))
-            except Exception:  # noqa: BLE001 — census stays a listing
+            except Exception as e:  # census stays a listing
+                record_failure("dissect.dissect_apk#4", e)
                 parsed = None
             if parsed is not None:
                 row["elf"] = parsed
@@ -805,7 +818,8 @@ def dissect_apk(path: str | Path, *, include_apkid: bool = True,
             res = a.get_android_resources()
             if res is not None:
                 arsc["parsed"] = True
-        except Exception:  # noqa: BLE001 — stub/custom arsc is a fact too
+        except Exception as e:  # stub/custom arsc is a fact too
+            record_failure("dissect.dissect_apk#5", e)
             arsc["parsed"] = False
 
     apkid = (apkid_scan(path) if include_apkid else
