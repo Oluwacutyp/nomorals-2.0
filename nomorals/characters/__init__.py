@@ -40,6 +40,13 @@ from .voice import (
     function_word_profile, style_report,
 )
 from .context import CharacterContextBuilder
+from .learn import (
+    LearnStore, LearnHandle, ScoredCandidate,
+    attach, detach, get_handle,
+    score_candidates, extract_features,
+    DEFAULT_WEIGHTS, MAX_ENTRIES, SESSION_GRADES,
+    GRADE_SOURCES, FEATURES,
+)
 from .render import (
     render_card, render_cast, render_scene, render_web, render_arc,
     THEMES,
@@ -71,4 +78,9 @@ __all__ = [
     "CharacterContextBuilder",
     "render_card", "render_cast", "render_scene", "render_web",
     "render_arc", "THEMES",
+    "LearnStore", "LearnHandle", "ScoredCandidate",
+    "attach", "detach", "get_handle",
+    "score_candidates", "extract_features",
+    "DEFAULT_WEIGHTS", "MAX_ENTRIES", "SESSION_GRADES",
+    "GRADE_SOURCES", "FEATURES",
 ]

@@ -22,6 +22,22 @@ class CharacterStore:
         self.dir = Path(data_dir or default_character_dir())
         self.dir.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
+        self._learn_store: Any | None = None
+
+    def _attach_learn(self, char: Character) -> Character:
+        """Bind the learn handle so every store-loaded character
+        journals its lines in every runtime path. Lazy: creating the
+        handle performs no I/O (the journal loads on first use), and
+        one LearnStore is shared per CharacterStore so handles share
+        the journal cache. Never raises into load paths."""
+        try:
+            from .learn import LearnStore, attach
+            if self._learn_store is None:
+                self._learn_store = LearnStore(self.dir)
+            attach(char, store=self._learn_store)
+        except Exception as e:
+            record_failure("store.attach_learn", e)
+        return char
 
     def _path(self, char_id: str) -> Path:
         safe = "".join(c for c in char_id if c.isalnum() or c in "-_")[:32]
@@ -39,7 +55,8 @@ class CharacterStore:
         if not p.exists():
             return None
         try:
-            return Character.from_dict(json.loads(p.read_text("utf-8")))
+            return self._attach_learn(
+                Character.from_dict(json.loads(p.read_text("utf-8"))))
         except Exception as e:
             record_failure("store.get:from_dict", e)
             return None
@@ -58,8 +75,8 @@ class CharacterStore:
                 if p.name.startswith("_"):
                     continue  # sidecar files, not characters
                 try:
-                    out.append(Character.from_dict(
-                        json.loads(p.read_text("utf-8"))))
+                    out.append(self._attach_learn(Character.from_dict(
+                        json.loads(p.read_text("utf-8")))))
                 except Exception as e:
                     record_failure("store.all:append", e)
                     continue

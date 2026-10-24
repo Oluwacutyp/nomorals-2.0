@@ -471,9 +471,18 @@ class Character:
 
     # ── speech ─────────────────────────────────────────────────────────
     def speak(self, context: str, suggest: SuggestFn | None,
-              memories: str = "") -> str:
+              memories: str = "", candidates: int = 1) -> str:
         """Say something in character. Model-backed when available,
-        deterministic fallback when not — a character always has a voice."""
+        deterministic fallback when not — a character always has a voice.
+
+        ``candidates``: when > 1, the model is asked N times and the
+        character's own scorer picks the most in-character line (ties:
+        earliest wins). Default 1 preserves the exact historical path.
+        When a learn handle is attached (see ``learn.attach``), every
+        spoken line — utterance or fallback — is journaled, and
+        candidate sets are journaled with their scores. Journaling is
+        best-effort and never changes the returned line.
+        """
         self.last_active = time.time()
         try:
             from .context import CharacterContextBuilder
@@ -492,15 +501,69 @@ class Character:
             prompt = (self.persona_block() + "\n"
                       + (f"Relevant memories:\n{memories}\n" if memories else "")
                       + f"Situation: {context}\n{self.name}:")
+        line = ""
+        kind = "fallback"
+        cand_texts: list[str] = []
+        chosen = 0
         if suggest is not None:
             try:
-                out = (suggest(prompt) or "").strip().strip('"').strip()
-                if out:
-                    return out[:600]
+                n = candidates if candidates and candidates > 1 else 1
+                for _ in range(n):
+                    out = (suggest(prompt) or "").strip().strip('"').strip()
+                    if out:
+                        cand_texts.append(out[:600])
+                if cand_texts:
+                    # dedupe (exact, whitespace-normalized), keep first
+                    seen: set[str] = set()
+                    uniq: list[str] = []
+                    for t in cand_texts:
+                        k = " ".join(t.split())
+                        if k not in seen:
+                            seen.add(k)
+                            uniq.append(t)
+                    cand_texts = uniq
+                    if len(cand_texts) > 1:
+                        line, chosen = self._pick_candidate(cand_texts)
+                    else:
+                        line, chosen = cand_texts[0], 0
+                    kind = "utterance"
             except Exception as e:
                 record_failure("character.speak:strip", e)
-        # fallback: in-character but model-free
-        return self._fallback_line(context)
+                line, cand_texts, chosen = "", [], 0
+        if not line:
+            # fallback: in-character but model-free
+            line = self._fallback_line(context)
+            kind = "fallback"
+            cand_texts, chosen = [], 0
+        # learn loop: journal best-effort, never eat the line
+        try:
+            learn = getattr(self, "_learn", None)
+            if learn is not None:
+                learn.journal_line(
+                    line, context=context, kind=kind,
+                    candidates=cand_texts if len(cand_texts) > 1 else None,
+                    chosen=chosen)
+        except Exception as e:
+            record_failure("character.speak:learn", e)
+        return line
+
+    def _pick_candidate(self, texts: list[str]) -> tuple[str, int]:
+        """Score candidates with the character's own scorer; ties go to
+        the earliest. Stateless path (no handle needed); any scorer
+        failure returns the first candidate, never raises."""
+        try:
+            from .learn import score_candidates, pick_best
+            handle = getattr(self, "_learn", None)
+            if handle is not None:
+                weights, prefs, recent = handle.scorer_state()
+            else:
+                weights, prefs, recent = None, None, []
+            scored = score_candidates(texts, self, weights, recent, prefs)
+            idx = pick_best(scored)
+            return texts[idx], idx
+        except Exception as e:
+            record_failure("character.speak:pick", e)
+            return texts[0], 0
 
     def _fallback_line(self, context: str) -> str:
         """Model-free voice: persona-flavored, never a bracketed stub."""

@@ -46,10 +46,12 @@ def _speak_in_scene(char: Character, scene: Scene,
                     suggest: SuggestFn | None,
                     graph: RelationshipGraph | None,
                     rng: random.Random,
-                    steer: str = "") -> str:
+                    steer: str = "",
+                    candidates: int = 1) -> str:
     """One character speaks in a group scene — aware of who else is here
     and how they feel about them. ``steer`` is a drama-director nudge
-    (Façade gold) appended to their context."""
+    (Façade gold) appended to their context. ``candidates`` passes
+    through to ``char.speak`` (see there)."""
     others_block = ""
     if others:
         bits = []
@@ -69,7 +71,8 @@ def _speak_in_scene(char: Character, scene: Scene,
         ctx += f"\nDirection for this turn: {steer}"
     mem = char.recall(scene.transcript(4))
     line = char.speak(ctx, suggest,
-                      memories="\n".join(mem) if mem else "")
+                      memories="\n".join(mem) if mem else "",
+                      candidates=candidates)
     char.remember(f"At '{scene.title}': I said: {line[:180]}", 0.55)
     return line
 
@@ -264,13 +267,28 @@ def run_scene(chars: list[Character], title: str, topic: str,
               seed: int | None = None,
               format: str = "roundtable",
               director: DramaDirector | None = None,
-              teams: list[list[str]] | None = None) -> Scene:
+              teams: list[list[str]] | None = None,
+              learn_store: Any | None = None,
+              candidates: int = 1) -> Scene:
     """Run a multi-character scene.
 
     ``format``: roundtable | interview | debate | roast | story_circle.
     ``director``: a DramaDirector that steers energy via beats — pass
     ``DramaDirector()`` for Façade-style invisible direction.
+    ``learn_store``: a LearnStore (or data dir) for store-less callers;
+    when given, characters without a handle get one attached and keep
+    it after the scene. ``candidates`` passes through to speak.
     """
+    if learn_store is not None:
+        try:
+            from .learn import LearnStore, attach, get_handle
+            store = (learn_store if isinstance(learn_store, LearnStore)
+                     else LearnStore(learn_store))
+            for c in chars:
+                if get_handle(c) is None:
+                    attach(c, store=store)
+        except Exception as e:
+            record_failure("ensemble.run_scene:learn_attach", e)
     fmt = format if format in SCENE_FORMATS else "roundtable"
     rng = random.Random(seed)
     sc = Scene(title=title, topic=topic,
@@ -304,7 +322,8 @@ def run_scene(chars: list[Character], title: str, topic: str,
                         "Build on the previous story — same thread, your angle."
             try:
                 line = _speak_in_scene(char, sc, others, suggest,
-                                       graph, rng, steer=steer.strip())
+                                       graph, rng, steer=steer.strip(),
+                                       candidates=candidates)
             except Exception as e:
                 record_failure("ensemble.run_scene:_speak_in_scene", e)
                 continue
@@ -327,13 +346,26 @@ def podcast_episode(host: Character, guests: list[Character], topic: str,
                     graph: RelationshipGraph | None = None,
                     rounds: int = 8,
                     seed: int | None = None,
-                    director: DramaDirector | None = None) -> Scene:
+                    director: DramaDirector | None = None,
+                    learn_store: Any | None = None,
+                    candidates: int = 1) -> Scene:
     """A podcast episode: host opens, guests discuss, host steers.
 
     Returns the Scene (transcript). Audio rendering is the podcast
     module's job — this is the living conversation underneath.
     Pass a DramaDirector to keep the energy alive across long episodes.
+    ``learn_store`` / ``candidates``: as in ``run_scene``.
     """
+    if learn_store is not None:
+        try:
+            from .learn import LearnStore, attach, get_handle
+            store = (learn_store if isinstance(learn_store, LearnStore)
+                     else LearnStore(learn_store))
+            for c in [host] + guests:
+                if get_handle(c) is None:
+                    attach(c, store=store)
+        except Exception as e:
+            record_failure("ensemble.podcast:learn_attach", e)
     all_cast = [host] + guests
     sc = Scene(title=f"Podcast: {topic}", topic=topic,
                participants=[c.name for c in all_cast])
@@ -343,7 +375,7 @@ def podcast_episode(host: Character, guests: list[Character], topic: str,
         f"Welcome the listeners and your guests, set up the topic. "
         f"Be yourself — human always, decide from your mood and how "
         f"your guests are acting.",
-        suggest)
+        suggest, candidates=candidates)
     sc.add(host.name, opener)
     host.remember(f"Hosted podcast on '{topic}' with "
                   f"{', '.join(g.name for g in guests)}", 0.7)
@@ -357,7 +389,7 @@ def podcast_episode(host: Character, guests: list[Character], topic: str,
             others = [c for c in all_cast if c.id != g.id]
             steer = director.direct(sc, i) if director else ""
             line = _speak_in_scene(g, sc, others, suggest, graph, rng,
-                                   steer=steer)
+                                   steer=steer, candidates=candidates)
             sc.add(g.name, line)
             if director:
                 director.observe(g.name, line)
@@ -366,7 +398,7 @@ def podcast_episode(host: Character, guests: list[Character], topic: str,
                 f"You're hosting. Topic: {topic}. Conversation so far:\n"
                 f"{sc.transcript()}\nSteer it as you would — from your mood "
                 f"and how the conversation is going.",
-                suggest)
+                suggest, candidates=candidates)
             sc.add(host.name, steer)
             if director:
                 director.observe(host.name, steer)
@@ -374,7 +406,7 @@ def podcast_episode(host: Character, guests: list[Character], topic: str,
         f"Close out the episode on '{topic}'. Thank your guests "
         f"({', '.join(g.name for g in guests)}) by name, give the "
         f"listeners one thing to think about. Sign off as yourself.",
-        suggest)
+        suggest, candidates=candidates)
     sc.add(host.name, closer)
     if graph is not None:
         for g in guests:

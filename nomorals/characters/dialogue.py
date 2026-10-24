@@ -71,7 +71,9 @@ def _brain_say(brain_persona: str, context: str,
 def converse(brain_persona: str, char: Character, opener: str,
              suggest: SuggestFn | None, rounds: int = 3,
              memories: str = "",
-             graph: Any | None = None) -> Dialogue:
+             graph: Any | None = None,
+             learn_store: Any | None = None,
+             candidates: int = 1) -> Dialogue:
     """Brain and character talk. ``opener`` is who speaks first's line —
     prefix with 'brain:' or '<name>:' or neither (brain opens).
 
@@ -79,7 +81,25 @@ def converse(brain_persona: str, char: Character, opener: str,
     post-conversation processing shifts the char<->brain edge on *that*
     graph so the caller can persist it — a fresh internal graph would
     silently discard the relationship growth.
+
+    ``learn_store``: a LearnStore (or data dir) for store-less callers.
+    When given and the character has no learn handle, one is attached
+    and left attached — the character keeps learning after the
+    dialogue. Store-loaded characters already carry a handle.
+    ``candidates``: passed through to ``char.speak`` (see there).
     """
+    # learn binding for store-less callers (no-op when already attached)
+    try:
+        from .learn import LearnStore, attach, get_handle
+        if learn_store is not None and get_handle(char) is None:
+            store = (learn_store if isinstance(learn_store, LearnStore)
+                     else LearnStore(learn_store))
+            attach(char, store=store)
+        _lh = get_handle(char)
+        if _lh is not None:
+            _lh.begin_session()
+    except Exception as e:
+        record_failure("dialogue.converse:learn_attach", e)
     dlg = Dialogue(participants=["Devon", char.name])
     if opener.startswith("brain:"):
         dlg.add("Devon", opener[len("brain:"):].strip())
@@ -99,7 +119,8 @@ def converse(brain_persona: str, char: Character, opener: str,
         if char_turn:
             mem = char.recall(dlg.transcript(4))
             line = char.speak(ctx, suggest,
-                              memories="\n".join(mem) if mem else memories)
+                              memories="\n".join(mem) if mem else memories,
+                              candidates=candidates)
             dlg.add(char.name, line)
             char.remember(f"I said to Devon: {line[:200]}", 0.5)
         else:
@@ -108,18 +129,29 @@ def converse(brain_persona: str, char: Character, opener: str,
         char_turn = not char_turn
 
     # background pass: relationships + mood shift from what happened
+    # (kind is computed first so the learn hook below can reuse it
+    # even if processing itself fails)
+    deep = any(len(t.text or "") > 200 for t in dlg.turns)
+    kind = "deep_conversation" if deep else "good_conversation"
     try:
         from .processing import SessionEvent, process_session
         from .relationships import RelationshipGraph, BRAIN_ID
         graph = graph if graph is not None else RelationshipGraph()
-        deep = any(len(t.text or "") > 200 for t in dlg.turns)
-        kind = "deep_conversation" if deep else "good_conversation"
         process_session(
             [SessionEvent(char.id, BRAIN_ID, kind, salience=0.6,
                           note=dlg.transcript(3))],
             {char.id: char}, graph)
     except Exception as e:
         record_failure("dialogue.converse:RelationshipGraph", e)
+    # learn loop: the session outcome grades this dialogue's lines
+    # (session strength — noisy attribution, small steps, see learn.py)
+    try:
+        from .learn import get_handle
+        _lh = get_handle(char)
+        if _lh is not None:
+            _lh.grade_session(kind)
+    except Exception as e:
+        record_failure("dialogue.converse:learn_grade", e)
     return dlg
 
 

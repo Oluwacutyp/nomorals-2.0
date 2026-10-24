@@ -4,7 +4,7 @@ This is how the brain reaches the character bank through the tool loop —
 she casts podcast hosts, room guests, game players, and conversation
 partners herself, in plain language, not via commands.
 
-Actions: list | cast | talk | direct | scene | podcast | arc | create | failures.
+Actions: list | cast | talk | direct | scene | podcast | arc | create | failures | learned.
 """
 from __future__ import annotations
 
@@ -58,11 +58,13 @@ def register(registry: Any) -> None:
             "arc <name> (character's growth story), create <name> "
             "<description> (bring a new character to life from a plain-"
             "words description), failures (recent recorded character "
-            "failures — best-effort fallbacks that fired instead of raising)."
+            "failures — best-effort fallbacks that fired instead of raising), "
+            "learned <name> (what a character has learned from its graded "
+            "lines — journal size, grades, scorer weights, learned taste)."
         ),
         capability="characters.manage",
         parameters={
-            "action": "str — list|cast|talk|direct|scene|podcast|arc|create|failures",
+            "action": "str — list|cast|talk|direct|scene|podcast|arc|create|failures|learned",
             "target": "str — character name(s), purpose, or topic",
             "text": "str — message, brief, or description",
             "n": "int — how many to cast (default 1)",
@@ -259,6 +261,16 @@ def register(registry: Any) -> None:
             from ..characters.failures import format_failures
             return format_failures()
 
+        if action == "learned":
+            c = store.get_by_name(target)
+            if c is None:
+                return f"no character named '{target}'."
+            from ..characters.learn import get_handle
+            h = get_handle(c)
+            if h is None:
+                return f"🎭 {c.name} has no learn journal yet."
+            return h.report()
+
         return (f"unknown action '{action}'. "
-                "list | cast | talk | direct | scene | podcast | arc | create | failures")
+                "list | cast | talk | direct | scene | podcast | arc | create | failures | learned")
     return characters
