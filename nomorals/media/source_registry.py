@@ -289,6 +289,7 @@ from typing import Any
 
 from ..core.logging_setup import get_logger
 from ..core.trust import SourceTrust
+from .source_registry_failures import record_failure
 
 _log = get_logger(__name__)
 
@@ -881,7 +882,8 @@ class SourceRegistry:
             self._trust = SourceTrust(None, store=store)
             self._load_persisted(merge=True)
             return True
-        except Exception:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001
+            record_failure("SourceRegistry.bind_store", e)
             return False
 
     def _persist(self) -> None:
@@ -998,7 +1000,8 @@ class SourceRegistry:
                         last_seen=float(raw_stats.get("last_seen") or 0),
                         last_error_class=str(
                             raw_stats.get("last_error_class") or ""))
-                except Exception:  # noqa: BLE001 - skip a corrupt row
+                except Exception as e:  # noqa: BLE001 - skip a corrupt row
+                    record_failure("SourceRegistry._load_persisted:stats_row", e)
                     continue
             for kstr, entry in (data.get("health") or {}).items():
                 key = _key_from_str(kstr)
@@ -1039,7 +1042,8 @@ class SourceRegistry:
                 delete(_PERSIST_KEY)
                 return True
             return False
-        except Exception:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001
+            record_failure("SourceRegistry.clear_persisted", e)
             return False
 
     # ── registration ──
@@ -1056,7 +1060,8 @@ class SourceRegistry:
             self._by_key[key] = desc
             self._origin.setdefault(key, "registered")
             return True
-        except Exception:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001
+            record_failure("SourceRegistry.register", e)
             return False
 
     def get(self, nation: str, language: str, domain: str) -> SourceDescriptor | None:
@@ -1128,7 +1133,8 @@ class SourceRegistry:
                     except re.error:
                         continue
             return None
-        except Exception:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001
+            record_failure("SourceRegistry.for_url", e)
             return None
 
     def stats_for(self, desc: SourceDescriptor) -> dict[str, Any]:
@@ -1144,7 +1150,8 @@ class SourceRegistry:
                     "avg_latency_s": round(st.avg_latency, 3),
                     "last_ok": st.last_ok, "last_seen": st.last_seen,
                     "last_error_class": st.last_error_class}
-        except Exception:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001
+            record_failure("SourceRegistry.stats_for", e)
             return {"ok": 0, "fail": 0, "blocked": 0, "rate_limited": 0,
                     "no_result": 0,
                     "success_rate": 0.5,
@@ -1185,7 +1192,8 @@ class SourceRegistry:
         this vocabulary without reaching into private state)."""
         try:
             return self._origin.get(desc.key, "registered")
-        except Exception:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001
+            record_failure("SourceRegistry.origin_for", e)
             return "registered"
 
     def is_active(self, desc: SourceDescriptor) -> bool:
@@ -1212,8 +1220,8 @@ class SourceRegistry:
             st.no_result += 1
             st.last_seen = now
             self._persist()
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as e:  # noqa: BLE001
+            record_failure("SourceRegistry.record_no_result", e)
 
     def record_blocked(self, desc: SourceDescriptor,
                        latency_s: float = 0.0,
@@ -1261,8 +1269,8 @@ class SourceRegistry:
             else:
                 entry["status"] = "bot-blocked"
             self._persist()
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as e:  # noqa: BLE001
+            record_failure("SourceRegistry.record_blocked", e)
 
     def record_rate_limited(self, desc: SourceDescriptor,
                             latency_s: float = 0.0,
@@ -1310,8 +1318,8 @@ class SourceRegistry:
             else:
                 entry["status"] = "rate-limited"
             self._persist()
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as e:  # noqa: BLE001
+            record_failure("SourceRegistry.record_rate_limited", e)
 
     # ── learned ordering ──
     def record_outcome(self, desc: SourceDescriptor, ok: bool,
@@ -1365,8 +1373,8 @@ class SourceRegistry:
                 elif entry.get("status") in (None, "", "unknown"):
                     entry["status"] = "unverifiable"
             self._persist()
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as e:  # noqa: BLE001
+            record_failure("SourceRegistry.record_outcome", e)
 
     # ── rule learning (Pass #87) ──────────────────────────────────
     def learn_rule(self, desc: SourceDescriptor, *, stage: str,
@@ -1411,7 +1419,8 @@ class SourceRegistry:
                     learned_at=now, last_success_at=now)
             self._persist()
             return True
-        except Exception:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001
+            record_failure("SourceRegistry.learn_rule", e)
             return False
 
     def learned_rule(self, desc: SourceDescriptor) -> LearnedRule | None:
@@ -1422,7 +1431,8 @@ class SourceRegistry:
             if desc is None:
                 return None
             return self._learned.get(desc.key)
-        except Exception:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001
+            record_failure("SourceRegistry.learned_rule", e)
             return None
 
     def active_learned_rule(
@@ -1449,7 +1459,8 @@ class SourceRegistry:
                     or rule.extraction_rule == "none":
                 return None
             return desc, rule
-        except Exception:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001
+            record_failure("SourceRegistry.learned_for_url", e)
             return None
 
     def effective_extraction_rule(self, desc: SourceDescriptor) -> str:
@@ -1461,7 +1472,8 @@ class SourceRegistry:
                 return desc.extraction_rule
             rule = self.active_learned_rule(desc)
             return rule.extraction_rule if rule is not None else ""
-        except Exception:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001
+            record_failure("SourceRegistry.effective_extraction_rule", e)
             return desc.extraction_rule if desc is not None else ""
 
     def effective_quality_map(
@@ -1475,7 +1487,8 @@ class SourceRegistry:
                 return desc.quality_map
             rule = self.active_learned_rule(desc)
             return rule.quality_map() if rule is not None else ()
-        except Exception:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001
+            record_failure("SourceRegistry.effective_quality_map", e)
             return desc.quality_map if desc is not None else ()
 
     def note_rule_failure(self, desc: SourceDescriptor,
@@ -1504,7 +1517,8 @@ class SourceRegistry:
                 return "cleared"
             self._persist()
             return rule.status
-        except Exception:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001
+            record_failure("SourceRegistry.note_rule_failure", e)
             return ""
 
     def score(self, desc: SourceDescriptor, now: float = 0.0) -> float:
@@ -1522,7 +1536,8 @@ class SourceRegistry:
             return round(max(0.0, min(1.0,
                 0.35 * base + 0.30 * domain_score + 0.35 * availability
                 - latency_pen - staleness_pen)), 3)
-        except Exception:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001
+            record_failure("SourceRegistry.score", e)
             return _TIER_WEIGHT.get(desc.trust_tier, 0.45)
 
     def ordered_for(self, nation: str = "", language: str = "",
@@ -1547,7 +1562,8 @@ class SourceRegistry:
                       for d in pool]
             scored.sort(key=lambda t: (t[0], t[1]))
             return [d for _, _, d in scored]
-        except Exception:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001
+            record_failure("SourceRegistry.ordered_for", e)
             return list(self._by_key.values())
 
     # ── discovery intake (Pass #86) ──
@@ -1619,7 +1635,8 @@ class SourceRegistry:
                       host, via or "download path")
             self._persist()
             return True
-        except Exception:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001
+            record_failure("SourceRegistry.note_candidate", e)
             return False
 
     def candidates(self) -> list[SourceDescriptor]:
@@ -1869,7 +1886,8 @@ class SourceRegistry:
             grown.sort(key=lambda g: g["domain"])
             return {"chain": chain, "grown": grown,
                     "candidates_pending": len(self._candidates)}
-        except Exception:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001
+            record_failure("SourceRegistry.music_status", e)
             return {"chain": [], "grown": [],
                     "candidates_pending": len(self._candidates)}
 
@@ -1920,7 +1938,8 @@ class SourceRegistry:
                 if "book" in d.kinds)
             return {"sources": rows, "grown": grown,
                     "candidates_pending": book_candidates}
-        except Exception:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001
+            record_failure("SourceRegistry.book_status", e)
             return {"sources": [], "grown": [],
                     "candidates_pending": 0}
 
@@ -1989,7 +2008,8 @@ class SourceRegistry:
             return {"engines": engines, "backends": backends,
                     "grown": grown,
                     "candidates_pending": web_candidates}
-        except Exception:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001
+            record_failure("SourceRegistry.web_search_status", e)
             return {"engines": [], "backends": [], "grown": [],
                     "candidates_pending": 0}
 
@@ -2058,7 +2078,8 @@ class SourceRegistry:
                         "image engines (result hosts are image "
                         "content, not engines) — outcomes/health "
                         "only, by design")}
-        except Exception:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001
+            record_failure("SourceRegistry.image_status", e)
             return {"engines": [], "link_only": [], "grown": [],
                     "candidates_pending": 0, "discovery": ""}
 
@@ -2115,7 +2136,8 @@ class SourceRegistry:
                 if "film" in d.kinds)
             return {"sources": sources, "grown": grown,
                     "candidates_pending": film_candidates}
-        except Exception:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001
+            record_failure("SourceRegistry.film_status", e)
             return {"sources": [], "grown": [],
                     "candidates_pending": 0}
 
@@ -2168,7 +2190,8 @@ class SourceRegistry:
                 if "wisdom-archive" in d.kinds)
             return {"sources": sources, "grown": grown,
                     "candidates_pending": wisdom_candidates}
-        except Exception:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001
+            record_failure("SourceRegistry.wisdom_status", e)
             return {"sources": [], "grown": [],
                     "candidates_pending": 0}
 
@@ -2201,7 +2224,8 @@ class SourceRegistry:
                 if "betting" in d.kinds)
             return {"sources": rows, "grown": grown,
                     "candidates_pending": betting_candidates}
-        except Exception:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001
+            record_failure("SourceRegistry.betting_status", e)
             return {"sources": [], "grown": [],
                     "candidates_pending": 0}
 
@@ -2271,7 +2295,8 @@ class SourceRegistry:
                 # Pass 8 (directed): the betting class, same surface.
                 "betting": self.betting_status(),
             }
-        except Exception:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001
+            record_failure("SourceRegistry.status", e)
             return {"total": 0, "seeds": 0, "grown": 0, "registered": 0,
                     "candidates_pending": 0, "shed_count": 0,
                     "learned_count": 0,
