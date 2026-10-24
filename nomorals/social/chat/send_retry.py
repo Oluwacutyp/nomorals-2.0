@@ -39,6 +39,7 @@ from ...core.errors import (
 )
 from ...core.retry import BackoffPolicy, RetryBudget
 from .base import SendResult
+from .failures import record_failure
 
 __all__ = [
     "classify_send_error",
@@ -122,7 +123,8 @@ def classify_send_error(error: str | BaseException | None) -> str:
         if any(p in lowered for p in _TRANSIENT_PATTERNS):
             return "transient"
         return "unknown"
-    except Exception:  # noqa: BLE001 - classification never breaks a send
+    except Exception as exc:  # noqa: BLE001 - classification never breaks a send
+        record_failure('send_retry.classify_send_error', exc)
         return "unknown"
 
 

@@ -13,6 +13,7 @@ import time
 from typing import Any
 
 from .base import ChatAdapter, ChatKind, ChatMessage, ChatRef, IncomingHandler, MediaRef, SendResult
+from .failures import record_failure
 
 __all__ = ["LocalAdapter"]
 
@@ -58,7 +59,8 @@ class LocalAdapter(ChatAdapter):
             if self.command_hook is not None:
                 try:
                     response = self.command_hook(text)
-                except Exception:  # noqa: BLE001 - a broken hook must not kill input
+                except Exception as exc:  # noqa: BLE001 - a broken hook must not kill input
+                    record_failure('local.LocalAdapter.run', exc)
                     response = None
                 if response is not None:
                     print(response, file=self._out)
@@ -82,7 +84,8 @@ class LocalAdapter(ChatAdapter):
         if self.mood_label_provider is not None:
             try:
                 label = f"  [{self.mood_label_provider()}]"
-            except Exception:  # noqa: BLE001 - label is cosmetic
+            except Exception as exc:  # noqa: BLE001 - label is cosmetic
+                record_failure('local.LocalAdapter.send', exc)
                 label = ""
         # Rich reply line: timestamp + colored speaker, mood tag stays.
         try:
@@ -95,7 +98,8 @@ class LocalAdapter(ChatAdapter):
                 print(f"{when} {who}{label}: {text}", file=self._out)
             else:
                 print(f"[{ts}] her{label}: {text}", file=self._out)
-        except Exception:  # noqa: BLE001 - formatting is cosmetic
+        except Exception as exc:  # noqa: BLE001 - formatting is cosmetic
+            record_failure('local.LocalAdapter.send#2', exc)
             print(f"her{label}: {text}", file=self._out)
         self.stats["sent"] += 1
         return SendResult(ok=True, platform=self.name, message_id=f"local-{int(time.time() * 1000)}")

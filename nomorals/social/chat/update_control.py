@@ -41,6 +41,7 @@ never lists them for non-owners, but hiding is not the enforcement.
 from __future__ import annotations
 
 from typing import Any, Callable
+from .failures import record_failure
 
 __all__ = [
     "UPDATE_KINDS",
@@ -90,13 +91,15 @@ def checkpoint_all(mission_store: Any, *, label: str = "pre-restart") -> list[st
     ids: list[str] = []
     try:
         resumable = mission_store.resumable()
-    except Exception:  # noqa: BLE001 - resumable() is best-effort
+    except Exception as exc:  # noqa: BLE001 - resumable() is best-effort
+        record_failure('update_control.checkpoint_all', exc)
         resumable = []
     for mission in resumable or []:
         try:
             cp = mission_store.checkpoint(mission, label=label)
             ids.append(str(getattr(cp, "id", cp)))
-        except Exception:  # noqa: BLE001 - one bad mission must not block the rest
+        except Exception as exc:  # noqa: BLE001 - one bad mission must not block the rest
+            record_failure('update_control.checkpoint_all#2', exc)
             continue
     return ids
 
@@ -293,7 +296,8 @@ class ChatUpdateController:
         if hasattr(report, "render"):
             try:
                 render = report.render()
-            except Exception:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001
+                record_failure('update_control.ChatUpdateController._apply_pull', exc)
                 render = str(report)
         else:
             render = str(report)

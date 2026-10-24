@@ -44,6 +44,7 @@ from ...core.ids import new_id
 from ...core.logging_setup import get_logger
 from ...storage.queue import WorkQueue
 from .send_retry import classify_send_error
+from .failures import record_failure
 
 __all__ = ["Outbox", "parse_since", "OUTBOX_TOPIC_PREFIX"]
 
@@ -341,8 +342,8 @@ class Outbox:
             if fresh_head is not None and str(fresh_head.get("id")) != str(job.id):
                 try:
                     self.queue.requeue(job.id)
-                except Exception:  # noqa: BLE001 - best-effort
-                    pass
+                except Exception as exc:  # noqa: BLE001 - best-effort
+                    record_failure('outbox.Outbox.deliver_chat', exc)
                 break
             payload = dict(job.payload or {})
             try:

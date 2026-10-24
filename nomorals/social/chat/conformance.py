@@ -19,6 +19,7 @@ import pkgutil
 from typing import Any
 
 from .base import ChatAdapter
+from .failures import record_failure
 
 __all__ = ["check_adapter_conformance", "all_adapter_classes", "base_send_signature"]
 
@@ -105,7 +106,8 @@ def all_adapter_classes() -> list[type[ChatAdapter]]:
     for info in pkgutil.iter_modules(pkg.__path__):
         try:
             module = importlib.import_module(f"{pkg.__name__}.{info.name}")
-        except Exception:  # noqa: BLE001 - a broken adapter module is reported by its own tests
+        except Exception as exc:  # noqa: BLE001 - a broken adapter module is reported by its own tests
+            record_failure('conformance.all_adapter_classes', exc)
             continue
         for _, cls in inspect.getmembers(module, inspect.isclass):
             if (

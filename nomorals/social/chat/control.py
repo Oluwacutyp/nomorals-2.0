@@ -51,6 +51,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from .failures import record_failure
 
 __all__ = ["CONTROL_COMMANDS", "COMMAND_DETAILS", "ControlCommand",
            "parse_control", "PLATFORMS", "help_text", "help_menu", "whatsapp_menu",
@@ -1122,7 +1123,8 @@ def help_menu(platform: str = "telegram") -> str:
             header="Devon — command menu",
             footer="say it in plain words, or tap a command — /help <command> for detail",
         )
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure('control.help_menu', exc)
         return help_text()
 
 
@@ -1227,7 +1229,8 @@ def _whatsapp_greeting() -> str:
         else:
             daypart = "up late"
         return f"✨ *Devon — {daypart}* · here's what I can do"
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure('control._whatsapp_greeting', exc)
         return "✨ *Devon — command menu*"
 
 
@@ -1284,7 +1287,8 @@ def whatsapp_menu(page: str = "") -> str:
         lines.append(f"_reply 1–{n} for just that section · "
                      "say it in plain words · /help play for one command's full page_")
         return "\n".join(lines).rstrip()
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure('control.whatsapp_menu', exc)
         return help_text()
 
 

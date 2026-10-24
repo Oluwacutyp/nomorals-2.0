@@ -43,6 +43,7 @@ from typing import Any
 from ...core.logging_setup import get_logger
 from .base import ChatAdapter, ChatKind, ChatMessage, ChatRef, SendResult
 from .platform_limits import for_platform
+from .failures import record_failure
 
 __all__ = [
     "SMSAdapter",
@@ -143,7 +144,8 @@ def sms_encoding(text: str) -> str:
             if ch not in _GSM7:
                 return "ucs2"
         return "gsm7"
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure('sms.sms_encoding', exc)
         return "ucs2"
 
 
@@ -184,7 +186,8 @@ def normalize_gsm7(text: str) -> tuple[str, list[str]]:
             else:
                 out.append(ch)  # no safe equivalent — keep, pay the segment
         return "".join(out), changed
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure('sms.normalize_gsm7', exc)
         return str(text or ""), []
 
 

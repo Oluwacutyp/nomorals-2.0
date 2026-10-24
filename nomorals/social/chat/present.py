@@ -81,6 +81,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Mapping
 
 from .platforms import to_markdown, to_plain, to_telegram, to_whatsapp
+from .failures import record_failure
 
 _log = logging.getLogger(__name__)
 
@@ -652,7 +653,8 @@ def render(doc: Doc, platform: Any = "telegram-bot") -> Rendered:
                    dialect, exc_info=True)
     try:
         return Rendered(_render(doc, "plain"), "", str(platform or ""))
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure('present.render', exc)
         return Rendered(str(getattr(doc, "title", "") or ""), "",
                         str(platform or ""))
 
@@ -670,7 +672,8 @@ def body_text(doc: Doc) -> str:
     any string alert)."""
     try:
         return _render(doc, "canonical", include_title=False)
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure('present.body_text', exc)
         return _render(doc, "plain", include_title=False)
 
 
@@ -705,7 +708,8 @@ def canonical_text(doc: Doc) -> str:
     rows, whose banner re-adds the title.)"""
     try:
         return _render(doc, "canonical")
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure('present.canonical_text', exc)
         return _render(doc, "plain")
 
 
@@ -820,5 +824,6 @@ def doc_from_json(text: Any) -> Doc | None:
             actions=tuple(actions),
             overflow_text=str(payload.get("overflow_text") or ""),
         )
-    except Exception:  # noqa: BLE001 - a bad stored form is a fallback
+    except Exception as exc:  # noqa: BLE001 - a bad stored form is a fallback
+        record_failure('present.doc_from_json', exc)
         return None

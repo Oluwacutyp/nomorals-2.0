@@ -57,6 +57,7 @@ from typing import Any
 from ...core.logging_setup import get_logger
 from .base import ChatAdapter, ChatKind, ChatMessage, ChatRef, IncomingHandler, MediaRef, SendResult
 from .platform_limits import for_platform
+from .failures import record_failure
 
 __all__ = ["WhatsAppAdapter", "Outbox", "GROUP_CAPABILITIES"]
 
@@ -294,7 +295,8 @@ class WhatsAppAdapter(ChatAdapter):
             with self._receipts_lock:
                 row = self._receipts.get(str(message_id or ""))
                 return dict(row) if row else None
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure('whatsapp.WhatsAppAdapter.delivery_status', exc)
             return None
 
     def _note_receipt(self, message_id: str, status: str) -> None:
@@ -368,8 +370,8 @@ class WhatsAppAdapter(ChatAdapter):
             try:
                 from .platforms import format_for_platform
                 text = format_for_platform(text, "whatsapp")
-            except Exception:  # noqa: BLE001 - same best-effort as send()
-                pass
+            except Exception as exc:  # noqa: BLE001 - same best-effort as send()
+                record_failure('whatsapp.WhatsAppAdapter._deliver_entry', exc)
             reply_to = str(entry.get("reply_to") or "")
             for i, chunk in enumerate(_split_text(text)):
                 result = self._send_with_retry(
@@ -689,8 +691,8 @@ class WhatsAppAdapter(ChatAdapter):
         try:
             from .platforms import format_for_platform
             text = format_for_platform(text, "whatsapp")
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:  # noqa: BLE001
+            record_failure('whatsapp.WhatsAppAdapter.send', exc)
         # WhatsApp caps a text message well above this; split long sends so
         # one giant alert doesn't get silently truncated by the bridge.
         chunks = _split_text(text)

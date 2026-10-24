@@ -52,6 +52,7 @@ from .chunking import (
 from .outbox import Outbox
 from .platform_limits import for_platform
 from .send_retry import send_with_retry
+from .failures import record_failure
 
 __all__ = ["ChatGateway", "OwnerTarget", "parse_chat_keys",
            "resolve_owner_targets"]
@@ -100,7 +101,8 @@ def _present_outbound(platform: str, text: str,
         from .platforms import to_telegram
 
         return to_telegram(text), "HTML"
-    except Exception:  # noqa: BLE001 - presentation never breaks a send
+    except Exception as exc:  # noqa: BLE001 - presentation never breaks a send
+        record_failure('gateway._present_outbound', exc)
         return text, parse_mode
 
 
@@ -455,7 +457,8 @@ class ChatGateway:
             )
             return [str(r.get("platform") or "")
                     for r in rows if r.get("platform")]
-        except Exception:  # noqa: BLE001 - registry is best-effort
+        except Exception as exc:  # noqa: BLE001 - registry is best-effort
+            record_failure('gateway.ChatGateway.platforms_for_chat_id', exc)
             return []
 
     def register_chat(self, chat: ChatRef) -> dict[str, Any]:
@@ -559,8 +562,8 @@ class ChatGateway:
         if mirror is not None and message.chat.platform != "local":
             try:
                 mirror(message)
-            except Exception:  # noqa: BLE001 - mirror must never break the feed
-                pass
+            except Exception as exc:  # noqa: BLE001 - mirror must never break the feed
+                record_failure('gateway.ChatGateway._on_inbound', exc)
 
     # ── outbound ────────────────────────────────────────────────────────────
     def _lock_for(self, chat: ChatRef) -> threading.Lock:
@@ -1296,7 +1299,8 @@ def resolve_owner_targets(
                 try:
                     resolved = [p for p in (registry_lookup(entry) or [])
                                 if p]
-                except Exception:  # noqa: BLE001 - registry is best-effort
+                except Exception as exc:  # noqa: BLE001 - registry is best-effort
+                    record_failure('gateway.resolve_owner_targets', exc)
                     resolved = []
             if resolved:
                 for plat in resolved:
@@ -1334,5 +1338,6 @@ def resolve_owner_targets(
                 "local", "console", source="",
                 note="console-fallback: no owner channel resolved"))
         return targets
-    except Exception:  # noqa: BLE001 - resolution must never break delivery
+    except Exception as exc:  # noqa: BLE001 - resolution must never break delivery
+        record_failure('gateway.resolve_owner_targets#2', exc)
         return targets

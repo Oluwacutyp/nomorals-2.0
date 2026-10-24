@@ -25,6 +25,7 @@ import contextvars
 import html
 from contextlib import contextmanager
 from typing import Iterator
+from .failures import record_failure
 
 __all__ = [
     "section", "cmd", "cta", "bar", "bold", "escape",
@@ -160,7 +161,8 @@ def quote(text: str) -> str:
     try:
         lines = [l for l in str(text or "").splitlines()]
         return "\n".join(f"▍ {l}" if l.strip() else "▍" for l in lines)
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure('style.quote', exc)
         return str(text or "")
 
 
@@ -173,7 +175,8 @@ def kv(pairs: list[tuple[str, str]], *, indent: int = 2) -> str:
         width = max(len(k) for k, _ in rows)
         pad = " " * indent
         return "\n".join(f"{pad}{_markup(k.ljust(width), 'b')}  {v}" for k, v in rows)
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure('style.kv', exc)
         return ""
 
 
@@ -202,7 +205,8 @@ def sparkline(values: list[float]) -> str:
         return "".join(
             _SPARK[min(7, int((v - lo) / (hi - lo) * 8))] for v in vals
         )
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure('style.sparkline', exc)
         return ""
 
 
@@ -248,7 +252,8 @@ def table(headers: list[str], rows: list[list[str]]) -> str:
                 l.replace("<code>", "").replace("</code>", "") for l in lines
             )
         return "\n".join(lines)
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure('style.table', exc)
         return ""
 
 
@@ -265,7 +270,8 @@ def _plat(platform: str) -> str:
         if p in ("telegram", "whatsapp", "sms", "web", "discord", "local"):
             return p
         return TELEGRAM
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure('style._plat', exc)
         return "telegram"
 
 
@@ -277,7 +283,8 @@ def menu_section(emoji: str, title: str, platform: str = "telegram") -> str:
         if p == "whatsapp":
             return f"{emoji} *{t}*"
         return f"{emoji} <b>{escape(t)}</b>"
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure('style.menu_section', exc)
         return f"{emoji} {title}"
 
 
@@ -292,7 +299,8 @@ def menu_item(command: str, description: str, platform: str = "telegram") -> str
         if p in ("sms",):
             return f"- {c} — {d}"
         return f"• <code>{escape(c)}</code> — {escape(d)}"
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure('style.menu_item', exc)
         return f"{command} — {description}"
 
 
@@ -328,5 +336,6 @@ def render_menu(sections: list, platform: str = "telegram",
         if footer:
             lines.append(f"_{footer}_" if p == "whatsapp" else f"<i>{escape(footer)}</i>")
         return "\n".join(lines).rstrip()
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure('style.render_menu', exc)
         return ""

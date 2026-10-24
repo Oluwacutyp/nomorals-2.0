@@ -21,6 +21,7 @@ import sys
 import threading
 import time
 import urllib.request
+from .failures import record_failure
 
 GATEWAY = "wss://remote-auth-gateway.discord.gg/?v=2"
 API = "https://discord.com/api/v9"
@@ -70,7 +71,8 @@ def main() -> int:
                     time.sleep(interval)
                     try:
                         ws.send(json.dumps({"op": "heartbeat"}))
-                    except Exception:
+                    except Exception as exc:
+                        record_failure('discord_qr_login.main.on_message._beat', exc)
                         break
             threading.Thread(target=_beat, daemon=True).start()
             ws.send(json.dumps({"op": "init", "encoded_public_key": pub_b64}))

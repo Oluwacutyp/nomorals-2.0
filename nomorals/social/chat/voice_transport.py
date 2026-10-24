@@ -43,6 +43,7 @@ from typing import Any
 
 from ...core.logging_setup import get_logger
 from .base import ChatRef, MediaRef, SendResult
+from .failures import record_failure
 
 _log = get_logger(__name__)
 
@@ -193,7 +194,8 @@ class MTProtoVoiceTransport(VoiceTransport):
             return None
         try:
             return ref()
-        except Exception:  # noqa: BLE001 - unknown id → no target, honestly
+        except Exception as exc:  # noqa: BLE001 - unknown id → no target, honestly
+            record_failure('voice_transport.MTProtoVoiceTransport.saved_messages_ref', exc)
             return None
 
 
@@ -254,7 +256,8 @@ def saved_messages_chat(adapter: Any) -> ChatRef | None:
         return None
     try:
         return voice_transport_for(adapter).saved_messages_ref()
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure('voice_transport.saved_messages_chat', exc)
         return None
 
 

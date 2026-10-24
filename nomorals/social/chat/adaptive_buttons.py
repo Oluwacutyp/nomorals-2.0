@@ -26,6 +26,7 @@ from __future__ import annotations
 from typing import Any
 
 from .tgbot_buttons import buttons_for_text, check_callback_data
+from .failures import record_failure
 
 __all__ = ["adaptive_buttons_for"]
 
@@ -185,7 +186,8 @@ def adaptive_buttons_for(
     # stale. Only then the retry-only fallback for a command result.
     try:
         kb = buttons_for_text(text or "")
-    except Exception:  # noqa: BLE001 - button derivation never breaks a send
+    except Exception as exc:  # noqa: BLE001 - button derivation never breaks a send
+        record_failure('adaptive_buttons.adaptive_buttons_for', exc)
         kb = None
     if kb:
         return kb

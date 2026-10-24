@@ -39,6 +39,7 @@ from ...core.logging_setup import get_logger
 from ...core.text import safe_filename
 from .base import ChatAdapter, ChatKind, ChatMessage, ChatRef, IncomingHandler, MediaRef, SendResult
 from .platform_limits import for_platform
+from .failures import record_failure
 
 
 def _is_entity_parse_error(exc: BaseException) -> bool:
@@ -82,8 +83,8 @@ def _flood_wait_seconds(exc: BaseException) -> int:
         status = int(getattr(exc, "status", 0) or 0)
         if status == 429:
             return int((getattr(exc, "parameters", None) or {}).get("retry_after", 0) or 0)
-    except (TypeError, ValueError):
-        pass
+    except (TypeError, ValueError) as exc:
+        record_failure('telegram._flood_wait_seconds', exc)
     return 0
 
 
@@ -498,13 +499,13 @@ class TelegramAdapter(ChatAdapter):
             try:
                 if _cand:
                     _ids.add(int(_cand))
-            except (TypeError, ValueError):
-                pass
+            except (TypeError, ValueError) as exc:
+                record_failure('telegram.TelegramAdapter.__init__', exc)
         try:
             if companion_bot_id:
                 _ids.add(int(companion_bot_id))
-        except (TypeError, ValueError):
-            pass
+        except (TypeError, ValueError) as exc:
+            record_failure('telegram.TelegramAdapter.__init__#2', exc)
         self._companion_bot_ids: frozenset[int] = frozenset(_ids)
         # Singular back-compat view: the first (lowest) id, or None.
         self._companion_bot_id: int | None = min(_ids) if _ids else None
@@ -705,7 +706,8 @@ class TelegramAdapter(ChatAdapter):
         t0 = time.perf_counter()
         try:
             entity = await self._client.get_entity(peer)
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure('telegram.TelegramAdapter._timed_get_entity', exc)
             entity = None
         dt = time.perf_counter() - t0
         self._input_entity_cache.record_lookup(dt, entity is not None)
@@ -1274,7 +1276,8 @@ class TelegramAdapter(ChatAdapter):
                                     if getattr(_attr, "voice", False) is True:
                                         _is_voice = True
                                         break
-                        except Exception:  # noqa: BLE001 - best-effort
+                        except Exception as exc:  # noqa: BLE001 - best-effort
+                            record_failure('telegram.TelegramAdapter._handle_inbound', exc)
                             _is_voice = False
                         _kind = "voice" if _is_voice else _kind_for_mime(mime)
                         media.append(
@@ -1422,8 +1425,8 @@ class TelegramAdapter(ChatAdapter):
             try:
                 from ...core.error_system import heartbeat
                 heartbeat("telegram", True)
-            except Exception:  # noqa: BLE001 - telemetry never breaks sends
-                pass
+            except Exception as exc:  # noqa: BLE001 - telemetry never breaks sends
+                record_failure('telegram.TelegramAdapter.send', exc)
             return SendResult(
                 ok=True, platform=self.name, message_id=str(getattr(result, "id", "")),
                 seconds=time.perf_counter() - started,
@@ -1433,8 +1436,8 @@ class TelegramAdapter(ChatAdapter):
             try:
                 from ...core.error_system import heartbeat
                 heartbeat("telegram", False)
-            except Exception:  # noqa: BLE001 - telemetry never breaks sends
-                pass
+            except Exception as exc:  # noqa: BLE001 - telemetry never breaks sends
+                record_failure('telegram.TelegramAdapter.send#2', exc)
             return SendResult(ok=False, platform=self.name, error=str(exc),
                               seconds=time.perf_counter() - started)
 
@@ -1872,7 +1875,8 @@ class TelegramAdapter(ChatAdapter):
                     if not k.startswith("_")
                 },
             }
-        except Exception:
+        except Exception as exc:
+            record_failure('telegram.TelegramAdapter._my_rights_coro', exc)
             return {"is_admin": False, "rights": {}}
 
     def admin_my_rights(self, chat: ChatRef) -> dict[str, Any]:
@@ -1889,7 +1893,8 @@ class TelegramAdapter(ChatAdapter):
         entity = await self._resolve(chat)
         try:
             user = await self._client.get_entity(int(user_id))
-        except Exception:
+        except Exception as exc:
+            record_failure('telegram.TelegramAdapter._member_role_coro', exc)
             return {"ok": False, "error": "user not found"}
         result = await self._client(functions.channels.GetParticipantRequest(
             channel=entity, participant=user))
@@ -2951,8 +2956,8 @@ class TelegramBotAdapter(ChatAdapter):
             try:
                 from ...core.error_system import heartbeat
                 heartbeat("telegram", True)
-            except Exception:  # noqa: BLE001 - telemetry never breaks sends
-                pass
+            except Exception as exc:  # noqa: BLE001 - telemetry never breaks sends
+                record_failure('telegram.TelegramBotAdapter.send', exc)
             return SendResult(ok=True, platform=self.name, message_id=last_id,
                               seconds=time.perf_counter() - started)
         except Exception as exc:  # noqa: BLE001 - ordinary failure, report as result
@@ -2960,8 +2965,8 @@ class TelegramBotAdapter(ChatAdapter):
             try:
                 from ...core.error_system import heartbeat
                 heartbeat("telegram", False)
-            except Exception:  # noqa: BLE001 - telemetry never breaks sends
-                pass
+            except Exception as exc:  # noqa: BLE001 - telemetry never breaks sends
+                record_failure('telegram.TelegramBotAdapter.send#2', exc)
             return SendResult(ok=False, platform=self.name, error=str(exc),
                               seconds=time.perf_counter() - started)
 
@@ -3068,7 +3073,8 @@ class TelegramBotAdapter(ChatAdapter):
                 sent = True
                 time.sleep(min(4.0, max(0.1, deadline - time.time())))
             return sent
-        except Exception:  # noqa: BLE001 - best-effort
+        except Exception as exc:  # noqa: BLE001 - best-effort
+            record_failure('telegram.TelegramBotAdapter.typing', exc)
             return sent
 
     # ── group/channel administration (Bot API) ──────────────────────────

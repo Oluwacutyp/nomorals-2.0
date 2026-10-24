@@ -37,6 +37,7 @@ from typing import Any, Callable
 from ...core.errors import ValidationError
 from ...core.logging_setup import get_logger
 from .base import ChatAdapter, ChatKind, ChatMessage, ChatRef, IncomingHandler, MediaRef, SendResult
+from .failures import record_failure
 
 __all__ = ["DiscordAdapter"]
 
@@ -96,7 +97,8 @@ class DiscordAdapter(ChatAdapter):
         """This account's user id, or "" before the ready event."""
         try:
             return str(getattr(self._me, "id", "") or "")
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure('discord.DiscordAdapter._me_id', exc)
             return ""
 
     def _mentions_me(self, message: Any) -> bool:
@@ -115,8 +117,8 @@ class DiscordAdapter(ChatAdapter):
             name = str(getattr(self._me, "name", "") or "").lower()
             if me_id and name and f"@{name}" in text:
                 return True
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:  # noqa: BLE001
+            record_failure('discord.DiscordAdapter._mentions_me', exc)
         return False
 
     def _author_identity(self, message: Any) -> tuple[str, str, str]:
@@ -138,7 +140,8 @@ class DiscordAdapter(ChatAdapter):
             with open(self._greeted_path(), encoding="utf-8") as fh:
                 data = json.load(fh)
             return {str(x) for x in data.get("members", [])}
-        except Exception:  # noqa: BLE001 - no file yet, corrupt file: start fresh
+        except Exception as exc:  # noqa: BLE001 - no file yet, corrupt file: start fresh
+            record_failure('discord.DiscordAdapter._load_greeted', exc)
             return set()
 
     def _save_greeted(self) -> None:
@@ -288,8 +291,8 @@ class DiscordAdapter(ChatAdapter):
                                 ivm = getattr(attachment, "is_voice_message", None)
                                 if callable(ivm) and ivm():
                                     mkind, is_voice = "voice", True
-                            except Exception:  # noqa: BLE001 - flag is best-effort
-                                pass
+                            except Exception as exc:  # noqa: BLE001 - flag is best-effort
+                                record_failure('discord.DiscordAdapter.run.on_message', exc)
                         media.append(
                             MediaRef(path=path, mime=str(attachment.content_type or ""),
                                      kind=mkind, is_voice=is_voice,
@@ -379,8 +382,8 @@ class DiscordAdapter(ChatAdapter):
                         try:
                             kwargs["reference"] = dc.MessageReference(
                                 message_id=int(reply_to), channel_id=int(chat.chat_id))
-                        except (TypeError, ValueError):  # noqa: E103 - invalid reply_to id, send without reference
-                            pass
+                        except (TypeError, ValueError) as exc:  # noqa: E103 - invalid reply_to id, send without reference
+                            record_failure('discord.DiscordAdapter.send._do', exc)
                     return await channel.send(text, **kwargs)
 
                 message = self._run_on_loop(_do())
@@ -662,8 +665,8 @@ class DiscordAdapter(ChatAdapter):
         try:
             base["servers"] = len(getattr(self._bot, "guilds", []) or [])
             base["dms"] = len(getattr(self._bot, "get_private_channels", lambda: [])() or [])
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:  # noqa: BLE001
+            record_failure('discord.DiscordAdapter.health', exc)
         return base
 
 

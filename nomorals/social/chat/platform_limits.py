@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import dataclasses
 from dataclasses import dataclass
+from .failures import record_failure
 
 __all__ = ["PlatformLimits", "for_platform", "register_limits", "all_limits"]
 
@@ -172,7 +173,8 @@ def for_platform(platform: object) -> PlatformLimits:
         if row is None:
             return dataclasses.replace(_DEFAULT, platform=key or "unknown")
         return row
-    except Exception:  # noqa: BLE001 - limits lookup never breaks a send
+    except Exception as exc:  # noqa: BLE001 - limits lookup never breaks a send
+        record_failure('platform_limits.for_platform', exc)
         return dataclasses.replace(_DEFAULT, platform="unknown")
 
 

@@ -33,6 +33,7 @@ import re
 from typing import Any
 
 from .platform_limits import for_platform as _for_platform
+from .failures import record_failure
 
 __all__ = [
     "TELEGRAM", "WHATSAPP", "SMS", "WEB", "DISCORD", "LOCAL",
@@ -78,7 +79,8 @@ def detect_platform(chat_key: Any) -> str:
     try:
         prefix = str(chat_key or "").split(":", 1)[0].strip().lower()
         return _PREFIX_MAP.get(prefix, TELEGRAM)
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure('platforms.detect_platform', exc)
         return TELEGRAM
 
 
@@ -114,7 +116,8 @@ def strip_html(text: str) -> str:
     """Remove all HTML tags, unescape entities. Never raises."""
     try:
         return _html.unescape(_ANY_TAG.sub("", str(text or "")))
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure('platforms.strip_html', exc)
         return str(text or "")
 
 
@@ -134,7 +137,8 @@ def to_plain(text: str) -> str:
         out = re.sub(r"```([^`]+)```", r"\1", out)
         out = re.sub(r"~([^~\n]+)~", r"\1", out)
         return out
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure('platforms.to_plain', exc)
         return str(text or "")
 
 
@@ -156,7 +160,8 @@ def to_whatsapp(text: str) -> str:
         out = _CODE_HTML.sub(r"```\1```", out)
         out = _ANY_TAG.sub("", out)  # any other tag: drop, keep content
         return _html.unescape(out)
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure('platforms.to_whatsapp', exc)
         return str(text or "")
 
 
@@ -238,7 +243,8 @@ def to_telegram(text: str) -> str:
         for key in reversed(list(stash)):
             out = out.replace(key, stash[key])
         return out
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure('platforms.to_telegram', exc)
         return str(text or "")
 
 
@@ -252,7 +258,8 @@ def to_markdown(text: str) -> str:
         out = _CODE_HTML.sub(r"`\1`", out)
         out = _ANY_TAG.sub("", out)
         return _html.unescape(out)
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure('platforms.to_markdown', exc)
         return str(text or "")
 
 
@@ -267,7 +274,8 @@ def format_for_platform(text: str, platform: str) -> str:
         if p in (WEB, DISCORD):
             return to_markdown(text)
         return to_telegram(text)
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure('platforms.format_for_platform', exc)
         return str(text or "")
 
 
@@ -287,7 +295,8 @@ def escape_markdown_v2(text: str) -> str:
     """
     try:
         return _MD_V2_SPECIAL.sub(r"\\\1", str(text or ""))
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure('platforms.escape_markdown_v2', exc)
         return str(text or "")
 
 
@@ -303,7 +312,8 @@ def link(label: str, url: str, platform: str = TELEGRAM) -> str:
         if p in (WEB, DISCORD):
             return f"[{label}]({url})"
         return f'<a href="{_html.escape(url, quote=True)}">{_html.escape(label)}</a>'
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure('platforms.link', exc)
         return str(label or "")
 
 
@@ -321,7 +331,8 @@ def code_block(text: str, language: str = "", platform: str = TELEGRAM) -> str:
             return body
         fence = f"```{language}" if language else "```"
         return f"{fence}\n{body}\n```"
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure('platforms.code_block', exc)
         return str(text or "")
 
 
@@ -336,7 +347,8 @@ def mention(name: str, user_id: str = "", platform: str = TELEGRAM) -> str:
         if p == DISCORD and uid:
             return f"<@{uid}>"
         return f"@{name.lstrip('@')}" if name else ""
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure('platforms.mention', exc)
         return str(name or "")
 
 
@@ -353,5 +365,6 @@ def chunk_text(text: str, limit: int = 3000) -> list[str]:
 
     try:
         return chunk_message(str(text or ""), max_text=limit)
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure('platforms.chunk_text', exc)
         return [str(text or "") or text] if text else [""]
