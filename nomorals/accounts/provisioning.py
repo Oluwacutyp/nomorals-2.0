@@ -92,6 +92,32 @@ _log = get_logger(__name__)
 #: (vs a key fetched on an account the owner already had).
 _CREATED_MARKER_PREFIX = "provisioning.created_pending."
 
+#: Strings that only ever appear in PRE-PURGE (2026-10-23) pending
+#: output. A stored checkpoint carrying any of them in its title or
+#: instructions is a stale echo of the purged generators, not a live
+#: wall — it is invalidated on sight (see _invalidate_stale_pending)
+#: instead of being re-reported. The kind alone never decides: a
+#: genuine MANUAL_REVIEW / REAL_ID / AGE_GATE / RATE_LIMIT wall keeps
+#: kind MANUAL_STEP with clean single-action text and must keep
+#: reporting.
+_PURGED_PENDING_MARKERS = (
+    "create the account yourself",
+    "identity: self-generated",
+    "paused at a human step",
+    "finish it, then run",
+    "manual_step",
+)
+
+
+def _contains_purged_text(text: str) -> bool:
+    """True when `text` carries pre-purge pending output."""
+    lowered = (text or "").lower()
+    if any(marker in lowered for marker in _PURGED_PENDING_MARKERS):
+        return True
+    # A numbered chore list (the pre-purge hand-back shape); genuine
+    # post-purge checkpoints carry ONE plain action, never a list.
+    return "\n1." in (text or "") and "\n2." in (text or "")
+
 #: Temp-mail provider used to mint a generated persona's real address.
 #: Matches the trial signup driver's default (``SignupDriver``'s
 #: ``temp_email_provider``) — the mint itself is the creator's
@@ -1029,12 +1055,27 @@ class ProvisionDriver:
 
         # 3. A creation is already stopped for this service (one
         #    owner-only step pending) → report the checkpoint,
-        #    never re-create.
+        #    never re-create — UNLESS the stored checkpoint is a
+        #    stale pre-purge echo: those are cancelled and the drive
+        #    proceeds fresh, so a record the purge already deleted
+        #    from the generators can never be re-reported forever.
         pending = self._pending_creation(svc)
+        while pending is not None and _contains_purged_text(
+                f"{pending.get('title', '')}\n"
+                f"{pending.get('instructions', '')}"):
+            self._invalidate_stale_pending(svc, pending)
+            pending = self._pending_creation(svc)
         if pending is not None:
             self._audit("create", svc.id, "checkpoint_pending",
                         checkpoint=pending.get("id", ""))
             note = self._created_marker_note(svc)
+            if _contains_purged_text(note):
+                # The checkpoint itself is genuine, but the marker
+                # note it carries is a pre-purge lecture — drop the
+                # note, keep the checkpoint's own single action.
+                self._audit("create", svc.id, "stale_marker_note_dropped",
+                            checkpoint=pending.get("id", ""))
+                note = ""
             return ProvisionResult(
                 ProvisionOutcome.CREATION_CHECKPOINT, svc.id,
                 f"creating your {svc.display} account stopped at "
@@ -1091,6 +1132,35 @@ class ProvisionDriver:
         except Exception:  # noqa: BLE001 - probe is best-effort
             _log.debug("pending-creation probe failed", exc_info=True)
         return None
+
+    def _invalidate_stale_pending(self, svc: ProvisionService,
+                                  pending: dict[str, Any]) -> None:
+        """Cancel a stale pre-purge pending echo (best-effort, audited).
+
+        The cancel is recorded with a clean note and the service's
+        created-marker is dropped with it, so the next step drives
+        fresh with a plain-fact note of its own. A cancel failure never
+        re-surfaces the stale text: the caller proceeds anyway and the
+        next run invalidates again (idempotent).
+        """
+        checkpoint_id = pending.get("id", "")
+        try:
+            from .creator import CheckpointStore
+
+            CheckpointStore(self.vault.db).cancel(
+                checkpoint_id,
+                "invalidated: pre-purge pending echo; drive proceeds fresh")
+        except Exception:  # noqa: BLE001 - invalidation is best-effort
+            _log.debug("stale-pending cancel failed", exc_info=True)
+        try:
+            from ..storage.kv import KVStore
+
+            KVStore(self.vault.db).delete(
+                _CREATED_MARKER_PREFIX + svc.id)
+        except Exception:  # noqa: BLE001 - marker is bookkeeping
+            _log.debug("stale-marker delete failed", exc_info=True)
+        self._audit("create", svc.id, "pending_stale_invalidated",
+                    checkpoint=checkpoint_id)
 
     # -- identity resolution for creation --------------------------------
 
@@ -1432,6 +1502,12 @@ class ProvisionDriver:
             account_created = bool(marker)
             if marker:
                 marker_note = str(marker.get("creation_note") or "")
+                if _contains_purged_text(marker_note):
+                    # A pre-purge lecture riding in a stored marker:
+                    # dropped, never adopted into a driven result.
+                    self._audit("create", svc.id,
+                                "stale_marker_note_dropped")
+                    marker_note = ""
                 if marker_note:
                     # The creation happened in an earlier run — keep
                     # THIS run's audit trail honest about the identity

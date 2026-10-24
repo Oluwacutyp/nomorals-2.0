@@ -1478,14 +1478,13 @@ class AccountCreator:
         }
         return flows.get(service, {
             "kind": CheckpointKind.MANUAL_STEP,
-            "title": "Create {service} account {username}",
+            "title": "Signup page needed for {service} account {username}",
             "instructions": (
-                "the one step only you can do: create the {service} "
-                "account as {username} with email {email} at "
-                "{service}'s signup page, completing any verification "
-                "step it asks for. Tell me the final username when "
-                "it's created — I'll store the credentials in the "
-                "vault and continue."
+                "the one step only you can do: tell me the signup "
+                "page for {service} — I have no signup URL for it, "
+                "so I cannot drive the signup for {email} myself "
+                "yet. Send the URL and I'll drive the signup from "
+                "there and store the credentials in the vault."
             ),
         })
 
