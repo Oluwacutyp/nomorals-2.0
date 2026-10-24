@@ -126,11 +126,14 @@ def test_schedule_post_runs_through_briefs_path():
                                scheduler=scheduler, queue=queue)
     assert res["ok"] is True
     # The real schedule_post ran: queue step, action registration, timed task.
-    assert queue.scheduled == [(draft.draft_id, when_ts)]
+    # The id it schedules is the QUEUE's id (the fake's "qd_fake"), never
+    # the briefs bd_ id — DraftQueue only knows its own ids (idfix pin:
+    # passing the bd_ id raised KeyError "unknown draft" on a real queue).
+    assert queue.scheduled == [("qd_fake", when_ts)]
     assert scheduler.actions == ["social.post_draft"]
     assert scheduler.once == [
-        (f"post-draft-{draft.draft_id}", when_ts, "social.post_draft",
-         {"draft_id": draft.draft_id, "platforms": [draft.platform]})]
+        ("post-draft-qd_fake", when_ts, "social.post_draft",
+         {"draft_id": "qd_fake", "platforms": [draft.platform]})]
     assert store.get_draft(draft.draft_id).scheduled_for == when_ts
     assert "briefs.BriefStore.schedule_draft.scheduler" not in _sites()
 

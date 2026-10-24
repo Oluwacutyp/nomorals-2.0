@@ -854,6 +854,10 @@ class BriefStore:
                 draft.predicted_engagement = self.predict_performance(
                     draft.content, brief)
             # Wire into the existing #45/#43 queue when available.
+            # The queue owns the draft once it enters it: schedule_post
+            # resolves its id through DraftQueue, so the scheduler step
+            # must pass the queue id (qd.id), never the briefs bd_ id.
+            queue_draft_id = None
             if queue is not None:
                 try:
                     qd = queue.create_draft(
@@ -864,12 +868,14 @@ class BriefStore:
                                       draft.predicted_engagement,
                                   "pipeline": "brief_first"})
                     queue.propose(qd.id)  # → pending_review: asks, never posts
+                    queue_draft_id = qd.id
                 except Exception as exc:  # noqa: BLE001
                     record_failure("briefs.BriefStore.schedule_draft.queue", exc)
             if scheduler is not None:
                 try:
                     from ..social.drafts import schedule_post
-                    schedule_post(scheduler, queue, draft_id, when_ts,
+                    schedule_post(scheduler, queue,
+                                  queue_draft_id or draft_id, when_ts,
                                   platforms=[draft.platform])
                 except Exception as exc:  # noqa: BLE001
                     record_failure("briefs.BriefStore.schedule_draft.scheduler", exc)
