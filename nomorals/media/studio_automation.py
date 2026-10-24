@@ -17,6 +17,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from nomorals.media.studio_automation_failures import record_failure
+
 
 def _ffmpeg() -> str | None:
     from shutil import which
@@ -64,8 +66,8 @@ def detect_silences(src: str | os.PathLike[str], *,
                 end = float(parts[0].strip())
                 dur = float(parts[1].split(":")[1].strip()) if len(parts) > 1 else end - cur_start
                 out.append(SilenceSegment(cur_start, end, dur))
-            except (IndexError, ValueError):
-                pass
+            except (IndexError, ValueError) as e:
+                record_failure("detect_silences.silence_end", e)
             cur_start = None
     return out
 
@@ -157,8 +159,8 @@ def detect_scenes(src: str | os.PathLike[str], *,
                 t = float(line.split("pts_time:")[1].split()[0])
                 if t - cuts[-1] >= min_length:
                     cuts.append(t)
-            except (IndexError, ValueError):
-                pass
+            except (IndexError, ValueError) as e:
+                record_failure("detect_scenes.showinfo", e)
     # Get total duration for the last scene end.
     duration = cuts[-1] + 1.0
     probe = _ffprobe()
@@ -167,8 +169,8 @@ def detect_scenes(src: str | os.PathLike[str], *,
                   "-of", "csv=p=0", src])
         try:
             duration = float(p.stdout.strip())
-        except ValueError:
-            pass
+        except ValueError as e:
+            record_failure("detect_scenes.duration", e)
     scenes: list[Scene] = []
     wd = Path(workdir) if workdir else Path(tempfile.mkdtemp())
     wd.mkdir(parents=True, exist_ok=True)
@@ -272,8 +274,8 @@ def auto_reframe(src: str | os.PathLike[str], *,
             st = info["streams"][0]
             sw, sh = int(st["width"]), int(st["height"])
             duration = float(info["format"]["duration"])
-        except (KeyError, ValueError, IndexError):
-            pass
+        except (KeyError, ValueError, IndexError) as e:
+            record_failure("auto_reframe.probe", e)
     if not sw or not sh:
         return {"ok": False, "reason": "could not probe video dimensions"}
 
