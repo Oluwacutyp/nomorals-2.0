@@ -39,6 +39,7 @@ from ..core.proxy_tiers import TierGate, normalize_tier
 from ..core.logging_setup import get_logger
 from ..storage.artifacts import Provenance
 from . import errors
+from .failures import record_failure
 from . import forms
 from .errors import (
     BrowserBotDetectedError,
@@ -118,8 +119,8 @@ def _mask_proxy(proxy_url: str) -> str:
                 netloc += f":{parsed.port}"
             return urllib.parse.urlunparse(
                 (parsed.scheme, netloc, parsed.path, "", "", ""))
-    except Exception:  # noqa: BLE001 - masking must never raise
-        pass
+    except Exception as exc:  # noqa: BLE001 - masking must never raise
+        record_failure("service._mask_proxy", exc)
     return proxy_url
 
 
@@ -754,15 +755,18 @@ class RenderedTab:
     def _on_console_msg(self, msg: Any) -> None:
         try:
             text = msg.text if isinstance(msg.text, str) else str(msg.text())
-        except Exception:  # noqa: BLE001 - cosmetic
+        except Exception as exc:  # noqa: BLE001 - cosmetic
+            record_failure("service._on_console_msg.text", exc)
             text = ""
         try:
             kind = msg.type if isinstance(msg.type, str) else str(msg.type())
-        except Exception:  # noqa: BLE001 - cosmetic
+        except Exception as exc:  # noqa: BLE001 - cosmetic
+            record_failure("service._on_console_msg.kind", exc)
             kind = ""
         try:
             loc = msg.location or {}
-        except Exception:  # noqa: BLE001 - cosmetic
+        except Exception as exc:  # noqa: BLE001 - cosmetic
+            record_failure("service._on_console_msg.loc", exc)
             loc = {}
         self._remember(self._console_log, {
             "type": kind or "log",
@@ -777,7 +781,8 @@ class RenderedTab:
         try:
             url = request.url
             method = request.method
-        except Exception:  # noqa: BLE001 - cosmetic
+        except Exception as exc:  # noqa: BLE001 - cosmetic
+            record_failure("service._on_request", exc)
             return
         self._remember(self._network_log, {
             "kind": "request",
@@ -790,12 +795,14 @@ class RenderedTab:
         try:
             url = response.url
             status = response.status
-        except Exception:  # noqa: BLE001 - cosmetic
+        except Exception as exc:  # noqa: BLE001 - cosmetic
+            record_failure("service._on_response", exc)
             return
         try:
             request = response.request
             method = request.method if request else ""
-        except Exception:  # noqa: BLE001 - cosmetic
+        except Exception as exc:  # noqa: BLE001 - cosmetic
+            record_failure("service._on_response.method", exc)
             method = ""
         self._remember(self._network_log, {
             "kind": "response",
@@ -809,7 +816,8 @@ class RenderedTab:
         try:
             kind = dialog.type
             message = dialog.message
-        except Exception:  # noqa: BLE001 - cosmetic
+        except Exception as exc:  # noqa: BLE001 - cosmetic
+            record_failure("service._on_dialog", exc)
             kind, message = "", ""
         record = {
             "type": kind if isinstance(kind, str) else str(kind),
@@ -934,7 +942,8 @@ class RenderedTab:
             if callable(close):
                 try:
                     close()
-                except Exception:  # noqa: BLE001 - teardown best effort
+                except Exception as exc:  # noqa: BLE001 - teardown best effort
+                    record_failure("service._teardown_quiet.close", exc)
                     _log.debug("rendered tab teardown %s.close failed", attr)
 
     def _handle_auto_download(self, download: Any) -> None:
@@ -1108,7 +1117,8 @@ class RenderedTab:
         self.url = page.url
         try:
             self.title = page.title()
-        except Exception:  # noqa: BLE001 - title is cosmetic
+        except Exception as exc:  # noqa: BLE001 - title is cosmetic
+            record_failure("service.navigate.title", exc)
             self.title = ""
         self.error = ""
         entry = {"url": self.url, "title": self.title, "ts": time.time()}
@@ -1131,7 +1141,8 @@ class RenderedTab:
             return ""
         try:
             content = page.content()
-        except Exception:  # noqa: BLE001 - cosmetic read
+        except Exception as exc:  # noqa: BLE001 - cosmetic read
+            record_failure("service._content_sample", exc)
             return ""
         return (content or "")[:limit]
 
@@ -1156,7 +1167,8 @@ class RenderedTab:
             if response is not None:
                 status = response.status
                 headers = dict(response.headers or {})
-        except Exception:  # noqa: BLE001 - response introspection is cosmetic
+        except Exception as exc:  # noqa: BLE001 - response introspection is cosmetic
+            record_failure("service._goto_once.response", exc)
             status = None
         if status is not None and status >= 400:
             raise errors.classify_http_status(
@@ -1181,7 +1193,8 @@ class RenderedTab:
             return ""
         try:
             return page.title() or ""
-        except Exception:  # noqa: BLE001 - title is cosmetic
+        except Exception as exc:  # noqa: BLE001 - title is cosmetic
+            record_failure("service._page_title", exc)
             return ""
 
     def wait_for_load_state(self, state: str = "load",
@@ -1584,7 +1597,8 @@ class RenderedTab:
                 if callable(press):
                     try:
                         press(selector, "Enter")
-                    except Exception:  # noqa: BLE001 - Enter is best effort
+                    except Exception as exc:  # noqa: BLE001 - Enter is best effort
+                        record_failure("service.set_date.enter", exc)
                         _log.debug("set_date Enter press failed")
                 if info is not None:
                     readback = self.evaluate(
@@ -1846,14 +1860,15 @@ class RenderedTab:
                 "click", exc, detail=f"target {target!r}") from exc
         try:
             after = page.url
-        except Exception:  # noqa: BLE001 - url read is cosmetic
+        except Exception as exc:  # noqa: BLE001 - url read is cosmetic
+            record_failure("service.click.url", exc)
             after = before
         if after != before:
             self.url = after
             try:
                 self.title = page.title()
-            except Exception:  # noqa: BLE001 - title is cosmetic
-                pass
+            except Exception as exc:  # noqa: BLE001 - title is cosmetic
+                record_failure("service.click.title", exc)
             self.history.append(
                 {"url": self.url, "title": self.title, "ts": time.time()})
         _notify_action(self, f"clicked {target!r}")
@@ -1892,8 +1907,8 @@ class RenderedTab:
         try:
             self.url = page.url
             self.title = page.title()
-        except Exception:  # noqa: BLE001 - cosmetic
-            pass
+        except Exception as exc:  # noqa: BLE001 - cosmetic
+            record_failure("service.submit.refresh", exc)
         self.history.append(
             {"url": self.url, "title": self.title, "ts": time.time()})
         _notify_action(self, f"submitted form{f' via {target!r}' if target else ''}")
@@ -1938,8 +1953,8 @@ class RenderedTab:
         try:
             self.url = page.url
             self.title = page.title()
-        except Exception:  # noqa: BLE001 - cosmetic
-            pass
+        except Exception as exc:  # noqa: BLE001 - cosmetic
+            record_failure("service.wait_for_url.refresh", exc)
         return {"ok": True, "pattern": pattern, "url": self.url}
 
     def wait_for_text(self, text: str = "",
@@ -2352,7 +2367,8 @@ class RenderedTab:
                         "(sel) => { const el = document.querySelector(sel);"
                         " return el ? el.value : null; }", selector)
                     verified = readback == text
-                except Exception:  # noqa: BLE001 - verification best-effort
+                except Exception as exc:  # noqa: BLE001 - verification best-effort
+                    record_failure("service.type_text.verify", exc)
                     verified = False
         except BrowserError:
             raise
@@ -2541,8 +2557,8 @@ class RenderedTab:
         except Exception as exc:  # noqa: BLE001 - input errors are opaque
             try:
                 page.mouse.up()
-            except Exception:  # noqa: BLE001 - best effort release
-                pass
+            except Exception as rel_exc:  # noqa: BLE001 - best effort release
+                record_failure("service.mouse_drag_path.release", rel_exc)
             raise BrowserError(
                 f"rendered mouse_drag_path failed: {exc}") from exc
 
@@ -2617,7 +2633,8 @@ class RenderedTab:
         for frame in frames:
             try:
                 html = frame.content()
-            except Exception:  # noqa: BLE001 - unreadable frame skips
+            except Exception as exc:  # noqa: BLE001 - unreadable frame skips
+                record_failure("service.frames_html", exc)
                 continue
             out.append({"url": str(getattr(frame, "url", "") or ""),
                         "html": str(html or "")})
@@ -2684,14 +2701,15 @@ class RenderedTab:
         notify the live view. Shared by reload/forward/back."""
         try:
             after = page.url
-        except Exception:  # noqa: BLE001 - url read is cosmetic
+        except Exception as exc:  # noqa: BLE001 - url read is cosmetic
+            record_failure("service._after_navigation.url", exc)
             after = before
         if after != before:
             self.url = after
             try:
                 self.title = page.title()
-            except Exception:  # noqa: BLE001 - title is cosmetic
-                pass
+            except Exception as exc:  # noqa: BLE001 - title is cosmetic
+                record_failure("service._after_navigation.title", exc)
             self.history.append(
                 {"url": self.url, "title": self.title, "ts": time.time()})
         _notify_action(self, action)
@@ -3161,7 +3179,8 @@ class RenderedTabTakeoverAdapter:
             return []
         try:
             return list(getter() or [])
-        except Exception:  # noqa: BLE001 - save is best effort
+        except Exception as exc:  # noqa: BLE001 - save is best effort
+            record_failure("service.cookies", exc)
             return []
 
     def storage_state(self) -> dict[str, Any]:
@@ -3172,7 +3191,8 @@ class RenderedTabTakeoverAdapter:
         try:
             state = getter()
             return dict(state) if isinstance(state, dict) else {}
-        except Exception:  # noqa: BLE001 - save is best effort
+        except Exception as exc:  # noqa: BLE001 - save is best effort
+            record_failure("service.storage_state", exc)
             return {}
 
     def add_cookies(self, cookies: list[dict[str, Any]]) -> dict[str, Any]:
