@@ -11,6 +11,7 @@ picking a surface:
   dispatch both surfaces use (cmdline dispatch first; GodConsole
   ``on_command`` for console-native commands).
 * ``render_frame()`` / ``push_event()`` — GodConsole passthrough.
+* ``failures()`` — the console failure ledger, newest first.
 * ``cmdline_commands()`` / ``create_godconsole()`` — direct access to
   each surface's real API, unchanged.
 
@@ -23,6 +24,7 @@ imported), so tests can inject fakes and assert passthrough equality:
 from __future__ import annotations
 
 from typing import Any, Callable, Sequence
+from .failures import record_failure
 
 __all__ = ["TUIFacade", "cmdline_commands", "create_godconsole"]
 
@@ -68,6 +70,15 @@ class TUIFacade:
     def push_event(self, event: str) -> None:
         self.godconsole.push_event(event)
 
+    def failures(self, limit: int = 20) -> str:
+        """Console failure ledger, newest first — the read-back for
+        every best-effort fallback the console recorded instead of
+        raising (see :mod:`nomorals.console.failures`). Empty when
+        nothing has failed; the facade never invents failures."""
+        from .failures import format_failures
+
+        return format_failures(limit)
+
     def render_frame(self) -> str:
         return self.godconsole._render_frame()
 
@@ -76,7 +87,8 @@ class TUIFacade:
         """Union of cmdline commands + console-native commands, sorted."""
         try:
             cli = set(cmdline_commands())
-        except Exception:
+        except Exception as e:
+            record_failure('tui_facade.TUIFacade.list_commands', e)
             cli = set()
         return sorted(cli | set(self._console_commands))
 
@@ -88,7 +100,8 @@ class TUIFacade:
         if self._cmdline_dispatch is not None:
             try:
                 known = set(cmdline_commands())
-            except Exception:
+            except Exception as e:
+                record_failure('tui_facade.TUIFacade.run_command', e)
                 known = set()
             if name in known:
                 return self._cmdline_dispatch(cmd)

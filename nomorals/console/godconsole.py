@@ -34,6 +34,7 @@ import sys
 import threading
 import time
 from typing import Any, Callable
+from .failures import record_failure
 
 # Unix-only stdlib modules. ``termios`` / ``tty`` do NOT exist on Windows
 # (``ModuleNotFoundError: No module named 'termios'``) and ``select`` only
@@ -126,8 +127,8 @@ class InputLine:
         try:
             with open(path, encoding="utf-8") as fh:
                 self.history = [ln.rstrip("\n") for ln in fh][-self._history_size:]
-        except Exception:  # noqa: BLE001 - history is best-effort
-            pass
+        except Exception as e:  # history is best-effort
+            record_failure('godconsole.InputLine.load_history', e)
 
     def save_history(self, path: str | None = None) -> None:
         target = path or self._history_path
@@ -136,8 +137,8 @@ class InputLine:
         try:
             with open(target, "w", encoding="utf-8") as fh:
                 fh.write("\n".join(self.history[-self._history_size:]))
-        except Exception:  # noqa: BLE001 - history is best-effort
-            pass
+        except Exception as e:  # history is best-effort
+            record_failure('godconsole.InputLine.save_history', e)
 
     def _push_history(self, line: str) -> None:
         line = line.strip()
@@ -403,7 +404,8 @@ class GodConsole:
         try:
             size = os.get_terminal_size()
             return size.columns, size.lines
-        except Exception:
+        except Exception as e:
+            record_failure('godconsole.GodConsole._get_size', e)
             return 80, 24
 
     def _truncate(self, s: str, width: int) -> str:
@@ -460,7 +462,8 @@ class GodConsole:
             snap = self._snapshot()
             try:
                 content = render_view(snap, self._view, bare=True, color=self._color)
-            except Exception:
+            except Exception as e:
+                record_failure('godconsole.GodConsole._render_main', e)
                 content = "view unavailable"
             lines = content.split("\n")
             result = [truncate_visible(ln, w) for ln in lines[:h]]
@@ -555,7 +558,8 @@ class GodConsole:
                     if ch == "\r":
                         return "\n"
                     return ch
-            except Exception:  # noqa: BLE001 - console input is best-effort
+            except Exception as e:  # console input is best-effort
+                record_failure('godconsole.GodConsole._wait_key_windows', e)
                 return None
             time.sleep(0.02)
         return None
@@ -577,7 +581,8 @@ class GodConsole:
         target = [fd] if fd is not None else [stdin]
         try:
             r, _, _ = select.select(target, [], [], timeout)
-        except Exception:  # noqa: BLE001 - select may fail on odd fds
+        except Exception as e:  # select may fail on odd fds
+            record_failure('godconsole.GodConsole._wait_key', e)
             time.sleep(max(0.0, timeout))
             return None
         if not r:
@@ -589,7 +594,8 @@ class GodConsole:
             while len(extra) < 8:
                 try:
                     r2, _, _ = select.select(target, [], [], 0.05)
-                except Exception:  # noqa: BLE001
+                except Exception as e:
+                    record_failure('godconsole.GodConsole._wait_key#2', e)
                     break
                 if not r2:
                     break
@@ -605,7 +611,8 @@ class GodConsole:
                 while True:
                     try:
                         r3, _, _ = select.select(target, [], [], 1.0)
-                    except Exception:  # noqa: BLE001
+                    except Exception as e:
+                        record_failure('godconsole.GodConsole._wait_key#3', e)
                         break
                     if not r3:
                         break
@@ -687,7 +694,8 @@ class GodConsole:
                     old_attrs = termios.tcgetattr(fd)
                     tty.setraw(fd)
                     raw = True
-                except Exception:
+                except Exception as e:
+                    record_failure('godconsole.GodConsole.run', e)
                     old_attrs = None
                     raw = False
 
@@ -711,7 +719,8 @@ class GodConsole:
                         # display never goes stale waiting for input.
                         try:
                             key = self._wait_key(TICK)
-                        except Exception:
+                        except Exception as e:
+                            record_failure('godconsole.GodConsole.run#2', e)
                             break
 
                         if key is None:

@@ -26,6 +26,7 @@ from .palette import (
     paint,
 )
 from .themes import get_theme, list_themes, theme_name
+from .failures import record_failure
 
 SnapshotProvider = Callable[[], dict[str, Any]]
 
@@ -160,7 +161,8 @@ class ConsoleCommands:
         try:
             snap = self._snapshot()
             return snap if isinstance(snap, dict) else {}
-        except Exception:  # noqa: BLE001 - dashboard must never crash the console
+        except Exception as e:  # dashboard must never crash the console
+            record_failure('commands.ConsoleCommands._safe_snapshot', e)
             return {}
 
     def _watch(self, interval: float) -> str:

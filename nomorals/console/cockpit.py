@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import threading
 from typing import Any, Callable, Iterable, Mapping, Sequence
+from .failures import record_failure
 
 MissionProvider = Callable[[], list[dict[str, Any]]]
 OrganProvider = Callable[[], list[dict[str, Any]]]
@@ -97,7 +98,8 @@ class Cockpit:
         try:
             rows = self._missions() or []
             return [dict(r) for r in rows]
-        except Exception:
+        except Exception as e:
+            record_failure('cockpit.Cockpit.missions', e)
             return []
 
     def organs(self) -> list[dict[str, Any]]:
@@ -106,7 +108,8 @@ class Cockpit:
         try:
             rows = self._organs() or []
             return [dict(r) for r in rows]
-        except Exception:
+        except Exception as e:
+            record_failure('cockpit.Cockpit.organs', e)
             return []
 
     def browser(self) -> dict[str, Any]:
@@ -114,7 +117,8 @@ class Cockpit:
             return {}
         try:
             return dict(self._browser() or {})
-        except Exception:
+        except Exception as e:
+            record_failure('cockpit.Cockpit.browser', e)
             return {}
 
     def ledger_entries(self, n: int | None = None) -> list[dict[str, Any]]:
@@ -122,7 +126,8 @@ class Cockpit:
             return []
         try:
             rows = self._ledger() or []
-        except Exception:
+        except Exception as e:
+            record_failure('cockpit.Cockpit.ledger_entries', e)
             return []
         rows = [dict(r) for r in rows]
         return rows[-max(1, n or self.ledger_limit):]
@@ -132,7 +137,8 @@ class Cockpit:
             return {}
         try:
             return dict(self._budget() or {})
-        except Exception:
+        except Exception as e:
+            record_failure('cockpit.Cockpit.budget_state', e)
             return {}
 
     # ── "why" ──

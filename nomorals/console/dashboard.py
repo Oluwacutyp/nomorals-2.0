@@ -44,6 +44,7 @@ from .palette import (
 )
 from .themes import Theme, get_theme
 from .widgets import gauge, panel, sparkline, table
+from .failures import record_failure
 
 _WIDTH = 58
 
@@ -56,7 +57,8 @@ def _resolve_width(width: int | None) -> int:
         import shutil
 
         return max(40, shutil.get_terminal_size((80, 24)).columns - 2)
-    except Exception:  # noqa: BLE001
+    except Exception as e:
+        record_failure('dashboard._resolve_width', e)
         return _WIDTH
 
 

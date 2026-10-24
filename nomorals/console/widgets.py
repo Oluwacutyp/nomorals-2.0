@@ -38,6 +38,7 @@ from .palette import (
     truncate_visible,
     visible_width,
 )
+from .failures import record_failure
 
 _SPARK_CHARS = "▁▂▃▄▅▆▇█"
 
@@ -450,7 +451,8 @@ class Spinner:
             try:
                 self.out.write(line)
                 self.out.flush()
-            except Exception:  # noqa: BLE001 - best effort
+            except Exception as e:  # best effort
+                record_failure('widgets.Spinner._spin', e)
                 break
             i += 1
 
@@ -470,8 +472,8 @@ class Spinner:
         try:
             self.out.write("\r" + " " * (len(strip_ansi(self.text)) + 4) + "\r")
             self.out.flush()
-        except Exception:  # noqa: BLE001 - best effort
-            pass
+        except Exception as e:  # best effort
+            record_failure('widgets.Spinner.__exit__', e)
 
 
 def status(text: str = "", **kw: Any) -> Spinner:
@@ -875,8 +877,8 @@ class MessageFeed:
                 if len(self._events) > self._capacity:
                     del self._events[: len(self._events) - self._capacity]
                 self._unread += 1
-        except Exception:  # noqa: BLE001 - feed must never break the caller
-            pass
+        except Exception as e:  # feed must never break the caller
+            record_failure('widgets.MessageFeed.push', e)
 
     def recent(self, n: int) -> list[MessageEvent]:
         with self._lock:
@@ -1073,7 +1075,8 @@ class _KeyReader:
             fd = sys.stdin.fileno()
             self._old = termios.tcgetattr(fd)
             self._fd = fd
-        except Exception:  # noqa: BLE001 - not a tty / no termios
+        except Exception as e:  # not a tty / no termios
+            record_failure('widgets._KeyReader.__init__', e)
             self._fd = None
 
     @property
@@ -1087,7 +1090,8 @@ class _KeyReader:
                 import tty
 
                 tty.setraw(self._fd)
-            except Exception:  # noqa: BLE001 - fall back to canonical
+            except Exception as e:  # fall back to canonical
+                record_failure('widgets._KeyReader.__enter__', e)
                 self._fd = None
         return self
 
@@ -1097,8 +1101,8 @@ class _KeyReader:
                 import termios
 
                 termios.tcsetattr(self._fd, termios.TCSADRAIN, self._old)
-            except Exception:  # noqa: BLE001 - teardown is best-effort
-                pass
+            except Exception as e:  # teardown is best-effort
+                record_failure('widgets._KeyReader.__exit__', e)
 
     def get(self, timeout: float) -> str | None:
         """Wait up to ``timeout`` seconds for one keypress.
@@ -1113,7 +1117,8 @@ class _KeyReader:
     def _get_raw(self, timeout: float) -> str | None:
         try:
             ready, _, _ = select.select([self._fd], [], [], max(0.0, timeout))
-        except Exception:  # noqa: BLE001
+        except Exception as e:
+            record_failure('widgets._KeyReader._get_raw', e)
             return None
         if not ready:
             return None
@@ -1133,13 +1138,15 @@ class _KeyReader:
     def _get_canonical(self, timeout: float) -> str | None:
         try:
             ready, _, _ = select.select([sys.stdin], [], [], max(0.0, timeout))
-        except Exception:  # noqa: BLE001
+        except Exception as e:
+            record_failure('widgets._KeyReader._get_canonical', e)
             return None
         if not ready:
             return None
         try:
             line = sys.stdin.readline()
-        except Exception:  # noqa: BLE001
+        except Exception as e:
+            record_failure('widgets._KeyReader._get_canonical#2', e)
             return None
         if not line:
             return None  # EOF
@@ -1204,15 +1211,15 @@ class _ScreenGuard:
             try:
                 handler.addFilter(self._filter)
                 self._muted.append(handler)
-            except Exception:  # noqa: BLE001 - best effort
-                pass
+            except Exception as e:  # best effort
+                record_failure('widgets._ScreenGuard._mute_logging', e)
 
     def _unmute_logging(self) -> None:
         for handler in self._muted:
             try:
                 handler.removeFilter(self._filter)
-            except Exception:  # noqa: BLE001 - teardown is best-effort
-                pass
+            except Exception as e:  # teardown is best-effort
+                record_failure('widgets._ScreenGuard._unmute_logging', e)
         self._muted.clear()
 
     # ── lifecycle ──
@@ -1221,15 +1228,16 @@ class _ScreenGuard:
         for stream in (sys.stdout, sys.stderr):
             try:
                 stream.flush()
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as e:
+                record_failure('widgets._ScreenGuard.__enter__', e)
         self._mute_logging()
         if not self._isolate:
             return self
         try:
             if not os.isatty(1):
                 return self
-        except Exception:  # noqa: BLE001
+        except Exception as e:
+            record_failure('widgets._ScreenGuard.__enter__#2', e)
             return self
         try:
             self._fd_out = os.dup(1)
@@ -1242,7 +1250,8 @@ class _ScreenGuard:
             # Private line-buffered handle to the real terminal — the
             # dashboard's only way out while fds 1/2 point at the spill.
             self.tty = os.fdopen(os.dup(self._fd_out), "w", buffering=1)
-        except Exception:  # noqa: BLE001 - isolation is best-effort
+        except Exception as e:  # isolation is best-effort
+            record_failure('widgets._ScreenGuard.__enter__#3', e)
             self.tty = sys.stdout
             self._fd_out = self._fd_err = None
             self._spill = None
@@ -1251,31 +1260,31 @@ class _ScreenGuard:
     def __exit__(self, *exc: Any) -> None:
         try:
             self.tty.flush()
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as e:
+            record_failure('widgets._ScreenGuard.__exit__', e)
         if self._fd_out is not None:
             for stream in (sys.stdout, sys.stderr):
                 try:
                     stream.flush()
-                except Exception:  # noqa: BLE001
-                    pass
+                except Exception as e:
+                    record_failure('widgets._ScreenGuard.__exit__#2', e)
             try:
                 os.dup2(self._fd_out, 1)
                 os.dup2(self._fd_err, 2)
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as e:
+                record_failure('widgets._ScreenGuard.__exit__#3', e)
             for fh in (self.tty, self._spill):
                 try:
                     if fh is not None:
                         fh.close()
-                except Exception:  # noqa: BLE001
-                    pass
+                except Exception as e:
+                    record_failure('widgets._ScreenGuard.__exit__#4', e)
             for fd in (self._fd_out, self._fd_err):
                 try:
                     if fd is not None:
                         os.close(fd)
-                except Exception:  # noqa: BLE001
-                    pass
+                except Exception as e:
+                    record_failure('widgets._ScreenGuard.__exit__#5', e)
             self.tty = sys.stdout
             self._fd_out = self._fd_err = None
             self._spill = None
@@ -1406,8 +1415,8 @@ class GodScreen:
                     try:
                         tty_out.write(_SHOW_CURSOR + _ALT_SCREEN_OFF)
                         tty_out.flush()
-                    except Exception:  # noqa: BLE001 - best-effort
-                        pass
+                    except Exception as e:  # best-effort
+                        record_failure('widgets.GodScreen.run', e)
         finally:
             WatchHub.set_active(False)
         return paint("exited live dashboard", DIM)
@@ -1652,7 +1661,8 @@ class GodScreen:
         try:
             snap = self._snapshot()
             return snap if isinstance(snap, dict) else {}
-        except Exception:  # noqa: BLE001 - dashboard is best-effort
+        except Exception as e:  # dashboard is best-effort
+            record_failure('widgets.GodScreen._snap', e)
             return {}
 
     # ── frame assembly: ONE paint path (Grok layout discipline) ──
@@ -1816,8 +1826,8 @@ class GodScreen:
             try:
                 out.write("\033[2J")
                 out.flush()
-            except Exception:  # noqa: BLE001 - best-effort
-                pass
+            except Exception as e:  # best-effort
+                record_failure('widgets.GodScreen._render_frame', e)
 
         c = self.color
 

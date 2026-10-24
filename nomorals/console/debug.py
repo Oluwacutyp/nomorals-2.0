@@ -26,6 +26,7 @@ import time
 from collections import deque
 from contextlib import contextmanager
 from typing import Any, Iterator
+from .failures import record_failure
 
 __all__ = ["DebugHub"]
 
@@ -49,8 +50,8 @@ class _DebugHandler(logging.Handler):
     def emit(self, record: logging.LogRecord) -> None:
         try:
             DebugHub._ingest(record)
-        except Exception:  # noqa: BLE001 - telemetry must never break logging
-            pass
+        except Exception as e:  # telemetry must never break logging
+            record_failure('debug._DebugHandler.emit', e)
 
 
 class DebugHub:
@@ -91,8 +92,8 @@ class DebugHub:
                 return
             try:
                 logging.getLogger().removeHandler(cls._handler)
-            except Exception:  # noqa: BLE001 - teardown is best-effort
-                pass
+            except Exception as e:  # teardown is best-effort
+                record_failure('debug.DebugHub.uninstall', e)
             cls._handler = None
 
     @classmethod
@@ -118,7 +119,8 @@ class DebugHub:
     def _ingest(cls, record: logging.LogRecord) -> None:
         try:
             msg = record.getMessage()
-        except Exception:  # noqa: BLE001
+        except Exception as e:
+            record_failure('debug.DebugHub._ingest', e)
             msg = str(record.msg)
         entry = (record.created, record.levelname, record.name, msg)
         with cls._lock:
@@ -141,11 +143,13 @@ class DebugHub:
             exc_text = "".join(
                 traceback.format_exception(*record.exc_info)  # type: ignore[arg-type]
             )
-        except Exception:  # noqa: BLE001
+        except Exception as e:
+            record_failure('debug.DebugHub._record_exception', e)
             return
         try:
             msg = record.getMessage()
-        except Exception:  # noqa: BLE001
+        except Exception as e:
+            record_failure('debug.DebugHub._record_exception#2', e)
             msg = str(record.msg)
         with cls._lock:
             cls._exceptions.append(
@@ -173,7 +177,8 @@ class DebugHub:
             exc_text = "".join(
                 traceback.format_exception(type(exc), exc, exc.__traceback__)
             )
-        except Exception:  # noqa: BLE001
+        except Exception as e:
+            record_failure('debug.DebugHub.record_exception', e)
             exc_text = f"{type(exc).__name__}: {exc}"
         with cls._lock:
             cls._exceptions.append(
@@ -262,17 +267,18 @@ class DebugHub:
                         latency_s=kw.get("latency_s", 0.0),
                         error=kw.get("error", ""),
                     )
-                except Exception:  # noqa: BLE001
-                    pass
+                except Exception as e:
+                    record_failure('debug.DebugHub.install_llm_hook.chained', e)
                 if callable(existing):
                     try:
                         existing(**kw)
-                    except Exception:  # noqa: BLE001
-                        pass
+                    except Exception as e:
+                        record_failure('debug.DebugHub.install_llm_hook.chained#2', e)
 
             setter(chained)
             return True
-        except Exception:  # noqa: BLE001 - hookup must never break boot
+        except Exception as e:  # hookup must never break boot
+            record_failure('debug.DebugHub.install_llm_hook', e)
             return False
 
     # ── explicit op timing ──
@@ -288,8 +294,8 @@ class DebugHub:
             try:
                 cls._record_slow(str(name), time.perf_counter() - t0,
                                  time.time())
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as e:
+                record_failure('debug.DebugHub.timed', e)
 
     # ── reads (for the debug view) ──
 

@@ -14,6 +14,7 @@ from __future__ import annotations
 import difflib
 import threading
 from dataclasses import dataclass, field
+from .failures import record_failure
 
 
 @dataclass
@@ -89,7 +90,8 @@ class CommandRegistry:
         """
         try:
             from .commands import _COMMANDS
-        except Exception:
+        except Exception as e:
+            record_failure('discovery.CommandRegistry.load_from_console', e)
             return 0
         count = 0
         for name, (usage, desc) in _COMMANDS.items():

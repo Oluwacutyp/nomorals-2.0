@@ -18,6 +18,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from typing import Any, Callable
+from .failures import record_failure
 
 Sender = Callable[[str, str, str], Any]
 
@@ -106,7 +107,8 @@ class AlertPolicy:
             for channel in rule.channels:
                 try:
                     delivered[channel] = bool(channels_sender(channel, sev, msg))
-                except Exception:
+                except Exception as e:
+                    record_failure('alerts.AlertPolicy.send_alert', e)
                     delivered[channel] = False
         with self._lock:
             self._history.append(AlertRecord(
