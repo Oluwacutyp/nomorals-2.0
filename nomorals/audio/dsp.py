@@ -33,6 +33,7 @@ from typing import Any, Sequence
 
 from ..core.logging_setup import get_logger
 from .fingerprint import has_numpy
+from .failures import record_failure
 
 _log = logging.getLogger(__name__)
 
@@ -87,7 +88,8 @@ def list_presets() -> str:
             chain = EffectChain(CHAIN_PRESETS[name])
             lines.append(f"  {name} — {chain.describe()}")
         return "\n".join(lines)
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("dsp.list_presets", exc)
         return "presets unavailable"
 
 _SAMPLE_EPS = 1e-9
@@ -146,7 +148,8 @@ def normalize_peak(samples: Sequence[float], target: float = 0.89) -> array:
             return array("d", samples)
         g = target / peak
         return array("d", (s * g for s in samples))
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("dsp.normalize_peak", exc)
         return array("d", samples)
 
 
@@ -158,7 +161,8 @@ def remove_dc(samples: Sequence[float]) -> array:
             return array("d")
         mean = sum(samples) / n
         return array("d", (s - mean for s in samples))
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("dsp.remove_dc", exc)
         return array("d", samples)
 
 
@@ -179,7 +183,8 @@ def trim_silence(samples: Sequence[float], sr: int,
         end = min(n, end + pad)
         return array("d", samples[start:end]) if end > start else \
             array("d", samples)
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("dsp.trim_silence", exc)
         return array("d", samples)
 
 
@@ -195,7 +200,8 @@ def fade_edges(samples: Sequence[float], sr: int,
             out[i] *= f
             out[n - 1 - i] *= f
         return out
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("dsp.fade_edges", exc)
         return array("d", samples)
 
 
@@ -241,7 +247,8 @@ def biquad(samples: Sequence[float], sr: int, kind: str,
             out[i] = y0
             x2, x1, y2, y1 = x1, x0, y1, y0
         return out
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("dsp.biquad", exc)
         return array("d", samples)
 
 
@@ -274,7 +281,8 @@ def telephone(samples: Sequence[float], sr: int) -> array:
     try:
         out = highpass(samples, sr, 300.0)
         return lowpass(out, sr, 3400.0)
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("dsp.telephone", exc)
         return array("d", samples)
 
 
@@ -283,7 +291,8 @@ def gain_db(samples: Sequence[float], sr: int, db: float = 0.0) -> array:
     try:
         g = 10.0 ** (float(db) / 20.0)
         return array("d", (s * g for s in samples))
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("dsp.gain_db", exc)
         return array("d", samples)
 
 
@@ -309,7 +318,8 @@ def bitcrush(samples: Sequence[float], sr: int, *,
                 held = q
             out[i] = held
         return out
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("dsp.bitcrush", exc)
         return array("d", samples)
 
 
@@ -329,7 +339,8 @@ def distortion(samples: Sequence[float], sr: int, *,
             shaped[i] = math.tanh(v)
         out = lowpass(shaped, sr, max(1000.0, float(tone)))
         return normalize_peak(out, 0.95)
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("dsp.distortion", exc)
         return array("d", samples)
 
 
@@ -362,7 +373,8 @@ def chorus(samples: Sequence[float], sr: int, *,
             out[i] = s * (1.0 - wet) + wet_s * wet
             bi = (bi + 1) % bl
         return normalize_peak(out, 0.95)
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("dsp.chorus", exc)
         return array("d", samples)
 
 
@@ -380,7 +392,8 @@ def tremolo(samples: Sequence[float], sr: int, *,
             lfo = 0.5 - 0.5 * math.cos(2.0 * math.pi * rate * i / sr)
             out[i] = s * (1.0 - d * lfo)
         return out
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("dsp.tremolo", exc)
         return array("d", samples)
 
 
@@ -408,7 +421,8 @@ def vibrato(samples: Sequence[float], sr: int, *,
             out[i] = buf[i0] * (1.0 - frac) + buf[(i0 + 1) % bl] * frac
             bi = (bi + 1) % bl
         return out
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("dsp.vibrato", exc)
         return array("d", samples)
 
 
@@ -440,7 +454,8 @@ def phaser(samples: Sequence[float], sr: int, *,
                 v = yn
             out[i] = s * (1.0 - d) + v * d
         return normalize_peak(out, 0.95)
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("dsp.phaser", exc)
         return array("d", samples)
 
 
@@ -465,7 +480,8 @@ def delay(samples: Sequence[float], sr: int, *,
             out[i] = s * (1.0 - wet) + wet_s * wet
             bi = (bi + 1) % d
         return normalize_peak(out, 0.95)
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("dsp.delay", exc)
         return array("d", samples)
 
 
@@ -510,7 +526,8 @@ def autolevel(samples: Sequence[float], sr: int, *,
             g = gains[w0] * (1.0 - blend) + gains[w1] * blend
             out[i] = samples[i] * g
         return soft_limiter(out, 0.98)
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("dsp.autolevel", exc)
         return array("d", samples)
 
 
@@ -548,7 +565,8 @@ def duck_under(bed: Sequence[float], voice: Sequence[float], sr: int, *,
             g = ducked if env > 0.01 else 1.0
             out[i] = bed_l[i] * g
         return out
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("dsp.duck_under", exc)
         return array("d", bed)
 
 
@@ -562,7 +580,8 @@ def dehum(samples: Sequence[float], sr: int,
                 if f * mult < sr / 2 - 50:
                     out = notch(out, sr, f * mult)
         return out
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("dsp.dehum", exc)
         return array("d", samples)
 
 
@@ -692,7 +711,8 @@ def compressor(samples: Sequence[float], sr: int, *,
                 gain = 1.0
             out[i] = s * gain
         return out
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("dsp.compressor", exc)
         return array("d", samples)
 
 
@@ -704,7 +724,8 @@ def soft_limiter(samples: Sequence[float], ceiling: float = 0.95) -> array:
             v = s / max(_SAMPLE_EPS, ceiling)
             out[i] = math.tanh(v) * ceiling
         return out
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("dsp.soft_limiter", exc)
         return array("d", samples)
 
 
@@ -728,7 +749,8 @@ def _convolve_fft(x: Sequence[float], h: Sequence[float]) -> array:
                                    dtype=np.float64))
         y = np.fft.irfft(X * H, n=size)
         return array("d", (float(v) for v in y[:n]))
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("dsp.convolve_fft", exc)
         # short-kernel direct convolution (used by the Schroeder path
         # only for tiny kernels — never the full reverb tail)
         out = array("d", [0.0]) * (len(x) + len(h) - 1)
@@ -834,7 +856,8 @@ def echo(samples: Sequence[float], sr: int, *,
             for i in range(n - off):
                 out[i + off] += samples[i] * g
         return normalize_peak(out, 0.95)
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("dsp.echo", exc)
         return array("d", samples)
 
 
@@ -1002,7 +1025,8 @@ def _varispeed(samples: Sequence[float], factor: float) -> array:
             frac = pos - lo
             out[i] = samples[lo] * (1.0 - frac) + samples[hi] * frac
         return out
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("dsp.varispeed", exc)
         return array("d", samples)
 
 
@@ -1028,7 +1052,8 @@ def pitch_shift(samples: Sequence[float], sr: int,
         if len(out) < n:
             out.extend([0.0] * (n - len(out)))
         return out
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("dsp.pitch_shift", exc)
         return array("d", samples)
 
 
@@ -1053,7 +1078,8 @@ def mix_under(bed: Sequence[float], top: Sequence[float],
         for i, s in enumerate(top):
             out[i] += s * gain
         return out
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("dsp.mix_under", exc)
         return array("d", bed)
 
 
