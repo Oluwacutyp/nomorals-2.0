@@ -41,6 +41,7 @@ from typing import Any, Callable
 from ..core.logging_setup import get_logger
 from ..tools.media import probe
 from .cookies import BOT_COOKIE_HELP, YTDLP_INSTALL_HELP
+from .failures import record_failure
 
 _log = get_logger(__name__)
 
@@ -198,9 +199,9 @@ class SourceResolver:
             try:
                 from ..storage.kv import KVStore
                 reg.bind_store(KVStore(db))
-            except Exception:  # noqa: BLE001 - persistence is an
+            except Exception as exc:  # noqa: BLE001 - persistence is an
                 # enhancement; its absence never sinks a resolution
-                pass
+                record_failure("resolver.registry_bind", exc)
             self._source_registry_cache = reg
             return reg
         except Exception:  # noqa: BLE001
