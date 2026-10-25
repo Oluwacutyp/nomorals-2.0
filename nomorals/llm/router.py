@@ -32,6 +32,7 @@ from .base import LLMProvider, LLMResponse, Message, SamplingParams
 from .cassette import (CassetteStore, canonical_key, message_key,
                        recording_enabled, replay_enabled,
                        response_from_record)
+from .swallow_failures import record_failure
 
 __all__ = [
     "LLMRouter",
@@ -117,7 +118,8 @@ def estimate_cost(
             * per_m_completion,
             9,
         )
-    except Exception:  # noqa: BLE001 — cost math never breaks the caller
+    except Exception as exc:  # noqa: BLE001 — cost math never breaks the caller
+        record_failure("router.estimate_cost", exc)
         return _FLAT_LLM_CALL_USD
 
 
@@ -184,8 +186,8 @@ class CostLog:
                         continue
                     if isinstance(row, dict) and float(row.get("ts", 0.0)) >= since:
                         out.append(row)
-        except FileNotFoundError:
-            pass
+        except FileNotFoundError as exc:
+            record_failure("router.entries_missing", exc)
         except Exception:  # noqa: BLE001
             _log.debug("cost log read failed", exc_info=True)
         return out
@@ -196,7 +198,8 @@ class CostLog:
             return round(
                 sum(float(r.get("cost_usd", 0.0)) for r in self.entries(since)), 9
             )
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("router.total_spend", exc)
             return 0.0
 
     def breakdown(self, since: float = 0.0) -> dict[str, Any]:
@@ -224,8 +227,8 @@ class CostLog:
             ):
                 try:
                     total[key] += float(val)
-                except (TypeError, ValueError):
-                    pass
+                except (TypeError, ValueError) as exc:
+                    record_failure("router.breakdown_total_cast", exc)
             for bucket, name in (
                 (by_operation, str(r.get("operation") or "chat")),
                 (by_provider, str(r.get("provider") or "unknown")),
@@ -239,8 +242,8 @@ class CostLog:
                             "latency_ms"):
                     try:
                         slot[key] += float(r.get(key, 0.0))
-                    except (TypeError, ValueError):
-                        pass
+                    except (TypeError, ValueError) as exc:
+                        record_failure("router.breakdown_slot_cast", exc)
         for bucket in (by_operation, by_provider):
             for slot in bucket.values():
                 calls = slot["calls"] or 1
@@ -262,7 +265,8 @@ class CostLog:
         try:
             spent = self.total_spend(since)
             budget = max(0.0, float(daily_budget))
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("router.budget_report", exc)
             return {"spent_usd": 0.0, "budget_usd": 0.0, "alert": "ok",
                     "pct": 0.0}
         if budget <= 0:
@@ -422,7 +426,8 @@ class ProviderHealth:
             ordered = sorted(self.latencies)
             idx = min(len(ordered) - 1, int(len(ordered) * 0.95))
             return round(ordered[idx], 2)
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("router.p95_latency", exc)
             return 0.0
 
     def available(self, now: float | None = None) -> bool:
@@ -630,8 +635,8 @@ class LLMRouter:
                     operation=operation, action=verdict.action,
                     note=verdict.note,
                     utilisation=verdict.utilisation)
-        except Exception:  # noqa: BLE001 — telemetry never breaks routing
-            pass
+        except Exception as exc:  # noqa: BLE001 — telemetry never breaks routing
+            record_failure("router.adaptive_block_emit", exc)
         return LLMResponse(
             text="",
             error=verdict.note or "budget exceeded",
@@ -648,8 +653,8 @@ class LLMRouter:
                 self.bus.emit("llm.budget_adapted", operation=operation,
                               action=verdict.action, note=verdict.note,
                               utilisation=verdict.utilisation)
-        except Exception:  # noqa: BLE001 — telemetry never breaks routing
-            pass
+        except Exception as exc:  # noqa: BLE001 — telemetry never breaks routing
+            record_failure("router.adaptive_apply_emit", exc)
 
     def _adaptive_record(self, operation: str, response: LLMResponse) -> None:
         """Feed one call's actuals into the adaptive ledger.  Never raises."""
@@ -1118,8 +1123,8 @@ class LLMRouter:
                 for card in broker.cards():
                     if card.provider == provider_name:
                         return float(card.price_per_1m_in)
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:  # noqa: BLE001
+            record_failure("router.route_price", exc)
         return 0.0
 
     def _apply_route(
@@ -1147,8 +1152,8 @@ class LLMRouter:
             try:
                 cap = float(max_price)
                 out = [p for p in out if self._route_price(p.name) <= cap]
-            except (TypeError, ValueError):
-                pass
+            except (TypeError, ValueError) as exc:
+                record_failure("router.max_price_cap", exc)
         if self.latency_slo_ms > 0 and len(out) > 1:
             def _under_slo(p: LLMProvider) -> bool:
                 health = self._health.get(p.name)
@@ -1273,8 +1278,8 @@ class LLMRouter:
                     self.bus.emit("llm.budget_warning", spent_usd=spent,
                                   budget_usd=self.daily_budget_usd,
                                   operation=operation)
-                except Exception:  # noqa: BLE001
-                    pass
+                except Exception as exc:  # noqa: BLE001
+                    record_failure("router.budget_warning_emit", exc)
         except Exception:  # noqa: BLE001 — budget must never break routing
             _log.debug("budget check failed", exc_info=True)
         return None
@@ -1484,8 +1489,8 @@ class LLMRouter:
                     failed_providers=[name for name, _ in failed],
                     error=last.error or "",
                 )
-        except Exception:  # noqa: BLE001 — telemetry never breaks dispatch
-            pass
+        except Exception as exc:  # noqa: BLE001 — telemetry never breaks dispatch
+            record_failure("router.brain_down_emit", exc)
         return last
 
     def _note_success(self, name: str, latency_ms: float = 0.0) -> None:
@@ -1500,8 +1505,8 @@ class LLMRouter:
         try:
             from ..core.error_system import heartbeat
             heartbeat(f"llm/{name}", True)
-        except Exception:  # noqa: BLE001 - telemetry never breaks routing
-            pass
+        except Exception as exc:  # noqa: BLE001 - telemetry never breaks routing
+            record_failure("router.note_success_heartbeat", exc)
 
     def _note_failure(self, name: str, error: str) -> None:
         from .failures import FailureClass, classify_failure
@@ -1548,8 +1553,8 @@ class LLMRouter:
         try:
             from ..core.error_system import heartbeat
             heartbeat(f"llm/{name}", False)
-        except Exception:  # noqa: BLE001 - telemetry never breaks routing
-            pass
+        except Exception as exc:  # noqa: BLE001 - telemetry never breaks routing
+            record_failure("router.note_failure_heartbeat", exc)
         if health.breaker is not None:
             if cooldown > 0:
                 health.breaker.reset_timeout = cooldown
@@ -1566,15 +1571,15 @@ class LLMRouter:
                         hook()
                         self._last_repair_time[hook_name] = now
                         self.stats["repairs"] += 1
-                    except Exception:  # noqa: BLE001
-                        pass
+                    except Exception as exc:  # noqa: BLE001
+                        record_failure("router.repair_hook_dict", exc)
         else:
             for hook in self.repair_hooks:
                 try:
                     hook(name, error)
                     self.stats["repairs"] += 1
-                except Exception:  # noqa: BLE001
-                    pass
+                except Exception as exc:  # noqa: BLE001
+                    record_failure("router.repair_hook_list", exc)
 
     # ── introspection ────────────────────────────────────────────────────────
     def probe(self, timeout: float = 10.0) -> dict[str, bool]:
@@ -1583,7 +1588,8 @@ class LLMRouter:
         for provider in self._chain():
             try:
                 results[provider.name] = bool(provider.health())
-            except Exception:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001
+                record_failure("router.probe_health", exc)
                 results[provider.name] = False
         return results
 
@@ -1601,13 +1607,13 @@ class LLMRouter:
                 day_start = now - (now % 86400)
                 snapshot["budget"] = self._cost_log().budget_report(
                     self.daily_budget_usd, day_start)
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as exc:  # noqa: BLE001
+                record_failure("router.snapshot_budget", exc)
         if self.adaptive_budget is not None:
             try:
                 snapshot["adaptive_budget"] = self.adaptive_budget.status()
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as exc:  # noqa: BLE001
+                record_failure("router.snapshot_adaptive", exc)
         return snapshot
 
     def reset_cooldowns(self) -> None:
