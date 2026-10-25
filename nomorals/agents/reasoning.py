@@ -42,6 +42,7 @@ from ..core.policy import Capability
 from ..llm.base import Message, SamplingParams
 from ..llm.brain import brain_for
 from ..storage.kv import KVStore
+from .failures import record_failure
 
 _log = get_logger(__name__)
 
@@ -219,7 +220,8 @@ def _response_usage(response: Any) -> tuple[int, int, int] | None:
         if total <= 0 and (prompt or completion):
             total = prompt + completion
         return prompt, completion, total
-    except Exception:  # noqa: BLE001 — metering must never break a call
+    except Exception as exc:  # noqa: BLE001 — metering must never break a call
+        record_failure("reasoning.response_usage", exc)
         return None
 
 
@@ -842,7 +844,8 @@ def reasoning_enabled(context: Any, *, complex_ok: bool = False) -> bool:
     try:
         mode = str(getattr(context.settings, "reasoning_mode", "auto")
                    or "auto").strip().lower()
-    except Exception:  # noqa: BLE001 — bad config must never kill agents
+    except Exception as exc:  # noqa: BLE001 — bad config must never kill agents
+        record_failure("reasoning.enabled_mode", exc)
         mode = "auto"
     if mode == "off":
         return False
@@ -853,8 +856,8 @@ def reasoning_enabled(context: Any, *, complex_ok: bool = False) -> bool:
         from .power import power_mode_for
         if power_mode_for(context).active:
             return True
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as exc:  # noqa: BLE001
+        record_failure("reasoning.enabled_power", exc)
     return bool(complex_ok)
 
 
@@ -876,7 +879,8 @@ def reasoning_permitted(context: Any) -> bool:
     try:
         mode = str(getattr(context.settings, "reasoning_mode", "auto")
                    or "auto").strip().lower()
-    except Exception:  # noqa: BLE001 — bad config must never kill agents
+    except Exception as exc:  # noqa: BLE001 — bad config must never kill agents
+        record_failure("reasoning.permitted_mode", exc)
         mode = "auto"
     return mode != "off"
 
@@ -887,8 +891,8 @@ def _hook_budget(context: Any) -> tuple[int, float]:
         from .power import power_mode_for
         if power_mode_for(context).active:
             return 8, 120.0
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as exc:  # noqa: BLE001
+        record_failure("reasoning.hook_budget", exc)
     return 3, 45.0
 
 
@@ -1207,8 +1211,8 @@ class ReasoningAgent:
                     if n:
                         risks.append(f"same action family failed {n}x in "
                                      "the last hour")
-        except Exception:  # noqa: BLE001 - pre-migration-27 db
-            pass
+        except Exception as exc:  # noqa: BLE001 - pre-migration-27 db
+            record_failure("reasoning.precheck_family", exc)
         # known systemic trap?  (plus prevention skills mined from
         # repeated pre-action aborts — the memory loop closing back)
         try:
@@ -1228,8 +1232,8 @@ class ReasoningAgent:
                 else:
                     risks.append(f"repeated abort: {p.name} — "
                                  f"{p.description[:100]}")
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:  # noqa: BLE001
+            record_failure("reasoning.precheck_traps", exc)
         # one bounded model advisory — a bonus, never a gate
         advice = ""
         try:
@@ -1253,16 +1257,16 @@ class ReasoningAgent:
                     journal.append({"ts": time.time(), **out})
                     journal = journal[-100:]
                     kv.set(self._MIDTASK_KEY, journal)
-            except Exception:  # noqa: BLE001 - journal is a bonus
-                pass
+            except Exception as exc:  # noqa: BLE001 - journal is a bonus
+                record_failure("reasoning.precheck_journal", exc)
         # wave 82: an abort is evidence — after it is journaled, mine the
         # journal into prevention skills so the repeated family becomes
         # durable memory (best-effort)
         if not proceed:
             try:
                 self.mine_preventions()
-            except Exception:  # noqa: BLE001 - memory never blocks the check
-                pass
+            except Exception as exc:  # noqa: BLE001 - memory never blocks the check
+                record_failure("reasoning.precheck_mine", exc)
         return out
 
     def mid_task_journal(self, limit: int = 20) -> list[dict[str, Any]]:
@@ -1273,7 +1277,8 @@ class ReasoningAgent:
                 return []
             data = KVStore(db).get(self._MIDTASK_KEY, default=[])
             return data[-max(1, limit):]
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("reasoning.midtask_journal", exc)
             return []
 
     # ── mid-task advice ────────────────────────────────────────────────────
@@ -1323,7 +1328,8 @@ class ReasoningAgent:
         try:
             if not reasoning_permitted(self.context):
                 return []
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("reasoning.plan_tools_permitted", exc)
             return []
         names = {name for name, _ in catalog}
         rendered = "\n".join(f"- {name}: {desc}" for name, desc in catalog)
@@ -1383,8 +1389,8 @@ class ReasoningAgent:
             journal.append(entry)
             journal = journal[-bound:]
             kv.set(key, journal)
-        except Exception:  # noqa: BLE001 - journals are a bonus
-            pass
+        except Exception as exc:  # noqa: BLE001 - journals are a bonus
+            record_failure("reasoning.journal_write", exc)
 
     @classmethod
     def _read_journal(cls, context: Any, key: str,
@@ -1395,7 +1401,8 @@ class ReasoningAgent:
                 return []
             data = KVStore(db).get(key, default=[])
             return data[-max(1, limit):] if isinstance(data, list) else []
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("reasoning.journal_read", exc)
             return []
 
     def record_think_trace(self, text: str, result: ReasoningResult) -> None:
@@ -1424,8 +1431,8 @@ class ReasoningAgent:
         try:
             from .failure import FailureAnalyzer
             FailureAnalyzer(self.context).record(scope, task, detail or "failed")
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:  # noqa: BLE001
+            record_failure("reasoning.record_outcome", exc)
 
     def course_correct(self, outcome: str, *,
                        scope: str = "agent",
@@ -1466,7 +1473,8 @@ class ReasoningAgent:
                         "AND summary LIKE ?",
                         (time.time() - 3600.0, f"%{head[:24]}%"))
                     family_hits = rows[0]["n"] if rows else 0
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("reasoning.course_family", exc)
             family_hits = 0
         if family_hits or attempts >= 2:
             why = (f"failed {family_hits}x in the last hour"
@@ -1486,16 +1494,16 @@ class ReasoningAgent:
                         f"{wins}/{uses} record — this approach is "
                         f"historically weak")
                     break
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:  # noqa: BLE001
+            record_failure("reasoning.course_skills", exc)
         # 3) known trap
         try:
             from .skills import SkillLibrary
             for t in SkillLibrary(getattr(self.context, "db")).match_errors(
                     outcome, limit=1):
                 signals.append(f"known trap: {t.name}")
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:  # noqa: BLE001
+            record_failure("reasoning.course_traps", exc)
         should_pivot = bool(signals)
         # 4) one bounded model pivot
         pivot = ""
@@ -1640,7 +1648,8 @@ class ReasoningAgent:
         try:
             body = json.loads(skill.body)
             return int(body.get("hits") or 0)
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("reasoning.prevention_hits", exc)
             return 0
 
     # ── wave 82: the audit → lessons loop ──────────────────────────────────
