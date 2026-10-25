@@ -35,6 +35,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable, Optional
 
 from ..core.logging_setup import get_logger
+from .failures import record_failure
 
 _log = get_logger(__name__)
 
@@ -135,7 +136,8 @@ class GeoIndex:
                 self._cells[cell].append(sid)
             self._coords[sid] = (float(lat), float(lng))
             return cell
-        except Exception:  # noqa: BLE001 - never raises
+        except Exception as exc:  # noqa: BLE001 - never raises
+            record_failure("route.geo_add", exc)
             return ""
 
     def nearby(self, lat: float, lng: float,
@@ -160,7 +162,8 @@ class GeoIndex:
                     ring_cells = _h3.k_ring(cell, rings)
                     for c in ring_cells:
                         candidates.extend(self._cells.get(str(c), []))
-                except Exception:  # noqa: BLE001 - fall through to full scan
+                except Exception as exc:  # noqa: BLE001 - fall through to full scan
+                    record_failure("route.nearby_kring", exc)
                     candidates = []
             if not candidates:
                 for c, ids in self._cells.items():
@@ -174,7 +177,8 @@ class GeoIndex:
                 if haversine_km(lat, lng, alat, alng) <= float(radius_km):
                     out.append(sid)
             return out
-        except Exception:  # noqa: BLE001 - never raises
+        except Exception as exc:  # noqa: BLE001 - never raises
+            record_failure("route.nearby", exc)
             return []
 
     @staticmethod
@@ -187,8 +191,8 @@ class GeoIndex:
             if len(pa) == 3 and len(pb) == 3 and pa[0] == pb[0]:
                 return abs(int(pa[1]) - int(pb[1])) <= 1 and \
                     abs(int(pa[2]) - int(pb[2])) <= 1
-        except (ValueError, IndexError):
-            pass
+        except (ValueError, IndexError) as exc:
+            record_failure("route.same_area", exc)
         return False
 
 
@@ -270,8 +274,8 @@ class CostModel:
                 if "recorded_at" not in cols:
                     self._db.execute(
                         "ALTER TABLE route_actuals ADD COLUMN recorded_at REAL DEFAULT 0")
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as exc:  # noqa: BLE001
+                record_failure("route.cost_init_migration", exc)
             self._db.execute(
                 """CREATE TABLE IF NOT EXISTS route_globals (
                        key TEXT PRIMARY KEY, value REAL)""")
@@ -355,7 +359,8 @@ class CostModel:
         try:
             minutes, cost, _ = self.estimate_detail(a, b)
             return minutes, cost
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("route.estimate", exc)
             return _DEFAULT_UNKNOWN_MINUTES, 0
 
     def estimate_detail(self, a: Stop, b: Stop) -> tuple[float, int, str]:
@@ -366,7 +371,8 @@ class CostModel:
                 return learned[0], int(round(learned[1])), "learned"
             minutes, cost, km = self._heuristic(a, b)
             return minutes, cost, "heuristic"
-        except Exception:  # noqa: BLE001 - never raises
+        except Exception as exc:  # noqa: BLE001 - never raises
+            record_failure("route.estimate_detail", exc)
             return _DEFAULT_UNKNOWN_MINUTES, 0, "heuristic"
 
     def _pair_key(self, a: Stop, b: Stop) -> tuple[str, str] | None:
@@ -405,7 +411,8 @@ class CostModel:
             row = self._db.execute(
                 "SELECT value FROM route_globals WHERE key = ?", (key,)).fetchone()
             return float(row["value"]) if row else default
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("route.get_global", exc)
             return default
 
     def _set_global(self, key: str, value: float) -> None:
@@ -416,8 +423,8 @@ class CostModel:
                 "INSERT OR REPLACE INTO route_globals VALUES (?, ?)",
                 (key, float(value)))
             self._db.commit()
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:  # noqa: BLE001
+            record_failure("route.set_global", exc)
 
     def stats(self) -> dict[str, Any]:
         """Learning summary: how much the model actually knows."""
@@ -433,7 +440,8 @@ class CostModel:
                         "SELECT SUM(n) AS s FROM route_actuals "
                         "WHERE recorded_at >= ?", (cutoff,)).fetchone()
                     recent = int(row2["s"] or 0) if row2 else 0
-                except Exception:  # noqa: BLE001
+                except Exception as exc:  # noqa: BLE001
+                    record_failure("route.stats_recent", exc)
                     recent = n
             return {
                 "recorded_trips": n,
@@ -442,7 +450,8 @@ class CostModel:
                 "cost_per_km_kobo": int(round(self._cost_per_km)),
                 "source": "learned" if n else "heuristic-defaults",
             }
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("route.stats", exc)
             return {"recorded_trips": 0, "source": "heuristic-defaults"}
 
 
@@ -529,8 +538,8 @@ class RouteSolver:
                         end = float(s.window[1])
                         if end > 0 and arr > end:
                             late = (arr - end) / 60.0
-                    except (TypeError, ValueError, IndexError):
-                        pass
+                    except (TypeError, ValueError, IndexError) as exc:
+                        record_failure("route.greedy_score_window", exc)
                 return minutes + late * 1000.0
 
             nxt = min(rest, key=_score)
@@ -581,8 +590,8 @@ class RouteSolver:
                             end = float(w[1])
                             if end > 0 and clock > end:
                                 late += (clock - end) / 60.0
-                        except (TypeError, ValueError, IndexError):
-                            pass
+                        except (TypeError, ValueError, IndexError) as exc:
+                            record_failure("route.two_opt_window", exc)
                     clock += (order[x].dwell_minutes or 0) * 60.0
                 return total + late * 1000.0
 
@@ -734,8 +743,8 @@ class RouteSolver:
                         f"{stop.label}: arrives {_fmt_eta(arr)} — "
                         f"{late_min:.0f}m after window closes "
                         f"({_fmt_eta(end)})")
-        except Exception:  # noqa: BLE001 - never raises
-            pass
+        except Exception as exc:  # noqa: BLE001 - never raises
+            record_failure("route.window_violations", exc)
         return out
 
 
@@ -770,8 +779,8 @@ class RoutePlanner:
                                 f"ALTER TABLE route_stops ADD COLUMN {col} "
                                 "REAL DEFAULT 0")
                     db.commit()
-                except Exception:  # noqa: BLE001
-                    pass
+                except Exception as exc:  # noqa: BLE001
+                    record_failure("route.planner_init_migration", exc)
                 for row in db.execute("SELECT * FROM route_stops"):
                     stop = Stop(row["stop_id"], row["label"], row["lat"],
                                 row["lng"], row["dwell_minutes"] or 15.0)
@@ -780,8 +789,8 @@ class RoutePlanner:
                         we = float(row["window_end"] or 0)
                         if ws > 0 and we > ws:
                             stop.window = (ws, we)
-                    except (TypeError, ValueError, IndexError, KeyError):
-                        pass
+                    except (TypeError, ValueError, IndexError, KeyError) as exc:
+                        record_failure("route.planner_row_window", exc)
                     self._stops[stop.stop_id] = stop
                     if stop.has_coords():
                         self.geo.add(stop.stop_id, stop.lat, stop.lng)
@@ -814,10 +823,11 @@ class RoutePlanner:
                         (sid, label, lat, lng, stop.dwell_minutes))
                     db.commit()
                     db.close()
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as exc:  # noqa: BLE001
+                record_failure("route.add_stop_persist", exc)
             return stop
-        except Exception:  # noqa: BLE001 - never raises
+        except Exception as exc:  # noqa: BLE001 - never raises
+            record_failure("route.add_stop", exc)
             return None
 
     def set_window(self, label: str, start_hm: str, end_hm: str) -> bool:
@@ -844,7 +854,8 @@ class RoutePlanner:
                 db.commit()
                 db.close()
             return True
-        except Exception:  # noqa: BLE001 - never raises
+        except Exception as exc:  # noqa: BLE001 - never raises
+            record_failure("route.set_window", exc)
             return False
 
     def find_stop(self, text: str) -> Stop | None:
@@ -860,7 +871,8 @@ class RoutePlanner:
                 if text in s.label.lower():
                     return s
             return None
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("route.find_stop", exc)
             return None
 
     def list_stops(self) -> list[Stop]:
@@ -875,7 +887,8 @@ class RoutePlanner:
         try:
             return self.solver.solve(stops, self.cost, start_time=start_time,
                                      return_to_origin=return_to_origin)
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("route.plan", exc)
             return RouteResult(stops or [], [], 0.0, 0, self.solver.backend)
 
     def record_trip(self, a: Stop, b: Stop, minutes: float,
@@ -921,8 +934,8 @@ def format_route(result: RouteResult) -> str:
             try:
                 win = (f" 🕐 window {_fmt_eta(float(stop.window[0]))}–"
                        f"{_fmt_eta(float(stop.window[1]))}")
-            except (TypeError, ValueError, IndexError):
-                pass
+            except (TypeError, ValueError, IndexError) as exc:
+                record_failure("route.format_window", exc)
         dwell = f" (~{stop.dwell_minutes:g}m there)" if i and stop.dwell_minutes else ""
         lines.append(f"  {i + 1}. {stop.label} {tag}{win}{dwell}")
     total_h = result.total_minutes / 60.0
