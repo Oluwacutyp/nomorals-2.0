@@ -107,6 +107,7 @@ class _MessageHistory:
 
 def _build_snapshot_provider(runtime, context, boot_mono, history: _MessageHistory):
     """Assemble the live-status snapshot for the console dashboard."""
+    from nomorals.console.failures import record_failure
 
     def _snapshot():
         snap: dict = {}
@@ -161,7 +162,8 @@ def _build_snapshot_provider(runtime, context, boot_mono, history: _MessageHisto
         # ── activity sparkline ──
         try:
             snap["history"] = history.per_minute()
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("run_chat_bot.snapshot_history", exc)
             snap["history"] = []
         # ── brain (LLM router health) ──
         try:
@@ -344,6 +346,7 @@ def main() -> int:
     from nomorals.agents.partner_runtime import PartnerRuntime
     from nomorals.core.config import load_settings
     from nomorals.core.logging_setup import setup_logging
+    from nomorals.console.failures import record_failure
 
     # Colored, compact logs — no black backgrounds, no red text.
     setup_logging(level=os.environ.get("NM_LOG_LEVEL", "INFO"), color=True)
@@ -411,7 +414,8 @@ def main() -> int:
                 local = None
                 try:
                     local = runtime.gateway.adapters.get("local")
-                except Exception:  # noqa: BLE001 - gateway internals are best-effort
+                except Exception as exc:  # noqa: BLE001 - gateway internals are best-effort
+                    record_failure("run_chat_bot.local_adapter", exc)
                     local = None
                 if local is not None:
                     local.command_hook = commands.handle
@@ -427,8 +431,8 @@ def main() -> int:
             finally:
                 try:
                     runtime.stop()
-                except Exception:  # noqa: BLE001 - best-effort shutdown
-                    pass
+                except Exception as exc:  # noqa: BLE001 - best-effort shutdown
+                    record_failure("run_chat_bot.shutdown_stop", exc)
     except Exception as exc:  # noqa: BLE001 - honest failure, then raise
         progress.fail(settings, exc)
         raise
