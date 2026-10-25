@@ -33,6 +33,7 @@ from ..core.ids import new_short_id
 from ..core.logging_setup import get_logger
 from ..storage.kv import KVStore
 from .notifier import Notifier
+from .failures import record_failure
 
 __all__ = ["CognitiveLoop", "ModelBudget", "autonomy_enabled",
            "set_autonomy_enabled", "SelfImprovementStatus", "register"]
@@ -75,7 +76,8 @@ def _kv_override(context: Any) -> bool | None:
         if not data:
             return None
         return bool(data.get("enabled")) if isinstance(data, dict) else None
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("cognition.kv_override", exc)
         return None
 
 
@@ -138,7 +140,8 @@ class ModelBudget:
         today = self._today()
         try:
             data = KVStore(self.context.db).get(self._KEY, default={})
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("cognition.budget_usage", exc)
             data = {}
         if not isinstance(data, dict) or data.get("date") != today:
             data = {"date": today, "calls": 0, "tokens": 0, "ticks": 0}
@@ -199,7 +202,8 @@ class ModelBudget:
     def _reservations_raw(self) -> list[dict[str, Any]]:
         try:
             data = KVStore(self.context.db).get(self._RES_KEY, default=[])
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("cognition.reservations_raw", exc)
             data = []
         return data if isinstance(data, list) else []
 
@@ -310,7 +314,8 @@ class ModelBudget:
                 tokens += (int(stats.get("prompt_tokens", 0) or 0)
                            + int(stats.get("completion_tokens", 0) or 0))
             return {"calls": calls, "tokens": tokens}
-        except Exception:  # noqa: BLE001 — metering must never break work
+        except Exception as exc:  # noqa: BLE001 — metering must never break work
+            record_failure("cognition.usage_snapshot", exc)
             return None
 
     def usage_delta(self, snap: dict[str, int] | None) -> dict[str, int]:
@@ -581,7 +586,8 @@ class CognitiveLoop:
             if row is None:
                 return False
             return int(row.get("c", 0) or 0) > 0
-        except Exception:  # noqa: BLE001 — cadence comfort, never fatal
+        except Exception as exc:  # noqa: BLE001 — cadence comfort, never fatal
+            record_failure("cognition.portfolio_pending", exc)
             return False
 
     def _update_adaptive_cadence(self, summary: dict[str, Any]) -> None:
@@ -928,7 +934,8 @@ class CognitiveLoop:
         loop = ImprovementLoop(self.context)
         try:
             train_status = SelfImprovementStatus(self.context)
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("cognition.status_training", exc)
             train_status = {}
         return {
             "enabled": autonomy_enabled(self.context),
