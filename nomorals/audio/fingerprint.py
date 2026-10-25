@@ -48,6 +48,8 @@ from typing import Any, Sequence
 
 from ..core.logging_setup import get_logger
 
+from .failures import record_failure
+
 _log = logging.getLogger(__name__)
 
 __all__ = [
@@ -111,7 +113,8 @@ def _ffmpeg_path() -> str | None:
     try:
         from ..media_edit.videos import ffmpeg_path
         return ffmpeg_path()
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("fingerprint.ffmpeg_path", exc)
         return None
 
 
@@ -155,7 +158,8 @@ def _resample_linear(samples: array, src_sr: int, dst_sr: int) -> array:
             frac = pos - lo
             out[i] = samples[lo] * (1.0 - frac) + samples[hi] * frac
         return out
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("fingerprint.resample_linear", exc)
         return array("d", samples)
 
 
@@ -200,8 +204,8 @@ def read_mono(path: str | os.PathLike[str], *,
             try:
                 os.remove(out)
                 os.rmdir(tmp)
-            except OSError:
-                pass
+            except OSError as exc:
+                record_failure("fingerprint.decode_tmp_cleanup", exc)
     if max_seconds and max_seconds > 0:
         cap = int(max_seconds * sr)
         if len(samples) > cap:
@@ -623,7 +627,8 @@ class FingerprintDB:
                 hashes = conn.execute(
                     "SELECT COUNT(*) FROM hashes").fetchone()[0]
             return {"ok": True, "tracks": tracks, "hashes": hashes}
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("fingerprint.stats", exc)
             return {"ok": False, "tracks": 0, "hashes": 0}
 
     def match(self, path: str | os.PathLike[str], *,
@@ -695,7 +700,8 @@ class FingerprintDB:
             return [{"track_id": r[0], "title": r[1], "artist": r[2],
                      "source": r[3], "duration_s": round(r[4] or 0.0, 1)}
                     for r in rows]
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("fingerprint.list_tracks", exc)
             return []
 
     def remove_track(self, track_id: int) -> bool:
@@ -709,15 +715,16 @@ class FingerprintDB:
                                    (track_id,))
                 conn.commit()
                 return cur.rowcount > 0
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("fingerprint.remove_track", exc)
             return False
 
     def close(self) -> None:
         try:
             if self._conn is not None:
                 self._conn.close()
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:  # noqa: BLE001
+            record_failure("fingerprint.close", exc)
         finally:
             self._conn = None
 
