@@ -59,6 +59,7 @@ from ..core.ids import new_short_id
 from ..core.logging_setup import get_logger
 from .failure import FailureAnalyzer
 from .skills import SkillLibrary
+from .failures import record_failure
 
 _log = get_logger(__name__)
 
@@ -209,11 +210,13 @@ class SkillEditRecord:
     def from_row(cls, row: dict[str, Any]) -> "SkillEditRecord":
         try:
             failures = json.loads(row.get("triggering_failures") or "[]")
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("skill_evolution.from_row_failures", exc)
             failures = []
         try:
             gate = json.loads(row.get("gate_results") or "{}")
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("skill_evolution.from_row_gate", exc)
             gate = {}
         return cls(
             id=row["id"], skill_name=row.get("skill_name", ""),
@@ -286,7 +289,8 @@ class SkillEvolutionLoop:
             rows = self.db.query(
                 "SELECT * FROM failures WHERE ts > ? AND skill<>'' "
                 "ORDER BY ts DESC", (cutoff,))
-        except Exception:  # noqa: BLE001 — pre-migration-52 databases
+        except Exception as exc:  # noqa: BLE001 — pre-migration-52 databases
+            record_failure("skill_evolution.detect", exc)
             rows = []
         groups: dict[str, list[dict[str, Any]]] = {}
         for r in rows:
@@ -303,7 +307,8 @@ class SkillEvolutionLoop:
         """Resolve a SkillLibrary row by id (used for lesson promotion)."""
         try:
             skill = self.skills.get(skill_id)
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("skill_evolution.resolve_target_by_id", exc)
             skill = None
         if skill is None:
             return None
@@ -327,7 +332,8 @@ class SkillEvolutionLoop:
                         name=skill_name, text=text)
         try:
             skill = self.skills.get_by_name(skill_name)
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("skill_evolution.resolve_target", exc)
             skill = None
         if skill is not None:
             return SkillTarget(kind="db", ref=skill.id,
@@ -522,7 +528,8 @@ class SkillEvolutionLoop:
                            failures: list[dict[str, Any]]) -> dict[str, Any]:
         try:
             from .benchmark import measurable, run_benchmark
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("skill_evolution.default_benchmark_import", exc)
             return {"ok": True, "skipped": True,
                     "detail": "no benchmark module"}
         if not measurable(self.context):
@@ -723,7 +730,8 @@ class SkillEvolutionLoop:
             return None
         try:
             from .skill_canary import CanaryRollout
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("skill_evolution.canary_import", exc)
             return None
         try:
             target = self.resolve_target(proposal["skill_name"])
@@ -749,14 +757,16 @@ class SkillEvolutionLoop:
         mark the edit applied) or revert (mark the edit regressed)."""
         try:
             from .skill_canary import CanaryRollout
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("skill_evolution.settle_canaries_import", exc)
             return []
         rollout = CanaryRollout(self.context)
         settled: list[dict[str, Any]] = []
         try:
             running = [r for r in rollout.history(limit=50)
                        if r.status == "running"]
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("skill_evolution.settle_canaries_history", exc)
             return []
         for run in running:
             try:
@@ -965,15 +975,15 @@ class SkillEvolutionLoop:
             settled = self.settle_canaries()
             if settled:
                 _log.info("skill_evolution: settled %d canaries", len(settled))
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:  # noqa: BLE001
+            record_failure("skill_evolution.tick_settle", exc)
         try:
             stats = FailureAnalyzer(self.context).evaluate_usefulness()
             if stats.get("evaluated") or stats.get("demoted") \
                     or stats.get("archived"):
                 _log.info("skill_evolution: usefulness %s", stats)
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:  # noqa: BLE001
+            record_failure("skill_evolution.tick_usefulness", exc)
         out: list[SkillEditRecord] = []
         # high-usefulness lessons get folded back into their governing skill
         try:
@@ -988,8 +998,8 @@ class SkillEvolutionLoop:
                 except SkillEvolutionError:
                     continue
                 out.append(self.apply_proposal(proposal))
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:  # noqa: BLE001
+            record_failure("skill_evolution.tick_promotion", exc)
         for cand in self.detect():
             try:
                 proposal = self.propose(cand["skill"], cand["failures"])
@@ -1018,7 +1028,8 @@ def ensure_improvement_schedule(context: Any) -> list[dict[str, Any]]:
         try:
             existing = context.db.query_one(
                 "SELECT id FROM schedule_jobs WHERE name=? LIMIT 1", (name,))
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("skill_evolution.ensure_schedule_query", exc)
             existing = None
         if existing:
             out.append({"name": name, "already_scheduled": True})
