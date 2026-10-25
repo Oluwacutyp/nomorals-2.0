@@ -57,6 +57,7 @@ from typing import Any, Callable, Sequence
 
 from ..core.logging_setup import get_logger
 from ..media_edit.captions import Word
+from .failures import record_failure
 
 _log = get_logger(__name__)
 
@@ -323,8 +324,8 @@ def _splice(audio: str | os.PathLike[str],
         for pt in parts:
             try:
                 Path(pt).unlink(missing_ok=True)
-            except OSError:
-                pass
+            except OSError as exc:
+                record_failure("edit.splice_cleanup", exc)
         return {"ok": True, "output": res["output"], "segments": len(parts),
                 "mode": "trim+concat"}
     except Exception as exc:  # noqa: BLE001
@@ -922,8 +923,8 @@ def apply_edits(transcript: EditableTranscript | dict[str, Any],
             for pt in pieces:
                 try:
                     Path(pt).unlink(missing_ok=True)
-                except OSError:
-                    pass
+                except OSError as exc:
+                    record_failure("edit.concat_cleanup", exc)
         return {"ok": True, "output": out, "applied": len(norm_edits),
                 "deletes": sum(1 for e in norm_edits if e.kind == "delete"),
                 "rewrites": len(rewrites),
