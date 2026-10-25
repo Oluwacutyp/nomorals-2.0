@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from ..core.logging_setup import get_logger
+from .swallow_failures import record_failure
 
 _log = get_logger(__name__)
 
@@ -212,7 +213,8 @@ class CostDisplay:
             )
             self._db.commit()
             return True
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("cost_display.set_enabled", exc)
             return False
 
     # -- spend --
@@ -323,8 +325,8 @@ def control_cost(tail: str, context: Any = None, chat: Any = None,
             try:
                 if context is not None and hasattr(context, "set_research_budget"):
                     context.set_research_budget(amount)
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as exc:  # noqa: BLE001
+                record_failure("cost_display.budget_set", exc)
             return f"💰 research budget set: {format_cost(amount)} per run."
         return _usage()
     except Exception:  # noqa: BLE001
