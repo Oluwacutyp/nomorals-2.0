@@ -29,6 +29,7 @@ from ..llm.brain import brain_for
 from ..core.ids import new_short_id
 from ..core.logging_setup import get_logger
 from ..storage.kv import KVStore
+from .failures import record_failure
 from .skills import SkillLibrary
 
 _log = get_logger(__name__)
@@ -256,8 +257,8 @@ class SkillSynthesizer:
             # gate failed: remove the half-registered skill
             try:
                 self.db.execute("DELETE FROM skills WHERE id=?", (skill.id,))
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as exc:  # noqa: BLE001
+                record_failure("skill_synthesis.smoke_cleanup", exc)
             return {"ok": False, "error": f"smoke test failed: {detail}"}
         # provenance
         try:
@@ -279,8 +280,8 @@ class SkillSynthesizer:
                 "until": time.time() + PROBATION_DAYS * 86400,
                 "pattern": pattern.to_dict(),
             })
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:  # noqa: BLE001
+            record_failure("skill_synthesis.probation_record", exc)
         _log.info("synthesized skill %s (%s) on probation",
                   skill.id, skill.name)
         return {"ok": True, "staged": False, "skill_id": skill.id,
@@ -329,7 +330,8 @@ class SkillSynthesizer:
             try:
                 srow = self.db.query_one(
                     "SELECT uses FROM skills WHERE id=?", (skill_id,))
-            except Exception:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001
+                record_failure("skill_synthesis.review_uses", exc)
                 srow = None
             uses = (srow["uses"] or 0) if srow else 0
             if uses > 0 and srow is not None:
@@ -348,8 +350,8 @@ class SkillSynthesizer:
                 try:
                     self.db.execute("DELETE FROM skills WHERE id=?",
                                     (skill_id,))
-                except Exception:  # noqa: BLE001
-                    pass
+                except Exception as exc:  # noqa: BLE001
+                    record_failure("skill_synthesis.review_removal", exc)
                 out.append({"skill_id": skill_id, "kept": False, "uses": uses})
             try:
                 KVStore(self.db).delete(key)
