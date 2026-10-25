@@ -45,6 +45,7 @@ from .recurrence import (
     parse_natural_schedule as _parse_natural_schedule,
     parse_rrule as _rec_parse_rrule,
 )
+from .failures import record_failure
 
 __all__ = [
     "Scheduler",
@@ -370,7 +371,8 @@ def _quiet_shift(now_ts: float, quiet: tuple[str, str] | None,
         try:
             from zoneinfo import ZoneInfo
             zone = ZoneInfo(tz)
-        except Exception:
+        except Exception as exc:
+            record_failure("scheduler.quiet_shift_zone", exc)
             zone = None
     now_dt = datetime.fromtimestamp(now_ts, tz=zone)
     start_dt = now_dt.replace(hour=sh, minute=sm, second=0, microsecond=0)
@@ -393,7 +395,8 @@ def _ts_date(ts: float, tz: str | None) -> Any:
         try:
             from zoneinfo import ZoneInfo
             zone = ZoneInfo(tz)
-        except Exception:
+        except Exception as exc:
+            record_failure("scheduler.ts_date_zone", exc)
             zone = None
     return datetime.fromtimestamp(ts, tz=zone).date()
 
@@ -437,7 +440,8 @@ def _fmt_next(ts: float, tz: str | None = None) -> str:
         try:
             from zoneinfo import ZoneInfo
             zone = ZoneInfo(tz)
-        except Exception:
+        except Exception as exc:
+            record_failure("scheduler.fmt_next_zone", exc)
             zone = None
     dt = datetime.fromtimestamp(ts, tz=zone)
     today = datetime.now(tz=zone).date()
@@ -1971,7 +1975,8 @@ class Scheduler:
                 JOIN scheduled_tasks t ON c.task_id = t.task_id
                 WHERE c.next_run <= ? AND t.status = 'pending'
             """, (now,))
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("scheduler.catchup_cron_rows", exc)
             cron_rows = []
         for row in cron_rows:
             row = dict(row)
@@ -1985,7 +1990,8 @@ class Scheduler:
                 JOIN scheduled_tasks t ON r.task_id = t.task_id
                 WHERE r.due_at <= ? AND t.status IN ('pending', 'snoozed')
             """, (now,))
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("scheduler.catchup_reminder_rows", exc)
             reminder_rows = []
         for row in reminder_rows:
             row = dict(row)
@@ -1997,7 +2003,8 @@ class Scheduler:
                 SELECT * FROM scheduled_tasks
                 WHERE task_type = 'one_time' AND status = 'pending'
             """)
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("scheduler.catchup_task_rows", exc)
             task_rows = []
         for row in task_rows:
             meta = self._row_metadata(row)
@@ -2014,7 +2021,8 @@ class Scheduler:
                 "SELECT COUNT(*) AS n FROM task_runs WHERE task_id = ?",
                 (task_id,))
             return int((row or {}).get("n") or 0)
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("scheduler.run_count", exc)
             return 0
 
     def health(self) -> dict[str, Any]:
@@ -2052,8 +2060,8 @@ class Scheduler:
                     "SELECT status, COUNT(*) AS n FROM scheduled_tasks "
                     "GROUP BY status")
                 out["tasks"] = {r["status"]: r["n"] for r in rows}
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as exc:  # noqa: BLE001
+                record_failure("scheduler.health_tasks", exc)
             now = time.time()
             try:
                 row = self.db.query_one(
@@ -2072,8 +2080,8 @@ class Scheduler:
                         1 for r in self.db.query(
                             "SELECT task_id FROM cron_jobs WHERE next_run <= ?",
                             (now,)))
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as exc:  # noqa: BLE001
+                record_failure("scheduler.health_due_now", exc)
             with self._flight_lock:
                 out["in_flight"] = sorted(self._in_flight)
             out["deferred"] = dict(self._deferrals)
@@ -2103,8 +2111,8 @@ class Scheduler:
                                                         - now))})
                 upcoming.sort(key=lambda e: e["at"])
                 out["upcoming"] = upcoming[:5]
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as exc:  # noqa: BLE001
+                record_failure("scheduler.health_upcoming", exc)
             # stale: elapsed-silence heuristic.  A job can show a healthy
             # *future* next_run while nothing actually executes (the trigger
             # keeps advancing); the signal that catches it is silence vs
@@ -2129,8 +2137,8 @@ class Scheduler:
                 if stale:
                     out["reasons"].append(
                         f"{len(stale)} cron job(s) silent beyond 2x cadence")
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as exc:  # noqa: BLE001
+                record_failure("scheduler.health_stale", exc)
             try:
                 dead = self.db.query(
                     "SELECT task_id, action, updated_at FROM scheduled_tasks "
@@ -2141,8 +2149,8 @@ class Scheduler:
                 if out["dead"]:
                     out["reasons"].append(
                         f"{len(out['dead'])} task(s) dead-lettered")
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as exc:  # noqa: BLE001
+                record_failure("scheduler.health_dead", exc)
             try:
                 runs = self.db.query(
                     "SELECT task_id, started_at, ok, result, trigger_source "
@@ -2152,8 +2160,8 @@ class Scheduler:
                      "result": (r["result"] or "")[:100],
                      "trigger_source": r["trigger_source"] or ""}
                     for r in runs]
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as exc:  # noqa: BLE001
+                record_failure("scheduler.health_recent_runs", exc)
             out["ok"] = not out["reasons"]
         except Exception as exc:  # noqa: BLE001 - health never raises
             out["ok"] = False
@@ -2191,7 +2199,8 @@ class Scheduler:
                 JOIN scheduled_tasks t ON c.task_id = t.task_id
                 WHERE c.next_run <= ? AND t.status = 'pending'
             """, (now,))
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("scheduler.tick_cron_rows", exc)
             cron_rows = []
         for row in cron_rows:
             if self._maybe_defer(row, defer_heavy, pressure_reasons):
@@ -2208,7 +2217,8 @@ class Scheduler:
                 JOIN scheduled_tasks t ON r.task_id = t.task_id
                 WHERE r.due_at <= ? AND t.status IN ('pending', 'snoozed')
             """, (now,))
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("scheduler.tick_reminder_rows", exc)
             reminder_rows = []
         for row in reminder_rows:
             if self._maybe_defer(row, defer_heavy, pressure_reasons):
@@ -2222,7 +2232,8 @@ class Scheduler:
                 SELECT * FROM scheduled_tasks
                 WHERE task_type = 'one_time' AND status = 'pending'
             """)
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("scheduler.tick_task_rows", exc)
             task_rows = []
         for row in task_rows:
             metadata = self._row_metadata(row)
@@ -2898,7 +2909,8 @@ class Scheduler:
                 "SELECT * FROM task_runs WHERE task_id = ? "
                 "ORDER BY started_at DESC LIMIT ?",
                 (task_id, max(1, int(limit))))
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("scheduler.recent_runs", exc)
             return []
         return [
             {
@@ -2945,7 +2957,8 @@ class Scheduler:
         try:
             from ..planning.estimates import eta_text
             return eta_text(task_type, segments)
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("scheduler.eta_estimate", exc)
             return "⏱️ estimate unavailable"
 
     def record_outcome(self, task_type: str, predicted_minutes: float,
@@ -2954,7 +2967,8 @@ class Scheduler:
         try:
             from ..planning.estimates import record_actual
             return record_actual(task_type, predicted_minutes, actual_minutes)
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("scheduler.record_outcome", exc)
             return False
     
     def register_action(self, name: str, handler: Callable) -> None:
