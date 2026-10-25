@@ -30,6 +30,7 @@ import sqlite3
 import time
 import uuid
 from dataclasses import dataclass, field
+from .failures import record_failure
 
 _log = logging.getLogger(__name__)
 
@@ -209,7 +210,8 @@ class RentalPassport:
             if not self.attested_at:
                 return False
             return (time.time() - self.attested_at) <= max_age_days * 86400
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("passport.is_fresh", exc)
             return False
 
     def freshness_note(self) -> str:
@@ -224,7 +226,8 @@ class RentalPassport:
                         f"~{max(0, left)} more days")
             return (f"attested {int(age_days)}d ago — STALE, re-attest "
                     f"before sharing (30-day validity)")
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("passport.freshness_note", exc)
             return "attestation: unknown"
 
 
@@ -353,7 +356,8 @@ class PassportStore:
                 p.doc_refs.append(DocRef(vault_id=d["vault_id"] or "",
                                          label=d["label"] or ""))
             return p
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("passport.get", exc)
             return None
 
     def list(self) -> list[RentalPassport]:
@@ -368,7 +372,8 @@ class PassportStore:
                 if p is not None:
                     out.append(p)
             return out
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("passport.list", exc)
             return []
 
     def default(self) -> RentalPassport | None:
@@ -392,7 +397,8 @@ class PassportStore:
                              (band, passport_id))
             self._touch(passport_id)
             return True
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("passport.set_income_band", exc)
             return False
 
     def set_kyc(self, passport_id: str, summary: str) -> bool:
@@ -404,7 +410,8 @@ class PassportStore:
                 ((summary or "").strip()[:500], passport_id))
             self._touch(passport_id)
             return True
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("passport.set_kyc", exc)
             return False
 
     def add_history(self, passport_id: str, address: str, landlord: str = "",
@@ -419,7 +426,8 @@ class PassportStore:
                  (years or "").strip()[:40], (note or "").strip()[:200]))
             self._touch(passport_id)
             return True
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("passport.add_history", exc)
             return False
 
     def add_reference(self, passport_id: str, name: str, relationship: str = "",
@@ -436,7 +444,8 @@ class PassportStore:
                  (contact_ref or "").strip()[:120]))
             self._touch(passport_id)
             return True
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("passport.add_reference", exc)
             return False
 
     def add_doc_ref(self, passport_id: str, vault_id: str,
@@ -452,7 +461,8 @@ class PassportStore:
                  (label or "").strip()[:120]))
             self._touch(passport_id)
             return True
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("passport.add_doc_ref", exc)
             return False
 
     # ── export ──
@@ -468,7 +478,8 @@ class PassportStore:
                 (time.time(), passport_id))
             self._touch(passport_id)
             return True
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("passport.reattest", exc)
             return False
 
     def export_text(self, passport_id: str) -> str:
@@ -545,7 +556,8 @@ def missing_kyc_docs(passport: RentalPassport) -> list[str]:
             if not any(k in labels for k in keys):
                 missing.append(doc)
         return missing
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("passport.missing_kyc_docs", exc)
         return list(NIGERIA_KYC_DOCS)
 
 
@@ -593,7 +605,8 @@ def referencing_readiness(passport: RentalPassport | None) -> dict:
                 "missing": missing + (["kyc: " + ", ".join(kyc_missing)]
                                       if kyc_missing else []),
                 "verdict": verdict}
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("passport.referencing_readiness", exc)
         return blank
 
 
@@ -739,7 +752,8 @@ def affordability(rent_kobo: int, income_band: str) -> dict:
                         if ok else
                         "tight — rent exceeds 33% of the income band midpoint"),
         }
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("passport.affordability", exc)
         return {"ok": False, "reason": "couldn't assess affordability"}
 
 
@@ -747,7 +761,8 @@ def can_afford(rent_kobo: int, income_band: str) -> bool:
     """Monthly rent ≤ 33% of the income band's midpoint. Never raises."""
     try:
         return bool(affordability(rent_kobo, income_band).get("ok"))
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("passport.can_afford", exc)
         return False
 
 
@@ -760,7 +775,8 @@ def required_monthly_income(rent_kobo: int,
         if rent_kobo <= 0 or ratio <= 0:
             return 0
         return int(round(rent_kobo / 100 / 12 / ratio))
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("passport.required_monthly_income", exc)
         return 0
 
 
@@ -772,7 +788,8 @@ def required_income_band(rent_kobo: int) -> str:
             if can_afford(rent_kobo, band):
                 return band
         return ""
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("passport.required_income_band", exc)
         return ""
 
 
@@ -786,7 +803,8 @@ def can_guarantee(rent_kobo: int, income_band: str) -> bool:
         low, high = INCOME_BANDS[band]
         mid_monthly = low if high is None else (low + high) / 2
         return mid_monthly * 12 >= (rent_kobo / 100) * 3
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("passport.can_guarantee", exc)
         return False
 
 
@@ -821,7 +839,8 @@ def combined_affordability(rent_kobo: int,
                         "tight even combined — rent exceeds 33% of the "
                         "pooled income"),
         }
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("passport.combined_affordability", exc)
         return {"ok": False, "reason": "couldn't assess combined "
                                        "affordability"}
 
@@ -859,13 +878,14 @@ def _memory_facts(context) -> dict:
                       "rental_history"):
                 try:
                     v = get(k)
-                except Exception:  # noqa: BLE001
+                except Exception as exc:  # noqa: BLE001
+                    record_failure("passport.memory_facts_key", exc)
                     v = None
                 if v:
                     out[k] = v
             return out
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as exc:  # noqa: BLE001
+        record_failure("passport.memory_facts", exc)
     return {}
 
 
