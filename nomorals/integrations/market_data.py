@@ -68,6 +68,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, Callable
 
+from ..core.failures import record_failure
 from ..core.http import HttpClient
 from ..core.logging_setup import get_logger
 
@@ -346,8 +347,8 @@ def record_quote_outcome(source: str, kind: str, *,
             else:
                 return
         _persist_price_state()
-    except Exception:  # noqa: BLE001 - bookkeeping never breaks a fetch
-        pass
+    except Exception as exc:  # noqa: BLE001 - bookkeeping never breaks a fetch
+        record_failure("market_data.record_quote_outcome", exc)
 
 
 def record_source_result(source: str, ok: bool) -> None:
