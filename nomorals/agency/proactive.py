@@ -22,6 +22,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .initiatives import Initiative, InitiativeStore
+from .failures import record_failure
 
 __all__ = [
     "Trigger", "fire_triggers", "detect_triggers", "scan_proactive",
@@ -124,14 +125,16 @@ def load_proactive_state(db: Any) -> dict[str, Any]:
         for row in rows:
             try:
                 decoded = _decode(json.loads(row.get("value", "") or "{}"))
-            except Exception:  # noqa: BLE001 - corrupt row: skip
+            except Exception as exc:  # noqa: BLE001 - corrupt row: skip
+                record_failure("proactive.load_row_decode", exc)
                 continue
             state[row.get("key", "")] = decoded
         # Fill any missing per-system buckets (fresh keys on upgrade).
         for key, bucket in _fresh_state().items():
             state.setdefault(key, bucket)
         return state
-    except Exception:  # noqa: BLE001 - no table/db = fresh state
+    except Exception as exc:  # noqa: BLE001 - no table/db = fresh state
+        record_failure("proactive.load_state", exc)
         return _fresh_state()
 
 
@@ -146,8 +149,8 @@ def save_proactive_state(db: Any, state: dict[str, Any]) -> None:
                 "INSERT OR REPLACE INTO agency_proactive_state "
                 "(key, value) VALUES (?, ?)",
                 (key, json.dumps(_encode(bucket), default=str)))
-    except Exception:  # noqa: BLE001 - persistence is best-effort
-        pass
+    except Exception as exc:  # noqa: BLE001 - persistence is best-effort
+        record_failure("proactive.save_state", exc)
 
 
 # ── detectors ────────────────────────────────────────────────────
@@ -170,7 +173,8 @@ def detect_triggers(system: str, source: Any, state: dict[str, Any], *,
         return []
     try:
         return fn(source, state, now, places or [])
-    except Exception:  # noqa: BLE001 - detector failure = no triggers
+    except Exception as exc:  # noqa: BLE001 - detector failure = no triggers
+        record_failure("proactive.detect_dispatch", exc)
         return []
 
 
@@ -180,7 +184,8 @@ def _detect_deals(source: Any, state: dict, now: float,
         return []
     try:
         alerts = source.check_alerts() or []
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("proactive.deals_alerts", exc)
         return []
     bucket = state.setdefault("deals", {})
     seen = bucket.setdefault("seen_alert_ids", set())
@@ -212,7 +217,8 @@ def _detect_weather(source: Any, state: dict, now: float,
     for place in places:
         try:
             snap = source.snapshot(place) or {}
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("proactive.weather_snapshot", exc)
             continue
         sig = _sig_weather(snap)
         prev = baselines.get(place)
@@ -242,7 +248,8 @@ def _detect_news(source: Any, state: dict, now: float,
         return []
     try:
         clusters = source.clusters() or []
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("proactive.news_clusters", exc)
         return []
     bucket = state.setdefault("news", {})
     seen = bucket.setdefault("seen_cluster_keys", set())
@@ -268,7 +275,8 @@ def _detect_social(source: Any, state: dict, now: float,
         return []
     try:
         backlog = source.backlog() or {}
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("proactive.social_backlog", exc)
         return []
     if backlog.get("stop_signal"):
         return []  # honour opt-out: no proactive contact
@@ -302,7 +310,8 @@ def _detect_leads(source: Any, state: dict, now: float,
         return []
     try:
         leads = source.live_leads() or []
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("proactive.leads_live", exc)
         return []
     bucket = state.setdefault("leads", {})
     seen = bucket.setdefault("seen_lead_ids", set())
@@ -348,7 +357,8 @@ def _detect_gigs(source: Any, state: dict, now: float,
     out = []
     try:
         opps = source.scan() or []
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("proactive.gigs_scan", exc)
         opps = []
     bucket = state.setdefault("gigs", {})
     seen = bucket.setdefault("seen_opp_ids", set())
@@ -366,7 +376,8 @@ def _detect_gigs(source: Any, state: dict, now: float,
             payload={"opp": dict(opp)}))
     try:
         due = source.follow_ups_due() or []
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("proactive.gigs_followups", exc)
         due = []
     seen_fu = bucket.setdefault("seen_followups", set())
     for app in due:
@@ -395,11 +406,13 @@ def _detect_research(source: Any, state: dict, now: float,
     elif source is not None:
         try:
             gaps = list(source.open_gaps(limit=50) or [])
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("proactive.research_gaps", exc)
             gaps = []
         try:
             watches = list(source.due_watches(now=now) or [])
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("proactive.research_watches", exc)
             watches = []
     bucket = state.setdefault("research", {})
     seen_g = bucket.setdefault("seen_gap_ids", set())
@@ -441,7 +454,8 @@ def _detect_wisdom(source: Any, state: dict, now: float,
     elif source is not None:
         try:
             queued = len(source._pending_manifest() or [])
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("proactive.wisdom_queue", exc)
             queued = 0
     bucket = state.setdefault("wisdom", {})
     flagged = bucket.get("flagged", False)
@@ -467,7 +481,8 @@ def _detect_impossible(source: Any, state: dict, now: float,
     elif source is not None:
         try:
             queued = list(source.queue_list(status="queued") or [])
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("proactive.impossible_queue", exc)
             queued = []
     bucket = state.setdefault("impossible", {})
     seen = bucket.setdefault("seen_claim_ids", set())
@@ -496,7 +511,8 @@ def _detect_digestion(source: Any, state: dict, now: float,
     elif source is not None:
         try:
             count = int(source.count() or 0)
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("proactive.digestion_count", exc)
             count = 0
     bucket = state.setdefault("digestion", {})
     last = int(bucket.get("last_count", 0) or 0)
@@ -522,7 +538,8 @@ def _detect_planner(source: Any, state: dict, now: float,
     elif source is not None:
         try:
             initiatives = list(source.list_active() or [])
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("proactive.planner_list", exc)
             initiatives = []
     bucket = state.setdefault("planner", {})
     seen = bucket.setdefault("seen_overdue", set())
