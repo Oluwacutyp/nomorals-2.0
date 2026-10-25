@@ -27,6 +27,7 @@ import re
 import sqlite3
 import time
 import uuid
+from .failures import record_failure
 
 _log = logging.getLogger("nomorals.health.challenges")
 
@@ -247,7 +248,8 @@ class ChallengeStore:
                 target=row["target"], proof_method=row["proof_method"],
                 created_by=row["created_by"], created_at=row["created_at"],
                 badge=row["badge"])
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("challenges.get", exc)
             return None
 
     def list_challenges(self, active_only: bool = True) -> list[Challenge]:
@@ -261,7 +263,8 @@ class ChallengeStore:
                     continue
                 out.append(c)
             return out
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("challenges.list_challenges", exc)
             return []
 
     def join_challenge(self, challenge_id: str, member: str) -> bool:
@@ -279,7 +282,8 @@ class ChallengeStore:
                 (challenge_id, member))
             self._db.commit()
             return True
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("challenges.join_challenge", exc)
             return False
 
     def members(self, challenge_id: str) -> list[str]:
@@ -287,7 +291,8 @@ class ChallengeStore:
             return [r["member"] for r in self._db.execute(
                 "SELECT member FROM challenge_members WHERE challenge_id = ?",
                 (challenge_id,))]
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("challenges.members", exc)
             return []
 
     # — workout logging (explicit override: "log my workout") —
@@ -397,7 +402,8 @@ class ChallengeStore:
                 "AND member = ?",
                 (challenge_id, member)).fetchone()
             return (int(row["count"]) if row else 0, c.target)
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("challenges.progress", exc)
             return (0, 0)
 
     def leaderboard(self, challenge_id: str,
@@ -411,7 +417,8 @@ class ChallengeStore:
                 (challenge_id, max(1, int(limit or 10)))).fetchall()
             return [(r["member"], int(r["count"]), bool(r["completed"]))
                     for r in rows]
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("challenges.leaderboard", exc)
             return []
 
     # — streaks —
@@ -423,7 +430,8 @@ class ChallengeStore:
                 "SELECT count FROM streaks WHERE member = ?",
                 ((member or "").strip()[:80],)).fetchone()
             return int(row["count"]) if row else 0
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("challenges.streak", exc)
             return 0
 
     def at_risk(self, *, now: float | None = None) -> list[tuple[str, int]]:
@@ -439,7 +447,8 @@ class ChallengeStore:
                 if last_day != today and int(row["count"]) >= 2:
                     out.append((row["member"], int(row["count"])))
             return sorted(out, key=lambda x: -x[1])
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("challenges.at_risk", exc)
             return []
 
     def risk_nudge(self, member: str) -> str:
@@ -462,7 +471,8 @@ class ChallengeStore:
                 "SELECT freezes FROM streak_freezes WHERE member = ?",
                 ((member or "").strip()[:80],)).fetchone()
             return int(row["freezes"]) if row else 0
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("challenges.freezes", exc)
             return 0
 
     def _set_freezes(self, member: str, n: int) -> None:
@@ -481,8 +491,8 @@ class ChallengeStore:
                 cur = self.freezes(member)
                 if cur < _MAX_FREEZES:
                     self._set_freezes(member, cur + 1)
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:  # noqa: BLE001
+            record_failure("challenges.maybe_earn_freeze", exc)
 
     def checkin(self, member: str, *, now: float | None = None) -> int:
         """Daily check-in. Returns the streak count. Never raises.
@@ -555,8 +565,8 @@ class ChallengeStore:
                         "UPDATE challenges SET badge = ? WHERE id = ?",
                         (c.badge, c.id))
                     self._db.commit()
-                except Exception:  # noqa: BLE001
-                    pass
+                except Exception as exc:  # noqa: BLE001
+                    record_failure("challenges.monthly_badge_update", exc)
             return c
         except Exception:  # noqa: BLE001
             _log.debug("monthly_challenge failed", exc_info=True)
@@ -571,7 +581,8 @@ class ChallengeStore:
                 "AND member = ?",
                 (challenge_id, (member or "").strip()[:80])).fetchone()
             return int(row["best"]) if row else 0
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("challenges.personal_best", exc)
             return 0
 
     def _note_personal_best(self, challenge_id: str, member: str,
@@ -586,7 +597,8 @@ class ChallengeStore:
                 self._db.commit()
                 return prev > 0  # a PB only counts once you've started
             return False
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("challenges.note_personal_best", exc)
             return False
 
     # — auto-progress from training logs (Strava auto-tracking) —
@@ -668,7 +680,8 @@ class ChallengeStore:
             return Squad(squad_id=row["id"], name=row["name"],
                          members=_json.loads(row["members_json"] or "[]"),
                          created_at=row["created_at"])
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("challenges.get_squad", exc)
             return None
 
     def squad_leaderboard(self, squad_id: str,
@@ -685,7 +698,8 @@ class ChallengeStore:
             else:
                 scored = [(m, self.streak(m)) for m in s.members]
             return sorted(scored, key=lambda x: -x[1])
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("challenges.squad_leaderboard", exc)
             return []
 
 
@@ -693,7 +707,8 @@ def _date_to_days(d: str) -> float:
     """YYYY-MM-DD → days since epoch. Never raises."""
     try:
         return time.mktime(time.strptime(d, "%Y-%m-%d")) / 86400.0
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("challenges.date_to_days", exc)
         return 0.0
 
 
