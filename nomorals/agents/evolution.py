@@ -61,6 +61,7 @@ from ..core.errors import ToolError
 from ..core.logging_setup import get_logger
 from ..core.policy import Capability
 from ..storage.kv import KVStore
+from .failures import record_failure
 
 _log = get_logger(__name__)
 
@@ -410,21 +411,24 @@ class EvolutionAgent:
         if db is not None:
             try:
                 skills = db.query_one("SELECT COUNT(*) AS n FROM skills")["n"]
-            except Exception:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001
+                record_failure("evolution.measure.skills", exc)
                 skills = 0
             try:
                 kg_nodes = db.query_one(
                     "SELECT COUNT(*) AS n FROM kg_nodes")["n"]
                 kg_edges = db.query_one(
                     "SELECT COUNT(*) AS n FROM kg_edges")["n"]
-            except Exception:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001
+                record_failure("evolution.measure.kg", exc)
                 pass
         failures_24h = 0
         try:
             failures_24h = db.query_one(
                 "SELECT COUNT(*) AS n FROM failures WHERE ts > ?",
                 (time.time() - 86400.0,))["n"]
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("evolution.measure.failures_24h", exc)
             pass
         snapshot = {
             "ts": time.time(),
@@ -446,7 +450,8 @@ class EvolutionAgent:
                 series.append(snapshot)
                 series = series[-200:]
                 kv.set(self._METRICS_KEY, series)
-        except Exception:  # noqa: BLE001 - telemetry must never break a run
+        except Exception as exc:  # noqa: BLE001 - telemetry must never break a run
+            record_failure("evolution.measure.persist", exc)
             pass
         # last benchmark score if one was stored
         try:
@@ -550,7 +555,8 @@ class EvolutionAgent:
                 FailureAnalyzer(self.context).record(
                     "evolution", f"reverted proposal {proposal_id}",
                     reason or "evolution change failed the test gate")
-            except Exception:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001
+                record_failure("evolution.record_outcome.lesson", exc)
                 pass
         return {"id": row_id, "applied": applied, "before": before,
                 "after": after}
@@ -1464,7 +1470,8 @@ class EvolutionAgent:
             goals = KVStore(self.context.db).get("evolution.queue", default=[])
             if not isinstance(goals, list):
                 goals = []
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("evolution.queue.load", exc)
             goals = []
         if action in {"add", "queue"}:
             instruction = (instruction or "").strip()
@@ -1607,7 +1614,8 @@ class EvolutionAgent:
     def _load(self, proposal_id: str) -> EvolutionProposal | None:
         try:
             data = KVStore(self.context.db).get(f"evolution.{proposal_id}")
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("evolution.load", exc)
             return None
         if not data:
             return None
@@ -1625,7 +1633,8 @@ class EvolutionAgent:
             # Scan is ASC; reverse for most-recent-first.
             pairs = KVStore(self.context.db).scan("evolution.evo-", limit=limit)
             pairs = list(reversed(pairs))
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("evolution.list.scan", exc)
             return []
         out: list[EvolutionProposal] = []
         for _key, data in pairs:
@@ -1633,7 +1642,8 @@ class EvolutionAgent:
                 if not isinstance(data, dict):
                     continue
                 out.append(EvolutionProposal.from_dict(data))
-            except Exception:  # noqa: BLE001 - a bad row never kills the list
+            except Exception as exc:  # noqa: BLE001 - a bad row never kills the list
+                record_failure("evolution.list.row", exc)
                 continue
         return out
 
