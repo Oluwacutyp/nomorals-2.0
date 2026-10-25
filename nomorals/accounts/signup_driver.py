@@ -54,6 +54,7 @@ from .creator import (
     CheckpointKind,
     CreatedAccount,
 )
+from .failures import record_failure
 from .identity_bank import ConfirmationRequired, Persona
 from .vault import Credential, CredentialVault
 
@@ -895,8 +896,10 @@ class SignupDriver:
                     except Exception:  # noqa: BLE001
                         try:
                             tab.click("verify")
-                        except Exception:  # noqa: BLE001
-                            pass
+                        except Exception as ver_exc:  # noqa: BLE001
+                            record_failure(
+                                "signup_driver.poll_verification_verify_click",
+                                ver_exc)
                     await asyncio.sleep(2)
                     return True
             await asyncio.sleep(self.verify_poll_s)
