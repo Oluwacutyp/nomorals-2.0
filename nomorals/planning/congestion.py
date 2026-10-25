@@ -32,6 +32,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from typing import Any, Iterator
+from .failures import record_failure
 
 _log = logging.getLogger("nomorals.planning.congestion")
 
@@ -70,7 +71,8 @@ def _profile_kind() -> str:
     try:
         from ...core.profiles import get_profile_kind
         return get_profile_kind() or "workstation"
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("congestion.profile_kind", exc)
         return os.environ.get("NM_PROFILE", "workstation") or "workstation"
 
 
@@ -218,7 +220,8 @@ class ContentionMonitor:
                 kind=row["kind"], capacity=int(row["capacity"] or 1),
                 alternates=[a for a in (row["alternates"] or "").split(",") if a],
                 created_at=float(row["created_at"] or 0.0))
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("congestion.resolve", exc)
             return None
 
     def get(self, name: str) -> Resource | None:
@@ -235,7 +238,8 @@ class ContentionMonitor:
                 capacity=int(r["capacity"] or 1),
                 alternates=[a for a in (r["alternates"] or "").split(",") if a],
                 created_at=float(r["created_at"] or 0.0)) for r in rows]
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("congestion.list_resources", exc)
             return []
 
     def register_alternate(self, name: str, alternate: str) -> bool:
@@ -252,7 +256,8 @@ class ContentionMonitor:
                 (",".join(alts), res.resource_id))
             self._db.commit()
             return True
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("congestion.register_alternate", exc)
             return False
 
     # ── holds ─────────────────────────────────────────────────────────
@@ -339,7 +344,8 @@ class ContentionMonitor:
                 (res.resource_id, "release", time.time()))
             self._db.commit()
             return True
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("congestion.release", exc)
             return False
 
     def queue_depth(self, name: str, *, now: float | None = None) -> int:
@@ -356,7 +362,8 @@ class ContentionMonitor:
                    AND (expires_at <= 0 OR expires_at > ?)""",
                 (res.resource_id, now)).fetchone()
             return int(row["n"] or 0)
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("congestion.queue_depth", exc)
             return 0
 
     def oldest_hold_age(self, name: str, *, now: float | None = None) -> float | None:
@@ -375,7 +382,8 @@ class ContentionMonitor:
             if row and row["m"]:
                 return max(0.0, now - float(row["m"]))
             return None
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("congestion.oldest_hold_age", exc)
             return None
 
     def wait_estimate(self, name: str, *, now: float | None = None) -> float | None:
@@ -398,7 +406,8 @@ class ContentionMonitor:
                 return None
             over = depth - res.capacity + 1  # slots ahead of a newcomer
             return round(over / (service_per_min / 60.0), 1)
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("congestion.wait_estimate", exc)
             return None
 
     def status(self) -> list[dict[str, Any]]:
@@ -416,7 +425,8 @@ class ContentionMonitor:
                             "breaker": self.breaker_state(res.name),
                             "oldest_hold_s": self.oldest_hold_age(res.name)})
             return out
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("congestion.status", exc)
             return []
 
     # ── circuit breaker (mined: Resilience4j state machine) ──────────
@@ -439,7 +449,8 @@ class ContentionMonitor:
                     "consec_fail": int(row["consec_fail"] or 0),
                     "probes_ok": int(row["probes_ok"] or 0),
                     "opened_at": float(row["opened_at"] or 0.0)}
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("congestion.breaker_row", exc)
             return {"state": "closed", "window": [], "consec_fail": 0,
                     "probes_ok": 0, "opened_at": 0.0}
 
@@ -462,8 +473,8 @@ class ContentionMonitor:
                  int(row["consec_fail"]), int(row["probes_ok"]),
                  float(row["opened_at"]), time.time()))
             self._db.commit()
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:  # noqa: BLE001
+            record_failure("congestion.breaker_save", exc)
 
     def breaker_state(self, name: str, *, now: float | None = None) -> str:
         """closed | open | half_open. Handles the OPEN→HALF-OPEN time
@@ -479,7 +490,8 @@ class ContentionMonitor:
                 row["probes_ok"] = 0
                 self._breaker_save(res.resource_id, row)
             return row["state"]
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("congestion.breaker_state", exc)
             return "closed"
 
     def _breaker_observe(self, resource_id: str, jammed: bool,
@@ -512,7 +524,8 @@ class ContentionMonitor:
                 row.update(state="open", opened_at=now)
             self._breaker_save(resource_id, row)
             return row["state"]
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("congestion.breaker_observe", exc)
             return "closed"
 
     # ── prediction ────────────────────────────────────────────────────
@@ -535,7 +548,8 @@ class ContentionMonitor:
                 (resource_id, cutoff)).fetchone()
             mins = max(window_s / 60.0, 1e-6)
             return (float(acq["n"] or 0) / mins, float(rel["n"] or 0) / mins)
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("congestion.rates", exc)
             return 0.0, 0.0
 
     def predict_jam(self, name: str, horizon_s: float = _DEFAULT_HORIZON_S,
@@ -692,7 +706,8 @@ def hold(monitor: ContentionMonitor | None, name: str,
     try:
         if monitor is not None:
             h = monitor.acquire(name, agent, ttl_s=ttl_s)
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("congestion.hold_acquire", exc)
         h = None
     try:
         yield h
@@ -700,8 +715,8 @@ def hold(monitor: ContentionMonitor | None, name: str,
         try:
             if monitor is not None and h is not None:
                 monitor.release(name, agent)
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:  # noqa: BLE001
+            record_failure("congestion.hold_release", exc)
 
 
 def route_around(monitor: ContentionMonitor | None,
@@ -724,7 +739,8 @@ def route_around(monitor: ContentionMonitor | None,
         for name in names or []:
             try:
                 advice = monitor.advise(name, agents_waiting=agents_waiting)
-            except Exception:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001
+                record_failure("congestion.route_around_resource", exc)
                 advice = {"action": "proceed", "detail": "unavailable",
                           "probability": 0.0}
             target = name
@@ -741,8 +757,8 @@ def route_around(monitor: ContentionMonitor | None,
                 out[name]["eta_s"] = eta
             if advice.get("wave_size"):
                 out[name]["wave_size"] = advice["wave_size"]
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as exc:  # noqa: BLE001
+        record_failure("congestion.route_around", exc)
     return out
 
 
@@ -761,7 +777,8 @@ def pre_fanout_check(monitor: ContentionMonitor | None,
         for name in resources or []:
             out[name] = monitor.advise(name, agents_waiting=agents_waiting)
         return out
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("congestion.pre_fanout_check", exc)
         return {}
 
 
@@ -786,7 +803,8 @@ def format_status(monitor: ContentionMonitor) -> str:
         lines.append("")
         lines.append(CONGESTION_DISCLAIMER)
         return "\n".join(lines)
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("congestion.format_status", exc)
         return "🚦 monitor unavailable."
 
 
@@ -862,5 +880,6 @@ def control_congestion(tail: str, *, monitor: ContentionMonitor | None = None,
                     if n else "🧹 no expired holds — queues are clean.")
 
         return _usage()
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("congestion.control_congestion", exc)
         return "🚦 congestion check failed safely — proceed with caution."
