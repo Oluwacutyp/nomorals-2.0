@@ -24,6 +24,7 @@ from typing import Any, Callable
 
 from .budgets import BudgetManager
 from .degradation import DegradationLadder, LadderManager, Rung
+from .failures import record_failure
 from .incidents import IncidentJournal
 from .logging_setup import get_logger
 from .selfheal import SelfHealingExecutor, SubsystemSupervisor
@@ -249,8 +250,8 @@ def heartbeat(subsystem: str, ok: bool) -> None:
         return
     try:
         es.journal.record_heartbeat(subsystem, ok=ok)
-    except Exception:  # noqa: BLE001 - telemetry must never break callers
-        pass
+    except Exception as exc:  # noqa: BLE001 - telemetry must never break callers
+        record_failure("error_system.heartbeat", exc)
 
 
 def record_error(subsystem: str, exc: BaseException,
@@ -262,8 +263,8 @@ def record_error(subsystem: str, exc: BaseException,
     try:
         es.journal.record_incident(exc, subsystem=subsystem,
                                    context=context or {})
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as exc:  # noqa: BLE001
+        record_failure("error_system.record_error", exc)
 
 
 # ── default degradation ladders ──────────────────────────────────────────
