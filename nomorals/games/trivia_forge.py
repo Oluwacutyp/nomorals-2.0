@@ -59,6 +59,7 @@ from typing import Any, Callable
 
 from ..core.logging_setup import get_logger
 from ..storage.kv import KVStore
+from .failures import record_failure
 
 _log = get_logger(__name__)
 
@@ -414,7 +415,8 @@ def _independent_solve(question: str,
     (None, reject_reason, "")."""
     try:
         raw = (suggest(_SOLVER_PROMPT + str(question)) or "").strip()
-    except Exception:  # noqa: BLE001 - a dead brain proves nothing
+    except Exception as exc:  # noqa: BLE001 - a dead brain proves nothing
+        record_failure("trivia_forge.independent_solve_suggest", exc)
         return None, "independent solve failed", ""
     m = _JSON_OBJ_RE.search(raw)
     cand = None
@@ -523,8 +525,8 @@ def maths_distractors(value: float, answer_text: str,
             t = s[:-2] + s[-1] + s[-2]
             try:
                 cands.append(float(t) * (1 if value >= 0 else -1))
-            except ValueError:
-                pass
+            except ValueError as exc:
+                record_failure("trivia_forge.maths_distractors_transpose", exc)
     rng.shuffle(cands)
     out: list[str] = []
     for c in cands:
@@ -617,7 +619,8 @@ class TriviaForge:
         try:
             data = self._kv.get("trivia_forge.seen") or {}
             self._seen = list(data.get("hashes", []))[-self.anti_repeat:]
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("trivia_forge.load_seen", exc)
             self._seen = []
 
     def _save_seen(self) -> None:
@@ -627,8 +630,8 @@ class TriviaForge:
             self._kv.set("trivia_forge.seen",
                          {"hashes": self._seen[-self.anti_repeat:],
                           "updated": time.time()})
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:  # noqa: BLE001
+            record_failure("trivia_forge.save_seen", exc)
 
     def _is_fresh(self, question: str) -> bool:
         return _hash_q(question) not in self._seen
@@ -670,7 +673,8 @@ class TriviaForge:
         )
         try:
             raw = (self._suggest(prompt) or "").strip()
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("trivia_forge.ask_model_suggest", exc)
             return []
         m = _JSON_RE.search(raw)
         if not m:
@@ -819,8 +823,8 @@ class TriviaForge:
                 try:
                     if ledger.theme_in_cooldown(theme):
                         blocked.add(theme)
-                except Exception:  # noqa: BLE001
-                    pass
+                except Exception as exc:  # noqa: BLE001
+                    record_failure("trivia_forge.blocked_themes", exc)
         return blocked
 
     def _draw_bank(self, count: int, difficulty: str,
@@ -1000,7 +1004,8 @@ class TriviaBank:
         if kv is not None:
             try:
                 data = kv.get(_BANK_KV) or {}
-            except Exception:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001
+                record_failure("trivia_forge.load_bank", exc)
                 data = {}
             return (list(data.get("items", [])),
                     list(data.get("ring", [])),
@@ -1017,8 +1022,8 @@ class TriviaBank:
         if kv is not None:
             try:
                 kv.set(_BANK_KV, blob)
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as exc:  # noqa: BLE001
+                record_failure("trivia_forge.save_bank", exc)
         else:
             self._forge._bank_mem = blob  # type: ignore[attr-defined]
 
@@ -1028,7 +1033,8 @@ class TriviaBank:
         if kv is not None:
             try:
                 data = kv.get(_BANK_STATS_KV) or {}
-            except Exception:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001
+                record_failure("trivia_forge.load_stats", exc)
                 data = {}
         else:
             data = getattr(self._forge, "_bank_mem_stats", None) or {}
@@ -1042,8 +1048,8 @@ class TriviaBank:
         if kv is not None:
             try:
                 kv.set(_BANK_STATS_KV, stats)
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as exc:  # noqa: BLE001
+                record_failure("trivia_forge.save_stats", exc)
         else:
             self._forge._bank_mem_stats = stats  # type: ignore[attr-defined]
 
@@ -1223,7 +1229,8 @@ class TriviaBank:
         ledger = forge._ledger() or TeachingsLedger(context)
         try:
             themes = ledger.eligible_themes(now=now)[:4]
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("trivia_forge.tick_library_themes", exc)
             themes = []
         if not themes:
             themes = list(BASE_THEMES[:4])
@@ -1234,8 +1241,8 @@ class TriviaBank:
             for it in ledger.served_items(since=now - ITEM_COOLDOWN_S):
                 if it.get("_key"):
                     blocked.add(str(it["_key"]))
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:  # noqa: BLE001
+            record_failure("trivia_forge.tick_library_served", exc)
         passages: list[tuple[dict[str, Any], str, str]] = []
         seen_keys: set[str] = set()
         for it in items:
@@ -1274,7 +1281,8 @@ class TriviaBank:
                 f"{passage[:1200]}")
             try:
                 raw = (suggest(prompt) or "").strip()
-            except Exception:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001
+                record_failure("trivia_forge.tick_library_suggest", exc)
                 raw = ""
             m = _JSON_OBJ_RE.search(raw)
             cand = None
@@ -1326,7 +1334,8 @@ class TriviaBank:
 
             kg = KnowledgeGraph(getattr(context, "db", None))
             nodes = kg.top(ntype="claim", n=6) or []
-        except Exception:  # noqa: BLE001 - research is one picker of 3
+        except Exception as exc:  # noqa: BLE001 - research is one picker of 3
+            record_failure("trivia_forge.research_items_kg", exc)
             return out
         for node in nodes:
             try:
@@ -1356,7 +1365,8 @@ class TriviaBank:
                     "source": {"type": "research", "ref": ref,
                                "label": f"{domain} — her research",
                                "passage": text[:1200]}})
-            except Exception:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001
+                record_failure("trivia_forge.research_items_node", exc)
                 continue
         return out
 
@@ -1441,7 +1451,8 @@ class TriviaBank:
                 '"expression": "...", "worked": "..."}')
             try:
                 raw = (suggest(prompt) or "").strip()
-            except Exception:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001
+                record_failure("trivia_forge.tick_maths_llm_suggest", exc)
                 raw = ""
             m = _JSON_OBJ_RE.search(raw)
             cand = None
