@@ -34,6 +34,7 @@ from typing import Any, Callable, Optional
 
 from ..llm.brain import brain_for
 from ..core.logging_setup import get_logger
+from .failures import record_failure
 
 _log = get_logger(__name__)
 
@@ -357,7 +358,8 @@ def has_proof(skill_name: str, db: Any, version: str | None = None,
             args.append(version_hash)
         q += " LIMIT 1"
         return db.query_one(q, tuple(args)) is not None
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("skill_proving.has_proof", exc)
         return False
 
 
@@ -373,8 +375,8 @@ def flag_skill(name: str, reason: str, db: Any,
         if registry is not None:
             try:
                 registry.disable(name)
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as exc:  # noqa: BLE001
+                record_failure("skill_proving.flag_skill_disable", exc)
         _log.info("skill flagged: %s (%s)", name, reason)
         return True
     except Exception as exc:  # noqa: BLE001
@@ -391,8 +393,8 @@ def unflag_skill(name: str, db: Any, registry: Any = None) -> bool:
         if registry is not None:
             try:
                 registry.enable(name)
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as exc:  # noqa: BLE001
+                record_failure("skill_proving.unflag_skill_enable", exc)
         return True
     except Exception:  # noqa: BLE001
         return False
@@ -404,7 +406,8 @@ def get_flag(name: str, db: Any) -> dict[str, Any] | None:
         ensure_tables(db)
         row = db.query_one("SELECT * FROM skill_flags WHERE name=?", (name,))
         return dict(row) if row else None
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("skill_proving.get_flag", exc)
         return None
 
 
@@ -459,8 +462,8 @@ def promote_on_proof(draft: Any, proof: ProofResult, registry: Any,
                     name, body, source="proof-pass")
                 proof.version_hash = vhash
                 record_proof(db, proof)
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as exc:  # noqa: BLE001
+                record_failure("skill_proving.promote_canary_chain", exc)
             _log.info("skill proven and activated: %s %s", name,
                       proof.version)
             return "active"
@@ -476,7 +479,8 @@ def _installed_version(registry: Any, name: str) -> str:
     try:
         versions = registry.versions(name) or []
         return versions[-1] if versions else ""
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("skill_proving.installed_version", exc)
         return ""
 
 
@@ -515,7 +519,8 @@ def skill_lifecycle(name: str, db: Any, registry: Any = None) -> str:
         # enabled: active pin set?
         try:
             active = registry.get(name)
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("skill_proving.lifecycle_active", exc)
             active = None
         if active is not None and active.active:
             return ACTIVE if has_proof(name, db) else INACTIVE
@@ -575,8 +580,8 @@ def ensure_capability(name: str, description: str, db: Any,
                             and installed.active
                             and has_proof(candidate, db)):
                         return {"status": "present", "skill": candidate}
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as exc:  # noqa: BLE001
+                record_failure("skill_proving.ensure_capability_present", exc)
         # draft the missing tool
         draft = _draft_capability(name, description, llm_fn, context)
         if draft is None:
