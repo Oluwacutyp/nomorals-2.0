@@ -36,6 +36,7 @@ from ..core.logging_setup import get_logger
 from ..llm.base import Message
 from ..storage.kv import KVStore
 from ..llm.brain import brain_for
+from .failures import record_failure
 
 __all__ = ["Project", "ProjectStep", "ProjectManager", "register"]
 
@@ -158,7 +159,8 @@ class ProjectManager:
                 from pathlib import Path
                 root = Path(self.context.settings.workspace_dir)
                 self._rooms_cache = RoomManager(root=root, db=self.db)
-            except Exception:  # noqa: BLE001 — rooms are optional
+            except Exception as exc:  # noqa: BLE001 — rooms are optional
+                record_failure("projects.room_manager", exc)
                 self._rooms_cache = False
                 return None
         return self._rooms_cache
@@ -169,14 +171,16 @@ class ProjectManager:
             return None
         try:
             return mgr.get_by_linked("project", project_id)
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("projects.linked_room", exc)
             return None
 
     def _rooms_auto_create(self) -> bool:
         try:
             return bool(getattr(self.context.settings,
                                 "rooms_auto_create", True))
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("projects.rooms_auto_create", exc)
             return True
 
     def _maybe_auto_room(self, project_id: str, title: str,
@@ -694,7 +698,8 @@ class ProjectManager:
 
                     GoalSystem(self.context)._record_completion_knowledge(
                         p.goal_id)
-                except Exception:  # noqa: BLE001
+                except Exception as exc:  # noqa: BLE001
+                    record_failure("projects.sync_goal_knowledge", exc)
                     pass
             elif p.status == "failed":
                 self.db.execute(
@@ -810,7 +815,8 @@ class ProjectManager:
         try:
             p = self._load(self._current_project_id) if getattr(
                 self, "_current_project_id", "") else None
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("projects.default_executor_load", exc)
             p = None
 
         # BUILD tasks execute for REAL (wave 65): draft -> sandbox run ->
@@ -897,7 +903,8 @@ class ProjectManager:
             if path.exists():
                 seed = path.read_text(encoding="utf-8",
                                       errors="replace")[:20000]
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("projects.build_seed", exc)
             seed = ""
 
         task = f"{p.objective or p.title}\n\nCurrent step: {description}"
@@ -985,7 +992,8 @@ class ProjectManager:
                 "SELECT id, project_id, step_id, cmd, output_hash, ok, ts "
                 "FROM acceptance_runs WHERE project_id=? "
                 "ORDER BY ts ASC LIMIT ?", (project_id, limit)))
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("projects.acceptance_history", exc)
             return []
 
     def _prior_acceptance_cmds(self, p: "Project",
@@ -997,7 +1005,8 @@ class ProjectManager:
                 "SELECT step_id, cmd FROM acceptance_runs "
                 "WHERE project_id=? AND ok=1 AND step_id != ? "
                 "ORDER BY ts ASC", (p.id, exclude_step_id))
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("projects.prior_acceptance_cmds", exc)
             return []
         latest: dict[str, str] = {}
         for r in rows:  # ascending ts: last write per step wins
@@ -1047,7 +1056,8 @@ class ProjectManager:
             rows = self.db.query(
                 "SELECT step_id, cmd FROM acceptance_runs "
                 "WHERE project_id=? AND ok=1 ORDER BY ts ASC", (p.id,))
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("projects.regression_check", exc)
             return {"ok": True, "results": [], "project_id": p.id,
                     "note": "no acceptance runs recorded"}
         latest: dict[str, str] = {}
@@ -1126,7 +1136,8 @@ class ProjectManager:
             lib = SkillLibrary(self.db)
             for s, _score in recalled:
                 lib.record_use(s.id, success=success, task=(task or "")[:200])
-        except Exception:  # noqa: BLE001 — reinforcement is best-effort
+        except Exception as exc:  # noqa: BLE001 — reinforcement is best-effort
+            record_failure("projects.record_skill_use", exc)
             pass
 
     # ── reporting ───────────────────────────────────────────────────────
@@ -1277,7 +1288,8 @@ class ProjectManager:
             row = self.db.query_one(
                 "SELECT heals FROM agent_goals WHERE id=?", (p.goal_id,))
             return bool(row) and int(row.get("heals", 0) or 0) >= threshold
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("projects.should_replan", exc)
             return False
 
 
