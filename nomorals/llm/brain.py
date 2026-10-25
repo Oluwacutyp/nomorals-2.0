@@ -35,6 +35,7 @@ from .base import LLMResponse, Message, SamplingParams, Usage
 from .context_fit import DEFAULT_CONTEXT_TOKENS, fit_messages, fit_prompt
 from .failures import FailureClass, classify_failure
 from .prompts import render_prompt, system_prompt_for
+from .swallow_failures import record_failure
 
 __all__ = [
     "Brain",
@@ -129,8 +130,8 @@ def _with_quality(constraints: Any, quality: float | None) -> Any:
             import dataclasses
 
             return dataclasses.replace(constraints, min_quality=q)
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as exc:  # noqa: BLE001
+        record_failure("brain._with_quality", exc)
     return constraints
 
 
@@ -475,8 +476,8 @@ class Brain:
             if not resp.ok and not resp.failure_class and resp.error:
                 resp.failure_class = classify_failure(
                     resp.error).failure_class.value
-        except Exception:  # noqa: BLE001 — tagging never breaks the call
-            pass
+        except Exception as exc:  # noqa: BLE001 — tagging never breaks the call
+            record_failure("brain._classify", exc)
         return resp
 
     def _context_budget(self) -> int:
