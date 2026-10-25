@@ -93,6 +93,7 @@ from typing import Any
 from ..core.logging_setup import get_logger
 from ..media.source_registry import BOOK_SOURCE_DOMAINS
 from ..tools.browser import Node, parse_html
+from .failures import record_failure
 
 _log = get_logger(__name__)
 
@@ -235,7 +236,8 @@ def book_registry_for_context(context: Any = None,
             # enhancement; its absence never sinks a fetch
             pass
         return reg
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("sources.registry_context", exc)
         return None
 
 
@@ -262,7 +264,8 @@ def _ensure_book_source(reg: Any, adapter: Any) -> Any:
             reg._persist()  # a registered source survives restarts too
             return desc
         return reg.for_domain(domains[0])
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("sources.ensure_book_source", exc)
         return None
 
 
@@ -303,7 +306,8 @@ def registry_desc_for_adapter(reg: Any, adapter: Any,
         if getattr(adapter, "descriptor", None) is not None:
             return _ensure_book_source(reg, adapter)
         return None
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("sources.registry_desc", exc)
         return None
 
 
@@ -354,7 +358,8 @@ def _book_result_urls(op: str, result: Any) -> list[str]:
         if op == "fetch_chapter" and result is not None:
             return [u for u in (result.url, result.prev_url,
                                 result.next_url) if u]
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("sources.result_urls", exc)
         return []
     return []
 
@@ -369,8 +374,8 @@ def _note_book_result_urls(reg: Any, op: str, result: Any) -> None:
             else "book-fetch-result"
         for url in _book_result_urls(op, result):
             reg.note_candidate(url, via=via, kinds=("book",))
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as exc:  # noqa: BLE001
+        record_failure("sources.note_result_urls", exc)
 
 
 def _record_book_success(reg: Any, adapter: Any, op: str,
@@ -389,8 +394,8 @@ def _record_book_success(reg: Any, adapter: Any, op: str,
             reg.record_no_result(desc)
         else:
             reg.record_outcome(desc, True, latency_s=latency_s)
-    except Exception:  # noqa: BLE001 - bookkeeping never breaks a fetch
-        pass
+    except Exception as exc:  # noqa: BLE001 - bookkeeping never breaks a fetch
+        record_failure("sources.record_success", exc)
 
 
 def _record_book_failure(reg: Any, adapter: Any, op: str,
@@ -413,8 +418,8 @@ def _record_book_failure(reg: Any, adapter: Any, op: str,
         else:
             reg.record_outcome(desc, False, latency_s=latency_s,
                                error_class=error_class)
-    except Exception:  # noqa: BLE001 - bookkeeping never breaks a fetch
-        pass
+    except Exception as exc:  # noqa: BLE001 - bookkeeping never breaks a fetch
+        record_failure("sources.record_failure", exc)
 
 
 def _wrap_book_op(op: str, fn: Any) -> Any:
@@ -468,7 +473,8 @@ def grown_book_adapters(reg: Any) -> list[Any]:
             out.append(adapter)
         out.sort(key=lambda a: a.domains[0] if a.domains else a.name)
         return out
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("sources.grown_adapters", exc)
         return []
 
 
@@ -505,7 +511,8 @@ def ordered_book_adapters(adapters: list[Any], reg: Any) -> list[Any]:
         active.sort(key=lambda it: -reg.score(it[1])
                     if it[1] is not None else 0.0)
         return [a for a, _d in active] + [a for a, _d in inactive]
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("sources.ordered_adapters", exc)
         return list(adapters)
 
 
@@ -712,8 +719,8 @@ class Fetcher:
         if "gzip" in encoding:
             try:
                 raw = gzip.decompress(raw)
-            except OSError:
-                pass
+            except OSError as exc:
+                record_failure("sources.gzip_decompress", exc)
         try:
             html = raw.decode("utf-8", errors="replace")
         except Exception:  # noqa: BLE001
@@ -809,8 +816,8 @@ class Fetcher:
                                        kinds=("book",))
                 if len(seen) >= 20:
                     break
-        except Exception:  # noqa: BLE001 - intake never breaks a fetch
-            pass
+        except Exception as exc:  # noqa: BLE001 - intake never breaks a fetch
+            record_failure("sources.note_discoveries", exc)
 
 
 def _looks_blocked(html: str) -> bool:
@@ -930,8 +937,8 @@ class SourceAdapter(ABC):
             fetcher = getattr(self, "fetcher", None)
             if isinstance(fetcher, Fetcher):
                 fetcher._book_registry = reg
-        except Exception:  # noqa: BLE001 - binding never breaks a fetch
-            pass
+        except Exception as exc:  # noqa: BLE001 - binding never breaks a fetch
+            record_failure("sources.bind_registry", exc)
         return self
 
     def matches(self, url: str) -> bool:
@@ -993,8 +1000,8 @@ class SourceAdapter(ABC):
             if on_chapter:
                 try:
                     on_chapter(i + 1, total, ch)
-                except Exception:  # noqa: BLE001
-                    pass
+                except Exception as exc:  # noqa: BLE001
+                    record_failure("sources.on_chapter_cb", exc)
         return {"meta": meta.to_dict(), "total": total,
                 "chapters": [c.to_dict() | {"url": normalize_url(c.url)}
                              for c in chapters],
@@ -1609,8 +1616,8 @@ def adapter_for_url(url: str,
                 if source_registry is not None:
                     adapter.bind_book_registry(source_registry)
                 return adapter
-    except Exception:  # noqa: BLE001 - descriptor failure never breaks lookup
-        pass
+    except Exception as exc:  # noqa: BLE001 - descriptor failure never breaks lookup
+        record_failure("sources.descriptor_lookup", exc)
     if source_registry is not None:
         host = _book_host(url)
         desc = source_registry.for_domain(host) if host else None
