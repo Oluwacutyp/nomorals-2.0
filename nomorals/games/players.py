@@ -26,6 +26,7 @@ from typing import Any
 
 from ..core.ids import new_id
 from ..core.logging_setup import get_logger
+from .failures import record_failure
 
 __all__ = ["AI_PLAYER", "Player", "PlayerStore", "Leaderboard",
            "GAME_IDENTITY_ALIASES", "SOFT_DELETE_RESTORE_S"]
@@ -199,7 +200,8 @@ class Profile:
         def _load(key: str) -> dict[str, Any]:
             try:
                 return json.loads(row.get(key) or "{}")
-            except Exception:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001
+                record_failure("players.from_row_load", exc)
                 return {}
         return cls(
             key=row["player_key"], name=row.get("display") or "",
@@ -352,7 +354,8 @@ class PlayerStore:
                     row = self.db.query_one(
                         "SELECT * FROM game_players WHERE player_key = ?", (key,)
                     )
-                except Exception:  # noqa: BLE001
+                except Exception as exc:  # noqa: BLE001
+                    record_failure("players.get_reread", exc)
                     row = None
                 if row is not None:
                     return Profile.from_row(row)
@@ -446,7 +449,8 @@ class PlayerStore:
                 "AND COALESCE(deleted_at, 0) = 0 LIMIT 1",
                 (label,),
             )
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("players.find_by_username", exc)
             return None
         return Profile.from_row(row) if row else None
 
@@ -499,7 +503,8 @@ class PlayerStore:
                 self.db.query(
                     "SELECT name FROM sqlite_master WHERE type = 'table'")
                 or [])]
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("players.purge_tables", exc)
             return
         try:
             with self.db.transaction():
@@ -556,7 +561,8 @@ class PlayerStore:
                 (canon, sender_id)) or []
             return [str(r["name"]) for r in rows
                     if str(r["name"]).strip()]
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("players.known_names", exc)
             return []
 
     def _legacy_candidate_keys(self, canon: str, name: str) -> list[str]:
@@ -625,7 +631,8 @@ class PlayerStore:
                     "AND COALESCE(deleted_at, 0) = 0",
                     (username,),
                 ) or []
-            except Exception:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001
+                record_failure("players.merge_username_rows", exc)
                 rows = []
             # ALSO match by key: legacy profiles created before username
             # tracking have NULL/empty username columns, but their key's
@@ -637,18 +644,20 @@ class PlayerStore:
                     "SELECT player_key FROM game_players "
                     "WHERE COALESCE(deleted_at, 0) = 0",
                 ) or []
-            except Exception:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001
+                record_failure("players.merge_key_rows", exc)
                 key_rows = []
             seen_keys = set()
             for r in rows:
                 try:
                     seen_keys.add(str(r["player_key"]))
-                except Exception:  # noqa: BLE001
-                    pass
+                except Exception as exc:  # noqa: BLE001
+                    record_failure("players.merge_seen_key", exc)
             for r in key_rows:
                 try:
                     k = str(r["player_key"])
-                except Exception:  # noqa: BLE001
+                except Exception as exc:  # noqa: BLE001
+                    record_failure("players.merge_key_cast", exc)
                     continue
                 if k in seen_keys:
                     continue
@@ -663,7 +672,8 @@ class PlayerStore:
             for r in rows:
                 try:
                     legacy_key = str(r["player_key"])
-                except Exception:  # noqa: BLE001
+                except Exception as exc:  # noqa: BLE001
+                    record_failure("players.merge_legacy_key_cast", exc)
                     continue
                 if legacy_key == id_key:
                     continue
@@ -708,7 +718,8 @@ class PlayerStore:
                         row = self.db.query_one(
                             "SELECT 1 FROM game_players "
                             "WHERE player_key = ?", (legacy_key,))
-                    except Exception:  # noqa: BLE001
+                    except Exception as exc:  # noqa: BLE001
+                        record_failure("players.merge_existence", exc)
                         row = None
                     if row is not None:
                         self._merge_one_legacy_key(id_key, legacy_key)
@@ -745,8 +756,8 @@ class PlayerStore:
                     k = r["player_key"]
                     if k not in keys:
                         keys.append(k)
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:  # noqa: BLE001
+            record_failure("players.resolve_legacy_keys", exc)
         return keys
 
     def _merge_legacy_name_key(self, id_key: str, name: str,
@@ -816,20 +827,23 @@ class PlayerStore:
         def _q1(sql: str, args: tuple = ()) -> Any:
             try:
                 return self.db.query_one(sql, args)
-            except Exception:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001
+                record_failure("players.merge_q1", exc)
                 return None
 
         def _qall(sql: str, args: tuple = ()) -> list:
             try:
                 return self.db.query(sql, args) or []
-            except Exception:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001
+                record_failure("players.merge_qall", exc)
                 return []
 
         def _cols(table: str) -> list[str]:
             try:
                 rows = self.db.query(f"PRAGMA table_info({table})") or []
                 return [str(r["name"]) for r in rows]
-            except Exception:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001
+                record_failure("players.merge_cols", exc)
                 return []
 
         def _tables() -> set[str]:
@@ -837,7 +851,8 @@ class PlayerStore:
                 rows = self.db.query(
                     "SELECT name FROM sqlite_master WHERE type = 'table'") or []
                 return {str(r["name"]) for r in rows}
-            except Exception:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001
+                record_failure("players.merge_tables", exc)
                 return set()
 
         have = _tables()
@@ -884,13 +899,15 @@ class PlayerStore:
         def _num(d: dict, k: str) -> int:
             try:
                 return int(d.get(k, 0) or 0)
-            except Exception:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001
+                record_failure("players.merge_num", exc)
                 return 0
 
         def _fnum(d: dict, k: str) -> float:
             try:
                 return float(d.get(k, 0) or 0)
-            except Exception:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001
+                record_failure("players.merge_fnum", exc)
                 return 0.0
 
         def _jmerge(k: str) -> str:
@@ -898,7 +915,8 @@ class PlayerStore:
                 try:
                     v = json.loads(d.get(k) or "{}")
                     return v if isinstance(v, dict) else {}
-                except Exception:  # noqa: BLE001
+                except Exception as exc:  # noqa: BLE001
+                    record_failure("players.merge_jload", exc)
                     return {}
             merged = _load(leg)
             merged.update(_load(cur))  # ID side wins conflicts
@@ -1105,7 +1123,8 @@ class PlayerStore:
                 "ORDER BY points DESC LIMIT ?",
                 (limit,),
             )
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("players.all_rows", exc)
             return []
         return [Profile.from_row(r) for r in rows]
 
@@ -1135,7 +1154,8 @@ class PlayerStore:
                     (player_key,),
                 )
                 return int(row["xp"]) if row else 0
-            except Exception:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001
+                record_failure("players.add_xp", exc)
                 return 0
 
     def record_outcome(self, player: Player, *, won: bool | None,
