@@ -31,6 +31,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any, Callable, Protocol, runtime_checkable
 
+from .failures import record_failure
 from .logging_setup import get_logger
 
 _log = get_logger(__name__)
@@ -1584,8 +1585,8 @@ class PermissionGradient:
         }
         try:
             self.store.save_proposal(proposal)
-        except Exception:  # noqa: BLE001 - never raises
-            pass
+        except Exception as exc:  # noqa: BLE001 - never raises
+            record_failure("policy.propose_save", exc)
         return dict(proposal)
 
     def get_proposal(self, proposal_id: str) -> dict[str, Any] | None:
