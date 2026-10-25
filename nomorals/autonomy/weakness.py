@@ -54,6 +54,7 @@ from typing import Any
 from ..core.events import Event, global_bus
 from ..core.logging_setup import get_logger
 from .. import organs as _organs
+from .failures import record_failure
 
 _log = get_logger(__name__)
 
@@ -265,8 +266,8 @@ def record_fix(db: Any, weakness_id: str, fix: str) -> bool:
     )
     try:
         db.commit()
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as exc:  # noqa: BLE001
+        record_failure("weakness.record_fix_commit", exc)
     _log.info("fix memorized for %s", key)
     _ledger(db, "fix_memorized", weakness_id,
             f"verified fix stored for {kind} {subject}",
@@ -347,8 +348,8 @@ def report_weakness(db: Any, kind: str, subject: str,
         (now - 30 * 86400,))
     try:
         db.commit()
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as exc:  # noqa: BLE001
+        record_failure("weakness.report_weakness_commit", exc)
 
     if new_occ >= FAILURE_THRESHOLD and status == "open":
         # Fixed-weakness memory first: known problem → one-step resolve.
@@ -367,8 +368,8 @@ def report_weakness(db: Any, kind: str, subject: str,
         )
         try:
             db.commit()
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:  # noqa: BLE001
+            record_failure("weakness.report_weakness_status_commit", exc)
         sev = severity(db, wid)
         _log.info("weakness detected: %s %s (%d occurrences, %s)",
                   kind, clustered, new_occ, sev["level"])
@@ -430,8 +431,8 @@ def record_degradation_sample(db: Any, subject: str, metric: str,
         "DELETE FROM weakness_metrics WHERE ts < ?", (now - 14 * 86400,))
     try:
         db.commit()
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as exc:  # noqa: BLE001
+        record_failure("weakness.degradation_sample_commit", exc)
     out: dict[str, Any] = {"subject": subject, "metric": metric}
     try:
         rows = db.execute(
@@ -478,7 +479,8 @@ def severity(db: Any, weakness_id: str,
             "SELECT COUNT(*) FROM weakness_sightings "
             "WHERE weakness_id = ? AND ts >= ?",
             (weakness_id, now - 86400)).fetchone()[0] or 0
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("weakness.severity_query", exc)
         return {"level": "watch", "fast_1h": 0, "slow_per_h": 0.0,
                 "burn": 0.0}
     slow_per_h = slow_n / 24.0
@@ -520,7 +522,8 @@ def acceleration(db: Any, kind: str, subject: str) -> dict[str, Any]:
             "SELECT COUNT(*) FROM weakness_sightings "
             "WHERE weakness_id = ? AND ts >= ? AND ts < ?",
             (wid, now - 7 * 86400, now - 86400)).fetchone()[0] or 0
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("weakness.acceleration_query", exc)
         return {"accelerating": False, "ratio": 0.0}
     older_per_day = older / 6.0
     ratio = recent / max(older_per_day, 0.2)
@@ -578,8 +581,8 @@ def investigate_weakness(db: Any, weakness_id: str) -> bool:
                       "severity": severity(db, weakness_id)["level"]},
                 source="nomorals.autonomy.weakness",
             ))
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:  # noqa: BLE001
+            record_failure("weakness.investigate_publish", exc)
         return True
     except Exception:  # noqa: BLE001
         _log.warning("weakness→research handoff failed", exc_info=True)
@@ -670,8 +673,8 @@ def idle_tick(db: Any) -> dict[str, Any]:
                         "WHERE id = ?", (wid,))
                     try:
                         db.commit()
-                    except Exception:  # noqa: BLE001
-                        pass
+                    except Exception as exc:  # noqa: BLE001
+                        record_failure("weakness.idle_tick_status_commit", exc)
                     if investigate_weakness(db, wid):
                         report["routed"] += 1
             elif status == "researching":
@@ -701,8 +704,8 @@ def expire_stale(db: Any,
             (cutoff,))
         try:
             db.commit()
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:  # noqa: BLE001
+            record_failure("weakness.expire_stale_commit", exc)
         n = cur.rowcount or 0
         if n:
             _log.info("expired %d stale weakness cases", n)
@@ -724,8 +727,8 @@ def record_proposal(db: Any, weakness_id: str, proposal: str) -> None:
     )
     try:
         db.commit()
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as exc:  # noqa: BLE001
+        record_failure("weakness.record_proposal_commit", exc)
     _log.info("weakness proposal recorded: %s", weakness_id)
     _ledger(db, "proposed", weakness_id,
             f"fix proposal recorded for {weakness_id}",
@@ -736,8 +739,8 @@ def record_proposal(db: Any, weakness_id: str, proposal: str) -> None:
             data={"id": weakness_id, "proposal": proposal[:500]},
             source="nomorals.autonomy.weakness",
         ))
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as exc:  # noqa: BLE001
+        record_failure("weakness.record_proposal_publish", exc)
 
 
 def approve_weakness(db: Any, weakness_id: str) -> bool:
@@ -764,8 +767,8 @@ def approve_weakness(db: Any, weakness_id: str) -> bool:
     )
     try:
         db.commit()
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as exc:  # noqa: BLE001
+        record_failure("weakness.approve_commit", exc)
     _log.info("weakness approved: %s", weakness_id)
     _ledger(db, "approved", weakness_id,
             f"proposal approved for {kind} {subject} — sandbox build queued",
@@ -784,8 +787,8 @@ def approve_weakness(db: Any, weakness_id: str) -> bool:
             data=payload,
             source="nomorals.autonomy.weakness",
         ))
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as exc:  # noqa: BLE001
+        record_failure("weakness.approve_publish", exc)
     return True
 
 
@@ -804,8 +807,8 @@ def resolve_weakness(db: Any, weakness_id: str, how: str = "",
     )
     try:
         db.commit()
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as exc:  # noqa: BLE001
+        record_failure("weakness.resolve_commit", exc)
     if cur.rowcount:
         if fix:
             try:
@@ -820,8 +823,8 @@ def resolve_weakness(db: Any, weakness_id: str, how: str = "",
                 data={"id": weakness_id, "how": how[:200]},
                 source="nomorals.autonomy.weakness",
             ))
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:  # noqa: BLE001
+            record_failure("weakness.resolve_publish", exc)
     return bool(cur.rowcount)
 
 
@@ -834,8 +837,8 @@ def dismiss_weakness(db: Any, weakness_id: str) -> bool:
     )
     try:
         db.commit()
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as exc:  # noqa: BLE001
+        record_failure("weakness.dismiss_commit", exc)
     if cur.rowcount:
         _ledger(db, "dismissed", weakness_id,
                 f"weakness dismissed by owner: {weakness_id}")
@@ -895,8 +898,8 @@ def record_tool_result(db: Any, tool: str, ok: bool,
         out["weakness_id"] = wid
     try:
         db.commit()
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as exc:  # noqa: BLE001
+        record_failure("weakness.tool_result_commit", exc)
     return out
 
 
@@ -926,7 +929,8 @@ def open_weaknesses(db: Any) -> list[dict[str, Any]]:
     for r in rows:
         try:
             sev = severity(db, r[0])["level"]
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("weakness.open_severity", exc)
             sev = "watch"
         out.append({
             "id": r[0], "kind": r[1], "subject": r[2],
