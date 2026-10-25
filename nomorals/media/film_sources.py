@@ -67,6 +67,7 @@ from typing import Any
 
 from ..core.logging_setup import get_logger
 from .sources import BROWSER_UA, _HTTP_TIMEOUT
+from .failures import record_failure
 
 _log = get_logger(__name__)
 
@@ -514,9 +515,9 @@ def film_registry_for_context(context: Any = None,
         try:
             from ..storage.kv import KVStore
             reg.bind_store(KVStore(db))
-        except Exception:  # noqa: BLE001 - persistence is an
+        except Exception as exc:  # noqa: BLE001 - persistence is an
             # enhancement; its absence never sinks a search
-            pass
+            record_failure("film_sources.registry_bind", exc)
         return reg
     except Exception:  # noqa: BLE001
         return None
