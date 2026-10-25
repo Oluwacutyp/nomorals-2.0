@@ -63,6 +63,7 @@ from ..llm.brain import brain_for
 from ..core.ids import new_id
 from ..core.http import HttpClient
 from .search.engine import SearchEngine
+from .failures import record_failure
 
 __all__ = ["DEFAULT_FEEDS", "DEFAULT_CATEGORIES", "FEED_CATEGORIES",
            "FEED_REGIONS", "NEWS_GLOBAL_REGIONS", "feeds_for",
@@ -709,7 +710,8 @@ class NewsAgent:
                     key = re.sub(r"\W+", " ", str(raw).lower()).strip()
                     if key:
                         known_titles.add(key)
-            except Exception:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001
+                record_failure("news.known_titles", exc)
                 known_titles = set()
 
         fresh: list[dict[str, str]] = []
@@ -717,7 +719,8 @@ class NewsAgent:
             if self.db is not None:
                 try:
                     known = self.db.query_one("SELECT id FROM news_items WHERE url = ?", (it["url"],))
-                except Exception:  # noqa: BLE001
+                except Exception as exc:  # noqa: BLE001
+                    record_failure("news.url_known", exc)
                     known = None
                 if known is not None:
                     continue
@@ -738,7 +741,8 @@ class NewsAgent:
                     "SELECT COUNT(*) AS n FROM news_items "
                     "WHERE delivery_state = ?", (STATE_UNDELIVERED,))
                 held = int((row or {}).get("n") or 0)
-            except Exception:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001
+                record_failure("news.held_count", exc)
                 held = 0
         else:
             held = sum(1 for r in self._pending
@@ -820,8 +824,8 @@ class NewsAgent:
                              r["publisher_url"], r["title"], r["url"],
                              r["summary"], r["published"], r["created_at"]),
                         )
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as exc:  # noqa: BLE001
+                record_failure("news.store_fresh_legacy", exc)
             # rows written without a state read back NULL = legacy
             # (already delivered) — keep this instance's copies so the
             # poll → brief flow on THIS agent still composes them.
@@ -870,7 +874,8 @@ class NewsAgent:
                 raw = (row or {}).get("value")
                 if raw:
                     saved = json.loads(raw)
-            except Exception:  # noqa: BLE001 - seeds are the fallback
+            except Exception as exc:  # noqa: BLE001 - seeds are the fallback
+                record_failure("news.load_profile", exc)
                 saved = None
         elif isinstance(getattr(self, "_profile_mem", None), dict):
             saved = self._profile_mem  # type: ignore[attr-defined]
@@ -896,8 +901,8 @@ class NewsAgent:
                 "INSERT OR REPLACE INTO news_interest (key, value) "
                 "VALUES (?, ?)",
                 ("profile", json.dumps(profile)))
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:  # noqa: BLE001
+            record_failure("news.save_profile", exc)
 
     def interest_profile(self) -> dict[str, Any]:
         """The effective interest profile: stored beats + pins, with
@@ -1019,8 +1024,8 @@ class NewsAgent:
                     "delivered_at = ?, delivery_channel = ? WHERE id = ?",
                     (state, row["delivered_at"],
                      row.get("delivery_channel"), row["id"]))
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as exc:  # noqa: BLE001
+                record_failure("news.set_state", exc)
 
     def _pushes_today(self) -> int:
         lt = time.localtime()
@@ -1036,7 +1041,8 @@ class NewsAgent:
                 "WHERE delivery_state = ? AND delivered_at >= ?",
                 (STATE_PUSHED, start))
             return int((row or {}).get("n") or 0)
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("news.pushes_today", exc)
             return 0
 
     def _quiet_now(self) -> bool:
@@ -1045,7 +1051,8 @@ class NewsAgent:
         try:
             from .notifier import _in_quiet_hours_now
             return bool(_in_quiet_hours_now(self.context))
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("news.quiet_now", exc)
             return False
 
     def _score_and_tier(self, new_rows: list[dict[str, Any]]) -> dict[str, Any]:
@@ -1073,8 +1080,8 @@ class NewsAgent:
                     (STATE_UNDELIVERED, _TIER_BACKLOG_MAX))
                 for r in rows or []:
                     candidates.setdefault(r["id"], dict(r))
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as exc:  # noqa: BLE001
+                record_failure("news.score_tier_backlog", exc)
         else:
             for r in self._pending:
                 if r.get("delivery_state") == STATE_UNDELIVERED:
@@ -1098,8 +1105,8 @@ class NewsAgent:
                     self.db.execute(
                         "UPDATE news_items SET interest = ? WHERE id = ?",
                         (val, rid))
-                except Exception:  # noqa: BLE001
-                    pass
+                except Exception as exc:  # noqa: BLE001
+                    record_failure("news.score_tier_update", exc)
         high, low = self._thresholds()
         push_candidates: list[dict[str, Any]] = []
         for row in rows:
@@ -1133,7 +1140,8 @@ class NewsAgent:
                         try:
                             res = self.notifier.publish(
                                 "news", str(row.get("title") or ""), body)
-                        except Exception:  # noqa: BLE001
+                        except Exception as exc:  # noqa: BLE001
+                            record_failure("news.score_tier_publish", exc)
                             res = {}
                         if isinstance(res, dict) and res.get("delivered"):
                             self._set_state(row, STATE_PUSHED,
@@ -1166,7 +1174,8 @@ class NewsAgent:
                     "ORDER BY published DESC",
                     (STATE_UNDELIVERED,)) or []
                 rows = [r for r in queried if isinstance(r, dict)]
-            except Exception:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001
+                record_failure("news.undelivered", exc)
                 rows = []
         seen_ids = {r.get("id") for r in rows}
         # this instance's in-memory copies (db-less contexts, and the
@@ -1256,7 +1265,8 @@ class NewsAgent:
             rows = self.db.query(
                 "SELECT id, url FROM news_items WHERE delivery_state = ? "
                 "OR delivery_state IS NULL", (STATE_UNDELIVERED,))
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("news.mark_delivered_select", exc)
             return 0
         n = 0
         for r in rows or []:
@@ -1268,8 +1278,8 @@ class NewsAgent:
                         "WHERE id = ?",
                         (STATE_DIGESTED, now, channel, r["id"]))
                     n += 1
-                except Exception:  # noqa: BLE001
-                    pass
+                except Exception as exc:  # noqa: BLE001
+                    record_failure("news.mark_delivered_update", exc)
         return n
 
     def status(self) -> dict[str, Any]:
@@ -1282,7 +1292,8 @@ class NewsAgent:
                         "FROM news_items GROUP BY delivery_state") or []:
                     key = r.get("delivery_state") or "legacy"
                     counts[str(key)] = int(r.get("n") or 0)
-            except Exception:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001
+                record_failure("news.status", exc)
                 counts = {}
         else:
             for r in self._pending:
@@ -1332,7 +1343,8 @@ class NewsAgent:
             rows = self.db.query(
                 "SELECT * FROM news_items ORDER BY created_at DESC LIMIT ?", (limit,)
             )
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("news.recent", exc)
             return []
         # Normalize stored rows to the live-item shape (pass #83), so
         # stored-path consumers see the same attribution fields a
