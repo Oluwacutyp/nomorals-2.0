@@ -62,6 +62,7 @@ from .browser_login import (
     LoginFailed,
     ensure_login,
 )
+from .failures import record_failure
 from .manager import AccountManager
 from .sessions import SessionManager
 from .vault import CredentialVault
@@ -1327,8 +1328,8 @@ class ProvisionDriver:
         finally:
             try:
                 tab.close()
-            except Exception:  # noqa: BLE001 - teardown best-effort
-                pass
+            except Exception as exc:  # noqa: BLE001 - teardown best-effort
+                record_failure("provisioning.attempt_signup_tab_close", exc)
         if result.status == "created":
             creator.finalize_account(
                 svc.vault_service, username, password, email=email,
@@ -1584,8 +1585,8 @@ class ProvisionDriver:
         finally:
             try:
                 tab.close()
-            except Exception:  # noqa: BLE001 - teardown best-effort
-                pass
+            except Exception as exc:  # noqa: BLE001 - teardown best-effort
+                record_failure("provisioning.drive_tab_close", exc)
         self._audit("flow", svc.id, "token_created")
 
         validation = validate_service_token(svc, token,
@@ -1698,7 +1699,7 @@ class ProvisionDriver:
             finally:
                 try:
                     tab.close()
-                except Exception:  # noqa: BLE001
-                    pass
+                except Exception as exc:  # noqa: BLE001
+                    record_failure("provisioning.license_tab_close", exc)
         return notes
 
