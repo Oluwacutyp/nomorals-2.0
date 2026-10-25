@@ -39,6 +39,7 @@ from datetime import date, timedelta
 from typing import Any, Callable
 
 from .coach import Readiness as _CoachReadiness, guard_coaching
+from .failures import record_failure
 
 _log = logging.getLogger(__name__)
 
@@ -618,7 +619,8 @@ class TrainingCoach:
             try:
                 from .coach import HealthCoach, HealthDataSource
                 coach = HealthCoach(source=HealthDataSource())
-            except Exception:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001
+                record_failure("training.readiness_coach_import", exc)
                 coach = None
         if coach is not None:
             try:
@@ -666,7 +668,8 @@ class TrainingCoach:
                         schedule=json.loads(row["schedule_json"] or "{}"),
                         blurb=row["blurb"] or "",
                         created_at=row["created_at"] or 0.0)
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("training.get_plan", exc)
             return None
 
     def latest_plan(self) -> Plan | None:
@@ -677,7 +680,8 @@ class TrainingCoach:
                 "SELECT * FROM plans ORDER BY created_at DESC LIMIT 1"
             ).fetchone()
             return self.get_plan(row["id"]) if row else None
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("training.latest_plan", exc)
             return None
 
     # -- the daily workout (readiness-gated) ------------------------------
@@ -692,7 +696,8 @@ class TrainingCoach:
                    WHERE kind = ? AND completed = 1
                    ORDER BY date DESC LIMIT 1""", (kind,)).fetchone()
             return json.loads(row["loads_json"] or "{}") if row else {}
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("training.last_loads", exc)
             return {}
 
     def today(self, plan: Plan | None = None,
@@ -810,8 +815,8 @@ class TrainingCoach:
                             "VALUES (?,?,?,?,?)",
                             (workout.date, key, int(erpe),
                              final_loads.get(key, ""), time.time()))
-                    except Exception:  # noqa: BLE001
-                        pass
+                    except Exception as exc:  # noqa: BLE001
+                        record_failure("training.set_feedback_insert", exc)
                 self._db.commit()
             return True
         except Exception:  # noqa: BLE001
@@ -872,7 +877,8 @@ class TrainingCoach:
                         f"easy, bumping the load extra next time.")
             return (f"{exercise_key}: recent RPEs {rpes} (avg {avg:.1f}) "
                     f"— standard +2.5% progression.")
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("training.progression_advice", exc)
             return "couldn't read progression history."
 
     def history(self, days: int = 14) -> list[dict[str, Any]]:
@@ -885,7 +891,8 @@ class TrainingCoach:
                    FROM workout_log WHERE date >= ? ORDER BY date DESC""",
                 (since,)).fetchall()
             return [dict(r) for r in rows]
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("training.history", exc)
             return []
 
     # -- volume landmarks (RP pattern) -------------------------------------
@@ -913,7 +920,8 @@ class TrainingCoach:
                 kind = row["kind"] or ""
                 try:
                     keys = set(json.loads(row["loads_json"] or "{}"))
-                except Exception:  # noqa: BLE001
+                except Exception as exc:  # noqa: BLE001
+                    record_failure("training.weekly_sets_loads", exc)
                     keys = set()
                 lib = {k: s for k, _n, s, _r, _rest
                        in _DAY_LIBRARY.get(kind, [])}
@@ -947,7 +955,8 @@ class TrainingCoach:
                              f"(band {lo}–{hi}) {flag}")
             lines.append(f"\ntotal: {total} hard sets this week.")
             return guard_coaching("\n".join(lines))
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("training.volume_report", exc)
             return "couldn't build the volume report."
 
     # -- automatic PR tracking (Strava pattern) ----------------------------
@@ -973,7 +982,8 @@ class TrainingCoach:
             for row in rows:
                 try:
                     loads = json.loads(row["loads_json"] or "{}")
-                except Exception:  # noqa: BLE001
+                except Exception as exc:  # noqa: BLE001
+                    record_failure("training.personal_records_loads", exc)
                     continue
                 for key, load in loads.items():
                     kg = self._kg(str(load))
@@ -1009,7 +1019,8 @@ class TrainingCoach:
                 lines.append(f"{medal} {pr.exercise_name}: **{pr.load}** "
                              f"({pr.date})")
             return guard_coaching("\n".join(lines))
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("training.format_prs", exc)
             return "couldn't read PRs right now."
 
     # -- deload advisory (RP pattern) --------------------------------------
@@ -1030,8 +1041,8 @@ class TrainingCoach:
             try:
                 info = self.readiness()
                 readiness_low = info.has_data and info.score < 55
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as exc:  # noqa: BLE001
+                record_failure("training.deload_readiness", exc)
             if rising and (readiness_low or w0 - w2 >= 15):
                 text = (f"📉 deload advisory: volume climbed {w2} → "
                         f"{w1} → {w0} hard sets over 3 weeks"
@@ -1041,7 +1052,8 @@ class TrainingCoach:
                           "move well — then come back fresh.")
                 return guard_coaching(text)
             return ""
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("training.deload_advisory", exc)
             return ""
 
     # -- weak-point notes (form → programming) -----------------------------
@@ -1113,7 +1125,8 @@ class TrainingCoach:
                              f"{rpe} (rest {ex.rest_secs}s)")
             lines.append(f"\n_{TRAINING_DISCLAIMER}_")
             return guard_coaching("\n".join(lines))
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("training.format_workout", exc)
             return "workout unavailable."
 
     def format_plan(self, plan: Plan) -> str:
@@ -1131,7 +1144,8 @@ class TrainingCoach:
                              "rotation, periodized)")
             lines.append(f"\n_{TRAINING_DISCLAIMER}_")
             return guard_coaching("\n".join(lines))
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("training.format_plan", exc)
             return "plan unavailable."
 
 
@@ -1243,5 +1257,6 @@ def _bump_load(load: str, factor: float = 1.0) -> str:
         kg = float(m.group(1)) * (1 + 0.025 * factor)
         num = f"{kg:.1f}".rstrip("0").rstrip(".")
         return num + (m.group(2) or "")
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("training.bump_load", exc)
         return load
