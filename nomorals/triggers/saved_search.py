@@ -34,6 +34,7 @@ from typing import Any, Callable
 
 from ..core.logging_setup import get_logger
 from ..property.scam import _normalize_address, _photo_hash
+from .failures import record_failure
 
 _log = get_logger(__name__)
 
@@ -259,7 +260,8 @@ class SavedSearchStore:
                 "SELECT * FROM saved_searches WHERE id = ?",
                 (search_id,)).fetchone()
             return _row_to_search(row) if row else None
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("saved_search.get", exc)
             return None
 
     def list(self, *, active_only: bool = True,
@@ -278,7 +280,8 @@ class SavedSearchStore:
                 out = [s for s in out
                        if not (s.expires_at and now >= s.expires_at)]
             return out
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("saved_search.list", exc)
             return []
 
     def remove(self, search_id: str) -> bool:
@@ -292,7 +295,8 @@ class SavedSearchStore:
                 "DELETE FROM seen_matches WHERE search_id = ?", (search_id,))
             self._db.commit()
             return (cur.rowcount or 0) > 0
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("saved_search.remove", exc)
             return False
 
     def purge_expired(self, now: float | None = None) -> int:
@@ -307,7 +311,8 @@ class SavedSearchStore:
             for sid in ids:
                 self.remove(sid)
             return len(ids)
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("saved_search.purge_expired", exc)
             return 0
 
     def mark_run(self, search_id: str, new_matches: int,
@@ -334,7 +339,8 @@ class SavedSearchStore:
                 "SELECT 1 FROM seen_matches WHERE search_id = ? "
                 "AND dedup_key = ?", (search_id, dedup_key)).fetchone() \
                 is not None
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("saved_search.seen", exc)
             return False
 
     def mark_seen(self, search_id: str, dedup_key: str,
@@ -364,7 +370,8 @@ class SavedSearchStore:
                 (now + max(0.0, float(hours)) * 3600, search_id))
             self._db.commit()
             return (cur.rowcount or 0) > 0
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("saved_search.snooze", exc)
             return False
 
     def unsnooze(self, search_id: str) -> bool:
@@ -376,7 +383,8 @@ class SavedSearchStore:
                 (search_id,))
             self._db.commit()
             return (cur.rowcount or 0) > 0
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("saved_search.unsnooze", exc)
             return False
 
     def set_digest_at(self, search_id: str, digest_at: str) -> bool:
@@ -398,7 +406,8 @@ class SavedSearchStore:
                 (digest_at, search_id))
             self._db.commit()
             return (cur.rowcount or 0) > 0
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("saved_search.set_digest_at", exc)
             return False
 
     def queue_digest(self, m: Match) -> None:
@@ -424,7 +433,8 @@ class SavedSearchStore:
                 "SELECT COUNT(*) AS n FROM pending_digest WHERE search_id = ?",
                 (search_id,)).fetchone()
             return int(row["n"]) if row else 0
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("saved_search.pending_digest_count", exc)
             return 0
 
     def take_digest(self, search_id: str) -> list[Match]:
@@ -446,7 +456,8 @@ class SavedSearchStore:
                 (search_id,))
             self._db.commit()
             return out
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("saved_search.take_digest", exc)
             return []
 
 
@@ -461,7 +472,8 @@ def _row_to_search(row: sqlite3.Row) -> SavedSearch:
     import json as _json
     try:
         filters = _json.loads(row["filters_json"] or "{}")
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("saved_search._row_to_search", exc)
         filters = {}
     def _col(name: str, default: Any = "") -> Any:
         try:
@@ -549,7 +561,8 @@ def _matches_filters(listing: dict[str, Any],
                 if words and not any(w in hay for w in words):
                     return False
         return True
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("saved_search._matches_filters", exc)
         return True
 
 
@@ -568,7 +581,8 @@ def dedup_key(listing: dict[str, Any]) -> str:
             str(listing.get("address") or listing.get("title") or ""))
         price = int(listing.get("price_kobo") or 0)
         return f"ad:{addr}|{price}"
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("saved_search.dedup_key", exc)
         return ""
 
 
@@ -712,8 +726,8 @@ def ensure_schedule(scheduler: Any) -> bool:
             jobs = []
             try:
                 jobs = scheduler.list_jobs()  # type: ignore[attr-defined]
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as exc:  # noqa: BLE001
+                record_failure("saved_search.ensure_schedule", exc)
             for j in jobs or []:
                 if getattr(j, "action", "") == SAVED_SEARCH_ACTION:
                     return True
