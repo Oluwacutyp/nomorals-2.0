@@ -21,6 +21,7 @@ from typing import Any
 
 from ..ai import GameMind
 from ..combat import skill_power_mult
+from ..failures import record_failure
 from ..gamemaster import feed
 from ..players import Player
 from .base import MultiGame, Room
@@ -1195,7 +1196,8 @@ class BattleArenaGame(MultiGame):
         try:
             from ..enemies import roll_enemy
             from ..power import fighter_power
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("ambitious.spawn_enemy", exc)
             return
         rng = rng or _random.Random()
         pkey = next((p.key for p in room.humans), "")
@@ -1289,7 +1291,8 @@ class BattleArenaGame(MultiGame):
             from ..enemies import GEAR_EFFECTIVENESS
             rank_idx = max(0, min(7, int(enemy.get("rank_idx", 2))))
             rank_eff = GEAR_EFFECTIVENESS.get(rank_idx, 0.5)
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("ambitious.gear_effectiveness", exc)
             rank_eff = 0.5
         effectiveness = 1.0 if myth_foe else rank_eff
         h["atk"] += int(int(weapon.get("atk", 0)) * effectiveness)
@@ -1304,7 +1307,8 @@ class BattleArenaGame(MultiGame):
         try:
             from ..gear import SET_BONUSES
             from ..power import fighter_power
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("ambitious.house_set_bonus", exc)
             SET_BONUSES = {}
         for set_name, slots in sets.items():
             bonus = SET_BONUSES.get(set_name)
@@ -1330,7 +1334,8 @@ class BattleArenaGame(MultiGame):
             skills = s.get("house_skills", {})
             try:
                 from ..power import fighter_power as _fp
-            except Exception:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001
+                record_failure("ambitious.myth_ascension", exc)
                 _fp = None
             if _fp is not None:
                 target = player_power * 0.85
@@ -1356,7 +1361,8 @@ class BattleArenaGame(MultiGame):
             try:
                 from ..skills import is_enemy_skill
                 has_forbidden = any(is_enemy_skill(sl) for sl in skills)
-            except Exception:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001
+                record_failure("ambitious.forbidden_cap", exc)
                 has_forbidden = False
             cap = 1.3 if has_forbidden else 1.2
             for _ in range(25):
@@ -1453,7 +1459,8 @@ class BattleArenaGame(MultiGame):
                 sets.setdefault(piece["set"], set()).add(slot)
         try:
             from ..gear import SET_BONUSES
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("ambitious.loadout_set_bonus", exc)
             SET_BONUSES = {}
         for set_name, slots in sets.items():
             bonus = SET_BONUSES.get(set_name)
@@ -1476,7 +1483,8 @@ class BattleArenaGame(MultiGame):
         y = s["you"]
         try:
             from ..skills import passive_bonuses
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("ambitious.passive_skills", exc)
             return
         slugs: list[str] = []
         for p in room.humans:
@@ -1527,7 +1535,8 @@ class BattleArenaGame(MultiGame):
         try:
             from ..stats import (StatBlock, apply_stats_to_fighter,
                                  gear_stat_bonuses)
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("ambitious.rpg_stats", exc)
             return
         pkey = ""
         for p in room.humans:
@@ -1552,8 +1561,8 @@ class BattleArenaGame(MultiGame):
                         y["hp"] = int(y.get("hp", 0)) + int(val)
             if effects:
                 s["title_effects"] = effects
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:  # noqa: BLE001
+            record_failure("ambitious.title_effects", exc)
 
     def _gear_note(self, room) -> str:
         loadout = self._loadout(room)
@@ -2109,8 +2118,8 @@ class BattleArenaGame(MultiGame):
                 before = int(y.get("mana", 0))
                 y["mana"] = min(int(y["max_mana"]),
                                 before + MANA_REGEN_PER_TURN)
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:  # noqa: BLE001
+            record_failure("ambitious.mana_regen", exc)
         # venom can finish the job before you even move
         win = self._check(room)
         if win:
